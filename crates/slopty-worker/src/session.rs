@@ -16,7 +16,8 @@ use slopty_proto::codec;
 use slopty_proto::drag::{DragId, DragItem};
 use slopty_proto::terminal::{
     ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
-    Progress, ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
+    ProgramState, ProgramStatus, Progress, ProgressState, Restored, TermColors, TermError,
+    TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
@@ -202,6 +203,8 @@ pub struct Snapshot {
     pub restored: Option<Restored>,
     /// The program asks for drops (Kitty drag and drop, OSC 72).
     pub drop_target: bool,
+    /// The program's status records (`OSC 7501`), by id.
+    pub program: Vec<ProgramStatus>,
 }
 
 /// What the worker can see of a session without asking anything running in it: the program in
@@ -895,6 +898,9 @@ struct Actor {
     program_colors: ColorOverrides,
     /// The program's progress report (OSC 9;4): broadcast, and sent to a late attach.
     progress: Progress,
+    /// The program's status records (`OSC 7501`), by id: broadcast whole after each change,
+    /// and sent to a late attach while there are any.
+    program: Vec<ProgramStatus>,
     /// The pointer shape the program asked for (`OSC 22`): broadcast, and sent to a late
     /// attach.
     pointer: PointerShape,
@@ -1070,6 +1076,7 @@ impl Actor {
         let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
         let (mut progress, mut pointer) = (Progress::default(), PointerShape::default());
         let mut drop_target = false;
+        let mut program = Vec::new();
         let prompted = events.iter().skip(replayed).any(|ev| matches!(ev, EngineEvent::Cwd(_)));
         for ev in events {
             match ev {
@@ -1077,6 +1084,7 @@ impl Actor {
                 EngineEvent::Cwd(c) => cwd = Some(c),
                 EngineEvent::Colors(c) => program_colors = c,
                 EngineEvent::Progress(p) => progress = p,
+                EngineEvent::ProgramStatus(p) => program = p,
                 EngineEvent::Pointer(p) => pointer = p,
                 EngineEvent::DropTarget { accepts } => drop_target = accepts,
                 EngineEvent::PtyWrite(_)
@@ -1113,6 +1121,7 @@ impl Actor {
             cwd,
             program_colors,
             progress,
+            program,
             pointer,
             restored: start.restored,
             repo,
@@ -1626,6 +1635,14 @@ impl Actor {
                     self.progress = progress;
                     self.broadcast(&TermEvent::Progress(progress));
                 }
+                EngineEvent::ProgramStatus(program) => {
+                    // The summary carries it to the clients that do not view the session.
+                    if program != self.program {
+                        self.program.clone_from(&program);
+                        self.moved();
+                        self.broadcast(&TermEvent::ProgramStatus(program));
+                    }
+                }
                 EngineEvent::Pointer(pointer) => {
                     self.pointer = pointer;
                     self.broadcast(&TermEvent::Pointer(pointer));
@@ -2048,6 +2065,9 @@ impl Actor {
         if self.progress.state != ProgressState::None {
             self.send_to(client, &TermEvent::Progress(self.progress));
         }
+        if !self.program.is_empty() {
+            self.send_to(client, &TermEvent::ProgramStatus(self.program.clone()));
+        }
         if self.pointer != PointerShape::default() {
             self.send_to(client, &TermEvent::Pointer(self.pointer));
         }
@@ -2259,6 +2279,7 @@ impl Actor {
                     progress: (self.progress.state != ProgressState::None).then_some(self.progress),
                     restored: self.restored.clone(),
                     drop_target: self.drops.accepts(),
+                    program: self.program.clone(),
                 });
             }
             Cmd::ResizeUnviewed { size, reply } => {
@@ -2294,6 +2315,14 @@ impl Actor {
                 self.flush_frame();
                 // Its report ends with the program; the viewers drop it on the exit.
                 self.progress = Progress::default();
+                // What was at work, waiting or at rest ends with it too; a result stays.
+                let before = self.program.len();
+                self.program
+                    .retain(|r| matches!(r.state, ProgramState::Done | ProgramState::Error));
+                if self.program.len() != before {
+                    self.moved();
+                    self.broadcast(&TermEvent::ProgramStatus(self.program.clone()));
+                }
                 self.broadcast(&TermEvent::Exited { status });
             }
             Cmd::Read { read, reply } => {

@@ -412,6 +412,15 @@ mod golden {
                 saved_ms: WallMs::from_millis(1_789_999_000_000),
                 command: Vec::new(),
             }),
+            program: vec![slopty_proto::terminal::ProgramStatus {
+                id: String::new(),
+                state: slopty_proto::terminal::ProgramState::Blocked,
+                need: Some(slopty_proto::terminal::ProgramStatus::PERMISSION.to_owned()),
+                progress: Some(40),
+                app: "terraform".to_owned(),
+                title: String::new(),
+                message: "Apply?".to_owned(),
+            }],
         };
         snap(
             "worker_session_opened",
@@ -1818,6 +1827,7 @@ mod golden {
             command: Vec::new(),
             progress: None,
             restored: None,
+            program: Vec::new(),
             repo_id: None,
         };
         snap("server_session_changed", &ToServer::SessionChanged(summary));
@@ -1843,6 +1853,41 @@ mod golden {
                 saved_ms: WallMs::from_millis(1_790_000_000_000),
                 command: vec!["claude".to_owned()],
             }),
+        );
+    }
+
+    /// A program's status records (`OSC 7501`), the whole set: one waiting on the person with
+    /// what it needs, and a part of its work that finished.
+    #[test]
+    fn program_status() {
+        use slopty_proto::terminal::{ProgramState, ProgramStatus};
+        let blank = ProgramStatus {
+            id: String::new(),
+            state: ProgramState::Idle,
+            need: None,
+            progress: None,
+            app: String::new(),
+            title: String::new(),
+            message: String::new(),
+        };
+        snap(
+            "worker_term_program_status",
+            &TermEvent::ProgramStatus(vec![
+                ProgramStatus {
+                    state: ProgramState::Blocked,
+                    need: Some(ProgramStatus::QUESTION.to_owned()),
+                    progress: Some(60),
+                    app: "deploy".to_owned(),
+                    message: "Which region?".to_owned(),
+                    ..blank.clone()
+                },
+                ProgramStatus {
+                    id: "build/test".to_owned(),
+                    state: ProgramState::Done,
+                    title: "Tests".to_owned(),
+                    ..blank
+                },
+            ]),
         );
     }
 
@@ -2429,6 +2474,7 @@ mod ctl {
                     command: vec!["/bin/zsh".to_owned()],
                     progress: None,
                     restored: None,
+                    program: Vec::new(),
                     repo_id: None,
                 }],
             },

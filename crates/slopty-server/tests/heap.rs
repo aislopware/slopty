@@ -114,6 +114,7 @@ mod tests {
             command: ["/bin/bash", "--noprofile", "--norc", "-i"].map(str::to_owned).to_vec(),
             progress: None,
             restored: None,
+            program: Vec::new(),
             repo_id: None,
         }
     }

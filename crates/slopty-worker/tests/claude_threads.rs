@@ -153,6 +153,7 @@ mod claude_threads {
                 command: Vec::new(),
                 progress: None,
                 restored: None,
+                program: Vec::new(),
             };
             self.events.send(WorkerMsg::SessionChanged(summary)).unwrap();
         }

@@ -10,8 +10,8 @@ use slopty_grid::{
 };
 use slopty_proto::terminal::{
     BlockMark, Blocks, ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_ABOVE,
-    MAX_BLOCKS, MAX_FETCH_LINES, Placement, PointerShape, Progress, Restored, SearchMatch,
-    TermEvent, TermRequest, TermSize,
+    MAX_BLOCKS, MAX_FETCH_LINES, Placement, PointerShape, ProgramStatus, Progress, Restored,
+    SearchMatch, TermEvent, TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
@@ -173,6 +173,8 @@ pub struct TermState {
     colors: ColorOverrides,
     /// The program's progress report (`OSC 9;4`).
     progress: Progress,
+    /// The program's status records (`OSC 7501`), by id.
+    program: Vec<ProgramStatus>,
     /// The pointer shape the program asked for (`OSC 22`).
     pointer: PointerShape,
     /// The program asks for drops (Kitty drag and drop, OSC 72).
@@ -289,6 +291,7 @@ impl TermState {
             blocks: BTreeMap::new(),
             colors: ColorOverrides::default(),
             progress: Progress::default(),
+            program: Vec::new(),
             pointer: PointerShape::Text,
             drop_target: false,
             drag: None,
@@ -398,6 +401,13 @@ impl TermState {
     #[must_use]
     pub const fn progress(&self) -> Progress {
         self.progress
+    }
+
+    /// The program's status records (`OSC 7501`), by id: empty when it reports none. Changes
+    /// arrive with no [`Effect`] of their own, as the progress's do.
+    #[must_use]
+    pub fn program(&self) -> &[ProgramStatus] {
+        &self.program
     }
 
     /// The pointer shape the program asked for over the grid (`OSC 22`); [`PointerShape::Text`]
@@ -525,8 +535,9 @@ impl TermState {
         self.parked = None;
         self.relinked = true;
         // The new stream says so again while the program asks; a restarted worker's program
-        // may not.
+        // may not. So too the program's status records, while it has any.
         self.drop_target = false;
+        self.program.clear();
         self.drag = None;
     }
 
@@ -592,6 +603,10 @@ impl TermState {
             }
             TermEvent::Progress(progress) => {
                 self.progress = progress;
+                Vec::new()
+            }
+            TermEvent::ProgramStatus(program) => {
+                self.program = program;
                 Vec::new()
             }
             TermEvent::Restored(restored) => {
@@ -1432,6 +1447,29 @@ mod tests {
         state.apply(TermEvent::Exited { status: 0 });
         assert_eq!(state.progress(), Progress::default(), "the exit ends the report");
         assert_eq!(state.restored(), Some(&restored));
+    }
+
+    /// The program's status records are kept as the last set said them, and a new stream
+    /// says them again: a relink lets them go until it does.
+    #[test]
+    fn program_status_is_kept_until_a_relink() {
+        use slopty_proto::terminal::{ProgramState, ProgramStatus};
+
+        let mut state = TermState::new(size());
+        assert_eq!(state.program(), []);
+        let blocked = ProgramStatus {
+            id: String::new(),
+            state: ProgramState::Blocked,
+            need: Some(ProgramStatus::PERMISSION.to_owned()),
+            progress: None,
+            app: String::new(),
+            title: String::new(),
+            message: "Apply?".to_owned(),
+        };
+        assert_eq!(state.apply(TermEvent::ProgramStatus(vec![blocked.clone()])), vec![]);
+        assert_eq!(state.program(), [blocked]);
+        state.relinked();
+        assert_eq!(state.program(), [], "the new stream says them again");
     }
 
     /// Whether the program asks for drops, and its answers to this client's drag, are kept

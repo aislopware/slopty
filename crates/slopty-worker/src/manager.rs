@@ -691,6 +691,7 @@ impl Worker {
             command,
             progress: snap.progress,
             restored: snap.restored,
+            program: snap.program,
         })
     }
 

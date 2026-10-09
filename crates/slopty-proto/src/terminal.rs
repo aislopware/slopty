@@ -144,6 +144,10 @@ pub struct SessionSummary {
     pub progress: Option<Progress>,
     /// The session was reopened after its shell was lost, as [`TermEvent::Restored`] says it.
     pub restored: Option<Restored>,
+    /// The program's status records (`OSC 7501`), as [`TermEvent::ProgramStatus`] says them to
+    /// the viewers: a client that does not view the session still shows what needs the person
+    /// and what finished. Empty when there are none.
+    pub program: Vec<ProgramStatus>,
 }
 
 /// Which repository a checkout is, the same on every machine that has a clone of it.
@@ -845,6 +849,9 @@ pub enum TermEvent {
         /// What it did.
         operation: DropOperation,
     },
+    /// The program's status records changed (`OSC 7501`): the whole set, by id. Sent on attach
+    /// while it holds any.
+    ProgramStatus(Vec<ProgramStatus>),
 }
 
 /// The pointer a program asks for over the grid with `OSC 22`, by its W3C cursor name.
@@ -889,6 +896,58 @@ pub enum PointerShape {
     NwseResize,
     ZoomIn,
     ZoomOut,
+}
+
+/// One record a program keeps of itself with the program status protocol (`OSC 7501`).
+///
+/// It says what the program, or one part of its work, is doing
+/// (<https://www.superlogical.com/rex/docs/build/program-status>). A terminal keeps at most
+/// [`ProgramStatus::RECORDS`]; a new prompt ends the records at work, waiting or at rest, and a
+/// result stays for the person to see.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ProgramStatus {
+    /// Which record: a `/` path (`build/test` is beneath `build`), empty for the program itself.
+    pub id: String,
+    /// What it is doing.
+    pub state: ProgramState,
+    /// What a [`ProgramState::Blocked`] program needs of the person, when it says. Open:
+    /// [`ProgramStatus::PERMISSION`], [`ProgramStatus::QUESTION`], [`ProgramStatus::AUTH`].
+    pub need: Option<String>,
+    /// How far along, 0 to 100, while at work or waiting, when it says.
+    pub progress: Option<u8>,
+    /// A name for the program a machine can match on (`cargo`); empty when it did not say.
+    pub app: String,
+    /// A short label for the record, for people; empty when it did not say.
+    pub title: String,
+    /// One line of what it is doing, waiting for or has finished; empty when it did not say.
+    /// The program's own words, with what would reorder or hide text taken out.
+    pub message: String,
+}
+
+impl ProgramStatus {
+    /// It waits on a login, password, token or other credential.
+    pub const AUTH: &str = "auth";
+    /// It waits on the person's approval ("Apply these changes?").
+    pub const PERMISSION: &str = "permission";
+    /// It waits on an answer the person types.
+    pub const QUESTION: &str = "question";
+    /// The most records a terminal keeps, the one updated longest ago making room.
+    pub const RECORDS: usize = 64;
+}
+
+/// What a program says it is doing, in a [`ProgramStatus`]: the protocol's lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ProgramState {
+    /// At rest, waiting for the next instruction (a tool at its own prompt).
+    Idle,
+    /// Running on its own.
+    Working,
+    /// Finished a piece of work whose result is ready to look at.
+    Done,
+    /// Cannot go on until the person does something.
+    Blocked,
+    /// Failed and stopped.
+    Error,
 }
 
 /// What a program reports of its progress with `OSC 9;4`, a sequence from the `ConEmu`

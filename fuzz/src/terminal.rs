@@ -40,7 +40,9 @@ use slopty_proto::codec;
 use slopty_proto::input::{
     CellMetrics, KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
 };
-use slopty_proto::terminal::{ColorOverrides, Frame, PointerShape, Progress, TermSize};
+use slopty_proto::terminal::{
+    ColorOverrides, Frame, PointerShape, ProgramStatus, Progress, TermSize,
+};
 
 /// Scrollback the engines keep: small, so a script reaches its eviction.
 const SCROLLBACK: u32 = 64;
@@ -214,6 +216,7 @@ struct Session {
     colors: ColorOverrides,
     pointer: PointerShape,
     progress: Progress,
+    program: Vec<ProgramStatus>,
 }
 
 impl Session {
@@ -226,6 +229,7 @@ impl Session {
                 EngineEvent::Colors(colors) => self.colors = colors,
                 EngineEvent::Pointer(pointer) => self.pointer = pointer,
                 EngineEvent::Progress(progress) => self.progress = progress,
+                EngineEvent::ProgramStatus(program) => self.program = program,
                 _ => {}
             }
         }

@@ -179,6 +179,7 @@ mod tests {
             command: Vec::new(),
             progress: None,
             restored: None,
+            program: Vec::new(),
             repo_id: None,
         }
     }

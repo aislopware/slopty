@@ -75,6 +75,7 @@ mod tests {
                 command: Vec::new(),
                 progress: None,
                 restored: None,
+                program: Vec::new(),
                 repo_id: None,
             }],
             session_key: [7; 32],

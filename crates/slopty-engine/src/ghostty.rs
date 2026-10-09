@@ -48,6 +48,7 @@ mod reports;
 mod restored;
 #[cfg(test)]
 mod session_state;
+mod status;
 
 pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 
@@ -209,6 +210,8 @@ pub struct GhosttyEngine {
     overrides: ColorOverrides,
     /// The program's progress report as last reported, shared with libghostty's callback.
     progress: Rc<std::cell::Cell<Progress>>,
+    /// The program's status records (`OSC 7501`).
+    program: status::Records,
     /// The title and the directory as last reported, shared with libghostty's callbacks.
     reported: Rc<RefCell<Reported>>,
     /// The pointer shape the program asked for (`OSC 22`) as last reported.
@@ -401,6 +404,8 @@ enum Pending {
     Mark { mark: osc133::Mark, row: Option<TrackedGridRef>, col: u16, screen: VtScreen },
     /// A full reset (RIS): the screen, the history and the alternate screen are gone.
     Reset,
+    /// A program status report (`OSC 7501`), applied in its place among the marks.
+    Status(status::Report),
 }
 
 impl std::fmt::Debug for GhosttyEngine {
@@ -457,6 +462,7 @@ impl GhosttyEngine {
         install_render_hold(&mut term, &render, &hold)?;
         let marks = Rc::new(RefCell::new(Vec::new()));
         install_marks(&mut term, &marks)?;
+        status::install(&mut term, &marks)?;
         let clipboard = Rc::new(RefCell::new(clipboard::Reads::default()));
         clipboard::install(&mut term, &clipboard)?;
         let drops = dnd::install(&mut term)?;
@@ -518,6 +524,7 @@ impl GhosttyEngine {
             block_news: Vec::new(),
             overrides: ColorOverrides::default(),
             progress,
+            program: status::Records::default(),
             reported,
             pointer: PointerShape::Text,
             clipboard,
@@ -588,6 +595,7 @@ impl GhosttyEngine {
             let name = convert::pointer_name(self.pointer);
             out.extend_from_slice(format!("\x1b]22;{name}\x1b\\").as_bytes());
         }
+        self.program.replay(out);
         let progress = self.progress.get();
         let state = match progress.state {
             ProgressState::None => return,
@@ -874,9 +882,19 @@ impl GhosttyEngine {
                     self.record_mark(mark, line, col);
                 }
                 Pending::Reset => self.forget_screen(),
+                Pending::Status(report) => {
+                    if self.program.apply(report) {
+                        self.program_moved();
+                    }
+                }
             }
         }
         self.spare_marks = taken;
+    }
+
+    /// The program's status records changed: the viewers are told the whole set.
+    fn program_moved(&self) {
+        self.events.borrow_mut().push(EngineEvent::ProgramStatus(self.program.all()));
     }
 
     const fn active_screen(&self) -> VtScreen {
@@ -922,6 +940,9 @@ impl GhosttyEngine {
                 // cleared or not.
                 if self.progress.replace(Progress::default()).state != ProgressState::None {
                     self.events.borrow_mut().push(EngineEvent::Progress(Progress::default()));
+                }
+                if self.program.prompt() {
+                    self.program_moved();
                 }
                 let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
                 remark(marks, starts, &mut self.remarked_rows, line, |_, starts| {
@@ -2978,6 +2999,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use slopty_grid::{CellWidth, CursorShape, StyleFlags};
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, Mods};
+    use slopty_proto::terminal::{ProgramState, ProgramStatus};
 
     use super::*;
 
@@ -4571,6 +4593,88 @@ mod tests {
         );
         e.write(b"\x1b]133;A\x07$ ");
         assert_eq!(progress_events(&e), [], "a prompt with no bar up says nothing");
+    }
+
+    /// Each set of program status records the engine reported, as `(id, state)` pairs.
+    fn status_events(e: &GhosttyEngine) -> Vec<Vec<(String, ProgramState)>> {
+        e.drain_events()
+            .into_iter()
+            .filter_map(|ev| match ev {
+                EngineEvent::ProgramStatus(records) => {
+                    Some(records.into_iter().map(|r| (r.id, r.state)).collect())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rec(id: &str, state: ProgramState) -> (String, ProgramState) {
+        (id.to_owned(), state)
+    }
+
+    /// `OSC 7501` reports become records, the whole set told after each change: a blocked
+    /// program's need, progress and words (decoded, with a direction override taken out), a
+    /// child record, and a clear of the parent taking the child with it. The support query is
+    /// answered.
+    #[test]
+    fn program_status_reports_become_records() {
+        let mut e = engine(20, 3);
+        // "Apply?" with U+202E inside it, in base64.
+        e.write(
+            b"\x1b]7501;state=blocked:kind=permission:progress=40:app=tf:msg=QXBwbOKArnk/\x1b\\",
+        );
+        let all = e.drain_events();
+        let [EngineEvent::ProgramStatus(records)] = all.as_slice() else { panic!("{all:?}") };
+        assert_eq!(
+            records.as_slice(),
+            [ProgramStatus {
+                id: String::new(),
+                state: ProgramState::Blocked,
+                need: Some(ProgramStatus::PERMISSION.to_owned()),
+                progress: Some(40),
+                app: "tf".to_owned(),
+                title: String::new(),
+                message: "Apply?".to_owned(),
+            }]
+        );
+        e.write(b"\x1b]7501;state=working:id=build\x07\x1b]7501;state=working:id=build/test\x07");
+        let blocked = rec("", ProgramState::Blocked);
+        let build = rec("build", ProgramState::Working);
+        let test = rec("build/test", ProgramState::Working);
+        assert_eq!(
+            status_events(&e),
+            [vec![blocked.clone(), build.clone()], vec![blocked.clone(), build, test]]
+        );
+        e.write(b"\x1b]7501;state=working:id=build/test\x07");
+        assert_eq!(status_events(&e), Vec::<Vec<_>>::new(), "the same again is no change");
+        e.write(b"\x1b]7501;state=clear:id=build\x07");
+        assert_eq!(status_events(&e), [vec![blocked]], "the clear takes the child too");
+        e.write(b"\x1b]7501;?\x07");
+        let answered = e.drain_events().into_iter().any(|ev| {
+            matches!(ev, EngineEvent::PtyWrite(bytes) if bytes.windows(5).any(|w| w == b"7501;"))
+        });
+        assert!(answered, "the support query is answered");
+    }
+
+    /// The records follow the specification's lifetimes: a prompt (`133;A`) ends what was at
+    /// work or waiting, a result stays, a report after the prompt in the same read outlives
+    /// it, and a full reset clears them all.
+    #[test]
+    fn program_status_records_live_as_the_specification_says() {
+        let mut e = engine(20, 3);
+        e.write(b"\x1b]7501;state=working:id=a\x07\x1b]7501;state=done:id=b\x07");
+        status_events(&e);
+        e.write(b"\x1b]133;A\x07$ \x1b]7501;state=blocked:id=c\x07");
+        let (b, c) = (rec("b", ProgramState::Done), rec("c", ProgramState::Blocked));
+        assert_eq!(
+            status_events(&e),
+            [vec![b.clone()], vec![b.clone(), c]],
+            "the prompt ends `a`; `c` came after it"
+        );
+        e.write(b"\x1b]133;A\x07$ ");
+        assert_eq!(status_events(&e), [vec![b]], "a result stays through prompts");
+        e.write(b"\x1bc");
+        assert_eq!(status_events(&e), [Vec::new()], "a full reset clears every record");
     }
 
     #[test]

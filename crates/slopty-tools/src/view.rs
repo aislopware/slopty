@@ -1335,6 +1335,7 @@ mod tests {
             command: vec!["zsh".to_owned()],
             progress: None,
             restored: None,
+            program: Vec::new(),
             repo_id: None,
         }
     }

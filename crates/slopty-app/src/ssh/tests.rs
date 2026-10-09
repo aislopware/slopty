@@ -588,6 +588,7 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
             command: Vec::new(),
             progress: None,
             restored: None,
+            program: Vec::new(),
             repo_id: None,
         };
         v.session_opened(key, summary, cx);

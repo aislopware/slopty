@@ -3725,3 +3725,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `escape_drops_the_selection_then_leaves`, `the_viewport_follows_the_cursor`,
       `copy_mode_takes_over_a_pointer_selection` and
       `the_foot_says_copy_mode_and_done_leaves` (`terminal/view/copy.rs`).
+
+- ✅ **A program's status records (`OSC 7501`) are session state on the wire** (2026-10-09,
+  readiness item 11; the ruling in `.research/osc7501-2026-10-07.md`). The program status
+  protocol lets a program say it is working, done, waiting on the person or failed, for itself
+  and for parts of its work. libghostty-vt checks each report against the specification since
+  ghostty #14560; the binding fork gained `Terminal::on_program_status` for it (libghostty-rs
+  `880d4950`), which also answers the support query (`OSC 7501 ; ?`). No mainstream agent sends
+  it yet; build tools and agent plugins are where it starts.
+  - **Shape.** `slopty_proto::terminal::ProgramStatus { id, state, need, progress, app, title,
+    message }`. `state` is the specification's lifecycle (`Idle`, `Working`, `Done`, `Blocked`,
+    `Error`); `need` is open text, with `ProgramStatus::PERMISSION`, `QUESTION` and `AUTH` for
+    the three the specification names, so one added later passes through as written. The whole
+    set travels as `TermEvent::ProgramStatus` after each change and on attach while it holds
+    any, and as `SessionSummary::program`, so a client that views nothing still shows what needs
+    the person. The set is small and sent whole: at most `ProgramStatus::RECORDS` (64, the
+    specification's least), the record updated longest ago making room.
+  - **The specification's lifetimes, kept in the engine.** A report replaces its record whole;
+    a clear takes the record and those beneath it (`build` takes `build/test`, not `builder`),
+    and with no id every record; a full reset sends such a clear. The next prompt (`133;A`)
+    ends `working`, `blocked` and `idle` records, and the worker ends them when the program
+    exits; `done` and `error` stay for the person to see. Reports are queued among the prompt
+    marks of the same read, so a report written after a prompt outlives it.
+  - **Untrusted words.** libghostty decodes the title and the message and drops a report with a
+    control character in them. The engine also takes out the characters that reorder or hide
+    text (the direction marks, embeddings, overrides and isolates, the zero-width ones), so a
+    message cannot pass for another's.
+  - **Kept across a worker restart.** The checkpoint replays each record as a report after the
+    screens, as it does the progress.
+  - Tests: `program_status_reports_become_records` and
+    `program_status_records_live_as_the_specification_says` (engine, from the bytes); the
+    checkpoint case "program status" (`ghostty::session_state`); `ghostty::status` (clears,
+    eviction, prompts, the words); `program_status_reaches_the_viewers_and_the_summary` (actor);
+    `program_status_is_kept_until_a_relink` (client); the fork's own `osc7501_*` tests. Goldens:
+    `worker_term_program_status`, and the four that carry a summary
+    (`worker_session_opened`, `worker_session_changed`, `server_session_changed`,
+    `ctl_reply_status`).

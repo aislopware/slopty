@@ -1,9 +1,9 @@
 //! A checkpoint carries the session's state: what the session tells its viewers (the title, the
-//! directory, the colours, the pointer shape, the progress), what the frames carry (the modes,
-//! the cursor's position, shape, blink and visibility), what shapes input (the mouse and key
-//! modes, the kitty keyboard flags), and what only shows once the program goes on writing (the
-//! pen, an open hyperlink, the character sets, the saved cursor, the kitty keyboard stack,
-//! protected cells, a pending wrap, the margins and the tab stops).
+//! directory, the colours, the pointer shape, the progress, the program's status records), what the
+//! frames carry (the modes, the cursor's position, shape, blink and visibility), what shapes input
+//! (the mouse and key modes, the kitty keyboard flags), and what only shows once the program goes
+//! on writing (the pen, an open hyperlink, the character sets, the saved cursor, the kitty keyboard
+//! stack, protected cells, a pending wrap, the margins and the tab stops).
 
 use pretty_assertions::assert_eq;
 use slopty_proto::input::CellMetrics;
@@ -35,6 +35,7 @@ struct Session {
     colors: ColorOverrides,
     pointer: PointerShape,
     progress: Progress,
+    program: Vec<slopty_proto::terminal::ProgramStatus>,
 }
 
 impl Session {
@@ -46,6 +47,7 @@ impl Session {
                 EngineEvent::Colors(c) => self.colors = c,
                 EngineEvent::Pointer(p) => self.pointer = p,
                 EngineEvent::Progress(p) => self.progress = p,
+                EngineEvent::ProgramStatus(p) => self.program = p,
                 _ => {}
             }
         }
@@ -139,6 +141,12 @@ fn a_checkpoint_carries_the_state_the_session_reports_and_shows() {
         ("progress error, no value", b"\x1b]9;4;2\x07"),
         ("progress indeterminate", b"\x1b]9;4;3\x07"),
         ("progress paused", b"\x1b]9;4;1;70\x07\x1b]9;4;4\x07"),
+        // "Apply?" and "Tests" in base64.
+        (
+            "program status",
+            b"\x1b]7501;state=blocked:kind=question:progress=40:app=tf:msg=QXBwbHk/\x07\
+              \x1b]7501;state=done:id=build/test:title=VGVzdHM=\x07\x1b]7501;state=error:id=b\x07",
+        ),
         ("palette", b"\x1b]4;1;#123456\x07"),
         ("foreground and background", b"\x1b]10;#010203\x07\x1b]11;#040506\x07"),
         ("bracketed paste", b"\x1b[?2004h"),

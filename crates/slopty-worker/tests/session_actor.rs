@@ -648,6 +648,60 @@ mod actor {
         session.close();
     }
 
+    /// A program's status record (`OSC 7501`) reaches the viewers and the summary, so a client
+    /// that views nothing shows what needs the person; a client attaching is told it ahead of
+    /// its first frame; the program's exit ends what was waiting and keeps its result.
+    #[tokio::test]
+    async fn program_status_reaches_the_viewers_and_the_summary() {
+        use slopty_proto::terminal::ProgramState;
+
+        let (moves, mut moved) = mpsc::unbounded_channel();
+        let (session, mut child, _tap) = start_with(
+            &[
+                "/bin/sh",
+                "-c",
+                "printf '\\033]7501;state=blocked:kind=permission\\007'; read x; \
+                 printf '\\033]7501;state=done:id=b\\007'; exit 0",
+            ],
+            Vec::new(),
+            Some(moves),
+        );
+        let states = |events: &[TermEvent]| -> Option<Vec<(String, ProgramState)>> {
+            events.iter().rev().find_map(|e| match e {
+                TermEvent::ProgramStatus(all) => {
+                    Some(all.iter().map(|r| (r.id.clone(), r.state)).collect())
+                }
+                _ => None,
+            })
+        };
+        let blocked = vec![(String::new(), ProgramState::Blocked)];
+        let (a, b) = (ClientId::new(), ClientId::new());
+        let (tx_a, mut rx_a) = viewer(64);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        wait_for(&mut rx_a, |ev, _| states(ev).as_ref() == Some(&blocked)).await;
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!(snap.program.len(), 1);
+        assert_eq!(snap.program[0].need.as_deref(), Some("permission"));
+        assert_eq!(moved.try_recv().ok(), Some(session.id()), "the record moved the summary");
+        let (tx_b, mut rx_b) = viewer(64);
+        session.attach(b, size(40, 6), tx_b).unwrap();
+        let (events, _) = wait_for(&mut rx_b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        let told = events.iter().position(|e| matches!(e, TermEvent::ProgramStatus(_)));
+        let frame = events.iter().position(|e| matches!(e, TermEvent::Frame(_)));
+        assert!(told.is_some() && told < frame, "{events:?}");
+        session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        let both = vec![blocked[0].clone(), ("b".to_owned(), ProgramState::Done)];
+        wait_for(&mut rx_a, |ev, _| states(ev).as_ref() == Some(&both)).await;
+        let status = child.wait().await.unwrap();
+        session.exited(status.code().unwrap());
+        let done = vec![("b".to_owned(), ProgramState::Done)];
+        wait_for(&mut rx_a, |ev, _| states(ev).as_ref() == Some(&done)).await;
+        session.close();
+    }
+
     /// The session's summary carries its progress report, so a client that views nothing
     /// shows it: each change of the report says the summary moved, and the snapshot has it
     /// until the report is removed. A reopened session's snapshot says so for its whole life.
