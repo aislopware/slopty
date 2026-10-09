@@ -46,6 +46,7 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::PresentedFrame;
 use gpui::composition::NativeHost;
 use gpui_apple::fast::video_layer::{VideoLayer, VideoLayerOptions};
+use objc2_core_foundation::CFRetained;
 use parking_lot::Mutex;
 use slopty_client::Presentable;
 use slopty_client::pacing::{FrameStamp, GlassStats, Pace, Pacer, PacingStats, PaintRate};
@@ -189,14 +190,14 @@ impl Picture {
         }
     }
 
-    /// The whole picture's buffer, or the top stripe's.
-    pub(super) fn buffer(&self) -> CVPixelBuffer {
-        self.top.clone()
+    /// The whole picture's buffer, or the top stripe's, as GPUI's surface takes it.
+    pub(super) fn buffer(&self) -> Option<Surface> {
+        surface(&self.top)
     }
 
-    /// The lower stripe's buffer; `None` for one picture.
-    pub(super) fn lower(&self) -> Option<CVPixelBuffer> {
-        self.lower.as_ref().map(|lower| lower.buffer.clone())
+    /// The lower stripe's buffer, as GPUI's surface takes it; `None` for one picture.
+    pub(super) fn lower(&self) -> Option<Surface> {
+        self.lower.as_ref().and_then(|lower| surface(&lower.buffer))
     }
 
     /// The part of the target it shows; `None` for all of it (tests).
@@ -206,8 +207,8 @@ impl Picture {
     }
 }
 
-/// The decoder's buffer at `image`, a `CVPixelBufferRef`, in the wrapper GPUI and the layer
-/// take.
+/// The decoder's buffer at `image`, a `CVPixelBufferRef`, in the wrapper the layer takes
+/// (GPUI's surface takes it through [`surface`]).
 fn wrap<T>(image: &T) -> CVPixelBuffer {
     let raw = std::ptr::from_ref(image).cast_mut().cast::<core_video::buffer::__CVBuffer>();
     // SAFETY: `raw` is a live `CVPixelBufferRef` the frame owns; `wrap_under_get_rule` takes a
@@ -568,6 +569,23 @@ fn reported(glass: &Weak<Glass>, generation: u64, sequence: u64, frame: Presente
         // as a remote desktop's virtual display): untimed, as GPUI's own frames are there.
         None => {}
     }
+}
+
+/// A pixel buffer as GPUI paints a surface from it (`Window::paint_surface`).
+pub(super) type Surface = CFRetained<objc2_core_video::CVPixelBuffer>;
+
+/// `buffer` as GPUI's surface takes it: the same `CVPixelBuffer`, held once more. The decoder
+/// hands out `core-video`'s wrapper, GPUI takes `objc2-core-video`'s; both are the one
+/// `CVPixelBufferRef`.
+fn surface(buffer: &CVPixelBuffer) -> Option<Surface> {
+    let raw = buffer.as_concrete_TypeRef().cast::<objc2_core_video::CVPixelBuffer>();
+    let raw = std::ptr::NonNull::new(raw)?;
+    // SAFETY: Core Foundation's Create Rule and Get Rule (CFMemoryMgmt): `raw` is the
+    // `CVPixelBufferRef` that `buffer` owns a reference to for as long as it lives, so it is
+    // valid here; `CFRetained::retain` takes a reference of its own (`CFRetain`), which it
+    // releases when dropped, so the surface outlives `buffer` safely. Both wrappers name the
+    // same Core Video type, `CVPixelBufferRef`.
+    Some(unsafe { CFRetained::retain(raw) })
 }
 
 /// A stamp for a picture a test puts up: decoded and arrived now, after every one before.

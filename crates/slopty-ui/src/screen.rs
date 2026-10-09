@@ -2943,11 +2943,15 @@ fn region_bounds(whole: Bounds<Pixels>, region: Region, native: (f32, f32)) -> B
 /// its rows.
 fn paint_picture(window: &mut Window, at: Bounds<Pixels>, picture: &glass::Picture) {
     let Some([top, lower]) = stripe_places(at, glass::Shape::of(picture)) else {
-        window.paint_surface(at, picture.buffer());
+        if let Some(buffer) = picture.buffer() {
+            window.paint_surface(at, buffer);
+        }
         return;
     };
     window.with_content_mask(Some(ContentMask { bounds: top.shown }), |window| {
-        window.paint_surface(top.layer, picture.buffer());
+        if let Some(buffer) = picture.buffer() {
+            window.paint_surface(top.layer, buffer);
+        }
     });
     if let Some(buffer) = picture.lower() {
         window.with_content_mask(Some(ContentMask { bounds: lower.shown }), |window| {
@@ -3308,8 +3312,8 @@ impl Render for ScreenView {
                             window.paint_native(&native, at, gpui::Corners::default(), None);
                             #[cfg(test)]
                             layer_at.set(Some((at, window.content_mask().bounds)));
-                            if let Some(picture) = captured {
-                                window.paint_surface(at, picture.buffer());
+                            if let Some(buffer) = captured.and_then(|p| p.buffer()) {
+                                window.paint_surface(at, buffer);
                             }
                             return;
                         };
@@ -3324,8 +3328,10 @@ impl Render for ScreenView {
                                 );
                                 #[cfg(test)]
                                 layer_at.set(Some((top.layer, window.content_mask().bounds)));
-                                if let Some(picture) = &captured {
-                                    window.paint_surface(top.layer, picture.buffer());
+                                if let Some(buffer) =
+                                    captured.as_ref().and_then(glass::Picture::buffer)
+                                {
+                                    window.paint_surface(top.layer, buffer);
                                 }
                             },
                         );

@@ -76,7 +76,7 @@ fn hang(
         stall: longest.map_or(Duration::ZERO, ForegroundEvent::duration),
         active,
         cause: longest.map_or_else(|| "main-thread work".to_owned(), cause),
-        piled_up: trigger == HangTrigger::Budget,
+        piled_up: trigger == HangTrigger::LateFrame,
         frames: contributors.iter().take(NAMED).filter_map(frame).collect(),
     }
 }
@@ -90,6 +90,7 @@ fn cause(event: &ForegroundEvent) -> String {
         ForegroundEvent::Action(action) => format!("the action {}", action.name),
         ForegroundEvent::Input(input) => format!("a {} input", input.kind),
         ForegroundEvent::Draw(_) => "drawing a window".to_owned(),
+        ForegroundEvent::View(view) => format!("the {:?} of the view {}", view.phase, view.name),
         ForegroundEvent::Present(_) => "presenting a frame".to_owned(),
         ForegroundEvent::SmallPolls(_) => "many short tasks".to_owned(),
     }
@@ -142,7 +143,7 @@ mod tests {
         assert!(!one.piled_up);
         assert_eq!(one.active, Duration::from_millis(360));
 
-        let many = hang(HangTrigger::Budget, Duration::from_millis(300), &events[..1]);
+        let many = hang(HangTrigger::LateFrame, Duration::from_millis(300), &events[..1]);
         assert!(many.piled_up, "no single piece past the threshold");
         assert_eq!(many.cause, "the action file::SaveFile");
     }

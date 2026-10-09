@@ -37,6 +37,9 @@ objc2-core-graphics = { workspace = true, features = [
     "CGPDFDocument",
     "CGPDFPage",
 ] }
+# GPUI's surface takes `objc2-core-video`'s pixel buffer; a remote picture is handed to it as one
+# (`screen::glass::surface`).
+objc2-core-video.workspace = true
 objc2-image-io = { workspace = true, features = [
     "CGImageProperties",
     "CGImageSource",
