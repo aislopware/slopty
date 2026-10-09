@@ -56,9 +56,9 @@ pub(super) fn pull_number(text: &str) -> Option<u32> {
     typed_pull(text).map(|(number, _)| number)
 }
 
-/// [`pull_number`], with the forge the text says it is on: GitLab for `!12` or a merge
-/// request's page, the page's host's for a pull request's page, and none for a bare number,
-/// which either forge's repository may hold.
+/// The number `text` names, as `pull_number` reads it, with the forge the text says it is on:
+/// GitLab for `!12` or a merge request's page, the page's host's for a pull request's page, and
+/// none for a bare number, which either forge's repository may hold.
 pub(super) fn typed_pull(text: &str) -> Option<(u32, Option<Forge>)> {
     let typed = text.trim();
     let (digits, forge) = match (typed.strip_prefix('#'), typed.strip_prefix('!')) {
