@@ -536,8 +536,9 @@ async fn follow_settings(
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
-/// answers, the person's own ACP agents as `own_acp` last says among them) and tell every
-/// client each change. What each agent can be started with follows the threads `host` holds.
+/// answers, the person's own ACP agents as `own_acp` last says among them, and an agent
+/// installed or removed while the worker runs as its directory changes) and tell every client
+/// each change. What each agent can be started with follows the threads `host` holds.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
     load: tokio::sync::watch::Sender<f32>,
@@ -549,14 +550,12 @@ fn watch_caps(
     let mut moved = load.subscribe();
     let load_events = events.clone();
     tokio::spawn(async move {
+        let dirs = slopty_worker::facts::agent_dirs().await;
         let own = own_acp.borrow_and_update().clone();
-        let (installed, agents) =
-            tokio::sync::watch::channel(slopty_worker::caps::installed_agents(&own).await);
+        let found = slopty_worker::caps::installed_agents(&dirs, &own).await;
+        let (installed, agents) = tokio::sync::watch::channel(found);
         tokio::spawn(slopty_worker::caps::watch(caps, load, agents, host));
-        while own_acp.changed().await.is_ok() {
-            let own = own_acp.borrow_and_update().clone();
-            installed.send_replace(slopty_worker::caps::installed_agents(&own).await);
-        }
+        slopty_worker::caps::follow_agents(dirs, own_acp, installed).await;
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {

@@ -158,14 +158,23 @@ pub async fn gather(own: OwnAcp) -> Facts {
     facts
 }
 
-/// The coding agents installed here, as `gather` puts them under `agents` and `acp`.
+/// The directories agents are looked for in: the worker's own `PATH`, then the login shell's,
+/// each once.
+pub async fn agent_dirs() -> Vec<PathBuf> {
+    let login = login_path().await;
+    SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)).dirs
+}
+
+/// The coding agents installed in `dirs` ([`agent_dirs`]), as `gather` puts them under `agents`
+/// and `acp`.
 ///
 /// Those run by an adapter of their own (and the other agent programs it knows) by program, then
 /// those reached over ACP by the registry's name, the person's own (`own_acp`) among them. What the
 /// worker's capabilities say it can start ([`crate::caps::installed_agents`]).
-pub async fn agents(own_acp: &BTreeMap<String, Vec<String>>) -> (Facts, Facts) {
-    let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
-    let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
+pub async fn agents(dirs: &[PathBuf], own_acp: &BTreeMap<String, Vec<String>>) -> (Facts, Facts) {
+    let stand_ins = StandIns::find().await;
+    let lists = std::iter::once(std::env::join_paths(dirs).unwrap_or_default());
+    let search = Arc::new(SearchPath::of(lists));
     tokio::join!(
         versions(&search, &stand_ins, &AGENTS),
         acp_agents(&search, &stand_ins, registry::registry(own_acp)),

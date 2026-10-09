@@ -61,9 +61,64 @@ const ADAPTED: [(&str, &str); 3] =
 /// Claude Code, Codex and pi, then each agent reached over ACP whose program is here, the
 /// person's own (`own_acp`, from `[worker.acp]`) among the known ones. What a client offers to
 /// start on this machine is exactly this, with no server needed.
-pub async fn installed_agents(own_acp: &BTreeMap<String, Vec<String>>) -> Vec<InstalledAgent> {
-    let (agents, acp) = crate::facts::agents(own_acp).await;
+pub async fn installed_agents(
+    dirs: &[std::path::PathBuf],
+    own_acp: &BTreeMap<String, Vec<String>>,
+) -> Vec<InstalledAgent> {
+    let (agents, acp) = crate::facts::agents(dirs, own_acp).await;
     agents_in(&agents, &acp)
+}
+
+/// How long the directories agents are found in stay quiet before they are looked in again:
+/// an install writes several files.
+pub const INSTALL_SETTLE: Duration = Duration::from_secs(1);
+
+/// Keep `installed` to the agents found in `dirs` ([`installed_agents`]) while the worker runs.
+///
+/// They are looked for again whenever an entry in one of the directories is added, removed or
+/// renamed (an agent installed, upgraded or removed), once the directories have been quiet for
+/// [`INSTALL_SETTLE`], and whenever the person's own ACP agents (`own_acp`) change. It ends once
+/// `installed` has no receiver left.
+pub async fn follow_agents(
+    dirs: Vec<std::path::PathBuf>,
+    mut own_acp: watch::Receiver<BTreeMap<String, Vec<String>>>,
+    installed: watch::Sender<Vec<InstalledAgent>>,
+) {
+    let listed = dirs.iter().map(|d| d.to_string_lossy().into_owned()).collect();
+    // Held for as long as it follows: the follower ends with the list's sender.
+    let (_lists, mut lists) = watch::channel(listed);
+    // The follower takes a list as it changes, so the first one is marked.
+    lists.mark_changed();
+    let mut moved = crate::fswatch::follow_folders(lists, crate::fswatch::Limits::default());
+    let mut own = own_acp.borrow_and_update().clone();
+    let mut acp_followed = true;
+    loop {
+        let now = installed_agents(&dirs, &own).await;
+        installed.send_if_modified(|was| {
+            let differs = *was != now;
+            *was = now;
+            differs
+        });
+        tokio::select! {
+            changed = own_acp.changed(), if acp_followed => match changed {
+                Ok(()) => own = own_acp.borrow_and_update().clone(),
+                Err(_) => acp_followed = false,
+            },
+            seen = moved.next() => {
+                if seen.is_none() {
+                    return;
+                }
+                // The rest of an install: looked in once it has been quiet.
+                loop {
+                    tokio::select! {
+                        () = tokio::time::sleep(INSTALL_SETTLE) => break,
+                        more = moved.next() => if more.is_none() { return },
+                    }
+                }
+            }
+            () = installed.closed() => return,
+        }
+    }
 }
 
 /// The agents a thread can be started of, from the `agents` and `acp` facts.
@@ -406,6 +461,42 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent installed while the worker runs is found without a restart, at the version it
+    /// says, and one removed goes.
+    #[tokio::test]
+    async fn an_agent_installed_while_the_worker_runs_is_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let bin = dir.path().canonicalize().expect("path");
+        let (_own, own_acp) = watch::channel(BTreeMap::new());
+        let (installed, mut agents) = watch::channel(Vec::new());
+        let following = tokio::spawn(follow_agents(vec![bin.clone()], own_acp, installed));
+        let codex = |agents: &[InstalledAgent]| {
+            agents
+                .iter()
+                .find(|a| a.agent == AgentId::named(AgentId::CODEX))
+                .map(|a| a.version.clone())
+        };
+        let until = async |agents: &mut watch::Receiver<Vec<InstalledAgent>>,
+                           want: Option<&str>| {
+            let waited = tokio::time::timeout(Duration::from_secs(30), async {
+                while codex(&agents.borrow_and_update()).as_deref() != want {
+                    agents.changed().await.expect("following");
+                }
+            });
+            waited.await.expect("came to what was awaited");
+        };
+        until(&mut agents, None).await;
+        let program = bin.join("codex");
+        std::fs::write(&program, "#!/bin/sh\necho 'codex-cli 0.162.0'\n").expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        until(&mut agents, Some("0.162.0")).await;
+        std::fs::remove_file(&program).expect("remove");
+        until(&mut agents, None).await;
+        following.abort();
+    }
 
     /// A machine says its form by its chassis: a laptop, a desktop, and a server or a virtual
     /// machine, which says "Other" or nothing.

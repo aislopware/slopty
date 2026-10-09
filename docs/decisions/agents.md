@@ -2617,3 +2617,22 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     again, and the retry Slopty prints is the one the capture printed and Claude Code acted on.
     Also the `conversation::auto` snapshot, and `auto` in every whole-scenario test
     (`every_entry_is_an_item_in_its_prompts_turn`, `every_captured_event_is_one_the_relay_registers`).
+
+- ✅ **An agent installed while the worker runs is offered without a restart** (2026-10-10,
+  readiness 10-10 rank 14). The worker read its installed agents once at start, and again only
+  when `[worker.acp]` changed. So Codex or pi installed on a running machine stayed out of
+  "New agent…" until the worker restarted.
+  - The directories agents are found in (the worker's `PATH` and the login shell's,
+    `facts::agent_dirs`) are now followed by the kernel's own directory events
+    (`fswatch::follow_folders`: kqueue on macOS, inotify on Linux). When an entry in one is
+    added, removed or renamed, and the directories have been quiet for `INSTALL_SETTLE` (1 s),
+    the agents are read again (`caps::follow_agents`). An install, a removal and an upgrade that
+    replaces the program all count.
+  - The capabilities change only when the list moved, and every client hears it as any caps
+    change. Nothing polls, and a quiet machine runs no `--version`.
+  - Not followed: an upgrade that rewrites files behind an unchanged link (an npm package's own
+    files). Its new version shows at the next change in those directories or at a restart. The
+    picker starts the same program either way.
+  - Test: `caps::tests::an_agent_installed_while_the_worker_runs_is_found` (slopty-worker): a
+    `codex` written into a followed directory shows at the version it says, and goes when
+    removed.
