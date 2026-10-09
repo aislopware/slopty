@@ -186,19 +186,21 @@ mod tests {
         assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "told, it is drawn anew");
     }
 
-    /// A mark that stands somewhere new every time it is drawn, as a spinner on the wall clock.
-    struct Spinner;
+    /// A mark that stands somewhere new every time it is drawn, as a spinner does. It steps on
+    /// each paint rather than reading the wall clock, so two frames from scratch never land on
+    /// the same place by chance and read as still.
+    #[derive(Default)]
+    struct Spinner(std::rc::Rc<std::cell::Cell<u8>>);
 
     impl Render for Spinner {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let turn = std::rc::Rc::clone(&self.0);
             gpui::canvas(
                 |_, _, _| (),
-                |bounds, (), window, _| {
-                    let turn = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.subsec_nanos() % 97);
-                    let at = bounds.origin
-                        + gpui::point(px(f32::from(u8::try_from(turn).unwrap_or(0))), px(0.0));
+                move |bounds, (), window, _| {
+                    let step = turn.get().wrapping_add(1) % 97;
+                    turn.set(step);
+                    let at = bounds.origin + gpui::point(px(f32::from(step)), px(0.0));
                     window.paint_quad(gpui::fill(
                         gpui::Bounds::new(at, gpui::size(px(2.0), px(2.0))),
                         gpui::black(),
@@ -217,7 +219,7 @@ mod tests {
         use gpui::AppContext as _;
         cx.update(|cx| cx.set_reduce_motion(true));
         let (both, cx) =
-            cx.add_window_view(|_, cx| Both(cx.new(|_| Bar(10.0)), cx.new(|_| Spinner)));
+            cx.add_window_view(|_, cx| Both(cx.new(|_| Bar(10.0)), cx.new(|_| Spinner::default())));
         let bar = both.read_with(cx, |both, _| both.0.clone());
         cx.run_until_parked();
         assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "drawn as it is");
