@@ -24,6 +24,9 @@ const FIELDS: &str = "number,url,title,state,isDraft,headRefName,headRefOid,base
 /// How gh says the branch has no pull request.
 const NONE_FOUND: &str = "no pull requests found";
 
+/// The state of a pull request that merged, in GitHub's words.
+const MERGED: &str = "MERGED";
+
 /// The merge methods gh and glab take, by the flag each is.
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
 
@@ -244,6 +247,12 @@ pub async fn land(
 
 /// Merge the branch's pull request by `method`, only while it ends at `head` when given.
 ///
+/// What the forge reads afterwards decides: a command line that fails once the merge went,
+/// in the local clean-up `--delete-branch` asks of it, reads as merged, in its own words. gh
+/// before 2.99 did so from an agent's worktree, switching the checkout to the base to delete
+/// the branch where the clone has the base checked out; since 2.99 it leaves a worktree's
+/// branch for the worktree's removal and deletes only the forge's.
+///
 /// # Errors
 /// The method is none the forge takes, its command line is missing, or it refused, in its
 /// words.
@@ -278,8 +287,15 @@ pub async fn merge(
         Forge::GitLab => gitlab::merge_args(&method, head, delete_branch),
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let said = run(program, root, &args, None, REMOTE).await?;
+    let ran = run(program, root, &args, None, REMOTE).await;
     let pull = status(programs, root).await.ok().flatten().map(Box::new);
+    let said = match ran {
+        Ok(said) => said,
+        Err(GitOutcome::Failed { said }) if pull.as_ref().is_some_and(|p| p.state == MERGED) => {
+            said
+        }
+        Err(failed) => return Err(failed),
+    };
     Ok(GitDone::Merged { said: said.trim().to_owned(), pull })
 }
 

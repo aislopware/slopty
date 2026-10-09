@@ -670,3 +670,106 @@ async fn a_pull_request_is_opened_once_its_branch_went_up() {
     assert_eq!(feature_at(&forge), feature_at(&work), "the branch went up first");
     assert_eq!(asked(&root), ["pr create --title Keep it --body Why."]);
 }
+
+/// A stand-in for gh `version` in `dir` merging with `--delete-branch` from an agent's
+/// worktree whose clone has `main` checked out, as gh's own source does it there
+/// (`pkg/cmd/pr/merge/merge.go`, `deleteLocalBranch`). The pull request merges on the forge
+/// first. Then gh 2.98 switches the checkout to `main` to delete the local branch, which git
+/// refuses, and fails; gh 2.99 and later warn that the branch is checked out in the current
+/// worktree, skip the local delete and delete the forge's branch, here with git where gh asks
+/// the API. Each call's arguments are recorded; no real gh runs.
+fn worktree_gh(dir: &Path, version: &str) -> PathBuf {
+    let gh = dir.join("gh");
+    let git = crate::changes::git().expect("git");
+    let after = if version == "2.98" {
+        "\"$git\" checkout -q main || exit 1"
+    } else {
+        "echo \"! Branch feature is checked out in the current worktree ($(pwd -P)); skipping \
+         local delete\" >&2\n\"$git\" push -q origin --delete feature || exit 1"
+    };
+    let script = format!(
+        "#!/bin/sh\nd=\"{dir}\"\ngit=\"{git}\"\nprintf '%s\\n' \"$*\" >> \"$d/asked\"\n\
+         case \"$1 $2\" in\n\
+         'pr merge') echo MERGED > \"$d/state\"\n\
+           echo '✓ Squashed and merged pull request #7 (Keep it)'\n\
+           {after} ;;\n\
+         'pr view') sed \"s/\\\"OPEN\\\"/\\\"$(cat \"$d/state\")\\\"/\" \"$d/view.json\" ;;\n\
+         *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+         esac\n",
+        dir = dir.display(),
+        git = git.display()
+    );
+    std::fs::write(dir.join("view.json"), VIEW).expect("written");
+    std::fs::write(dir.join("state"), "OPEN").expect("written");
+    std::fs::write(dir.join("asked"), "").expect("written");
+    std::fs::write(&gh, script).expect("written");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    gh
+}
+
+/// A merge asked to delete its branch, from an agent's worktree whose clone has `main` checked
+/// out, reads as merged and leaves the worktree on its branch, whichever gh runs it: gh 2.98
+/// fails in its local clean-up once the merge went, and the forge's word that the pull request
+/// merged decides; gh 2.99 and later leave the local branch and delete the forge's. A merge gh
+/// refuses still fails (`a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words`).
+#[tokio::test]
+async fn a_merge_from_a_worktree_reads_as_merged_and_leaves_the_worktree_on_its_branch() {
+    let Some(git) = crate::changes::git() else { return };
+    let in_dir = |at: &Path, args: &[&str]| {
+        let ran = std::process::Command::new(git)
+            .arg("-C")
+            .arg(at)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(ran.status.success(), "{args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    };
+    for version in ["2.98", "2.99"] {
+        let dir = tempfile::tempdir().expect("temp");
+        let root = std::fs::canonicalize(dir.path()).expect("real");
+        let clone = root.join("clone");
+        std::fs::create_dir_all(&clone).expect("made");
+        in_dir(&clone, &["init", "-q", "-b", "main"]);
+        in_dir(&clone, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        in_dir(&root, &["init", "-q", "--bare", "forge.git"]);
+        let forge = root.join("forge.git");
+        in_dir(&clone, &["remote", "add", "origin", &forge.to_string_lossy()]);
+        let tree = clone.join(".claude/worktrees/fix");
+        in_dir(&clone, &["worktree", "add", "-q", "-b", "feature", &tree.to_string_lossy()]);
+        in_dir(&tree, &["commit", "-q", "--allow-empty", "-m", "the agent's work"]);
+        in_dir(&tree, &["push", "-q", "--set-upstream", "origin", "main", "feature"]);
+
+        let programs = Programs {
+            git: Some(git.to_path_buf()),
+            gh: Some(worktree_gh(&root, version)),
+            glab: None,
+        };
+        let merge = GitOp::Merge {
+            method: "squash".to_owned(),
+            head: Some("0123abcd".to_owned()),
+            delete_branch: true,
+        };
+        let done = apply(&programs, &tree.to_string_lossy(), merge, &[]).await;
+        let GitOutcome::Done(GitDone::Merged { said, pull }) = &done else {
+            panic!("gh {version}: {done:?}")
+        };
+        assert!(said.contains("Squashed and merged"), "gh {version}: {said}");
+        assert_eq!(pull.as_ref().map(|p| p.state.as_str()), Some("MERGED"), "gh {version}");
+        assert_eq!(
+            asked(&root).first().map(String::as_str),
+            Some("pr merge --squash --match-head-commit 0123abcd --delete-branch"),
+            "gh {version}"
+        );
+        let on = |at: &Path| in_dir(at, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(on(&tree), "feature", "gh {version}: the worktree on its branch");
+        assert_eq!(on(&clone), "main", "gh {version}: the clone as it was");
+        assert_eq!(
+            feature_at(&forge).is_none(),
+            version != "2.98",
+            "gh {version}: the forge's branch deleted only where gh got that far"
+        );
+    }
+}
