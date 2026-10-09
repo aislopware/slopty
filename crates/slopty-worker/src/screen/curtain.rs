@@ -333,23 +333,22 @@ pub struct Native;
 
 #[cfg(not(target_os = "macos"))]
 impl Drapes for Native {
-    type Raised = std::convert::Infallible;
+    /// Never made: [`Self::raise`] always refuses, so the rest answer for a curtain never up.
+    type Raised = ();
 
     fn raise(&mut self) -> Result<Self::Raised, String> {
         Err("only a Mac draws the curtain".to_owned())
     }
 
-    fn input_held(&self, raised: &Self::Raised) -> bool {
-        match *raised {}
+    fn input_held(&self, (): &Self::Raised) -> bool {
+        false
     }
 
-    fn follow(&mut self, raised: &mut Self::Raised) -> bool {
-        match *raised {}
+    fn follow(&mut self, (): &mut Self::Raised) -> bool {
+        false
     }
 
-    fn lower(&mut self, raised: Self::Raised, _lock: bool) {
-        match raised {}
-    }
+    fn lower(&mut self, (): Self::Raised, _lock: bool) {}
 }
 
 /// The worker's curtain, on the main queue, following every display reconfiguration. `None` off
