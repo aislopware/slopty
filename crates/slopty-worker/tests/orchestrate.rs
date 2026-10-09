@@ -8,7 +8,6 @@ mod orchestrate {
 
     use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_core::{SessionId, WallMs};
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::orchestration::{Command, ErrorCode, Input, Screen, WaitUntil, Waited};
     use slopty_proto::terminal::TermSize;
@@ -37,7 +36,6 @@ mod orchestrate {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             let status = self.0.lock().clone()?;
             Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
                 status,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
@@ -66,13 +64,7 @@ mod orchestrate {
     impl Agents for Said {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             let (status, source) = self.0.lock().0.clone()?;
-            Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
-                status,
-                source,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            })
+            Some(SessionAgent { status, source, since_ms: WallMs::ZERO, mode: None })
         }
 
         fn forget(&self, _session: SessionId) {}
@@ -88,7 +80,6 @@ mod orchestrate {
     impl Agents for Stopped {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::IdlePrompt),
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
@@ -106,7 +97,6 @@ mod orchestrate {
     fn agent_event(session: SessionId, status: AgentStatus) -> AgentEvent {
         AgentEvent {
             session,
-            kind: AgentKind::ClaudeCode,
             status,
             agent_session: None,
             detail: None,

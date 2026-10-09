@@ -545,18 +545,6 @@ mod golden_thread {
                 liveness: Liveness::Exited { resumable: true },
                 since_ms: ms(3),
             }),
-            Action::Status(Status {
-                phase: Phase::Waiting,
-                wait: None,
-                liveness: Liveness::Sleeping { until_ms: ms(9) },
-                since_ms: ms(3),
-            }),
-            Action::Status(Status {
-                phase: Phase::Working,
-                wait: None,
-                liveness: Liveness::Silent { since_ms: ms(4) },
-                since_ms: ms(3),
-            }),
             Action::TurnStarted(turn()),
             Action::TurnEnded {
                 turn: TurnId(1),

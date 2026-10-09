@@ -519,16 +519,6 @@ pub enum Liveness {
         /// Its session can be resumed.
         resumable: bool,
     },
-    /// It sleeps until a wakeup.
-    Sleeping {
-        /// When it wakes.
-        until_ms: WallMs,
-    },
-    /// It runs but has said nothing for a while.
-    Silent {
-        /// Since when.
-        since_ms: WallMs,
-    },
 }
 
 /// A thread's state at a glance ([`Action::Status`]).

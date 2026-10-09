@@ -12,7 +12,6 @@ mod compose {
     use slopty_agent::observed::{Observed, Out};
     use slopty_agent::status::{AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_core::{ClientId, SessionId, WallMs};
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::input::CellMetrics;
     use slopty_proto::terminal::{TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};
@@ -42,7 +41,6 @@ mod compose {
         fn status(&self, _session: SessionId) -> Option<SessionAgent> {
             let status = self.agent.lock().clone()?;
             Some(SessionAgent {
-                kind: AgentKind::ClaudeCode,
                 status,
                 source: *self.source.lock(),
                 since_ms: WallMs::ZERO,

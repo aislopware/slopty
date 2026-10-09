@@ -14,7 +14,6 @@ mod claude_start {
     use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus};
     use slopty_core::SessionId;
     use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Drive, Fork, IntentId, ItemBody, Liveness, PendingState, Phase, ThreadId,
@@ -376,7 +375,6 @@ mod claude_start {
     fn gone(rig: &Rig, terminal: SessionId, native: &str) {
         let event = AgentEvent {
             session: terminal,
-            kind: AgentKind::ClaudeCode,
             status: AgentStatus::None,
             agent_session: Some(native.to_owned()),
             detail: None,

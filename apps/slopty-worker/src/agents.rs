@@ -349,7 +349,6 @@ mod tests {
     fn at(status: AgentStatus) -> (AgentEvent, Option<i32>) {
         let event = AgentEvent {
             session: SessionId::new(),
-            kind: slopty_proto::agent::AgentKind::ClaudeCode,
             status,
             agent_session: None,
             detail: None,

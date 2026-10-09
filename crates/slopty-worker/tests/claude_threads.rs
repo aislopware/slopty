@@ -17,7 +17,6 @@ mod claude_threads {
     use slopty_agent::transcript::Tail;
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState};
@@ -100,7 +99,6 @@ mod claude_threads {
         fn tracked(&self, status: AgentStatus, native: Option<&str>, source: AgentSource) {
             let event = AgentEvent {
                 session: self.terminal,
-                kind: AgentKind::ClaudeCode,
                 status,
                 agent_session: native.map(str::to_owned),
                 detail: None,

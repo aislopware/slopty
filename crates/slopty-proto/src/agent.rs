@@ -1,17 +1,10 @@
-//! Coding agents: which one a start asks for, and where its work lands.
+//! Coding agents: where their work lands.
 //!
 //! What an agent is doing travels as its thread's row ([`crate::thread::wire::ThreadRow`]);
 //! the worker's hook tracker that feeds the row keeps its own vocabulary off the wire.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::SessionId;
-
-/// Which agent.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum AgentKind {
-    /// Claude Code.
-    ClaudeCode,
-}
 
 /// Where an agent's work lands, as its status line names it: the worktree it runs in.
 ///

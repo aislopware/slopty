@@ -41,7 +41,6 @@ use slopty_agent::observed::{self, Observed, Out};
 use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::conversation::{PermissionEvent, PermissionPrompt};
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadId, ThreadState};
@@ -149,10 +148,7 @@ pub fn spawn(
         loop {
             let (session, input) = tokio::select! {
                 report = heard.recv() => match report {
-                    Ok(event) if event.kind == AgentKind::ClaudeCode => {
-                        (event.session, Input::Status(Box::new(event)))
-                    }
-                    Ok(_) => continue,
+                    Ok(event) => (event.session, Input::Status(Box::new(event))),
                     // A status missed is told again with the next change.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::debug!(missed, "the observed sessions missed agent reports");

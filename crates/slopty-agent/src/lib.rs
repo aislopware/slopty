@@ -75,7 +75,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::{AgentBranch, AgentKind, Worktree};
+use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::project::{AgentReport, NativeTask};
 
 use crate::detect::Program;
@@ -775,7 +775,6 @@ impl Tracker {
     pub fn event(&self, session: SessionId) -> AgentEvent {
         AgentEvent {
             session,
-            kind: AgentKind::ClaudeCode,
             status: self.status.clone(),
             agent_session: self.agent_session.clone(),
             detail: self.detail.clone(),

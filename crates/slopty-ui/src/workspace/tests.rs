@@ -15,7 +15,6 @@ use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId, StreamId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, SemanticMark, Style, TermModes};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::screen::{CaptureTarget, ScreenEvent, ScreenRequest};
@@ -1395,7 +1394,6 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
         v.agent_event(
             AgentEvent {
                 session,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: None,
@@ -1420,7 +1418,6 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
 fn blocked(session: SessionId) -> AgentEvent {
     AgentEvent {
         session,
-        kind: AgentKind::ClaudeCode,
         status: AgentStatus::Blocked(BlockReason::Question),
         agent_session: None,
         detail: None,

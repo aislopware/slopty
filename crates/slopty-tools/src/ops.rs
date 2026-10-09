@@ -4,7 +4,6 @@
 //! A verb that changes something takes the caller's [`IdempotencyKey`], if it gave one.
 
 use slopty_core::WorkerId;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
@@ -163,11 +162,9 @@ pub async fn spawn_agent<D: Dispatch>(
 ) -> Result<TermRef, ToolError> {
     let worker = res.worker(worker).await?;
     let AgentSpec { cwd, prompt, args, env, size } = spec;
-    let agent = AgentKind::ClaudeCode;
     // The server sets `permission_flags` from the person's policy, whatever is asked here.
     let verb = Verb::SpawnAgent {
         worker,
-        agent,
         cwd,
         prompt,
         args,

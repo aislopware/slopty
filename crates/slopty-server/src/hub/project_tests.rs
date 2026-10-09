@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_agent::vouch::SessionKey;
-use slopty_proto::agent::{AgentKind, Worktree};
+use slopty_proto::agent::Worktree;
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
     ASKING_ENV, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV,
@@ -179,8 +179,8 @@ async fn a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task() {
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut linux_rx).await;
     let verb = start.1.clone();
-    let Verb::SpawnAgent { worker, agent, env, cwd, prompt, .. } = verb else { panic!("{verb:?}") };
-    assert_eq!((worker, agent, cwd.as_str()), (linux, AgentKind::ClaudeCode, "~/src/slopty"));
+    let Verb::SpawnAgent { worker, env, cwd, prompt, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!((worker, cwd.as_str()), (linux, "~/src/slopty"));
     assert_eq!(prompt.as_deref(), Some("Read your brief."));
     let last = |name: &str| env.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
     assert_eq!(last(PROJECT_ENV), Some("slopty"));
@@ -387,7 +387,6 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     create(&hub, None).await;
     let plain = || Verb::SpawnAgent {
         worker: linux,
-        agent: AgentKind::ClaudeCode,
         cwd: "~".to_owned(),
         prompt: None,
         args: Vec::new(),
@@ -429,7 +428,6 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
     refused(&start.await, ErrorCode::Limit);
     let plain = Verb::SpawnAgent {
         worker: linux,
-        agent: AgentKind::ClaudeCode,
         cwd: "~".to_owned(),
         prompt: None,
         args: vec!["--allowedTools".to_owned(), "Bash".to_owned()],
@@ -1126,7 +1124,6 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
     };
     let agent = |prompt: &str| Verb::SpawnAgent {
         worker,
-        agent: AgentKind::ClaudeCode,
         cwd: "~".to_owned(),
         prompt: Some(prompt.to_owned()),
         args: Vec::new(),
@@ -1211,7 +1208,6 @@ async fn an_agent_names_no_environment_that_steers_what_it_starts() {
     };
     let agent = |env| Verb::SpawnAgent {
         worker: linux,
-        agent: AgentKind::ClaudeCode,
         cwd: "~".to_owned(),
         prompt: None,
         args: Vec::new(),
@@ -1424,7 +1420,6 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
     hub.set_policy(Policy { permission_flags: [project()].into(), ..Policy::default() });
     let loose = Verb::SpawnAgent {
         worker: linux,
-        agent: AgentKind::ClaudeCode,
         cwd: "~".to_owned(),
         prompt: None,
         args: vec!["--allowedTools".to_owned(), "Bash".to_owned()],

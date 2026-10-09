@@ -3,7 +3,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use slopty_proto::agent::AgentKind;
 use slopty_proto::thread::{ThreadState, Wait};
 
 use super::*;
@@ -420,7 +419,6 @@ fn always_allow_says_what_it_grants_as_claude_code_does() {
 fn the_status_maps_to_a_phase() {
     let event = |status| AgentEvent {
         session: SessionId::nil(),
-        kind: AgentKind::ClaudeCode,
         status,
         agent_session: None,
         detail: None,
@@ -472,7 +470,6 @@ fn the_status_maps_to_a_phase() {
 fn a_block_with_no_prompt_held_asks_in_the_terminal() {
     let event = |status, detail: Option<&str>, since| AgentEvent {
         session: SessionId::nil(),
-        kind: AgentKind::ClaudeCode,
         status,
         agent_session: None,
         detail: detail.map(str::to_owned),
@@ -612,7 +609,6 @@ fn approvals_come_with_the_hooks() {
     assert!(!host.thread(observed.main()).meta.caps.contains(&approvals), "no hook heard");
     let titled = AgentEvent {
         session: SessionId::nil(),
-        kind: AgentKind::ClaudeCode,
         status: AgentStatus::Working,
         agent_session: None,
         detail: None,
@@ -736,7 +732,6 @@ fn stopped_turn(error: &str, quota: Option<serde_json::Value>) -> Vec<serde_json
 fn done() -> AgentEvent {
     AgentEvent {
         session: SessionId::nil(),
-        kind: AgentKind::ClaudeCode,
         status: AgentStatus::Done,
         agent_session: None,
         detail: None,
@@ -928,7 +923,6 @@ fn a_wait_on_commands_left_running_names_them() {
     use serde_json::json;
     let waiting = |tasks, crons| AgentEvent {
         session: SessionId::nil(),
-        kind: AgentKind::ClaudeCode,
         status: AgentStatus::Waiting { tasks, crons },
         agent_session: None,
         detail: None,

@@ -1906,7 +1906,6 @@ mod golden {
 #[cfg(test)]
 mod orchestration {
     use slopty_core::{DisplayId, ItemId, SessionId, WallMs, WindowId, WorkerId};
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::codec;
     use slopty_proto::items::{Item, ItemKind};
     use slopty_proto::orchestration::{
@@ -1984,7 +1983,6 @@ mod orchestration {
             "server_request_spawn",
             &request(Verb::SpawnAgent {
                 worker,
-                agent: AgentKind::ClaudeCode,
                 cwd: "~/src/app".to_owned(),
                 prompt: Some("fix it".to_owned()),
                 args: vec!["--model".to_owned(), "opus".to_owned()],

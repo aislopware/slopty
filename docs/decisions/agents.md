@@ -1104,9 +1104,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     followed under the same thread id and answered `Started` with it, at once when it is followed
     already, and refused in Codex's words when Codex cannot load it. An exited Codex thread's
     Resume sends that start, so the daemon comes up and the thread comes back through one door.
-  - **Left:** `InstalledAgent` names its agent by the closed `AgentKind`, which has only Claude
-    Code, so detecting `codex` and `pi` in `caps.rs` waits on a wire change (an open `AgentId`
-    there). Proposed to the owner of `slopty-proto`.
+  - **Since closed:** `InstalledAgent` names its agent by the open `AgentId`, and `caps.rs`
+    finds `codex` and `pi` beside `claude`. The closed `AgentKind` is deleted (readiness rank 23).
   - Code: `crates/slopty-worker/src/thread/codex.rs` (`Launch`, `Bringing`, `Begin`),
     `crates/slopty-agent/src/codex/daemon.rs`. Tests (`crates/slopty-worker/tests/codex.rs`):
     `a_codex_start_with_no_daemon_starts_the_persons_daemon_once`,
@@ -2518,3 +2517,15 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     live in `driven` (`unified_patch`, `replaced_patch`), which pi shares.
   - Test: `pi::driven::an_edit_and_a_write_carry_their_diff` (slopty-agent), using the
     shapes pi 1.1.0 publishes.
+
+- ✅ **Two closed names left over are deleted** (readiness ranks 22 and 23, 2026-10-09).
+  - **`Liveness::Sleeping` and `Liveness::Silent`.** Nothing built either: they were left
+    when sleep and wake were deleted. A thread's agent is `Live` or `Exited`.
+  - **`AgentKind`.** It was a closed enum with Claude Code as its only value, against the rule
+    that agents are open names. The start of Claude Code's TUI (`Verb::SpawnAgent`) no longer
+    names the agent. It only ever starts `claude`, and any other agent starts by its own
+    `Runner`. The hook tracker's `AgentEvent` and `SessionAgent` lose their `kind` too, since
+    every hook it hears is Claude Code's.
+  - Proof: the deletions compile, and only the wire goldens these values were in moved:
+    `golden__orchestration__server_request_spawn` (one byte fewer) and
+    `golden_thread__frame_actions` (the two statuses that named them are gone).

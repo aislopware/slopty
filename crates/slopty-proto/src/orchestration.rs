@@ -31,7 +31,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
-use crate::agent::AgentKind;
 use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
 use crate::project::{
@@ -298,12 +297,11 @@ pub enum Verb {
         /// in it, where `cwd` stood in the clone.
         worktree: Option<crate::thread::wire::NewWorktree>,
     },
-    /// Start an agent's TUI in a new terminal, optionally with a first prompt.
+    /// Start Claude Code's TUI in a new terminal, optionally with a first prompt; another
+    /// agent starts by its own [`crate::project::Runner`].
     SpawnAgent {
         /// Where.
         worker: WorkerId,
-        /// Which agent.
-        agent: AgentKind,
         /// Working directory (usually a repository).
         cwd: String,
         /// The first prompt, typed once the agent is ready.

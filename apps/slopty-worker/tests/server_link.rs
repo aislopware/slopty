@@ -657,7 +657,6 @@ mod tests {
     /// settings.
     #[tokio::test]
     async fn a_spawned_agent_reports_through_the_relay_it_was_handed() {
-        use slopty_proto::agent::AgentKind;
         use slopty_proto::thread::{AgentId, Cap};
 
         let dir = tempfile::tempdir().unwrap();
@@ -691,7 +690,6 @@ mod tests {
 
         let spawn = Verb::SpawnAgent {
             worker: reg.worker,
-            agent: AgentKind::ClaudeCode,
             cwd: dir.path().to_string_lossy().into_owned(),
             prompt: None,
             args: ["--settings", r#"{"model":"haiku"}"#, "--verbose"].map(String::from).to_vec(),
@@ -782,7 +780,6 @@ mod tests {
     #[tokio::test]
     async fn a_spawned_agent_is_typed_into_only_when_it_can_take_it() {
         use serde_json::json;
-        use slopty_proto::agent::AgentKind;
         use slopty_proto::project::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
@@ -807,7 +804,6 @@ mod tests {
         ];
         let spawn = Verb::SpawnAgent {
             worker: reg.worker,
-            agent: AgentKind::ClaudeCode,
             cwd: dir.path().to_string_lossy().into_owned(),
             prompt: Some("write the brief".to_owned()),
             args: Vec::new(),
@@ -946,7 +942,6 @@ mod tests {
     #[tokio::test]
     async fn reports_reach_an_agent_through_its_next_prompt_s_hook() {
         use serde_json::json;
-        use slopty_proto::agent::AgentKind;
         use slopty_proto::project::AgentReport;
 
         let dir = tempfile::tempdir().unwrap();
@@ -972,7 +967,6 @@ mod tests {
         ];
         let spawn = Verb::SpawnAgent {
             worker: reg.worker,
-            agent: AgentKind::ClaudeCode,
             cwd: dir.path().to_string_lossy().into_owned(),
             prompt: None,
             args: Vec::new(),
@@ -1028,8 +1022,6 @@ mod tests {
         dir: &Path,
         more: &[(&str, String)],
     ) -> (Peer, SessionId, PathBuf, PathBuf, PathBuf, Daemons) {
-        use slopty_proto::agent::AgentKind;
-
         let programs = dir.join("programs");
         std::fs::create_dir_all(&programs).unwrap();
         std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
@@ -1051,7 +1043,6 @@ mod tests {
         env.extend(more.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
         let spawn = Verb::SpawnAgent {
             worker: reg.worker,
-            agent: AgentKind::ClaudeCode,
             cwd: dir.to_string_lossy().into_owned(),
             prompt: None,
             args: Vec::new(),

@@ -71,7 +71,7 @@ async fn round(host: &Host, programs: &Programs, due: &mut HashMap<Key, Instant>
                 let since = state.status.since_ms.as_millis();
                 now_ms.saturating_sub(since) > u64::try_from(ENDED_FOR.as_millis()).ok()?
             }
-            _ => false,
+            Liveness::Live => false,
         };
         if ended || state.meta.cwd.is_empty() {
             return None;

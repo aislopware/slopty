@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::{AgentBranch, AgentKind};
+use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
     ASKING_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
@@ -1209,8 +1209,7 @@ impl Hub {
         if let Some(answer) = self.start_keyed(key.as_ref(), sent).await {
             return answer;
         }
-        let Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size, worktree, .. } = verb
-        else {
+        let Verb::SpawnAgent { worker, cwd, prompt, args, env, size, worktree, .. } = verb else {
             return error(ErrorCode::Invalid, "not an agent's start");
         };
         let admitted = Self::admit_agent(&mut self.inner.state.lock(), caller, from, worker, &args);
@@ -1235,7 +1234,6 @@ impl Hub {
         let session = Some(term.session);
         let start = Verb::SpawnAgent {
             worker,
-            agent,
             cwd,
             prompt,
             args,
@@ -1758,10 +1756,8 @@ impl Hub {
                     NewWorktree { name, base: Some(base), pull: None, setup: true }
                 });
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
-                let agent = AgentKind::ClaudeCode;
                 let spawn = Verb::SpawnAgent {
                     worker,
-                    agent,
                     cwd,
                     prompt,
                     args,

@@ -1,13 +1,12 @@
 //! An agent's status as the worker's hook tracker reads it, before the observed adapter maps it
 //! into its thread's row.
 //!
-//! Which agent a shell runs and whether it works, waits on the human or is done: the
+//! Whether the Claude Code a shell runs works, waits on the human or is done: the
 //! vocabulary of Claude Code's hooks, its title and its transcript ([`crate::AgentTable`]). It
 //! stays on the worker. What goes over the wire is the thread's row
 //! (`slopty_proto::thread::wire::ThreadRow`), which every client and the server read alone.
 
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::AgentKind;
 
 /// Why an agent is blocked on a human.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -108,8 +107,6 @@ pub enum AgentSource {
 /// The agent a session runs, as a listing or a status query reports it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SessionAgent {
-    /// Which agent.
-    pub kind: AgentKind,
     /// What it is doing.
     pub status: AgentStatus,
     /// Where the status came from; anything short of [`AgentSource::Hook`] means the hooks are
@@ -145,7 +142,6 @@ impl SessionAgent {
     pub fn quiet_event(&self, session: SessionId) -> AgentEvent {
         AgentEvent {
             session,
-            kind: self.kind,
             status: self.status.clone(),
             agent_session: None,
             detail: None,
@@ -162,8 +158,6 @@ impl SessionAgent {
 pub struct AgentEvent {
     /// Session.
     pub session: SessionId,
-    /// Agent.
-    pub kind: AgentKind,
     /// Status.
     pub status: AgentStatus,
     /// Agent session id (Claude Code `session_id`), when known.
@@ -187,7 +181,6 @@ pub struct AgentEvent {
 impl From<&AgentEvent> for SessionAgent {
     fn from(event: &AgentEvent) -> Self {
         Self {
-            kind: event.kind,
             status: event.status.clone(),
             source: event.source,
             since_ms: event.since_ms,

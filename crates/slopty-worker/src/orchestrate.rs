@@ -45,7 +45,6 @@ use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, Se
 use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{
@@ -460,7 +459,6 @@ impl Orchestrator {
             }
             Verb::SpawnAgent {
                 worker,
-                agent,
                 cwd,
                 prompt,
                 args,
@@ -486,7 +484,7 @@ impl Orchestrator {
                     ),
                     None => None,
                 };
-                match self.spawn_agent(agent, spawn, prompt, session).await? {
+                match self.spawn_agent(spawn, prompt, session).await? {
                     Outcome::Opened(term) => Ok(opened(term, made)),
                     other => Ok(other),
                 }
@@ -788,14 +786,10 @@ impl Orchestrator {
     /// is the session's own `SLOPTY_SERVER`.
     async fn spawn_agent(
         &self,
-        agent: AgentKind,
         spawn: Spawn,
         prompt: Option<String>,
         chosen: Option<SessionId>,
     ) -> Result<Outcome, Failure> {
-        let program = match agent {
-            AgentKind::ClaudeCode => "claude",
-        };
         // Subscribed before the spawn: the agent may report itself ready before the open
         // returns.
         let heard = self.inner.heard.subscribe();
@@ -833,7 +827,7 @@ impl Orchestrator {
         let req = OpenSession {
             size,
             cwd: Some(cwd),
-            command: std::iter::once(program.to_owned()).chain(args).collect(),
+            command: std::iter::once("claude".to_owned()).chain(args).collect(),
             env,
             title: None,
             attach: false,

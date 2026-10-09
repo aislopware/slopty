@@ -8,7 +8,6 @@ use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 use slopty_core::{ClientId, WallMs};
 use slopty_platform::notify::Memory;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemOp, ItemSync};
 use slopty_proto::server::{Os, WorkerCaps};
@@ -440,7 +439,6 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
         v.agent_event(
             AgentEvent {
                 session,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: Some("$ cargo test".into()),
@@ -997,7 +995,6 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
 fn blocked_on(session: SessionId) -> AgentEvent {
     AgentEvent {
         session,
-        kind: AgentKind::ClaudeCode,
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
         agent_session: None,
         detail: Some("$ cargo test".into()),
@@ -1047,7 +1044,6 @@ fn agent(
 ) -> AgentEvent {
     AgentEvent {
         session,
-        kind: AgentKind::ClaudeCode,
         status,
         agent_session: None,
         detail: detail.map(str::to_owned),
@@ -1150,7 +1146,6 @@ fn notes_of_one_project_share_a_thread(cx: &mut TestAppContext) {
             v.session_opened(key, placed, cx);
             let waits = AgentEvent {
                 session: *session,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: Some("$ cargo test".into()),

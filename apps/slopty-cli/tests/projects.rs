@@ -11,7 +11,6 @@ mod tests {
 
     use serde_json::{Value, json};
     use slopty_core::WorkerId;
-    use slopty_proto::agent::AgentKind;
     use slopty_proto::orchestration::{Outcome, Verb};
     use slopty_proto::project::{
         LimitsChange, Moment, Natives, ProjectId, ProjectStatus, Runner, TaskId, TaskLaunch,
@@ -632,7 +631,6 @@ mod tests {
         let spawned = hub
             .dispatch(Verb::SpawnAgent {
                 worker,
-                agent: AgentKind::ClaudeCode,
                 cwd: root.to_string_lossy().into_owned(),
                 prompt: None,
                 args: Vec::new(),

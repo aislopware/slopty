@@ -336,7 +336,6 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
         v.agent_event(
             AgentEvent {
                 session: agent,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: None,
@@ -384,7 +383,6 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
         v.agent_event(
             AgentEvent {
                 session: agent,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Question),
                 agent_session: None,
                 detail: None,
@@ -451,7 +449,6 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
         v.agent_event(
             AgentEvent {
                 session: agent,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: None,
@@ -798,7 +795,6 @@ fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
         v.agent_event(
             AgentEvent {
                 session: agent,
-                kind: AgentKind::ClaudeCode,
                 status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
                 agent_session: None,
                 detail: None,
