@@ -590,7 +590,10 @@ impl ThreadView {
             return None;
         }
         let words = self.release_words(cx)?;
-        let only_way = request.options.is_empty() && request.questions.is_empty();
+        // A grant that lasts (trusting a folder for good) is never the one the card leads to:
+        // with no other answer, the way back to the agent's own prompt stays the solid one.
+        let only_way = super::decision::arrange(&request.options).front.is_empty()
+            && request.questions.is_empty();
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
         let release = request.id.clone();
         Some(

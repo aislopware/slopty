@@ -487,3 +487,69 @@ fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContex
     assert_eq!(started.len(), 1, "{started:?}");
     assert_eq!(started[0].1.first().map(String::as_str), Some("--resume"));
 }
+
+/// A Claude Code start held at its trust dialog offers to trust the folder, a grant that
+/// lasts: quiet, its folder written out, while answering in the terminal stays the solid way.
+/// The press answers the request with the trust; a refusal says why, and the card is back with
+/// the way to the terminal.
+#[gpui::test]
+fn a_start_held_at_its_trust_dialog_offers_to_trust_the_folder(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Choice, Effect, Request, RequestState};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let ask = AskId("terminal-start".to_owned());
+    state.requests = vec![Request {
+        id: ask.clone(),
+        item: None,
+        kind: "input".to_owned(),
+        title: "Claude Code is asking something in its terminal".to_owned(),
+        text: None,
+        options: vec![Choice {
+            id: "trust".to_owned(),
+            label: "Trust this folder".to_owned(),
+            effect: Effect::Allow,
+            scope: Some("/w/atlas".to_owned()),
+            stops: false,
+        }],
+        questions: Vec::new(),
+        proposed: None,
+        schema_json: None,
+        url: None,
+        state: RequestState::Open,
+        opened_ms: slopty_core::WallMs::ZERO,
+        until_ms: None,
+    }];
+    state.meta.terminal = Some(SessionId::new());
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let trust = cx.debug_bounds("answer-terminal-start-trust").expect("the trust is offered");
+    let standing = cx.debug_bounds("standing-terminal-start").expect("as a grant that lasts");
+    assert!(standing.contains(&trust.center()), "quiet, its folder beside it");
+    assert!(cx.debug_bounds("release-terminal-start").is_some(), "the terminal stays a way");
+
+    click(cx, "answer-terminal-start-trust");
+    cx.run_until_parked();
+    let asked: Vec<_> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent { id, intent, .. }) => {
+                Some((*id, intent.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let [(id, intent)] = asked.as_slice() else { panic!("one answer: {asked:?}") };
+    assert_eq!(*intent, Intent::Answer { ask, choice: "trust".to_owned(), message: None });
+
+    let refused = Outcome::Refused { reason: "the folder's settings could not be written".into() };
+    hub.update(cx, |hub, cx| hub.done(&IntentDone { id: *id, outcome: refused }, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(format!("refused-{id}").leak()).is_some(), "why, in the thread");
+    assert!(cx.debug_bounds("release-terminal-start").is_some(), "the terminal is still a way");
+}
