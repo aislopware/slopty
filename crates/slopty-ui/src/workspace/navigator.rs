@@ -2037,7 +2037,7 @@ impl WorkspaceView {
     }
 
     /// The mark of `thread`'s agent, the neutral glyph while it is not known.
-    fn thread_mark(&self, thread: ThreadId) -> Mark {
+    pub(super) fn thread_mark(&self, thread: ThreadId) -> Mark {
         self.thread_agent(thread).map_or_else(|| crate::icons::AGENT.into(), Mark::agent)
     }
 
@@ -3689,7 +3689,7 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.xxs))
                 .child(icon(theme, GitGlyph::of_stands(pull.stands), IconSize::Inline, hsla(ink)))
-                .child(SharedString::from(format!("#{}", pull.number)))
+                .child(SharedString::from(pull.named()))
         });
         let line2 = t.two_lines().then(|| {
             meta(div(), theme)

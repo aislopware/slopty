@@ -71,6 +71,8 @@ pub(in crate::workspace) struct Approvals {
     wake: Option<gpui::Task<()>>,
     /// Verdicts on their way through the server, not answered yet.
     through_server: usize,
+    /// The requests whose card was put away (`approval_cards`): theirs does not come back.
+    put_away: std::collections::HashSet<AskId>,
 }
 
 /// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole
@@ -81,6 +83,16 @@ pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
 }
 
 impl Approvals {
+    /// Put away the card of request `ask` (`approval_cards`): it does not come back.
+    pub(in crate::workspace) fn put_away(&mut self, ask: AskId) {
+        self.put_away.insert(ask);
+    }
+
+    /// Whether the card of request `ask` was put away.
+    pub(in crate::workspace) fn is_put_away(&self, ask: &AskId) -> bool {
+        self.put_away.contains(ask)
+    }
+
     /// Whether a note's verdict waits for its request.
     pub(in crate::workspace) const fn taps_waiting(&self) -> bool {
         !self.tapped.is_empty() || self.through_server > 0

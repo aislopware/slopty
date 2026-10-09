@@ -8997,3 +8997,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     focused tile. The iPad keeps it above the home indicator.
   - Tests: `workspace::tests::foot::*`,
     `workspace::tests::chrome::the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work`.
+
+- ✅ **What an agent out of sight waits on is a card at the panes' top right** (2026-10-09,
+  MonoCode audit row 4, M21 and M35; reverses "a pointer, never an answer" for a plain yes or
+  no, as `workspace.md` 2026-10-04 already let one be answered wherever it is seen).
+  - **Where.** Cards 360 pt wide stack under the title bar at the panes' trailing edge, the
+    newest on top, at most three (`workspace::approval_cards`). The rest wait under *Needs
+    you*, which stays the full list. A card rises in over the toast's pace, and arrives at
+    once under Reduce Motion.
+  - **What.** The agent's mark and the thread's title, "Approval" in the warn tone, up to
+    three lines of the request, the agent and its machine, then Deny and Allow across the
+    foot. Allow is the neutral solid primary, as every primary is, never green. They answer
+    with the request's plain allow or deny, once (`approvals`). A question, a plan or a form
+    is answered in its thread, so its card has one button, Open thread.
+  - **When.** Only while the agent's tile is not on show. A tile on show asks in its own tray
+    or TUI. A card goes once its request is answered, here or anywhere. Its close puts it away
+    for good. A project muted in the navigator raises none, which is what the mute is for.
+    A phone has none: its notes and *Needs you* say it.
+  - Tests: `workspace::tests::approval_cards::*`.

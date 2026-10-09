@@ -36,6 +36,7 @@ pub mod actions;
 mod agent_screens;
 mod agent_start;
 mod agents;
+mod approval_cards;
 mod approvals;
 mod area;
 pub mod attention;

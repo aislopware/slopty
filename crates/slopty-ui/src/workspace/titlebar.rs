@@ -533,6 +533,7 @@ impl WorkspaceView {
             .children(readouts)
             .child(buttons)
             .children(hanging)
+            .children(self.render_approval_cards(window, cx))
             .into_any_element()
     }
 
