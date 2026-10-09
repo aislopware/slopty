@@ -19,6 +19,8 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+# A file's version as its listing's time (`item`), on every platform.
+slopty-core.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
@@ -28,7 +30,6 @@ uuid.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 parking_lot.workspace = true
 slopty-client.workspace = true
-slopty-core.workspace = true
 slopty-net.workspace = true
 slopty-platform.workspace = true
 tokio.workspace = true
@@ -60,8 +61,6 @@ objc2-uniform-type-identifiers = { workspace = true, features = [ "UTCoreTypes",
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# A listing's times, in the items' tests.
-slopty-core.workspace = true
 tempfile.workspace = true
 # The daemons the tests spawn, found built (`slopty_testkit::bins`).
 slopty-testkit.workspace = true
