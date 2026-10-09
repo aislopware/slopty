@@ -1920,7 +1920,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - A client that follows the session's thread (`ThreadRequest::Follow` of a thread with a
       terminal) holds every prompt there.
     - A client that keeps the thread table (`ThreadRequest::Table`) holds a yes or no, for
-      `APPROVAL_HOLD` at most, since every thread's requests show in its rows. That is a
+      `APPROVAL_HOLD` at most, since every thread's requests show in its rows (since
+      2026-10-10 a plan and a question too; see "A plan or a question waits for the Mac's
+      approvers"). That is a
       notification's Allow, or the inbox. It took `ConversationRequest::Approvals`, which every
       app client sent anyway.
     - Orchestration follows as before.
@@ -2558,3 +2560,25 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   (`threads::post_on`). The reader is never held up, and the answer comes after what was queued
   before it. Test: `threads::tests::an_intent_s_answer_waits_for_room_in_a_full_queue`
   (`slopty-workerd`).
+
+- ✅ **A plan or a question waits for the Mac's approvers** (2026-10-10, readiness 10-10 rank
+  5). A question (`AskUserQuestion`) or a plan (`ExitPlanMode`) from an agent nobody followed
+  went straight back to the TUI when no pocketed phone could answer, even with the Mac app
+  open. Only a yes or no waited for the clients that keep the thread table. Since the stacked
+  approval cards (`5f33d3dc`), such a client shows a question's card, which opens its thread.
+  - **Held for approvers too.** `Holds::reach` no longer asks whether a prompt is a yes or no:
+    with nobody following and no phone, any prompt waits for the approvers
+    (`Reach::Approvers`). An approver still answers only a yes or no in place
+    (`Holds::shown`). A plan or a question is answered in its thread, which the card opens and
+    the client then follows. The last approver leaving releases what nobody else can answer,
+    as before.
+  - **The 120 s, revisited.** `APPROVAL_HOLD` stays the approvers' bound. It is how long a
+    person at a plain terminal waits for Claude Code's own dialog, and that reason is
+    unchanged. But a person who opened the thread from the card to read a plan was cut off at
+    120 s, because the hold's length was fixed when it began. Now, when the hold runs out and
+    someone follows the thread (or a phone can answer), it is held on to the relay's own wait
+    (`threads::hold::held_on`), as if held for them from the start.
+  - Tests: `conversation::tests::an_approver_is_held_for_without_following` (slopty-worker: a
+    question held for an approver, answered once it follows, released with the last
+    approver) and `threads::hold::tests::a_followed_thread_keeps_its_prompt_past_the_approvers_hold`
+    (slopty-workerd).

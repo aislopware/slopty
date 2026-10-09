@@ -934,7 +934,8 @@ mod threads {
     }
 
     /// A client that keeps the thread table, following nothing, answers a yes or no from its
-    /// row, and the relay prints its answer; a question is not held for it. A hold for it ends
+    /// row, and the relay prints its answer; a question is held for it too, to be answered in
+    /// its thread. A hold for it ends
     /// a second before the relay's wait would, undecided; it can hand a held prompt to the TUI
     /// at once; and once it leaves, what only it could answer goes back to the TUI and the
     /// next prompt is let go at once. The bounded hold is a control-socket request, as the
@@ -967,11 +968,21 @@ mod threads {
         let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
         assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "allow");
 
+        // A question is held for it too, shown on its row, and answered in the thread its card
+        // opens; nobody opens it here, so the hold runs out.
         let mut question = ask.clone();
         question["tool_name"] = "AskUserQuestion".into();
-        let started = std::time::Instant::now();
-        assert_eq!(printed(relay(dir.path(), session, &question)).await, "");
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let asked_q = CtlRequest::Permission(PermissionAsk {
+            session,
+            payload: question.to_string(),
+            wait_ms: 2_500,
+        });
+        let sock = dir.path().join("worker.sock");
+        let reply = tokio::spawn(async move { ctl(&sock, &asked_q).await });
+        a.until(|c| fresh(c, &done).is_some()).await;
+        done.push(fresh(&a, &done).unwrap());
+        let reply = reply.await.unwrap();
+        assert_eq!(reply, CtlReply::Permission(PermissionAnswer { decision: Decision::Pass }));
 
         let bounded = CtlRequest::Permission(PermissionAsk {
             session,

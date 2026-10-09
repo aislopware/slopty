@@ -1763,6 +1763,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     as before (`Reach::Followers`), and when nobody follows, for the approvers
     (`Reach::Approvers`), but only a yes or no: `slopty_agent::permission::approvable`
     leaves out `AskUserQuestion` and `ExitPlanMode`, whose answer is a pick or a plan to read.
+    (Since 2026-10-10 those wait for approvers too and are answered in the thread the card
+    opens: `agents.md`, "A plan or a question waits for the Mac's approvers".)
     An approver-only hold lasts `APPROVAL_HOLD` (120 s), or less when the relay's wait is
     shorter, and then goes back to the TUI undecided as it always did. Answers and news go to
     the clients a prompt was shown to (`Holds::tells`). The last follower unfollowing still

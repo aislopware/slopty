@@ -9,8 +9,11 @@
 //! [`answer`]) or hands it to the TUI (`Intent::Release`, [`hand_back`]), the last follower lets
 //! the thread go, the wait runs out or the relay goes away ([`release`]).
 //!
-//! A yes or no nobody follows is held for the clients that keep the thread table, where every
-//! request shows (a notification's "Allow", the inbox), for [`APPROVAL_HOLD`] at most. While
+//! A prompt nobody follows is held for the clients that keep the thread table, where every
+//! request shows (a notification's "Allow", the inbox, the stacked approval cards), for
+//! [`APPROVAL_HOLD`] at most: a yes or no is answered there in place, a plan or a question in
+//! the thread its card opens. Once someone follows the thread, the hold lasts as long as the
+//! relay waits ([`held_on`]), so the person reading a plan is not cut off. While
 //! the server says a pocketed phone can answer (`FromServer::Pushes`), any prompt nobody
 //! follows is held for that phone as long as the relay waits instead: the person has to reach
 //! the phone. A note's Allow reaches the server's link first, which answers it as
@@ -100,11 +103,23 @@ pub async fn ask(
     };
     let id = prompt.ask;
     tracing::info!(%session, ask = id, tool = %prompt.tool, ?reach, "permission held");
-    tokio::pin!(decided);
-    let outcome = tokio::select! {
-        decision = &mut decided => return decision.unwrap_or(Decision::Pass),
-        () = tokio::time::sleep(wait) => Settled::Released,
-        () = relay_gone => Settled::Withdrawn,
+    let held_at = tokio::time::Instant::now();
+    let after = |wait| held_at.checked_add(wait).unwrap_or(held_at);
+    let longest = after(hold_for(Reach::Followers, relay_wait));
+    let mut until = after(wait);
+    tokio::pin!(decided, relay_gone);
+    let outcome = loop {
+        tokio::select! {
+            decision = &mut decided => return decision.unwrap_or(Decision::Pass),
+            () = tokio::time::sleep_until(until) => {
+                let now = daemon.follows.lock().holds.reach(session);
+                match held_on(now, until, longest) {
+                    Some(later) => until = later,
+                    None => break Settled::Released,
+                }
+            }
+            () = &mut relay_gone => break Settled::Withdrawn,
+        }
     };
     let released = daemon.follows.lock().holds.release(id);
     match released {
@@ -132,7 +147,7 @@ fn hold(
 ) -> Option<(PermissionPrompt, Reach, Duration)> {
     let approvable = permission::approvable(hook);
     let holds = &mut daemon.follows.lock().holds;
-    let reach = holds.reach(session, approvable)?;
+    let reach = holds.reach(session)?;
     let wait = hold_for(reach, relay_wait);
     let asked_ms = WallMs::now();
     let until_ms = asked_ms.saturating_add(wait);
@@ -144,6 +159,21 @@ fn hold(
     let prompt = holds.get(id).map(|held| held.reply.prompt.clone())?;
     tell(daemon, PermissionEvent::Asked(Box::new(prompt.clone())));
     Some((prompt, reach, wait))
+}
+
+/// Whether a prompt whose hold ran out at `until` is held on, and until when: when someone
+/// follows its thread now, or a pocketed phone can answer, it waits as long as the relay does
+/// (`longest`), as if held for them from the start. A person who opened the thread from an
+/// approval card is not cut off mid-answer by the approvers' shorter hold.
+fn held_on(
+    now: Option<Reach>,
+    until: tokio::time::Instant,
+    longest: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    match now {
+        Some(Reach::Followers | Reach::Pushed) if longest > until => Some(longest),
+        _ => None,
+    }
 }
 
 /// How long a prompt held for `reach` waits when the relay waits `relay_wait`.
@@ -278,5 +308,19 @@ mod tests {
         assert!(hold_for(Reach::Pushed, relay) > APPROVAL_HOLD, "longer than a linked approver's");
         let short = Duration::from_secs(10);
         assert_eq!(hold_for(Reach::Pushed, short), Duration::from_secs(9), "never past the relay");
+    }
+
+    /// An approvers' hold that runs out is held on to the relay's wait once someone follows the
+    /// thread (the person opened it from its card) or a phone can answer, and released when
+    /// only approvers are left, or when it already waited that long.
+    #[test]
+    fn a_followed_thread_keeps_its_prompt_past_the_approvers_hold() {
+        let start = tokio::time::Instant::now();
+        let (until, longest) = (start + APPROVAL_HOLD, start + Duration::from_secs(599));
+        assert_eq!(held_on(Some(Reach::Followers), until, longest), Some(longest));
+        assert_eq!(held_on(Some(Reach::Pushed), until, longest), Some(longest));
+        assert_eq!(held_on(Some(Reach::Approvers), until, longest), None, "nobody opened it");
+        assert_eq!(held_on(None, until, longest), None);
+        assert_eq!(held_on(Some(Reach::Followers), longest, longest), None, "as long as it may");
     }
 }

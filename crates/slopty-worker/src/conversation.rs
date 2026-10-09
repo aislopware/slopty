@@ -11,9 +11,10 @@
 //!   request; the first answer from a follower takes it, and anything after that finds nothing to
 //!   take;
 //! - nobody follows, but a client keeps the thread table, where every thread's requests show (a
-//!   notification's "Allow", the inbox), and the prompt is a yes or no ([`Held::approvable`]): it
-//!   is held the same way for those approvers, for a shorter time the caller sets
-//!   ([`Reach::Approvers`]);
+//!   notification's "Allow", the inbox, the stacked approval cards): it is held the same way for
+//!   those approvers, for a shorter time the caller sets ([`Reach::Approvers`]). An approver
+//!   answers a yes or no ([`Held::approvable`]) in place; a plan or a question it answers in the
+//!   thread its card opens, which it then follows;
 //! - nobody follows, and the server says a pocketed phone it pushes to can answer
 //!   ([`Holds::set_pushed`]): it is held for that phone as long as the hook waits
 //!   ([`Reach::Pushed`]). A yes or no is answered from the note, through the server, as
@@ -155,7 +156,7 @@ impl<R> Holds<R> {
             (&self.followers, !self.approvers.is_empty(), self.pushed);
         self.held
             .extract_if(.., |_id, held| {
-                !(followers.contains_key(&held.session) || pushed || held.approvable && approvers)
+                !(followers.contains_key(&held.session) || pushed || approvers)
             })
             .collect()
     }
@@ -183,15 +184,15 @@ impl<R> Holds<R> {
     ///
     /// Any prompt a pocketed phone can answer waits for it rather than only for the clients
     /// linked now: a yes or no from its note, a plan or a question in the thread the note
-    /// opens. Otherwise a prompt that is not `approvable` waits only for followers, since the
-    /// table's keepers answer a yes or no whole and nothing more.
+    /// opens. Otherwise it waits for the table's keepers: a yes or no they answer in place, a
+    /// plan or a question in the thread their card opens.
     #[must_use]
-    pub fn reach(&self, session: SessionId, approvable: bool) -> Option<Reach> {
+    pub fn reach(&self, session: SessionId) -> Option<Reach> {
         if self.followers.contains_key(&session) {
             Some(Reach::Followers)
         } else if self.pushed {
             Some(Reach::Pushed)
-        } else if approvable && !self.approvers.is_empty() {
+        } else if !self.approvers.is_empty() {
             Some(Reach::Approvers)
         } else {
             None
@@ -207,7 +208,7 @@ impl<R> Holds<R> {
         approvable: bool,
         make: impl FnOnce(u64) -> R,
     ) -> Option<u64> {
-        self.reach(session, approvable)?;
+        self.reach(session)?;
         self.last = self.last.saturating_add(1);
         self.held.insert(self.last, Held { session, approvable, reply: make(self.last) });
         Some(self.last)
@@ -513,32 +514,36 @@ mod tests {
         assert!(holds.unfollow(s, A).is_empty(), "the connection's own unfollow finds nothing");
     }
 
-    /// A client that keeps the thread table has a yes or no held for it with nobody following;
-    /// a question waits only for followers. It answers or hands a prompt back as a follower
-    /// does, and the last approver leaving releases what only it could answer, while a
-    /// follower's unfollow still releases the session's prompts to the TUI.
+    /// A client that keeps the thread table has every prompt held for it with nobody following:
+    /// a yes or no it answers in place, a question once it follows the thread. It answers or
+    /// hands a prompt back as a follower does, and the last approver leaving releases what only
+    /// it could answer, while a follower's unfollow still releases the session's prompts to the
+    /// TUI.
     #[test]
     fn an_approver_is_held_for_without_following() {
         let mut holds = Holds::default();
         let (s, t) = (session(1), session(2));
-        assert_eq!(holds.reach(s, true), None, "nobody to answer");
+        assert_eq!(holds.reach(s), None, "nobody to answer");
         holds.follow(t, B);
         let question = holds.ask(t, false, |_| "question").expect("held for the follower");
         let waiting = holds.ask(t, true, |_| "waiting").expect("held for the follower");
         holds.approve(A);
         assert!(holds.approves(A) && !holds.approves(B));
-        assert_eq!(holds.reach(s, true), Some(Reach::Approvers));
-        assert_eq!(holds.ask(s, false, |_| "question"), None, "a question needs a follower");
+        assert_eq!(holds.reach(s), Some(Reach::Approvers));
+        let asked = holds.ask(s, false, |_| "asked").expect("a question waits for the approvers");
+        assert_eq!(holds.answer(A, s, asked), None, "answered in its thread, not in place");
         let yes = holds.ask(s, true, |_| "yes").expect("held for the approvers");
         assert_eq!(holds.answer(A, t, question), None, "the question is not shown to A");
         assert_eq!(holds.answer(A, s, yes).map(|h| h.reply), Some("yes"), "an approver answers");
         let kept = holds.ask(s, true, |_| "kept").expect("held");
-        holds.follow(s, B);
-        let gone: Vec<u64> = holds.leave(B).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(gone, [question], "the question only B could answer");
-        assert!(holds.get(waiting).is_some() && holds.get(kept).is_some(), "A answers the rest");
+        holds.follow(s, A);
+        assert_eq!(holds.answer(A, s, asked).map(|h| h.reply), Some("asked"), "its thread does");
+        assert_eq!(holds.unfollow(s, A).len(), 1, "back to the TUI: what was held on s goes");
+        assert!(holds.get(kept).is_none());
+        assert_eq!(holds.leave(B), [], "A can still answer t's");
+        assert!(holds.get(question).is_some() && holds.get(waiting).is_some());
         let orphaned: Vec<u64> = holds.leave(A).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(orphaned, [waiting, kept], "nobody is left to answer");
+        assert_eq!(orphaned, [question, waiting], "nobody is left to answer");
         holds.follow(s, B);
         let again = holds.ask(s, true, |_| "again").expect("held for the follower");
         assert_eq!(holds.unfollow(s, B).len(), 1, "the person went back to the TUI");
@@ -554,10 +559,9 @@ mod tests {
     fn a_prompt_is_held_for_a_pushed_phone() {
         let mut holds = Holds::default();
         let s = session(1);
-        assert_eq!(holds.reach(s, false), None, "a question needs someone to answer it");
+        assert_eq!(holds.reach(s), None, "a question needs someone to answer it");
         assert_eq!(holds.set_pushed(true), []);
-        assert_eq!(holds.reach(s, true), Some(Reach::Pushed), "no client is linked");
-        assert_eq!(holds.reach(s, false), Some(Reach::Pushed), "a plan or a question too");
+        assert_eq!(holds.reach(s), Some(Reach::Pushed), "no client is linked: any prompt");
         let yes = holds.ask(s, true, |_| "yes").expect("held for the phone");
         assert_eq!(holds.answer(A, s, yes), None, "not shown to a stranger");
         assert_eq!(holds.answer(ORCHESTRATION, s, yes).map(|h| h.reply), Some("yes"));
@@ -567,14 +571,14 @@ mod tests {
         assert_eq!(holds.answer(B, s, plan).map(|h| h.reply), Some("plan"), "its thread does");
         assert_eq!(holds.leave(B), [], "nothing was left held");
         holds.approve(A);
-        assert_eq!(holds.reach(s, true), Some(Reach::Pushed), "the phone may be pocketed soon");
+        assert_eq!(holds.reach(s), Some(Reach::Pushed), "the phone may be pocketed soon");
         let kept = holds.ask(s, true, |_| "kept").expect("held");
         let asked = holds.ask(s, false, |_| "asked").expect("held");
         assert!(holds.leave(A).is_empty(), "the phone left the screen: still held");
         assert_eq!(holds.get(kept).map(|h| h.reply), Some("kept"));
         let gone: Vec<u64> = holds.set_pushed(false).into_iter().map(|(id, _)| id).collect();
         assert_eq!(gone, [kept, asked], "no phone can answer now");
-        assert_eq!(holds.reach(s, true), None);
+        assert_eq!(holds.reach(s), None);
         let later = holds.ask(s, true, |_| "later");
         assert_eq!(later, None, "nobody to answer");
     }
