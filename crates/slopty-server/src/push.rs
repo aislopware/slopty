@@ -339,6 +339,7 @@ fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
     let thread = match &body.notice.about {
         Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
         Subject::Project { project, .. } => format!("project {project}"),
+        Subject::Terminal(term) => format!("terminal {} {}", term.worker, term.session),
     };
     Ok(apns::Note {
         urgent: body.notice.kind == NoticeKind::NeedsYou,
@@ -348,12 +349,13 @@ fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
     })
 }
 
-/// What a note about `about` replaces, before it is made opaque: a thread's last note, or a
-/// project's at one timeline entry.
+/// What a note about `about` replaces, before it is made opaque: a thread's last note, a
+/// terminal's program's, or a project's at one timeline entry.
 fn collapse_of(about: &Subject) -> String {
     match about {
         Subject::Thread(at) => format!("thread {} {}", at.worker, at.thread),
         Subject::Project { project, entry } => format!("project {project} {entry}"),
+        Subject::Terminal(term) => format!("terminal {} {}", term.worker, term.session),
     }
 }
 

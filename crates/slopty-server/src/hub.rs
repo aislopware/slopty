@@ -592,6 +592,15 @@ impl Hub {
         for session in gone {
             self.session_closed(&mut state, TermRef { worker, session });
         }
+        if let Some(entry) = state.workers.get(&worker) {
+            let waiting: Vec<SessionId> = entry
+                .sessions
+                .iter()
+                .filter(|s| ladder::program_blocked(s).is_some())
+                .map(|s| s.id)
+                .collect();
+            ladder::programs_back(&mut state.board, worker, &waiting);
+        }
         // After a restart the server knew none of the worker's sessions: what its tasks worked
         // in and it no longer has ended while the server was away.
         let open: Vec<SessionId> = state
@@ -1360,6 +1369,10 @@ impl Lease {
                 let term = TermRef { worker, session: summary.id };
                 // A known session reports a change (a resize, a new directory): no event of its
                 // own, but for its program exiting.
+                let waited = entry.sessions.iter().find(|s| s.id == summary.id);
+                let waited = waited.is_some_and(|known| ladder::program_blocked(known).is_some());
+                ladder::program_moved(&mut state.board, term, waited, Some(&summary));
+                let Some(entry) = state.workers.get_mut(&worker) else { return };
                 if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
                     let was = known.state;
                     known.clone_from(&summary);
@@ -1382,6 +1395,7 @@ impl Lease {
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);
+                ladder::program_moved(&mut state.board, TermRef { worker, session }, false, None);
                 hub.session_closed(&mut state, TermRef { worker, session });
             }
             ToServer::Facts(facts) => entry.facts = crate::placement::bounded(facts),

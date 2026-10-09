@@ -744,6 +744,8 @@ impl WorkspaceView {
             Subject::Project { project, entry } => {
                 return self.heard_project(notice, project, *entry);
             }
+            // A program's records are posted here as they come; the server only pushes them.
+            Subject::Terminal(_) => return None,
         };
         let worker = super::projects::worker_key(at.worker);
         let (about, item) = if let Some(tile) = notice.tile {

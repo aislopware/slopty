@@ -804,3 +804,103 @@ async fn a_pushed_ask_answered_elsewhere_is_taken_back() {
     hub.rank_ladder();
     assert!(pushes().is_empty(), "a worker away may still be asking");
 }
+
+/// A program that waits on the person by its own record (`OSC 7501`), in a terminal no agent's
+/// thread is seated at, is pushed to a pocketed phone once, in its own words, and taken back
+/// once it stops waiting. Nothing is pushed while the person is at a desk, nor for a terminal
+/// an agent's thread speaks for. A worker linked again takes back what waits no more.
+#[tokio::test]
+async fn a_program_waiting_on_the_person_is_pushed_and_taken_back() {
+    use slopty_proto::push::PushDevice;
+    use slopty_proto::terminal::{ProgramState, ProgramStatus};
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(16);
+    hub.push_to(Some(out));
+    let (shell, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub
+        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 10].into(), tx)
+        .unwrap();
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push.what);
+        }
+        out
+    };
+    let phone = Client::sit(&hub, "phone");
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 0,
+    };
+    hub.push_device(phone.seated.link(), ClientId::new(), Some(device));
+    let pocketed = Presence {
+        seat: Seat::Handheld,
+        active: false,
+        workspace: None,
+        showing: Vec::new(),
+        focus: None,
+        listening: false,
+    };
+    hub.presence(phone.seated.link(), pocketed);
+    let with = |state: ProgramState, message: &str| {
+        let record = ProgramStatus {
+            id: String::new(),
+            state,
+            need: Some(ProgramStatus::PERMISSION.to_owned()),
+            progress: None,
+            app: "deploy".to_owned(),
+            title: String::new(),
+            message: message.to_owned(),
+        };
+        SessionSummary { program: vec![record], ..summary(shell) }
+    };
+    let term = TermRef { worker, session: shell };
+
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Blocked, "Approve the rollout?")));
+    let first = pushes();
+    let [Sending::Note(body)] = first.as_slice() else { panic!("{first:?}") };
+    assert_eq!(body.notice.about, Subject::Terminal(term));
+    assert_eq!(body.notice.kind, NoticeKind::NeedsYou);
+    assert_eq!(
+        (body.notice.title.as_str(), body.notice.text.as_str()),
+        ("deploy", "Approve the rollout?")
+    );
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Blocked, "Still waiting")));
+    assert!(pushes().is_empty(), "pushed once while it waits");
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Working, "Rolling out")));
+    assert_eq!(pushes(), [Sending::TakeBack(vec![Subject::Terminal(term)])], "answered");
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Done, "Rolled out")));
+    assert!(pushes().is_empty(), "taken back once");
+
+    let mac = Client::sit(&hub, "mac");
+    mac.at(&hub, Seat::Desk, true, Vec::new());
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Blocked, "Again?")));
+    assert!(pushes().is_empty(), "the person at a desk sees it there");
+    mac.at(&hub, Seat::Desk, false, Vec::new());
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Working, "")));
+    lease.handle(snapshot(vec![row(Phase::Working, 1_000, Some(shell))]));
+    hub.rank_ladder();
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Blocked, "Its agent's own")));
+    assert!(pushes().is_empty(), "an agent's thread speaks for its terminal");
+
+    lease.handle(snapshot(Vec::new()));
+    hub.rank_ladder();
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Working, "")));
+    lease.handle(ToServer::SessionChanged(with(ProgramState::Blocked, "Once more")));
+    assert_eq!(pushes().len(), 1);
+    drop(lease);
+    let (tx, _rx) = mpsc::channel(8);
+    let _back = hub
+        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 10].into(), tx)
+        .unwrap();
+    assert_eq!(
+        pushes(),
+        [Sending::TakeBack(vec![Subject::Terminal(term)])],
+        "linked again, it waits no more"
+    );
+}

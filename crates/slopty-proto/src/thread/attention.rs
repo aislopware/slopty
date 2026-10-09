@@ -349,6 +349,9 @@ pub enum Subject {
         /// The entry's sequence number: one notice per entry.
         entry: u64,
     },
+    /// A terminal whose program, no agent's thread, waits on the person by its own status
+    /// record (`OSC 7501`). Only pushed: a linked client posts a program's records itself.
+    Terminal(TermRef),
 }
 
 /// A notice the server picked this client to show. A subagent's goes as its parent's.

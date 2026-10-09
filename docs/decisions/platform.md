@@ -1028,3 +1028,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     note was shown under); `slopty-platform` `a_take_back_names_only_opaque_ids`. The app
     delegate's half is proved only on a device, or by a simulator test sending `simctl push`,
     which is still to be written.
+
+- ✅ **A program waiting on the person reaches a pocketed phone** (2026-10-10). A program that
+  says it is blocked through its own status record (`OSC 7501`) made a note on each linked
+  client, which posts a program's records itself. A phone whose link had gone heard nothing,
+  because the server ranks agents' threads only.
+  - **The server reads the records it already has.** Each terminal's records ride its summary
+    (`SessionSummary::program`), and the worker sends the summary again whenever they change.
+    When a terminal's records come to wait on the person (`ladder::program_moved`), the server
+    makes a notice about `Subject::Terminal(term)`. It does this only where no agent's thread
+    is seated at that terminal, since the thread speaks for it there. The title is the
+    record's title, else its program, else the terminal's. The text is the record's message,
+    else a line for what it needs (approval, an answer, a sign-in).
+  - **Only pushed.** It goes through the same routing as a thread's notice, but only when the
+    person is at none of their clients, and then only to phones. No link is told, because
+    every linked client already posts the program's own note. A client that hears one anyway
+    makes nothing of it (`WorkspaceView::heard`).
+  - **Taken back** like an answered ask (`Phones::program_answered`, see "A note answered
+    elsewhere leaves a pocketed phone"): when the records stop waiting, or the terminal
+    closes. A worker that links again takes back what no longer waits
+    (`ladder::programs_back`). A wait that began while it was away is no news, as a thread
+    first seen is not.
+  - **On the phone** the note leads to the terminal (`info::SESSION`) under the session's id,
+    the same id the app's own note uses, so the two replace each other.
+  - Tests: `slopty-server`
+    `hub::ladder::tests::a_program_waiting_on_the_person_is_pushed_and_taken_back`;
+    `slopty-platform` `a_pushed_note_carries_what_a_tap_routes_by` (its terminal case);
+    golden `push_body_program`.

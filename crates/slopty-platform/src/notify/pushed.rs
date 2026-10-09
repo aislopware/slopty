@@ -41,14 +41,16 @@ pub fn notice_body(notice: &Notice) -> String {
 
 /// The identifier of a note about `notice`.
 ///
-/// It is its terminal's session, else its thread's, else its project's timeline entry. The
-/// app's note about the same moment has the same one, so either replaces the other.
+/// It is its terminal's session (a thread's tile, or a program's own terminal), else its
+/// thread's, else its project's timeline entry. The app's note about the same moment has the
+/// same one, so either replaces the other.
 #[must_use]
 pub fn note_id(notice: &Notice) -> String {
     match (&notice.about, notice.tile) {
         (Subject::Project { project, entry }, _) => format!("project-{project}-{entry}"),
         (Subject::Thread(_), Some(tile)) => tile.session.to_string(),
         (Subject::Thread(at), None) => format!("{}-{}", info::THREAD, at.thread),
+        (Subject::Terminal(term), _) => term.session.to_string(),
     }
 }
 
@@ -64,6 +66,7 @@ pub fn note_of(body: &PushBody) -> Note {
     let mut keys = BTreeMap::new();
     let worker = match (&notice.about, notice.tile) {
         (Subject::Thread(at), _) => Some(at.worker),
+        (Subject::Terminal(term), _) => Some(term.worker),
         (Subject::Project { .. }, tile) => tile.map(|t| t.worker),
     };
     if let Some(worker) = worker {
@@ -76,6 +79,9 @@ pub fn note_of(body: &PushBody) -> Note {
         (Subject::Thread(at), None) => {
             keys.insert(info::THREAD.to_owned(), at.thread.to_string());
         }
+        (Subject::Terminal(term), None) => {
+            keys.insert(info::SESSION.to_owned(), term.session.to_string());
+        }
         (Subject::Project { .. }, None) => {}
     }
     if let Some(ask) = &body.ask {
@@ -86,7 +92,7 @@ pub fn note_of(body: &PushBody) -> Note {
         .map_or_else(|| slopty_push::apns::TITLE.to_owned(), str::to_owned);
     let thread = match &notice.about {
         Subject::Project { project, .. } => Some(project.as_str().to_owned()),
-        Subject::Thread(_) => None,
+        Subject::Thread(_) | Subject::Terminal(_) => None,
     };
     Note {
         id: note_id(notice),
@@ -455,6 +461,19 @@ mod tests {
         assert_eq!(note.id, format!("project-{project}-7"));
         assert_eq!(note.thread.as_deref(), Some("ladder"));
         assert_eq!(note.info.get(info::SESSION), Some(&session.to_string()));
+
+        // A program's own wait leads to its terminal, under the id the app's own note has.
+        let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile), None);
+        let note = note_of(&PushBody { notice: program, ask: None });
+        assert_eq!(note.id, session.to_string());
+        assert_eq!(
+            note.info,
+            keys(&[
+                (info::WORKER, worker.as_uuid().as_u128().to_string()),
+                (info::SESSION, session.to_string())
+            ])
+        );
+        assert_eq!((note.category, note.urgent, note.thread), (None, true, None));
     }
 
     /// What the server seals opens on the phone to the note, under its token and key only.

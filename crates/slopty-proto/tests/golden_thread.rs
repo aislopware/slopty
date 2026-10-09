@@ -1150,6 +1150,16 @@ mod golden_thread {
             via: None,
         };
         snap("push_body", &PushBody { notice, ask: Some(AskId("toolu_01".to_owned())) });
+        let program = Notice {
+            kind: NoticeKind::NeedsYou,
+            about: Subject::Terminal(TermRef { worker, session }),
+            tile: Some(TermRef { worker, session }),
+            title: "deploy".to_owned(),
+            text: "Approve the production rollout?".to_owned(),
+            worked_ms: None,
+            via: None,
+        };
+        snap("push_body_program", &PushBody { notice: program, ask: None });
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
     }
 }

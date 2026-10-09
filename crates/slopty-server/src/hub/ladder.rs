@@ -37,6 +37,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::server::FromServer;
+use slopty_proto::terminal::{ProgramState, ProgramStatus, SessionSummary};
 use slopty_proto::thread::attention::{
     Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, Subject,
     ThreadAt, Via,
@@ -95,9 +96,26 @@ struct Phones {
     /// [`Self::answerable`], as every worker's link sends it: a word each link takes the
     /// latest of, so none is dropped behind a full queue.
     said: watch::Sender<bool>,
-    /// The threads each phone was last pushed a note about that needs the person, to take back
-    /// once they no longer do ([`Self::take_back`]).
-    asked: BTreeMap<ClientId, std::collections::BTreeSet<ThreadAt>>,
+    /// What each phone was last pushed a note about that needs the person, to take back once
+    /// it no longer does ([`Self::take_back`], [`Self::program_answered`]).
+    asked: BTreeMap<ClientId, std::collections::HashSet<Asked>>,
+}
+
+/// What a pushed note that needs the person is about: a thread, or a terminal's program.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Asked {
+    Thread(ThreadAt),
+    Terminal(TermRef),
+}
+
+impl Asked {
+    /// The subject a take-back names.
+    const fn subject(self) -> Subject {
+        match self {
+            Self::Thread(at) => Subject::Thread(at),
+            Self::Terminal(term) => Subject::Terminal(term),
+        }
+    }
 }
 
 /// The phones the server may push to, by their clients.
@@ -137,17 +155,51 @@ impl Phones {
                 tracing::debug!(%client, "a push found its queue full or gone");
                 continue;
             }
-            // The phone shows one note per thread: this one replaced whatever was up.
-            if let Subject::Thread(at) = notice.about {
-                let asked = self.asked.entry(*client).or_default();
-                if notice.kind == NoticeKind::NeedsYou {
-                    asked.insert(at);
-                } else {
-                    asked.remove(&at);
-                }
+            // The phone shows one note per thread or terminal: this one replaced whatever was up.
+            let about = match notice.about {
+                Subject::Thread(at) => Asked::Thread(at),
+                Subject::Terminal(term) => Asked::Terminal(term),
+                Subject::Project { .. } => continue,
+            };
+            let asked = self.asked.entry(*client).or_default();
+            if notice.kind == NoticeKind::NeedsYou {
+                asked.insert(about);
+            } else {
+                asked.remove(&about);
             }
         }
         self.asked.retain(|_, asked| !asked.is_empty());
+    }
+
+    /// Take back from each phone what `answered` says no longer needs the person, among what
+    /// it was pushed: one background push per [`slopty_push::apns::MAX_TAKE_BACK`].
+    fn take_back_where(&mut self, answered: impl Fn(&Asked) -> bool) {
+        let Some(out) = &self.out else {
+            self.asked.clear();
+            return;
+        };
+        let devices = &self.devices;
+        self.asked.retain(|client, asked| {
+            let Some(device) = devices.get(client) else { return false };
+            let gone: Vec<Asked> = asked.iter().copied().filter(|a| answered(a)).collect();
+            for about in &gone {
+                asked.remove(about);
+            }
+            for chunk in gone.chunks(slopty_push::apns::MAX_TAKE_BACK) {
+                let what = Sending::TakeBack(chunk.iter().map(|a| a.subject()).collect());
+                let push = Outgoing { client: *client, device: device.clone(), what };
+                if out.try_send(push).is_err() {
+                    tracing::debug!(%client, "a take-back found its queue full or gone");
+                }
+            }
+            !asked.is_empty()
+        });
+    }
+
+    /// Take back each phone's pushed note about `term`'s program: it no longer waits on the
+    /// person, or the terminal is gone.
+    fn program_answered(&mut self, term: TermRef) {
+        self.take_back_where(|a| *a == Asked::Terminal(term));
     }
 
     /// Take back each phone's pushed asks whose threads no longer need the person in `ladder`:
@@ -159,36 +211,13 @@ impl Phones {
         ladder: &Ladder,
         tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>,
     ) {
-        let Some(out) = &self.out else {
-            self.asked.clear();
-            return;
-        };
-        let devices = &self.devices;
-        self.asked.retain(|client, asked| {
-            let Some(device) = devices.get(client) else { return false };
-            let answered: Vec<ThreadAt> = asked
-                .iter()
-                .filter(|at| tables.contains_key(&at.worker))
-                .filter(|at| {
-                    let found = ladder.threads.binary_search_by_key(*at, |r| r.at).ok();
-                    found
-                        .and_then(|i| ladder.threads.get(i))
-                        .is_none_or(|r| r.rung != Rung::NeedsYou)
-                })
-                .copied()
-                .collect();
-            for at in &answered {
-                asked.remove(at);
+        self.take_back_where(|asked| {
+            let Asked::Thread(at) = asked else { return false };
+            if !tables.contains_key(&at.worker) {
+                return false;
             }
-            for chunk in answered.chunks(slopty_push::apns::MAX_TAKE_BACK) {
-                let about = chunk.iter().map(|at| Subject::Thread(*at)).collect();
-                let what = Sending::TakeBack(about);
-                let push = Outgoing { client: *client, device: device.clone(), what };
-                if out.try_send(push).is_err() {
-                    tracing::debug!(%client, "a take-back found its queue full or gone");
-                }
-            }
-            !asked.is_empty()
+            let found = ladder.threads.binary_search_by_key(at, |r| r.at).ok();
+            found.and_then(|i| ladder.threads.get(i)).is_none_or(|r| r.rung != Rung::NeedsYou)
         });
     }
 
@@ -735,6 +764,66 @@ impl Board {
     pub(super) fn pushes(&self) -> watch::Receiver<bool> {
         self.phones.said.subscribe()
     }
+}
+
+/// The record by which `summary`'s program waits on the person (`OSC 7501`), if one does.
+pub(super) fn program_blocked(summary: &SessionSummary) -> Option<&ProgramStatus> {
+    summary.program.iter().find(|r| r.state == ProgramState::Blocked)
+}
+
+/// A terminal's program records moved: `was` they had one waiting on the person, `now` the
+/// summary as it stands (none once the terminal closed).
+///
+/// One that comes to wait, in a terminal no agent's thread is seated at (the thread speaks for
+/// it), is pushed to the phones when the person is at none of their clients. A linked client
+/// posts a program's records itself, so no link is told. One that stops waiting, or closes, is
+/// taken back from the phones it was pushed to.
+pub(super) fn program_moved(
+    board: &mut Board,
+    term: TermRef,
+    was: bool,
+    now: Option<&SessionSummary>,
+) {
+    let Some((summary, record)) = now.and_then(|s| Some((s, program_blocked(s)?))) else {
+        board.phones.program_answered(term);
+        return;
+    };
+    if was || board.thread_in(term).is_some() {
+        return;
+    }
+    let title = [&record.title, &record.app, &summary.title]
+        .into_iter()
+        .map(|t| t.trim())
+        .find(|t| !t.is_empty())
+        .unwrap_or_default();
+    let text = match (record.message.trim(), record.need.as_deref()) {
+        ("", Some(ProgramStatus::PERMISSION)) => "Waits for your approval",
+        ("", Some(ProgramStatus::QUESTION)) => "Waits for your answer",
+        ("", Some(ProgramStatus::AUTH)) => "Waits for you to sign in",
+        ("", _) => "Waits for you",
+        (message, _) => message,
+    };
+    let notice = Notice {
+        kind: NoticeKind::NeedsYou,
+        about: Subject::Terminal(term),
+        tile: Some(term),
+        title: title.to_owned(),
+        text: text.to_owned(),
+        worked_ms: None,
+        via: None,
+    };
+    if route(&board.seats, &notice).away {
+        board.phones.push(&board.seats, &notice, None);
+    }
+}
+
+/// `worker` is linked again, with programs waiting on the person in the terminals `waiting`:
+/// a program pushed while it was away that waits no more, or whose terminal went, is taken
+/// back. A new wait that came while it was away is no news, as a thread first seen is not.
+pub(super) fn programs_back(board: &mut Board, worker: WorkerId, waiting: &[SessionId]) {
+    board.phones.take_back_where(|asked| {
+        matches!(asked, Asked::Terminal(t) if t.worker == worker && !waiting.contains(&t.session))
+    });
 }
 
 /// A project's change that holds its work up goes to the person as a notice, where they are.
