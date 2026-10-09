@@ -216,6 +216,13 @@ impl WorkspaceView {
         if let Some(item) = self.item(tile) {
             return self.tile_title(item);
         }
+        if let Some(project) = self.board_tile(tile.item) {
+            return self
+                .projects
+                .mirror
+                .get(project)
+                .map_or_else(|| project.to_string(), |b| b.project.title.clone());
+        }
         match self.starting.get(tile.item) {
             Some(starting) => {
                 format!("New {} thread", super::projects::agent_label(&starting.agent))

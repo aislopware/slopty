@@ -38,7 +38,8 @@ use super::recap::{Recap, RecapKind};
 use super::{
     AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, GiveTaskToAgent, MergeTask,
     OpenNode, PushTask, ResolveConflicts, RetryTask, ReviewTask, RunTaskOn, SelectNext,
-    SelectPrevious, ShowTerminal, StartTaskFresh, StopTaskAgent, TellOrchestrator, TogglePush,
+    SelectPrevious, ShowTerminal, StartTask, StartTaskFresh, StopTaskAgent, TellOrchestrator,
+    TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -185,6 +186,8 @@ pub struct WorkerSeen {
     /// The agents it can start, while it is linked: what "Give to another agent" offers for a
     /// task that ran there.
     pub agents: Vec<AgentId>,
+    /// It is out of reach now: a task running there is not heard from until it is back.
+    pub away: bool,
 }
 
 /// What the workspace hands a board: the project and what the board names it by.
@@ -373,6 +376,10 @@ impl ProjectView {
                 self.hand(task, format!("Starting #{task} fresh\u{2026}"));
                 cx.notify();
             }
+            TaskAction::Start => {
+                self.hand(task, format!("Starting #{task}\u{2026}"));
+                cx.notify();
+            }
             _ => {}
         }
         cx.emit(ProjectEvent::Act(task, action));
@@ -434,9 +441,10 @@ impl ProjectView {
             return;
         };
         let handing = self.handing.contains_key(&task)
-            && matches!(action, TaskAction::StartFresh | TaskAction::GiveTo);
+            && matches!(action, TaskAction::Start | TaskAction::StartFresh | TaskAction::GiveTo);
         if handing {
-            cx.emit(ProjectEvent::Say(format!("#{task} is starting again")));
+            let again = if action == TaskAction::Start { "" } else { " again" };
+            cx.emit(ProjectEvent::Say(format!("#{task} is starting{again}")));
         } else if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
             self.act(task, action, cx);
         } else {
@@ -492,13 +500,21 @@ impl ProjectView {
         let place = board.place(node)?;
         let name = self.worker_name(place.worker);
         let os = self.seen.workers.get(&place.worker).and_then(|w| w.os).map(os_name);
-        let short = os.map_or_else(|| name.clone(), |os| format!("{name} \u{b7} {os}"));
+        let away = self.runs_away(&place);
+        let short = match os {
+            _ if away => format!("{name} \u{b7} away"),
+            Some(os) => format!("{name} \u{b7} {os}"),
+            None => name.clone(),
+        };
         let on = os.map_or_else(|| name.clone(), |os| format!("{name}, {os}"));
         let mut lines = vec![match place.how {
             PlaceHow::Runs => format!("Runs on {on}"),
             PlaceHow::Ran => format!("Ran on {on}"),
             PlaceHow::Pinned => format!("Pinned to {on}"),
         }];
+        if away {
+            lines.push(format!("{name} is away: its agent is not heard from until it is back"));
+        }
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
         lines.extend(place.why.as_ref().map(|why| format!("Why: {why}")));
@@ -506,6 +522,11 @@ impl ProjectView {
             lines.push(MOVE_HINT.to_owned());
         }
         Some((place, short, lines.join("\n")))
+    }
+
+    /// Whether `place` is where an agent runs on a machine out of reach now.
+    fn runs_away(&self, place: &Place) -> bool {
+        place.how == PlaceHow::Runs && self.seen.workers.get(&place.worker).is_some_and(|w| w.away)
     }
 
     /// `node`'s place as a quiet chip: the worker and its system in words, in a stronger ink
@@ -530,7 +551,19 @@ impl ProjectView {
             PlaceHow::Pinned => (true, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
+        // Its machine out of reach, the chip wears the away mark: the row's own mark still says
+        // the task's state, which nothing has changed yet.
         let id = format!("{prefix}-{}-where", node_key(node));
+        let away = self.runs_away(&place).then(|| {
+            let side = px(theme.typography.icon());
+            let selector = format!("{id}-away");
+            div().debug_selector(move || selector).flex_none().child(status_icon(
+                theme,
+                Status::Away,
+                side,
+                hsla(s.text_muted),
+            ))
+        });
         let selector = id.clone();
         let hint_theme = Rc::clone(&self.hint_theme);
         let label = hint.replace('\n', ". ");
@@ -555,6 +588,7 @@ impl ProjectView {
                         .size(px(theme.typography.icon())),
                 )
             })
+            .children(away)
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
             .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
@@ -681,6 +715,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::Review => "review",
         TaskAction::Merge => "merge",
         TaskAction::Retry => "retry",
+        TaskAction::Start => "start",
         TaskAction::RunOn => "choose where it runs",
         TaskAction::FixCi => "fix",
         TaskAction::AddressComments => "address",
@@ -835,18 +870,16 @@ impl ProjectView {
         // Choosing a worker is a control of the card stood on, so a lane of planned tasks is
         // not a column of the same button.
         let offered = board.actions(task);
-        let mut actions: Vec<(TaskAction, bool)> = offered
-            .iter()
-            .copied()
-            .filter(|a| *a != TaskAction::RunOn)
-            .map(|a| (a, false))
-            .collect();
+        let stood_on = [TaskAction::Start, TaskAction::RunOn];
+        let mut actions: Vec<(TaskAction, bool)> =
+            offered.iter().copied().filter(|a| !stood_on.contains(a)).map(|a| (a, false)).collect();
         if self.picked() == Some(Some(task)) {
-            if offered.contains(&TaskAction::RunOn) {
-                actions.push((TaskAction::RunOn, true));
-            }
             // A task asked to start again is not asked twice while it does.
             let handing = self.handing.contains_key(&task);
+            let starts = stood_on.into_iter().filter(|a| offered.contains(a));
+            actions.extend(
+                starts.filter(|a| !(handing && *a == TaskAction::Start)).map(|a| (a, true)),
+            );
             let controls = board
                 .controls(task)
                 .into_iter()
@@ -2362,6 +2395,9 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &StopTaskAgent, _w, cx| {
                 this.act_on_picked(TaskAction::Stop, cx);
+            }))
+            .on_action(cx.listener(|this, _: &StartTask, _w, cx| {
+                this.act_on_picked(TaskAction::Start, cx);
             }))
             .on_action(cx.listener(|this, _: &StartTaskFresh, _w, cx| {
                 this.act_on_picked(TaskAction::StartFresh, cx);

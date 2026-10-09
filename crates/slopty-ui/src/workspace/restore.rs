@@ -101,6 +101,7 @@ impl WorkspaceView {
                 at_ms: l.at_ms,
             })
             .collect();
+        saved.boards = self.saved_boards();
         saved
     }
 

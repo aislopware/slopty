@@ -285,6 +285,8 @@ impl WorkspaceView {
         // The worker hands pages and files only to a client that said it takes them.
         self.declare_handoffs(key);
         self.curtain_relinked(key);
+        // A board's tasks on it are no longer marked away.
+        self.projects.dirty = true;
         self.focus_link_reset(key);
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.home = (!home.is_empty()).then_some(home);
@@ -368,6 +370,8 @@ impl WorkspaceView {
         let screens = &self.screens;
         w.stale_screens.extend(items.iter().copied().filter(|id| screens.contains_key(id)));
         self.probes.retain(|(k, ..)| *k != key);
+        // A board marks the tasks that run on it as away.
+        self.projects.dirty = true;
         self.reset_remote(key, &sessions, cx);
         // The worker's own word on its agents went with the link; the server's ladder stands
         // in ([`Self::agent_state`]).

@@ -29,6 +29,8 @@ gpui::actions!(
         SelectPrevious,
         /// Open the agent of the row the keyboard stands on.
         OpenNode,
+        /// Start the task the keyboard stands on, not started yet.
+        StartTask,
         /// Choose the worker the task the keyboard stands on runs on.
         RunTaskOn,
         /// Review the whole branch of the task the keyboard stands on, before it merges.
@@ -94,6 +96,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "give_task_to_agent", GiveTaskToAgent, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
+        Command::new(Scope::Project, "start_task", StartTask, &["s"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
@@ -121,6 +124,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Stop the task's agent", Box::new(StopTaskAgent)),
         line("Start the task fresh", Box::new(StartTaskFresh)),
         line("Give the task to another agent\u{2026}", Box::new(GiveTaskToAgent)),
+        line("Start the task", Box::new(StartTask)),
         line("Run the task on\u{2026}", Box::new(RunTaskOn)),
         line("Push after each merge", Box::new(TogglePush)),
         line("Show the orchestrator's terminal", Box::new(ShowTerminal)),

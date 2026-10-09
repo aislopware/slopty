@@ -80,6 +80,11 @@ impl WorkspaceView {
             }
             // A thread on its way: the composer writing its first message.
             None if self.starting.has(tile.item) => self.focus_start(tile.item),
+            // A board in a tile of its own takes the keyboard in the board.
+            None if let Some(project) = self.board_tile(tile.item).cloned() => {
+                self.projects.focus.insert(project);
+                self.projects.dirty = true;
+            }
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the panes must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -125,6 +130,14 @@ impl WorkspaceView {
             }
             None if let Some(tile) = self.focused()
                 && let Some(view) = self.starting.draft_view(tile.item) =>
+            {
+                view.update(cx, |v, cx| v.focus(window, cx));
+            }
+            None if let Some(tile) = self.focused()
+                && let Some(view) = self
+                    .board_tile(tile.item)
+                    .and_then(|p| self.projects.views.get(p))
+                    .cloned() =>
             {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
@@ -880,7 +893,9 @@ impl WorkspaceView {
     pub fn close_item(&mut self, _: &CloseItem, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(tile) = self.focused() else { return };
         let Some(item) = self.item(tile).cloned() else {
-            self.close_starting(tile, cx);
+            if !self.close_board_tile(tile, cx) {
+                self.close_starting(tile, cx);
+            }
             return;
         };
         tracing::debug!(item = %tile.item, kind = ?item.kind, "close tile");

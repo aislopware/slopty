@@ -489,7 +489,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     assert_eq!(of(1), [TaskAction::FixCi], "no Retry while an agent can fix it");
     assert_eq!(of(3), [TaskAction::AddressComments]);
     assert_eq!(of(4), [TaskAction::ResolveConflicts]);
-    assert_eq!(of(5), [TaskAction::Retry, TaskAction::RunOn], "nobody to tell");
+    assert_eq!(of(5), [TaskAction::Retry, TaskAction::Start, TaskAction::RunOn], "nobody to tell");
     assert!(TaskAction::FixCi.tells() && !TaskAction::Retry.tells());
 
     let told = |n, action| b.told(TaskId(n), action).expect("words");
@@ -711,8 +711,11 @@ fn a_task_starts_fresh_or_goes_to_another_agent(cx: &mut gpui::TestAppContext) {
     let agents = vec![AgentId::named(AgentId::CLAUDE_CODE), codex.clone()];
     let seen = Seen {
         board: mirror.get(&fixtures::id("board")).cloned(),
-        workers: [(worker, WorkerSeen { name: "box".to_owned(), os: None, form: None, agents })]
-            .into(),
+        workers: [(
+            worker,
+            WorkerSeen { name: "box".to_owned(), os: None, form: None, agents, away: false },
+        )]
+        .into(),
         ..Seen::default()
     };
     cx.update(gpui_kit::init);

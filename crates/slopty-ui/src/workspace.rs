@@ -41,6 +41,7 @@ mod approvals;
 mod area;
 pub mod attention;
 mod authors;
+mod board_tiles;
 mod breadcrumb;
 mod browsers;
 mod clone_here;
@@ -1248,6 +1249,7 @@ impl WorkspaceView {
                         (l.project.clone(), looked)
                     })
                     .collect(),
+                tiles: board_tiles::saved(saved.as_ref()),
                 ..projects::ProjectsState::default()
             },
             next_open: std::cell::Cell::new(1),

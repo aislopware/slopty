@@ -87,6 +87,9 @@ fn a_project_whose_orchestrator_has_no_tile_here_still_lists_and_opens(cx: &mut 
     let (worker, mut studio) = studio(&view, cx);
     let _other = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/w/site"));
     let orchestrator = SessionId::new();
+    // Its terminal runs on the worker, with no tile here.
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.session_opened(key, summary(orchestrator, None), cx));
     declare(&view, cx, worker, orchestrator);
     let group = leak(format!("nav-group-{}", GroupKey::new(fact::PROJECT, "board")));
     assert!(cx.debug_bounds(group).is_some(), "the project is listed");

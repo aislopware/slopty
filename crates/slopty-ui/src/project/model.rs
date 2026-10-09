@@ -237,6 +237,9 @@ pub enum TaskAction {
     Merge,
     /// Check it again from the start, and merge it if it passes.
     Retry,
+    /// Start a task not started yet with an agent of the person's, on its pin when it has one
+    /// ([`slopty_proto::orchestration::Verb::TaskSpawn`]): the orchestrator need not be there.
+    Start,
     /// Choose the worker it runs on.
     RunOn,
     /// Tell its agent, as the person, to make its failed verifier pass.
@@ -267,6 +270,7 @@ impl TaskAction {
             Self::Review => "Review",
             Self::Merge => "Merge",
             Self::Retry => "Retry",
+            Self::Start => "Start",
             Self::RunOn => "Run on\u{2026}",
             Self::FixCi => "Fix CI",
             Self::AddressComments => "Address comments",
@@ -292,6 +296,7 @@ impl TaskAction {
             Self::Review => "review",
             Self::Merge => "merge",
             Self::Retry => "retry",
+            Self::Start => "start",
             Self::RunOn => "run-on",
             Self::FixCi => "fix-ci",
             Self::AddressComments => "address-comments",
@@ -765,7 +770,7 @@ impl Board {
             out.push(TaskAction::Retry);
         }
         if self.not_started(card) {
-            out.push(TaskAction::RunOn);
+            out.extend([TaskAction::Start, TaskAction::RunOn]);
         }
         out
     }
@@ -853,6 +858,7 @@ impl Board {
             }
             TaskAction::Review
             | TaskAction::Merge
+            | TaskAction::Start
             | TaskAction::RunOn
             | TaskAction::Retry
             | TaskAction::PushAgain

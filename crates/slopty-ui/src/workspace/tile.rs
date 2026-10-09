@@ -886,7 +886,10 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let Some(item) = self.item(tile) else {
-            return self.render_starting(placed, cx).or_else(|| self.render_missing(placed, cx));
+            return self
+                .render_starting(placed, cx)
+                .or_else(|| self.render_board_tile(placed, cx))
+                .or_else(|| self.render_missing(placed, cx));
         };
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
@@ -1031,7 +1034,7 @@ impl WorkspaceView {
     /// A body's view as the strip draws it: from its cached drawing unless it is not
     /// [`Self::cacheable`]. Then it is built again in this frame: the strip's focus moved,
     /// which tells no view.
-    fn body_view<V: Render>(
+    pub(super) fn body_view<V: Render>(
         &self,
         view: &Entity<V>,
         placed: &Placed,

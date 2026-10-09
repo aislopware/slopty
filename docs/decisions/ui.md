@@ -9432,3 +9432,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the file is read. The faces' in-memory `drafts` map is deleted: one store, not two.
   - Tests: `workspace::tests::drafts::a_composer_s_words_come_back_after_a_relaunch`,
     `workspace::drafts::tests::drafts_come_back_and_old_ones_go`.
+
+- ✅ **A project's board opens in a tile of its own when no orchestrator can show it**
+  (2026-10-11, readiness audit items 12, 13, 16 and 17).
+  - **The defect.** A board showed only as a face of its orchestrator's terminal tile. A
+    project named with "Name this project…" has no orchestrator. An orchestrator's agent can
+    end, and its machine can be away. In all three cases the palette's line for the project
+    said why it could not open, and nothing let the person read, tell, move or cancel the
+    tasks.
+  - **The board tile** (`workspace/board_tiles.rs`). The board belongs to the server, not to
+    a machine, so its tile sits under `BOARD_WORKER`, the nil key that no worker has. It opens
+    in a tab of its own, takes the keyboard in the board, and is gone to again rather than
+    opened twice. ⌘W closes it. It is saved with the layout as `Saved::boards` (tile and
+    project), so a relaunch puts it back. Until the server's projects arrive, and while the
+    server is away, it shows the state pill saying so. The orchestrator's tile keeps the board
+    as one of its faces wherever it can show it, including while its machine is away, since
+    that tile is kept then.
+  - **Away mark** (item 13, client half). `WorkerSeen.away` is true when this client has no
+    link to the worker. A task whose agent runs there wears the away glyph on its place chip,
+    which reads "studio · away", and its hint says that its agent is not heard from until the
+    machine is back. The row's own mark still says the task's state: the server has not
+    changed it.
+  - **Not sent** (item 16, client half). A board's action pressed with no server linked used
+    to do nothing. It now says "Not sent: the server is away".
+  - **Start** (item 17, client half). A task never started offers "Start" (s), with "Run on…",
+    on the card the keyboard stands on. Start reads the task's brief (`TaskGet`) and sends
+    `TaskSpawn` on the task's pin, with the brief as the first prompt. It uses the agent the
+    orchestrator is, or Claude Code when this client cannot tell. Dependencies still hold it.
+    The card says "Starting #3…" at once, and a refusal puts the card back and says why.
+  - Tests: `workspace::tests::projects::a_board_with_no_orchestrator_to_show_it_opens_in_a_tile_of_its_own`,
+    `…::a_task_on_a_machine_gone_away_says_so`, `…::a_task_never_started_is_started_from_its_card`,
+    `workspace::tests::relaunch::a_relaunch_puts_a_board_tile_back`.

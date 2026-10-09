@@ -1765,3 +1765,202 @@ fn the_message_to_the_orchestrator_sends_from_its_control(cx: &mut TestAppContex
     assert_eq!(text, "split #2\nthen merge");
     assert_eq!(line(cx).as_deref(), Some(""), "cleared once sent");
 }
+
+/// The board tiles in the layout.
+fn board_tiles(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Vec<TileRef> {
+    use crate::workspace::board_tiles::BOARD_WORKER;
+    view.read_with(cx, |v, _| v.layout.tiles().filter(|t| t.worker == BOARD_WORKER).collect())
+}
+
+/// A project with no orchestrator, or with one on a machine that is away, opens its board in a
+/// tile of its own. The tile shows the cards and takes the keyboard, opening the project again
+/// goes back to it, and ⌘W closes it. A board's action pressed with no server linked says it
+/// was not sent.
+#[gpui::test]
+fn a_board_with_no_orchestrator_to_show_it_opens_in_a_tile_of_its_own(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
+    let away = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+    let made = |n: u32, title: &str| vec![card(n, title, TaskState::Planned)];
+    view.update_in(cx, |v, _w, cx| {
+        let created = || vec![entry(1, None, Moment::Created)];
+        v.projects_part(
+            snapshot(
+                10,
+                vec![
+                    status(project("solo", None), made(1, "Wire the board"), created()),
+                    status(project("away", Some(away)), made(2, "Read the store"), created()),
+                ],
+            ),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    view.update_in(cx, |v, _w, cx| v.open_project(&fixtures::id("solo"), cx));
+    cx.run_until_parked();
+    let tiles = board_tiles(&view, cx);
+    let [solo] = tiles.as_slice() else { panic!("one board tile: {tiles:?}") };
+    assert_eq!(focused(&view, cx), Some(*solo), "it is gone to");
+    assert!(cx.debug_bounds("project-card-1").is_some(), "the board is drawn in it");
+    let b = view
+        .read_with(cx, |v, _| v.projects.views.get(&fixtures::id("solo")).cloned())
+        .expect("a board");
+    let board_focused = cx.update(|window, cx| b.read(cx).focus_handle(cx).is_focused(window));
+    assert!(board_focused, "the board takes the keyboard");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "nothing to say");
+
+    view.update_in(cx, |v, _w, cx| v.open_project(&fixtures::id("solo"), cx));
+    cx.run_until_parked();
+    assert_eq!(board_tiles(&view, cx), [*solo], "the same tile, not a second");
+
+    view.update_in(cx, |v, _w, cx| v.open_project(&fixtures::id("away"), cx));
+    cx.run_until_parked();
+    let tiles = board_tiles(&view, cx);
+    assert_eq!(tiles.len(), 2, "its orchestrator's machine is away");
+    let away_tile = focused(&view, cx).expect("focused");
+    assert_ne!(away_tile, *solo);
+    assert!(cx.debug_bounds("project-card-2").is_some(), "its board is drawn");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.send_to_server(set_push_verb(), |_, _| (), cx);
+    });
+    cx.run_until_parked();
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some(crate::workspace::projects::NOT_SENT));
+
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    assert_eq!(board_tiles(&view, cx), [*solo], "⌘W closed the focused one");
+    assert_eq!(view.read_with(cx, |v, _| v.projects.tiles.len()), 1);
+}
+
+/// Any verb that changes a project, for a send with no server linked.
+fn set_push_verb() -> Verb {
+    Verb::ProjectDelete { project: fixtures::id("away") }
+}
+
+/// A task whose machine drops while it runs wears the away mark on its place. The orchestrator's
+/// tile, kept while its machine is away, still shows the board.
+#[gpui::test]
+fn a_task_on_a_machine_gone_away_says_so(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    // The orchestrator's tile alone, so the board has room for each card's place.
+    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
+    cx.simulate_keystrokes("cmd-shift-enter");
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-project-node-1-where").is_some(), "its place is drawn");
+    assert!(
+        cx.debug_bounds("project-card-project-node-1-where-away").is_none(),
+        "its machine is here"
+    );
+
+    let key = setup.fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Unreachable, cx);
+        v.open_project(&fixtures::id("board"), cx);
+    });
+    cx.run_until_parked();
+    assert!(board_tiles(&view, cx).is_empty(), "the orchestrator's tile still shows it");
+    assert!(cx.debug_bounds("project-card-project-node-1-where-away").is_some(), "marked away");
+}
+
+/// A task's brief, as the server's `TaskGet` answers it.
+fn brief_of(task: TaskId, brief: &str) -> Outcome {
+    use slopty_proto::project::{NodeDetail, Spent, Task};
+    let task = Task {
+        id: task,
+        depends_on: Vec::new(),
+        kind: "code".to_owned(),
+        title: "Golden files".to_owned(),
+        brief: brief.to_owned(),
+        read_only: false,
+        pin: None,
+        verifier: None,
+        metadata: None,
+        state: TaskState::Planned,
+        status: None,
+        assignment: None,
+        branch: None,
+        worktree: None,
+        base: None,
+        pull: None,
+        verified: None,
+        merge: None,
+        step: None,
+        spent: Spent::default(),
+        created_ms: WallMs::ZERO,
+        updated_ms: WallMs::ZERO,
+        give_backs: slopty_proto::project::GiveBacks::default(),
+        tests: None,
+    };
+    Outcome::Node(Box::new(NodeDetail {
+        task: Some(task),
+        natives: slopty_proto::project::Natives::default(),
+    }))
+}
+
+/// "Start" on a task never started reads its brief and spawns it, on its pin, with the brief as
+/// the agent's first prompt; its card says it is starting at once. With no server linked, the
+/// card says so and nothing is sent.
+#[gpui::test]
+fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
+    use slopty_proto::project::Runner;
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut pinned = card(3, "Golden files", TaskState::Planned);
+    pinned.depends_on = vec![TaskId(1)];
+    pinned.pin = Some(worker);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", pinned, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-start-3").is_none(), "not on a card at rest");
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| {
+        for _ in 0..3 {
+            b.select_by(1, cx);
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(3))));
+    assert!(cx.debug_bounds("project-card-start-1").is_none(), "#1 has started");
+
+    click(cx, "project-card-start-3");
+    let asked = sent(&mut queue, cx, |_| brief_of(TaskId(3), "Bless the goldens"));
+    assert_eq!(asked, [Verb::TaskGet { project: fixtures::id("board"), task: Some(TaskId(3)) }]);
+    assert!(cx.debug_bounds("project-card-start-3").is_none(), "not asked twice while it starts");
+    let spawned = sent(&mut queue, cx, done);
+    let [Verb::TaskSpawn { task: TaskId(3), launch, .. }] = spawned.as_slice() else {
+        panic!("a spawn: {spawned:?}");
+    };
+    assert_eq!(launch.pin, Some(worker), "on its pin");
+    assert_eq!(
+        launch.run,
+        Runner::Claude { prompt: Some("Bless the goldens".to_owned()), args: Vec::new() },
+        "its brief first"
+    );
+    assert!(!launch.ignore_dependencies, "what it waits on still holds it");
+
+    let start = crate::project::model::TaskAction::Start;
+    b.update(cx, |b, cx| b.act_on_picked(start, cx));
+    cx.run_until_parked();
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some("#3 is starting"), "asked once");
+
+    // The spawn refused, the card is as it was, and a Start with no server says so.
+    b.update(cx, |b, cx| b.handing_refused(TaskId(3), cx));
+    view.update_in(cx, |v, _w, _cx| v.set_server_caller(None));
+    b.update(cx, |b, cx| b.act_on_picked(start, cx));
+    cx.run_until_parked();
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some(crate::workspace::projects::NOT_SENT));
+}

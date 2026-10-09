@@ -145,6 +145,8 @@ pub struct Saved {
     pub displays: Vec<SavedDisplay>,
     /// How far this device read each project's timeline, for the recap its board opens on.
     pub looked: Vec<SavedLooked>,
+    /// The tiles that show a project's board on their own, not in its orchestrator's tile.
+    pub boards: Vec<SavedBoard>,
     /// How often and how lately each project was gone to here, for the palette to rank them.
     pub frecency: Frecency,
 }
@@ -208,6 +210,15 @@ pub struct SavedPopout {
     pub tile: TileRef,
     /// Where its window stood.
     pub frame: WindowFrame,
+}
+
+/// A tile that shows `project`'s board.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SavedBoard {
+    /// Which.
+    pub tile: TileRef,
+    /// The project.
+    pub project: slopty_proto::project::ProjectId,
 }
 
 /// How far this device read a project's timeline: the last entry its board showed, and when

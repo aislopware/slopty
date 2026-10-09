@@ -16,7 +16,8 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, TaskChange, TaskId, TaskState,
+    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, Runner, TaskChange, TaskId,
+    TaskLaunch, TaskState,
 };
 use slopty_proto::thread::AgentId;
 
@@ -29,6 +30,8 @@ use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
+/// What a board's action says when no server is linked to take it.
+pub(crate) const NOT_SENT: &str = "Not sent: the server is away";
 /// What "Start a project here" says away from an agent's terminal, and the way that works.
 pub(crate) const NO_TERMINAL: &str = "A project is run by an agent in a terminal: start one with \u{201c}New project\u{2026}\u{201d}";
 /// How many pages of the timeline a recap reads back from the server, past what the board
@@ -63,6 +66,9 @@ pub(super) struct ProjectsState {
     pub subscriptions: HashMap<ProjectId, gpui::Subscription>,
     /// The orchestrators whose tiles show the board rather than the terminal.
     pub shown: HashSet<SessionId>,
+    /// The tiles that show a board on their own, by the project each shows
+    /// ([`super::board_tiles`]).
+    pub tiles: HashMap<ItemId, ProjectId>,
     /// Boards that take the keyboard on the next frame.
     pub focus: HashSet<ProjectId>,
     /// Something a board shows changed since the boards were last handed what they show.
@@ -104,6 +110,18 @@ pub fn agent_label(agent: &AgentId) -> String {
         AgentId::CODEX => "Codex".to_owned(),
         AgentId::PI => "pi".to_owned(),
         other => agent.acp_name().unwrap_or(other).to_owned(),
+    }
+}
+
+/// How `agent` runs for a task, told `prompt` first: Claude Code and Codex in their own
+/// terminals, any other as a thread of the worker's thread host.
+fn runner_for(agent: AgentId, prompt: Option<String>) -> Runner {
+    if agent.is(AgentId::CLAUDE_CODE) {
+        Runner::Claude { prompt, args: Vec::new() }
+    } else if agent.is(AgentId::CODEX) {
+        Runner::Codex { prompt, args: Vec::new() }
+    } else {
+        Runner::Agent { agent, prompt, model: None, args: Vec::new() }
     }
 }
 
@@ -238,19 +256,24 @@ impl WorkspaceView {
     }
 
     /// Show `project`'s board in its orchestrator's tile, and go there. Where its orchestrator
-    /// has no tile here, one is opened for it on its worker.
+    /// has no tile here, one is opened for it on its worker. With no orchestrator, one whose
+    /// agent ended, or one on a machine away, the board opens in a tile of its own
+    /// ([`super::board_tiles`]).
     pub fn open_project(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
         let Some(board) = self.projects.mirror.get(project) else { return };
-        let title = board.project.title.clone();
         let Some(term) = board.project.orchestrator else {
-            self.show_notice(format!("{title} has no orchestrator yet"), cx);
+            self.open_board_tile(project, cx);
             return;
         };
         let session = term.session;
         let worker = worker_key(term.worker);
-        if self.tile_of_session(session).is_none()
-            && self.workers.get(&worker).is_some_and(|w| w.link.is_some())
-        {
+        let linked = self.workers.get(&worker).is_some_and(|w| w.link.is_some());
+        // An orchestrator whose agent ended, or whose machine is away, has no tile to show it.
+        if self.tile_of_session(session).is_none() && (!linked || self.summary(session).is_none()) {
+            self.open_board_tile(project, cx);
+            return;
+        }
+        if self.tile_of_session(session).is_none() {
             let item = Item {
                 id: ItemId::new(),
                 kind: ItemKind::Terminal { session },
@@ -260,7 +283,7 @@ impl WorkspaceView {
             self.propose(worker, ItemOp::Add(item), cx);
         }
         let Some(tile) = self.tile_of_session(session) else {
-            self.show_notice(format!("{title}'s orchestrator is on a machine not linked now"), cx);
+            self.open_board_tile(project, cx);
             return;
         };
         self.focus_tile(tile, cx);
@@ -442,27 +465,25 @@ impl WorkspaceView {
         let live = &self.projects.mirror;
         self.projects.views.retain(|p, _| live.get(p).is_some());
         self.projects.subscriptions.retain(|p, _| live.get(p).is_some());
-        self.look_at_boards(cx);
-        if self.projects.shown.is_empty() {
-            self.projects.focus.clear();
-            return;
-        }
-        let tiled: HashSet<SessionId> = self
-            .layout
-            .tiles()
-            .filter_map(|t| match self.item(t)?.kind {
+        let tiles: Vec<_> = self.layout.tiles().collect();
+        let tiled: HashSet<SessionId> = tiles
+            .iter()
+            .filter_map(|t| match self.item(*t)?.kind {
                 ItemKind::Terminal { session } => Some(session),
                 _ => None,
             })
             .collect();
         let mirror = &self.projects.mirror;
         self.projects.shown.retain(|s| tiled.contains(s) && mirror.of_orchestrator(*s).is_some());
-        let wanted: Vec<ProjectId> = self
-            .projects
-            .shown
-            .iter()
-            .filter_map(|s| Some(mirror.of_orchestrator(*s)?.project.id.clone()))
-            .collect();
+        // A board tile closed some other way than ⌘W (its tab, its pane) is let go here.
+        let items: HashSet<ItemId> = tiles.iter().map(|t| t.item).collect();
+        self.projects.tiles.retain(|item, _| items.contains(item));
+        self.look_at_boards(cx);
+        let wanted: Vec<ProjectId> = self.boards_on_show().into_iter().collect();
+        if wanted.is_empty() {
+            self.projects.focus.clear();
+            return;
+        }
         for project in &wanted {
             if !self.projects.views.contains_key(project) {
                 self.make_board(project.clone(), cx);
@@ -486,7 +507,8 @@ impl WorkspaceView {
                 let caps = worker.caps.as_ref();
                 let (os, form) = (caps.map(|c| c.os), caps.map(|c| c.form));
                 let agents = self.startable_on(worker_key(id));
-                Some((id, WorkerSeen { name: worker.name.clone(), os, form, agents }))
+                let away = worker.link.is_none();
+                Some((id, WorkerSeen { name: worker.name.clone(), os, form, agents, away }))
             })
             .collect();
         let now = crate::clock::now(cx);
@@ -510,17 +532,24 @@ impl WorkspaceView {
         }
     }
 
+    /// The projects whose boards are on show: in their orchestrators' tiles, or in tiles of
+    /// their own.
+    fn boards_on_show(&self) -> HashSet<ProjectId> {
+        let mirror = &self.projects.mirror;
+        let in_orchestrators = self
+            .projects
+            .shown
+            .iter()
+            .filter_map(|s| Some(mirror.of_orchestrator(*s)?.project.id.clone()));
+        let own = self.projects.tiles.values().filter(|p| mirror.get(p).is_some()).cloned();
+        in_orchestrators.chain(own).collect()
+    }
+
     /// The boards on show now against those at the last hand-over: a board that hid read its
     /// timeline to the end, and one that opened is handed what changed since this client last
     /// looked. A first look has nothing to compare with, and no recap.
     fn look_at_boards(&mut self, cx: &Context<Self>) {
-        let mirror = &self.projects.mirror;
-        let now: HashSet<ProjectId> = self
-            .projects
-            .shown
-            .iter()
-            .filter_map(|s| Some(mirror.of_orchestrator(*s)?.project.id.clone()))
-            .collect();
+        let now = self.boards_on_show();
         let at_ms = WallMs::now();
         let hid: Vec<ProjectId> = self.projects.open.difference(&now).cloned().collect();
         if !hid.is_empty() {
@@ -694,6 +723,7 @@ impl WorkspaceView {
             TaskAction::Review => return self.review_task(&project, task, cx),
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::PushAgain => Verb::TaskPush { project, task },
+            TaskAction::Start => return self.start_task(&project, task, cx),
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::StartFresh => return self.restart_task(&project, task, None, cx),
             // The board picks the agent itself, and says so as `ProjectEvent::GiveTo`.
@@ -753,6 +783,7 @@ impl WorkspaceView {
     fn tell_orchestrator(&self, project: &ProjectId, text: String, cx: &mut Context<Self>) {
         let Some(caller) = self.projects.caller.clone() else {
             self.give_back_words(project, text, cx);
+            Self::not_sent(cx);
             return;
         };
         let verb = Verb::TaskTell { project: project.clone(), task: None, text: text.clone() };
@@ -839,6 +870,48 @@ impl WorkspaceView {
         });
     }
 
+    /// "Start" on a task not started yet: its brief read from the server, then the task
+    /// spawned with it as the first prompt, on its pin when it has one, by the agent its
+    /// orchestrator is (Claude Code when this client cannot tell). The server places it, as it
+    /// would for the orchestrator.
+    fn start_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+        if self.projects.caller.is_none() {
+            return self.restart_refused(project, task, NOT_SENT.to_owned(), cx);
+        }
+        let board = self.projects.mirror.get(project);
+        let pin = board.and_then(|b| b.tasks.get(&task)).and_then(|c| c.pin);
+        let orchestrator = board.and_then(|b| b.project.orchestrator).map(|t| t.session);
+        let agent = orchestrator
+            .and_then(|s| self.session_agent(s))
+            .map_or_else(|| AgentId::named(AgentId::CLAUDE_CODE), AgentId::named);
+        let asked = project.clone();
+        let verb = Verb::TaskGet { project: project.clone(), task: Some(task) };
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            let brief = match outcome {
+                Outcome::Node(node) => node.task.map(|t| t.brief),
+                Outcome::Error { message, .. } => {
+                    return this.restart_refused(&asked, task, message, cx);
+                }
+                _ => None,
+            };
+            let prompt = brief.filter(|b| !b.trim().is_empty());
+            let launch = TaskLaunch {
+                pin,
+                cwd: String::new(),
+                run: runner_for(agent, prompt),
+                env: Vec::new(),
+                size: None,
+                ignore_dependencies: false,
+            };
+            let verb = Verb::TaskSpawn { project: asked.clone(), task, launch };
+            this.ask_server(verb, cx, move |this, outcome, cx| {
+                if let Outcome::Error { message, .. } = outcome {
+                    this.restart_refused(&asked, task, message, cx);
+                }
+            });
+        });
+    }
+
     /// The server would not start `task` again: say why, and let its card say what it did.
     fn restart_refused(
         &mut self,
@@ -853,6 +926,15 @@ impl WorkspaceView {
         self.show_failure(message, cx);
     }
 
+    /// A board's action pressed with no server linked says so ([`NOT_SENT`]) rather than
+    /// doing nothing.
+    fn not_sent(cx: &Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| this.show_failure(NOT_SENT.to_owned(), cx))
+        })
+        .detach();
+    }
+
     /// Send `verb` and hand whatever the server answers to `then`.
     fn ask_server(
         &self,
@@ -860,7 +942,10 @@ impl WorkspaceView {
         cx: &Context<Self>,
         then: impl FnOnce(&mut Self, Outcome, &mut Context<Self>) + 'static,
     ) {
-        let Some(caller) = self.projects.caller.clone() else { return };
+        let Some(caller) = self.projects.caller.clone() else {
+            Self::not_sent(cx);
+            return;
+        };
         cx.spawn(async move |this, cx| {
             let outcome = caller.call(verb).await;
             this.update(cx, |this, cx| then(this, outcome, cx))
@@ -876,7 +961,10 @@ impl WorkspaceView {
         then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
     ) {
-        let Some(caller) = self.projects.caller.clone() else { return };
+        let Some(caller) = self.projects.caller.clone() else {
+            Self::not_sent(cx);
+            return;
+        };
         cx.spawn(async move |this, cx| {
             let outcome = caller.call(verb).await;
             this.update(cx, |this, cx| match outcome {
@@ -1093,12 +1181,13 @@ impl WorkspaceView {
 
     /// Counts of what the projects keep, for the leak checks.
     #[cfg(test)]
-    pub(super) fn project_sizes(&self) -> [(&'static str, usize); 4] {
+    pub(super) fn project_sizes(&self) -> [(&'static str, usize); 5] {
         [
             ("projects.views", self.projects.views.len()),
             ("projects.subscriptions", self.projects.subscriptions.len()),
             ("projects.shown", self.projects.shown.len()),
             ("projects.focus", self.projects.focus.len()),
+            ("projects.tiles", self.projects.tiles.len()),
         ]
     }
 }
