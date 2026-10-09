@@ -196,6 +196,12 @@ not (
 )
 '''
 
+# The gate's encoder probe (`xtask` gate, `Probe`): one test, in a profile of its own so its
+# report goes to a directory of its own. Under the lane's profile, the probe after a failed
+# VideoToolbox run replaced that run's JUnit report with its one test, and CI's timings lost
+# every test of the run it judged (run 37931699857).
+[profile.encoder-probe]
+
 # `cargo xtask deep miri`: the pure crates' tests under the interpreter, 50–100 times slower than
 # native. A test still running after 20 minutes is ended and fails, so one slow test is a finding
 # and not a night.

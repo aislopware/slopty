@@ -971,7 +971,7 @@ fn test_lane(
         videotoolbox_step(
             cmd!(sh, "cargo nextest run {p...} --profile {profile} --no-tests=pass -E {expr}")
                 .env(crate::runner::RUNNER_VAR, &runner),
-            &Probe { sh, packages: p, profile, runner: &runner },
+            &Probe { sh, packages: p, runner: &runner },
         )
     } else {
         Ok(())
@@ -991,22 +991,24 @@ const VIDEOTOOLBOX_DEADLINE: Duration = Duration::from_mins(5);
 /// The test that codes one frame, and nothing else, through a real session.
 const ENCODER_PROBE: &str = "encoder::tests::the_encoder_codes_one_frame";
 
+/// The nextest profile the probe runs in (`.config/nextest.toml`).
+const PROBE_PROFILE: &str = "encoder-probe";
+
 /// How long the probe may take, its test binary already built: one frame codes in milliseconds,
 /// and nextest lists the shard's binaries in seconds, so only an encoder that does not answer runs
 /// this long.
 const PROBE_DEADLINE: Duration = Duration::from_mins(1);
 
 /// Whether the runner's encoder answers: [`ENCODER_PROBE`] run through nextest under
-/// [`PROBE_DEADLINE`], on the packages and in the profile the lane's build just built, so it
-/// builds nothing. A lone `cargo test -p slopty-codec` resolved other features than the shard's
-/// build and compiled a dozen crates again first: five and a half minutes of every worker shard.
+/// [`PROBE_DEADLINE`], on the packages the lane's build just built, so it builds nothing. It runs
+/// in a nextest profile of its own ([`PROBE_PROFILE`]), so its report never replaces the lane's.
+/// A lone `cargo test -p slopty-codec` resolved other features than the shard's build and
+/// compiled a dozen crates again first: five and a half minutes of every worker shard.
 struct Probe<'a> {
     /// The tree the tests run in.
     sh: &'a Shell,
     /// The packages the lane built, as cargo's arguments.
     packages: &'a [String],
-    /// The nextest profile the lane runs.
-    profile: &'a str,
     /// The test runner the lane's binaries run under (`crate::runner`).
     runner: &'a str,
 }
@@ -1014,11 +1016,13 @@ struct Probe<'a> {
 impl Probe<'_> {
     /// Whether one frame coded in time.
     fn answers(&self) -> bool {
-        let Self { sh, packages: p, profile, runner } = *self;
+        let Self { sh, packages: p, runner } = *self;
         let expr = format!("package(=slopty-codec) & test(={ENCODER_PROBE})");
-        let run =
-            cmd!(sh, "cargo nextest run {p...} --profile {profile} --no-tests=fail -E {expr}")
-                .env(crate::runner::RUNNER_VAR, runner);
+        let run = cmd!(
+            sh,
+            "cargo nextest run {p...} --profile {PROBE_PROFILE} --no-tests=fail -E {expr}"
+        )
+        .env(crate::runner::RUNNER_VAR, runner);
         within(std::process::Command::from(run), PROBE_DEADLINE) == Some(true)
     }
 }
