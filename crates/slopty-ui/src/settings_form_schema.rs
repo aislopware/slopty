@@ -20,7 +20,7 @@ use slopty_settings::schema::{self, Field};
 use crate::keymap::{Command, Keymap, Scope};
 use crate::palette::{PaletteItem, PaletteRun};
 
-/// A page of the form, in the order the sidebar lists them.
+/// A page of the form, in the order the section list gives them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     /// The theme, the chrome's size and the terminal's colours.
@@ -69,6 +69,63 @@ impl Section {
     #[must_use]
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|s| *s == self).unwrap_or_default()
+    }
+
+    /// The group the section list puts it under.
+    #[must_use]
+    pub const fn group(self) -> Group {
+        match self {
+            Self::Appearance | Self::Terminal | Self::Input => Group::App,
+            Self::Streams | Self::Network => Group::Machines,
+            Self::Keyboard | Self::About => Group::Help,
+        }
+    }
+
+    /// Its glyph in the section list.
+    #[must_use]
+    pub const fn symbol(self) -> crate::icons::Symbol {
+        use crate::icons::Symbol;
+        match self {
+            Self::Appearance => Symbol::Palette,
+            Self::Terminal => Symbol::Terminal,
+            Self::Input => Symbol::Cursorarrow,
+            Self::Streams => Symbol::Display,
+            Self::Network => Symbol::ServerRack,
+            Self::Keyboard => Symbol::Keyboard,
+            Self::About => Symbol::InfoCircle,
+        }
+    }
+}
+
+/// The section list's groups, each under its name, in [`Section::ALL`]'s order: how this app
+/// looks and takes input, the machines it reaches, and what the Help menu opens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Group {
+    /// The theme, the terminal and the input.
+    App,
+    /// Remote windows and desktops, the server and the workers.
+    Machines,
+    /// The keymap and the build: the Help menu's Keyboard Shortcuts and About.
+    Help,
+}
+
+impl Group {
+    /// Every group, in order.
+    pub const ALL: [Self; 3] = [Self::App, Self::Machines, Self::Help];
+
+    /// Its name over its sections.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::App => "App",
+            Self::Machines => "Machines",
+            Self::Help => "Help",
+        }
+    }
+
+    /// Its sections, in order.
+    pub fn sections(self) -> impl Iterator<Item = Section> {
+        Section::ALL.into_iter().filter(move |s| s.group() == self)
     }
 }
 
@@ -594,6 +651,15 @@ mod tests {
     use slopty_settings::schema::Kind;
 
     use super::*;
+
+    /// The groups list every section once, in [`Section::ALL`]'s order, so ↑ and ↓ walk the
+    /// list as it is drawn.
+    #[test]
+    fn the_groups_list_the_sections_in_order() {
+        let listed: Vec<Section> = Group::ALL.into_iter().flat_map(Group::sections).collect();
+        assert_eq!(listed, Section::ALL);
+        assert!(Group::ALL.into_iter().all(|g| g.sections().next().is_some()), "none empty");
+    }
 
     /// The stepper's arithmetic: on the grid, off it, and written as the file takes it.
     #[test]

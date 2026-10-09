@@ -447,16 +447,14 @@ async fn a_workspace_of_panes_in_both_themes() {
         .unwrap();
 
     drv.keys("cmd-,").await.unwrap();
-    drv.wait_for("the settings", STEP, |d| d.a11y_node("Dialog", Some("Settings")).is_some())
+    drv.wait_for("the settings", STEP, |d| d.a11y_node("Group", Some("Settings")).is_some())
         .await
         .unwrap();
     golden(drv, &dir, "settings").await;
     drv.keys("escape").await.unwrap();
-    drv.wait_for("the settings closed", STEP, |d| {
-        d.a11y_node("Dialog", Some("Settings")).is_none()
-    })
-    .await
-    .unwrap();
+    drv.wait_for("the settings closed", STEP, |d| d.a11y_node("Group", Some("Settings")).is_none())
+        .await
+        .unwrap();
 
     let dump = drv.dump().await.unwrap();
     let [x, y, w, h] = dump.a11y_node("Button", Some("More")).expect("the menu button").bounds;
@@ -496,7 +494,7 @@ async fn a_workspace_of_panes_in_both_themes() {
         .await
         .unwrap();
     drv.keys("cmd-,").await.unwrap();
-    drv.wait_for("the settings", STEP, |d| d.a11y_node("Dialog", Some("Settings")).is_some())
+    drv.wait_for("the settings", STEP, |d| d.a11y_node("Group", Some("Settings")).is_some())
         .await
         .unwrap();
     golden(drv, &dir, "settings-dark").await;

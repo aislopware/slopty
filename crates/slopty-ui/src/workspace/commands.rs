@@ -156,6 +156,8 @@ impl WorkspaceView {
     /// Run a tiling action, then follow the focus, ask the remote windows whose panes changed
     /// size to follow them, and save.
     pub(super) fn layout_action(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Tiling)) {
+        // An action on the panes shows them: the settings page leaves.
+        self.leave_settings(cx);
         let before = self.focused();
         let sizes = self.pane_sizes();
         f(&mut self.layout);

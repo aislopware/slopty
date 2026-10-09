@@ -3018,8 +3018,8 @@ mod tests {
     }
 
     /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that
-    /// hold the window until answered (the settings, adding a worker) dim it with the
-    /// [`backdrop`]. Both open at one place.
+    /// hold the window until answered (adding a worker) dim it with the [`backdrop`]. Both open
+    /// at one place. The settings are a page in the panes' place, and dim nothing.
     #[test]
     fn a_list_floats_and_a_modal_dims() {
         let calls = |file: &str, call: &str| {
@@ -3031,9 +3031,8 @@ mod tests {
             assert!(anchored, "{list} lays out on the anchor");
             assert!(!calls(list, "kit::backdrop("), "{list} dims nothing");
         }
-        for modal in ["slopty-ui/src/settings_editor.rs", "slopty-app/src/lib.rs"] {
-            assert!(calls(modal, "kit::backdrop("), "{modal} is a modal");
-        }
+        assert!(calls("slopty-app/src/lib.rs", "kit::backdrop("), "adding a worker is a modal");
+        assert!(!calls("slopty-ui/src/settings_editor.rs", "kit::backdrop("), "a page");
     }
 
     /// Under the touch density an icon button is a finger's 44 pt round the same icon, and the

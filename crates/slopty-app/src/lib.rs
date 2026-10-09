@@ -532,8 +532,6 @@ pub struct Workspace {
     settings_editor: Option<Entity<SettingsEditor>>,
     /// What the editor asks for, heard while it is open.
     settings_editor_events: Option<gpui::Subscription>,
-    /// The settings dialog just closed, drawn for the moment it takes to fade away.
-    settings_leaving: Option<Entity<SettingsEditor>>,
     /// Focus the editor's field on the next frame (it needs a frame to exist).
     pending_focus_editor: bool,
     /// The self-test's stand-in for iPad Split View and Stage Manager: the app laid out in
@@ -691,7 +689,6 @@ impl Workspace {
             settings_seen,
             settings_editor: None,
             settings_editor_events: None,
-            settings_leaving: None,
             pending_focus_editor: false,
             split_view: None,
             key_bar_scroll: ScrollHandle::new(),
@@ -813,6 +810,15 @@ impl Workspace {
         if active && self.attention.unsaid_while_off() {
             self.show_notice(slopty_ui::workspace::attention::NOTES_OFF.to_owned(), cx);
         }
+        // Back in front, the notes a push put up while away are the system's to list.
+        if active {
+            cx.spawn(async move |this, cx| {
+                let shown = slopty_platform::notify::delivered().await;
+                let ids: Vec<String> = shown.into_iter().map(|d| d.id).collect();
+                let _gone = this.update(cx, |ws, _cx| ws.attention.delivered(&ids));
+            })
+            .detach();
+        }
         #[cfg(target_os = "ios")]
         {
             self.grace = if active {
@@ -826,7 +832,8 @@ impl Workspace {
     }
 
     /// ⌘, / "Settings…" / the palette: the file's text (the commented defaults when there is
-    /// none) in the in-app editor. A second ask while it is open just refocuses it.
+    /// none) in the in-app editor, a page in the panes' place. A second ask while it is open
+    /// just refocuses it.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_focus_editor = true;
         if self.settings_editor.is_some() {
@@ -850,6 +857,7 @@ impl Workspace {
                 }
                 SettingsEditorEvent::Dismiss => this.close_settings(window, cx),
             }));
+        self.view.update(cx, |view, cx| view.show_settings(Some(editor.clone()), cx));
         self.settings_editor = Some(editor);
         cx.notify();
     }
@@ -903,26 +911,16 @@ impl Workspace {
         }
     }
 
-    /// Drop the editor and hand the keyboard back to the focused tile at once; the dialog
-    /// fades out where it stands for its way out, then goes.
+    /// Drop the editor, show the panes again, and hand the keyboard back to the focused tile.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_editor_events = None;
-        let Some(editor) = self.settings_editor.take() else { return };
-        let during = editor.update(cx, SettingsEditor::leave);
-        if !during.is_zero() {
-            self.settings_leaving = Some(editor.clone());
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(during).await;
-                let _gone = this.update(cx, |this, cx| {
-                    if this.settings_leaving.as_ref() == Some(&editor) {
-                        this.settings_leaving = None;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+        if self.settings_editor.take().is_none() {
+            return;
         }
-        self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
+        self.view.update(cx, |view, cx| {
+            view.show_settings(None, cx);
+            view.return_keyboard(window, cx);
+        });
         cx.notify();
     }
 
@@ -3494,8 +3492,6 @@ impl Render for Workspace {
             let editor = editor.entity_id();
             window.defer(cx, move |_window, cx| App::notify(cx, editor));
         }
-        let settings_editor =
-            self.settings_editor.clone().or_else(|| self.settings_leaving.clone());
         let welcome = self.welcome();
         if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
             sheet.follow_secure(window, cx);
@@ -3549,7 +3545,6 @@ impl Render for Workspace {
             })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(inviting, gpui::ParentElement::child)
-            .when_some(settings_editor, gpui::ParentElement::child)
     }
 }
 
@@ -4817,7 +4812,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
-        // The dialog lands at once, so the frame holds still to be judged.
+        // What moves lands at once, so the frame holds still to be judged.
         cx.update(|_window, cx| cx.set_reduce_motion(true));
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.cancel_add_worker(window, cx)));
         cx.run_until_parked();
@@ -5801,8 +5796,6 @@ mod tests {
         };
         let press = |cx: &mut VisualTestContext, keys: &str| {
             cx.update(|window, cx| ws.update(cx, |ws, cx| ws.close_settings(window, cx)));
-            // The dialog's dim holds the pointer while it fades out.
-            cx.executor().advance_clock(kit::Pace::Exit.duration());
             cx.run_until_parked();
             let field = cx.debug_bounds("add-worker-field").expect("the panel's field");
             cx.simulate_click(field.center(), gpui::Modifiers::none());
@@ -5901,18 +5894,18 @@ mod tests {
         assert_eq!(note_keys(), ["alt-cmd-n"], "the keys last applied");
     }
 
-    /// A change from the settings form writes the file and applies it with the dialog still
-    /// open; a text that does not parse is not written and the dialog says why; the file's face
+    /// A change from the settings form writes the file and applies it with the page still
+    /// up; a text that does not parse is not written and the page says why; the file's face
     /// saved is written, applied and closed.
     #[gpui::test]
-    fn a_settings_change_applies_with_the_dialog_still_open(cx: &mut TestAppContext) {
+    fn a_settings_change_applies_with_the_page_still_up(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         let (ws, cx) = shell(cx, &runtime, &dir, false);
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_settings(window, cx)));
         cx.run_until_parked();
-        let editor = ws.read_with(cx, |ws, _| ws.settings_editor.clone()).expect("the dialog");
+        let editor = ws.read_with(cx, |ws, _| ws.settings_editor.clone()).expect("the page");
         let send = |cx: &mut VisualTestContext, event: SettingsEditorEvent| {
             editor.update(cx, |_, cx| cx.emit(event));
             cx.run_until_parked();
@@ -5923,11 +5916,11 @@ mod tests {
         send(cx, SettingsEditorEvent::Apply("[font]\nligatures = false\n".to_owned()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[font]\nligatures = false\n");
         assert!(!ws.read_with(cx, |ws, _| ws.settings.font.ligatures), "applied");
-        assert!(open(cx), "the dialog stays open");
+        assert!(open(cx), "the page stays up");
 
         send(cx, SettingsEditorEvent::Apply("[font]\nligatures = 3\n".to_owned()));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[font]\nligatures = false\n");
-        assert!(editor.read_with(cx, |e, _| e.error().is_some()), "the dialog says why");
+        assert!(editor.read_with(cx, |e, _| e.error().is_some()), "the page says why");
         assert!(open(cx), "and stays open");
 
         send(cx, SettingsEditorEvent::Save("[font]\nligatures = true\n".to_owned()));

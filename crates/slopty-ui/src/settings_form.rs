@@ -12,14 +12,17 @@
 //! keystrokes writes the file once. A value the key does not take (a colour that is not one, a
 //! host with a bad port) is never written; its row says why until it is typed again.
 //!
-//! On a desktop the sections are a sidebar with the search field at its top, as System
-//! Settings has it, and the page beside it holds the chosen section's rows under their group
-//! labels. A query lists every row that matches, under its section's name; so does a window too
-//! narrow for the sidebar, all sections in one column.
+//! On a desktop the sections are a list with the search field at its top, grouped App,
+//! Machines and Help, each with its glyph, the file's text and the way back at its foot
+//! (`SettingsForm::sections`); the page beside it holds the chosen section's rows under their
+//! group labels. The workspace draws the list as its navigator's body while the settings fill
+//! the panes; with no navigator beside it the form draws the list as its own sidebar. A query
+//! lists every row that matches, under its section's name; so does a window too narrow for the
+//! list, all sections in one column.
 //!
 //! The keyboard walks it: ↓ from the search goes to the first row's control, ↑ and ↓ go from row
 //! to row, ← and → move a choice or a stepper, Space or Return turns a switch, and ↑ and ↓ in the
-//! sidebar move between sections. Tab goes along the ring as everywhere else.
+//! list move between sections. Tab goes along the ring as everywhere else.
 //!
 //! Two pages under the sections hold no table's rows. Keyboard lists every command of the app's
 //! keymap with the chords that run it, as the palette words them: a press on a command's chords
@@ -44,13 +47,14 @@ use gpui::{
     KeyDownEvent, Keystroke, ParentElement as _, Render, ScrollHandle, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, MoveUp};
+use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_platform::login::Login;
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::{Choice, Kind};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
 
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::icons::{IconSize, Symbol};
 use crate::kit::ButtonKind;
 use crate::palette::PaletteItem;
@@ -61,7 +65,7 @@ pub mod schema;
 #[path = "settings_form_map.rs"]
 pub mod map;
 
-use schema::{KeyRow, Row, Section, System, rows};
+use schema::{Group, KeyRow, Row, Section, System, rows};
 
 /// What the search field says before anything is typed.
 pub const SEARCH_PLACEHOLDER: &str = "Search settings";
@@ -106,8 +110,14 @@ const NAV_WIDTH: f32 = 168.0;
 /// by side. A window with less room stacks the form in one column.
 const CONTENT_MIN: f32 = 480.0;
 
-/// The way to the file's own text, an advanced path kept apart from the task's Done.
+/// The way to the file's own text, an advanced path kept apart from the sections.
 pub const EDIT_FILE: &str = "Edit as TOML";
+
+/// The way out of the settings, back to the work, at the section list's foot.
+pub const BACK: &str = "Back";
+
+/// What the section list is to a screen reader, apart from the page beside it.
+pub const SECTIONS: &str = "Settings sections";
 
 /// The form's name, over a search's results and over the single column.
 pub const SETTINGS: &str = "Settings";
@@ -116,14 +126,14 @@ pub const SETTINGS: &str = "Settings";
 const TITLE_FLOOR_EMS: f32 = 6.0;
 
 /// The narrowest window that has the sidebar beside a page of at least 480 pt, with the
-/// dialog's margins either side.
+/// page's margins either side.
 #[must_use]
 pub fn sidebar_from(theme: &Theme) -> f32 {
     2.0_f32.mul_add(theme.spacing.md, NAV_WIDTH + CONTENT_MIN)
 }
 
 /// Whether `window` is narrower than [`sidebar_from`]: the form stacks in one column, and the
-/// dialog's foot offers the file instead.
+/// page's head offers the file and Done instead.
 #[must_use]
 pub fn narrow(window: &Window, theme: &Theme) -> bool {
     window.viewport_size().width < px(sidebar_from(theme))
@@ -135,10 +145,6 @@ const FIELD_WIDTH: f32 = 140.0;
 
 /// The font picker's width: a family's name, drawn in itself.
 const FONT_WIDTH: f32 = 184.0;
-
-/// The page's height before the window takes some back, in two-line rows: with the title and
-/// the foot, a dialog about 600 pt tall.
-const PAGE_ROWS: f32 = 13.0;
 
 /// How many families the font list shows before it scrolls.
 const FONT_ROWS: f32 = 6.0;
@@ -176,6 +182,9 @@ pub enum SettingsFormEvent {
     Done,
     /// The sidebar's way to the file itself: show its text.
     EditFile,
+    /// A section was picked from the list: the page shows it, and the file's face gives way
+    /// to it.
+    Shown,
 }
 
 /// The form over one `settings.toml` text.
@@ -216,8 +225,11 @@ pub struct SettingsForm {
     /// The row a page was opened on ([`Self::show_setting`]) until the page is drawn: it takes
     /// the keyboard instead of the search, and is scrolled into view.
     reveal: Option<usize>,
-    /// The sidebar is gone: every section in one column.
+    /// No section list beside the page: every section in one column.
     narrow: bool,
+    /// The section list is drawn beside the page by its host, the workspace's navigator
+    /// ([`Self::set_aside`]), so the form draws only the page.
+    aside: bool,
     /// The Keyboard page's lines for the text, read again when the text changes.
     keys: Option<KeyPage>,
     /// The app's palette lines beside the workspace's, whose words name its commands here.
@@ -331,6 +343,7 @@ impl SettingsForm {
             placed: Vec::new(),
             reveal: None,
             narrow: false,
+            aside: false,
             keys: None,
             words: Vec::new(),
             key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
@@ -453,6 +466,21 @@ impl SettingsForm {
         self.tabs.get(section.index()).cloned()
     }
 
+    /// Whether the host draws the section list beside the page (`SettingsForm::sections`): then the
+    /// form draws only the page, one section at a time.
+    pub fn set_aside(&mut self, aside: bool, cx: &mut Context<Self>) {
+        if self.aside != aside {
+            self.aside = aside;
+            cx.notify();
+        }
+    }
+
+    /// Whether the host draws the section list ([`Self::set_aside`]).
+    #[must_use]
+    pub const fn aside(&self) -> bool {
+        self.aside
+    }
+
     /// Whether a text field (the search or a row's) holds the keyboard: its Escape and Return
     /// are its own actions, which the dialog answers.
     #[must_use]
@@ -471,12 +499,6 @@ impl SettingsForm {
     /// The search field and every field of the form.
     fn fields_iter(&self) -> impl Iterator<Item = &Entity<InputState>> {
         std::iter::once(&self.search).chain(self.fields.iter().flatten())
-    }
-
-    /// The height the form asks for; a short window gets less and the page scrolls.
-    #[must_use]
-    pub fn height(theme: &Theme) -> f32 {
-        PAGE_ROWS.mul_add(theme.density.row_two_line, theme.density.row + theme.spacing.sm)
     }
 
     /// The rows shown, in order: the query's matches across every section, else the chosen
@@ -924,7 +946,7 @@ impl SettingsForm {
 
     // ----- drawing ---------------------------------------------------------------------------
 
-    fn search_field(&self, cx: &Context<Self>) -> Stateful<Div> {
+    fn search_field(&self, cx: &Draw<'_, Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
         well(theme)
@@ -956,35 +978,33 @@ impl SettingsForm {
             )
     }
 
-    /// The sections down the side. The page shown is the selected tab, live while the keyboard
-    /// is on the tabs and at the hover's wash while it is in the page.
-    fn sidebar(&self, window: &Window, cx: &Context<Self>) -> Div {
+    /// The section list: the search at its top, the sections under their groups' names, each
+    /// its glyph and its name, then the file's own text and the way back to the work at its
+    /// foot. The page shown is the selected row, live while the keyboard is on the list and at
+    /// the hover's wash while it is in the page.
+    ///
+    /// The workspace draws it as its navigator's body while the settings fill the panes
+    /// ([`Self::set_aside`]); a form with no navigator beside it draws it as its own sidebar.
+    /// It lies on whatever it is drawn on, as the navigator's rows do.
+    pub(crate) fn sections(&self, window: &Window, cx: &Draw<'_, Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let searching = !self.query.trim().is_empty();
         let keyed = self.tabs.iter().any(|tab| tab.is_focused(window));
-        let tabs = Section::ALL.iter().zip(&self.tabs).map(|(&section, handle)| {
+        let tab = |section: Section, handle: &FocusHandle| {
             let selected = !searching && section == self.section;
             let hover = hsla(theme.surfaces.hover);
-            let el = div()
-                .id(("settings-section", section.index()))
+            let ink = if selected { s.text } else { s.text_secondary };
+            let el = self
+                .list_row(div().id(("settings-section", section.index())), section.symbol(), ink)
                 .debug_selector(move || format!("settings-section-{}", section.index()))
                 .track_focus(handle)
                 .role(gpui::accesskit::Role::Tab)
                 .aria_label(section.label())
                 .aria_selected(selected)
-                .flex_none()
-                .h(px(theme.density.row))
-                // The pages that set nothing stand apart from the ones that do.
-                .when(section == Section::Keyboard, |el| el.mt(px(spacing.md)))
-                .flex()
-                .items_center()
-                .px(px(spacing.sm))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
                 .map(|el| {
                     if selected {
-                        // The sections lie on the canvas, so the one shown rises off it as a
+                        // The sections lie on the chrome, so the one shown rises off it as a
                         // white plate in light, as the navigator's chosen row does.
                         crate::kit::selected(el, theme, keyed)
                             .text_color(hsla(s.text))
@@ -995,54 +1015,92 @@ impl SettingsForm {
                             .hover(move |el| el.bg(hover).text_color(hsla(s.text)))
                     }
                 })
-                .on_click(
-                    cx.listener(move |this, _ev, window, cx| this.select(section, window, cx)),
-                )
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.select(section, window, cx);
+                    cx.emit(SettingsFormEvent::Shown);
+                }))
                 .on_key_down(cx.listener(move |this, ev, window, cx| {
                     this.tab_key(section, ev, window, cx);
                 }))
                 .child(section.label());
             crate::a11y::tab_stop(el, s.focus)
+        };
+        let groups = Group::ALL.into_iter().enumerate().map(|(n, group)| {
+            let heading = crate::kit::typed(div(), theme.roles().section)
+                .id(("settings-group", n))
+                .debug_selector(move || format!("settings-group-{n}"))
+                .role(gpui::accesskit::Role::Heading)
+                .aria_label(group.label())
+                .flex_none()
+                .px(px(spacing.sm))
+                .pt(px(if n == 0 { spacing.xs } else { spacing.md }))
+                .pb(px(spacing.xxs))
+                .text_color(hsla(s.text_muted))
+                .child(group.label());
+            div().flex().flex_col().gap(px(spacing.xxs)).child(heading).children(
+                group.sections().filter_map(|section| {
+                    self.tabs.get(section.index()).map(|handle| tab(section, handle))
+                }),
+            )
         });
         div()
-            .flex_none()
-            .w(px(NAV_WIDTH))
-            .h_full()
+            .id("settings-sections-panel")
+            .debug_selector(|| "settings-sections".to_owned())
+            .role(gpui::accesskit::Role::Group)
+            .aria_label(SECTIONS)
+            // Drawn in the navigator it is outside the page, so it answers as the page does:
+            // Esc and ⌘↩ leave the settings, unless an input method is composing.
+            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+                if !this.composing(cx) {
+                    cx.emit(SettingsFormEvent::Done);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
+                if enter.secondary && !this.composing(cx) {
+                    cx.emit(SettingsFormEvent::Done);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+                if ev.keystroke.key == "escape" && !this.composing(cx) {
+                    cx.emit(SettingsFormEvent::Done);
+                    cx.stop_propagation();
+                }
+            }))
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(spacing.xxs))
             .p(px(spacing.sm))
-            // The canvas, a tone step from the page and not a rule: the sidebar of the window's
-            // own frame, the sections on it as the navigator's rows lie on it.
-            .bg(hsla(s.chrome))
             .child(self.search_field(cx))
             .child(
                 div()
                     .id("settings-sections")
                     .role(gpui::accesskit::Role::TabList)
                     .aria_label("Sections")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(px(spacing.xxs))
                     .pt(px(spacing.sm))
-                    .children(tabs),
+                    .children(groups),
             )
-            .child(div().flex_1())
-            .child(self.edit_file(cx))
+            .child(self.foot_row("settings-edit-toml", Symbol::Curlybraces, EDIT_FILE, cx, |cx| {
+                cx.emit(SettingsFormEvent::EditFile);
+            }))
+            .child(self.foot_row("settings-back", Symbol::ArrowLeft, BACK, cx, |cx| {
+                cx.emit(SettingsFormEvent::Done);
+            }))
     }
 
-    /// The way to the file's own text, at the sidebar's foot: an advanced path, quiet and
-    /// apart from the sections and from the dialog's Done, as Zed keeps its settings file
-    /// under its sections.
-    fn edit_file(&self, cx: &Context<Self>) -> Stateful<Div> {
+    /// A row of the section list: a row tall, its glyph in `ink`'s tier, then its words.
+    fn list_row(&self, el: Stateful<Div>, symbol: Symbol, ink: Rgb) -> Stateful<Div> {
         let theme = &self.theme;
-        let (s, spacing) = (theme.surfaces, theme.spacing);
-        let el = div()
-            .id("settings-edit-toml")
-            .debug_selector(|| "settings-edit-toml".to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(EDIT_FILE)
-            .flex_none()
+        let spacing = theme.spacing;
+        el.flex_none()
             .h(px(theme.density.row))
             .flex()
             .items_center()
@@ -1050,18 +1108,32 @@ impl SettingsForm {
             .px(px(spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
+            .child(crate::palette::icon_slot(theme, symbol, hsla(ink)))
+    }
+
+    /// A way out of the form at the section list's foot (the file's text, back to the work):
+    /// quiet and apart from the sections, as Zed keeps its settings file under its sections and
+    /// `MonoCode` its way back under its settings' sections.
+    fn foot_row(
+        &self,
+        id: &'static str,
+        symbol: Symbol,
+        words: &'static str,
+        cx: &Draw<'_, Self>,
+        then: impl Fn(&mut Context<Self>) + 'static,
+    ) -> Stateful<Div> {
+        let s = self.theme.surfaces;
+        let el = self
+            .list_row(div().id(id), symbol, s.text_muted)
+            .debug_selector(move || id.to_owned())
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(words)
             .text_color(hsla(s.text_secondary))
             .map(crate::kit::eased)
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .active(move |el| el.bg(hsla(s.pressed)))
-            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)))
-            .child(crate::icons::icon(
-                theme,
-                Symbol::Curlybraces,
-                IconSize::Inline,
-                hsla(s.text_muted),
-            ))
-            .child(EDIT_FILE);
+            .on_click(cx.listener(move |_this, _ev, _window, cx| then(cx)))
+            .child(words);
         crate::a11y::tab_stop(el, s.focus)
     }
 
@@ -1103,10 +1175,11 @@ impl SettingsForm {
             .into_any_element()
     }
 
-    /// The page's head, as a macOS 26 pane titles itself: the page's name on its line and Done
-    /// at its end, with no rule under it (the page fades under it once scrolled). In one column
-    /// it says "Settings" and offers the file before Done, its words giving way to its glyph
-    /// alone where there is no room for them (`kit::priority_row`).
+    /// The page's head, as a macOS 26 pane titles itself: the page's name on its line, with no
+    /// rule under it (the page fades under it once scrolled). The section list beside it holds
+    /// the ways out; in one column, with no list, the head says "Settings" and offers the file
+    /// and Done at its end, the file's words giving way to its glyph alone where there is no
+    /// room for them (`kit::priority_row`).
     fn head(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
@@ -1123,8 +1196,6 @@ impl SettingsForm {
             .text_ellipsis()
             .text_color(hsla(s.text))
             .child(words);
-        let done = crate::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
-            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
         let row = crate::kit::priority_row("settings-head-row")
             .h(px(theme.density.row))
             .gap(px(spacing.sm))
@@ -1142,7 +1213,11 @@ impl SettingsForm {
                 EDIT_FILE,
             )
             .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)));
-            row.item("file", crate::kit::Priority::HIGH, file).menu(glyph)
+            let done = crate::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
+                .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
+            row.item("file", crate::kit::Priority::HIGH, file)
+                .item("done", crate::kit::Priority::ESSENTIAL, done)
+                .menu(glyph)
         } else {
             row
         };
@@ -1153,7 +1228,7 @@ impl SettingsForm {
             .w_full()
             .mt(px(spacing.sm))
             .px(px(spacing.inset()))
-            .child(row.item("done", crate::kit::Priority::ESSENTIAL, done))
+            .child(row)
             .into_any_element()
     }
 
@@ -2273,9 +2348,10 @@ impl Focusable for SettingsForm {
 
 impl Render for SettingsForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.narrow = narrow(window, &self.theme);
+        self.narrow = !self.aside && narrow(window, &self.theme);
         let shown = self.visible();
         let page = self.page(&shown, cx);
+        let draw = Draw::new(cx, cx.weak_entity());
         let root = div()
             .id("settings-form")
             .debug_selector(|| "settings-form".to_owned())
@@ -2298,14 +2374,25 @@ impl Render for SettingsForm {
                     crate::kit::inset_x(div(), &self.theme)
                         .flex_none()
                         .py(px(self.theme.spacing.sm))
-                        .child(self.search_field(cx)),
+                        .child(self.search_field(&draw)),
                 )
             })
             .child(div().flex_1().min_h_0().flex().child(page));
-        if self.narrow {
+        if self.narrow || self.aside {
             root.child(column)
         } else {
-            root.child(self.sidebar(window, cx)).child(column)
+            // No navigator beside it: the list is the form's own sidebar, on the chrome step
+            // as the navigator is, parted from the page by the sash.
+            let sidebar = div()
+                .flex_none()
+                .w(px(NAV_WIDTH))
+                .h_full()
+                .flex()
+                .bg(hsla(self.theme.surfaces.chrome))
+                .border_r(crate::kit::HAIR)
+                .border_color(hsla(self.theme.surfaces.sash))
+                .child(self.sections(window, &draw));
+            root.child(sidebar).child(column)
         }
     }
 }

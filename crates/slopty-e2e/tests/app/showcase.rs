@@ -1698,7 +1698,7 @@ async fn build_box(stack: &mut Stack, third: &SecondWorker) {
 async fn settings(stack: &mut Stack) {
     let drv = &mut stack.driver;
     drv.keys("cmd-,").await.unwrap();
-    wait(drv, "the settings", |d| d.a11y_node("Dialog", Some("Settings")).is_some()).await;
+    wait(drv, "the settings", |d| d.a11y_node("Group", Some("Settings")).is_some()).await;
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     // Light only: the form writes the file the theme is switched by.
     shot(&mut stack.driver, "settings-appearance-light").await;
@@ -1711,7 +1711,7 @@ async fn settings(stack: &mut Stack) {
     }
     let drv = &mut stack.driver;
     drv.keys("escape").await.unwrap();
-    wait(drv, "the settings closed", |d| d.a11y_node("Dialog", Some("Settings")).is_none()).await;
+    wait(drv, "the settings closed", |d| d.a11y_node("Group", Some("Settings")).is_none()).await;
 }
 
 /// Hover the row of `session`'s terminal that shows `text`, so its block says what it is.

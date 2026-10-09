@@ -2049,7 +2049,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   hosts popover and a block's menu move to it with their owners' files.
   Test: palette `the_layers_stack_popover_submenu_dialog_toast`.
 
-- ✅ **Settings open in a dialog as tall as the file** (2026-09-27, UI wave 2 overlays). The
+- ❌ **Settings open in a dialog as tall as the file** (2026-09-27, UI wave 2 overlays;
+  superseded 2026-10-09 by "The settings are a page in the panes' place" below). The
   settings golden showed a 640 × 440 modal, 80 % empty, around two lines of TOML. There were
   two ways out: open `settings.toml` as a file tile, as Zed opens `settings.json`, or size the
   dialog to its content. A file tile reads and writes through a worker, but the settings file
@@ -9015,3 +9016,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     for good. A project muted in the navigator raises none, which is what the mute is for.
     A phone has none: its notes and *Needs you* say it.
   - Tests: `workspace::tests::approval_cards::*`.
+
+- ✅ **The settings are a page in the panes' place, and the navigator lists their sections**
+  (2026-10-09, MonoCode audit row 9, M26; supersedes "Settings open in a dialog as tall as the
+  file").
+  - **Where.** The app hands the workspace its settings editor, and the page takes the panes'
+    place under the title bar (`workspace::settings_page`). No dim and no dialog. The foot bar
+    goes with the panes, as MonoCode's usage footer does while its settings are open.
+  - **The section list.** While the navigator is docked, its body becomes the settings'
+    sections; its top row stays. The search sits at the list's top. The sections follow under
+    three group names: App (Appearance, Terminal, Input), Machines (Streams, Network) and Help
+    (Keyboard, About, which the Help menu opens). Each section has its Tabler glyph. "Edit as
+    TOML" and Back sit at the foot. MonoCode groups App, Agents and Workspace. No setting here
+    is an agent's or a workspace's, so neither group is made up.
+  - **Without a docked navigator.** With the navigator hidden or over the panes, the page
+    carries the same list as its own sidebar. A window too narrow for it lists every section
+    in one column, with the file and Done in the head. The list is one builder over the form,
+    drawn in either place (`SettingsForm::sections`).
+  - **Leaving.** Back, Esc and ⌘↩ leave, writing first what was waiting for a pause. So does
+    turning to the work: a press on a title tab, any action on the tiling, or the bell.
+  - Tests: `workspace::tests::settings_page::*`, `settings_editor::tests::*`,
+    `settings_form::schema::tests::the_groups_list_the_sections_in_order`; the app's
+    `a_settings_change_applies_with_the_page_still_up`.

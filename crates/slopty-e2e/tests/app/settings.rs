@@ -1,6 +1,6 @@
 //! The settings form in the real app: ⌘, opens it on its sections, and a change made in it lands
-//! in `settings.toml` and applies at once, with no Save and the dialog still open, the rest of
-//! the file as it was. The terminal's page is held as a golden. The Keyboard page lists what
+//! in `settings.toml` and applies at once, with no Save and the page still up, the rest of the
+//! file as it was. The terminal's page is held as a golden. The Keyboard page lists what
 //! the running app binds, its own ⌘, among the workspace's keys. The Input page shows a map's
 //! entries, the clipboard's machines by name.
 
@@ -13,19 +13,26 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// Where the pointer rests before a golden, over nothing that answers a hover.
 const PARK: (f32, f32) = (1.0, 1.0);
 
-/// Click the centre of the node with `role` and `label` in the Settings dialog: a pane's
-/// own tab behind it may share a section's name ("Terminal").
+/// Click the centre of the node with `role` and `label` in the settings: in their page or in
+/// their section list, which the navigator holds. A pane's own tab elsewhere may share a
+/// section's name ("Terminal"), and the title bar's arrows a way's ("Back").
 async fn press(drv: &mut Driver, dump: &Dump, role: &str, label: &str) {
-    let [dx, dy, dw, dh] = dump.a11y_node("Dialog", Some("Settings")).expect("the dialog").bounds;
+    let areas: Vec<[f32; 4]> = [("Group", "Settings"), ("Group", "Settings sections")]
+        .iter()
+        .filter_map(|(r, l)| dump.a11y_node(r, Some(l)).map(|n| n.bounds))
+        .collect();
+    assert!(!areas.is_empty(), "the settings: {:#?}", dump.a11y);
     let inside = |b: [f32; 4]| {
         let [x, y, w, h] = b;
-        x >= dx - 0.5 && y >= dy - 0.5 && x + w <= dx + dw + 0.5 && y + h <= dy + dh + 0.5
+        areas.iter().any(|&[dx, dy, dw, dh]| {
+            x >= dx - 0.5 && y >= dy - 0.5 && x + w <= dx + dw + 0.5 && y + h <= dy + dh + 0.5
+        })
     };
     let [x, y, w, h] = dump
         .a11y
         .iter()
         .find(|n| n.role == role && n.label.as_deref() == Some(label) && inside(n.bounds))
-        .unwrap_or_else(|| panic!("{label} in the dialog: {:#?}", dump.a11y))
+        .unwrap_or_else(|| panic!("{label} in the settings: {:#?}", dump.a11y))
         .bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
@@ -47,7 +54,7 @@ async fn the_settings_form_edits_the_file() {
     drv.keys("cmd-,").await.unwrap();
     let dump = drv
         .wait_for("the settings form", STEP, |d| {
-            d.a11y_node("Dialog", Some("Settings")).is_some()
+            d.a11y_node("Group", Some("Settings")).is_some()
                 && d.a11y_node("RadioGroup", Some("Theme")).is_some()
         })
         .await
@@ -75,7 +82,7 @@ async fn the_settings_form_edits_the_file() {
     golden(drv, &dir, "settings-form").await;
 
     // The Keyboard page reads the app's keymap: the app's own binding is there beside the
-    // workspace's, on the keys that open this dialog.
+    // workspace's, on the keys that open these settings.
     press(drv, &dump, "Tab", "Keyboard").await;
     let keys = drv
         .wait_for("the keyboard page", STEP, |d| {
@@ -101,7 +108,7 @@ async fn the_settings_form_edits_the_file() {
         .await
         .unwrap();
     assert!(input.a11y_node("Switch", Some("studio")).is_some(), "{:#?}", input.a11y);
-    // Scrolled until the map's lines are in the page, under the dialog's title and over its foot.
+    // Scrolled until the map's lines are in the page, under its title and over the window's foot.
     let mut lines = input;
     for _ in 0..20 {
         let [_, y, _, h] = lines.a11y_node("ListItem", Some("studio")).expect("studio").bounds;
@@ -122,16 +129,16 @@ async fn the_settings_form_edits_the_file() {
         .await
         .unwrap();
 
-    // A switch writes the file as it turns, and the dialog stays open.
+    // A switch writes the file as it turns, and the page stays up.
     let file = || std::fs::read_to_string(&settings).unwrap_or_default();
     press(drv, &dump, "Switch", "Ligatures").await;
-    drv.wait_for("ligatures off in the file, the dialog open", STEP, |d| {
-        file().contains("ligatures = false") && d.a11y_node("Dialog", Some("Settings")).is_some()
+    drv.wait_for("ligatures off in the file, the page up", STEP, |d| {
+        file().contains("ligatures = false") && d.a11y_node("Group", Some("Settings")).is_some()
     })
     .await
     .unwrap();
 
-    // A choice writes it too, and the app applies it: the theme turns dark under the dialog.
+    // A choice writes it too, and the app applies it: the theme turns dark around the page.
     let dump = drv.dump().await.unwrap();
     assert!(!dump.dark, "the stack starts light");
     press(drv, &dump, "Tab", "Appearance").await;
@@ -142,21 +149,19 @@ async fn the_settings_form_edits_the_file() {
         .await
         .unwrap();
     press(drv, &dump, "RadioButton", "Dark").await;
-    drv.wait_for("the theme dark, the dialog open", STEP, |d| {
+    drv.wait_for("the theme dark, the page up", STEP, |d| {
         d.dark
             && file().contains("appearance = \"dark\"")
-            && d.a11y_node("Dialog", Some("Settings")).is_some()
+            && d.a11y_node("Group", Some("Settings")).is_some()
     })
     .await
     .unwrap();
 
     let dump = drv.dump().await.unwrap();
-    press(drv, &dump, "Button", "Done").await;
-    drv.wait_for("the settings closed", STEP, |d| {
-        d.a11y_node("Dialog", Some("Settings")).is_none()
-    })
-    .await
-    .unwrap();
+    press(drv, &dump, "Button", "Back").await;
+    drv.wait_for("the settings closed", STEP, |d| d.a11y_node("Group", Some("Settings")).is_none())
+        .await
+        .unwrap();
     let after = file();
     let kept = before
         .lines()

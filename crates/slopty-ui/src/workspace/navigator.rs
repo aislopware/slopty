@@ -1099,6 +1099,7 @@ impl WorkspaceView {
     /// *Needs you* and *To review* lead. A filter is emptied, since it would hide them; a scope
     /// stays, as the person chose it.
     pub(super) fn needs_you_shown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_settings(cx);
         match self.navigator_mode(window) {
             Mode::Docked => {
                 let nav = self.navigator().clone();
@@ -2618,7 +2619,11 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let safe = window.insets().effective();
-        let rows = div().flex_1().min_h_0().flex().flex_col().child(self.chrome.nav_rows.clone());
+        // While the settings are up, their section list is the body ([`super::settings_page`]).
+        let rows = div().flex_1().min_h_0().flex().flex_col().child(
+            self.render_settings_sections(window, cx)
+                .unwrap_or_else(|| self.chrome.nav_rows.clone().into_any_element()),
+        );
         div()
             .id("navigator")
             .debug_selector(|| "navigator".to_owned())

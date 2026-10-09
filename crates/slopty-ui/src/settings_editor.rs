@@ -2,33 +2,30 @@
 //! as it is made, with the file itself one click away, saved on ⌘↩.
 //!
 //! The phone has no editor to hand the file to, and on the Mac a small change should not
-//! need one either. The dialog opens on the form ([`crate::settings_form`]): a sidebar of
-//! sections and a page of rows, each a label, a line on what it does and its control. "Edit as
-//! TOML", at the sidebar's foot (in the dialog's foot when the form is one column), swaps the
-//! page for the file's text (the commented defaults when there is none) in a monospace field,
-//! and "Edit with controls" swaps it back. Both edit one text: a row writes its
-//! key into it a line at a time, and the form reads the field's text when it comes back, so
-//! neither can hold a value the other does not.
+//! need one either. The settings are a page, not a dialog: the workspace draws it where the
+//! panes are, and its navigator's body becomes the form's section list while it is up
+//! ([`crate::settings_form`]), as `MonoCode`'s settings fill its main area and turn its rail into
+//! their sections. With no navigator beside it the page carries the list as its own sidebar.
+//! "Edit as TOML", at the list's foot (in the page's head when the form is one column), swaps
+//! the page for the file's text (the commented defaults when there is none) in a monospace
+//! field, and "Edit with controls" swaps it back. Both edit one text: a row writes its key into
+//! it a line at a time, and the form reads the field's text when it comes back, so neither can
+//! hold a value the other does not.
 //!
 //! The form applies each change as it is made ([`SettingsEditorEvent::Apply`]): the app writes
-//! the file and reloads it, and the dialog stays open, as System Settings, Zed's settings and
-//! Linear's do. Done, Escape or a click outside closes it, writing first what was still
-//! waiting for a pause. The file's face keeps an explicit save: ⌘↩ or the Save button hands the
-//! text back ([`SettingsEditorEvent::Save`]), which the app parses and either writes, applies
-//! and closes, or puts the parse error above the foot and keeps the dialog open so the typo can
-//! be fixed. There, Escape, Cancel or a click outside discards what was typed. On the Mac an "Open
-//! in editor" link keeps the old path to the default `.toml` editor. The field is the file tile's
-//! editor with its TOML colours and line numbers, so a parse error's line is one glance away.
-//!
-//! The field is as tall as the file (between [`MIN_ROWS`] and [`MAX_ROWS`] lines), not a
-//! fixed share of the window: two lines of TOML in a window-high box was mostly empty field.
+//! the file and reloads it, and the page stays, as System Settings, Zed's settings and Linear's
+//! do. Back, Escape or ⌘↩ leaves it, writing first what was still waiting for a pause. The
+//! file's face keeps an explicit save: ⌘↩ or the Save button hands the text back
+//! ([`SettingsEditorEvent::Save`]), which the app parses and either writes, applies and closes,
+//! or puts the parse error under the field and keeps the page so the typo can be fixed. There,
+//! Escape or Cancel discards what was typed. The field is the file tile's editor with its TOML
+//! colours and line numbers, so a parse error's line is one glance away, and it fills the page.
 
 use gpui::{
     AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::component::Size;
 use gpui_kit::component::input::{Editor, EditorState, Enter, Escape, InputEvent};
 use slopty_theme::Theme;
 
@@ -36,28 +33,13 @@ use crate::colors::hsla;
 use crate::kit::ButtonKind;
 use crate::settings_form::{SettingsForm, SettingsFormEvent};
 
-/// Key context of the dialog.
+/// Key context of the page.
 pub const CTX: &str = "SettingsEditor";
-
-/// The fewest lines the field shows: room to add a table to a short file.
-pub const MIN_ROWS: u16 = 8;
-
-/// The most lines the field shows before it scrolls.
-pub const MAX_ROWS: u16 = 28;
-
-/// How many lines the field shows for `text`: its lines and one to type on, within
-/// [`MIN_ROWS`] and [`MAX_ROWS`].
-#[must_use]
-pub fn rows_for(text: &str) -> u16 {
-    u16::try_from(text.lines().count().saturating_add(1))
-        .unwrap_or(u16::MAX)
-        .clamp(MIN_ROWS, MAX_ROWS)
-}
 
 /// What the user asked of the editor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsEditorEvent {
-    /// The form changed the file: write this text and apply it, and keep the dialog open.
+    /// The form changed the file: write this text and apply it, and keep the page up.
     Apply(String),
     /// The file's face was saved: parse this text, and when it holds, write it, apply it and
     /// close.
@@ -66,7 +48,7 @@ pub enum SettingsEditorEvent {
     Dismiss,
 }
 
-/// Which face of the file the dialog shows.
+/// Which face of the file the page shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// Sections of rows with their controls.
@@ -75,12 +57,10 @@ pub enum Mode {
     Toml,
 }
 
-/// The dialog, its form and its field.
+/// The page, its form and its field.
 #[derive(Debug)]
 pub struct SettingsEditor {
     text: Entity<EditorState>,
-    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
-    scope: FocusHandle,
     form: Entity<SettingsForm>,
     mode: Mode,
     /// The file's name, shown beside the title on the file's face; the whole path is its
@@ -91,17 +71,13 @@ pub struct SettingsEditor {
     path: SharedString,
     /// Why the last save was refused.
     error: Option<String>,
-    /// How many lines the field shows: [`rows_for`] the text, kept as it is typed.
-    rows: u16,
-    /// The file's text as the dialog last knew it: given, applied or followed. The field
+    /// The file's text as the page last knew it: given, applied or followed. The field
     /// holding just this has nothing of the person's own to keep.
     file: String,
-    /// The file's text as it changed outside the dialog, taken in at the next frame, which
+    /// The file's text as it changed outside the page, taken in at the next frame, which
     /// has the window the fields are set in.
     changed_file: Option<String>,
     theme: Theme,
-    /// Dismissed and fading out: it takes no more keys nor clicks.
-    leaving: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -134,9 +110,8 @@ impl SettingsEditor {
         });
         install_highlighter(&state, &theme, cx);
         let typed = cx.subscribe(&state, |this, _state, event, cx| match event {
-            // Typing past an error is the fix in progress; the line goes on the next save. A
-            // line added or taken away grows or shrinks the dialog with the file.
-            InputEvent::Change => this.text_changed(&this.text(cx), cx),
+            // Typing past an error is the fix in progress; the line goes on the next save.
+            InputEvent::Change => this.text_changed(cx),
             InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
         });
         let form = cx.new(|cx| SettingsForm::new(text, theme.clone(), window, cx));
@@ -144,10 +119,15 @@ impl SettingsEditor {
             SettingsFormEvent::Apply(text) => this.apply(text, window, cx),
             SettingsFormEvent::Done => this.close(cx),
             SettingsFormEvent::EditFile => this.show_toml(window, cx),
+            // A section picked from the list while the file's text shows: the controls again.
+            SettingsFormEvent::Shown => {
+                if this.mode == Mode::Toml {
+                    this.show_form(window, cx);
+                }
+            }
         });
         Self {
             text: state,
-            scope: cx.focus_handle(),
             form,
             mode: Mode::Form,
             file_name: SharedString::from(
@@ -157,22 +137,22 @@ impl SettingsEditor {
             ),
             path: SharedString::from(path.to_owned()),
             error: None,
-            rows: rows_for(text),
             file: text.to_owned(),
             changed_file: None,
             theme,
-            leaving: false,
             _subscriptions: [typed, set],
         }
     }
 
-    /// Stop taking the keys and the pointer and fade out where it stands, the dim with it. How
-    /// long that takes, for the owner to keep drawing it before dropping it; nothing under
-    /// Reduce Motion.
-    pub fn leave(&mut self, cx: &mut Context<Self>) -> std::time::Duration {
-        self.leaving = true;
-        cx.notify();
-        crate::kit::exit_time(cx).unwrap_or_default()
+    /// Whether the host draws the form's section list beside the page: the workspace's
+    /// navigator while it is docked ([`SettingsForm::set_aside`]).
+    pub fn set_aside(&self, aside: bool, cx: &mut Context<Self>) {
+        self.form.update(cx, |form, cx| form.set_aside(aside, cx));
+    }
+
+    /// The form, whose section list the workspace's navigator draws.
+    pub(crate) const fn form(&self) -> &Entity<SettingsForm> {
+        &self.form
     }
 
     /// The file's text, as the field and the form both hold it.
@@ -181,13 +161,13 @@ impl SettingsEditor {
         self.text.read(cx).value().to_string()
     }
 
-    /// Which face the dialog shows.
+    /// Which face the page shows.
     #[must_use]
     pub const fn mode(&self) -> Mode {
         self.mode
     }
 
-    /// Give the keyboard to what the dialog shows: the form's search, or the end of the field.
+    /// Give the keyboard to what the page shows: the form's search, or the end of the field.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             Mode::Form => self.form.update(cx, |form, cx| form.focus(window, cx)),
@@ -270,13 +250,9 @@ impl SettingsEditor {
         }
     }
 
-    /// The text changed under the field or the form: an edit is the fix in progress, and the
-    /// field follows the file's length.
-    fn text_changed(&mut self, text: &str, cx: &mut Context<Self>) {
-        let rows = rows_for(text);
-        if self.error.is_some() || rows != self.rows {
-            self.error = None;
-            self.rows = rows;
+    /// The text changed under the field or the form: an edit is the fix in progress.
+    fn text_changed(&mut self, cx: &mut Context<Self>) {
+        if self.error.take().is_some() {
             cx.notify();
         }
     }
@@ -284,12 +260,12 @@ impl SettingsEditor {
     /// The form's `text`: the field holds it too, and the app writes and applies it.
     fn apply(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.text.update(cx, |state, cx| state.set_value(text, window, cx));
-        self.text_changed(text, cx);
+        self.text_changed(cx);
         text.clone_into(&mut self.file);
         cx.emit(SettingsEditorEvent::Apply(text.to_owned()));
     }
 
-    /// The file changed outside the dialog (another editor, the appearance written to it): the
+    /// The file changed outside the page (another editor, the appearance written to it): the
     /// form and the field follow it, so neither shows a value the file no longer holds, nor
     /// writes it back over the file. What the person is changing here is kept: the form's
     /// change on its way, or a field edited away from the file.
@@ -307,7 +283,7 @@ impl SettingsEditor {
         let followed = self.form.update(cx, |form, cx| form.follow_file(&text, window, cx));
         if followed && !edited {
             self.text.update(cx, |state, cx| state.set_value(&text, window, cx));
-            self.text_changed(&text, cx);
+            self.text_changed(cx);
             self.file = text;
         }
     }
@@ -318,7 +294,7 @@ impl SettingsEditor {
 
     /// Close: on the form, after applying what was still waiting for a pause; on the file's
     /// face, dropping what was not saved.
-    fn close(&self, cx: &mut Context<Self>) {
+    pub fn close(&self, cx: &mut Context<Self>) {
         if self.mode == Mode::Form
             && let Some(text) = self.form.update(cx, SettingsForm::flush)
         {
@@ -391,24 +367,15 @@ impl Render for SettingsEditor {
                 .child(SharedString::from(error))
         });
         let body = match self.mode {
-            // The form asks for its page's height and gives some up to a short window; the
-            // page scrolls inside.
-            Mode::Form => div()
-                .flex_initial()
-                .min_h_0()
-                .h(px(SettingsForm::height(&theme)))
-                .flex()
-                .child(self.form.clone()),
-            // The file's text at the document size and line: the field is as tall as its
-            // lines, and gives up height to a short window (a phone's keyboard), scrolling
-            // inside.
+            // The form fills the page, which scrolls inside.
+            Mode::Form => div().flex_1().min_h_0().flex().child(self.form.clone()),
+            // The file's text at the document size and line, on the content's plane, filling
+            // the page and scrolling inside.
             Mode::Toml => {
                 let line = theme.typography.mono_size * theme.typography.markdown_line_height;
-                let field = px(f32::from(self.rows) * line) + Size::Medium.input_py() * 2.0;
                 div()
-                    .flex_initial()
+                    .flex_1()
                     .min_h_0()
-                    .h(field + px(spacing.sm * 2.0))
                     // The text starts on the edge grid: the field pads itself by its size's
                     // inset, and this makes up the rest.
                     .px(px(spacing.inset() - crate::kit::FIELD_INSET))
@@ -425,9 +392,9 @@ impl Render for SettingsEditor {
                     )
             }
         };
-        // The form heads its own page (its name and Done, a macOS 26 pane's); the file's face
-        // has this head: the file's name, the way back to the controls, Cancel and Save. No
-        // rule under it and no foot: the field ends where the dialog does.
+        // The form heads its own page (its name, a macOS 26 pane's); the file's face has this
+        // head: the file's name, the way back to the controls, Cancel and Save. No rule under
+        // it and no foot: the field runs to the page's foot.
         let head = (self.mode == Mode::Toml).then(|| {
             let back = |id| {
                 button(id, "Edit with controls", ButtonKind::Link)
@@ -485,28 +452,19 @@ impl Render for SettingsEditor {
                 .mt(px(spacing.sm))
                 .child(row)
         });
-        let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::Editor)
+        div()
             .id("settings-editor")
             .debug_selector(|| "settings-editor".to_owned())
-            .role(gpui::accesskit::Role::Dialog)
+            .role(gpui::accesskit::Role::Group)
             .aria_label("Settings")
-            .children(head)
-            .child(body)
-            .children(error);
-        let layer = crate::palette::Layer::Dialog.priority();
-        if self.leaving {
-            let dialog = dialog.debug_selector(|| "settings-leaving".to_owned());
-            let root = crate::kit::backdrop(&theme, window).id("settings-backdrop").child(dialog);
-            let root = crate::kit::presence(root, "settings", false);
-            return gpui::deferred(root).with_priority(layer);
-        }
-        // The keyboard and the palette summon it, so it fades in where it stands, as the
-        // palette does, with no travel, and leaves the same way ([`crate::kit::Presence`]).
-        let home = self.focus_handle(cx);
-        crate::a11y::hold(&self.scope, &home, cx);
-        let root = crate::kit::backdrop(&theme, window).id("settings-backdrop");
-        let root = crate::a11y::trap(root, &self.scope)
             .key_context(CTX)
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(hsla(theme.content()))
+            .font_family(theme.typography.ui_family.clone())
             .on_key_down(cx.listener(Self::key_down))
             // While an input method composes in a field, Esc and Enter are its own.
             .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
@@ -516,8 +474,8 @@ impl Render for SettingsEditor {
                 }
             }))
             // ⌘↩ (a field's `secondary-enter`: ⌘ on macOS and iOS alike) saves the file's face and
-            // closes the form; captured so the field does not also break the line. A control that
-            // is not a field asks through the form.
+            // leaves the form; captured so the field does not also break the line. A control
+            // that is not a field asks through the form.
             .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
                 if enter.secondary && !this.composing(cx) {
                     match this.mode {
@@ -527,17 +485,9 @@ impl Render for SettingsEditor {
                     cx.stop_propagation();
                 }
             }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.close(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(dialog);
-        let root =
-            crate::kit::presence(root, "settings", true).arrives_whole(!crate::kit::motion(cx));
-        gpui::deferred(root).with_priority(layer)
+            .children(head)
+            .child(body)
+            .children(error)
     }
 }
 
@@ -620,21 +570,25 @@ mod tests {
         tree.into_iter().find(|n| n.is(role, Some(label))).and_then(|n| n.value)
     }
 
-    /// The dialog opens on the form: sections in a sidebar, the first section's rows, the
-    /// search with the keyboard, and the file one link away. The form has nothing to save, so
-    /// its foot is Done.
+    /// The page opens on the form: the sections listed under their groups, the first
+    /// section's rows, the search with the keyboard, and the file and the way back at the
+    /// list's foot. The form has nothing to save.
     #[gpui::test]
-    fn the_dialog_opens_on_the_form(cx: &mut TestAppContext) {
+    fn the_page_opens_on_the_form(cx: &mut TestAppContext) {
         let (view, _events, cx) = editor(cx, "", Mode::Form);
         assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Form);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Dialog", Some("Settings"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Group", Some("Settings"))), "{tree:#?}");
         for section in Section::ALL.map(Section::label) {
             assert!(tree.iter().any(|n| n.is("Tab", Some(section))), "{section}: {tree:#?}");
         }
+        for group in schema::Group::ALL.map(schema::Group::label) {
+            assert!(tree.iter().any(|n| n.is("Heading", Some(group))), "{group}: {tree:#?}");
+        }
         assert!(tree.iter().any(|n| n.is("RadioGroup", Some("Theme"))), "{tree:#?}");
         assert!(!tree.iter().any(|n| n.is("ComboBox", Some("Family"))), "another section's row");
-        for label in ["Edit as TOML", "Done"] {
+        assert!(!tree.iter().any(|n| n.is("Button", Some("Done"))), "the list's Back is the way");
+        for label in ["Edit as TOML", "Back"] {
             assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
         }
         for label in ["Cancel", "Save"] {
@@ -669,25 +623,28 @@ mod tests {
         assert!(fills.contains(&gpui::Background::from(plate)), "{plate:?} in {fills:?}");
     }
 
-    /// Where the window has room the dialog is about 800 pt wide, its sidebar beside a page of
-    /// at least 480 pt, and the file is the sidebar's advanced path at its foot, apart from
-    /// Done at the page's head; it opens the file's face. Stacked in one column, with no
-    /// sidebar, the head offers the file beside Done instead.
+    /// Where the window has room the list is a sidebar beside a page of at least 480 pt, and
+    /// the file is its advanced path at its foot, over the way back, apart from the sections;
+    /// it opens the file's face, and Back leaves. Stacked in one column, with no list, the head
+    /// offers the file beside Done instead.
     #[gpui::test]
     fn the_file_is_the_sidebars_advanced_path(cx: &mut TestAppContext) {
-        let (view, _events, cx) = editor(cx, "", Mode::Form);
+        let (view, events, cx) = editor(cx, "", Mode::Form);
         cx.simulate_resize(gpui::size(px(1280.0), px(800.0)));
         cx.run_until_parked();
-        let dialog = cx.debug_bounds("settings-editor").expect("the dialog");
-        let (w, h) = crate::kit::Overlay::Editor.bounds();
-        assert!((f32::from(dialog.size.width) - w).abs() < 0.5, "{dialog:?}");
-        assert!(f32::from(dialog.size.height) <= h, "{dialog:?}");
         let page = cx.debug_bounds("settings-page").expect("the page");
         assert!(f32::from(page.size.width) >= 480.0, "{page:?}");
         let file = cx.debug_bounds("settings-edit-toml").expect("the file's way");
-        let done = cx.debug_bounds("settings-done").expect("Done");
+        let back = cx.debug_bounds("settings-back").expect("the way back");
+        let last = cx.debug_bounds(leak(format!("settings-section-{}", Section::About.index())));
+        let last = last.expect("the last section");
         assert!(file.right() <= page.left(), "in the sidebar: {file:?} {page:?}");
-        assert!(file.top() > done.bottom(), "at the sidebar's foot, apart from Done at the head");
+        assert!(file.top() > last.bottom() && back.top() >= file.bottom(), "at its foot");
+        click(cx, "settings-edit-toml");
+        assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Toml, "the file's face");
+        click(cx, "settings-edit-form");
+        click(cx, "settings-back");
+        assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss), "Back leaves");
         click(cx, "settings-edit-toml");
         assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Toml, "the file's face");
         click(cx, "settings-edit-form");
@@ -882,17 +839,13 @@ mod tests {
     }
 
     /// The page's head stands on the search field's line, so the columns start together: the
-    /// page's name and Done on it, as a macOS 26 pane is titled, with no title bar over both.
+    /// page's name on it, as a macOS 26 pane is titled, with no title bar over both.
     #[gpui::test]
     fn the_columns_start_together(cx: &mut TestAppContext) {
         let (_view, _events, cx) = editor(cx, "", Mode::Form);
         let search = cx.debug_bounds("settings-search").expect("the search");
         let title = cx.debug_bounds("settings-title").expect("the page's name");
-        let done = cx.debug_bounds("settings-done").expect("Done");
-        let dialog = cx.debug_bounds("settings-editor").expect("the dialog");
         assert!((search.center().y - title.center().y).abs() < px(0.5), "{search:?} {title:?}");
-        assert!((done.center().y - title.center().y).abs() < px(0.5), "Done on its line");
-        assert!(done.right() > title.right() && done.right() <= dialog.right(), "at its end");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let general = Section::ALL[0].label();
         assert!(tree.iter().any(|n| n.is("Heading", Some(general))), "{tree:#?}");
@@ -1193,13 +1146,13 @@ mod tests {
         assert!((knob_after_turning(cx) - off).abs() < 0.5, "at the off end at once");
     }
 
-    /// The dialog reads as one to a screen reader, the field holds the file, ⌘↩ hands the
+    /// The page reads as one to a screen reader, the field holds the file, ⌘↩ hands the
     /// edited text back, and a refused save shows its reason until the next keystroke.
     #[gpui::test]
     fn the_editor_saves_on_command_enter_and_shows_a_refusal(cx: &mut TestAppContext) {
         let (view, events, cx) = editor(cx, "[font]\nmono_size = 13\n", Mode::Toml);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Dialog", Some("Settings"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Group", Some("Settings"))), "{tree:#?}");
         for label in ["Edit with controls", "Cancel", "Save"] {
             assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
         }
@@ -1268,44 +1221,24 @@ mod tests {
         assert_eq!(*events.borrow(), vec![SettingsEditorEvent::Dismiss; 4]);
     }
 
-    /// The dialog opens at the one modal anchor, where the palette does, and the file's face
-    /// is as tall as the file: a short one leaves room for a few lines to type, each line
-    /// typed grows it by one, and past [`MAX_ROWS`] it stops and the field scrolls.
+    /// The page fills what it is given, on the content's plane, with no backdrop: on the form
+    /// and on the file's face, whose field runs to the page's foot however short the file.
     #[gpui::test]
-    fn the_dialog_is_as_tall_as_the_file(cx: &mut TestAppContext) {
-        // Measured where it lands, not on the frame it starts rising from.
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", Mode::Toml);
-        let height = |cx: &mut VisualTestContext| {
-            f32::from(cx.debug_bounds("settings-editor").expect("the dialog").size.height)
-        };
-        let rows = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.rows);
-        let typography = Theme::default().typography;
-        let line = typography.mono_size * typography.markdown_line_height;
-        let short = height(cx);
-        assert_eq!(rows(cx), MIN_ROWS, "two lines get the fewest");
-        let viewport = cx.update(|window, _cx| f32::from(window.viewport_size().height));
-        assert!(short < viewport * 0.5, "not a share of the window: {short} of {viewport}");
-        let top = f32::from(cx.debug_bounds("settings-editor").expect("the dialog").top());
-        let anchor = viewport * crate::kit::MODAL_ANCHOR;
-        assert!((top - anchor).abs() < 0.5, "where the palette opens: {top} for {anchor}");
+    fn the_page_fills_what_it_is_given(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", Mode::Form);
+        let viewport = cx.update(|window, _cx| window.viewport_size());
+        let page = cx.debug_bounds("settings-editor").expect("the page");
+        assert_eq!(page.size, viewport, "the whole window it is given");
+        assert!(cx.debug_bounds("settings-backdrop").is_none(), "no dim under it");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(!tree.iter().any(|n| n.role == "Dialog"), "not a dialog: {tree:#?}");
 
-        for _ in 0..MIN_ROWS {
-            cx.simulate_keystrokes("enter");
-        }
+        view.update_in(cx, SettingsEditor::show_toml);
         cx.run_until_parked();
-        let grown = rows(cx);
-        assert!(grown > MIN_ROWS && grown < MAX_ROWS, "{grown}");
-        let taller = height(cx);
-        let expected = f32::from(grown.saturating_sub(MIN_ROWS)) * line;
-        assert!((taller - short - expected).abs() < 0.5, "{short} → {taller}, {expected}");
-
-        for _ in 0..MAX_ROWS {
-            cx.simulate_keystrokes("enter");
-        }
-        cx.run_until_parked();
-        assert_eq!(rows(cx), MAX_ROWS, "a long file stops at the most");
-        assert!(height(cx) <= viewport, "and fits the window");
+        let page = cx.debug_bounds("settings-editor").expect("the page");
+        assert_eq!(page.size, viewport, "the file's face too");
+        let field = cx.debug_bounds("settings-file-head").expect("the file's head");
+        assert!(field.bottom() < page.bottom() - px(200.0), "the field has the rest: {field:?}");
     }
 
     /// The file written outside while the dialog is open (the appearance switched to dark):

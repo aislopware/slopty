@@ -168,8 +168,7 @@ pub enum ThreadViewEvent {
         thread: ThreadId,
     },
     /// Keep this run of the thread's first message and close the others for good, their agents
-    /// and their worktrees with them
-    /// ([`Intent::Discard`](slopty_proto::thread::wire::Intent::Discard)).
+    /// and their worktrees with them ([`Intent::Discard`]).
     KeepRun {
         /// The run kept.
         thread: ThreadId,

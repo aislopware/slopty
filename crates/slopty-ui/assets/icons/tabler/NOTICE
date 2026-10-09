@@ -9,6 +9,7 @@ What each glyph stands for, by the name the chrome knew it under:
 ArrowClockwise                       refresh.svg
 ArrowDown                            arrow-down.svg
 ArrowDownToLine                      arrow-bar-to-down.svg
+ArrowLeft                            arrow-left.svg
 ArrowRight                           arrow-right.svg
 ArrowTriangleBranch                  git-branch.svg
 ArrowTriangleMerge                   git-merge.svg
@@ -60,6 +61,7 @@ Gearshape                            settings.svg
 Globe                                world.svg
 InfoCircle                           info-circle.svg
 Iphone                               device-mobile.svg
+Keyboard                             keyboard.svg
 Laptopcomputer                       device-laptop.svg
 Link                                 link.svg
 Lock                                 lock.svg
@@ -68,6 +70,7 @@ Macwindow                            app-window.svg
 Magnifyingglass                      search.svg
 Minus                                minus.svg
 Paperclip                            paperclip.svg
+Palette                              palette.svg
 PauseCircle                          player-pause.svg
 Pencil                               pencil.svg
 Photo                                photo.svg

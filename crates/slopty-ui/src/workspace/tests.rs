@@ -1664,6 +1664,7 @@ mod review_tile;
 mod rooms;
 mod save_copy;
 mod search;
+mod settings_page;
 mod shell_drag;
 mod soak;
 mod tab_commands;

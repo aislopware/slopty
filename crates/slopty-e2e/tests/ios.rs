@@ -217,7 +217,7 @@ mod tests {
         drv.keys("enter").await.unwrap();
         let dump = drv
             .wait_for("the settings editor", STEP, |d| {
-                d.a11y_node("Dialog", Some("Settings")).is_some()
+                d.a11y_node("Group", Some("Settings")).is_some()
             })
             .await
             .unwrap();
@@ -239,7 +239,7 @@ mod tests {
         drv.ui_insert_text(&settings).await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
-            d.a11y_node("Dialog", Some("Settings")).is_none()
+            d.a11y_node("Group", Some("Settings")).is_none()
         })
         .await
         .unwrap();

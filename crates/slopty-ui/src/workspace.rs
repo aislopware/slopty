@@ -71,6 +71,7 @@ mod restore;
 mod reviews;
 mod rollup;
 mod secure;
+mod settings_page;
 mod starting;
 mod tab_look;
 mod tabs;
@@ -890,6 +891,8 @@ pub struct WorkspaceView {
     machine_remove: Option<machine_remove::Asking>,
     /// The permission prompts this client may answer from a row or a note.
     approvals: approvals::Approvals,
+    /// The settings, as a page in the panes' place while they are up ([`settings_page`]).
+    settings: Option<Entity<crate::settings_editor::SettingsEditor>>,
     /// Agents' turns under way, and the ones that ended unread.
     turns: turns::Turns,
     /// The app's rows in the "…" menu.
@@ -1159,6 +1162,7 @@ impl WorkspaceView {
             machines: machines::Machines::default(),
             machine_remove: None,
             approvals: approvals::Approvals::default(),
+            settings: None,
             turns: turns::Turns::default(),
             more_entries: Vec::new(),
             server_entries: Vec::new(),
@@ -2017,6 +2021,7 @@ impl gpui::Render for WorkspaceView {
         }
         // First: a docked navigator narrows the title bar and the area.
         self.place_navigator(window);
+        self.sync_settings_aside(cx);
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
             self.settle_navigator_filter(window, cx);
@@ -2266,8 +2271,11 @@ impl WorkspaceView {
             }
             None => (None, None, None, None),
         };
+        // The settings take the panes' place, and the foot bar goes with them.
+        let page = self.render_settings_page();
+        let area = page.unwrap_or(area);
         // Cached, as the title bar is not: nothing in it is a view notified alone.
-        let foot = self.foot_shown().then(|| {
+        let foot = (self.foot_shown() && self.settings.is_none()).then(|| {
             let height = px(self.foot_height()) + safe.bottom;
             self.chrome
                 .foot

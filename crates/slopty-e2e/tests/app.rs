@@ -313,11 +313,11 @@ mod tests {
         assert_eq!(dump.status, "connected", "{dump:#?}");
 
         // ⌘, opens the settings on their form, and "Edit as TOML" on the file's text; a line
-        // typed into it and ⌘↩ write the file, and the dialog goes.
+        // typed into it and ⌘↩ write the file, and the page goes.
         drv.keys("cmd-,").await.unwrap();
         let dump = drv
             .wait_for("the settings editor", STEP, |d| {
-                d.a11y_node("Dialog", Some("Settings")).is_some()
+                d.a11y_node("Group", Some("Settings")).is_some()
             })
             .await
             .unwrap();
@@ -335,7 +335,7 @@ mod tests {
         drv.type_text("alert = \"never\"").await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
-            d.a11y_node("Dialog", Some("Settings")).is_none()
+            d.a11y_node("Group", Some("Settings")).is_none()
         })
         .await
         .unwrap();
