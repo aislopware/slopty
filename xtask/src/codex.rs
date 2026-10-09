@@ -27,7 +27,7 @@ use crate::tools::repo_root;
 
 /// The Codex version Slopty speaks: its types are generated from it, and its fixtures recorded
 /// with it.
-pub const VERSION: &str = "0.160.0";
+pub const VERSION: &str = "0.162.0";
 
 /// Names a `codex` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_CODEX";

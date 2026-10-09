@@ -599,12 +599,13 @@ impl Shared {
                     turn: self.turn(&error.turn_id),
                     at_ms: now,
                     body: ItemBody::Notice(Notice {
-                        kind: if retry.is_none() && limited(error.error.codex_error_info) {
-                            Notice::LIMIT
-                        } else {
-                            Notice::API_ERROR
-                        }
-                        .to_owned(),
+                        kind:
+                            if retry.is_none() && limited(error.error.codex_error_info.as_ref()) {
+                                Notice::LIMIT
+                            } else {
+                                Notice::API_ERROR
+                            }
+                            .to_owned(),
                         text: Clipped::whole(&error.error.message),
                         retry,
                     }),
@@ -1233,7 +1234,7 @@ impl Shared {
                 error: error.as_ref().map_or_else(String::new, |e| e.message.clone()),
                 until_ms: error
                     .as_ref()
-                    .filter(|e| limited(e.codex_error_info))
+                    .filter(|e| limited(e.codex_error_info.as_ref()))
                     .and_then(|_| crate::driven::reset_of_full(&self.meters.limits)),
             },
             _ => TurnState::Complete,
@@ -1721,10 +1722,13 @@ fn title_of(thread: &p::Thread) -> String {
 }
 
 /// Whether Codex says a turn stopped on the account's usage or rate limit.
-const fn limited(info: Option<p::CodexErrorInfo>) -> bool {
+const fn limited(info: Option<&p::CodexErrorInfo>) -> bool {
     matches!(
         info,
-        Some(p::CodexErrorInfo::UsageLimitExceeded | p::CodexErrorInfo::RateLimitExceeded)
+        Some(p::CodexErrorInfo::String(
+            p::CodexErrorInfoString::UsageLimitExceeded
+                | p::CodexErrorInfoString::RateLimitExceeded
+        ))
     )
 }
 
