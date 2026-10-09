@@ -65,6 +65,7 @@ const LIST_WIDTH: f32 = 240.0;
 mod authors;
 mod file_menu;
 mod gaps;
+mod whole;
 
 pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
 
@@ -745,6 +746,9 @@ impl ReviewView {
             return;
         }
         self.show(review);
+        if self.take_whole(cx) {
+            self.rebuild();
+        }
         self.author_review(cx);
         cx.notify();
     }
@@ -752,6 +756,12 @@ impl ReviewView {
     /// The repository said something: a folder's changes came, or a commit or a merge went,
     /// after which they are read again.
     fn git_moved(&mut self, cx: &mut Context<Self>) {
+        // A file left out by the review's budget may have come whole, or its reading moved on.
+        if self.take_whole(cx) {
+            self.rebuild();
+        } else {
+            self.redraw_left_out();
+        }
         if let Reviewed::Folder(path) = &self.reviewed {
             let said = self.hub.read(cx).git().repo(path).and_then(|r| r.said.clone());
             let went = said.as_ref().is_some_and(|(_, said)| said.went());
@@ -1955,7 +1965,7 @@ impl ReviewView {
         let Some(row) = self.rows.get(ix).copied() else { return div().into_any_element() };
         let inner = match row {
             Row::File(at) => return self.file_head(at, cx),
-            Row::Bare(at) => self.bare(at),
+            Row::Bare(at) => self.bare(at, cx),
             Row::Hunk(at, hunk) => self.hunk_head(at, hunk, cx),
             Row::Line(at, hunk, line) => self.line_row(at, hunk, line, cx),
             Row::Gap(at, gap) => self.gap_row(at, gap, cx),
@@ -2121,8 +2131,14 @@ impl ReviewView {
             .into_any_element()
     }
 
-    fn bare(&self, at: usize) -> AnyElement {
+    fn bare(&self, at: usize, cx: &Context<Self>) -> AnyElement {
         let s = self.theme.surfaces;
+        if let Some(file) = self.model.file(at)
+            && file.patch.clipped_lines > 0
+            && !file.binary
+        {
+            return self.whole_row(at, file.patch.clipped_lines, cx);
+        }
         let words = match self.model.file(at) {
             Some(f) if f.binary => "Binary file",
             _ => "No lines to show",

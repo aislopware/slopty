@@ -176,4 +176,43 @@ mod units {
         assert!(!card(Request::APPROVAL, vec![always, stop]).answerable(), "no plain allow");
         assert!(!card(Request::QUESTION, ask.options).answerable(), "a question");
     }
+
+    /// A review is read the weightiest file first, tests, fixtures, locks and generated code
+    /// after the rest, the same weight by path; a word that only holds "test" is no test.
+    #[test]
+    fn a_review_is_read_by_weight_with_the_quiet_files_below() {
+        use slopty_proto::thread::Patch;
+        use slopty_proto::thread::wire::{FileDiff, quiet, reading_order};
+
+        let file = |path: &str, added, removed| FileDiff {
+            path: path.to_owned(),
+            from: None,
+            to: None,
+            binary: false,
+            patch: Patch { hunks: Vec::new(), added, removed, clipped_lines: 0, full: None },
+        };
+        let files = [
+            file("src/small.rs", 1, 0),
+            file("Cargo.lock", 400, 300),
+            file("crates/x/tests/e2e.rs", 90, 0),
+            file("src/big.rs", 40, 12),
+            file("src/__snapshots__/a.snap", 5, 5),
+            file("src/also_small.rs", 1, 0),
+        ];
+        let paths: Vec<&str> =
+            reading_order(&files).into_iter().map(|at| files[at].path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/big.rs",
+                "src/also_small.rs",
+                "src/small.rs",
+                "Cargo.lock",
+                "crates/x/tests/e2e.rs",
+                "src/__snapshots__/a.snap"
+            ]
+        );
+        assert!(!quiet("src/contest.rs"), "a word holding \"test\" is not a test");
+        assert!(quiet("web/app.test.ts") && quiet("pkg/x_test.go") && quiet("test_x.py"));
+    }
 }

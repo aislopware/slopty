@@ -649,6 +649,63 @@ pub struct FileDiff {
     pub patch: Patch,
 }
 
+impl FileDiff {
+    /// Lines added and removed: how much there is to read in it, hunks shown or not.
+    #[must_use]
+    pub const fn weight(&self) -> u32 {
+        self.patch.added.saturating_add(self.patch.removed)
+    }
+}
+
+/// Lock files, by name.
+const LOCKS: [&str; 10] = [
+    "cargo.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lock",
+    "bun.lockb",
+    "go.sum",
+    "gemfile.lock",
+    "poetry.lock",
+    "uv.lock",
+];
+
+/// Whether `path` is the kind of file a reviewer reads last: tests, fixtures, snapshots, locks
+/// and generated code. They are listed under the rest, quieter.
+#[must_use]
+pub fn quiet(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let in_dir =
+        |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
+    LOCKS.contains(&name)
+        || ["tests", "test", "__tests__", "fixtures", "testdata", "snapshots", "generated", "dist"]
+            .iter()
+            .any(|dir| in_dir(dir))
+        || [".snap", ".min.js", ".pb.go", ".g.dart", "_pb2.py"]
+            .iter()
+            .any(|end| name.ends_with(end))
+        || ["_test.", ".test.", ".spec.", "_spec."].iter().any(|mid| name.contains(mid))
+        || name.starts_with("test_")
+}
+
+/// The order a review's files are read in, as places in `files`.
+///
+/// The weightiest come first ([`FileDiff::weight`]), the [`quiet`] ones after the rest, the
+/// same weight by path. The worker spends a review's lines in this order, so the files read
+/// first are the ones shown.
+#[must_use]
+pub fn reading_order(files: &[FileDiff]) -> Vec<usize> {
+    let mut order: Vec<(bool, u32, usize)> =
+        files.iter().enumerate().map(|(at, f)| (quiet(&f.path), f.weight(), at)).collect();
+    order.sort_by(|a, b| {
+        let path = |at: usize| files.get(at).map(|f| f.path.as_str());
+        a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then_with(|| path(a.2).cmp(&path(b.2)))
+    });
+    order.into_iter().map(|(_, _, at)| at).collect()
+}
+
 /// Older turns of a thread.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Page {

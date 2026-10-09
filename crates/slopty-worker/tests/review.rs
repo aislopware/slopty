@@ -423,6 +423,65 @@ mod review {
         assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
     }
 
+    /// A review past its line budget spends it in the order the files are read, the
+    /// weightiest first and the quiet ones last, so a lock file is the one left without hunks
+    /// rather than the source after it; a file past the budget says how many lines it has, and
+    /// comes whole when asked by its blobs. A name that is no object id is refused.
+    #[tokio::test]
+    async fn a_big_review_spends_its_lines_in_reading_order_and_a_file_comes_whole() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+        use slopty_proto::thread::wire::Against;
+        use slopty_worker::repo::commit::{Programs, apply};
+        use slopty_worker::repo::snapshot::REVIEW_LINES;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let lines = |n: u32, word: &str| {
+            (0..n).fold(String::new(), |mut all, i| {
+                all.push_str(word);
+                all.push(' ');
+                all.push_str(&i.to_string());
+                all.push('\n');
+                all
+            })
+        };
+        // In path order the lock went first and took the room the source after it needed.
+        let budget = REVIEW_LINES;
+        let (big, mid, lock) = (budget + 5_000, budget * 3 / 5, budget * 9 / 20);
+        std::fs::write(repo.join("big.rs"), lines(big, "big")).unwrap();
+        std::fs::write(repo.join("mid.rs"), lines(mid, "mid")).unwrap();
+        std::fs::write(repo.join("small.rs"), lines(5, "small")).unwrap();
+        std::fs::write(repo.join("Cargo.lock"), lines(lock, "lock")).unwrap();
+        let programs = Programs { git: Some(git()), gh: None, glab: None };
+        let folder = repo.to_string_lossy().into_owned();
+        let op = GitOp::Changes { against: Against::Head };
+        let review = match apply(&programs, &folder, op, &[]).await {
+            GitOutcome::Done(GitDone::Changes(review)) => *review,
+            other => panic!("{other:?}"),
+        };
+        let file = |path: &str| review.files.iter().find(|f| f.path == path).expect(path);
+        let shown =
+            |path: &str| file(path).patch.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+        assert_eq!((shown("big.rs"), file("big.rs").patch.clipped_lines), (0, big), "past it all");
+        assert_eq!(file("big.rs").patch.added, big, "its counts stay");
+        assert_eq!(shown("mid.rs"), mid as usize, "the heaviest that fits is shown");
+        assert_eq!(shown("small.rs"), 5, "and a light one after it");
+        assert_eq!(file("Cargo.lock").patch.clipped_lines, lock, "the lock, read last, waits");
+
+        let whole = GitOp::FileDiff { from: None, to: file("big.rs").to.clone() };
+        let (asked, patch) = match apply(&programs, &folder, whole, &[]).await {
+            GitOutcome::Done(GitDone::FileDiff { to, patch, .. }) => (to, *patch),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(asked, file("big.rs").to, "answered for the blobs asked");
+        let lines_whole = patch.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+        assert_eq!((lines_whole, patch.clipped_lines), (big as usize, 0), "the file whole");
+
+        let bad = GitOp::FileDiff { from: Some("--output=/tmp/x".to_owned()), to: None };
+        let refused = apply(&programs, &folder, bad, &[]).await;
+        assert!(matches!(refused, GitOutcome::Failed { .. }), "{refused:?}");
+    }
+
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one
     /// with nothing changed, and one after a file changed. A measurement for
     /// `docs/MEASUREMENTS.md`, not a pass or fail.

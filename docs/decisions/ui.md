@@ -9185,3 +9185,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `conversation::thread::tests::face::a_subagent_s_thread_opens_at_its_newest_row_without_the_way_down`
     (a short and a long subagent's thread: the first frame of the opening and of its rows
     holds the marks the layout keeps; the way back; a followed thread followed again).
+
+- ✅ **A big review shows every file it leaves out, and leaves out the ones read last**
+  (2026-10-10, readiness audit item 6).
+  - **The defect.** A review carries at most 20 000 diff lines (`REVIEW_LINES`). The worker
+    spent them in path order while the list sorts the heaviest file first, so on a big branch
+    the files at the top of the list were the ones that came with no hunks. Their rows said
+    "No lines to show", though `Patch::clipped_lines` said how many there were.
+  - **The budget goes in reading order.** `slopty_proto::thread::wire::reading_order` is the
+    list's order: the heaviest first, tests, fixtures, locks and generated code after the rest,
+    then by path. The worker spends the budget in it (`repo::snapshot::spend`). A file past
+    what is left keeps its counts, and a lighter one after it may still fit, so a big lock is
+    left out before the source it would have crowded. `quiet` moved from the review's model
+    into the wire crate so the worker and the list share one rule.
+  - **Said, then read whole on a press.** A file left out reads "25000 lines of changes, past
+    what one review shows at once", with "Show this file's changes". The press asks the
+    repository for that file alone by the blobs the review named (`GitOp::FileDiff`, answered
+    with `GitDone::FileDiff`). It is cut with the worker's own `diff`, so its hunks number as
+    the review's do, and its folds, comments and picks work as on any other file. A folder's
+    review has no thread, and a thread's review is always in a git repository, so one git op
+    serves both through the reviewed folder. "Reading this file's changes…" shows while it
+    comes, and a failure says why in git's words and offers the press again. What came is
+    kept in the hub's git book by its pair of blobs, so a review read again keeps it.
+  - **Not taken.** Fetching both sides through the thread's `Expand` and diffing on the client
+    would not reach a folder's review, and a second diff algorithm could number hunks
+    differently from the worker's.
+  - Tests: `units::a_review_is_read_by_weight_with_the_quiet_files_below` (slopty-proto, the
+    order), `review::a_big_review_spends_its_lines_in_reading_order_and_a_file_comes_whole`
+    (slopty-worker, on a real repository: the source shown and the lock left out where path
+    order did the reverse, a file past the budget whole by its blobs, a name that is no
+    object id refused), and
+    `review::tests::a_file_past_the_review_s_budget_says_so_and_comes_whole_on_a_press`
+    (slopty-ui: the row, the ask by blobs in the thread's repository, reading, the hunks in
+    its place, a failure said with the press again).

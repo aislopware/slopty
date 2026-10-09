@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, DiffTag};
 use slopty_proto::thread::detail::{Hunk, heading};
-use slopty_proto::thread::wire::{Against, FileDiff, Pick, Review, ReviewScope};
+use slopty_proto::thread::wire::{Against, FileDiff, Pick, Review, ReviewScope, reading_order};
 use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
 use tokio::io::AsyncWriteExt as _;
 
@@ -390,7 +390,8 @@ impl Repo {
     }
 
     /// Every file that differs from `from` to `to`, by path, cut into hunks while the review
-    /// has room for them ([`REVIEW_LINES`]).
+    /// has room for them ([`REVIEW_LINES`]), spent in the order the files are read
+    /// ([`reading_order`]).
     ///
     /// # Errors
     ///
@@ -400,24 +401,8 @@ impl Repo {
             .run(&["diff-tree", "-r", "-z", "--no-renames", &from.0, &to.0], None, None)
             .await?;
         let mut files = Vec::new();
-        let mut room = REVIEW_LINES;
         for entry in parse_raw(&raw) {
-            let old = self.blob(entry.from.as_deref()).await?;
-            let new = self.blob(entry.to.as_deref()).await?;
-            let mut patch = empty_patch();
-            let binary = !is_text(&old) || !is_text(&new);
-            if !binary {
-                let (old, new) = (lossy(&old), lossy(&new));
-                patch = diff(&old, &new);
-                let lines = patch.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
-                let lines = u32::try_from(lines).unwrap_or(u32::MAX);
-                if lines > room {
-                    patch.clipped_lines = lines;
-                    patch.hunks.clear();
-                } else {
-                    room = room.saturating_sub(lines);
-                }
-            }
+            let (binary, patch) = self.patch(entry.from.as_deref(), entry.to.as_deref()).await?;
             files.push(FileDiff {
                 path: entry.path,
                 from: entry.from,
@@ -426,7 +411,19 @@ impl Repo {
                 patch,
             });
         }
+        spend(&mut files, REVIEW_LINES);
         Ok(files)
+    }
+
+    /// One file's hunks whole, from blob `from` to blob `to` (none for a side the file lacks),
+    /// and whether a side is not text: binary, or past [`TEXT_BYTES`], which has no hunks.
+    async fn patch(&self, from: Option<&str>, to: Option<&str>) -> Result<(bool, Patch), Failed> {
+        let old = self.blob(from).await?;
+        let new = self.blob(to).await?;
+        if !is_text(&old) || !is_text(&new) {
+            return Ok((true, empty_patch()));
+        }
+        Ok((false, diff(&lossy(&old), &lossy(&new))))
     }
 
     /// The bytes of the blob a review named on one side of a file ([`FileDiff::from`],
@@ -436,10 +433,7 @@ impl Repo {
     ///
     /// When `id` is not an object id, or git has no such blob.
     pub async fn object(&self, id: &str) -> Result<Vec<u8>, Failed> {
-        let hex = id.bytes().all(|b| b.is_ascii_hexdigit());
-        if !hex || !matches!(id.len(), 40 | 64) {
-            return Err(Failed(format!("{id:?} is no object id")));
-        }
+        object_id(id)?;
         self.blob(Some(id)).await
     }
 
@@ -664,11 +658,61 @@ pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<R
     Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
 }
 
+/// One file of a review whole, past the review's own budget.
+///
+/// It is read by the blobs the review named on its two sides (none for a side the file lacks)
+/// in the repository at `root`: its hunks, or none when a side is not text.
+///
+/// # Errors
+///
+/// When a side is not an object id, or git has no such blob.
+pub async fn file_diff(
+    git: &Path,
+    root: &Path,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<Patch, Failed> {
+    for id in from.iter().chain(to.iter()) {
+        object_id(id)?;
+    }
+    // Blobs are read from the object store alone: no index is ever named.
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
+    repo.patch(from, to).await.map(|(_binary, patch)| patch)
+}
+
 const fn edge_name(edge: Edge) -> &'static str {
     match edge {
         Edge::Before => "before",
         Edge::After => "after",
     }
+}
+
+/// Keep the hunks of the files read first while `budget` lines last, in the order the review
+/// lists them ([`reading_order`]): the weightiest first, the quiet ones (tests, locks,
+/// generated code) after the rest. A file past what is left keeps its counts and says how many
+/// lines it has ([`Patch::clipped_lines`]), and a lighter one after it may still fit.
+fn spend(files: &mut [FileDiff], budget: u32) {
+    let mut room = budget;
+    for at in reading_order(files) {
+        let Some(file) = files.get_mut(at) else { continue };
+        let lines = file.patch.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
+        if lines > room {
+            file.patch.clipped_lines = lines;
+            file.patch.hunks.clear();
+        } else {
+            room = room.saturating_sub(lines);
+        }
+    }
+}
+
+/// `id`, when it is a whole object id: a client names blobs, and git takes nothing else.
+fn object_id(id: &str) -> Result<(), Failed> {
+    let hex = id.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hex || !matches!(id.len(), 40 | 64) {
+        return Err(Failed(format!("{id:?} is no object id")));
+    }
+    Ok(())
 }
 
 const fn empty_patch() -> Patch {

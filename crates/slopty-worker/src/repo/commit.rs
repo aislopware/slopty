@@ -105,6 +105,12 @@ pub async fn apply(
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::FileDiff { from, to } => {
+            super::snapshot::file_diff(git, &root, from.as_deref(), to.as_deref())
+                .await
+                .map(|patch| GitDone::FileDiff { from, to, patch: Box::new(patch) })
+                .map_err(|failed| GitOutcome::Failed { said: failed.0 })
+        }
         GitOp::Branches => {
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))
         }

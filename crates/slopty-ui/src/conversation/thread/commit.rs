@@ -1161,7 +1161,8 @@ impl CommitSheet {
                 | GitOp::Changes { .. }
                 | GitOp::Branches
                 | GitOp::Worktrees
-                | GitOp::Scripts => return None,
+                | GitOp::Scripts
+                | GitOp::FileDiff { .. } => return None,
             };
             return Some(self.quiet("commit-busy", words).into_any_element());
         }

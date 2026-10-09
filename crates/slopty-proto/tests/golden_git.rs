@@ -347,4 +347,35 @@ mod golden_git {
         };
         snap("worker_git_scripts", &done);
     }
+
+    /// One file of a big review asked whole by its blobs, and its hunks.
+    #[test]
+    fn file_diff() {
+        use slopty_proto::thread::Patch;
+        use slopty_proto::thread::detail::Hunk;
+
+        let (from, to) = (Some("1a2b3c4d".to_owned()), Some("5a6b7c8d".to_owned()));
+        let op = GitOp::FileDiff { from: from.clone(), to: to.clone() };
+        let ask = ClientMsg::Git { request: 15, repo: "~/src/demo".to_owned(), op };
+        snap("client_git_file_diff", &ask);
+        let patch = Patch {
+            hunks: vec![Hunk {
+                old_start: 3,
+                old_lines: 1,
+                new_start: 3,
+                new_lines: 1,
+                heading: Some("fn main()".to_owned()),
+                lines: vec!["-    old();".to_owned(), "+    new();".to_owned()],
+            }],
+            added: 1,
+            removed: 1,
+            clipped_lines: 0,
+            full: None,
+        };
+        let done = WorkerMsg::GitDone {
+            request: 15,
+            outcome: GitOutcome::Done(GitDone::FileDiff { from, to, patch: Box::new(patch) }),
+        };
+        snap("worker_git_file_diff", &done);
+    }
 }

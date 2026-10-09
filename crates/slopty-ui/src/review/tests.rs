@@ -1034,3 +1034,90 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
     right_click(cx, "review-file-1");
     assert_eq!(rows(cx), ["Open", COPY_PATH], "no keep or revert while one is on its way");
 }
+
+/// A file the review's line budget left without hunks says how many lines it has, not "No
+/// lines to show", and a press reads it whole from the repository by its blobs: "Reading…" on
+/// its way, then its hunks in place of the row. One that could not be read says why and can be
+/// asked again.
+#[gpui::test]
+fn a_file_past_the_review_s_budget_says_so_and_comes_whole_on_a_press(cx: &mut TestAppContext) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+
+    let (_view, hub, sent, cx) = tile_in(cx, 1200.0, Some("/w/repo"));
+    let thread = sent
+        .borrow()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Review { thread, .. }) => Some(*thread),
+            _ => None,
+        })
+        .expect("the review was asked");
+    let left_out = |path: &str, lines: u32| {
+        let mut file = file(path, &[], lines, 0);
+        file.patch.hunks.clear();
+        file.patch.clipped_lines = lines;
+        file
+    };
+    let mut big = review();
+    // Read first by weight: at 0 and 1 of the review, listed before the rest.
+    big.files.insert(0, left_out("src/big.rs", 25_000));
+    big.files.insert(1, left_out("src/huge.rs", 30_000));
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(big)), cx));
+    cx.run_until_parked();
+    let row = cx.debug_bounds("review-left-out-0").expect("the file left out has its row");
+    assert!(cx.debug_bounds("review-whole-0").is_some(), "with the press that reads it");
+    assert!(row.size.height > px(0.0));
+
+    sent.borrow_mut().clear();
+    click(cx, "review-whole-0");
+    let asked = sent.borrow().iter().find_map(|m| match m {
+        ClientMsg::Git { request, repo, op: GitOp::FileDiff { from, to } } => {
+            Some((*request, repo.clone(), from.clone(), to.clone()))
+        }
+        _ => None,
+    });
+    let Some((request, repo, from, to)) = asked else { panic!("asked whole: {sent:?}") };
+    assert_eq!(repo, "/w/repo", "of the thread's repository");
+    assert_eq!(
+        (from.as_deref(), to.as_deref()),
+        (Some("src/big.rs@old"), Some("src/big.rs@new")),
+        "by the blobs the review named"
+    );
+    assert!(cx.debug_bounds("review-whole-said-0").is_some(), "reading, on its way");
+    assert!(cx.debug_bounds("review-whole-0").is_none(), "asked once");
+
+    let patch = Patch {
+        hunks: vec![Hunk {
+            old_start: 1,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: 2,
+            heading: None,
+            lines: vec!["+big one".to_owned(), "+big two".to_owned()],
+        }],
+        added: 2,
+        removed: 0,
+        clipped_lines: 0,
+        full: None,
+    };
+    let done = GitDone::FileDiff { from, to, patch: Box::new(patch) };
+    hub.update(cx, |hub, cx| hub.git_done(request, GitOutcome::Done(done), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-left-out-0").is_none(), "the row gave way");
+    assert!(cx.debug_bounds("review-line-0-0-0").is_some(), "to its lines");
+    assert!(cx.debug_bounds("review-line-0-0-1").is_some(), "every one");
+
+    sent.borrow_mut().clear();
+    click(cx, "review-whole-1");
+    let request = sent.borrow().iter().find_map(|m| match m {
+        ClientMsg::Git { request, op: GitOp::FileDiff { .. }, .. } => Some(*request),
+        _ => None,
+    });
+    let request = request.expect("the other asked whole");
+    let failed = GitOutcome::Failed { said: "fatal: bad object".to_owned() };
+    hub.update(cx, |hub, cx| hub.git_done(request, failed, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-whole-said-1").is_some(), "why it could not be read");
+    assert!(cx.debug_bounds("review-whole-1").is_some(), "and the press again");
+    assert!(cx.debug_bounds("review-left-out-1").is_some(), "its row stays");
+}

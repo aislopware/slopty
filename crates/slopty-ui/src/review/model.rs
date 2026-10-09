@@ -5,7 +5,7 @@
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
 
-use slopty_proto::thread::wire::{Against, FileDiff, Intent, Pick, Review, ReviewScope};
+use slopty_proto::thread::wire::{self, Against, FileDiff, Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{ThreadState, TurnId};
 
 use super::findings::Finding;
@@ -88,39 +88,6 @@ impl Scope {
     }
 }
 
-/// Lock files, by name.
-const LOCKS: [&str; 10] = [
-    "cargo.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "bun.lock",
-    "bun.lockb",
-    "go.sum",
-    "gemfile.lock",
-    "poetry.lock",
-    "uv.lock",
-];
-
-/// Whether `path` is the kind of file a reviewer reads last: tests, fixtures, snapshots, locks
-/// and generated code. They are listed under the rest, quieter.
-#[must_use]
-pub fn quiet(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    let in_dir =
-        |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
-    LOCKS.contains(&name)
-        || ["tests", "test", "__tests__", "fixtures", "testdata", "snapshots", "generated", "dist"]
-            .iter()
-            .any(|dir| in_dir(dir))
-        || [".snap", ".min.js", ".pb.go", ".g.dart", "_pb2.py"]
-            .iter()
-            .any(|end| name.ends_with(end))
-        || ["_test.", ".test.", ".spec.", "_spec."].iter().any(|mid| name.contains(mid))
-        || name.starts_with("test_")
-}
-
 /// A file's place in the list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Listed {
@@ -132,24 +99,17 @@ pub struct Listed {
     pub quiet: bool,
 }
 
-/// The files of `review`, the weightiest first, the quiet ones after the rest.
+/// The files of `review` in their reading order ([`wire::reading_order`]): the weightiest
+/// first, the quiet ones after the rest. The worker spends the review's lines in this order.
 #[must_use]
 pub fn order(review: &Review) -> Vec<Listed> {
-    let mut listed: Vec<Listed> = review
-        .files
-        .iter()
-        .enumerate()
-        .map(|(at, f)| Listed {
-            at,
-            weight: f.patch.added.saturating_add(f.patch.removed),
-            quiet: quiet(&f.path),
+    wire::reading_order(&review.files)
+        .into_iter()
+        .filter_map(|at| {
+            let f = review.files.get(at)?;
+            Some(Listed { at, weight: f.weight(), quiet: wire::quiet(&f.path) })
         })
-        .collect();
-    listed.sort_by(|a, b| {
-        let path = |l: &Listed| review.files.get(l.at).map(|f| f.path.as_str());
-        a.quiet.cmp(&b.quiet).then(b.weight.cmp(&a.weight)).then_with(|| path(a).cmp(&path(b)))
-    });
-    listed
+        .collect()
 }
 
 /// Which side of a diff a line is on.
@@ -425,30 +385,6 @@ mod tests {
 
     fn review(files: Vec<FileDiff>) -> Review {
         Review { scope: ReviewScope::Kept, from: None, to: None, files, absent: None }
-    }
-
-    #[test]
-    fn files_go_by_weight_with_tests_locks_and_generated_code_below() {
-        let r = review(vec![
-            file("src/small.rs", 1, 0),
-            file("Cargo.lock", 400, 300),
-            file("crates/x/tests/e2e.rs", 90, 0),
-            file("src/big.rs", 40, 12),
-            file("src/__snapshots__/a.snap", 5, 5),
-        ]);
-        let paths: Vec<&str> = order(&r).iter().map(|l| r.files[l.at].path.as_str()).collect();
-        assert_eq!(
-            paths,
-            [
-                "src/big.rs",
-                "src/small.rs",
-                "Cargo.lock",
-                "crates/x/tests/e2e.rs",
-                "src/__snapshots__/a.snap"
-            ]
-        );
-        assert!(!quiet("src/contest.rs"), "a word holding \"test\" is not a test");
-        assert!(quiet("web/app.test.ts") && quiet("pkg/x_test.go") && quiet("test_x.py"));
     }
 
     #[test]

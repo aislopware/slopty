@@ -114,6 +114,17 @@ pub enum GitOp {
     /// open in a terminal ([`GitDone::Scripts`]): a dev server, a test watch, what a tool's Run
     /// button starts.
     Scripts,
+    /// One file of a review whole, by the blobs the review named on its two sides
+    /// ([`FileDiff::from`](crate::thread::wire::FileDiff::from) and
+    /// [`FileDiff::to`](crate::thread::wire::FileDiff::to)), for a file the review's own budget
+    /// left without hunks ([`Patch::clipped_lines`](crate::thread::Patch::clipped_lines);
+    /// [`GitDone::FileDiff`]). Cut into hunks as the review cuts them.
+    FileDiff {
+        /// Its blob on the old side; `None` when it was added.
+        from: Option<String>,
+        /// Its blob on the new side; `None` when it was removed.
+        to: Option<String>,
+    },
 }
 
 /// What a [`GitOp`] did.
@@ -174,6 +185,16 @@ pub enum GitDone {
     Worktrees(Box<Worktrees>),
     /// The repository's run scripts.
     Scripts(Box<RunScripts>),
+    /// One file of a review whole, by the blobs asked: its hunks, or none when a side is not
+    /// text the worker cuts (binary, or larger than it cuts into hunks).
+    FileDiff {
+        /// The old side's blob, as asked.
+        from: Option<String>,
+        /// The new side's blob, as asked.
+        to: Option<String>,
+        /// Its hunks.
+        patch: Box<crate::thread::Patch>,
+    },
 }
 
 /// The branches of a repository, as a start offers them for a new worktree's base.

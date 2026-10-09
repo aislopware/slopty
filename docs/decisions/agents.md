@@ -287,7 +287,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ThreadFrame::Review`, from a task of its own so the thread's frames go on meanwhile. Each
     file carries its blob ids on both sides. Hunks are cut on the worker with three lines of
     context, the same way every time, so a hunk named by its place is the one the review
-    showed. A review carries at most 20 000 diff lines, and files past that come without hunks.
+    showed. A review carries at most 20 000 diff lines, spent in the order the files are read;
+    a file past what is left comes with its counts and no hunks, and is read whole on the
+    person's press (`docs/decisions/ui.md`, "A big review shows every file it leaves out").
   - **Keep and revert act once per id, checked against what the review showed.** A revert
     writes the file's old side back, whole or by hunk, only while the file is still the blob
     the review showed. Keeping moves the file, whole or by hunk, into a kept tree

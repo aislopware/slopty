@@ -16,6 +16,7 @@ use slopty_proto::git::{
     Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStanding, PullStatus,
     RunScripts, Worktrees,
 };
+use slopty_proto::thread::Patch;
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
@@ -122,6 +123,21 @@ pub struct Repo {
     pub worktrees: Option<Arc<Worktrees>>,
     /// Its own run scripts, as last read; why they could not be is said where they were asked.
     pub scripts: Option<Arc<RunScripts>>,
+    /// Files of a review asked whole past the review's budget, by the blobs of their two
+    /// sides ([`GitOp::FileDiff`]).
+    pub whole: HashMap<Sides, Whole>,
+}
+
+/// A file's blobs on its two sides, as a review names them: `None` for a side it lacks.
+pub type Sides = (Option<String>, Option<String>);
+
+/// A file of a review asked whole.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Whole {
+    /// Its hunks came.
+    Came(Arc<Patch>),
+    /// They could not be read, in the worker's words.
+    Failed(String),
 }
 
 impl Repo {
@@ -324,6 +340,9 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
         GitDone::Scripts(scripts) => repo.scripts = Some(Arc::from(scripts)),
+        GitDone::FileDiff { from, to, patch } => {
+            repo.whole.insert((from, to), Whole::Came(Arc::from(patch)));
+        }
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {
@@ -378,6 +397,10 @@ fn missed(
             repo.scripts = None;
             repo.said = Some((request, said(words)));
         }
+        // A file that could not be read whole says why where it was asked.
+        GitOp::FileDiff { from, to } => {
+            repo.whole.insert((from.clone(), to.clone()), Whole::Failed(words));
+        }
         _ => repo.said = Some((request, said(words))),
     }
 }
@@ -397,6 +420,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::Branches
             | GitOp::Worktrees
             | GitOp::Scripts
+            | GitOp::FileDiff { .. }
     )
 }
 
