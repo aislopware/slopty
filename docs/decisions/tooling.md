@@ -1360,3 +1360,32 @@ more full-window layer.
     `CC=clang` is gone too (the entry "Linux clippy runs on a Linux runner" above).
   - Checked here: musl clippy for the server, and both glibc triples for the server and xtask,
     pass with blake3's NEON object built by zig.
+
+- ✅ **libghostty-rs rebased onto upstream `d2036bae`** (2026-10-10, fork `e50b61b5`). Upstream
+  merged #89 (paste), #90 (snapshot) and #91 (streamed formatting), each in a later form than the
+  copies our fork carried. Six of our 35 commits were dropped as upstream's, and 29 remain.
+  - Dropped as merged: `3e7a47c` (paste), `90697ed` and `0e890bf` (snapshot), `befc59a`
+    (formatter), `18f4688` (our take of the refreshed #89), and `8726a22` (zeroing a reader's
+    buffer). The last one is upstream's `3514d35` in all but its comment, and that commit also
+    adds a Miri test.
+  - Conflict: `521715d` (unknown sequence limit) adds the test allocator `Counting` beside
+    `Capped`. Upstream's #89 had removed the `kitty-graphics`/`png` gate from `Capped`, since
+    its paste test uses it. Both are kept, with upstream's gating.
+  - Snapshot: upstream's #90 identifies the terminal an incremental decode writes into by a
+    process-unique `Terminal::id`, where our copy compared handles. So a replacement terminal
+    allocated at the freed original's address is now rejected instead of receiving the rest of
+    the history.
+  - Paste ruling: upstream's paste no longer reports a refused write itself (no
+    `&& !writer.refused`). It relies on libghostty failing the paste after any refused write.
+    Our ghostty fork at `95b7cc6f` contains upstream's pin `3425025e` and has that behaviour:
+    `refused_writes_fail_the_paste_even_if_ignored` passes on it without the guard. So the
+    guard stays out.
+  - Checks: in the fork, `cargo test --workspace` (with and without `--all-features`), clippy
+    1.99 over `--workspace --all-targets` (the same warnings as `880d495` under this
+    repository's `clippy.toml`, none new), and rustfmt with its defaults. Here,
+    `upstream sync --only libghostty-rs` found the fork already on `d2036bae` and the ghostty
+    pin current. It only moved `Cargo.lock` and `fuzz/Cargo.lock`. slopty-engine's clippy and
+    its 198 tests pass with no source change.
+  - Not yet on upstream master, so kept on the fork: the stack #92 (unsupported sequences),
+    #93 (new OSC commands) and #94 (secure random). #94 is merged into #93's branch, which has
+    not reached master yet.
