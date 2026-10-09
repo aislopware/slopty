@@ -362,24 +362,63 @@ async fn rested(drv: &mut Driver) {
 /// time shows, and short of the second.
 const AT_WORK: Duration = Duration::from_secs(75);
 
-/// A live task as the board shows it: its agent at work for over a minute, its pull request's
-/// own checks failing as the worker's `gh` reports them, and its reviewer on the forge asking
-/// for changes. Its row says the time, the board offers Fix CI and Address comments, and its
-/// card draws the pipeline and where it runs. `gh` is a stand-in on the worker's `PATH`; no
-/// forge is asked.
+/// A live task as the board shows it: its agent at work for over a minute in its own worktree,
+/// whose branch's pull request has a check failing as the worker's `gh` reports it. The
+/// worker's watcher reads the pull request onto the thread's row, the server hands it to the
+/// task, its row says the time, the board offers Fix CI, and its card draws the pipeline and
+/// where it runs. `gh` is a stand-in on the worker's `PATH`, there before the worker looks for
+/// it; no forge is asked.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
-    let mut stack = ProjectStack::launch("studio").await.unwrap();
-    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let gh = stack.path("programs").join("gh");
-    let listed = r#"[{"name":"clippy (macos)","bucket":"fail"},{"name":"test (macos)","bucket":"pass"},{"name":"test (linux)","bucket":"pass"},{"name":"golden","bucket":"pass"}]"#;
-    // `gh pr checks` ends 1 once a check failed, with its JSON all the same.
-    std::fs::write(&gh, format!("#!/bin/sh\nprintf '%s' '{listed}'\nexit 1\n")).unwrap();
+    let programs = tempfile::tempdir().unwrap();
+    let gh = programs.path().join("gh");
+    // `gh pr view --json …` for the branch's pull request, in gh's own words.
+    let viewed = serde_json::json!({
+        "number": 42,
+        "url": "https://github.com/aislopware/slopty/pull/42",
+        "title": "Draw the project board's lanes",
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefName": "worktree-slopty-board-1",
+        "headRefOid": "0123abcd",
+        "baseRefName": "main",
+        "reviewDecision": "CHANGES_REQUESTED",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BLOCKED",
+        "statusCheckRollup": [
+            { "__typename": "CheckRun", "name": "clippy (macos)", "workflowName": "CI",
+              "status": "COMPLETED", "conclusion": "FAILURE" },
+            { "__typename": "CheckRun", "name": "test (macos)", "workflowName": "CI",
+              "status": "COMPLETED", "conclusion": "SUCCESS" },
+            { "__typename": "CheckRun", "name": "test (linux)", "workflowName": "CI",
+              "status": "COMPLETED", "conclusion": "SUCCESS" },
+            { "__typename": "CheckRun", "name": "golden", "workflowName": "CI",
+              "status": "COMPLETED", "conclusion": "SUCCESS" },
+        ],
+    });
+    let answer = programs.path().join("pr-view.json");
+    std::fs::write(&answer, viewed.to_string()).unwrap();
+    std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", answer.display())).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut stack = ProjectStack::launch_with("studio", &[("gh", &gh)], &[]).await.unwrap();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let repo = stack.path("repo").to_string_lossy().into_owned();
     let tree = stack.path("repo/.claude/worktrees/slopty-board-1");
-    std::fs::create_dir_all(&tree).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=Mira", "-c", "user.email=mira@localhost"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let at = tree.to_string_lossy().into_owned();
+    git(&["worktree", "add", "-q", "-b", "worktree-slopty-board-1", &at]);
 
     let orchestrator = term(&stack.slopty(&["agent", "spawn", "--cwd", &repo]).await.unwrap());
     let orchestrator_session = session_of(&orchestrator);
@@ -399,9 +438,10 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         ])
         .await
         .unwrap();
+    // Each with the folder the agent works in, its worktree, as Claude Code's hooks carry it.
     let hooks = serde_json::json!([
-        { "hook_event_name": "SessionStart", "source": "startup" },
-        { "hook_event_name": "UserPromptSubmit", "prompt": "Read the checks with gh" },
+        { "hook_event_name": "SessionStart", "source": "startup", "cwd": at },
+        { "hook_event_name": "UserPromptSubmit", "prompt": "Read the checks with gh", "cwd": at },
         {
             "hook_event_name": "Statusline",
             "worktree": {
@@ -410,13 +450,6 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
                 "branch": "worktree-slopty-board-1",
                 "original_cwd": repo,
                 "original_branch": "main",
-            },
-            // As the relay posts the status line's, in the wire's own shape.
-            "pr": {
-                "number": 42,
-                "url": "https://github.com/aislopware/slopty/pull/42",
-                "review": "ChangesRequested",
-                "merge_request": false,
             },
         },
     ]);
@@ -440,19 +473,23 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     let agent_session = started_session(&started);
     planned(&stack, "Draw the pipeline row", &[], &[]).await;
 
-    // The server reads the checks on its own round, and counts the agent's time from its
-    // prompt.
+    // The worker reads the pull request on its watcher's round (every 15 s) onto the thread,
+    // the server hands it to the task, and counts the agent's time from its prompt.
     let started = tokio::time::Instant::now();
     let failing = loop {
         let status = stack.slopty(&["project", "status", PROJECT]).await.unwrap();
         let task = &status["tasks"][0];
-        if task["checks"]["state"] == "failing" && task["at_work_since_ms"].is_u64() {
+        if task["pull"]["stands"] == "checks_failed" && task["at_work_since_ms"].is_u64() {
             break status;
         }
-        assert!(started.elapsed() < STEP, "checks and time on the server: {status}");
+        assert!(started.elapsed() < STEP * 2, "the pull request and time on the server: {status}");
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
-    assert_eq!(failing["tasks"][0]["checks"]["failing"], serde_json::json!(["clippy (macos)"]));
+    let pull = &failing["tasks"][0]["pull"];
+    assert_eq!(
+        (&pull["number"], &pull["failed_first"]),
+        (&serde_json::json!(42), &serde_json::json!("clippy (macos)"))
+    );
     let since = failing["tasks"][0]["at_work_since_ms"].as_u64().unwrap();
     let at_work = || {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
