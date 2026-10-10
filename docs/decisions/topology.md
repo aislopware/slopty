@@ -916,3 +916,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       list and its order;
     - the e2e stack's `Stack::mcp` speaks through a `slopty mcp` child. An agent's call to
       `answer_request` is still refused there.
+
+- ✅ **A worker is published anew when Tailscale comes up, and a deploy names the server by its
+  tailnet address** (2026-10-12, readiness 10-12 rank 14, the server's and the deploy's halves).
+  - **Why.** The server worked out a worker's address once, when it registered. A Mac set up
+    before Tailscale was allowed stayed listed at `127.0.0.1`, which other machines cannot
+    reach. A deploy over a LAN name told the far worker to dial the server at the address
+    `ssh` came from (`$SSH_CONNECTION`), and the server refuses a LAN address unless
+    `[server] allow` lists it, which it does not by default.
+  - **The server.** A worker that dialed over loopback while listening on every interface is
+    watched for as long as it stays linked (`link::republish`, every 10 s). Once this node has
+    a tailnet address, `Lease::republish` lists the worker there on its own port, tells every
+    client and saves the listing. A worker bound to one address, or one that dialed from
+    elsewhere, is never watched. A tailnet that goes down again does not move it back to
+    loopback: an address that stops answering for a while beats one that never answers.
+  - **The deploy.** When the host `ssh` connects to names a peer on this machine's tailnet (by
+    one of its addresses, its host name, or its `MagicDNS` name, whole or its first label), the
+    worker dials the server at this machine's tailnet IPv4 (`Runner::tailnet_route`,
+    `ssh::route_to`). The host is read from `ssh -G`, so an alias in the person's `ssh` config
+    is matched by the `HostName` it stands for, never by its own name. Otherwise
+    `$SSH_CONNECTION` stands as before.
+  - **An address, not the `MagicDNS` name.** The plan asked for the name. The address needs no
+    `MagicDNS` on the far side, does not change while the node stays in the tailnet, and is
+    what the server's admission matches.
+  - Tests: `slopty-server` `tailscale_coming_up_republishes_a_worker_published_at_loopback`
+    (a fake daemon whose node gains an address); `slopty-deploy`
+    `the_worker_registers_with_the_server_as_the_machine_reaches_it` (the route wins over
+    `$SSH_CONNECTION`), `a_tailnet_peer_reaches_this_machine_at_its_tailnet_address` and
+    `a_tailnet_route_follows_the_ssh_config` (a real `ssh -G` over a config file).

@@ -113,9 +113,10 @@ impl Host {
         Ssh { echo, ..Ssh::new(self.ssh.clone(), "studio".to_owned()) }
     }
 
+    /// What ran there: every `ssh` but the `ssh -G` that only reads this machine's config.
     fn scripts(&self) -> Vec<String> {
         let log = std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
-        log.lines().map(str::to_owned).collect()
+        log.lines().filter(|line| !line.starts_with("-G ")).map(str::to_owned).collect()
     }
 
     fn staged(&self, name: &str) -> PathBuf {
@@ -287,11 +288,13 @@ struct Scripted {
     local: bool,
     /// The runner a sign-in gave: what it runs is kept as `signed: <script>`.
     signed: bool,
+    /// This machine's tailnet address, when the machine played is a peer of it.
+    route: Option<std::net::IpAddr>,
 }
 
 impl Scripted {
     fn new(answer: Answer) -> Self {
-        Self { answer, ran: std::sync::Arc::default(), local: false, signed: false }
+        Self { answer, ran: std::sync::Arc::default(), local: false, signed: false, route: None }
     }
 
     fn ran(&self) -> Vec<String> {
@@ -306,6 +309,10 @@ impl Runner for Scripted {
 
     fn is_local(&self) -> bool {
         self.local
+    }
+
+    fn tailnet_route(&self) -> Pending<'_, Option<std::net::IpAddr>> {
+        Box::pin(std::future::ready(self.route))
     }
 
     fn program(&self) -> String {
@@ -348,6 +355,7 @@ impl Runner for Scripted {
             ran: std::sync::Arc::clone(&self.ran),
             local: self.local,
             signed: true,
+            route: self.route,
         };
         let signed: Box<dyn Runner> = Box::new(signed);
         Box::pin(std::future::ready(Ok(Some(signed))))
@@ -536,6 +544,15 @@ async fn the_worker_registers_with_the_server_as_the_machine_reaches_it() {
     assert_eq!(done.unwrap().server, "100.64.0.2:45560", "where ssh came from");
     assert!(install_script(&runner.ran()).contains(" --server 100.64.0.2:45560 "));
 
+    // A peer on this machine's tailnet dials it there, whatever address ssh came from (a LAN
+    // one, which the server lets in only when listed).
+    let runner = Scripted { route: Some([100, 64, 0, 3].into()), ..Scripted::new(healthy) };
+    let (done, _) = run(&runner, &with("127.0.0.1")).await;
+    assert_eq!(done.unwrap().server, "100.64.0.3:45560", "this machine's tailnet address");
+    let named = Scripted { route: Some([100, 64, 0, 3].into()), ..Scripted::new(healthy) };
+    let (done, _) = run(&named, &with("studio.tail1234.ts.net")).await;
+    assert_eq!(done.unwrap().server, "studio.tail1234.ts.net:45560", "a named server as it is");
+
     for unreachable in ["localhost", "studio;reboot"] {
         let runner = Scripted::new(no_client);
         let (done, _) = run(&runner, &with(unreachable)).await;
@@ -547,6 +564,48 @@ async fn the_worker_registers_with_the_server_as_the_machine_reaches_it() {
         assert_eq!(install_script(&runner.ran()), "", "nothing installed: {unreachable}");
         assert!(!runner.ran().iter().any(|s| s.contains("cat >")), "nothing sent: {unreachable}");
     }
+}
+
+/// A machine named as a peer of this one on its tailnet, by an address, its host name or its
+/// `MagicDNS` name (whole or its first label, after any `user@`), reaches this machine at its
+/// tailnet address; one named otherwise, or a node with no address of its own, at none.
+#[test]
+fn a_tailnet_peer_reaches_this_machine_at_its_tailnet_address() {
+    let status: slopty_tailnet::Status = serde_json::from_str(
+        r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac","DNSName":"mac.tail1234.ts.net.",
+        "OS":"macOS","TailscaleIPs":["100.64.0.3","fd7a::3"]},"Peer":{"k":{"ID":"n2","HostName":"Studio",
+        "DNSName":"studio.tail1234.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.9"]}}}"#,
+    )
+    .unwrap();
+    let me = Some(std::net::IpAddr::from([100, 64, 0, 3]));
+    for target in
+        ["studio", "me@studio", "studio.tail1234.ts.net", "studio.tail1234.ts.net.", "100.64.0.9"]
+    {
+        assert_eq!(ssh::route_to(&status, target), me, "{target}");
+    }
+    for target in ["studio.local", "builder", "10.0.0.9", "me@mac-mini"] {
+        assert_eq!(ssh::route_to(&status, target), None, "{target}");
+    }
+    let mut alone = status;
+    alone.me = None;
+    assert_eq!(ssh::route_to(&alone, "studio"), None, "no address of its own");
+}
+
+/// The host a tailnet route is looked for is the one `ssh` connects to: an alias in its config
+/// is resolved to its `HostName` first, and a target with none is taken as named.
+#[tokio::test]
+async fn a_tailnet_route_follows_the_ssh_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::write(&config, "Host studio\n  HostName studio.tail1234.ts.net\n").unwrap();
+    let with = |target: &str| Ssh {
+        options: vec!["-F".to_owned(), config.display().to_string()],
+        ..Ssh::new("ssh".into(), target.to_owned())
+    };
+    assert_eq!(with("me@studio").host_name().await.as_deref(), Some("studio.tail1234.ts.net"));
+    assert_eq!(with("builder").host_name().await.as_deref(), Some("builder"));
+    let missing = Ssh { program: dir.path().join("no-ssh"), ..with("studio") };
+    assert_eq!(missing.host_name().await, None, "no ssh to ask");
 }
 
 #[test]

@@ -16,6 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
+# This machine's tailnet address, which a worker deployed to a peer registers at.
+slopty-tailnet.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

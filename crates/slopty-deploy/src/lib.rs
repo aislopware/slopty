@@ -730,7 +730,9 @@ pub async fn deploy(
     let server = if runner.is_local() {
         plan.server.address()
     } else {
-        plan.server.seen_from(reached.client.as_deref())
+        let route = if plan.server.is_here() { runner.tailnet_route().await } else { None };
+        let route = route.map(|ip| ip.to_string());
+        plan.server.seen_from(route.as_deref().or(reached.client.as_deref()))
     }
     .ok_or_else(|| DeployError::NoServerAddress {
         target: runner.target().to_owned(),

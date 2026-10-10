@@ -8,9 +8,11 @@
 //! replaces everything it was told before.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 use slopty_core::SessionId;
 use slopty_net::NetError;
+use slopty_net::admission::Admission;
 use slopty_net::framed::{FramedRecv, FramedSend};
 use slopty_net::server::{AcceptedLink, ServerListener};
 use slopty_proto::codec::CodecError;
@@ -31,10 +33,7 @@ pub async fn serve(listener: ServerListener, hub: Hub) {
         let (hub, admission) = (hub.clone(), listener.admission().clone());
         tokio::spawn(async move {
             match link.role.clone() {
-                Role::Worker(registration) => {
-                    let tailscale = admission.local_api();
-                    worker(hub, link, *registration, tailscale.as_ref()).await;
-                }
+                Role::Worker(registration) => worker(hub, link, *registration, &admission).await,
                 Role::Client { name, .. } => client(hub, link, name, Speaker::Person).await,
                 Role::Agent { name, vouch } => {
                     let proven = vouch.filter(|v| proven(&hub, &name, v.session, &v.token));
@@ -69,7 +68,7 @@ async fn worker(
     hub: Hub,
     link: AcceptedLink,
     registration: slopty_proto::server::Registration,
-    tailscale: Option<&LocalApi>,
+    admission: &Admission,
 ) {
     let (out, queue) = mpsc::channel(LINK_QUEUE);
     let welcome = FromServer::Welcome {
@@ -82,7 +81,8 @@ async fn worker(
         return;
     }
     let (id, name, remote) = (registration.worker, registration.name.clone(), link.remote);
-    let at = published(remote.ip(), registration.listen.ip(), tailscale).await;
+    let bound = registration.listen.ip();
+    let at = published(remote.ip(), bound, admission.local_api().as_ref()).await;
     let lease = match hub.register(registration, at, out) {
         Ok(lease) => lease,
         Err(why) => {
@@ -97,9 +97,45 @@ async fn worker(
     tokio::select! {
         () = read_worker(&lease, &mut rx) => {}
         () = write_worker(&lease, tx, queue) => {}
+        () = republish(&lease, (remote.ip(), bound, at), admission, REPUBLISH_EVERY) => {}
     }
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"lease ended");
     drop(lease);
+}
+
+/// How often a worker published at loopback asks Tailscale again for this machine's address.
+const REPUBLISH_EVERY: Duration = Duration::from_secs(10);
+
+/// Keep a worker published where other machines reach it, for as long as its lease lives.
+///
+/// One that dialed over loopback and listens everywhere is published at this machine's tailnet
+/// address, but only once Tailscale gives one: until then it is published at loopback, which
+/// no other machine can use. So while it is, Tailscale is asked again `every` so often, and the
+/// address it gives once it is up is published in its place. An address once published stays
+/// when Tailscale stops answering, rather than flap back to loopback. Never returns for any
+/// other worker.
+#[expect(
+    clippy::infinite_loop,
+    reason = "it watches for as long as the lease lives; the link's select ends it with the lease"
+)]
+async fn republish(
+    lease: &Lease,
+    (ip, bound, at): (IpAddr, IpAddr, IpAddr),
+    admission: &Admission,
+    every: Duration,
+) {
+    if !(ip.is_loopback() && bound.is_unspecified()) {
+        return std::future::pending().await;
+    }
+    let mut at = at;
+    loop {
+        tokio::time::sleep(every).await;
+        let now = published(ip, bound, admission.local_api().as_ref()).await;
+        if now != at && !now.is_loopback() {
+            lease.republish(now);
+            at = now;
+        }
+    }
 }
 
 /// Where clients reach a worker that dialed in from `ip` and listens on `bound`.
@@ -383,6 +419,67 @@ mod tests {
         let (broken, _) =
             slopty_tailnet::fake::daemon(|_| (500, "stuck".to_owned())).await.unwrap();
         assert_eq!(published(ip("127.0.0.1"), every, Some(&broken)).await, ip("127.0.0.1"));
+    }
+
+    /// Tailscale coming up after a worker on the server's own machine registered, published
+    /// at loopback for want of a tailnet address, republishes it at the machine's tailnet
+    /// address, and every client hears it; a worker that dialed from elsewhere is never asked
+    /// about again.
+    #[tokio::test]
+    async fn tailscale_coming_up_republishes_a_worker_published_at_loopback() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static UP: AtomicBool = AtomicBool::new(false);
+        let (api, seen) = slopty_tailnet::fake::daemon(|_| {
+            if !UP.load(Ordering::SeqCst) {
+                return (503, "starting".to_owned());
+            }
+            let me = r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac",
+                "DNSName":"mac.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.3"]}}"#;
+            (200, me.to_owned())
+        })
+        .await
+        .unwrap();
+        let admission = Admission::with_tailnet(Vec::new(), Some(api));
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, _rx) = mpsc::channel(8);
+        let registration = registration(worker, Vec::new());
+        let (loopback, every) = (IpAddr::from([127, 0, 0, 1]), registration.listen.ip());
+        let at = published(loopback, every, admission.local_api().as_ref()).await;
+        assert_eq!(at, loopback, "no tailnet address yet");
+        let lease = hub.register(registration, at, tx).unwrap();
+        let mut heard = hub.subscribe();
+        let address = || hub.directory()[0].address.clone();
+        let watching =
+            republish(&lease, (loopback, every, at), &admission, Duration::from_millis(10));
+        let republished = async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(address(), "127.0.0.1:45550", "Tailscale is not up");
+            UP.store(true, Ordering::SeqCst);
+            while address() != "100.64.0.3:45550" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            () = watching => unreachable!("it watches for as long as the lease"),
+            done = tokio::time::timeout(Duration::from_secs(10), republished) => {
+                done.expect("republished once Tailscale is up");
+            }
+        }
+        let told = std::iter::from_fn(|| heard.try_recv().ok()).any(
+            |msg| matches!(msg, FromServer::Worker(info) if info.address == "100.64.0.3:45550"),
+        );
+        assert!(told, "every client hears it");
+
+        let asked = seen.lock().len();
+        let elsewhere = republish(
+            &lease,
+            (IpAddr::from([100, 64, 0, 9]), every, at),
+            &admission,
+            Duration::from_millis(1),
+        );
+        assert!(tokio::time::timeout(Duration::from_millis(50), elsewhere).await.is_err());
+        assert_eq!(seen.lock().len(), asked, "a worker that dialed from elsewhere asks nothing");
     }
 
     /// What a client shows of the agents, as the app keeps it: each terminal's agent's phase,

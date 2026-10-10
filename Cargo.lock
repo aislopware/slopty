@@ -7980,6 +7980,7 @@ dependencies = [
  "slopty-core",
  "slopty-platform",
  "slopty-proto",
+ "slopty-tailnet",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

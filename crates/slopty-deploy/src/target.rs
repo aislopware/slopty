@@ -93,9 +93,11 @@ pub struct Server {
 
 impl Server {
     /// The address the worker on the far side dials: this one, unless it is loopback, which
-    /// means the deploying machine itself; then `client`, the address that machine reached the
-    /// target from (`$SSH_CONNECTION`'s first word there). `None` when it is loopback and that
-    /// is not known, or when it holds what a shell would read as more than an address.
+    /// means the deploying machine itself; then `client`, how the far side reaches that
+    /// machine: its tailnet address when both are on one ([`crate::Runner::tailnet_route`]),
+    /// else the address `ssh` came from there (`$SSH_CONNECTION`'s first word). `None` when it is
+    /// loopback and that is not known, or when it holds what a shell would read as more than an
+    /// address.
     #[must_use]
     pub fn seen_from(&self, client: Option<&str>) -> Option<String> {
         let host = if is_loopback(&self.host) {
@@ -104,6 +106,13 @@ impl Server {
             self.host.as_str()
         };
         dialled(host, self.port)
+    }
+
+    /// It names the deploying machine itself (loopback), so the far side dials it as it
+    /// reaches this machine ([`Self::seen_from`]).
+    #[must_use]
+    pub fn is_here(&self) -> bool {
+        is_loopback(&self.host)
     }
 
     /// The address as it is, for a worker on the deploying machine itself; `None` when it

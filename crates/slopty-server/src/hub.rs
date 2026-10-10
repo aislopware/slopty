@@ -1511,6 +1511,28 @@ impl Lease {
         self.hub.inner.state.lock().board.pushes()
     }
 
+    /// Publish the worker at `ip` from now on, on the port it listens on: its machine came to
+    /// have an address other machines reach (Tailscale came up after it registered). Every
+    /// client is told, and the listing kept; nothing when it is there already.
+    pub fn republish(&self, ip: IpAddr) {
+        let mut state = self.hub.inner.state.lock();
+        let Some(entry) =
+            state.workers.get_mut(&self.worker).filter(|e| e.generation == self.generation)
+        else {
+            return;
+        };
+        let Ok(at) = entry.info.address.parse::<SocketAddr>() else { return };
+        if at.ip() == ip {
+            return;
+        }
+        entry.info.address = SocketAddr::new(ip, at.port()).to_string();
+        let info = entry.info.clone();
+        tracing::info!(worker = %self.worker, name = %info.name, address = %info.address, "worker published anew");
+        self.hub.announce(FromServer::Worker(info));
+        self.hub.persist(&state);
+        drop(state);
+    }
+
     /// Answer forwarded request `id` here, in the worker's place: it could not be sent.
     pub fn answer(&self, id: RequestId, outcome: Outcome) {
         let mut state = self.hub.inner.state.lock();

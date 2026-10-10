@@ -66,6 +66,14 @@ pub trait Runner: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// This machine's tailnet address, when the machine there is a peer of it on the same
+    /// tailnet: where it dials a server that runs here. Preferred over the address `ssh` came
+    /// from, which may be a LAN address the server lets in only when it is listed. `None` for
+    /// this machine itself, and where either is off the tailnet.
+    fn tailnet_route(&self) -> Pending<'_, Option<std::net::IpAddr>> {
+        Box::pin(std::future::ready(None))
+    }
+
     /// Sign in once with `password`, which the machine asks for instead of a key: the runner
     /// the later steps take, so they ride that one sign-in. `None` when this runner has nothing
     /// to sign in to (this machine, a test's), and the steps go on through it.
@@ -140,6 +148,16 @@ impl Ssh {
         let program = PathBuf::from("ssh");
         let target = target.host.clone();
         Self { program, options, target, echo: Echo::Lines, askpass: askpass_here() }
+    }
+
+    /// The host `ssh` connects to for the target, its config applied (`ssh -G`): an alias
+    /// resolved to its `HostName`. `None` when `ssh` cannot say.
+    pub(crate) async fn host_name(&self) -> Option<String> {
+        let mut ssh = Command::new(&self.program);
+        ssh.arg("-G").args(&self.options).arg(&self.target);
+        ssh.stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+        let out = ssh.output().await.ok().filter(|out| out.status.success())?;
+        host_name_in(&String::from_utf8_lossy(&out.stdout))
     }
 
     /// `script` run by `sh` there, whatever the login shell (the scripts hold no `'`).
@@ -230,6 +248,13 @@ async fn go(
 impl Runner for Ssh {
     fn target(&self) -> &str {
         &self.target
+    }
+
+    fn tailnet_route(&self) -> Pending<'_, Option<std::net::IpAddr>> {
+        Box::pin(async move {
+            let status = slopty_tailnet::LocalApi::find()?.status().await.ok()?;
+            route_to(&status, &self.host_name().await?)
+        })
     }
 
     fn program(&self) -> String {
@@ -361,6 +386,40 @@ impl Runner for Signed {
     fn run<'a>(&'a self, job: Job<'a>, on: &'a mut OnEvent<'_>) -> Pending<'a, io::Result<Ran>> {
         self.ssh.run(job, on)
     }
+
+    fn tailnet_route(&self) -> Pending<'_, Option<std::net::IpAddr>> {
+        self.ssh.tailnet_route()
+    }
+}
+
+/// The `hostname` line of what `ssh -G` prints.
+fn host_name_in(config: &str) -> Option<String> {
+    config.lines().find_map(|line| {
+        let (key, value) = line.split_once(' ')?;
+        (key.eq_ignore_ascii_case("hostname") && !value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+/// This node's tailnet address in `status`, when `target` (the host `ssh` connects to, after its
+/// config, or `user@host`) names one of its peers: by an address of it, its host name, or its
+/// `MagicDNS` name, whole or its first label.
+pub fn route_to(status: &slopty_tailnet::Status, target: &str) -> Option<std::net::IpAddr> {
+    let me = status.me.as_ref()?.ipv4()?;
+    let host = target.rsplit_once('@').map_or(target, |(_, host)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
+    let address = host.parse::<std::net::IpAddr>().ok();
+    let named = |peer: &slopty_tailnet::Node| {
+        let name = peer.name();
+        address.map_or_else(
+            || {
+                host.eq_ignore_ascii_case(&peer.host_name)
+                    || host.eq_ignore_ascii_case(name)
+                    || name.split('.').next().is_some_and(|first| host.eq_ignore_ascii_case(first))
+            },
+            |ip| peer.has(ip),
+        )
+    };
+    status.peer.values().any(named).then_some(me)
 }
 
 /// The master connection: ended (`ssh -O exit`), then its directory removed, when dropped.
