@@ -752,6 +752,24 @@ pub async fn drop_branches(
     Ok(dropped)
 }
 
+/// Make `branch`, a name the server gives, in the clone at `clone` at what is checked out there.
+///
+/// That is the tip of its branch, or its commit when detached: what a project made with no
+/// target lands on (`Verb::BranchOff`). One there already is left as it is, wherever it has
+/// moved since.
+pub async fn branch_off(git: &Path, clone: &Path, branch: &str) -> Result<(), Failed> {
+    if !server_named(branch) {
+        return Err(Failed::NotOne(format!("{branch} is no branch Slopty names")));
+    }
+    let reference = format!("refs/heads/{branch}");
+    let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
+    if bundle::run(git, clone, &verify).await.is_ok() {
+        return Ok(());
+    }
+    bundle::run(git, clone, &["branch", "--no-track", "--end-of-options", branch, "HEAD"]).await?;
+    Ok(())
+}
+
 /// Whether `branch` is one the server names: under `slopty/`, with no part git would read as
 /// something else.
 fn server_named(branch: &str) -> bool {
@@ -928,6 +946,39 @@ mod tests {
         assert_eq!(kept, Removed { branch: Some(open_branch.clone()), branch_removed: false });
         assert!(!open.exists());
         assert!(has_branch(&clone, &open_branch), "its work is on its branch alone");
+    }
+
+    /// A project made with no target gets its own branch at what the checkout has out, the
+    /// branch's tip or a detached commit, and the person's branch does not move. One there
+    /// already is left where it went, and a name the server never sets is not made.
+    #[tokio::test]
+    async fn a_project_s_own_branch_starts_at_the_checkout_s_and_stays_where_it_went() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        git_in(&clone, &["switch", "-q", "-c", "feature"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+        let feature = git_in(&clone, &["rev-parse", "feature"]);
+
+        branch_off(git, &clone, "slopty/p/goal").await.expect("made");
+        assert_eq!(git_in(&clone, &["rev-parse", "slopty/p/goal"]), feature, "at the tip out");
+        assert_eq!(git_in(&clone, &["branch", "--show-current"]), "feature", "still on its own");
+
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c2"]);
+        branch_off(git, &clone, "slopty/p/goal").await.expect("there already");
+        assert_eq!(git_in(&clone, &["rev-parse", "slopty/p/goal"]), feature, "left as it was");
+
+        let main = git_in(&clone, &["rev-parse", "main"]);
+        git_in(&clone, &["switch", "-q", "--detach", "main"]);
+        branch_off(git, &clone, "slopty/q/goal").await.expect("made detached");
+        assert_eq!(git_in(&clone, &["rev-parse", "slopty/q/goal"]), main, "at the commit out");
+
+        let stray = branch_off(git, &clone, "main-copy").await;
+        assert!(matches!(stray, Err(Failed::NotOne(_))), "{stray:?}");
+        assert!(!has_branch(&clone, "main-copy"));
     }
 
     /// The server's branches go when it drops them: one absent is passed over, one a worktree

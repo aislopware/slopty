@@ -734,7 +734,8 @@ pub struct ProjectSpec {
     pub title: String,
     /// Its repository.
     pub repo: String,
-    /// The branch work lands on; `main` when absent.
+    /// The branch work lands on; a branch of the project's own when absent
+    /// ([`slopty_proto::project::Task::goal_branch`]).
     pub target: Option<String>,
     /// The verifier command.
     pub verifier: Option<String>,
@@ -764,7 +765,7 @@ pub async fn project_create<D: Dispatch>(
         project,
         title: spec.title,
         repo: spec.repo,
-        target: spec.target.unwrap_or_else(|| "main".to_owned()),
+        target: spec.target.unwrap_or_default(),
         verifier: spec.verifier,
         push: spec.push,
         orchestrator,

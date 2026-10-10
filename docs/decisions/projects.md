@@ -2996,3 +2996,45 @@ reordering and edited allows are gone" in `agents.md`.*
     - `a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns`, on a paused
       clock across twice the grace, with the store's replica agreeing;
     - the Send steps in the hub and CLI tests.
+
+- ✅ **The server hands over the goal, and a goal lands on a branch of its own** (2026-10-11,
+  the orchestrator-first study, item 9, the server's half).
+  - **The goal is the orchestrator's first word.** The client made the project, then sent the
+    goal as a separate `TaskTell`. Every other way of making a project (the CLI, the tools)
+    never sent it, so their orchestrators started without it. Now, when the person makes a
+    project with a goal and an orchestrator, the server delivers the goal to the orchestrator
+    in the same batch as its role, as the person's words (`Hub::hand_goal`), and logs it on the
+    timeline as theirs (`Moment::Told`). A project an agent makes is not handed its goal,
+    since that agent already knows it. The client's follow-up `TaskTell` goes, or the goal
+    would arrive twice.
+  - **A goal never lands on the person's branch unasked.** `ProjectCreate.target` left empty
+    asks for a branch of the project's own, `slopty/<project>/goal` (`Task::goal_branch`).
+    - **Where it is made.** Before the project is stored, the server has the orchestrator's
+      worker make that branch in the project's repository, at whatever is checked out there:
+      the branch's tip, or the commit when detached (`Verb::BranchOff`,
+      `worktrees::branch_off`). Merges then land there, and the person's own Push or pull
+      request moves the work on to their branch.
+    - **When it cannot be made.** If the worker cannot make it, the create is refused with the
+      worker's words and nothing is stored. With no orchestrator there is no checkout to make
+      it in, so a target must be named.
+    - **Taken names.** A branch already there is left where it went, so a repeat under the same
+      key, or a project made again after a delete, reuses it. A name already taken by another
+      project is refused by the store without making anything.
+  - **Why not `slopty/<project>`.** The study's sketch named the branch `slopty/<project>`. Git
+    cannot hold that name next to the task branches the project already brings home as
+    `slopty/<project>/<task>`, because a ref cannot be both a branch and a directory. So the
+    project's own branch sits beside its task branches instead. Nothing ever drops it, since
+    `DropBranches` is only ever given home and `…/target` names.
+  - **Empty, not an `Option`.** The wire keeps `target: String`. A sheet's blank target and a
+    CLI or tool call that names none both arrive empty, so no client changes shape. The CLI's
+    `--target` lost its `main` default, and the tools' `project_create` lost its `main`
+    fallback, so neither lands on `main` unless told to.
+  - Tests:
+    - `hub::project_tests::a_project_carries_its_goal_and_the_person_s_autonomy`: the goal is
+      delivered once, with the role, and logged on the timeline as told;
+    - `hub::project_tests::a_project_with_no_target_lands_on_a_branch_of_its_own`: the branch is
+      made in the orchestrator's checkout, a refusal stores nothing, and there is none without
+      an orchestrator;
+    - `repo::worktrees::tests::a_project_s_own_branch_starts_at_the_checkout_s_and_stays_where_it_went`
+      (slopty-worker);
+    - the `branch_off` golden.

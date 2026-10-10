@@ -615,6 +615,14 @@ mod golden_project {
                 branches: vec!["slopty/slopty/3".to_owned(), "slopty/slopty/target".to_owned()],
             }),
         );
+        snap(
+            "branch_off",
+            &request(Verb::BranchOff {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                branch: "slopty/slopty/goal".to_owned(),
+            }),
+        );
         let edit = |key: &str, entry: Option<&str>, literal: Option<&str>| SettingEdit {
             table: "worker".to_owned(),
             key: key.to_owned(),

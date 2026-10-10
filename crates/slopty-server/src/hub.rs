@@ -1002,6 +1002,10 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server drops the branches it named itself, once their work has landed",
             ),
+            Verb::BranchOff { .. } => error(
+                ErrorCode::Forbidden,
+                "the server makes a project's own branch itself, when it is made with no target",
+            ),
             Verb::Settings { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "a machine's settings are the person's to read and change, never an agent's",
@@ -1011,8 +1015,11 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server starts a task's thread itself; task_start with an agent asks for it",
             ),
-            verb @ (Verb::ProjectCreate { .. }
-            | Verb::ProjectSet { .. }
+            verb @ Verb::ProjectCreate { .. } => match self.goal_target(verb).await {
+                Ok(verb) => self.project_change(caller, key, &verb),
+                Err(refused) => refused,
+            },
+            verb @ (Verb::ProjectSet { .. }
             | Verb::ProjectProgress { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
@@ -1973,6 +1980,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::DropBranches { worker, .. }
+        | Verb::BranchOff { worker, .. }
         | Verb::RestartWorker { worker }
         | Verb::StartThread { worker, .. } => Some(*worker),
         Verb::Settings { of, .. } => *of,

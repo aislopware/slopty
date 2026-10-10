@@ -465,8 +465,8 @@ mod tests {
         assert_eq!(facts["os"], std::env::consts::OS, "{facts}");
 
         let repo = root.to_string_lossy().into_owned();
-        slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
-            .await;
+        let create = ["project", "create", "demo", "--title", "Demo", "--repo", &repo];
+        slopty(&root, addr, &[&create[..], &["--target", "main"]].concat()).await;
         slopty(
             &root,
             addr,

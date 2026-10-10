@@ -984,6 +984,52 @@ impl Hub {
         self.inner.deliver.notify_one();
     }
 
+    /// `verb`, a project to make, with the branch its work lands on: one it names, else a branch
+    /// of its own ([`Task::goal_branch`]) made first in its repository on the orchestrator's
+    /// worker at the tip of what is checked out there, so a goal never lands on the person's
+    /// branch unasked and their Push moves it on. A name already taken is left for the store
+    /// to refuse, with nothing made.
+    pub(super) async fn goal_target(&self, mut verb: Verb) -> Result<Verb, Outcome> {
+        let wanted = match &verb {
+            Verb::ProjectCreate { project, repo, target, orchestrator, .. }
+                if target.trim().is_empty() =>
+            {
+                Some((project.clone(), repo.clone(), *orchestrator))
+            }
+            _ => None,
+        };
+        let Some((project, repo, orchestrator)) = wanted else { return Ok(verb) };
+        if self.inner.state.lock().projects.project(&project).is_ok() {
+            return Ok(verb);
+        }
+        let Some(term) = orchestrator else {
+            return Err(error(
+                ErrorCode::Invalid,
+                "name the branch its work lands on, or an orchestrator: a project's own branch \
+                 is made in the checkout its orchestrator works in",
+            ));
+        };
+        let branch = Task::goal_branch(&project);
+        let off =
+            Verb::BranchOff { worker: term.worker, repo: repo.clone(), branch: branch.clone() };
+        match self.forward(None, off).await {
+            Outcome::Done => {}
+            Outcome::Error { code, message } => {
+                let why =
+                    format!("the project's own branch {branch} was not made in {repo}: {message}");
+                return Err(error(code, &why));
+            }
+            other => {
+                let why = format!("the project's own branch {branch} was not made: {other:?}");
+                return Err(error(ErrorCode::Failed, &why));
+            }
+        }
+        if let Verb::ProjectCreate { target, .. } = &mut verb {
+            *target = branch;
+        }
+        Ok(verb)
+    }
+
     /// A project change the store answers at once: made once per key, logged and pushed.
     pub(super) fn project_change(
         &self,
@@ -1034,6 +1080,7 @@ impl Hub {
         let task = |t: Task| Outcome::Task(Box::new(t));
         let status = |s: ProjectStatus| Outcome::Project(Box::new(s));
         let mut named = None;
+        let mut created = false;
         let mut kick = None;
         let mut told = None;
         let mut goal_met = None;
@@ -1065,7 +1112,10 @@ impl Hub {
                     metadata,
                 };
                 named = orchestrator.map(|_| new.id.clone());
-                state.projects.create(new, &running, now).map(|(s, u)| (status(s), u))
+                let made = state.projects.create(new, &running, now);
+                // An agent that makes a project knows its goal; the person's is handed over.
+                created = made.is_ok() && caller == Caller::Person;
+                made.map(|(s, u)| (status(s), u))
             }),
             Verb::ProjectSet {
                 project,
@@ -1192,7 +1242,12 @@ impl Hub {
         {
             let clones = clones_of(state, record);
             let role = orchestrator_role(record, &clones);
-            state.deliveries.instructions((project, None), &role, tokio::time::Instant::now());
+            let goal = record.goal.clone().filter(|_| created);
+            let at = tokio::time::Instant::now();
+            state.deliveries.instructions((project.clone(), None), &role, at);
+            if let Some(goal) = goal {
+                self.hand_goal(state, &project, &goal, &terminals);
+            }
             self.inner.deliver.notify_one();
         }
         if let Some(key) = key {
@@ -1200,6 +1255,24 @@ impl Hub {
         }
         drop(guard);
         outcome
+    }
+
+    /// The goal a project was made with goes to its orchestrator as the person's first words,
+    /// with its role, and on the timeline as said by them, so it arrives once however the
+    /// project was made. A terminal not live yet hears it when it is.
+    fn hand_goal(
+        &self,
+        state: &mut State,
+        project: &ProjectId,
+        goal: &str,
+        terminals: &HashSet<TermRef>,
+    ) {
+        let by = (None, Teller::Person);
+        match state.projects.tell(project, by, goal, terminals, WallMs::now()) {
+            Ok((_, updates)) => self.projects_moved(state, updates),
+            Err(refused) => tracing::debug!(%project, ?refused, "the goal is not on the timeline"),
+        }
+        state.deliveries.person(project.clone(), None, goal, tokio::time::Instant::now());
     }
 
     /// Put the live terminal `term` on `task`, as a start of its own would once announced: for

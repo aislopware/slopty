@@ -1120,6 +1120,13 @@ impl Task {
         format!("slopty/{project}/{task}")
     }
 
+    /// The branch a project made with no target lands its work on: `slopty/<project>/goal`,
+    /// beside its tasks' home branches, so no ref is both a branch and a folder of them.
+    #[must_use]
+    pub fn goal_branch(project: &ProjectId) -> String {
+        format!("slopty/{project}/goal")
+    }
+
     /// The branch the project's target lands as in a task's clone on another machine, when
     /// the merge queue gives the task back to rebase onto it: `slopty/<project>/target`, a
     /// name only the server sets and no task's number can take.

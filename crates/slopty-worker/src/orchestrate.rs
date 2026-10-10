@@ -629,7 +629,8 @@ impl Orchestrator {
             | Verb::CatchUp { .. }
             | Verb::LandPull { .. }
             | Verb::RemoveWorktree { .. }
-            | Verb::DropBranches { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::DropBranches { .. }
+            | Verb::BranchOff { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
                 let threads = inner.task_threads.get().cloned().ok_or_else(|| {
@@ -1174,6 +1175,17 @@ impl Orchestrator {
                 })?;
                 let repo = crate::file::expand_home(Path::new(&repo));
                 crate::repo::worktrees::drop_branches(git, &repo, &branches)
+                    .await
+                    .map_err(|failed| worktree_failed(&failed))?;
+                Ok(Outcome::Done)
+            }
+            Verb::BranchOff { worker, repo, branch } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                crate::repo::worktrees::branch_off(git, &repo, &branch)
                     .await
                     .map_err(|failed| worktree_failed(&failed))?;
                 Ok(Outcome::Done)

@@ -2825,13 +2825,14 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
 }
 
 /// A project carries the goal the person handed over and how far its agents go before they
-/// ask: the goal kept trimmed, the autonomy changed by the person alone. An orchestrator that
-/// tries to set it is refused and changes nothing.
+/// ask: the goal kept trimmed, the autonomy changed by the person alone. The goal goes to the
+/// orchestrator once as the person's first words, with its role, and is on the timeline as
+/// theirs. An orchestrator that tries to set the autonomy is refused and changes nothing.
 #[tokio::test]
 async fn a_project_carries_its_goal_and_the_person_s_autonomy() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let orchestrator = SessionId::new();
-    let (worker, lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, orchestrator, true);
     let made = hub
         .dispatch(Verb::ProjectCreate {
@@ -2851,6 +2852,20 @@ async fn a_project_carries_its_goal_and_the_person_s_autonomy() {
     let Outcome::Project(made) = made else { panic!("{made:?}") };
     let kept = (made.project.goal.as_deref(), made.project.autonomy);
     assert_eq!(kept, (Some("Ship projects mode"), Autonomy::Edits), "trimmed");
+    let context = delivered(&hub, &mut rx, "Ship projects mode").await;
+    assert!(context.contains("The person says:\n  Ship projects mode"), "{context}");
+    assert!(context.contains("You orchestrate"), "with its role: {context}");
+    assert_eq!(context.matches("Ship projects mode").count(), 1, "once: {context}");
+    let told: Vec<String> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Told { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(told, ["Ship projects mode"], "the person's words on the timeline");
     let set = |autonomy| Verb::ProjectSet {
         project: project(),
         autonomy,
@@ -2867,6 +2882,56 @@ async fn a_project_carries_its_goal_and_the_person_s_autonomy() {
     assert_eq!(own.project.autonomy, Autonomy::Own, "the person's word");
     let Outcome::Project(kept) = hub.dispatch(set(None)).await else { panic!() };
     assert_eq!(kept.project.autonomy, Autonomy::Own, "left out is left alone");
+}
+
+/// A project made with no target lands on a branch of its own, made first in its repository
+/// on the orchestrator's worker, so a goal never lands on the person's branch unasked. One
+/// the worker could not make is the refusal, with nothing made; with no orchestrator there is
+/// no checkout to make it in, so a target must be named.
+#[tokio::test]
+async fn a_project_with_no_target_lands_on_a_branch_of_its_own() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    let make = |project: &str, orchestrator| Verb::ProjectCreate {
+        project: ProjectId::new(project).unwrap(),
+        title: "Projects".to_owned(),
+        goal: Some("Ship it".to_owned()),
+        autonomy: Autonomy::Ask,
+        repo: "~/src/slopty".to_owned(),
+        target: " ".to_owned(),
+        verifier: None,
+        push: false,
+        orchestrator,
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    let term = TermRef { worker, session: orchestrator };
+
+    let broken = spawn(&hub, make("broken", Some(term)));
+    let (id, verb) = request(&mut rx).await;
+    let message = "not a git repository".to_owned();
+    answer(&lease, id, Outcome::Error { code: ErrorCode::Failed, message });
+    let broken = broken.await.unwrap();
+    assert!(refused(&broken, ErrorCode::Failed).contains("slopty/broken/goal"), "{verb:?}");
+    let listed = hub.dispatch(Verb::ProjectList).await;
+    assert!(!format!("{listed:?}").contains("broken"), "nothing made: {listed:?}");
+
+    let made = spawn(&hub, make("slopty", Some(term)));
+    let (id, verb) = request(&mut rx).await;
+    let wanted = Verb::BranchOff {
+        worker,
+        repo: "~/src/slopty".to_owned(),
+        branch: "slopty/slopty/goal".to_owned(),
+    };
+    assert_eq!(verb, wanted, "made in the orchestrator's checkout");
+    answer(&lease, id, Outcome::Done);
+    let Outcome::Project(made) = made.await.unwrap() else { panic!("made") };
+    assert_eq!(made.project.target, "slopty/slopty/goal", "its work lands there");
+
+    let unplaced = hub.dispatch(make("nowhere", None)).await;
+    assert!(refused(&unplaced, ErrorCode::Invalid).contains("orchestrator"), "{unplaced:?}");
 }
 
 /// The orchestrator says where the goal stands: it is kept on the project and its timeline, a

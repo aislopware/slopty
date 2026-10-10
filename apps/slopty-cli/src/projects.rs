@@ -45,9 +45,10 @@ pub enum ProjectCmd {
         /// The repository its tasks work in.
         #[arg(long)]
         repo: String,
-        /// The branch finished work lands on.
-        #[arg(long, default_value = "main")]
-        target: String,
+        /// The branch finished work lands on; left out, a branch of the project's own
+        /// (`slopty/<project>/goal`) made where the orchestrator's checkout is.
+        #[arg(long)]
+        target: Option<String>,
         /// The command that says a task's work is right (`cargo gate`).
         #[arg(long)]
         verifier: Option<String>,
@@ -362,7 +363,7 @@ pub async fn project(
                 project,
                 title,
                 repo,
-                target: Some(target),
+                target,
                 verifier,
                 push,
                 orchestrator,
