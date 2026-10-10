@@ -297,6 +297,8 @@ impl SettingsForm {
         let mut fields = Vec::with_capacity(rows().len());
         for (ix, row) in rows().iter().enumerate() {
             let placeholder: SharedString = match row.field.kind {
+                // A colour list's example is someone's palette; its empty field is the theme's.
+                Kind::List if theme_ansi(row.table(), row.key()).is_some() => THEME_COLOUR.into(),
                 Kind::Text | Kind::List => row.field.example.clone().unwrap_or_default().into(),
                 Kind::Colour => colour_hint(row.table(), row.key()),
                 Kind::Map(_) => {
@@ -2135,6 +2137,23 @@ impl SettingsForm {
             .into_any_element()
     }
 
+    /// The sixteen ANSI colours a palette row stands for, one band of swatches in order, black
+    /// to white then their bright forms: the field's own where it names them, the theme's for
+    /// the rest. The list's hexes cut short in a field; the band shows the whole palette.
+    fn ansi_strip(&self, ix: usize, ansi: &[Rgb; 16]) -> Div {
+        let theme = &self.theme;
+        div()
+            .debug_selector(move || format!("settings-ansi-{ix}"))
+            .flex_none()
+            .flex()
+            .h(px(theme.typography.icon()))
+            .overflow_hidden()
+            .rounded(px(theme.radii.xs))
+            .border(crate::kit::HAIR)
+            .border_color(hsla(theme.surfaces.border))
+            .children(ansi.iter().map(|c| div().w(px(theme.spacing.sm)).h_full().bg(hsla(*c))))
+    }
+
     /// A field typed into: a host, a list of addresses, a colour with its swatch.
     fn field(&self, ix: usize, row: &Row, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
@@ -2158,6 +2177,13 @@ impl SettingsForm {
                         .bg(hsla(colour))
                 })
             }
+            Kind::List => theme_ansi(row.table(), row.key()).map(|ansi| {
+                let own = match self.value(row) {
+                    Value::List(hexes) => hexes,
+                    _ => Vec::new(),
+                };
+                self.ansi_strip(ix, &ansi_of(ansi, &own))
+            }),
             _ => None,
         };
         well(theme)
@@ -2376,6 +2402,28 @@ fn theme_colour(table: &str, key: &str) -> Option<Rgb> {
         "selection" => t.selection,
         _ => return None,
     })
+}
+
+/// The theme's sixteen ANSI colours that a `[colors.light]` or `[colors.dark]` `ansi` list
+/// stands in for, of that appearance; none for any other list.
+fn theme_ansi(table: &str, key: &str) -> Option<[Rgb; 16]> {
+    let palette = match table {
+        "colors.light" => TerminalPalette::LIGHT,
+        "colors.dark" => TerminalPalette::DARK,
+        _ => return None,
+    };
+    (key == "ansi").then_some(palette.ansi)
+}
+
+/// The palette `own` makes of the theme's `ansi`: each hex it lists in order in place of the
+/// theme's colour, the rest the theme's; a hex that does not read keeps the theme's.
+fn ansi_of(mut ansi: [Rgb; 16], own: &[String]) -> [Rgb; 16] {
+    for (slot, hex) in ansi.iter_mut().zip(own) {
+        if let Some(colour) = parse_hex(hex) {
+            *slot = colour;
+        }
+    }
+    ansi
 }
 
 /// The bundled face, then every installed family whose `i` is as wide as its `M`.
@@ -2786,6 +2834,38 @@ mod map_tests {
             colour_hint("colors.light", "background")
         );
         assert_eq!(colour_hint("colors.light", "palette"), SharedString::from(THEME_COLOUR));
+    }
+
+    /// A palette row shows all sixteen ANSI colours as a band beside its field, the theme's
+    /// until the field names its own, which take their places in order; its empty field says
+    /// the theme's, not someone's example palette.
+    #[gpui::test]
+    fn the_ansi_row_shows_its_sixteen_colours(cx: &mut TestAppContext) {
+        let theme = TerminalPalette::LIGHT.ansi;
+        assert_eq!(ansi_of(theme, &[]), theme);
+        let own = ["#ff0000".to_owned(), "nonsense".to_owned(), "#00ff00".to_owned()];
+        let mine = ansi_of(theme, &own);
+        assert_eq!(mine[0], Rgb::hex(0x00ff_0000), "the first is the field's");
+        assert_eq!(mine[1], theme[1], "one that does not read keeps the theme's");
+        assert_eq!(mine[2], Rgb::hex(0x0000_ff00));
+        assert_eq!(mine[3..], theme[3..], "the rest are the theme's");
+        assert_eq!(theme_ansi("colors.dark", "ansi"), Some(TerminalPalette::DARK.ansi));
+        assert_eq!(theme_ansi("worker", "acp"), None, "another list has no band");
+
+        cx.update(gpui_kit::init);
+        let (_form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let row = rows()
+            .iter()
+            .position(|r| r.table() == "colors.light" && r.key() == "ansi")
+            .expect("the light palette row");
+        let band = cx.debug_bounds(leak(format!("settings-ansi-{row}"))).expect("the band");
+        let field = cx.debug_bounds(leak(format!("settings-field-{row}"))).expect("its field");
+        let sm = Theme::default().spacing.sm;
+        assert!(f32::from(band.size.width) >= 16.0 * sm, "all sixteen: {band:?}");
+        assert!(band.left() >= field.left() && band.right() <= field.right(), "in the field");
     }
 
     /// The Agents page writes its keys to their own tables: a step of the live agents to
