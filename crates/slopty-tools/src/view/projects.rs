@@ -477,6 +477,7 @@ fn progress_text(progress: &Progress) -> String {
 fn step_text(step: &TaskStep) -> String {
     let what = match step.kind {
         StepKind::Clone => format!("clone on worker {}", step.worker),
+        StepKind::Send => format!("send to the clone on worker {}", step.worker),
         StepKind::Home => format!("branch brought to worker {}", step.worker),
         StepKind::Verify => format!("verifier on worker {}", step.worker),
         StepKind::Merge => format!("merge on worker {}", step.worker),

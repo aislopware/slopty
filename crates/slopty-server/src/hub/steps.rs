@@ -204,7 +204,8 @@ impl Hub {
                             .insert((project, task), (term, commits, step.since_ms));
                     }
                 }
-                StepKind::Merge | StepKind::Rebase => {}
+                // A start's send goes again with the next start, a give-back's with its merge.
+                StepKind::Send | StepKind::Merge | StepKind::Rebase => {}
             }
         }
     }
@@ -391,7 +392,7 @@ impl Hub {
             into: Task::target_branch(project),
             target: route.target,
         };
-        self.send_back((project, task), back, (StepKind::Merge, worker)).await
+        self.send_back((project, task), back, (StepKind::Send, worker)).await
     }
 
     /// Send what `task`'s new worktree starts from to `clone` on `worker`, where it is about to
@@ -400,7 +401,7 @@ impl Hub {
     /// saw what the merge queue merged, and a task elsewhere would start from the worker's stale
     /// copy of the target. For a task that starts from the done, checked work of `on`
     /// ([`Task::start_from`]), it is that work's branch as the orchestrator's clone holds it, as
-    /// [`Task::home_branch`] of `on`. Shown on `task`'s clone step as it goes, and settled there
+    /// [`Task::home_branch`] of `on`. Shown on `task`'s send step as it goes, and settled there
     /// once it ends.
     ///
     /// # Errors
@@ -419,7 +420,7 @@ impl Hub {
             }
         };
         let what = on.map_or_else(|| target.clone(), |on| format!("task {on}'s work"));
-        let onto = self.send_back((project, task), back, (StepKind::Clone, worker)).await;
+        let onto = self.send_back((project, task), back, (StepKind::Send, worker)).await;
         let (ended, started) = match onto {
             Onto::Here => (None, Ok(target)),
             Onto::Sent { head, branch } => {
@@ -438,7 +439,7 @@ impl Hub {
             }
         };
         if let Some(ended) = ended {
-            self.step_now((project, task), StepKind::Clone, worker, ended);
+            self.step_now((project, task), StepKind::Send, worker, ended);
         }
         started
     }

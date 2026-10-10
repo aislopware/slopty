@@ -1237,6 +1237,7 @@ fn held_up(entry: &TimelineEntry, task: Option<&Task>, target: &str) -> Option<S
         Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {
             StepKind::Rebase => format!("its work conflicts with {target}: {}", first(why)),
             StepKind::Clone => format!("the clone it needs failed: {}", first(why)),
+            StepKind::Send => format!("its clone was not sent its start: {}", first(why)),
             StepKind::Home => format!("its branch did not come home: {}", first(why)),
             StepKind::Verify => format!("its verifier did not run: {}", first(why)),
             StepKind::Merge => format!("its merge stopped: {}", first(why)),

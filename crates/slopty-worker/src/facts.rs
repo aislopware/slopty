@@ -1,9 +1,11 @@
 //! What this worker has, as the [`Facts`] an orchestrator reads to pick a worker.
 //!
 //! The agents and toolchains installed, the GPUs and the power source
-//! (`docs/decisions/projects.md`). The agents reached over ACP are under `acp`, named
-//! as the ACP registry names them (`slopty_agent::acp::registry`), which is also how their
-//! threads' agent is named (`acp:<name>`): what a client offers to start is what is there.
+//! (`docs/decisions/projects.md`), and the clones the server had made under
+//! `~/slopty/clones` ([`REPOS`]), so a server that restarts still finds them. The agents reached
+//! over ACP are under `acp`, named as the ACP registry names them (`slopty_agent::acp::registry`),
+//! which is also how their threads' agent is named (`acp:<name>`): what a client offers to start is
+//! what is there.
 //!
 //! The server fills in what it knows itself, from the worker's registration and capabilities
 //! (`os`, `arch`, `cpus`, `memory_mb`, `encoders`, `displays`, `load` and the rest), so none of
@@ -31,6 +33,14 @@ use tokio::task::JoinSet;
 
 /// How often the facts are gathered again: installs and upgrades are rare.
 pub const REFRESH: Duration = Duration::from_mins(10);
+/// The fact the clones under `~/slopty/clones` are in: each key of a clone's identity
+/// ([`slopty_proto::terminal::RepoId::keys`]) to its path, as the server keys its `repos`.
+pub const REPOS: &str = "repos";
+/// How deep under `~/slopty/clones` a clone is looked for: `host/owner/repo`, with room for a
+/// GitLab group's subgroups.
+const CLONES_DEPTH: usize = 6;
+/// The most clones listed.
+const CLONES_MAX: usize = 256;
 /// How long a `--version` may take: an agent written in Node or Python starts slowly.
 const VERSION_WAIT: Duration = Duration::from_secs(10);
 /// How much of a `--version` is read, in bytes.
@@ -106,8 +116,96 @@ where
         }
         let read = Arc::clone(&own);
         let own_now = tokio::task::spawn_blocking(move || read()).await.unwrap_or_default();
-        publish(&facts, gather(own_now).await);
+        let mut next = gather(own_now).await;
+        // A clone made while this gathered ([`clone_made`]) stays until its folder is gone.
+        let made_meanwhile = facts.borrow().get(REPOS).cloned();
+        if let (Some(Fact::Map(made)), Some(Fact::Map(found))) =
+            (made_meanwhile, next.get_mut(REPOS))
+        {
+            let there = tokio::task::spawn_blocking(move || still_there(made)).await;
+            for (key, path) in there.unwrap_or_default() {
+                found.entry(key).or_insert(path);
+            }
+        }
+        publish(&facts, next);
     }
+}
+
+/// The server had a clone of `repo` made at `path`: [`REPOS`] holds it from now on, before the
+/// next gathering finds it.
+pub fn clone_made(
+    facts: &watch::Sender<Facts>,
+    path: &Path,
+    repo: &slopty_proto::terminal::RepoId,
+) {
+    let path = path.to_string_lossy().into_owned();
+    facts.send_if_modified(|now| {
+        let repos = now.entry(REPOS.to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
+        let Fact::Map(repos) = repos else { return false };
+        let mut changed = false;
+        for key in repo.keys() {
+            let at = Fact::Text(path.clone());
+            changed |= repos.insert(key.to_owned(), at.clone()) != Some(at);
+        }
+        changed
+    });
+}
+
+/// The entries of a [`REPOS`] map whose clone's folder is still there.
+fn still_there(repos: Facts) -> Vec<(String, Fact)> {
+    repos
+        .into_iter()
+        .filter(|(_, path)| matches!(path, Fact::Text(p) if Path::new(p).is_dir()))
+        .collect()
+}
+
+/// The clones under `root` (`~/slopty/clones`), as [`REPOS`] lists them.
+///
+/// Every folder holding a `.git` at most `CLONES_DEPTH` below it, at most `CLONES_MAX` of
+/// them, each by the keys of its identity. A key two clones share names the first path in
+/// order.
+pub async fn clones(root: &Path) -> Fact {
+    let root = root.to_path_buf();
+    let found = tokio::task::spawn_blocking(move || clone_roots(&root)).await.unwrap_or_default();
+    let mut repos = Facts::new();
+    for path in found {
+        let id = crate::repo::identify(path.clone()).await;
+        let text = path.to_string_lossy().into_owned();
+        for key in id.keys() {
+            repos.entry(key.to_owned()).or_insert_with(|| Fact::Text(text.clone()));
+        }
+    }
+    Fact::Map(repos)
+}
+
+/// The folders under `root` holding a `.git`, in order, not looking inside one.
+fn clone_roots(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut next = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = next.pop() {
+        if found.len() >= CLONES_MAX {
+            break;
+        }
+        if depth > 0 && dir.join(".git").exists() {
+            found.push(dir);
+            continue;
+        }
+        if depth >= CLONES_DEPTH {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut subdirs: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            // A clone under way is made beside its place under a hidden name.
+            .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+            .collect();
+        subdirs.sort();
+        next.extend(subdirs.into_iter().rev().map(|p| (p, depth.saturating_add(1))));
+    }
+    found.sort();
+    found
 }
 
 /// Make `next` the current facts, telling the watchers only when it differs; whether it did.
@@ -129,13 +227,15 @@ pub async fn gather(own: OwnAcp) -> Facts {
     let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
     let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
     let acp = registry::registry(&own);
-    let (agents, acp, toolchains, rust_targets, gpus, power) = tokio::join!(
+    let clones_root = crate::repo::cloning::clones_root(&slopty_platform::dirs::home());
+    let (agents, acp, toolchains, rust_targets, gpus, power, repos) = tokio::join!(
         versions(&search, &stand_ins, &AGENTS),
         acp_agents(&search, &stand_ins, acp),
         versions(&search, &stand_ins, TOOLCHAINS),
         rust_targets(&search),
         gpus(&search),
         power(),
+        clones(&clones_root),
     );
     let mut toolchains = toolchains;
     if let Some(xcode) = stand_ins.xcode {
@@ -145,6 +245,7 @@ pub async fn gather(own: OwnAcp) -> Facts {
     facts.insert("agents".to_owned(), Fact::Map(agents));
     facts.insert("acp".to_owned(), Fact::Map(acp));
     facts.insert("toolchains".to_owned(), Fact::Map(toolchains));
+    facts.insert(REPOS.to_owned(), repos);
     let texts = |items: Vec<String>| Fact::List(items.into_iter().map(Fact::Text).collect());
     if let Some(targets) = rust_targets {
         facts.insert("rust_targets".to_owned(), texts(targets));
@@ -900,6 +1001,73 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         false
+    }
+
+    /// `git` in `dir`, with no config of the developer's, answering its output.
+    fn git_in(dir: &Path, args: &[&str]) -> String {
+        let git = crate::changes::git().expect("git");
+        let out = std::process::Command::new(git)
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The clones under `~/slopty/clones` are listed by the keys of their identity, each in
+    /// the first path that has it; a clone under way (hidden beside its place) and a folder
+    /// that holds no repository are not. A clone made later joins the list at once, and a
+    /// gathering that started before it keeps it.
+    #[tokio::test]
+    async fn the_clones_made_for_the_server_are_a_fact() {
+        if crate::changes::git().is_none() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("clones");
+        let demo = root.join("example.com").join("o").join("demo");
+        std::fs::create_dir_all(&demo).unwrap();
+        git_in(&demo, &["init", "-q", "-b", "main"]);
+        git_in(&demo, &["remote", "add", "origin", "https://example.com/o/demo.git"]);
+        git_in(&demo, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let first = git_in(&demo, &["rev-parse", "HEAD"]);
+        let partial = root.join("example.com").join("o").join(".other.partial");
+        std::fs::create_dir_all(partial.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("example.com").join("empty")).unwrap();
+
+        let Fact::Map(found) = clones(&root).await else { panic!("a map") };
+        let at = Fact::Text(demo.to_string_lossy().into_owned());
+        assert_eq!(found.get("example.com/o/demo"), Some(&at), "by its origin");
+        assert_eq!(found.get(&first), Some(&at), "by its first commit");
+        assert_eq!(found.len(), 2, "{found:?}");
+        let Fact::Map(none) = clones(&tmp.path().join("nowhere")).await else { panic!() };
+        assert!(none.is_empty());
+
+        let (tx, rx) = watch::channel(Facts::new());
+        let other = root.join("example.com").join("o").join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let id = slopty_proto::terminal::RepoId {
+            origin: Some("example.com/o/other".to_owned()),
+            root: None,
+            url: None,
+        };
+        clone_made(&tx, &other, &id);
+        let made = rx.borrow().get(REPOS).cloned();
+        let want = Fact::Text(other.to_string_lossy().into_owned());
+        let Some(Fact::Map(made)) = made else { panic!("{made:?}") };
+        assert_eq!(made.get("example.com/o/other"), Some(&want));
+        let mut gone = made.clone();
+        gone.insert(
+            "gone".to_owned(),
+            Fact::Text(root.join("gone").to_string_lossy().into_owned()),
+        );
+        let kept: Facts = still_there(gone).into_iter().collect();
+        assert_eq!(kept, made, "a clone whose folder went is let go");
     }
 
     /// A command that hangs past the wait is killed with everything it started. A machine so

@@ -2957,3 +2957,42 @@ reordering and edited allows are gone" in `agents.md`.*
     - the CLI's `a_task_s_clone_is_made_where_it_runs_and_its_branch_comes_home`, which waits
       for the agent after the early answer;
     - the `start_thread` and `client_start_in_worktree` goldens.
+
+- ✅ **Project state survives a server restart** (2026-10-11, the orchestrator-first study,
+  item 18).
+  - **Clones.** The server kept the clones it had made in memory (`Steps::made`), so a
+    restarted server forgot them. Its next task on that worker then cloned again, or was
+    refused when no address was known. That list is deleted.
+    - Each worker reports the clones under `~/slopty/clones` in its own `repos` fact
+      (`facts::clones`, `facts::REPOS`): each key of a clone's identity mapped to its path,
+      the same shape the server uses.
+    - A clone made for the server joins that fact at once (`facts::clone_made`, through
+      `Orchestrator::set_facts`). A gathering that started before the clone keeps it while its
+      folder is there.
+    - On `Outcome::Cloned` the server writes it into its copy of the worker's facts
+      (`projects::cloned`), so the start that asked can go on. `repos_of` merges the worker's
+      `repos` with its shells' repositories.
+  - **A Home trip waits for both ends.** A trip taken up after a restart when the
+    orchestrator's worker registers ran at once and failed if the task's worker had not
+    registered yet. It now waits for that worker (`away_from`, `Projects::resume_on`). In the
+    other order it was already right: a trip is taken up only when the orchestrator's worker
+    is back.
+  - **A merge pressed while its branch is on its way home** was already kept
+    (`ProjectsFile::merges`).
+  - **Starts are stored.** A task start under way whose terminal is not yet on its task is
+    kept (`ProjectsFile::starts`, `Keep::Starts`, `projects::keep_starts` at every change to
+    `starting`). The next server takes it up as answered: it still counts, a second start of
+    the task is refused, and its terminal goes on the task once its worker shows it. A
+    start's grace runs only while its worker is linked, from the moment it registers, so a
+    worker away for longer than the grace does not lose it.
+  - **The send has its own step.** Sending a task's clone its start, or the target to rebase
+    onto, was shown as a Clone or a Merge step. It is now `StepKind::Send`, added last so no
+    golden moved. Its failure is a start's, so the card offers Start, not Retry
+    (`project/model.rs`, which also gets its step line).
+  - Tests:
+    - `the_clones_made_for_the_server_are_a_fact` (slopty-worker);
+    - the reported clones in `a_repository_is_a_fact_of_every_worker_with_a_clone`;
+    - `a_branch_on_its_way_home_waits_for_both_ends_after_a_restart` (both orders);
+    - `a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns`, on a paused
+      clock across twice the grace, with the store's replica agreeing;
+    - the Send steps in the hub and CLI tests.

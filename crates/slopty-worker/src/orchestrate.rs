@@ -313,6 +313,9 @@ struct Inner {
     /// The `settings.toml` the daemon follows, whose `[worker]` another device reads and edits
     /// ([`Verb::Settings`]), once the daemon gave it.
     settings_file: std::sync::OnceLock<PathBuf>,
+    /// This worker's facts, which a clone made for the server joins
+    /// ([`crate::facts::clone_made`]).
+    facts: std::sync::OnceLock<tokio::sync::watch::Sender<slopty_proto::project::Facts>>,
     /// What has the daemon exit for its service manager to start it again
     /// ([`Verb::RestartWorker`]), once the daemon gave it: only a daemon a service manager
     /// keeps alive gives one.
@@ -365,6 +368,7 @@ impl Orchestrator {
             task_threads: std::sync::OnceLock::new(),
             thread_reads: std::sync::OnceLock::new(),
             settings_file: std::sync::OnceLock::new(),
+            facts: std::sync::OnceLock::new(),
             restart: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
@@ -390,6 +394,14 @@ impl Orchestrator {
     pub fn set_settings_file(&self, path: PathBuf) {
         if self.inner.settings_file.set(path).is_err() {
             tracing::warn!("the settings file was given twice; the first stays");
+        }
+    }
+
+    /// Tell `facts` of every clone made for the server from now on, so this worker's `repos`
+    /// fact holds it across a restart of the server. The first one given stays.
+    pub fn set_facts(&self, facts: tokio::sync::watch::Sender<slopty_proto::project::Facts>) {
+        if self.inner.facts.set(facts).is_err() {
+            tracing::warn!("the facts were given twice; the first stays");
         }
     }
 
@@ -971,6 +983,9 @@ impl Orchestrator {
                     Ok(())
                 })
                 .await?;
+                if let Some(facts) = self.inner.facts.get() {
+                    crate::facts::clone_made(facts, &path, &repo);
+                }
                 Ok(Outcome::Cloned { path: path.to_string_lossy().into_owned(), repo })
             }
             Verb::BundleBranch { worker, repo, branch, target } => {

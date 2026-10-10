@@ -867,6 +867,7 @@ impl Drop for InFlight<'_> {
             let mut state = self.hub.inner.state.lock();
             state.starting.retain(|s| s.id != self.id);
             keep_starts(&mut state);
+            drop(state);
         }
     }
 }
@@ -1834,11 +1835,14 @@ impl Hub {
         // A clone to make or a branch to send takes a while: the caller hears where the task
         // goes now, and the rest runs as the task's steps. A start that fails then says why on
         // its card and to the orchestrator.
-        let phase =
-            if url.is_some() { "Cloning the repository" } else { "Getting its clone ready" };
+        let (kind, phase) = if url.is_some() {
+            (slopty_proto::project::StepKind::Clone, "Cloning the repository")
+        } else {
+            (slopty_proto::project::StepKind::Send, "Sending its clone what it starts from")
+        };
         let running =
             slopty_proto::project::StepState::Running { phase: phase.to_owned(), percent: None };
-        self.step_now((project, task), slopty_proto::project::StepKind::Clone, worker, running);
+        self.step_now((project, task), kind, worker, running);
         let card = self.inner.state.lock().projects.task(project, task).cloned();
         let hub = self.clone();
         let at = project.clone();

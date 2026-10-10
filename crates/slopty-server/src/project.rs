@@ -77,8 +77,22 @@ pub struct ProjectsFile {
     pub merges: Vec<(ProjectId, TaskId)>,
     /// What projects let go left for workers to remove, until each worker answers.
     pub cleanups: Vec<Cleanup>,
+    /// The starts of task agents under way, whose terminal is not on its task yet: one a
+    /// restart cut off is put on its task once its worker shows the terminal.
+    pub starts: Vec<KeptStart>,
     /// How many changes it holds: the store's log goes on from the next.
     pub through: u64,
+}
+
+/// A start of a task's agent under way, as the store keeps it ([`ProjectsFile::starts`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct KeptStart {
+    /// The terminal it opens, under the id the server chose.
+    pub term: TermRef,
+    /// The task it is for.
+    pub task: (ProjectId, TaskId),
+    /// The conversation its agent was started under, once its worker's answer was lost.
+    pub conversation: Option<String>,
 }
 
 /// What a project let go leaves for a worker to remove, kept until the worker answers: one away
@@ -194,6 +208,8 @@ pub enum Keep {
         /// Whether it waits.
         waits: bool,
     },
+    /// The task starts under way now, every one.
+    Starts(Vec<KeptStart>),
 }
 
 /// The most keys the store holds: the hub remembers [`KEYS_REMEMBERED`] changes and as many
@@ -296,6 +312,7 @@ impl ProjectsFile {
             Keep::Forget(project) => {
                 self.projects.retain(|r| r.project.id != *project);
                 self.merges.retain(|(p, _)| p != project);
+                self.starts.retain(|s| s.task.0 != *project);
             }
             Keep::Key(kept) => self.apply_key(kept),
             Keep::Merge { project, task, waits } => {
@@ -311,6 +328,7 @@ impl ProjectsFile {
                     self.cleanups.push(cleanup.clone());
                 }
             }
+            Keep::Starts(starts) => self.starts.clone_from(starts),
         }
     }
 
@@ -980,6 +998,17 @@ impl Projects {
             .collect()
     }
 
+    /// Take `step` of `task` up once `worker` is back rather than now: a step whose other end
+    /// a restart has not heard from yet.
+    pub(crate) fn resume_on(
+        &mut self,
+        worker: WorkerId,
+        task: (ProjectId, TaskId),
+        step: TaskStep,
+    ) {
+        self.restarted.insert(task, TaskStep { worker, ..step });
+    }
+
     /// Every project, as the store keeps it after `through` changes, beside `watched`.
     pub(crate) fn file(&self, watched: Vec<Watched>, through: u64) -> ProjectsFile {
         let projects = self.records.values().cloned().collect();
@@ -989,6 +1018,7 @@ impl Projects {
             keys: Vec::new(),
             merges: Vec::new(),
             cleanups: Vec::new(),
+            starts: Vec::new(),
             through,
         }
     }

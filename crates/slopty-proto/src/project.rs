@@ -1040,6 +1040,10 @@ pub enum StepKind {
     /// The merge queue's rebase of the task's work onto the target. It is a step of its own
     /// only when it fails, and then it conflicts: the work goes back to its agent to resolve.
     Rebase,
+    /// What a task's worktree starts from (the target, or the work it starts on), or the
+    /// target it rebases onto, sent from the orchestrator's clone to the task's on another
+    /// machine.
+    Send,
 }
 
 /// How a [`TaskStep`] goes. Its texts are at most [`SUMMARY_MAX`] bytes.

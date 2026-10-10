@@ -715,7 +715,7 @@ pub(super) fn announce(lease: &Lease, session: SessionId, with_agent: bool) {
 /// A start a restart of the server cut off is kept: the next server counts it, refuses a
 /// second start of its task, and puts the terminal on the task once its worker comes back
 /// showing it, whenever that is.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let mut kept = hub.keep_projects();
@@ -725,10 +725,10 @@ async fn a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns() 
     let _asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let (_, session) = chosen(&start.1);
-    let mut file = hub.projects_file(0);
+    let file = hub.projects_file(0);
     assert_eq!(file.starts.len(), 1, "kept while it is under way");
     // The store's own replica hears it as the hub's file has it.
-    let mut replica = crate::project::ProjectsFile::default();
+    let mut replica = ProjectsFile::default();
     while let Ok(change) = kept.try_recv() {
         replica.apply(&change);
     }
@@ -737,14 +737,13 @@ async fn a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns() 
     drop((lease, rx, hub));
 
     let hub = Hub::new("server".to_owned(), known);
-    file.starts.iter_mut().for_each(|s| s.conversation = None);
     hub.adopt_projects(file);
     let again = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: claude() });
     assert!(refused(&again.await, ErrorCode::Conflict).contains("being started"));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut shells = vec![summary(session)];
-    shells[0].id = session;
-    let (_, lease, _rx) = worker_again(&hub, linux, "box", Os::Linux, shells);
+    // Its worker is away longer than a start's grace: the grace runs from its return.
+    tokio::time::advance(projects::STARTED_GRACE.saturating_mul(2)).await;
+    assert_eq!(status(&hub).await.live.project, 1, "it counts while its worker is away");
+    let (_, lease, _rx) = worker_again(&hub, linux, "box", Os::Linux, vec![summary(session)]);
     announce(&lease, session, true);
     let on = assigned(&hub, task).await.assignment.expect("put on its task");
     assert_eq!(on.term, TermRef { worker: linux, session });
@@ -2184,7 +2183,7 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     let step = step_of(&hub, task).await.map(|s| (s.kind, s.worker, s.state));
     let detail = "main as the orchestrator's clone has it, at 9e1f0c2".to_owned();
-    assert_eq!(step, Some((StepKind::Clone, linux, StepState::Done { detail })));
+    assert_eq!(step, Some((StepKind::Send, linux, StepState::Done { detail })), "its own step");
 
     // The start answers once placed, the target's trip still to go; one that fails then says
     // why on the card and to the orchestrator, and starts nothing.
@@ -2195,8 +2194,8 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
         placed.step.map(|s| (s.kind, s.worker, matches!(s.state, StepState::Running { .. })));
     assert_eq!(
         readying,
-        Some((StepKind::Clone, linux, true)),
-        "answered at once, its clone being readied"
+        Some((StepKind::Send, linux, true)),
+        "answered at once, its clone being sent its start"
     );
     assert!(placed.assignment.is_none());
     let (id, verb) = request(&mut studio_rx).await;
@@ -2558,7 +2557,7 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
         })
         .collect();
     let detail = format!("{branch} as slopty/slopty/{task} at 4a7aa6d in /w/demo");
-    let target = (StepKind::Clone, linux, "main from its origin".to_owned());
+    let target = (StepKind::Send, linux, "main from its origin".to_owned());
     assert_eq!(arrived, [target, (StepKind::Home, studio, detail)], "the branch arrived");
     let nothing = format!("{branch} has no commit beyond main");
     answer(&linux_lease, id, Outcome::Error { code: ErrorCode::Failed, message: nothing.clone() });

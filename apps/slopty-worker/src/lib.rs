@@ -399,6 +399,7 @@ fn join_server(
         orchestrator.set_restart(Arc::clone(restart));
     }
     let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
+    orchestrator.set_facts(facts_tx.clone());
     let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
     let facts_task = tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };

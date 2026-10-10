@@ -702,7 +702,8 @@ impl Board {
         let retried = |kind: StepKind| match kind {
             StepKind::Home | StepKind::Merge => true,
             StepKind::Verify | StepKind::Rebase => !live,
-            StepKind::Clone => false,
+            // A failed send is a start's: the card offers Start, not Retry.
+            StepKind::Clone | StepKind::Send => false,
         };
         if failed.is_some_and(|s| retried(s.kind)) && !fix_ci {
             out.push(TaskAction::Retry);
@@ -977,6 +978,11 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
         (StepKind::Clone, StepState::Done { .. }) => format!("Cloned on {at}"),
         (StepKind::Clone, StepState::Failed { why }) => {
             format!("Clone on {at} failed: {}", first(why))
+        }
+        (StepKind::Send, StepState::Running { .. }) => format!("Sending its start to {at}"),
+        (StepKind::Send, StepState::Done { detail }) => format!("Sent to {at}: {}", first(detail)),
+        (StepKind::Send, StepState::Failed { why }) => {
+            format!("Not sent to {at}: {}", first(why))
         }
         (StepKind::Home, StepState::Running { percent, .. }) => match percent {
             Some(p) => format!("Bringing its branch to {at}: {p}%"),

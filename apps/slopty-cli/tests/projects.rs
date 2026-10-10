@@ -799,7 +799,7 @@ mod tests {
         // The clone is made, and then the target is there as the forge has it: nothing was
         // merged in the orchestrator's clone that the forge lacks.
         let detail = "main from its origin".to_owned();
-        assert_eq!(step, Some((StepKind::Clone, StepState::Done { detail })), "shown as a step");
+        assert_eq!(step, Some((StepKind::Send, StepState::Done { detail })), "shown as a step");
         let config: Value =
             serde_json::from_slice(&std::fs::read(linux_home.join(".claude.json")).unwrap())
                 .unwrap();
@@ -867,8 +867,8 @@ mod tests {
             [
                 (StepKind::Clone, false),
                 (StepKind::Clone, true),
-                (StepKind::Clone, false),
-                (StepKind::Clone, true),
+                (StepKind::Send, false),
+                (StepKind::Send, true),
                 (StepKind::Home, false),
                 (StepKind::Home, true)
             ],
@@ -1134,8 +1134,8 @@ mod tests {
             [
                 "Clone began",
                 "Clone done",
-                "Clone began",
-                "Clone done",
+                "Send began",
+                "Send done",
                 "Home began",
                 "Home done",
                 "Verify began",
@@ -1259,8 +1259,8 @@ mod tests {
             [
                 "Clone began",
                 "Clone done",
-                "Clone began",
-                "Clone done",
+                "Send began",
+                "Send done",
                 "Home began",
                 "Home done",
                 "Verify began",
@@ -1268,6 +1268,7 @@ mod tests {
                 "Home began",
                 "Home done",
                 "Merge began",
+                "Send began",
                 "Rebase failed",
                 "Home began",
                 "Home done",

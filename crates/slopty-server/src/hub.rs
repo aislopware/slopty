@@ -200,6 +200,8 @@ struct State {
     /// Starts of agents and tasks' terminals placed and not live yet.
     starting: Vec<Starting>,
     next_start: u64,
+    /// The task starts the store was last told of ([`projects::keep_starts`]).
+    kept_starts: Vec<crate::project::KeptStart>,
     /// Reports on their way to the agents they are for.
     deliveries: Deliveries,
     /// Terminals the server watches for as long as they live ([`Watched`]), with when each
@@ -456,6 +458,21 @@ impl Hub {
         }
         state.steps.adopt_merges(file.merges.drain(..));
         state.cleanups.adopt(file.cleanups.drain(..));
+        // A start a restart cut off is put on its task once its worker shows the terminal.
+        for kept in file.starts.drain(..) {
+            state.next_start = state.next_start.wrapping_add(1);
+            let id = state.next_start;
+            state.starting.push(Starting {
+                id,
+                term: kept.term,
+                task: Some(kept.task),
+                agent: true,
+                since: now,
+                answered: true,
+                conversation: kept.conversation,
+            });
+        }
+        state.kept_starts = projects::starts_kept(&state);
         state.projects = Projects::restore(file);
     }
 
@@ -478,6 +495,8 @@ impl Hub {
         file.keys.sort_by_key(|k| k.at);
         file.merges = state.steps.merges();
         file.cleanups = state.cleanups.kept();
+        file.starts = projects::starts_kept(&state);
+        drop(state);
         file
     }
 
@@ -684,6 +703,12 @@ impl Hub {
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
+        // A start whose worker was away, one a restart cut off among them, counts its grace
+        // from the worker's return.
+        let back = tokio::time::Instant::now();
+        for start in state.starting.iter_mut().filter(|s| s.term.worker == worker && s.answered) {
+            start.since = back;
+        }
         let (name, liveness) = (info.name.clone(), info.liveness);
         self.happen(Happening::Worker { worker, name: name.clone(), liveness });
         self.announce(FromServer::Worker(info));
