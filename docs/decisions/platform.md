@@ -1317,3 +1317,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::attention::a_small_question_is_answered_from_its_notes_options`,
     `workspace::tests::approvals::a_notes_reply_goes_straight_to_a_linked_worker`,
     `…::a_notes_reply_goes_through_the_server_while_its_worker_is_away` (slopty-ui).
+
+- ✅ **Save to Files comes down into the folder chosen** (2026-10-10, readiness audit "below
+  the line"). On iPhone and iPad, "Save to Files…" and "Save a copy…" brought the whole file
+  into the app's outbox before the export sheet showed, with no progress and no stop, and the
+  file was stored twice. A large file looked like nothing happening.
+  - **Where first.** The Files picker opens on folders, not copies
+    (`file_drop::picker::choose_folder`, `UIDocumentPickerMode::Open` on `public.folder`).
+    The worker's file then comes down straight into the folder chosen, as any download does on
+    the Mac. It is listed in the transfers popover with its progress, its rate and its stop. It
+    lands in a hidden staging directory beside its name and is renamed into place, under a name
+    the folder does not have yet (`name (2).ext`).
+  - **The folder's scope.** A folder outside the sandbox is reached only inside its security
+    scope. `picker::Scoped` enters it when the folder is chosen and leaves it when dropped, one
+    stop for the one start that succeeded. The download holds it until it stops writing, which
+    covers landing, failure, the person's stop, a lost link and the view going.
+  - **Not resumed after a relaunch.** The grant is not bookmarked, so such a download is not
+    kept in the transfer ledger; the next run would not hold the folder.
+  - Test: `workspace::tests::remote::saving_to_files_comes_down_into_the_chosen_folder`
+    (slopty-ui, on the Mac through the same `save_into`).

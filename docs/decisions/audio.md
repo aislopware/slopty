@@ -479,8 +479,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `UIDocumentPickerViewController` in import mode. The copies it hands over are moved into a
     landing and go to the tile as a drop on it would (`WorkspaceView::files_picked`), so the
     upload deletes them when it ends. "Save to Files…" (the palette, and the selected row's
-    button) brings the row down into the outbox off the main thread and shows the picker in
-    export mode; the copy goes once it is done. Import uses the string-typed initialiser, which
+    button) asks the picker for a folder and brings the row down straight into it (amended
+    2026-10-10; platform.md, "Save to Files comes down into the folder chosen"). Import uses the string-typed initialiser, which
     is deprecated, because the content-type one takes a `UTType` and nothing here binds
     UniformTypeIdentifiers yet (the Mac's drag icon makes the same trade). A `FilesSeam` global
     takes the picker's asks in tests, so none shows a real one.

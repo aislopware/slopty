@@ -1649,6 +1649,57 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("readout-transfers").is_none());
 }
 
+/// "Save to Files" brings the worker's file straight into the folder chosen, listed while it
+/// comes, under a name the folder does not have yet; what it holds (the folder's security
+/// scope) is let go once the download stops writing, whether it landed or failed, and no
+/// staging directory is left in the folder.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn saving_to_files_comes_down_into_the_chosen_folder(cx: &mut TestAppContext) {
+    /// Says when it is let go, as the folder's scope is left.
+    struct Held(Rc<std::cell::Cell<bool>>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+    let (view, cx) = workspace(cx);
+    let (studio, _calls, _board) = connect_remote(&view, cx);
+    let key = studio.key;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("out.txt"), b"mine").unwrap();
+    let left = Rc::new(std::cell::Cell::new(false));
+    let held: Box<dyn std::any::Any> = Box::new(Held(Rc::clone(&left)));
+    let rows = view.update_in(cx, |v, _window, cx| {
+        v.save_into(key, "~/out.txt".to_owned(), dir.path(), held, cx);
+        v.transfer_rows(cx.background_executor().now())
+    });
+    let listed: Vec<(bool, &str)> = rows.iter().map(|r| (r.up, r.name.as_str())).collect();
+    assert_eq!(listed, [(false, "out.txt")], "listed, with its stop, while it comes");
+    cx.run_until_parked();
+    let landed = dir.path().join("out (2).txt");
+    assert_eq!(std::fs::read_to_string(&landed).unwrap(), "~/out.txt", "beside the one there");
+    assert_eq!(std::fs::read(dir.path().join("out.txt")).unwrap(), b"mine", "which it kept");
+    assert!(left.get(), "the scope is let go once it landed");
+    let entries = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(entries, 2, "no staging directory is left");
+    let notice = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert_eq!(notice, "Saved out (2).txt in Files");
+
+    let not_a_folder = dir.path().join("out.txt");
+    let left = Rc::new(std::cell::Cell::new(false));
+    let held: Box<dyn std::any::Any> = Box::new(Held(Rc::clone(&left)));
+    view.update_in(cx, |v, _window, cx| {
+        v.save_into(key, "~/b.txt".to_owned(), &not_a_folder, held, cx);
+    });
+    cx.run_until_parked();
+    assert!(left.get(), "a download that failed lets the scope go too");
+    let notice = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert!(notice.starts_with("b.txt was not saved: "), "{notice}");
+    let rows = view.read_with(cx, |v, cx| v.transfer_rows(cx.background_executor().now()));
+    assert!(rows.is_empty(), "nothing left on the list");
+}
+
 /// Transfers in flight are kept in the ledger and taken up at the next launch: listed as
 /// waiting for their machine until it links, then an upload goes on from what the worker holds
 /// and a download to where it was going; each leaves the ledger as it ends, and the file goes

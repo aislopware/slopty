@@ -549,10 +549,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - **Mac:** the save panel (GPUI's `prompt_for_new_path`) opens in `~/Downloads` on the
     file's name. The file lands in a hidden directory beside the chosen path and is renamed
     into place, as a kept drag promise is, so a half-arrived file never carries the chosen
-    name. **iPhone and iPad:** GPUI has no save panel there, so the file comes into the
-    outbox, and `UIDocumentPickerViewController` in export mode (`file_drop::picker::export`,
-    the folder tile's "Save to Files…") copies it where the person chooses. The copy here is
-    deleted once the sheet is done. A failure is a notice: "name was not saved: why".
+    name. **iPhone and iPad:** GPUI has no save panel there, so the Files picker asks for a
+    folder first and the file comes down straight into it, listed with its progress and its
+    stop (amended 2026-10-10; platform.md, "Save to Files comes down into the folder chosen").
+    A failure is a notice: "name was not saved: why".
   - **A tile with no editor still takes the keyboard.** A file tile gave its editor the
     focus even while the body showed a notice (not text, too large, not readable) and drew no
     editor. The focus then sat on nothing drawn, and a palette action fell to the window's root.

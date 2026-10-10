@@ -1,18 +1,21 @@
 //! The Files and Photos pickers on iOS: files or photos picked there go up to a tile, and a
 //! worker's file brought down here is saved in Files.
 //!
+//! "Save to Files" asks for a folder first ([`choose_folder`]): the worker's file then comes
+//! down straight into it, as a download with its progress and its stop, while the folder's
+//! security scope is held ([`Scoped`]), so nothing is fetched whole before the person sees it
+//! move and nothing is stored twice.
+//!
 //! The picker in import mode hands over copies in the app's own temporary directory, which are
 //! moved into a landing and go on as a drop's files do ([`Dropped`]), so the upload deletes them
-//! when it ends. In export mode it copies the files it is given to wherever the person chooses;
-//! the caller deletes its own once the picker is done. One picker shows at a time: a new one
-//! ends the last as dismissed.
+//! when it ends. One picker shows at a time: a new one ends the last as dismissed.
 //!
 //! The Photos picker runs out of the app's process and needs no access to the library: what is
 //! picked comes as item providers, loaded as a drop's are, in the most compatible form (a HEIC
 //! photo as a JPEG, which every agent reads).
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -37,12 +40,64 @@ use super::{Dropped, Landing, Waiting, arrive, root};
 /// The type every file conforms to, packages included.
 const ITEM_UTI: &str = "public.item";
 
+/// The type of a folder.
+const FOLDER_UTI: &str = "public.folder";
+
 /// What a picker was shown for.
 enum Purpose {
     /// Files picked are landed and handed here.
     Import(Rc<dyn Fn(Dropped)>),
-    /// Called once the files are saved or the picker is dismissed.
-    Export(RefCell<Option<Box<dyn FnOnce()>>>),
+    /// Called once with the folder chosen, entered; with none when the picker was dismissed.
+    Folder(RefCell<Option<FolderSink>>),
+}
+
+/// Where a chosen folder goes ([`choose_folder`]).
+type FolderSink = Box<dyn FnOnce(Option<Scoped>)>;
+
+/// A folder the person chose in Files, reachable while this is held.
+///
+/// A folder outside the app's sandbox is reached only inside its security scope: entered as it
+/// is chosen, and left when this drops, so every way a download into it ends (done, failed,
+/// stopped, its link lost, the view gone) leaves it exactly once.
+#[derive(Debug)]
+pub struct Scoped {
+    url: Retained<NSURL>,
+    path: PathBuf,
+    /// Whether entering the scope succeeded, and so must be left: a folder inside the app's
+    /// own container needs no scope, and Foundation says so by returning `false`.
+    entered: bool,
+}
+
+impl Scoped {
+    /// Enter `url`'s security scope; none for a URL that is not a file's.
+    fn enter(url: Retained<NSURL>) -> Option<Self> {
+        let path = PathBuf::from(url.path()?.to_string());
+        // SAFETY: Foundation's security-scoped URL rule (`NSURL.h`,
+        // `startAccessingSecurityScopedResource`): a URL the document picker hands over in open
+        // mode is reached only between this call and a balancing
+        // `stopAccessingSecurityScopedResource`, made once by `Drop` when this returned `true`.
+        let entered = unsafe { url.startAccessingSecurityScopedResource() };
+        tracing::info!(path = %path.display(), entered, "a folder chosen in Files");
+        Some(Self { url, path, entered })
+    }
+
+    /// Where the folder is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scoped {
+    fn drop(&mut self) {
+        if self.entered {
+            // SAFETY: the same rule: one `stopAccessingSecurityScopedResource` for the one
+            // `startAccessingSecurityScopedResource` that returned `true` in `enter`.
+            unsafe {
+                self.url.stopAccessingSecurityScopedResource();
+            }
+        }
+    }
 }
 
 struct Ivars {
@@ -69,9 +124,7 @@ define_class!(
     unsafe impl UIDocumentPickerDelegate for Picker {
         #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
         fn picked(&self, _controller: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
-            let paths =
-                urls.iter().filter_map(|url| url.path()).map(|p| PathBuf::from(p.to_string()));
-            self.end(paths.collect());
+            self.end(urls.to_vec());
             let _released = SHOWN.take().map(Retained::autorelease_ptr);
         }
 
@@ -90,18 +143,19 @@ impl std::fmt::Debug for Picker {
 }
 
 impl Picker {
-    /// The picker is done with `paths`: the files picked, or where the copies went.
-    fn end(&self, paths: Vec<PathBuf>) {
+    /// The picker is done with `urls`: the files or the folder picked; none when it was
+    /// dismissed.
+    fn end(&self, urls: Vec<Retained<NSURL>>) {
         match &self.ivars().purpose {
             Purpose::Import(sink) => {
-                if let Some(dropped) = land(paths) {
+                let paths = urls.iter().filter_map(|url| url.path());
+                if let Some(dropped) = land(paths.map(|p| PathBuf::from(p.to_string())).collect()) {
                     sink(dropped);
                 }
             }
-            Purpose::Export(done) => {
-                tracing::info!(saved = paths.len(), "saved to Files");
-                if let Some(done) = done.borrow_mut().take() {
-                    done();
+            Purpose::Folder(sink) => {
+                if let Some(sink) = sink.borrow_mut().take() {
+                    sink(urls.into_iter().next().and_then(Scoped::enter));
                 }
             }
         }
@@ -283,22 +337,20 @@ pub fn import(sink: Rc<dyn Fn(Dropped)>) -> bool {
     present(mtm, &picker, Purpose::Import(sink))
 }
 
-/// Show the picker saving copies of `paths` where the person chooses; `done` runs once it is
-/// done or dismissed, for the caller to delete its own.
+/// Show the picker for a folder to save into; `sink` gets it, its scope entered, or none once
+/// the picker is dismissed. It is called once either way.
 ///
-/// Main thread only: `false` off it, or with no window to show it over, and `done` has not run.
-pub fn export(paths: &[PathBuf], done: Box<dyn FnOnce()>) -> bool {
+/// Main thread only: `false` off it, or with no window to show it over, and `sink` has not run.
+pub fn choose_folder(sink: FolderSink) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
-    let urls: Vec<Retained<NSURL>> = paths
-        .iter()
-        .map(|p| NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())))
-        .collect();
-    let picker = UIDocumentPickerViewController::initForExportingURLs_asCopy(
+    let types = NSArray::from_retained_slice(&[NSString::from_str(FOLDER_UTI)]);
+    #[expect(deprecated, reason = "`initForOpeningContentTypes:` needs UniformTypeIdentifiers")]
+    let picker = UIDocumentPickerViewController::initWithDocumentTypes_inMode(
         UIDocumentPickerViewController::alloc(mtm),
-        &NSArray::from_retained_slice(&urls),
-        true,
+        &types,
+        objc2_ui_kit::UIDocumentPickerMode::Open,
     );
-    present(mtm, &picker, Purpose::Export(RefCell::new(Some(done))))
+    present(mtm, &picker, Purpose::Folder(RefCell::new(Some(sink))))
 }
 
 /// Show `picker` over whatever is showing, its delegate kept until it is done.

@@ -10,28 +10,20 @@
 //! worker, listed meanwhile, and goes on once the worker links, an upload from what the worker
 //! holds of it.
 
-#[cfg(not(target_os = "ios"))]
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(not(target_os = "ios"))]
-use gpui::AppContext as _;
-use gpui::Context;
+use gpui::{AppContext as _, Context};
 use slopty_client::layout::WorkerKey;
-#[cfg(not(target_os = "ios"))]
 use slopty_client::remote::Remote;
 use slopty_client::xfer::ledger::{Kept, Ledger, Way};
-#[cfg(not(target_os = "ios"))]
 use slopty_client::xfer::{Brought, Versions};
 use slopty_core::XferId;
 use tokio::sync::watch;
 
-#[cfg(not(target_os = "ios"))]
-use super::Bringing;
-use super::{Upload, sent};
+use super::{Bringing, Upload, sent};
 use crate::kit;
 use crate::workspace::WorkspaceView;
 
@@ -45,7 +37,6 @@ pub const PACE_FROM: Duration = Duration::from_secs(1);
 
 /// A download's progress is drawn at most this often: the bar's figures move four times a
 /// second, which reads as live without drawing the window for every chunk.
-#[cfg(not(target_os = "ios"))]
 const SEEN_EVERY: Duration = Duration::from_millis(250);
 
 /// How fast a transfer goes: its progress over the last [`PACE_WINDOW`].
@@ -119,7 +110,6 @@ pub fn progress_words(done: u64, total: u64, pace: &Pace, now: Instant) -> Strin
 }
 
 /// A worker's file or folder coming down to a place here.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug)]
 pub(in crate::workspace) struct Download {
     /// The worker it comes from.
@@ -141,7 +131,6 @@ pub(in crate::workspace) struct Download {
 }
 
 /// A download asked for: the worker's `source` to `dest` here, as transfer `xfer`.
-#[cfg(not(target_os = "ios"))]
 #[derive(Clone, Debug)]
 pub(in crate::workspace) struct Down {
     /// The worker it comes from.
@@ -181,7 +170,6 @@ pub struct TransferRow {
 #[derive(Debug, Default)]
 pub struct Transfers {
     /// Downloads in flight.
-    #[cfg(not(target_os = "ios"))]
     downloads: HashMap<XferId, Download>,
     /// Every kept transfer in flight, as last written.
     ledger: Ledger,
@@ -238,7 +226,6 @@ impl WorkspaceView {
     /// Whether any transfer is in flight or waits for its worker.
     #[must_use]
     pub fn transfers_in_flight(&self) -> bool {
-        #[cfg(not(target_os = "ios"))]
         if !self.transfers.downloads.is_empty() {
             return true;
         }
@@ -272,14 +259,11 @@ impl WorkspaceView {
                     self.uploads.insert(kept.xfer, upload);
                     remote.upload(kept.xfer, files, dest, true);
                 }
-                #[cfg(not(target_os = "ios"))]
                 Way::Down { source, dest, versions } => {
                     tracing::info!(xfer = %kept.xfer, %source, "a download taken up again");
                     let down = Down { worker: key, xfer: kept.xfer, source, dest, versions };
                     self.bring_down(down, Bringing::Download, cx);
                 }
-                #[cfg(target_os = "ios")]
-                Way::Down { .. } => self.transfer_over(kept.xfer),
             }
         }
         cx.notify();
@@ -287,11 +271,24 @@ impl WorkspaceView {
 
     /// Bring `down` down, listed while it goes and kept across a relaunch; the person is told
     /// as `bringing` says when it ends.
-    #[cfg(not(target_os = "ios"))]
     pub(in crate::workspace) fn bring_down(
         &mut self,
         down: Down,
         bringing: Bringing,
+        cx: &mut Context<Self>,
+    ) {
+        self.bring_down_holding(down, bringing, None, cx);
+    }
+
+    /// [`Self::bring_down`], with `held` kept until the download has stopped writing, however
+    /// it ends (landed, failed, stopped, its link lost, or the view gone): a folder's security
+    /// scope (`slopty_platform::file_drop::picker::Scoped`), which the transfer's staging
+    /// directory there needs until it is cleaned away.
+    pub(in crate::workspace) fn bring_down_holding(
+        &mut self,
+        down: Down,
+        bringing: Bringing,
+        held: Option<Box<dyn std::any::Any>>,
         cx: &mut Context<Self>,
     ) {
         let xfer = down.xfer;
@@ -308,13 +305,13 @@ impl WorkspaceView {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            drop(held);
             let _gone = this.update(cx, |this, cx| this.download_over(xfer, result, cx));
         })
         .detach();
     }
 
     /// `down` began: it is listed, kept in the ledger, and moves as `heard` says.
-    #[cfg(not(target_os = "ios"))]
     pub(in crate::workspace) fn download_began(
         &mut self,
         down: &Down,
@@ -375,7 +372,6 @@ impl WorkspaceView {
 
     /// Download `xfer` ended with `result`: it leaves the list and the ledger, and the person
     /// is told, unless they stopped it.
-    #[cfg(not(target_os = "ios"))]
     pub(in crate::workspace) fn download_over(
         &mut self,
         xfer: XferId,
@@ -389,6 +385,10 @@ impl WorkspaceView {
         let text = match (result, bringing) {
             (Ok(()), Bringing::Copy) => Some(format!("Saved a copy of {name}")),
             (Ok(()), Bringing::Download) => Some(format!("Downloaded {}", super::tildes(&dest))),
+            (Ok(()), Bringing::Files) => {
+                let saved = dest.file_name().map_or(name, |n| n.to_string_lossy().into_owned());
+                Some(format!("Saved {saved} in Files"))
+            }
             // The drop's own window showed it land; the paste it came down for goes on, or
             // says why not.
             (Ok(()), Bringing::Drag) | (_, Bringing::Paste) => None,
@@ -413,7 +413,6 @@ impl WorkspaceView {
             }
             return;
         }
-        #[cfg(not(target_os = "ios"))]
         if let Some(download) = self.transfers.downloads.remove(&xfer) {
             tracing::info!(%xfer, "download cancelled");
             download.via.cancel(xfer);
@@ -452,7 +451,6 @@ impl WorkspaceView {
             })
             .collect();
         ups.sort_by(|a, b| a.name.cmp(&b.name).then(a.xfer.cmp(&b.xfer)));
-        #[cfg(not(target_os = "ios"))]
         let mut downs: Vec<TransferRow> = self
             .transfers
             .downloads
@@ -470,8 +468,6 @@ impl WorkspaceView {
                 TransferRow { xfer: *xfer, up: false, name, machine, fraction, done, total, words }
             })
             .collect();
-        #[cfg(target_os = "ios")]
-        let mut downs: Vec<TransferRow> = Vec::new();
         downs.sort_by(|a, b| a.name.cmp(&b.name).then(a.xfer.cmp(&b.xfer)));
         let waiting = self.transfers.waiting.iter().map(|k| {
             let machine = machine(k.worker);

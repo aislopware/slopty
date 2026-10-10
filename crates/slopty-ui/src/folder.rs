@@ -151,8 +151,6 @@ pub enum FolderViewEvent {
     SaveToFiles {
         /// Its path on the worker.
         path: String,
-        /// Whether it is a folder.
-        folder: bool,
     },
 }
 
@@ -787,11 +785,11 @@ impl FolderView {
 
     /// The selected entry is to be brought down and saved with the Files app.
     pub fn save_selected(&self, cx: &mut Context<Self>) {
-        let Some((path, folder)) = self.selected.and_then(|ix| self.entry_path(ix)) else {
+        let Some((path, _folder)) = self.selected.and_then(|ix| self.entry_path(ix)) else {
             return;
         };
         tracing::info!(%path, "folder saves to Files");
-        cx.emit(FolderViewEvent::SaveToFiles { path, folder });
+        cx.emit(FolderViewEvent::SaveToFiles { path });
     }
 
     /// What the body says instead of rows, one composed block in its middle: the kind's mark,

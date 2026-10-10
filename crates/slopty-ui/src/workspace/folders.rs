@@ -35,14 +35,12 @@ pub(super) enum FilesAsk {
     /// Photos and videos picked from Photos go up to this tile, as a drop on it. On the Mac,
     /// whose open panel reaches the Photos library itself, it is the open panel.
     Photos(TileRef),
-    /// This worker file comes down, and is saved where the person chooses.
+    /// This worker file or folder comes down, and is saved where the person chooses.
     Export {
         /// The worker it is on.
         worker: WorkerKey,
         /// Its path there.
         path: String,
-        /// Whether it is a folder.
-        folder: bool,
     },
 }
 
@@ -258,8 +256,8 @@ impl WorkspaceView {
                 FolderViewEvent::NewShell(dir) => {
                     this.open_session_on(worker, Some(dir.clone()), Vec::new(), None, cx);
                 }
-                FolderViewEvent::SaveToFiles { path, folder } => {
-                    let ask = FilesAsk::Export { worker, path: path.clone(), folder: *folder };
+                FolderViewEvent::SaveToFiles { path } => {
+                    let ask = FilesAsk::Export { worker, path: path.clone() };
                     this.ask_files(&ask, cx);
                 }
             }
@@ -427,9 +425,7 @@ impl WorkspaceView {
         match ask {
             FilesAsk::Import(tile) => self.pick_files(*tile, cx),
             FilesAsk::Photos(tile) => self.pick_photos(*tile, cx),
-            FilesAsk::Export { worker, path, folder } => {
-                self.save_to_files(*worker, path, *folder, cx);
-            }
+            FilesAsk::Export { worker, path } => self.save_to_files(*worker, path, cx),
         }
         #[cfg(not(target_os = "ios"))]
         match ask {
@@ -506,41 +502,49 @@ impl WorkspaceView {
         self.drop_files(tile, &dropped.paths, cx);
     }
 
-    /// Bring the worker's `path` down, off the main thread, and show the Files picker saving
-    /// it; the copy here goes once the picker is done.
+    /// "Save to Files": the Files picker asks for a folder, and the worker's `path` comes down
+    /// straight into it ([`Self::save_into`]), listed with its progress and its stop.
     #[cfg(target_os = "ios")]
-    fn save_to_files(
-        &mut self,
-        worker: WorkerKey,
-        path: &str,
-        folder: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(offer) = self.offer(worker, path, folder) else {
+    fn save_to_files(&mut self, worker: WorkerKey, path: &str, cx: &mut Context<Self>) {
+        if self.remote(worker).is_none() {
             self.show_notice("The machine is away; nothing was saved".to_owned(), cx);
             return;
-        };
-        let name = offer.name.clone();
-        let fetched =
-            cx.background_executor().spawn(async move { offer.fetch_under(&out::outbox()) });
-        cx.spawn(async move |this, cx| {
-            let landed = fetched.await;
-            let _gone = this.update(cx, |this, cx| match landed {
-                Ok(path) => {
-                    let kept = path.clone();
-                    let done = Box::new(move || discard_fetched(kept));
-                    if !slopty_platform::file_drop::picker::export(
-                        std::slice::from_ref(&path),
-                        done,
-                    ) {
-                        discard_fetched(path);
-                        this.show_failure("The Files picker could not be shown".to_owned(), cx);
-                    }
-                }
-                Err(why) => this.show_failure(format!("{name} was not saved: {why}"), cx),
-            });
-        })
-        .detach();
+        }
+        let (view, mut app) = (cx.entity().downgrade(), cx.to_async());
+        let source = path.to_owned();
+        let chosen = Box::new(move |folder: Option<slopty_platform::file_drop::picker::Scoped>| {
+            let Some(folder) = folder else { return };
+            let dir = folder.path().to_path_buf();
+            let held: Box<dyn std::any::Any> = Box::new(folder);
+            let _gone = view.update(&mut app, |v, cx| v.save_into(worker, source, &dir, held, cx));
+        });
+        if !slopty_platform::file_drop::picker::choose_folder(chosen) {
+            self.show_failure("The Files picker could not be shown".to_owned(), cx);
+        }
+    }
+
+    /// Bring the worker's `source` down into the folder `dir` here, under a name no entry there
+    /// has (`name (2).ext` beside one that has it), as a listed download with its stop; `held`
+    /// (the folder's security scope) is kept until the download stops writing there.
+    #[cfg_attr(
+        not(any(target_os = "ios", test)),
+        expect(dead_code, reason = "a folder chosen in Files is iOS's; the Mac tests it")
+    )]
+    pub(super) fn save_into(
+        &mut self,
+        worker: WorkerKey,
+        source: String,
+        dir: &Path,
+        held: Box<dyn std::any::Any>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = super::remote::worker_name(&source);
+        let dest = slopty_platform::web::unique_path(dir, name, Path::exists);
+        tracing::info!(%source, dest = %dest.display(), "save to Files");
+        let versions = slopty_client::xfer::Versions::new();
+        let xfer = slopty_core::XferId::new();
+        let down = super::remote::transfers::Down { worker, xfer, source, dest, versions };
+        self.bring_down_holding(down, super::remote::Bringing::Files, Some(held), cx);
     }
 
     /// The worker files under `at` (window points) that a touch held there lifts out to another
@@ -602,17 +606,6 @@ impl WorkspaceView {
             out::landed_top(&landed, into)
         });
         Offer::of(path, folder, fetch)
-    }
-}
-
-/// Delete a file brought down for the Files picker, off the main thread: it may be a big folder.
-#[cfg(target_os = "ios")]
-fn discard_fetched(path: std::path::PathBuf) {
-    let spawned = std::thread::Builder::new()
-        .name("slopty-out-done".to_owned())
-        .spawn(move || out::discard(&path));
-    if let Err(e) = spawned {
-        tracing::warn!(error = %e, "discard a file saved to Files");
     }
 }
 

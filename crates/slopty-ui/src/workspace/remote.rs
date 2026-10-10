@@ -1085,7 +1085,7 @@ impl WorkspaceView {
     }
 
     /// "Save a copy…": the focused file tile's file comes down whole onto this device, to where
-    /// the Mac's save panel says, or through the Files export sheet on iPhone and iPad. It
+    /// the Mac's save panel says, or into a folder chosen in Files on iPhone and iPad. It
     /// comes as a download, not the editor's text, so a file of any size or kind is saved as
     /// its bytes are on the worker.
     pub fn save_copy(&mut self, _: &SaveCopy, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1099,10 +1099,7 @@ impl WorkspaceView {
         };
         tracing::info!(%source, "save a copy");
         #[cfg(target_os = "ios")]
-        self.ask_files(
-            &super::folders::FilesAsk::Export { worker, path: source, folder: false },
-            cx,
-        );
+        self.ask_files(&super::folders::FilesAsk::Export { worker, path: source }, cx);
         #[cfg(not(target_os = "ios"))]
         self.bring_down_as(worker, source, Bringing::Copy, cx);
     }
@@ -1264,7 +1261,7 @@ fn no_finder_place(machine: &str) -> String {
 }
 
 /// The last component of a worker path, a trailing `/` aside.
-fn worker_name(path: &str) -> &str {
+pub(in crate::workspace) fn worker_name(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
@@ -1353,25 +1350,32 @@ fn promise(
 }
 
 /// Why a worker's file comes down, for what the person is told.
-#[cfg(not(target_os = "ios"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::workspace) enum Bringing {
     /// "Save a copy…" of a file tile's file.
+    #[cfg_attr(target_os = "ios", expect(dead_code, reason = "iOS saves a copy through Files"))]
     Copy,
     /// "Download…" of a folder tile's selected entry, or a download an earlier run left.
     Download,
     /// Dragged out of a folder tile, a shell or a remote window and dropped here.
+    #[cfg_attr(target_os = "ios", expect(dead_code, reason = "a drag out is the Mac's"))]
     Drag,
     /// Copied on one machine and pasted on another: it comes down on its way there.
+    #[cfg_attr(
+        target_os = "ios",
+        expect(dead_code, reason = "iOS brings a paste over without listing it")
+    )]
     Paste,
+    /// "Save to Files" on iPhone and iPad: into a folder chosen in Files, under the folder's
+    /// security scope, which a new run of the app does not hold.
+    Files,
 }
 
-#[cfg(not(target_os = "ios"))]
 impl Bringing {
     /// What it was, as in "nothing was saved".
     const fn done(self) -> &'static str {
         match self {
-            Self::Copy => "saved",
+            Self::Copy | Self::Files => "saved",
             Self::Download => "downloaded",
             Self::Drag => "dragged out",
             Self::Paste => "brought over",
@@ -1386,7 +1390,6 @@ impl Bringing {
 }
 
 /// `path` with the home directory as `~`, as a person reads it.
-#[cfg(not(target_os = "ios"))]
 fn tildes(path: &std::path::Path) -> String {
     let home = slopty_platform::dirs::home();
     match path.strip_prefix(&home) {
@@ -1432,7 +1435,6 @@ fn kept_both(sent: &[String], landed: &[String]) -> Option<String> {
 /// it got: into a hidden directory beside it first, named for the transfer, then renamed into
 /// place, so a half-arrived file never sits under the chosen name. A transfer an earlier run
 /// left takes up its directory again.
-#[cfg(not(target_os = "ios"))]
 fn bring_down_seen(
     remote: &dyn Remote,
     source: &str,

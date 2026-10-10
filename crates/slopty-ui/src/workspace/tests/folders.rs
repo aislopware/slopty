@@ -404,7 +404,7 @@ fn the_files_picker_is_asked_through_its_seam_and_its_files_go_up(cx: &mut TestA
     assert!(!landing.dir().exists(), "the picked copies are gone once they are up");
 
     cx.dispatch_action(crate::folder::SaveToFiles);
-    let saved = FilesAsk::Export { worker: key, path: "/w/in/a.txt".into(), folder: false };
+    let saved = FilesAsk::Export { worker: key, path: "/w/in/a.txt".into() };
     assert_eq!(asks.borrow().last(), Some(&saved), "the selected row is saved");
 
     let note = arrives(&view, cx, &studio, ItemKind::File { path: "/w/n.md".into() }, 2);
