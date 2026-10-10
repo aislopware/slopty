@@ -43,9 +43,9 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "0bbd9870ce420af9feacbf948b21d3824d82dc0b"
-base_date = "2026-10-09"
-checked = "2026-10-09"
+base = "ed27c6293b585acc40c10be7138534243bee5841"
+base_date = "2026-10-10"
+checked = "2026-10-10"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 
