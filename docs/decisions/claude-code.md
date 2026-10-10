@@ -2309,6 +2309,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The GUI.** Lane A shows the fact.
   - Tests: `managed_settings_that_keep_the_hooks_off_are_said_as_they_change` (slopty-worker
     `caps.rs`), and the `machine_hello_ack` golden.
+  - **Its silence is no dialog** (2026-10-12, readiness 10-12 rank 6). A start armed the
+    five-second silence (`observed::UNHEARD`) whenever no hook had spoken, and only a hook
+    cleared it, so under such a policy every Slopty-started Claude Code thread read "Claude
+    Code is asking something in its terminal" as Needs you for its whole life. Now the
+    observed session asks its `Sources::hooks_off` (the daemon reads it off its caps) and
+    arms nothing when the hooks are kept off. A turn the person began after the start also
+    settles the request, as answered in the terminal, since it is past whatever dialog Claude
+    Code waited at: a turn older than the start, in a resumed session's transcript, settles
+    nothing. Tests: `a_start_whose_hooks_are_kept_off_asks_nothing_in_its_silence`
+    (slopty-worker `claude_start`), `a_turn_begun_after_the_start_answers_the_dialog_with_no_hook`
+    (slopty-agent `observed`).
 
 - ✅ **The transcript decoder's vocabulary lives with the decoder, and its diffs are the thread
   model's** (2026-10-11, readiness 10-11 deletions).

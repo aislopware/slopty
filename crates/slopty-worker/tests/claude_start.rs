@@ -84,6 +84,8 @@ mod claude_start {
     struct Fake {
         main: watch::Sender<Option<PathBuf>>,
         seen: watch::Sender<Seen>,
+        /// The machine's managed settings keep Slopty's hooks off.
+        hooks_off: std::sync::atomic::AtomicBool,
     }
 
     impl Sources for Fake {
@@ -101,6 +103,10 @@ mod claude_start {
 
         fn open(&self, _session: SessionId) -> bool {
             true
+        }
+
+        fn hooks_off(&self) -> bool {
+            self.hooks_off.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -132,6 +138,7 @@ mod claude_start {
             let sources = Arc::new(Fake {
                 main: watch::Sender::new(None),
                 seen: watch::Sender::new(Seen::default()),
+                hooks_off: std::sync::atomic::AtomicBool::new(false),
             });
             let events = (broadcast::Sender::new(64), broadcast::Sender::new(64));
             let (driver, asks) = claude::Driver::channel();
@@ -336,6 +343,29 @@ mod claude_start {
         let state =
             until(&rig.host, thread, |s| !users(s).is_empty() && s.pending.is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
+    }
+
+    /// Under managed settings that keep Slopty's hooks off (`allowManagedHooksOnly`), no hook
+    /// ever speaks for a Claude Code Slopty starts: its silence is no dialog, so the thread
+    /// never says it asks in the terminal, and it shows the transcript's turn as it comes.
+    #[tokio::test]
+    async fn a_start_whose_hooks_are_kept_off_asks_nothing_in_its_silence() {
+        let rig = Rig::new();
+        rig.trust_work();
+        rig.sources.hooks_off.store(true, std::sync::atomic::Ordering::Relaxed);
+        let outcome = rig.starter.start(IntentId::new(), rig.start(None)).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        tokio::time::sleep(observed::UNHEARD + Duration::from_secs(1)).await;
+        let (state, _) = rig.host.state(thread).expect("begun");
+        assert_eq!(state.open_requests().count(), 0, "nothing asked in its silence");
+        assert_ne!(state.status.phase, Phase::NeedsYou);
+        let main = rig.dir.path().join("transcript.jsonl");
+        let from = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../slopty-agent/tests/fixtures/conversation/edit/transcript.jsonl");
+        std::fs::copy(from, &main).unwrap();
+        rig.sources.main.send_replace(Some(main));
+        let state = until(&rig.host, thread, |s| !s.turns.is_empty()).await;
+        assert_eq!(state.open_requests().count(), 0);
     }
 
     /// A start in a folder Claude Code keeps no trust for, held at its dialog, offers to trust

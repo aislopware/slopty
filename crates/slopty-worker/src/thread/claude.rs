@@ -67,6 +67,10 @@ pub trait Sources: Send + Sync {
     /// Whether terminal `session` is still open: what is kept of one whose close was missed
     /// is let go.
     fn open(&self, session: SessionId) -> bool;
+    /// Whether this machine's managed settings keep the hooks Slopty registers from running
+    /// (`disableAllHooks`, `allowManagedHooksOnly`): a Claude Code Slopty opens then never
+    /// speaks through one, and its silence says nothing of a dialog.
+    fn hooks_off(&self) -> bool;
 }
 
 /// Which terminal holds each Claude Code session id it observes, so a second terminal on the
@@ -348,8 +352,8 @@ async fn observe(
                     on.trust = trust;
                     on.begin(&native);
                     // Slopty opened it with the hook relay: until a hook speaks, it may be held
-                    // at a dialog of its own.
-                    if on.hooks == 0 {
+                    // at a dialog of its own. With its hooks kept off, none ever speaks.
+                    if on.hooks == 0 && !on.sources.hooks_off() {
                         on.silent_since = Some(Instant::now());
                     }
                     let _gone = reply.send(on.observed.as_ref().map(Observed::main));

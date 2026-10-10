@@ -552,6 +552,12 @@ impl Observed {
         }
         self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
         // Its hooks speak once its own dialog is answered, in its terminal.
+        self.answered_in_terminal();
+    }
+
+    /// The dialog Claude Code was held at ([`Self::unheard`]) was answered in its terminal:
+    /// its hooks spoke, or a turn began after it opened.
+    fn answered_in_terminal(&mut self) {
         if let Some(asked) = self.unheard.take() {
             let by = Answerer { client: None, name: IN_TERMINAL.to_owned() };
             let state = RequestState::Answered { by, choice: String::new() };
@@ -1361,6 +1367,15 @@ impl Observed {
 
     fn turn(&mut self, thread: &conv::ThreadId, record: &conv::Turn) {
         let id = self.ensure(thread);
+        // A turn the person began after Slopty opened Claude Code is past any dialog it was
+        // held at, though no hook spoke: hooks the person's managed settings keep off.
+        let opened = self.unheard.as_ref().map(|asked| {
+            let unheard = u64::try_from(UNHEARD.as_millis()).unwrap_or(u64::MAX);
+            asked.opened_ms.as_millis().saturating_sub(unheard)
+        });
+        if id == self.meta.id && opened.is_some_and(|at| record.started_ms.as_millis() >= at) {
+            self.answered_in_terminal();
+        }
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let Some(&turn) = mapped.prompts.get(&record.prompt) else { return };
         let state = match (record.ended_ms, mapped.stopped.get(&turn)) {

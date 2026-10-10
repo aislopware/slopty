@@ -755,6 +755,45 @@ fn a_thread_is_named_by_the_session_until_its_first_prompt() {
     assert_eq!(host.thread(observed.main()).meta.title, titled, "and keeps it");
 }
 
+/// A Claude Code whose hooks the person's managed settings keep off never speaks through one:
+/// the first turn the person began after Slopty opened it says the dialog it waited at was
+/// answered, and the thread stops asking. A turn already in a resumed session's transcript,
+/// older than the start, says nothing of the dialog.
+#[test]
+fn a_turn_begun_after_the_start_answers_the_dialog_with_no_hook() {
+    let terminal = SessionId::from_uuid(uuid::Uuid::from_u128(9));
+    let fixture = dir("conversation", "edit");
+    let changes = Transcripts::default().read(&fixture.join("transcript.jsonl"), &[]);
+    let first = changes.iter().find_map(|c| match c {
+        Change::Turn { turn, .. } => Some(turn.started_ms),
+        _ => None,
+    });
+    let first = first.expect("the fixture has a turn");
+    let unheard = u64::try_from(UNHEARD.as_millis()).unwrap();
+    let asked = |opened_ms: u64| {
+        let mut observed = Observed::new(
+            "00000000-0000-4000-8000-000000000001",
+            "2.1.286",
+            Some(terminal),
+            "/work",
+            WallMs::ZERO,
+        );
+        let mut host = Host::default();
+        host.take(observed.drain());
+        host.take(observed.unheard(WallMs::from_millis(opened_ms), None));
+        assert_eq!(host.thread(observed.main()).status.phase, Phase::NeedsYou, "asked");
+        host.take(observed.transcript(&changes, &[]));
+        host.thread(observed.main()).clone()
+    };
+    // Opened just before the person's first turn began.
+    let answered = asked(first.as_millis().saturating_add(unheard).saturating_sub(1_000));
+    assert_eq!(answered.open_requests().count(), 0, "the dialog was answered");
+    assert_ne!(answered.status.phase, Phase::NeedsYou);
+    // Opened after every turn the transcript holds: those were before the start.
+    let resumed = asked(first.as_millis().saturating_add(unheard).saturating_add(86_400_000));
+    assert_eq!(resumed.open_requests().count(), 1, "an older turn answers nothing");
+}
+
 /// A thread declares approvals once a hook has been heard, since only the hook holds a prompt,
 /// and says so once; before that its row is the one that offers to install the hooks.
 #[test]

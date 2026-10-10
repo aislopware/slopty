@@ -70,6 +70,10 @@ mod claude_threads {
         fn open(&self, session: SessionId) -> bool {
             !self.closed.lock().contains(&session)
         }
+
+        fn hooks_off(&self) -> bool {
+            false
+        }
     }
 
     struct Rig {

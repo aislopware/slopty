@@ -69,6 +69,10 @@ impl Sources for Observed {
     fn open(&self, session: SessionId) -> bool {
         self.0.worker.get(session).is_ok()
     }
+
+    fn hooks_off(&self) -> bool {
+        self.0.caps.borrow().agents.iter().any(|agent| agent.managed_hooks_off)
+    }
 }
 
 /// The daemon's terminals and agents, as the composer types into them.
