@@ -1374,6 +1374,7 @@ mod tests {
             git: Some(git.to_path_buf()),
             gh: Some(stand_in_gh(tmp.path())),
             glab: None,
+            path: None,
         };
         let at = tree.to_string_lossy().into_owned();
         let free = |terminals: Vec<PathBuf>| {
@@ -1420,7 +1421,7 @@ mod tests {
         assert!(!has_branch(&clone, &made.branch));
 
         let (open, open_branch) = agent_tree(&clone, "half-done");
-        let alone = Programs { git: Some(git.to_path_buf()), gh: None, glab: None };
+        let alone = Programs { git: Some(git.to_path_buf()), gh: None, glab: None, path: None };
         let kept = apply(&alone, &open.to_string_lossy(), GitOp::RemoveWorktree, &[]).await;
         let GitOutcome::Done(GitDone::WorktreeRemoved { branch_removed, .. }) = kept else {
             panic!("not freed: {kept:?}")
@@ -1477,7 +1478,8 @@ mod tests {
             .expect("write");
         let gh = stand_in_gh(tmp.path());
         std::fs::write(tmp.path().join("state"), "MERGED").expect("write");
-        let programs = Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None };
+        let programs =
+            Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None, path: None };
 
         let at = clone.to_string_lossy().into_owned();
         let listed = apply(&programs, &at, GitOp::Worktrees, &[busy.join("src")]).await;

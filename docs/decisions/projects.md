@@ -1828,6 +1828,14 @@ reordering and edited allows are gone" in `agents.md`.*
   config, hooks and credential helpers as they are. `GIT_TERMINAL_PROMPT=0`,
   `GH_PROMPT_DISABLED=1` and `GIT_EDITOR=true` make whatever would prompt fail instead. Slopty
   reads no credential.
+  - Each runs on the person's `PATH`: the daemon's own, then their login shell's, read once for
+    the worker's life (`facts::person_path`, 2026-10-12, readiness 10-12 rank 2). A worker
+    launchd started has `/usr/bin:/bin` and little else, so a husky, lefthook or pre-commit
+    hook, git-lfs or a signing helper installed by Homebrew, mise or npm failed under
+    "Commit" while "Ask Claude to commit" worked, Claude Code being started on the login
+    `PATH` already. The op is scoped to that `PATH` (`Programs::scope`), so gh's and glab's
+    reads, the pull-request watcher and the merge queue's landing run on it too. Test:
+    `repo::commit::tests::a_hook_s_tool_is_found_on_the_person_s_path`.
   - A refusal comes back as `GitOutcome::Failed { said }`: the end of git's or gh's own words,
     at most `SAID_MAX`, such as a rejected push or a hook that failed.
   - What Slopty itself refuses is `Refused { why }`: no files chosen, an empty message,

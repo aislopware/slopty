@@ -485,6 +485,24 @@ async fn launcher(search: &SearchPath, program: &Path) -> Launcher {
     launcher
 }
 
+/// The `PATH` the person's own programs run with: the daemon's own, then their login shell's,
+/// each directory once.
+///
+/// A daemon launchd started has little on its `PATH`, so a git hook, git-lfs, a signing helper
+/// or a pre-commit tool installed by Homebrew, mise or npm is found only on the login shell's.
+/// The login shell is read once for the worker's life; while it does not answer, the daemon's
+/// own `PATH` stands in and it is asked again next time.
+pub async fn person_path() -> OsString {
+    static READ: tokio::sync::OnceCell<OsString> = tokio::sync::OnceCell::const_new();
+    let read = READ
+        .get_or_try_init(async || {
+            let login = login_path().await.ok_or(())?;
+            Ok::<_, ()>(SearchPath::of(std::env::var_os("PATH").into_iter().chain([login])).joined)
+        })
+        .await;
+    read.map_or_else(|()| std::env::var_os("PATH").unwrap_or_default(), Clone::clone)
+}
+
 /// The person's login shell's `PATH`, as it stands once their profile and rc files ran.
 async fn login_path() -> Option<OsString> {
     let shell =

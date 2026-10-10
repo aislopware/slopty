@@ -75,6 +75,7 @@ async fn a_pull_request_s_status_is_read_in_the_forge_s_words() {
         git: crate::changes::git().map(Path::to_path_buf),
         gh: Some(stand_in(dir.path(), "open")),
         glab: None,
+        path: None,
     };
     let work = repo(dir.path());
     let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
@@ -110,10 +111,15 @@ async fn a_branch_with_no_pull_request_reads_as_none() {
     let dir = tempfile::tempdir().expect("temp");
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
-    let none = Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "none")), glab: None };
+    let none = Programs {
+        git: git.clone(),
+        gh: Some(stand_in(dir.path(), "none")),
+        glab: None,
+        path: None,
+    };
     let read = apply(&none, &work, GitOp::PullStatus, &[]).await;
     assert_eq!(read, GitOutcome::Done(GitDone::PullStatus(None)));
-    let without = Programs { git, gh: None, glab: None };
+    let without = Programs { git, gh: None, glab: None, path: None };
     let missing = apply(&without, &work, GitOp::PullStatus, &[]).await;
     assert!(
         matches!(&missing, GitOutcome::Unavailable { program, .. } if program == "gh"),
@@ -129,8 +135,12 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
     let dir = tempfile::tempdir().expect("temp");
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
-    let programs =
-        Programs { git: git.clone(), gh: Some(stand_in(dir.path(), "open")), glab: None };
+    let programs = Programs {
+        git: git.clone(),
+        gh: Some(stand_in(dir.path(), "open")),
+        glab: None,
+        path: None,
+    };
     let merge = |method: &str| GitOp::Merge {
         method: method.to_owned(),
         head: Some("0123abcd".to_owned()),
@@ -157,7 +167,7 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
     );
     assert_eq!(asked(dir.path()).len(), calls.len(), "gh not asked");
 
-    let strict = Programs { git, gh: Some(stand_in(dir.path(), "refuse")), glab: None };
+    let strict = Programs { git, gh: Some(stand_in(dir.path(), "refuse")), glab: None, path: None };
     let said = apply(&strict, &work, merge("merge"), &[]).await;
     assert!(
         matches!(&said, GitOutcome::Failed { said } if said.contains("base branch policy")),
@@ -173,7 +183,7 @@ async fn an_automatic_merge_and_a_draft_made_ready_go_through_gh() {
     let dir = tempfile::tempdir().expect("temp");
     let git = crate::changes::git().map(Path::to_path_buf);
     let work = repo(dir.path()).to_string_lossy().into_owned();
-    let programs = Programs { git, gh: Some(stand_in(dir.path(), "open")), glab: None };
+    let programs = Programs { git, gh: Some(stand_in(dir.path(), "open")), glab: None, path: None };
     let auto =
         GitOp::Merge { method: "merge".to_owned(), head: None, delete_branch: false, auto: true };
     let merged = apply(&programs, &work, auto, &[]).await;
@@ -270,7 +280,12 @@ fn gitlab_repo(dir: &Path) -> PathBuf {
 }
 
 fn with_glab(glab: PathBuf) -> Programs {
-    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None, glab: Some(glab) }
+    Programs {
+        git: crate::changes::git().map(Path::to_path_buf),
+        gh: None,
+        glab: Some(glab),
+        path: None,
+    }
 }
 
 /// A repository whose `origin` is on a GitLab host has merge requests, read with glab in a pull
@@ -482,6 +497,7 @@ async fn a_pull_request_s_open_review_is_read_with_gh() {
         git: crate::changes::git().map(Path::to_path_buf),
         gh: Some(stand_in(dir.path(), "open")),
         glab: None,
+        path: None,
     };
     let work = repo(dir.path());
     let op = GitOp::PullComments { number: 7 };
@@ -572,7 +588,7 @@ async fn work_on_a_protected_target_goes_up_as_a_pull_request() {
     );
     std::fs::write(&gh, script).expect("written");
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("executable");
-    let programs = Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None };
+    let programs = Programs { git: Some(git.to_path_buf()), gh: Some(gh), glab: None, path: None };
     let landing = Landing { head: &head, branch: "slopty/demo/3", target: "main" };
 
     let opened = land(&programs, &work, landing, ("Split the parser", "Task #3")).await;
@@ -679,7 +695,7 @@ async fn a_pull_request_is_opened_once_its_branch_went_up() {
         draft: false,
     };
 
-    let no_gh = Programs { git: Some(git.to_path_buf()), gh: None, glab: None };
+    let no_gh = Programs { git: Some(git.to_path_buf()), gh: None, glab: None, path: None };
     let refused = apply(&no_gh, &work_text, open(), &[]).await;
     assert!(
         matches!(&refused, GitOutcome::Unavailable { program, .. } if program == "gh"),
@@ -687,8 +703,12 @@ async fn a_pull_request_is_opened_once_its_branch_went_up() {
     );
     assert_eq!(feature_at(&forge), None, "nothing went up without gh to open it");
 
-    let programs =
-        Programs { git: Some(git.to_path_buf()), gh: Some(stand_in(&root, "open")), glab: None };
+    let programs = Programs {
+        git: Some(git.to_path_buf()),
+        gh: Some(stand_in(&root, "open")),
+        glab: None,
+        path: None,
+    };
     assert_eq!(
         apply(&programs, &work_text, open(), &[]).await,
         GitOutcome::Done(GitDone::PullRequest {
@@ -774,6 +794,7 @@ async fn a_merge_from_a_worktree_reads_as_merged_and_leaves_the_worktree_on_its_
             git: Some(git.to_path_buf()),
             gh: Some(worktree_gh(&root, version)),
             glab: None,
+            path: None,
         };
         let merge = GitOp::Merge {
             method: "squash".to_owned(),
@@ -862,6 +883,7 @@ async fn a_review_is_posted_as_one_with_gh_and_never_past_the_head_reviewed() {
         git: crate::changes::git().map(Path::to_path_buf),
         gh: Some(stand_in_poster(dir.path(), "gh", arms)),
         glab: None,
+        path: None,
     };
     let work = repo(dir.path());
     let at = work.to_string_lossy();

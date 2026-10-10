@@ -310,10 +310,13 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     drop(Screens::new(threads.host.clone()).spawn());
-    let programs = slopty_worker::repo::commit::Programs::here();
-    if programs.has_forge() {
-        drop(slopty_worker::thread::pulls::spawn(threads.host.clone(), programs));
-    }
+    let host = threads.host.clone();
+    drop(tokio::spawn(async move {
+        let programs = slopty_worker::repo::commit::Programs::here().await;
+        if programs.has_forge() {
+            drop(slopty_worker::thread::pulls::spawn(host, programs));
+        }
+    }));
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     let (events, heard) = (daemon.events.subscribe(), daemon.heard.subscribe());

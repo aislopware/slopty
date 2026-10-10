@@ -1103,14 +1103,15 @@ impl Orchestrator {
             }
             Verb::LandPull { worker, repo, head, branch, target, title, body } => {
                 self.mine(worker)?;
-                let programs = crate::repo::commit::Programs::here();
+                let programs = crate::repo::commit::Programs::here().await;
                 let repo = crate::file::expand_home(Path::new(&repo));
                 let landing =
                     crate::repo::pull::Landing { head: &head, branch: &branch, target: &target };
-                let (number, url) =
-                    crate::repo::pull::land(&programs, &repo, landing, (&title, &body))
-                        .await
-                        .map_err(|why| Failure::new(ErrorCode::Failed, why))?;
+                let landed = crate::repo::pull::land(&programs, &repo, landing, (&title, &body));
+                let (number, url) = programs
+                    .scope(landed)
+                    .await
+                    .map_err(|why| Failure::new(ErrorCode::Failed, why))?;
                 Ok(Outcome::PullOpened { number, url })
             }
             Verb::RemoveWorktree { worker, worktree, landed } => {

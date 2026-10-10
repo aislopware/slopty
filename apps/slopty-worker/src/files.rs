@@ -237,7 +237,7 @@ pub async fn git_op(
         Vec::new()
     };
     let outcome = slopty_worker::repo::commit::apply(
-        &slopty_worker::repo::commit::Programs::here(),
+        &slopty_worker::repo::commit::Programs::here().await,
         &repo,
         op,
         &terminals,

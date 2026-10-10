@@ -481,7 +481,7 @@ mod review {
         std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
         std::fs::write(repo.join("new.txt"), "not added\n").unwrap();
         let index = std::fs::read(repo.join(".git/index")).unwrap();
-        let programs = Programs { git: Some(git()), gh: None, glab: None };
+        let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
         let folder = repo.to_string_lossy().into_owned();
         let changes = async |against| match apply(
             &programs,
@@ -583,7 +583,7 @@ mod review {
         std::fs::write(repo.join("mid.rs"), lines(mid, "mid")).unwrap();
         std::fs::write(repo.join("small.rs"), lines(5, "small")).unwrap();
         std::fs::write(repo.join("Cargo.lock"), lines(lock, "lock")).unwrap();
-        let programs = Programs { git: Some(git()), gh: None, glab: None };
+        let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
         let folder = repo.to_string_lossy().into_owned();
         let op = GitOp::Changes { against: Against::Head };
         let review = match apply(&programs, &folder, op, &[]).await {
@@ -628,7 +628,7 @@ mod review {
         let huge = vec![0_u8; usize::try_from(BLOB_MAX).unwrap() + 1];
         std::fs::write(repo.join("huge.bin"), &huge).unwrap();
         let huge_id = run(&repo, &["hash-object", "-w", "huge.bin"]);
-        let programs = Programs { git: Some(git()), gh: None, glab: None };
+        let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
         let folder = repo.to_string_lossy().into_owned();
 
         match apply(&programs, &folder, GitOp::Blob { blob: id.clone() }, &[]).await {

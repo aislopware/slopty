@@ -30,19 +30,33 @@ pub struct Programs {
     pub gh: Option<PathBuf>,
     /// glab, when the worker has it.
     pub glab: Option<PathBuf>,
+    /// The `PATH` they run with, and what they run in turn: a hook's tools, git-lfs, a signing
+    /// helper ([`crate::facts::person_path`]). `None` runs them with the worker's own.
+    pub path: Option<std::ffi::OsString>,
+}
+
+tokio::task_local! {
+    /// The `PATH` every program [`run`] starts with while an op of [`Programs::scope`] runs.
+    static PATH: Option<std::ffi::OsString>;
 }
 
 impl Programs {
-    /// The ones this worker has: git as everything else finds it ([`crate::changes::git`]),
-    /// gh and glab on `PATH` or where Homebrew and the system put them ([`find`]).
-    #[must_use]
-    pub fn here() -> Self {
-        let path = std::env::var_os("PATH");
+    /// The ones this worker has, on the person's `PATH` ([`crate::facts::person_path`]): git as
+    /// everything else finds it ([`crate::changes::git`]), gh and glab on that `PATH` or where
+    /// Homebrew and the system put them ([`find`]).
+    pub async fn here() -> Self {
+        let path = crate::facts::person_path().await;
         Self {
             git: crate::changes::git().map(Path::to_path_buf),
-            gh: find("gh", path.as_deref()),
-            glab: find("glab", path.as_deref()),
+            gh: find("gh", Some(&path)),
+            glab: find("glab", Some(&path)),
+            path: Some(path),
         }
+    }
+
+    /// `op`, with every program it runs started on [`Self::path`].
+    pub async fn scope<T>(&self, op: impl Future<Output = T>) -> T {
+        PATH.scope(self.path.clone(), op).await
     }
 
     /// Whether it has a forge's command line, so pull requests can be read at all.
@@ -66,7 +80,8 @@ pub fn find(program: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs`.
+/// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs` on their
+/// `PATH` ([`Programs::scope`]).
 ///
 /// `terminals` holds the directory of every terminal live on the worker, which a worktree's
 /// removal never pulls out from under and a listing says are worked in.
@@ -76,6 +91,11 @@ pub async fn apply(
     op: GitOp,
     terminals: &[PathBuf],
 ) -> GitOutcome {
+    programs.scope(applied(programs, repo, op, terminals)).await
+}
+
+/// [`apply`], once its programs' `PATH` is in place.
+async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBuf]) -> GitOutcome {
     let Some(git) = programs.git.as_deref() else {
         return GitOutcome::Unavailable {
             program: "git".to_owned(),
@@ -357,7 +377,8 @@ async fn pushed_pull(programs: &Programs, root: &Path) -> Option<Box<PullStatus>
 }
 
 /// `program args…` in `root`, with `input` on its stdin, within `within`: its stdout when it
-/// succeeds, else what it said, its end kept.
+/// succeeds, else what it said, its end kept. Inside [`Programs::scope`] it runs on that
+/// `PATH`.
 pub(super) async fn run(
     program: &Path,
     root: &Path,
@@ -378,6 +399,9 @@ pub(super) async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Ok(Some(path)) = PATH.try_with(Clone::clone) {
+        command.env("PATH", path);
+    }
     let name = program.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let failed = |said: String| GitOutcome::Failed { said };
     let mut child = command.spawn().map_err(|e| failed(format!("{name} did not start: {e}")))?;

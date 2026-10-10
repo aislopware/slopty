@@ -41,7 +41,7 @@ fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
 
 /// The worker's git and no gh, so no test reaches the person's own GitHub sign-in.
 fn git_only() -> Programs {
-    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None, glab: None }
+    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None, glab: None, path: None }
 }
 
 async fn done(repo: &Path, op: GitOp) -> GitDone {
@@ -198,4 +198,35 @@ async fn a_refusal_is_said_in_git_s_own_words() {
     ));
     let said = failed(apply(git, &at, GitOp::Push, &[]).await);
     assert!(said.contains("rejected"), "{said}");
+}
+
+/// A commit runs the person's hooks on their own `PATH`: a pre-commit hook whose tool is found
+/// only there (a daemon launchd started has no Homebrew, mise or npm on its own) commits, and
+/// fails in git's words without it.
+#[tokio::test]
+async fn a_hook_s_tool_is_found_on_the_person_s_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (dir, work, _bare) = repo();
+    let tools = dir.path().join("tools");
+    std::fs::create_dir_all(&tools).expect("made");
+    let tool = tools.join("slopty-test-lint");
+    std::fs::write(&tool, "#!/bin/sh\nexit 0\n").expect("written");
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    let hook = work.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\nslopty-test-lint\n").expect("written");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    std::fs::write(work.join("kept.txt"), "changed\n").expect("written");
+    let commit = || GitOp::Commit { paths: vec!["kept.txt".to_owned()], message: "m".to_owned() };
+    let repo = work.to_string_lossy();
+
+    let alone = apply(&git_only(), &repo, commit(), &[]).await;
+    assert!(
+        matches!(&alone, GitOutcome::Failed { said } if said.contains("slopty-test-lint")),
+        "the worker's own PATH has no such tool: {alone:?}"
+    );
+    let mut path = std::ffi::OsString::from(&tools);
+    path.push(":/usr/bin:/bin");
+    let person = Programs { path: Some(path), ..git_only() };
+    let made = apply(&person, &repo, commit(), &[]).await;
+    assert!(matches!(made, GitOutcome::Done(GitDone::Committed { .. })), "{made:?}");
 }

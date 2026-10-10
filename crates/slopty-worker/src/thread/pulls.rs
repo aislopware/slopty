@@ -48,7 +48,7 @@ pub fn spawn(host: Host, programs: Programs) -> JoinHandle<()> {
         let mut due: HashMap<Key, Instant> = HashMap::new();
         loop {
             tokio::time::sleep(TICK).await;
-            round(&host, &programs, &mut due).await;
+            programs.scope(round(&host, &programs, &mut due)).await;
         }
     })
 }
