@@ -53,6 +53,10 @@ pub fn foreground(fd: impl AsFd) -> Option<Foreground> {
 /// (`/proc/<pid>/stat` field 22). `None` when the process is gone or the platform would not say.
 /// Together with the pid it names one process: a pid used again carries another mark.
 #[must_use]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    expect(clippy::missing_const_for_fn, reason = "const only where no process table is read")
+)]
 pub fn start_mark(pid: i32) -> Option<u64> {
     imp::start_mark(pid)
 }
