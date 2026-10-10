@@ -2327,3 +2327,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - No golden moved. The decoder's own snapshots (`conversation__edit`,
     `conversation__tools`) now say `created` where they said `kind`. The whole-diff test also
     checks that the reference names the thread it is in.
+
+- ✅ **Which of Claude Code's commands open a dialog is read from its build, not guessed**
+  (2026-10-11, readiness 10-11 item 10, the gap its audit left).
+  - **What was open.** A command that opens a dialog, sent from a thread's composer, shows only
+    in the hidden TUI, so the client flips to the TUI for it. The plugin API's command list
+    (`$.command.list()`, the mod's catalog) says only name, description and source. The list
+    of dialog commands was written by hand.
+  - **Read from the build.** `cargo xtask fixtures claude-commands` reads the pinned official
+    build without running it, and records every command
+    (`crates/slopty-agent/tests/fixtures/claude/commands.json`):
+    - which render in the TUI (`local-jsx`), and which exist only there;
+    - which are hidden, which take arguments, and which act at once given them.
+
+    The bundle defines each command as an object literal. A command headless sessions run too
+    is defined twice, and the TUI's `local-jsx` one is kept. Pairing the two by name avoids
+    depending on minified identifiers.
+  - **What 2.1.296 says.**
+    - `/agents` is removed (a hidden stub).
+    - `/doctor` is a bundled skill, a prompt Claude answers.
+    - `/output-style` has no TUI form.
+    - `/config` and `/settings` act at once given `key=value`, and `/mcp` given its
+      `reconnect`, `enable` or `disable` arguments.
+    - `/rewind` is TUI-only and opens its selector.
+  - **The lists.** They live with Claude Code's adapter (`slopty_agent::commands::{DIALOGS,
+    BARE_DIALOGS, opens_dialog, may_open_dialog}`), corrected by the points above, and the UI
+    calls them.
+  - **The test** (`the_dialog_commands_are_the_build_s_own`) holds every listed name to a
+    visible command the build renders in its TUI, or has only there. A bare-only one must take
+    arguments. The table must be the pinned mod version's. A snapshot of the TUI-rendered
+    commands makes a bump that adds one, or turns one into plain text, show in review.

@@ -28,6 +28,8 @@ use serde_json::{Map, Value, json};
 
 use crate::tools::repo_root;
 
+mod commands;
+
 #[derive(Subcommand)]
 pub enum FixturesCmd {
     /// Capture every scenario, or the one named, with the official Claude Code build.
@@ -50,6 +52,13 @@ pub enum FixturesCmd {
         #[arg(long, default_value = crate::claude::VERSION)]
         version: String,
     },
+    /// Read Claude Code's own slash commands from the official build: which render in the TUI,
+    /// which exist only there, and which act at once given arguments. Nothing runs.
+    ClaudeCommands {
+        /// The Claude Code release to read.
+        #[arg(long, default_value = crate::claude::VERSION)]
+        version: String,
+    },
     /// The hook a capture registers: saves the payload on stdin and answers permission
     /// requests. Not for people.
     #[command(hide = true)]
@@ -65,6 +74,7 @@ pub fn run(cmd: &FixturesCmd) -> Result<()> {
         FixturesCmd::ClaudeMod { only, version } => {
             crate::claude_mod::capture_all(only.as_deref(), version)
         }
+        FixturesCmd::ClaudeCommands { version } => commands::record(version),
         FixturesCmd::HookSink { dir } => hook_sink(dir),
     }
 }

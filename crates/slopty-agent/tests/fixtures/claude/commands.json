@@ -1,0 +1,1000 @@
+{
+  "claude": "2.1.296",
+  "commands": [
+    {
+      "aliases": [],
+      "argument_hint": "<path>",
+      "hidden": false,
+      "immediate": "with-arguments",
+      "jsx": true,
+      "name": "add-dir",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "with-arguments",
+      "jsx": true,
+      "name": "advisor",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": false,
+      "name": "agents",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "artifacts",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "auto-mode-setup",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[auto|<tokens>]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "autocompact",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "autofix-pr",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "bg"
+      ],
+      "argument_hint": "[prompt]",
+      "hidden": false,
+      "immediate": "other",
+      "jsx": true,
+      "name": "background",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[name]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "branch",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "brief",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[question]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "btw",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "share"
+      ],
+      "argument_hint": "[report]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "bug",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "<path>",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "cd",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "chrome",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "reset",
+        "new"
+      ],
+      "argument_hint": "[name]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "clear",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "cloud-plugins",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "color",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "<optional custom summarization instructions>",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "compact",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "settings"
+      ],
+      "argument_hint": "[key=value]",
+      "hidden": false,
+      "immediate": "with-arguments",
+      "jsx": true,
+      "name": "config",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[all]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "context",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "copy",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "daemon",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": false,
+      "name": "design-consent",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "design-login",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": false,
+      "name": "design-revoke",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "app"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "desktop",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "other",
+      "jsx": true,
+      "name": "diff",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "effort",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "quit"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "exit",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[filename]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "export",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": true,
+      "name": "extra-usage",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[on|off]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "fast",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[report]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "feedback",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "focus",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "<directive>",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "fork",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[<condition> | clear]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "goal",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": false,
+      "name": "heapdump",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "other",
+      "jsx": true,
+      "name": "help",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "hooks",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[open]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "ide",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[codex|gemini|cursor] [--dry-run]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "import",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "init",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "insights",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[options]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "install",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "install-github-app",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "install-slack-app",
+      "tui_only": true
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "keybindings",
+      "tui_only": true
+    },
+    {
+      "aliases": [
+        "peers"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "list-agents",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "login",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "logout",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "loops",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[reconnect (<server>|all)|enable|disable [<server>|all]]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "mcp",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "memory",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "ios",
+        "android"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "mobile",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[model]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "model",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[style]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "output-style",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "passes",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "memory-pause",
+        "toggle-memory"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "pause-memory",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "allowed-tools"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "permissions",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[open|<description>]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "plan",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "plugins",
+        "marketplace"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "plugin",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "powerup",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "privacy-settings",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": true,
+      "name": "pro-trial-expired",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "radio",
+      "tui_only": true
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "rate-limit-options",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "recap",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "release-notes",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[--force]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "reload-plugins",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "reload-skills",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "rc"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "remote-control",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "remote-env",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "name"
+      ],
+      "argument_hint": "[name]",
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "rename",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "update"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "restart",
+      "tui_only": true
+    },
+    {
+      "aliases": [
+        "continue"
+      ],
+      "argument_hint": "[conversation id or search term]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "resume",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "checkpoint",
+        "undo"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "rewind",
+      "tui_only": true
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "other",
+      "jsx": true,
+      "name": "sandbox",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "scroll-speed",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "remote"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "session",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "setup-bedrock",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "setup-vertex",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "skill-doctor",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "skills",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "status",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "statusline",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "stickers",
+      "tui_only": true
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "stop",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "<task>",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "subtask",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "bashes"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "tasks",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "team-onboarding",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "tp"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "teleport",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "terminal-setup",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "other",
+      "jsx": true,
+      "name": "theme",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[default|fullscreen]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "tui",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "<prompt>",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "ultraplan",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "ultrareview",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "upgrade",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "cost",
+        "stats"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "usage",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "usage-credits",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "version",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": "[hold|tap|off]",
+      "hidden": false,
+      "immediate": "never",
+      "jsx": false,
+      "name": "voice",
+      "tui_only": true
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "never",
+      "jsx": true,
+      "name": "web-setup",
+      "tui_only": false
+    },
+    {
+      "aliases": [
+        "breaks",
+        "break-reminder",
+        "downtime"
+      ],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "wellbeing",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": true,
+      "immediate": "never",
+      "jsx": false,
+      "name": "workflow-launch-exec",
+      "tui_only": false
+    },
+    {
+      "aliases": [],
+      "argument_hint": null,
+      "hidden": false,
+      "immediate": "always",
+      "jsx": true,
+      "name": "workflows",
+      "tui_only": false
+    }
+  ]
+}

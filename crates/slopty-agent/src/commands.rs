@@ -39,6 +39,55 @@ const MAX_DEPTH: usize = 4;
 /// Longest description kept, in characters.
 const DESCRIPTION_CHARS: usize = 160;
 
+/// Claude Code's own commands that open a dialog in its terminal whatever follows them.
+///
+/// Each is a name or an alias. Sent from a thread's composer, the dialog shows only in the TUI,
+/// so the client shows the TUI. Claude Code's command list does not say which do; its build does,
+/// and `cargo xtask fixtures claude-commands` records it (`tests/fixtures/claude/commands.json`):
+/// each renders in the TUI, or exists only there (`rewind`).
+pub const DIALOGS: &[&str] = &[
+    "bashes",
+    "context",
+    "help",
+    "hooks",
+    "ide",
+    "install-github-app",
+    "login",
+    "logout",
+    "memory",
+    "permissions",
+    "plugin",
+    "plugins",
+    "privacy-settings",
+    "rewind",
+    "status",
+    "tasks",
+    "terminal-setup",
+    "theme",
+    "upgrade",
+    "usage",
+];
+
+/// Its commands that open a dialog only when run bare: given arguments they act at once
+/// (`/model sonnet`, `/config theme=dark`, `/mcp reconnect github`).
+pub const BARE_DIALOGS: &[&str] =
+    &["add-dir", "config", "export", "mcp", "model", "resume", "settings"];
+
+/// Whether Claude Code's built-in command `name` can open a dialog in its terminal.
+#[must_use]
+pub fn may_open_dialog(name: &str) -> bool {
+    DIALOGS.contains(&name) || BARE_DIALOGS.contains(&name)
+}
+
+/// Whether Claude Code shows `draft`, sent, as a dialog in its terminal: `/permissions`, a bare
+/// `/model`.
+#[must_use]
+pub fn opens_dialog(draft: &str) -> bool {
+    let Some(command) = draft.trim().strip_prefix('/') else { return false };
+    let (name, args) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
+    DIALOGS.contains(&name) || (BARE_DIALOGS.contains(&name) && args.trim().is_empty())
+}
+
 /// The menu: Claude Code's own list (`agent`) where the mod sent one, each command with the
 /// argument hint and the source its file on disk gives (`custom`); else the custom commands
 /// alone. Each name once.
@@ -284,6 +333,52 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    /// Every command said to open a dialog is one the pinned Claude Code build renders in its
+    /// TUI, or has only there, and is not hidden; one that opens a dialog only bare takes
+    /// arguments. The commands the TUI renders are pinned too, so a Claude Code bump that adds
+    /// one or turns one into plain text shows in review.
+    #[test]
+    fn the_dialog_commands_are_the_build_s_own() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude/commands.json");
+        let doc: Value =
+            serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("json");
+        let claude = doc["claude"].as_str().expect("a version");
+        assert!(
+            crate::claude_mod::MOD_CLAUDE_VERSIONS.contains(&claude),
+            "commands.json is {claude}'s: record it again with `cargo xtask fixtures claude-commands`"
+        );
+        let commands = doc["commands"].as_array().expect("commands");
+        let find = |name: &str| {
+            commands.iter().find(|c| {
+                c["name"] == name
+                    || c["aliases"].as_array().is_some_and(|a| a.iter().any(|a| a == name))
+            })
+        };
+        for name in DIALOGS.iter().chain(BARE_DIALOGS) {
+            let command = find(name).unwrap_or_else(|| panic!("{name} is no command of {claude}"));
+            let shown = command["jsx"] == true || command["tui_only"] == true;
+            assert!(shown && command["hidden"] == false, "{name}: {command}");
+        }
+        for name in BARE_DIALOGS {
+            assert!(
+                find(name).is_some_and(|c| c["argument_hint"].is_string()),
+                "{name} takes none"
+            );
+        }
+        let rendered: Vec<&str> = commands
+            .iter()
+            .filter(|c| c["hidden"] == false && (c["jsx"] == true || c["tui_only"] == true))
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        insta::assert_snapshot!("claude_tui_commands", rendered.join("\n"));
+        assert!(
+            opens_dialog("/permissions") && opens_dialog(" /model ") && opens_dialog("/settings")
+        );
+        assert!(!opens_dialog("/model sonnet") && !opens_dialog("/config theme=dark"));
+        assert!(!opens_dialog("/doctor") && !opens_dialog("/agents") && !opens_dialog("model"));
+    }
 
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
