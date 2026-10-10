@@ -161,7 +161,10 @@ mod tests {
             .arg(server.quic_addr().to_string())
             .arg("--data-dir")
             .arg(data.path())
-            .args(["project", "create", "demo", "--title", "Demo", "--repo", "demo"])
+            .args([
+                "project", "create", "demo", "--title", "Demo", "--repo", "demo", "--target",
+                "main",
+            ])
             .env("RUST_LOG", "warn")
             .kill_on_drop(true)
             .output();
