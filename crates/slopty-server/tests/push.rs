@@ -301,6 +301,7 @@ mod tests {
             kind: Request::APPROVAL.to_owned(),
             title: "Run cargo test?".to_owned(),
             options: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
+            buttons: Vec::new(),
             opened_ms: WallMs::from_millis(2_000),
         });
         // Once the working row is ranked, so the next is a climb and not a first sight.

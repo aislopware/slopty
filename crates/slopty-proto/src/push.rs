@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::thread::AskId;
 use crate::thread::attention::Notice;
+use crate::thread::wire::NoteChoice;
 
 /// A phone the server may push to, as it tells the server on every link and whenever its token
 /// changes ([`crate::server::ToServer::PushDevice`], which names the client).
@@ -28,14 +29,20 @@ pub struct PushDevice {
     pub quiet_ms: u64,
 }
 
-/// What is sealed to the phone: the server's notice, as a linked client hears it, and the
-/// request its note's Allow and Deny answer, when it asks a yes or no they can.
+/// What is sealed to the phone: the server's notice, and what its note's buttons answer.
+///
+/// The notice is as a linked client hears it. The buttons are Allow and Deny on a yes or no
+/// they can answer, or a question's options ([`Self::choices`]).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PushBody {
     /// The notice.
     pub notice: Notice,
     /// The request a note's buttons answer, on the notice's thread.
     pub ask: Option<AskId>,
+    /// The answers the note offers as buttons of their own, each answering `ask` with its
+    /// choice ([`RequestCard::buttons`](crate::thread::wire::RequestCard::buttons)): a small
+    /// question's options. Empty, the buttons are Allow and Deny when there is an `ask`.
+    pub choices: Vec<NoteChoice>,
     /// The note is already on the phone and only what its buttons answer moved (a request
     /// opened after the thread came to need the person, or the one it showed went): it
     /// replaces that note under the same collapse id without a sound or a banner.

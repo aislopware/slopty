@@ -997,8 +997,53 @@ pub struct RequestCard {
     pub title: String,
     /// The answers the agent offers.
     pub options: Vec<Choice>,
+    /// The answers a note offers as buttons of their own ([`NoteChoice::of`]); none for a
+    /// request that is not a question that small.
+    pub buttons: Vec<NoteChoice>,
     /// When it opened.
     pub opened_ms: WallMs,
+}
+
+/// An answer a note offers as a button of its own: one of the options of a question that asks
+/// one thing and takes one of a few answers.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct NoteChoice {
+    /// What the button says: the option's label.
+    pub label: String,
+    /// What pressing it answers the request with ([`Intent::Answer`]'s `choice`).
+    pub choice: String,
+}
+
+impl NoteChoice {
+    /// The most options a note offers as buttons: what a notification's actions show.
+    pub const MAX: usize = 4;
+
+    /// The buttons of `request`: one per option of a question that asks one thing, takes one
+    /// answer and offers at most [`Self::MAX`], each answering with that option alone, as the
+    /// question's own dialog would. None for anything else, which is opened or replied to.
+    #[must_use]
+    pub fn of(request: &super::Request) -> Vec<Self> {
+        let [question] = request.questions.as_slice() else { return Vec::new() };
+        if request.kind != super::Request::QUESTION
+            || question.multi_select
+            || question.options.is_empty()
+            || question.options.len() > Self::MAX
+        {
+            return Vec::new();
+        }
+        question
+            .options
+            .iter()
+            .map(|offered| {
+                let answer = super::detail::Answer {
+                    question: question.text.clone(),
+                    answer: offered.label.clone(),
+                };
+                let choice = super::detail::Answer::choice(&request.questions, &[answer]);
+                Self { label: offered.label.clone(), choice }
+            })
+            .collect()
+    }
 }
 
 impl RequestCard {

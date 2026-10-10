@@ -190,7 +190,7 @@ impl Phones {
         &mut self,
         seats: &BTreeMap<u64, Sitting>,
         notice: &Notice,
-        ask: Option<&AskId>,
+        ask: Option<&Ask>,
         unheard: &[u64],
     ) {
         self.send(seats, notice, ask, (unheard, false));
@@ -198,7 +198,7 @@ impl Phones {
 
     /// Push `notice` as [`Self::push`] does, but only to the phones not already showing a note
     /// about its subject that needs the person.
-    fn push_new(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
+    fn push_new(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&Ask>) {
         self.send(seats, notice, ask, (&[], true));
     }
 
@@ -208,7 +208,7 @@ impl Phones {
         &mut self,
         seats: &BTreeMap<u64, Sitting>,
         notice: &Notice,
-        ask: Option<&AskId>,
+        ask: Option<&Ask>,
         (unheard, new_only): (&[u64], bool),
     ) {
         let Some(out) = &self.out else { return };
@@ -228,7 +228,12 @@ impl Phones {
             if listening || short {
                 continue;
             }
-            let body = PushBody { notice: notice.clone(), ask: ask.cloned(), quiet: false };
+            let body = PushBody {
+                notice: notice.clone(),
+                ask: ask.map(|a| a.id.clone()),
+                choices: ask.map(|a| a.choices.clone()).unwrap_or_default(),
+                quiet: false,
+            };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
             self.owed_notes.retain(|(c, owed)| *c != *client || owed.notice.about != notice.about);
@@ -1058,10 +1063,20 @@ pub(super) fn tell_project(state: &mut State, kept: &Kept) {
     }
 }
 
+/// The request a pushed note's buttons answer, and the answers it offers as buttons of their
+/// own: a small question's options; none for a yes or no, which Allow and Deny answer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct Ask {
+    /// The request.
+    id: AskId,
+    /// Its buttons ([`slopty_proto::thread::wire::RequestCard::buttons`]).
+    choices: Vec<slopty_proto::thread::wire::NoteChoice>,
+}
+
 /// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
 /// phones when it finds the person at none of them, with `ask`, the request its note's buttons
 /// answer.
-fn tell(board: &mut Board, notice: &Notice, ask: Option<&AskId>) {
+fn tell(board: &mut Board, notice: &Notice, ask: Option<&Ask>) {
     let reach = route(&board.seats, notice);
     let mut unheard = Vec::new();
     for link in &reach.links {
@@ -1306,7 +1321,7 @@ fn ladder(
 /// ready to merge, and its orchestrator hears of the rest.
 ///
 /// [`RequestCard::answerable`]: slopty_proto::thread::wire::RequestCard::answerable
-fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice, Option<AskId>)> {
+fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice, Option<Ask>)> {
     let before: HashMap<ThreadAt, Rung> =
         board.published.threads.iter().map(|r| (r.at, r.rung)).collect();
     let busy = |rung: Rung| matches!(rung, Rung::Working | Rung::Waiting);
@@ -1347,7 +1362,7 @@ fn notice_of(
     projects: &Projects,
     at: ThreadAt,
     (kind, worked_ms): (NoticeKind, Option<u64>),
-) -> Option<(Notice, Option<AskId>)> {
+) -> Option<(Notice, Option<Ask>)> {
     let table = board.tables.get(&at.worker)?;
     let row = table.get(&at.thread)?;
     let task_agent = || {
@@ -1368,8 +1383,9 @@ fn notice_of(
     let ask = row
         .requests
         .first()
-        .filter(|r| kind == NoticeKind::NeedsYou && via.is_none() && r.answerable());
-    let ask = ask.map(|r| r.id.clone());
+        .filter(|_| kind == NoticeKind::NeedsYou && via.is_none())
+        .filter(|r| r.answerable() || !r.buttons.is_empty())
+        .map(|r| Ask { id: r.id.clone(), choices: r.buttons.clone() });
     let notice = Notice {
         kind,
         about: Subject::Thread(at),

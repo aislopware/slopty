@@ -115,6 +115,7 @@ fn thread_at(cwd: &str, repo: Option<&str>) -> ThreadRow {
     row.cwd = Some(cwd.to_owned());
     row.repo = repo.map(str::to_owned);
     row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId("ask-1".to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

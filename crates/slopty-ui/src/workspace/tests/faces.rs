@@ -287,6 +287,7 @@ fn the_request_is_said_once(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     let mut row = thread_on(session).row(WallMs::ZERO);
     row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId("ask-1".to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),
@@ -445,6 +446,7 @@ fn a_branch_opens_as_a_tile_and_an_aside_does_not(cx: &mut TestAppContext) {
     asked.meta.facts.insert(ThreadMeta::ASIDE_FACT.to_owned(), thread.to_string());
     let mut aside_row = asked.row(WallMs::ZERO);
     aside_row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId("ask-1".to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

@@ -153,6 +153,7 @@ fn a_tiles_notice_reads_the_name_the_tile_comes_to_have(cx: &mut TestAppContext)
     state.meta.terminal = Some(away);
     let mut row = state.row(WallMs::ZERO);
     row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId("ask-1".to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

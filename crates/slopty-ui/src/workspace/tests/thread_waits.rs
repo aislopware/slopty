@@ -18,6 +18,7 @@ fn asking(terminal: Option<SessionId>) -> ThreadRow {
     state.meta.terminal = terminal;
     let mut row = state.row(WallMs::ZERO);
     row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId("ask-1".to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

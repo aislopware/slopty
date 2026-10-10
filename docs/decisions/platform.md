@@ -1270,3 +1270,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::attention::a_note_tapped_before_its_machine_links_goes_there_once_it_does`
     (slopty-ui); `verdict::tests::a_background_answer_that_did_not_land_is_said` (slopty-app);
     the simulator's cold press is "A press on a killed app is proved on the simulator" above.
+
+- ✅ **A small question is answered from its note** (2026-10-12, readiness 10-12 item 13, the
+  wire and the server). A note offered Allow and Deny on a plain yes or no and nothing else, so
+  a question an agent asked could only be opened.
+  - A request card carries `buttons` (`NoteChoice`), made where the card is
+    (`NoteChoice::of`): for a question that asks one thing, takes one answer and offers at
+    most four (what a notification's actions show), one per option, each with the choice
+    that answers the request with it alone, as the question's own dialog would send it. Any
+    other request has none, and is opened or replied to.
+  - The server pushes a needing thread's first request with its note when it is a yes or no
+    Allow and Deny answer, or when it has buttons. `PushBody.choices` carries them, and the
+    phone offers them as the note's actions, each answering `ask` with its choice.
+  - Tests: `slopty-proto` `units::a_small_question_is_answered_by_its_options`, the
+    `push_body_choices` golden; `slopty-server`
+    `hub::ladder::tests::needs_you_pushes_once_per_ask` (the pocketed phone's push carries a
+    question's buttons).

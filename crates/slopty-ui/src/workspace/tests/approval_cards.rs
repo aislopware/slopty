@@ -41,6 +41,7 @@ fn waiting(ask: &str, approval: bool, opened: u64) -> ThreadRow {
         (Request::QUESTION, Vec::new())
     };
     row.requests = vec![RequestCard {
+        buttons: Vec::new(),
         id: AskId(ask.to_owned()),
         item: None,
         kind: kind.to_owned(),

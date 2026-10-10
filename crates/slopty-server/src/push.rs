@@ -86,6 +86,10 @@ pub struct Outgoing {
 
 /// What a push does on the phone.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per note a phone is pushed, a few a minute at most; a box would cost more"
+)]
 pub enum Sending {
     /// Show the note this body makes, sealed to the phone.
     Note(PushBody),
@@ -540,7 +544,7 @@ mod tests {
         let out = Outgoing {
             client: ClientId::new(),
             device: device.clone(),
-            what: Sending::Note(PushBody { notice, ask: None, quiet: false }),
+            what: Sending::Note(PushBody { notice, ask: None, choices: Vec::new(), quiet: false }),
         };
         let push = sealed(&out).unwrap();
         let request = apns::request(&push, &device.topic, "token").unwrap();
@@ -607,7 +611,7 @@ mod tests {
         let note = Outgoing {
             client,
             device: device.clone(),
-            what: Sending::Note(PushBody { notice, ask: None, quiet: false }),
+            what: Sending::Note(PushBody { notice, ask: None, choices: Vec::new(), quiet: false }),
         };
         let back = Outgoing { client, device, what: Sending::TakeBack(vec![about]) };
         let hub = crate::Hub::new("server".to_owned(), Vec::new());

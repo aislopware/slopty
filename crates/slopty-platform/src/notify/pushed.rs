@@ -434,6 +434,7 @@ mod tests {
         let body = PushBody {
             notice: notice(NoticeKind::NeedsYou, at.clone(), Some(tile)),
             ask: Some(ask),
+            choices: Vec::new(),
             quiet: false,
         };
         let note = note_of(&body);
@@ -456,7 +457,7 @@ mod tests {
         );
         assert_eq!((note.category, note.urgent, note.thread), (Some(APPROVAL), true, None));
         assert!(!note.silent, "the first push sounds");
-        let moved = note_of(&PushBody { ask: None, quiet: true, ..body });
+        let moved = note_of(&PushBody { ask: None, choices: Vec::new(), quiet: true, ..body });
         assert_eq!(moved.id, note.id, "in place of the note up");
         assert!(moved.silent, "a quiet push only moves its buttons");
         assert_eq!(moved.category, Some(super::super::REPLYING), "the yes or no went: a reply");
@@ -464,7 +465,8 @@ mod tests {
         let mut done = notice(NoticeKind::Finished, at, None);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
         done.title = " ".to_owned();
-        let note = note_of(&PushBody { notice: done, ask: None, quiet: false });
+        let note =
+            note_of(&PushBody { notice: done, ask: None, choices: Vec::new(), quiet: false });
         assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
             note.info,
@@ -481,6 +483,7 @@ mod tests {
         let note = note_of(&PushBody {
             notice: notice(NoticeKind::Project, about, Some(tile)),
             ask: None,
+            choices: Vec::new(),
             quiet: false,
         });
         assert_eq!(note.id, format!("project-{project}-7"));
@@ -490,7 +493,8 @@ mod tests {
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
         let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile), None);
-        let note = note_of(&PushBody { notice: program, ask: None, quiet: false });
+        let note =
+            note_of(&PushBody { notice: program, ask: None, choices: Vec::new(), quiet: false });
         assert_eq!(note.id, session.to_string());
         assert_eq!(
             note.info,
@@ -512,6 +516,7 @@ mod tests {
         let body = PushBody {
             notice: notice(NoticeKind::NeedsYou, at, Some(TermRef { worker, session })),
             ask: None,
+            choices: Vec::new(),
             quiet: false,
         };
         let bytes = slopty_proto::codec::encode_body(&body).unwrap();

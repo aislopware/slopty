@@ -536,6 +536,7 @@ mod tests {
             kind: kind.to_owned(),
             title: title.to_owned(),
             options: Vec::new(),
+            buttons: Vec::new(),
             opened_ms: WallMs::ZERO,
         };
         ThreadStand { asks: Some(card), ..at(Phase::NeedsYou, wait) }

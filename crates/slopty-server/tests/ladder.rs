@@ -209,6 +209,7 @@ mod tests {
             kind: "permission".to_owned(),
             title: "Run cargo test?".to_owned(),
             options: Vec::new(),
+            buttons: Vec::new(),
             opened_ms: WallMs::from_millis(2_000),
         });
         let delta = |rows| TableFrame::Delta { cursor: Cursor::default(), rows, removed: vec![] };

@@ -267,6 +267,7 @@ impl ThreadState {
                     kind: r.kind.clone(),
                     title: r.title.clone(),
                     options: r.options.clone(),
+                    buttons: super::wire::NoteChoice::of(r),
                     opened_ms: r.opened_ms,
                 })
                 .collect(),

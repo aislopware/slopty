@@ -158,6 +158,7 @@ mod units {
             kind: kind.to_owned(),
             title: "Run cargo test?".to_owned(),
             options,
+            buttons: Vec::new(),
             opened_ms: WallMs::ZERO,
         };
         let always = choice("always", Effect::Allow, Some("this session"), false);
@@ -175,6 +176,66 @@ mod units {
         );
         assert!(!card(Request::APPROVAL, vec![always, stop]).answerable(), "no plain allow");
         assert!(!card(Request::QUESTION, ask.options).answerable(), "a question");
+    }
+
+    /// A question that asks one thing, takes one answer and offers at most four is answered from
+    /// a note by its options, each sending what the question's own dialog would for it; one
+    /// that offers more, takes several or asks more than one thing, and any other request,
+    /// offers none.
+    #[test]
+    fn a_small_question_is_answered_by_its_options() {
+        use slopty_core::WallMs;
+        use slopty_proto::thread::detail::{Answer, Offered, Question};
+        use slopty_proto::thread::wire::NoteChoice;
+        use slopty_proto::thread::{AskId, Request, RequestState};
+        let question = |text: &str, labels: &[&str], multi_select| Question {
+            text: text.to_owned(),
+            header: None,
+            options: labels
+                .iter()
+                .map(|l| Offered { label: (*l).to_owned(), description: None })
+                .collect(),
+            multi_select,
+        };
+        let request = |kind: &str, questions| Request {
+            id: AskId("toolu_1".to_owned()),
+            item: None,
+            kind: kind.to_owned(),
+            title: "Which database?".to_owned(),
+            text: None,
+            options: Vec::new(),
+            questions,
+            proposed: None,
+            schema_json: None,
+            url: None,
+            state: RequestState::Open,
+            opened_ms: WallMs::ZERO,
+            until_ms: None,
+        };
+        let which = question("Which database?", &["Postgres", "SQLite"], false);
+        let buttons = NoteChoice::of(&request(Request::QUESTION, vec![which.clone()]));
+        assert_eq!(
+            buttons.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(),
+            ["Postgres", "SQLite"]
+        );
+        let answered = Answer::read(std::slice::from_ref(&which), &buttons[1].choice).unwrap();
+        assert_eq!(answered[0].answer, "SQLite", "it answers as the dialog would");
+
+        let five = question("Which?", &["a", "b", "c", "d", "e"], false);
+        let several = question("Which?", &["a", "b"], true);
+        let open = question("Why?", &[], false);
+        for (kind, questions) in [
+            (Request::QUESTION, vec![five]),
+            (Request::QUESTION, vec![several]),
+            (Request::QUESTION, vec![open]),
+            (Request::QUESTION, vec![which.clone(), which.clone()]),
+            (Request::PLAN, vec![which]),
+        ] {
+            assert!(
+                NoteChoice::of(&request(kind, questions.clone())).is_empty(),
+                "{kind} {questions:?}"
+            );
+        }
     }
 
     /// A review is read the weightiest file first, tests, fixtures, locks and generated code

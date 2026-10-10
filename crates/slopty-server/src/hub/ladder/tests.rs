@@ -7,7 +7,7 @@ use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::project::{TaskId, TaskSpec};
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
-use slopty_proto::thread::wire::{PullSeen, PullStands, RequestCard};
+use slopty_proto::thread::wire::{NoteChoice, PullSeen, PullStands, RequestCard};
 use slopty_proto::thread::{
     AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Status,
 };
@@ -71,6 +71,7 @@ pub(in crate::hub) fn asking(mut row: ThreadRow, title: &str) -> ThreadRow {
         kind: "permission".to_owned(),
         title: title.to_owned(),
         options: Vec::new(),
+        buttons: Vec::new(),
         opened_ms: row.status.since_ms,
     });
     row
@@ -674,6 +675,7 @@ async fn needs_you_pushes_once_per_ask() {
     assert_eq!(pushed_body.notice.kind, NoticeKind::NeedsYou);
     assert_eq!(pushed_body.notice.text, "Run cargo test?");
     assert_eq!(pushed_body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
+    assert_eq!(pushed_body.choices, [], "Allow and Deny answer it");
     assert!(urgent(push));
     hub.rank_ladder();
     rank(vec![needs.clone()]);
@@ -686,6 +688,19 @@ async fn needs_you_pushes_once_per_ask() {
     assert_eq!(back[0].what, Sending::TakeBack(vec![about]));
     rank(vec![moved(&thread, Phase::Working, 4_500)]);
     assert!(pushes().is_empty(), "taken back once");
+    let mut question = asking(moved(&thread, Phase::NeedsYou, 4_600), "Which database?");
+    question.requests[0].kind = Request::QUESTION.to_owned();
+    let buttons: Vec<NoteChoice> = ["Postgres", "SQLite"]
+        .map(|label| NoteChoice { label: label.to_owned(), choice: format!("[{label}]") })
+        .to_vec();
+    question.requests[0].buttons.clone_from(&buttons);
+    rank(vec![question]);
+    let asked = pushes();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(body(&asked[0]).ask, Some(AskId("1".to_owned())), "a question its options answer");
+    assert_eq!(body(&asked[0]).choices, buttons, "each a button of its own");
+    rank(vec![moved(&thread, Phase::Working, 4_700)]);
+    assert_eq!(pushes().len(), 1, "taken back");
     mac.at(&hub, Seat::Desk, true, Vec::new());
     rank(vec![needs.clone()]);
     assert!(pushes().is_empty(), "the person at a desk hears it there");

@@ -601,8 +601,12 @@ fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
         attention.notice(&heard);
         let posted = memory.posted();
         let [posted] = posted.as_slice() else { panic!("one note: {posted:?}") };
-        let pushed =
-            notify::pushed::note_of(&PushBody { notice: notice.clone(), ask: None, quiet: false });
+        let pushed = notify::pushed::note_of(&PushBody {
+            notice: notice.clone(),
+            ask: None,
+            choices: Vec::new(),
+            quiet: false,
+        });
         let mut info = posted.info.clone();
         info.remove(ITEM);
         let what = |n: &Note| (n.id.clone(), n.title.clone(), n.body.clone(), n.urgent, n.category);
@@ -814,6 +818,7 @@ fn asking_row(state: &ThreadState, ask: Option<(&str, &str)>) -> ThreadRow {
     let mut row = state.row(WallMs::ZERO);
     row.requests = ask
         .map(|(id, kind)| RequestCard {
+            buttons: Vec::new(),
             id: AskId(id.to_owned()),
             item: None,
             kind: kind.to_owned(),

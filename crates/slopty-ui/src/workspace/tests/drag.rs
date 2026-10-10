@@ -212,6 +212,7 @@ fn a_threads_row_warms_on_its_press_and_drops_on_a_panes_edge(cx: &mut TestAppCo
     row.repo = Some("/w/atlas".to_owned());
     // Waiting on the person, so it is listed under its project rather than folded away.
     row.requests = vec![slopty_proto::thread::wire::RequestCard {
+        buttons: Vec::new(),
         id: slopty_proto::thread::AskId("ask-1".to_owned()),
         item: None,
         kind: slopty_proto::thread::Request::APPROVAL.to_owned(),

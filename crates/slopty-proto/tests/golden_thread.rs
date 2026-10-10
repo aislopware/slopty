@@ -1200,8 +1200,16 @@ mod golden_thread {
             via: None,
         };
         let ask = Some(AskId("toolu_01".to_owned()));
-        snap("push_body", &PushBody { notice: notice.clone(), ask: ask.clone(), quiet: false });
-        snap("push_body_quiet", &PushBody { notice, ask, quiet: true });
+        let body = |ask, choices, quiet| PushBody { notice: notice.clone(), ask, choices, quiet };
+        snap("push_body", &body(ask.clone(), Vec::new(), false));
+        snap("push_body_quiet", &body(ask.clone(), Vec::new(), true));
+        let choices = ["Postgres", "SQLite"]
+            .map(|label| slopty_proto::thread::wire::NoteChoice {
+                label: label.to_owned(),
+                choice: format!("[{{\"question\":\"Which database?\",\"answer\":\"{label}\"}}]"),
+            })
+            .to_vec();
+        snap("push_body_choices", &body(ask, choices, false));
         let program = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Terminal(TermRef { worker, session }),
@@ -1211,7 +1219,10 @@ mod golden_thread {
             worked_ms: None,
             via: None,
         };
-        snap("push_body_program", &PushBody { notice: program, ask: None, quiet: false });
+        snap(
+            "push_body_program",
+            &PushBody { notice: program, ask: None, choices: Vec::new(), quiet: false },
+        );
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
     }
 }
