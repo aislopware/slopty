@@ -2672,6 +2672,9 @@ impl ThreadView {
                 .debug_selector(|| "thread-tray".to_owned())
                 .w_full()
                 .min_h_0()
+                // Apart from the last row above it, as the composer is apart from the tray:
+                // a card flush with the transcript's own card read as one.
+                .pt(px(spacing.sm))
                 // A column, so a card in it gives up the height of what scrolls inside it
                 // before the tray itself scrolls: a request's answers stay in view.
                 .flex()

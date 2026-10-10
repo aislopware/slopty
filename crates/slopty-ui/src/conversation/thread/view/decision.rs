@@ -15,7 +15,6 @@
 use std::rc::Rc;
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
@@ -305,9 +304,10 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The grants that hold past this once, leading the row from its other end: each a quiet
-    /// button in its words, then its reach written out whole in the readable size, wrapping
-    /// rather than cut, since that reach is what the person grants.
+    /// The grants that hold past this once, leading the row from its other end: each one quiet
+    /// button that reads as one sentence, its words then its reach muted ("Always allow edits
+    /// in /work this session"), wrapping as a whole rather than cut, since that reach is what
+    /// the person grants. Its reach outside the button read as a second, loose label.
     fn standing_grants(
         &self,
         request: &Request,
@@ -326,38 +326,34 @@ impl ThreadView {
             .min_w_0()
             .flex()
             .flex_col()
+            .items_start()
             .gap(px(theme.spacing.xxs))
             .children(standing.iter().map(|choice| {
                 let reach = choice.scope.as_deref().map(str::trim).filter(|r| !r.is_empty());
                 let (ask, id) = (request.id.clone(), choice.id.clone());
                 let label = standing_label(&choice.label, reach);
-                let button = self
-                    .button_frame(
-                        format!("answer-{}-{}", request.id.0, choice.id),
-                        label,
-                        ButtonKind::Ghost,
-                    )
-                    .flex_none()
-                    .child(SharedString::from(choice.label.clone()))
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.answer(ask.clone(), id.clone(), cx);
-                    }));
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .child(button)
-                    .children(reach.map(|reach| {
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .whitespace_normal()
-                            .map(|el| kit::typed(el, theme.roles().metadata))
-                            .text_color(hsla(s.text_secondary))
-                            .child(SharedString::from(reach.to_owned()))
-                    }))
+                let muted = gpui::HighlightStyle {
+                    color: Some(hsla(s.text_secondary)),
+                    font_weight: Some(gpui::FontWeight::NORMAL),
+                    ..gpui::HighlightStyle::default()
+                };
+                let reach_at = choice.label.len().saturating_add(' '.len_utf8())..label.len();
+                let words = gpui::StyledText::new(SharedString::from(label.clone()))
+                    .with_highlights(reach.map(|_| (reach_at, muted)));
+                self.button_frame(
+                    format!("answer-{}-{}", request.id.0, choice.id),
+                    label,
+                    ButtonKind::Ghost,
+                )
+                .flex_shrink_1()
+                .min_w_0()
+                .max_w_full()
+                .justify_start()
+                .px(px(theme.spacing.sm))
+                .child(div().min_w_0().whitespace_normal().child(words))
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    this.answer(ask.clone(), id.clone(), cx);
+                }))
             }))
     }
 }

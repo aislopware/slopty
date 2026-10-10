@@ -147,7 +147,8 @@ fn a_reason_keeps_its_lines(cx: &mut TestAppContext) {
 
 /// An approval is one decision: Deny and Allow side by side a base unit apart, the solid last;
 /// "Deny and stop" waits behind the deny's chevron and answers from there, and so does
-/// answering in the terminal; the standing grant leads the same row from its other end.
+/// answering in the terminal; the standing grant leads the same row from its other end, one
+/// button with its reach in it.
 #[gpui::test]
 fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext) {
     use slopty_proto::thread::{Choice, Effect};
@@ -189,6 +190,10 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
     assert!(always.right() <= deny.left(), "the standing grant leads the row");
     assert!(always.top() < deny.bottom() && deny.top() < always.bottom(), "on the same row");
     assert!(bounds(cx, "standing-a").contains(&always.center()), "and only there");
+    // Its reach is the button's own, read on as one sentence: "Always allow" alone is half
+    // as wide.
+    let wide = f32::from(always.size.width);
+    assert!(wide > 180.0, "the reach inside the grant's button: {wide}");
     assert!(cx.debug_bounds("release-a").is_none(), "the terminal waits in the menu");
 
     click(cx, "denials-a");
