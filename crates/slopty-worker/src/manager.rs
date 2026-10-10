@@ -187,7 +187,7 @@ impl std::fmt::Debug for Worker {
 #[derive(Debug)]
 pub struct Reports {
     /// Each child exit, as ptyd reports it; the caller pumps it into [`Worker::on_exit`]. A
-    /// lost link to ptyd is dialled again ([`keep_ptyd`]), so it ends only with the worker.
+    /// lost link to ptyd is dialled again (`keep_ptyd`), so it ends only with the worker.
     pub exits: mpsc::UnboundedReceiver<(SessionId, i32)>,
     /// The sessions whose output named a local server.
     pub port_hints: mpsc::UnboundedReceiver<SessionId>,
@@ -201,10 +201,10 @@ impl Worker {
     /// already holds. `agents` is the daemon's agent table. `kept` is
     /// where sessions are kept on disk ([`crate::restore`]); the ones ptyd no longer holds wait
     /// for [`Self::restore`]. `custody` is the one this build speaks: a ptyd that says another
-    /// beside its socket is refused, its sessions left alone ([`dial`]).
+    /// beside its socket is refused, its sessions left alone (`dial`).
     ///
     /// A link to ptyd that is lost later is dialled again, and every session the worker runs
-    /// is handed back to the ptyd it reaches ([`keep_ptyd`]).
+    /// is handed back to the ptyd it reaches (`keep_ptyd`).
     pub async fn connect(
         socket: Option<PathBuf>,
         agents: Arc<dyn Agents>,
