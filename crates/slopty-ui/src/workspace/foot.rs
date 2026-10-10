@@ -5,12 +5,12 @@
 //! the focused tile's machine and agent (`Plan 5h 23% · 7d 41%`, in `warn` once a window is 80 %
 //! used), which lists every machine's readings when clicked; then the focused agent: its mark,
 //! its name and how it is doing. On the right, the ports forwarded here, the transfers in
-//! flight, the frame time while the stats show, a chip for each shell of the project on show
-//! whose command runs out of sight (in another tab, behind a pane's other tab, or in the tab's
-//! terminal put away; a click goes to it), and the toggle of the tab's terminal (⌘⌥T, which the
-//! palette names). A shell on show says its command in its own header, so it has no chip. The title
-//! bar keeps only the readouts that warn: the server out of reach, a link on a relay, a newer
-//! build.
+//! flight, a chip for each shell of the project on show whose command runs out of sight (in
+//! another tab, behind a pane's other tab, or in the tab's terminal put away; a click goes to
+//! it), and the toggle of the tab's terminal (⌘⌥T, which the palette names). A shell on show
+//! says its command in its own header, so it has no chip. The title bar keeps only the readouts
+//! that warn: the server out of reach, a link on a relay, a newer build. The frame time is the
+//! stream stats overlay's (⌘⇧I), not a readout.
 //!
 //! A phone has no room for it: its bar along the foot is the key bar. The popovers it opens
 //! rise from it, at its ends.
@@ -96,8 +96,6 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let stats = self.show_stats && !self.phone;
-        self.keep_clock(stats, cx);
         let running = self.running_shells();
         *self.foot.running.borrow_mut() = running.iter().map(|(_, s)| *s).collect();
 
@@ -105,7 +103,6 @@ impl WorkspaceView {
         let agent = self.foot_agent().map(gpui::IntoElement::into_any_element);
         let ports = self.ports_button(cx).map(gpui::IntoElement::into_any_element);
         let transfers = self.transfers_button(cx).map(gpui::IntoElement::into_any_element);
-        let frame = self.frame_readout_el(stats, cx).map(gpui::IntoElement::into_any_element);
         let chips: Vec<gpui::AnyElement> = running
             .into_iter()
             .map(|(tile, session)| self.shell_chip(tile, session, cx).into_any_element())
@@ -133,7 +130,6 @@ impl WorkspaceView {
             .gap(px(spacing.xs))
             .children(ports)
             .children(transfers)
-            .children(frame)
             .children(chips)
             .child(toggle);
         let bar = div()

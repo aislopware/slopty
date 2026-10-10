@@ -588,10 +588,8 @@ impl WorkspaceView {
         if w.caps.as_ref() != Some(&caps) {
             let agents_moved = w.caps.as_ref().is_none_or(|was| was.agents != caps.agents);
             w.caps = Some(caps);
-            // What a machine can start is what its link says: an open palette offers the new
-            // agents at once.
+            // What a machine can start is what its link says.
             if agents_moved {
-                self.refresh_palette(cx);
                 self.hub_agents(key, cx);
             }
             cx.notify();
@@ -837,7 +835,7 @@ impl WorkspaceView {
     /// A session's program exited: the tile stays with its last screen and says so, until the
     /// human closes or restarts it. The worker announces the exit too; this is the attached
     /// view's word for it, a round trip sooner.
-    fn session_exited(&mut self, session: SessionId, status: i32, cx: &mut Context<Self>) {
+    fn session_exited(&mut self, session: SessionId, status: Option<i32>, cx: &mut Context<Self>) {
         for w in self.workers.values_mut() {
             if let Some(summary) = w.sessions.get_mut(&session) {
                 summary.state = SessionState::Exited { status };

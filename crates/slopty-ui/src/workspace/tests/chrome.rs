@@ -748,46 +748,10 @@ fn the_keyboard_goes_back_to_the_focused_shell(cx: &mut TestAppContext) {
     assert!(terminal_focused(&view, cx, session), "the shell has it back");
 }
 
-/// "+" is a menu of what to open, hung from its own left edge: the empty workspace's three ways
-/// to begin and a note. A row runs what its keys run: New terminal asks the worker for a shell
-/// in the focused one's directory, as ⌘T does.
-#[gpui::test]
-fn plus_lists_what_to_open_and_runs_it_as_its_keys_do(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let _shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/tmp/work"));
-    studio.drain();
-    click_at(cx, "new-menu");
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let rows: Vec<String> = cx
-        .update(|window, _cx| crate::a11y::tree(window))
-        .into_iter()
-        .filter(|n| n.role == "MenuItem")
-        .filter_map(|n| n.label)
-        .collect();
-    assert_eq!(rows, ["New terminal", "New agent\u{2026}", "Add a window or display", "New note",]);
-    assert!(cx.debug_bounds("menu-separator-0").is_none(), "one section");
-    let (menu, plus) =
-        (cx.debug_bounds("menu").expect("the menu"), cx.debug_bounds("new-menu").expect("+"));
-    assert!((f32::from(menu.left() - plus.left())).abs() < 0.5, "{menu:?} under {plus:?}");
-
-    click_at(cx, "menu-New terminal");
-    assert!(cx.debug_bounds("menu").is_none(), "the menu goes");
-    let sent = studio.drain();
-    assert!(
-        matches!(
-            sent.as_slice(),
-            [ClientMsg::OpenSession { spec: OpenSession { cwd: Some(cwd), .. }, .. }] if cwd == "/tmp/work"
-        ),
-        "{sent:?}"
-    );
-}
-
-/// The "…" menu reads in sections, a hairline between each: where to go, the settings, then
-/// the connections, whatever order the app handed its rows in. The machines are the
-/// navigator's, so it has no row for them.
+/// The "…" menu reads in sections, a hairline between each: the settings, then the
+/// connections, whatever order the app handed its rows in. The palette and the stream stats
+/// are the palette's and the menu bar's on a Mac, and the machines the navigator's, so it has
+/// no row for them.
 #[gpui::test]
 fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -813,22 +777,23 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
         let selector = Box::leak(format!("menu-{label}").into_boxed_str());
         f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("{label}")).top())
     };
-    let order = ["Command palette", "Stream stats", "Settings", "Add a machine"];
+    let order = ["Settings", "Add a machine"];
     let tops: Vec<f32> = order.iter().map(|label| top(cx, label)).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} at {tops:?}");
     let hairlines = (0..8).filter(|i| {
         let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
         cx.debug_bounds(selector).is_some()
     });
-    assert_eq!(hairlines.count(), 2, "one between each of the three sections");
-    let settings = top(cx, "Settings");
+    assert_eq!(hairlines.count(), 1, "one between the two sections");
+    let (settings, machine) = (top(cx, "Settings"), top(cx, "Add a machine"));
     let separator = (0..8)
         .find_map(|i| {
             let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
             cx.debug_bounds(selector)
         })
         .expect("a hairline");
-    assert!(f32::from(separator.top()) < settings, "the settings open a section");
+    let between = f32::from(separator.top());
+    assert!(settings < between && between < machine, "the connections open a section");
 
     assert!(cx.debug_bounds("menu-Machines").is_none(), "the machines are the navigator's");
 }

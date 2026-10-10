@@ -16,7 +16,7 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, Runner, TaskChange, TaskId,
+    Autonomy, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, TaskChange, TaskId,
     TaskLaunch, TaskState,
 };
 use slopty_proto::thread::AgentId;
@@ -92,9 +92,11 @@ pub(super) struct ProjectsState {
     /// What changed since the last look, for each board that opened onto news.
     pub recaps: HashMap<ProjectId, Recap>,
     /// Tiles that came from elsewhere this run, each alone in a background tab, not yet known
-    /// as a task's agent: one that turns out to be is seated beside its orchestrator
-    /// ([`super::seating`]).
+    /// as a task's agent: one that turns out to be leaves the tiling ([`super::seating`]).
     pub arrived: HashSet<slopty_client::layout::TileRef>,
+    /// The task's agent last opened as the helper preview, which the next one opened takes
+    /// over while it is on show ([`WorkspaceView::open_helper`]).
+    pub helper: Option<slopty_client::layout::TileRef>,
 }
 
 /// The last entry of `board`'s timeline, 0 for an empty one.
@@ -113,18 +115,6 @@ pub fn agent_label(agent: &AgentId) -> String {
     }
 }
 
-/// How `agent` runs for a task, told `prompt` first: Claude Code and Codex in their own
-/// terminals, any other as a thread of the worker's thread host.
-fn runner_for(agent: AgentId, prompt: Option<String>) -> Runner {
-    if agent.is(AgentId::CLAUDE_CODE) {
-        Runner::Claude { prompt, args: Vec::new() }
-    } else if agent.is(AgentId::CODEX) {
-        Runner::Codex { prompt, args: Vec::new() }
-    } else {
-        Runner::Agent { agent, prompt, model: None, args: Vec::new() }
-    }
-}
-
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.
 #[must_use]
 pub const fn worker_key(id: WorkerId) -> WorkerKey {
@@ -140,7 +130,7 @@ fn set_push(project: &ProjectId, push: bool) -> Verb {
         push: Some(push),
         limits: LimitsChange::default(),
         metadata: None,
-        members: None,
+        autonomy: None,
     }
 }
 
@@ -154,7 +144,7 @@ fn set_checks(project: &ProjectId, verifier: String) -> Verb {
         push: None,
         limits: LimitsChange::default(),
         metadata: None,
-        members: None,
+        autonomy: None,
     }
 }
 
@@ -405,7 +395,7 @@ impl WorkspaceView {
         };
         let verb = Verb::ProjectSet {
             project: make.project.clone(),
-            members: None,
+            autonomy: None,
             orchestrator: Some(TermRef { worker, session }),
             verifier: None,
             push: None,
@@ -446,7 +436,7 @@ impl WorkspaceView {
             self.open_project(&project, cx);
         }
         self.projects.dirty = true;
-        self.seat_helpers(cx);
+        self.unseat_helpers(cx);
         // Whether a thread is a project's to brief moves with the boards.
         self.faces_dirty = true;
         self.changed(cx);
@@ -870,10 +860,9 @@ impl WorkspaceView {
         });
     }
 
-    /// "Start" on a task not started yet: its brief read from the server, then the task
-    /// spawned with it as the first prompt, on its pin when it has one, by the agent its
-    /// orchestrator is (Claude Code when this client cannot tell). The server places it, as it
-    /// would for the orchestrator.
+    /// "Start" on a task not started yet: the task spawned on its pin when it has one, by the
+    /// agent its orchestrator is (Claude Code when this client cannot tell), its brief its first
+    /// prompt. The server places it, as it would for the orchestrator.
     fn start_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
         if self.projects.caller.is_none() {
             return self.restart_refused(project, task, NOT_SENT.to_owned(), cx);
@@ -885,30 +874,12 @@ impl WorkspaceView {
             .and_then(|s| self.session_agent(s))
             .map_or_else(|| AgentId::named(AgentId::CLAUDE_CODE), AgentId::named);
         let asked = project.clone();
-        let verb = Verb::TaskGet { project: project.clone(), task: Some(task) };
+        let launch = TaskLaunch { pin, agent };
+        let verb = Verb::TaskSpawn { project: project.clone(), task, launch };
         self.ask_server(verb, cx, move |this, outcome, cx| {
-            let brief = match outcome {
-                Outcome::Node(node) => node.task.map(|t| t.brief),
-                Outcome::Error { message, .. } => {
-                    return this.restart_refused(&asked, task, message, cx);
-                }
-                _ => None,
-            };
-            let prompt = brief.filter(|b| !b.trim().is_empty());
-            let launch = TaskLaunch {
-                pin,
-                cwd: String::new(),
-                run: runner_for(agent, prompt),
-                env: Vec::new(),
-                size: None,
-                ignore_dependencies: false,
-            };
-            let verb = Verb::TaskSpawn { project: asked.clone(), task, launch };
-            this.ask_server(verb, cx, move |this, outcome, cx| {
-                if let Outcome::Error { message, .. } = outcome {
-                    this.restart_refused(&asked, task, message, cx);
-                }
-            });
+            if let Outcome::Error { message, .. } = outcome {
+                this.restart_refused(&asked, task, message, cx);
+            }
         });
     }
 
@@ -1112,7 +1083,8 @@ impl WorkspaceView {
             orchestrator: Some(term),
             limits: LimitsChange::default(),
             metadata: None,
-            members: Vec::new(),
+            goal: None,
+            autonomy: Autonomy::default(),
         };
         self.send_to_server(
             verb,

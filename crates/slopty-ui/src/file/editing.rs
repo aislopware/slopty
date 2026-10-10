@@ -13,14 +13,14 @@ use gpui::{
 };
 use gpui_kit::component::input::{
     Input, InputEvent, InputState, RangeDecoration, RangeDecorationStyle, Rope, RopeExt as _,
-    SelectAllOccurrences, SelectNextOccurrence, TabSize,
+    TabSize,
 };
 use slopty_theme::alpha;
 
 use super::edit::{self, Indent, LineEdit};
 use super::{
-    CloseGoToLine, DuplicateLine, FileView, GoToLine, GoToSymbol, JumpToBracket, MoveLineDown,
-    MoveLineUp, ToggleComment, TogglePreview, ToggleReplace, ToggleSoftWrap,
+    CloseGoToLine, DuplicateLine, FileView, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
+    ToggleComment, TogglePreview, ToggleReplace, ToggleSoftWrap,
 };
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
@@ -57,9 +57,6 @@ pub fn palette_items(bindings: &[KeyBinding]) -> Vec<PaletteItem> {
         line("Wrap long lines", Box::new(ToggleSoftWrap)),
         line("Show preview or source", Box::new(TogglePreview)),
         line("Find and replace", Box::new(ToggleReplace)),
-        line("Jump to symbol", Box::new(GoToSymbol)),
-        line("Add the next match to the selection", Box::new(SelectNextOccurrence)),
-        line("Select every match", Box::new(SelectAllOccurrences)),
     ]
 }
 
@@ -84,7 +81,6 @@ impl FileView {
         .on_action(
             cx.listener(|this, _: &ToggleReplace, window, cx| this.toggle_replace(window, cx)),
         )
-        .on_action(cx.listener(|this, _: &GoToSymbol, window, cx| this.go_to_symbol(window, cx)))
     }
 
     /// How the file indents, as read from it: what Tab puts in.
@@ -238,7 +234,6 @@ impl FileView {
         if self.search.take().is_some() {
             self.remark(cx);
         }
-        self.symbols = None;
         if self.goto.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(GO_TO_LINE));
             let subscription =

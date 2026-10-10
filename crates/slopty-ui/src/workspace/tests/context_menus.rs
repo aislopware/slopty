@@ -78,7 +78,7 @@ fn a_right_click_or_a_long_press_opens_a_things_own_menu(cx: &mut TestAppContext
 }
 
 /// A tab's menu adds what a pane of tabs offers: Split out to the right puts its tile in a
-/// pane of its own right of the one it left, and Close other tabs is there beside Close tile.
+/// pane of its own right of the one it left, and Close other tiles is there beside Close tile.
 #[gpui::test]
 fn a_tabs_menu_splits_its_tile_out_to_the_right(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -90,7 +90,7 @@ fn a_tabs_menu_splits_its_tile_out_to_the_right(cx: &mut TestAppContext) {
 
     right_click(cx, selector("tab", first.item));
     let shown = rows(cx);
-    for row in ["Rename", "Split out to the right", "Close tile", "Close other tabs"] {
+    for row in ["Rename", "Split out to the right", "Close tile", "Close other tiles"] {
         assert!(shown.iter().any(|r| r == row), "{row}: {shown:?}");
     }
     assert!(!shown.iter().any(|r| r == "Open"), "the tab is open: {shown:?}");

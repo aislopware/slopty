@@ -1084,10 +1084,10 @@ impl WorkspaceView {
         }
     }
 
-    /// "Save a copy…": the focused file tile's file comes down whole onto this device, to where
-    /// the Mac's save panel says, or into a folder chosen in Files on iPhone and iPad. It
-    /// comes as a download, not the editor's text, so a file of any size or kind is saved as
-    /// its bytes are on the worker.
+    /// "Save a copy…": the focused file tile's file comes down whole onto this device, as a
+    /// folder's "Download…" brings its entry: to where the Mac's save panel says, or into a
+    /// folder chosen in Files on iPhone and iPad. It comes as a download, not the editor's
+    /// text, so a file of any size or kind is saved as its bytes are on the worker.
     pub fn save_copy(&mut self, _: &SaveCopy, _window: &mut Window, cx: &mut Context<Self>) {
         let file = self.focused().and_then(|tile| match &self.item(tile)?.kind {
             ItemKind::File { path } => Some((tile.worker, path.clone())),
@@ -1098,10 +1098,7 @@ impl WorkspaceView {
             return;
         };
         tracing::info!(%source, "save a copy");
-        #[cfg(target_os = "ios")]
         self.ask_files(&super::folders::FilesAsk::Export { worker, path: source }, cx);
-        #[cfg(not(target_os = "ios"))]
-        self.bring_down_as(worker, source, Bringing::Copy, cx);
     }
 
     /// Where downloads from `worker` through `via` that the view did not start itself tell it
@@ -1352,11 +1349,9 @@ fn promise(
 /// Why a worker's file comes down, for what the person is told.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::workspace) enum Bringing {
-    /// "Save a copy…" of a file tile's file.
-    #[cfg_attr(target_os = "ios", expect(dead_code, reason = "iOS saves a copy through Files"))]
-    Copy,
-    /// "Download…" of a folder tile's selected entry, or a download an earlier run left.
-    Download,
+    /// Saved where the Mac's save panel said: "Save a copy…" of a file tile's file and
+    /// "Download…" of a folder tile's entry, two words for one save, or one an earlier run left.
+    Save,
     /// Dragged out of a folder tile, a shell or a remote window and dropped here.
     #[cfg_attr(target_os = "ios", expect(dead_code, reason = "a drag out is the Mac's"))]
     Drag,
@@ -1375,8 +1370,7 @@ impl Bringing {
     /// What it was, as in "nothing was saved".
     const fn done(self) -> &'static str {
         match self {
-            Self::Copy | Self::Files => "saved",
-            Self::Download => "downloaded",
+            Self::Save | Self::Files => "saved",
             Self::Drag => "dragged out",
             Self::Paste => "brought over",
         }
@@ -1385,7 +1379,7 @@ impl Bringing {
     /// Whether it still means something to the next run of the app: a drop's place may be
     /// another app's scratch, and a paste is over with this run.
     const fn kept(self) -> bool {
-        matches!(self, Self::Copy | Self::Download)
+        matches!(self, Self::Save)
     }
 }
 

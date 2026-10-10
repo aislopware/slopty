@@ -188,6 +188,10 @@ pub fn reconnecting(away: Duration) -> String {
 /// What the in-body pill says for a shell whose session is gone and whose status is not known.
 pub const SESSION_ENDED: &str = "Session ended";
 
+/// The in-body pill of a shell that exited with a status nobody knows (rescued from a lost
+/// ptyd): neutral, with no code.
+const EXITED: &str = "Exited";
+
 /// The in-body pill's action for a worker on another build: the command that updates it, to
 /// the clipboard.
 pub const COPY_COMMAND: &str = "Copy command";
@@ -481,9 +485,10 @@ pub const GRANT_COPIED: &str =
 pub(super) enum BodyState {
     /// The tile's worker is out of reach; the text says how.
     Away(SharedString),
-    /// The shell's program exited with this status (a signal negated); its session is
-    /// still listed, so it can be started again where it was.
-    Exited(i32),
+    /// The shell's program exited with this status (a signal negated), or one not known (a
+    /// shell rescued from a lost ptyd); its session is still listed, so it can be started again
+    /// where it was.
+    Exited(Option<i32>),
     /// The shell's session is gone and nothing says how it ended.
     Ended,
     /// The tile's worker runs a different build: both builds, and the command that updates it.
@@ -495,10 +500,11 @@ impl BodyState {
     pub(super) fn text(&self) -> SharedString {
         match self {
             Self::Away(text) => text.clone(),
-            Self::Exited(status) if *status < 0 => {
+            Self::Exited(Some(status)) if *status < 0 => {
                 format!("Exited · signal {}", status.unsigned_abs()).into()
             }
-            Self::Exited(status) => format!("Exited · code {status}").into(),
+            Self::Exited(Some(status)) => format!("Exited · code {status}").into(),
+            Self::Exited(None) => EXITED.into(),
             Self::Ended => SESSION_ENDED.into(),
             Self::NeedsUpdate(notice) => update_title(notice).into(),
         }
@@ -509,8 +515,9 @@ impl BodyState {
         match self {
             Self::Away(_) => Status::Away,
             // Nothing is broken and nothing is lost: an update is all it takes.
-            Self::Exited(0) | Self::Ended | Self::NeedsUpdate(_) => Status::Idle,
-            Self::Exited(_) => Status::Failed,
+            // A status not known is shown neutral: nothing says it failed.
+            Self::Exited(Some(0) | None) | Self::Ended | Self::NeedsUpdate(_) => Status::Idle,
+            Self::Exited(Some(_)) => Status::Failed,
         }
     }
 }
@@ -1667,7 +1674,6 @@ impl WorkspaceView {
         let (part, label) = match renaming.field {
             Field::Name => ("rename", "Tile name"),
             Field::Address => ("address", ADDRESS),
-            Field::Project => ("project-name", "Project name"),
         };
         Some(
             div()
@@ -2000,7 +2006,8 @@ impl WorkspaceView {
             return Some(failed(done.exit.map_or(0, i64::from)));
         }
         if let Some(SessionState::Exited { status }) = self.summary(session).map(|s| &s.state) {
-            return Some(failed(i64::from(*status)));
+            // An exit whose status is not known is neutral, neither done nor failed.
+            return Some(status.map_or(Status::Idle, |s| failed(i64::from(s))));
         }
         // The newest prompt carries the status of the command before it.
         let shell = self.shell(session)?;

@@ -643,7 +643,7 @@ fn an_exited_shell_offers_restart_and_close(cx: &mut TestAppContext) {
     let (key, me) = (fake.key, fake.me);
     view.update_in(cx, |v, _w, cx| {
         let exited = SessionSummary {
-            state: SessionState::Exited { status: 2 },
+            state: SessionState::Exited { status: Some(2) },
             command: vec!["make".into()],
             ..summary(session, Some("/w/src"))
         };
@@ -682,7 +682,7 @@ fn an_exited_shell_stays_until_it_is_closed(cx: &mut TestAppContext) {
     let tile = opens(&view, cx, &fake, session, fake.me, 1);
     view.update_in(cx, |v, _w, cx| {
         v.term_event(session, frame(&["$ exit 1"]), cx);
-        v.term_event(session, TermEvent::Exited { status: 1 }, cx);
+        v.term_event(session, TermEvent::Exited { status: Some(1) }, cx);
     });
     cx.run_until_parked();
     cx.executor().advance_clock(UNDO_CLOSE);
@@ -732,7 +732,9 @@ fn the_exited_pill_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("lines-below").is_some(), "scrolled up: the count shows");
     assert!(cx.debug_bounds(selector("state", tile.item)).is_none());
 
-    view.update_in(cx, |v, _w, cx| v.term_event(session, TermEvent::Exited { status: 0 }, cx));
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(session, TermEvent::Exited { status: Some(0) }, cx);
+    });
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("state", tile.item)).is_some(), "the tile's pill");
     assert!(cx.debug_bounds("lines-below").is_none(), "in the count's place");
@@ -1159,7 +1161,6 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
         n.role == "Heading" && n.label.as_deref() == Some(format!("terminal {title}").as_str())
     });
     assert!(heading.is_some(), "the bar is titled as the tile's header is: {title}");
-    assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("phone-title").expect("the focused tile's title");
     assert!(cx.debug_bounds("breadcrumb").is_none(), "the title alone, no breadcrumb");
     let role = view.read_with(cx, |v, _| titlebar::phone_title_role(&v.theme));

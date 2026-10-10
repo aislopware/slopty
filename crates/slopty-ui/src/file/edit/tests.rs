@@ -258,11 +258,6 @@ fn timing_of_the_editor_helpers() {
         (find(&mib, "value", false), find(&mib, "zebra", false), find(&mib, r"\w+\(", true));
     let (common_big, rare_big) = (find(&big, "value", false), find(&big, "zebra", false));
     let flatten = median(|| drop(std::hint::black_box(Rope::from(mib.as_str()).to_string())));
-    let rust = crate::highlight::Syntax::for_path("lib.rs", "");
-    let symbols_text = "fn compute(alpha: u32) -> u32 { alpha }\n".repeat((1 << 20) / 40);
-    let symbols = median(|| {
-        drop(std::hint::black_box(rust.map(|s| crate::highlight::symbols(&symbols_text, s))));
-    });
     let us = |d: Duration| d.as_secs_f64() * 1e6;
     println!(
         "bracket: pair 64 KiB apart {:.0} µs, unmatched {:.0} µs, no bracket at the caret {:.2} µs; \
@@ -275,14 +270,12 @@ fn timing_of_the_editor_helpers() {
     );
     println!(
         "find over 1 MiB: common word (10 000 kept) {:.0} µs, rare word {:.0} µs, `\\w+\\(` {:.0} µs; \
-         over 16 MiB: common {:.0} µs, rare {:.0} µs; 1 MiB rope to a string {:.0} µs; \
-         symbols over 1 MiB of Rust {:.0} µs",
+         over 16 MiB: common {:.0} µs, rare {:.0} µs; 1 MiB rope to a string {:.0} µs",
         us(common),
         us(rare),
         us(pattern),
         us(common_big),
         us(rare_big),
-        us(flatten),
-        us(symbols)
+        us(flatten)
     );
 }

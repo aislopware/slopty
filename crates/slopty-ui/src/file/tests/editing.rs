@@ -1,6 +1,6 @@
 //! The editor's own commands in a real tile, by their default keys: comment, move and copy
 //! lines, go to line, the bracket pair, the file's indentation, its line ends and BOM, wrap,
-//! more selections, completed words, and what an `EditorConfig` asks.
+//! find and replace, and what an `EditorConfig` asks.
 
 use super::*;
 
@@ -179,10 +179,7 @@ fn the_editor_s_chrome_and_palette_lines_are_sentence_case() {
     let words: Vec<String> = editor_palette_items(&[])
         .into_iter()
         .map(|item| item.label)
-        .chain(
-            [GO_TO_LINE, symbols::GO_TO_SYMBOL, symbols::READING_SYMBOLS, symbols::NO_SYMBOLS]
-                .map(str::to_owned),
-        )
+        .chain([GO_TO_LINE.to_owned()])
         .collect();
     for word in words {
         let mut chars = word.chars();
@@ -250,77 +247,6 @@ fn text_is_replaced_as_typed_with_no_groups(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(text(&view, cx), "cost $1, cost $1", "`$1` is put in as written");
-}
-
-#[gpui::test]
-fn cmd_shift_o_lists_the_symbols_narrows_them_and_goes_to_one(cx: &mut TestAppContext) {
-    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
-    let source = "struct Tile;\n\nfn make() -> Tile { Tile }\n\nfn main() {\n    make();\n}";
-    arrives(&view, cx, text_read(source, true, 1));
-    select(&view, cx, 0..0);
-    keys(cx, "cmd-shift-o");
-    assert!(view.read_with(cx, |v, _| v.listing_symbols()));
-    let shown = view.read_with(cx, |v, _| v.shown_symbols().map(|s| s.join(" ")));
-    assert_eq!(shown.as_deref(), Some("Tile make main"), "the definitions, not the calls");
-    cx.simulate_input("ma");
-    cx.run_until_parked();
-    let shown = view.read_with(cx, |v, _| v.shown_symbols().map(|s| s.join(" ")));
-    assert_eq!(shown.as_deref(), Some("make main"));
-    assert_eq!(selection(&view, cx), 17..21, "the caret follows the first, `make`");
-    keys(cx, "down");
-    assert_eq!(selection(&view, cx), 45..49, "then `main`");
-    keys(cx, "down");
-    assert_eq!(selection(&view, cx), 17..21, "wrapping");
-    keys(cx, "escape");
-    assert!(!view.read_with(cx, |v, _| v.listing_symbols()));
-    assert_eq!(selection(&view, cx), 0..0, "Esc puts the caret back");
-    keys(cx, "cmd-shift-o");
-    cx.simulate_input("main");
-    keys(cx, "enter");
-    assert_eq!(selection(&view, cx), 45..49, "↩ keeps it on the symbol");
-    keys(cx, "x");
-    assert!(text(&view, cx).contains("fn x()"), "the editor has the keyboard again");
-}
-
-/// The symbols list keeps to the file's room: its own measure where the file is wide, the
-/// file's width less its margins in a column beside a board, never past the file's edge.
-#[gpui::test]
-fn the_symbols_list_keeps_inside_a_narrow_file(cx: &mut TestAppContext) {
-    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
-    arrives(&view, cx, text_read("fn main() {}", true, 1));
-    for width in [800.0_f32, 300.0, 200.0] {
-        cx.simulate_resize(gpui::size(px(width), px(500.0)));
-        select(&view, cx, 0..0);
-        keys(cx, "cmd-shift-o");
-        assert!(view.read_with(cx, |v, _| v.listing_symbols()), "{width}: listing");
-        let list = cx.debug_bounds("file-symbols").expect("the symbols list");
-        assert!(f32::from(list.left()) >= 0.0, "{width}: inside the file's left edge {list:?}");
-        assert!(f32::from(list.right()) <= width, "{width}: inside its right edge {list:?}");
-        if width >= 800.0 {
-            let measure = Theme::default().typography.ui_size * 24.0;
-            assert!((f32::from(list.size.width) - measure).abs() < 0.5, "its own measure {list:?}");
-        }
-        keys(cx, "escape");
-    }
-}
-
-#[gpui::test]
-fn cmd_d_adds_the_next_match_and_cmd_shift_l_takes_every_one(cx: &mut TestAppContext) {
-    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
-    arrives(&view, cx, text_read("let n = 1;\nlet m = n + n;", true, 1));
-    select(&view, cx, 4..4);
-    keys(cx, "cmd-d");
-    assert_eq!(selection(&view, cx), 4..5, "the first press selects the word at the caret");
-    keys(cx, "cmd-d");
-    cx.simulate_input("k");
-    cx.run_until_parked();
-    assert_eq!(text(&view, cx), "let k = 1;\nlet m = k + n;", "the second adds the next one");
-    keys(cx, "cmd-z");
-    select(&view, cx, 19..19);
-    keys(cx, "cmd-shift-l");
-    cx.simulate_input("count");
-    cx.run_until_parked();
-    assert_eq!(text(&view, cx), "let count = 1;\nlet m = count + count;", "⌘⇧L takes them all");
 }
 
 /// A text read whose `.editorconfig` set `pairs` for it.

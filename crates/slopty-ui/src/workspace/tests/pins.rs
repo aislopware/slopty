@@ -1,15 +1,10 @@
-//! A tile put in a project by hand, a project named from the palette, and a declared project's
-//! members claiming the tiles they name.
+//! A tile put in a project by hand.
 
 use slopty_client::groups::{GroupKey, fact};
-use slopty_proto::orchestration::{Outcome, Verb};
-use slopty_proto::project::Matcher;
 
-use super::super::actions::{NameProject, PinToProject};
-use super::super::project_lines::NAME_PROJECT;
+use super::super::actions::PinToProject;
 use super::palette::shell_in;
 use super::*;
-use crate::project::fixtures;
 
 fn project_of(view: &Entity<WorkspaceView>, cx: &VisualTestContext, tile: TileRef) -> GroupKey {
     view.read_with(cx, |v, _| v.project_groups().group_of(tile).map(|g| g.key.clone()))
@@ -53,71 +48,4 @@ fn adding_a_tile_to_a_project_pins_it_there(cx: &mut TestAppContext) {
     let unsaid = ItemOp::SetFact { id: site.item, key: fact::PROJECT.to_owned(), value: None };
     assert_eq!(studio.drain(), [ClientMsg::Items(unsaid)]);
     assert_eq!(project_of(&view, cx, site), site_key, "and is site's again");
-}
-
-/// "Name this project…" puts the project's name in the focused tile's header; ↩ keeps it on
-/// the server under the name typed, its members the place its tiles are in, spelled with the
-/// machine's name.
-#[gpui::test]
-fn naming_a_project_keeps_it_on_the_server_with_its_members(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let (_, atlas) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
-        v.focus_tile(atlas, cx);
-    });
-    cx.run_until_parked();
-    assert!(labels(&view, cx).contains(&NAME_PROJECT.to_owned()));
-
-    cx.dispatch_action(NameProject);
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("project-name", atlas.item)).is_some(), "the field is up");
-    cx.simulate_keystrokes("cmd-a");
-    cx.simulate_input("Atlas app");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    let mut verbs = Vec::new();
-    while let Some((verb, reply)) = queue.try_next() {
-        let _gone = reply.send(Outcome::Done);
-        verbs.push(verb);
-    }
-    let [Verb::ProjectCreate { project, title, members, orchestrator: None, .. }] =
-        verbs.as_slice()
-    else {
-        panic!("a project: {verbs:?}");
-    };
-    assert_eq!((project.as_str(), title.as_str()), ("atlas-app", "Atlas app"));
-    let place: Matcher = [
-        (fact::MACHINE.to_owned(), "studio".to_owned()),
-        (fact::CWD.to_owned(), "/w/atlas".to_owned()),
-    ]
-    .into();
-    assert_eq!(members, &[place]);
-}
-
-/// A declared project's members claim the tiles they name, on the machine named, and only
-/// there: the notes shell on the studio joins it, the laptop's at the same path does not.
-#[gpui::test]
-fn a_projects_members_claim_the_tiles_they_name(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let laptop = connect(&view, cx, 2, "laptop");
-    let here = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/w/notes/a"));
-    let there = opens_in(&view, cx, &laptop, SessionId::new(), laptop.me, 1, Some("/w/notes/a"));
-    let mut notes = fixtures::project("notes", None);
-    notes.members = vec![
-        [
-            (fact::MACHINE.to_owned(), "studio".to_owned()),
-            (fact::CWD.to_owned(), "/w/notes".to_owned()),
-        ]
-        .into(),
-    ];
-    view.update_in(cx, |v, _w, cx| {
-        v.projects_part(fixtures::snapshot(1, vec![fixtures::status(notes, vec![], vec![])]), cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(project_of(&view, cx, here), GroupKey::new(fact::PROJECT, "notes"));
-    assert_ne!(project_of(&view, cx, there), GroupKey::new(fact::PROJECT, "notes"));
 }

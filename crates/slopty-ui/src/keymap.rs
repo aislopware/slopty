@@ -222,7 +222,6 @@ const FILE_TEXT: Option<&str> = Some("FileText > Input");
 /// A file tile's "go to line" field.
 const FILE_GO_TO: Option<&str> = Some(crate::file::GO_TO_CTX);
 /// A file tile's symbol list.
-const FILE_SYMBOLS: Option<&str> = Some(crate::file::SYMBOLS_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
@@ -271,8 +270,8 @@ pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{
-        AllowRequest, AskAside, BranchFromHere, CompactContext, CycleDensity, CycleEffort,
-        DenyRequest, EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges, TakeBack,
+        AllowRequest, AskAside, BranchFromHere, CycleDensity, CycleEffort, DenyRequest,
+        EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges,
     };
     use crate::terminal as t;
 
@@ -289,7 +288,6 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "start_agent", ws::StartAgent, &["cmd-t"], W),
         c(Workspace, "new_terminal", ws::NewTerminal, &["cmd-shift-t"], W),
         c(Workspace, "new_agent", ws::NewAgent, &[], W),
-        // An editor's ⌘D, the next occurrence, is deeper and wins in its text.
         c(Workspace, "split_right", ws::SplitRight, &["cmd-d"], W),
         c(Workspace, "split_down", ws::SplitDown, &["cmd-shift-d"], W),
         c(Workspace, "tab_terminal", ws::TabTerminal, &["cmd-alt-t"], W),
@@ -405,8 +403,6 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "cycle_effort", CycleEffort, &[], &[FACE]),
         c(Conversation, "ask_aside", AskAside, &[], &[FACE]),
         c(Conversation, "review_changes", ReviewChanges, &[], &[FACE]),
-        c(Conversation, "take_back", TakeBack, &[], &[FACE]),
-        c(Conversation, "compact_context", CompactContext, &[], &[FACE]),
         c(Conversation, "branch_from_here", BranchFromHere, &[], &[FACE]),
         c(Conversation, "resume_agent", ResumeAgent, &[], &[FACE]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
@@ -455,26 +451,6 @@ pub fn defaults() -> Vec<Command> {
             &[FILE_SEARCH],
         ),
         c(File, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[FILE_SEARCH]),
-        // Zed's and VS Code's outline key.
-        c(File, "go_to_symbol", crate::file::GoToSymbol, &["cmd-shift-o"], &[FILE_TEXT]),
-        // Sublime's, Zed's and VS Code's keys for more selections from the selected text.
-        c(
-            File,
-            "select_next_occurrence",
-            gpui_kit::component::input::SelectNextOccurrence,
-            &["cmd-d"],
-            &[FILE_TEXT],
-        ),
-        c(
-            File,
-            "select_all_occurrences",
-            gpui_kit::component::input::SelectAllOccurrences,
-            &["cmd-shift-l"],
-            &[FILE_TEXT],
-        ),
-        c(File, "close_symbols", crate::file::CloseSymbols, &["escape"], &[FILE_SYMBOLS]),
-        c(File, "next_symbol", crate::file::NextSymbol, &["down"], &[FILE_SYMBOLS]),
-        c(File, "previous_symbol", crate::file::PreviousSymbol, &["up"], &[FILE_SYMBOLS]),
         // A PDF's pages, as Preview reads them.
         c(File, "scroll_down", crate::file::ScrollDown, &["down"], &[FILE_PAGES]),
         c(File, "scroll_up", crate::file::ScrollUp, &["up"], &[FILE_PAGES]),

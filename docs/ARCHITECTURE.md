@@ -956,7 +956,7 @@ map of facts (`machine`, `kind`, `os`, `agent`, `cwd`, `repo`, `folder`, `branch
 client holds), a grouping is a chain of fact keys (by default `project`, `repo`, `folder`,
 `machine`), and tiles that share any value of their first fact on the chain are one group, so
 one repository's clones on three machines are one project. The server's declared projects
-claim tiles by matchers over those facts (`Project::members`), and an item pinned to a
+claim the tiles in their repository's clones (`Project::repo_id`), and an item pinned to a
 project says so in its own `project` fact (`ItemOp::SetFact`). The navigator lists
 *Projects*, each declared one led by its board's row and followed by its threads at work that
 have no tile here, then *Machines* (each machine's health and what has no project); a
@@ -999,15 +999,14 @@ The title bar holds, in order:
 
 - the navigator's toggle;
 - the breadcrumb (`project ▾ / checkout ▾ / branch`);
-- the project's tabs, with "+" after them, a menu that with several workers first chooses the
-  worker a new tile goes to, then offers a terminal, an agent, a window or display, or a note
-  (a new Markdown file);
+- the project's tabs (a new tile comes from the palette, the File menu or ⌘T, on the worker in
+  context);
 - the notices about no one tile's work;
 - the readouts, each only while it has something to say (`workspace::readouts`);
-- the bell and "…".
+- the bell and "…" (settings and adding a machine; on a phone the palette too).
 
 Along the window's foot runs the foot bar (`workspace::foot`): the plan's usage and the
-focused agent on the left; the ports, the transfers, the frame time while the stats show, and a
+focused agent on the left; the ports, the transfers, and a
 chip for each shell whose command runs out of sight on the right.
 
 A shell's title is, first that says something, the command it runs, a title its program set

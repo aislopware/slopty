@@ -1607,7 +1607,7 @@ fn a_board_sets_its_verifier(cx: &mut TestAppContext) {
         push: None,
         limits: LimitsChange::default(),
         metadata: None,
-        members: None,
+        autonomy: None,
     };
     assert!(cx.debug_bounds("project-checks-panel").is_none(), "closed until asked");
 
@@ -1877,47 +1877,12 @@ fn a_task_on_a_machine_gone_away_says_so(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project-card-project-node-1-where-away").is_some(), "marked away");
 }
 
-/// A task's brief, as the server's `TaskGet` answers it.
-fn brief_of(task: TaskId, brief: &str) -> Outcome {
-    use slopty_proto::project::{NodeDetail, Spent, Task};
-    let task = Task {
-        id: task,
-        depends_on: Vec::new(),
-        kind: "code".to_owned(),
-        title: "Golden files".to_owned(),
-        brief: brief.to_owned(),
-        read_only: false,
-        pin: None,
-        verifier: None,
-        metadata: None,
-        state: TaskState::Planned,
-        status: None,
-        assignment: None,
-        branch: None,
-        worktree: None,
-        base: None,
-        pull: None,
-        verified: None,
-        merge: None,
-        step: None,
-        spent: Spent::default(),
-        created_ms: WallMs::ZERO,
-        updated_ms: WallMs::ZERO,
-        give_backs: slopty_proto::project::GiveBacks::default(),
-        tests: None,
-    };
-    Outcome::Node(Box::new(NodeDetail {
-        task: Some(task),
-        natives: slopty_proto::project::Natives::default(),
-    }))
-}
-
-/// "Start" on a task never started reads its brief and spawns it, on its pin, with the brief as
-/// the agent's first prompt; its card says it is starting at once. With no server linked, the
+/// "Start" on a task never started spawns it on its pin, by the orchestrator's agent (the
+/// server gives it its brief); its card says it is starting at once. With no server linked, the
 /// card says so and nothing is sent.
 #[gpui::test]
 fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
-    use slopty_proto::project::Runner;
+    use slopty_proto::thread::AgentId;
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
@@ -1944,20 +1909,13 @@ fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project-card-start-1").is_none(), "#1 has started");
 
     click(cx, "project-card-start-3");
-    let asked = sent(&mut queue, cx, |_| brief_of(TaskId(3), "Bless the goldens"));
-    assert_eq!(asked, [Verb::TaskGet { project: fixtures::id("board"), task: Some(TaskId(3)) }]);
     assert!(cx.debug_bounds("project-card-start-3").is_none(), "not asked twice while it starts");
     let spawned = sent(&mut queue, cx, done);
     let [Verb::TaskSpawn { task: TaskId(3), launch, .. }] = spawned.as_slice() else {
         panic!("a spawn: {spawned:?}");
     };
     assert_eq!(launch.pin, Some(worker), "on its pin");
-    assert_eq!(
-        launch.run,
-        Runner::Claude { prompt: Some("Bless the goldens".to_owned()), args: Vec::new() },
-        "its brief first"
-    );
-    assert!(!launch.ignore_dependencies, "what it waits on still holds it");
+    assert!(launch.agent.is(AgentId::CLAUDE_CODE), "by the orchestrator's agent");
 
     let start = crate::project::model::TaskAction::Start;
     b.update(cx, |b, cx| b.act_on_picked(start, cx));

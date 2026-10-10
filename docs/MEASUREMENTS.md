@@ -12911,8 +12911,7 @@ The worst case is under 3 % of a 120 Hz frame and only arises with the caret nex
 whose pair is hundreds of lines off; `BRACKET_SCAN_BYTES` bounds it by size, never by the clock.
 
 Round two, same machine and method, load average 23 to 32. A find runs again on every edit while
-its field is open, so it is on the input path; the symbol list and the word candidates run off
-the UI thread.
+its field is open, so it is on the input path; the word candidates run off the UI thread.
 
 | What | Median |
 | --- | --- |
@@ -12922,19 +12921,17 @@ the UI thread.
 | Find over 16 MiB (the largest text a worker sends), a word on every line | 707 µs |
 | Find over 16 MiB, a word not in it | 1.9 ms |
 | The editor's rope made one string, per MiB (each find starts so) | 269 µs |
-| Symbols over 1 MiB of Rust (off the UI thread) | 635 ms |
 | Word candidates for `va` over 1 MiB (off the UI thread) | 1.8 ms |
 | Word candidates for `va` over 16 MiB (off the UI thread) | 30 ms |
 
 A find stops at `MATCHES_MAX`, which is why a common word costs the same at 1 and at 16 MiB.
 The cost an edit pays is the string copy plus the scan: about 0.4 ms at 1 MiB, and some 6 ms in a
-16 MiB file, the one size where it nears a 120 Hz frame. The symbol list parses as a colouring
-does, so it reads a file only up to `COLOURED_BYTES` (2 MiB, about 1.3 s, "Reading symbols…"
-shown meanwhile); past it the tile is plain text and lists none.
+16 MiB file, the one size where it nears a 120 Hz frame.
 The word candidates are read from the 1 MiB round the caret (`complete::SCAN_BYTES`), so a
 keystroke costs the 1 MiB row above at any file size rather than the 16 MiB one.
 Word completion was cut on 2026-10-05 (prune #10), and its rows with it; the test no longer
-times it.
+times it. The symbol list (635 ms over 1 MiB of Rust, off the UI thread) was cut on 2026-10-10
+with Jump to symbol, and its row with it.
 
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture

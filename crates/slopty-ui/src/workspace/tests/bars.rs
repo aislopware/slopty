@@ -91,8 +91,8 @@ fn a_place_is_named_by_its_repository_else_its_directory() {
 }
 
 /// The foot bar counts the ports forwarded here, which list them; the machine a shell runs on
-/// is the navigator's and the breadcrumb's to say, not a readout's, and the frame time waits
-/// for the stream stats.
+/// is the navigator's and the breadcrumb's to say, not a readout's, and the frame time is the
+/// stream stats overlay's.
 #[gpui::test]
 fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -112,7 +112,6 @@ fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext)
     let ports = cx.debug_bounds("readout-ports").expect("the ports");
     assert!(foot.contains(&ports.center()), "{ports:?}");
     assert!(cx.debug_bounds("status-worker").is_none(), "the machine is the navigator's");
-    assert!(cx.debug_bounds("readout-frame").is_none(), "no frame time without the stats");
 
     click(cx, "readout-ports");
     let lines = view.read_with(cx, |v, cx| {

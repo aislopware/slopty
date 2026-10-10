@@ -60,7 +60,6 @@ impl FileView {
         }
         // One field over the corner at a time: the find bar takes the place of the others.
         self.goto = None;
-        self.symbols = None;
         if self.search.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
             let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {

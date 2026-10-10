@@ -277,8 +277,7 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     assert_eq!(navigator::host_line(&healthy(), None), "macOS 26.5", "no load heard yet");
 }
 
-/// With several workers the empty workspace's rows each open a shell on theirs, here; and "+"
-/// chooses the worker a new tile goes to, keeping its menu open on the kinds of tile.
+/// With several workers the empty workspace's rows each open a shell on theirs, here.
 #[gpui::test]
 fn a_new_tile_can_go_to_any_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -291,17 +290,6 @@ fn a_new_tile_can_go_to_any_worker(cx: &mut TestAppContext) {
     let laptop_row = order.iter().position(|k| *k == laptop.key).expect("listed");
     click(cx, leak(format!("empty-worker-{laptop_row}")));
     assert!(opened(&mut laptop), "a shell on the row's worker");
-    assert!(!opened(&mut studio));
-
-    view.update_in(cx, |v, _w, cx| {
-        v.menu = Some(titlebar::MenuKind::New);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    click(cx, "menu-laptop");
-    assert_eq!(view.read_with(cx, |v, _| v.menu), Some(titlebar::MenuKind::New), "still open");
-    click(cx, "menu-New terminal");
-    assert!(opened(&mut laptop), "the chosen worker");
     assert!(!opened(&mut studio));
 }
 

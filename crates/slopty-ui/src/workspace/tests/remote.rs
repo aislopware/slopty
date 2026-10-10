@@ -1303,11 +1303,11 @@ fn drag_steps(sent: Vec<ClientMsg>) -> Vec<slopty_proto::drag::DragInput> {
         .collect()
 }
 
-/// A drag over a remote window's body is the worker's: it enters with what it carries, its
-/// files start up into the drag's landing and its big data goes up beside them. Off the body
-/// it is GPUI's again: the worker's drag ends and its upload stops. A drop the worker says did
-/// not land says why, and a drag over a remote tile carrying nothing a remote app takes is
-/// refused there.
+/// A drag over a remote window's body is the worker's: it enters with what it carries and its
+/// big data goes up, but its files wait for the drop, so passing over a tile sends none. Off
+/// the body it is GPUI's again: the worker's drag ends. A drop the worker says did not land
+/// says why, and a drag over a remote tile carrying nothing a remote app takes is refused
+/// there.
 #[cfg(target_os = "macos")]
 #[gpui::test]
 fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestAppContext) {
@@ -1344,12 +1344,8 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
         panic!("{steps:?}")
     };
     assert_eq!((*entered, items.len()), (drag, 2));
-    let Some(Call::Upload(xfer, files, Dest::Drag(to))) = calls.try_recv().ok() else {
-        panic!("the files go up at once")
-    };
-    assert_eq!((files, to), (vec![file], drag));
     let Some(Call::SendClip(rep, Fetched::Data(bytes), false)) = calls.try_recv().ok() else {
-        panic!("the picture goes up beside them, in bulk")
+        panic!("the picture goes up, in bulk, and the file does not yet")
     };
     assert_eq!((rep.source, rep.item, bytes.len()), (Source::Drag(drag), 1, picture.len()));
 
@@ -1357,7 +1353,7 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     assert!(drag_steps(studio.drain()).is_empty(), "a still drag sends nothing");
     assert_eq!(over(&mut state, header, cx), Over::Local, "off the body");
     assert_eq!(drag_steps(studio.drain()), [DragInput::Leave { drag }]);
-    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == xfer), "its upload stops");
+    assert!(calls.try_recv().is_err(), "nothing went up, so nothing stops");
 
     assert_eq!(over(&mut state, body, cx), Over::Remote(DragOp::Copy), "back on");
     let again = state.drag().expect("a new drag");
@@ -1383,10 +1379,10 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     assert_eq!(fresh.drag(), None);
 }
 
-/// The files of a drag still hovering over a remote window are a guess, which goes when the
-/// drag leaves: not listed, holding no quit. Dropped, the drop waits for them on the worker,
-/// so they are listed by the window they land in and hold a quit; Cancel there lets go of the
-/// drop on the worker, whose button no longer waits, and stops their upload.
+/// The files of a drag hovering over a remote window stay here. Dropped, they go up and the
+/// drop waits for them on the worker, so they are listed by the window they land in and hold
+/// a quit; Cancel there lets go of the drop on the worker, whose button no longer waits, and
+/// stops their upload.
 #[cfg(target_os = "macos")]
 #[gpui::test]
 fn a_drops_files_are_listed_and_cancel_lets_go_of_the_drop(cx: &mut TestAppContext) {
@@ -1409,14 +1405,12 @@ fn a_drops_files_are_listed_and_cancel_lets_go_of_the_drop(cx: &mut TestAppConte
     let mut state = DropIn::default();
     view.update_in(cx, |v, _w, cx| v.drag_over(&mut state, body, carried(&board, None), cx));
     let drag = state.drag().expect("the worker's drag");
-    let Some(Call::Upload(xfer, _, Dest::Drag(_))) = calls.try_recv().ok() else {
-        panic!("the files go up as the drag enters")
-    };
+    assert!(calls.try_recv().is_err(), "a hover sends no file");
     let rows = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, cx| v.transfer_rows(cx.background_executor().now()))
     };
-    assert!(rows(cx).is_empty(), "a hover's files are not listed");
-    assert!(!view.read_with(cx, |v, _| v.transfers_in_flight()), "nor hold a quit");
+    assert!(rows(cx).is_empty(), "nothing is listed");
+    assert!(!view.read_with(cx, |v, _| v.transfers_in_flight()), "nor holds a quit");
 
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {
@@ -1425,6 +1419,10 @@ fn a_drops_files_are_listed_and_cancel_lets_go_of_the_drop(cx: &mut TestAppConte
     });
     let taken = view.update_in(cx, |v, _w, cx| v.drag_dropped(&mut state, body, 0, cx));
     assert_eq!(taken, Taken::CallIn);
+    let Some(Call::Upload(xfer, files, Dest::Drag(to))) = calls.try_recv().ok() else {
+        panic!("the files go up on the drop")
+    };
+    assert_eq!((files, to), (vec![file], drag));
     let title = view.read_with(cx, |v, _| v.tile_title(v.item(tile).unwrap()));
     let listed = rows(cx);
     assert_eq!(listed.len(), 1, "{listed:?}");
@@ -1572,7 +1570,7 @@ fn a_drag_out_back_over_its_worker_names_its_files_there(cx: &mut TestAppContext
     let Some(DragInput::Enter { items, .. }) = steps.last() else { panic!("{steps:?}") };
     let named = items[0].file.as_ref().map(|f| (f.name.as_str(), f.path.is_none()));
     assert_eq!(named, Some(("here.txt", true)), "this Mac's file, to go up");
-    assert!(matches!(calls.try_recv(), Ok(Call::Upload(..))), "and it goes up");
+    assert!(calls.try_recv().is_err(), "once it is dropped");
 }
 
 /// Every transfer in flight is on the title bar's list, both ways: an upload with how far it
@@ -1609,7 +1607,7 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
         let source = "~/out.txt".to_owned();
         let versions = slopty_client::xfer::Versions::new();
         let asked = Down { worker: key, xfer: down, source, dest: dest.clone(), versions };
-        v.bring_down(asked, Bringing::Download, cx);
+        v.bring_down(asked, Bringing::Save, cx);
         v.transfer_rows(cx.background_executor().now())
     });
     let said: Vec<(bool, &str, &str, &str)> = rows
@@ -1627,7 +1625,7 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(std::fs::read_to_string(&dest).unwrap(), "~/out.txt", "it landed");
     let notice = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
-    assert!(notice.starts_with("Downloaded ") && notice.ends_with("out.txt"), "{notice}");
+    assert!(notice.starts_with("Saved ") && notice.ends_with("out.txt"), "{notice}");
 
     // Another tile focused: the title bar counts the upload, and its list stops it.
     let other = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);

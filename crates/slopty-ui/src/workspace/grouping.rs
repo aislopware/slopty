@@ -358,8 +358,7 @@ impl WorkspaceView {
     }
 
     /// What the server's declared projects claim: the clones of the repository each works in,
-    /// by its origin and by its first commit, and its own members. A member names a machine as
-    /// the person does, by its worker's name, and a path in that machine's home as `~`.
+    /// by its origin and by its first commit.
     pub(super) fn claims(&self) -> Vec<Claim> {
         self.projects
             .mirror
@@ -374,29 +373,9 @@ impl WorkspaceView {
                         .chain(id.root.iter().map(|r| format!("{}{r}", groups::COMMIT)))
                         .map(repo)
                 });
-                let members = board.project.members.iter().map(|m| self.member_matcher(m));
-                let matchers: Vec<Matcher> = clones.chain(members).collect();
+                let matchers: Vec<Matcher> = clones.collect();
                 let project = board.project.id.as_str().to_owned();
                 (!matchers.is_empty()).then_some(Claim { project, matchers })
-            })
-            .collect()
-    }
-
-    /// `member` as a tile's facts spell it: a machine by its worker's key, a path in its home
-    /// spelled out.
-    fn member_matcher(&self, member: &Matcher) -> Matcher {
-        let worker = member.get(fact::MACHINE).and_then(|name| {
-            self.workers.iter().find(|(_, w)| w.name == *name).map(|(key, _)| *key)
-        });
-        member
-            .iter()
-            .map(|(key, value)| {
-                let value = match (key.as_str(), worker) {
-                    (fact::MACHINE, Some(worker)) => worker.to_string(),
-                    (_, Some(worker)) if value.starts_with('~') => self.expand_home(worker, value),
-                    _ => value.clone(),
-                };
-                (key.clone(), value)
             })
             .collect()
     }
@@ -502,11 +481,12 @@ impl WorkspaceView {
     }
 
     /// Put `arriving` (tiles from elsewhere: another client, an orchestrator, the worker's own
-    /// list) in the tiling: a task's agent beside its orchestrator ([`super::seating`]), any
-    /// other a background tab in its project ([`slopty_client::layout::Tiling::arrive`]),
-    /// kept in mind in case the project names it a task's agent later. The projects are worked
-    /// out once over the tiling and the arrivals together, so a snapshot of many lands in one
-    /// pass, and the tiles already placed say their project first.
+    /// list) in the tiling: a task's agent nowhere, a row until it is opened
+    /// ([`super::seating`]), any other a background tab in its project
+    /// ([`slopty_client::layout::Tiling::arrive`]), kept in mind in case the project names it a
+    /// task's agent later. The projects are worked out once over the tiling and the arrivals
+    /// together, so a snapshot of many lands in one pass, and the tiles already placed say
+    /// their project first.
     pub(super) fn place_from_elsewhere(&mut self, arriving: &[TileRef]) {
         let mut tiles = self.reading_order();
         tiles.extend(arriving.iter().filter(|t| !self.layout.contains(**t)));
@@ -514,7 +494,7 @@ impl WorkspaceView {
         let layout = &self.layout;
         self.projects.arrived.retain(|t| layout.contains(*t));
         for &tile in arriving {
-            if self.layout.contains(tile) || self.arrive_beside_lead(tile) {
+            if self.layout.contains(tile) || self.is_task_agent(tile) {
                 continue;
             }
             let home = grouping

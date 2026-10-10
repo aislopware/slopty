@@ -187,9 +187,6 @@ actions!(
         PageCut,
         /// Select all in the page that holds the keyboard: its field with the caret, or the page.
         PageSelectAll,
-        /// Name the focused tile's project, in a field in its header, and keep it on the server
-        /// with its members, so every device groups it under that name.
-        NameProject,
     ]
 );
 
@@ -279,17 +276,7 @@ pub struct RunScriptOn {
     pub script: slopty_proto::git::RunScript,
 }
 
-/// A repository picked in "Review a pull request…": which pull request of it is asked next.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct ReviewPullIn {
-    /// On which machine.
-    pub worker: slopty_client::layout::WorkerKey,
-    /// The repository, as the worker spells it.
-    pub repo: String,
-}
-
-/// The last step of "Review a pull request…": the agent starts on pull request `number` of
+/// A line of "Review a pull request…": the agent starts on pull request `number` of
 /// `repo` on `worker`, in a new worktree checking it out.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
@@ -333,8 +320,8 @@ pub struct ResumeSession {
     pub session: Box<slopty_proto::thread::wire::PastSession>,
 }
 
-/// "New `agent` agent", or an agent picked in "New agent…": the machine to start it on is
-/// asked next, then the folder.
+/// An agent picked in "New agent…": the machine to start it on is asked next, then the
+/// folder.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
 pub struct NewAgentOf {

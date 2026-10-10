@@ -340,8 +340,8 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
     assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge: the breadcrumb and "+", each clear of
-/// the next and of the bell, however long the workspace's name. The toggle stays in the
+/// The bar runs from the docked navigator's right edge: the breadcrumb clear of the bell,
+/// however long the workspace's name. The toggle stays in the
 /// navigator's top row, clear of the bar.
 #[gpui::test]
 fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext) {
@@ -358,17 +358,15 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
         cx.notify();
     });
     cx.run_until_parked();
-    let (navigator, toggle, crumbs, new, bell) = (
+    let (navigator, toggle, crumbs, bell) = (
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
         bounds(cx, "crumb-project"),
-        bounds(cx, "new-menu"),
         bounds(cx, "bell"),
     );
     assert!(toggle.right() <= navigator.right(), "the toggle is the navigator's: {toggle:?}");
     assert!(navigator.right() <= crumbs.left(), "the bar starts at the navigator's edge");
-    assert!(crumbs.right() <= new.left(), "{crumbs:?} {new:?}");
-    assert!(new.right() <= bell.left(), "+ covers the bell: {new:?} {bell:?}");
+    assert!(crumbs.right() <= bell.left(), "{crumbs:?} {bell:?}");
 }
 
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the

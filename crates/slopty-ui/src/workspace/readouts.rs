@@ -9,8 +9,8 @@
 //! agents last published (`5h 23% · 7d 41%`, in `warn` once one is 80 % used, which list every
 //! machine's when clicked); the ports forwarded here (which list them when clicked); the
 //! transfers in flight both ways while one is not the focused tile's own upload (whose header
-//! says it; they list every transfer with its rate, time left and stop when clicked); and the
-//! frame time with the stream stats (⌘⇧I). Their popovers rise from the foot bar.
+//! says it; they list every transfer with its rate, time left and stop when clicked). Their
+//! popovers rise from the foot bar. The frame time is the stream stats' overlay's (⌘⇧I).
 //!
 //! Nothing here repeats what is said elsewhere: which machine a tile runs on is the navigator's
 //! and the breadcrumb's, a link's round trip its machine row's, a file's language and
@@ -19,7 +19,6 @@
 //! Each readout is meta text with no icon, its figures tabular; a state is a small dot of its
 //! fill beside quiet words. A phone's bars have no room for them.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
     MouseButton, ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Task, Window, div, px,
+    Styled as _, Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::update::Release;
@@ -58,20 +57,9 @@ const PLAN_AGED_FROM: Duration = Duration::from_mins(15);
 /// A plan window used this far, in hundredths of a percent, is said in `warn`.
 const PLAN_WARN_FROM_BP: u32 = 8_000;
 
-/// How often the frame time's clock reads it and draws the title bar again, while the stats
-/// show: the percentile sorts the probe's ring, which is not work for every frame.
-const FRAME_READOUT_EVERY: Duration = Duration::from_secs(1);
-
 /// The readouts' own state.
 #[derive(Default)]
 pub(super) struct Readouts {
-    /// The frame time's readout, as the clock last read it.
-    frame_text: RefCell<FrameReading>,
-    /// Draws the title bar again when the frame time's readout is due, while the stats show.
-    tick: RefCell<Option<Task<()>>>,
-    /// [`Self::tick`] waits to fire. A draw while it waits leaves it be: one that set it going
-    /// again put the readout off for good under a bar drawn more often than its clock.
-    ticking: Cell<bool>,
     /// The plan windows' popover is up.
     plans_open: bool,
     /// The transfers' popover is up.
@@ -80,24 +68,6 @@ pub(super) struct Readouts {
     leaving: Option<Popover>,
     /// A newer Slopty that is out, as the app last found it.
     release: Option<Release>,
-}
-
-impl Readouts {
-    /// Let the frame time's readout go, so the first draw with the stats reads it afresh
-    /// rather than print the one from when they last showed.
-    pub(super) fn forget_frame_time(&self) {
-        self.frame_text.take();
-    }
-}
-
-/// The frame time's readout as the clock read it.
-#[derive(Clone, Default)]
-enum FrameReading {
-    /// Not read since the stats showed.
-    #[default]
-    Unread,
-    /// Read: the readout, or nothing before the app's probe has timed a frame.
-    Read(Option<SharedString>),
 }
 
 /// One of the readouts' popovers.
@@ -207,49 +177,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The frame time's readout, as the clock last read it ([`Self::read_clock`]), read here
-    /// only for the first draw after the stats show; nothing before the app's probe has timed a
-    /// frame. A draw never reads the clock itself: one drawn from scratch a moment after the
-    /// frame on screen must print what that frame printed.
-    fn frame_readout(&self, cx: &App) -> Option<SharedString> {
-        let mut reading = self.readouts.frame_text.borrow_mut();
-        if matches!(*reading, FrameReading::Unread) {
-            *reading = FrameReading::Read(frame_text(cx));
-        }
-        match &*reading {
-            FrameReading::Read(text) => text.clone(),
-            FrameReading::Unread => None,
-        }
-    }
-
-    /// What the clock reads before it draws the title bar again: the frame time while the
-    /// stats show.
-    fn read_clock(&self, cx: &App) {
-        self.readouts.ticking.set(false);
-        *self.readouts.frame_text.borrow_mut() =
-            if self.show_stats { FrameReading::Read(frame_text(cx)) } else { FrameReading::Unread };
-    }
-
-    /// Keep the frame time's clock going while the stats show, and let it go once they do not.
-    /// Set going once and left to fire: a draw that set it going again put the readout off for
-    /// as long as the bar was drawn more often than its clock ticks.
-    pub(super) fn keep_clock(&self, stats: bool, cx: &Draw<'_, Self>) {
-        if !stats {
-            self.readouts.tick.borrow_mut().take();
-            self.readouts.ticking.set(false);
-        } else if !self.readouts.ticking.replace(true) {
-            let (bar, this) = (self.chrome.foot.entity_id(), cx.weak_entity());
-            *self.readouts.tick.borrow_mut() = Some(cx.spawn(async move |cx| {
-                cx.background_executor().timer(FRAME_READOUT_EVERY).await;
-                cx.update(|cx| {
-                    let Some(this) = this.upgrade() else { return };
-                    this.read(cx).read_clock(cx);
-                    cx.notify(bar);
-                });
-            }));
-        }
-    }
-
     /// The readouts that have something to say, for the title bar's trailing end, with the
     /// popover that is up; nothing on a phone's bar, nor while none has anything to say.
     pub(super) fn render_readouts(
@@ -357,12 +284,6 @@ impl WorkspaceView {
         Some(tab_stop(el, theme.surfaces.focus).on_click(cx.listener(|this, _ev, window, cx| {
             this.list_ports(&super::actions::ListPorts, window, cx);
         })))
-    }
-
-    /// The frame time while the stats show (⌘⇧I), in the foot bar.
-    pub(super) fn frame_readout_el(&self, stats: bool, cx: &App) -> Option<Stateful<Div>> {
-        let text = stats.then(|| self.frame_readout(cx)).flatten()?;
-        Some(tabular(readout("readout-frame", text.clone())).child(text))
     }
 
     /// The plan's windows on the focused tile's machine, as its agent last published them (else
@@ -837,14 +758,6 @@ fn plan_words(
         parts.push(format!("{} ago", crate::palette::age_label(age)));
     }
     (parts.join(META_SEPARATOR), warn)
-}
-
-/// The frame time's readout now: the median of the frames the app's probe timed, or nothing
-/// before it has timed one.
-fn frame_text(cx: &App) -> Option<SharedString> {
-    crate::frames::stats(cx)
-        .filter(|s| s.frames > 0)
-        .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into())
 }
 
 /// `el` holding `text`, its parts (joined by [`META_SEPARATOR`]) set apart by the faint dot.

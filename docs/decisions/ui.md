@@ -4428,6 +4428,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     symbols, and narrows by every typed word in any case. The caret follows the chosen row, ↩
     keeps it and Esc puts it back, as "go to line" does. The status bar adds the indentation and
     any line end or BOM that is not the default: `Rust · Spaces: 4 · Ln 1, Col 1`.
+  - **No symbol list, ⌘D or ⌘⇧L** (cut 2026-10-10, orchestrator-first study item 6). The list
+    and the two multi-selection commands below went whole: the editor is for a quick fix,
+    ⌘D is split right everywhere else, and ⌘⇧O is also the review's file list.
   - **⌘D and ⌘⇧L need a fork change.** gpui-kit adds a caret with the pointer only; its
     selection set is private. `SelectNextOccurrence` and `SelectAllOccurrences` live in the
     fork (aislopware/gpui-kit#2, with no open counterpart upstream). The first press with a
@@ -8422,6 +8425,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     number is typed as `123`, `#123` or the pull request's page, and the step's one line says
     "Review #123 in atlas". No list of open pull requests is fetched: the person comes with a
     number from a link or a notification, and asking the forge first would only add a wait.
+  - **One step** (amended 2026-10-10, orchestrator-first study §C.4). The repository step is
+    gone: the number or page is typed first, and each repository is a line ("Review #123 in
+    atlas"). A page's repository leads (`page_repo`), else the focused tile's, so ↩ takes the
+    likely one. `ReviewPullIn` is deleted.
   - **The start.** The machine's usual agent starts in a new worktree that checks the pull
     request out, named `pr-123-` and four hex digits, so several agents on one pull request
     are found as runs. Its composer holds "Review pull request #123", to send as it is or add
@@ -9763,6 +9770,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     own words is never taken back, so a message sent before its echo arrived does not return.
     A sent message clears the draft there. Whoever writes last holds it. A draft past the
     row's limit stays in the local drafts file only.
+  - **A cleared draft keeps its time** (2026-10-10, the orchestrator-first study). Clearing
+    took the row's draft away, so a device holding older words of its own kept them: with no
+    draft on the row, nothing said they were cleared after it wrote them. Empty words now
+    leave an empty draft with the worker's time (`Action::DraftSet(Draft)`, no `Option`), and
+    the newer of the device's words and the row's draft wins as before, so the clear reaches
+    every device. Test: `a_draft_is_kept_cleared_and_bounded` (slopty-worker `thread::marks`);
+    golden `frame_actions`.
   - Tests: `workspace::tests::thread_waits::a_turn_read_on_another_device_leaves_the_bell`,
     `…::looking_at_a_thread_marks_it_seen_on_its_worker`,
     `…::a_threads_finished_turn_without_a_terminal_is_to_review`;
@@ -9874,3 +9888,84 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Work with neither stays a plain status line, with no disclosure and nothing to press.
   - Test: `conversation::thread::tests::steps::a_background_task_opens_from_its_line`
     (slopty-ui).
+
+- ✅ **Task agents are rows, not tiles** (2026-10-10, orchestrator-first study item 1).
+  Supersedes "An orchestrator's helpers open beside it" in `workspace.md`.
+  - **The defect.** Every task an orchestrator started took a pane beside it, and on a phone a
+    tab. Ten tasks were ten tiles to manage, which is the babysitting the orchestrator-first
+    direction removes: the person directs the orchestrator and looks at a helper only when it
+    asks for them or its work is ready.
+  - **No place.** A task's agent from elsewhere is never put in the tiling
+    (`WorkspaceView::place_from_elsewhere`, `is_task_agent`). One that came before the
+    server named it waits alone in its background tab as any arrival does, and leaves the
+    tiling once the project names it. A tile the person has shown, moved or given company is
+    theirs and stays.
+  - **Opened on demand.** It stays a row: the board's, a Needs-you or To review row, a note.
+    Focusing an item the tiling does not hold opens it as the helper preview
+    (`WorkspaceView::open_helper`, from `focus_tile`): a tab in its project, which the next
+    helper opened takes over while it is still on show, the one before leaving the tiling
+    again. Reading through the tasks leaves one tab, as the file preview does for files.
+  - **The navigator** still sets a helper the person opened in under its orchestrator's row.
+  - `slopty_client::layout::Tiling::arrive_beside` is no longer called; lane W deletes it.
+  - Tests: `workspace::tests::seating::{task_agents_arriving_take_no_place,
+    a_task_agent_opens_on_demand_as_one_preview_tab, a_tile_the_person_has_seen_stays_where_it_is}`.
+
+- ✅ **One door each: the "+" menu, per-agent lines and editor extras cut** (2026-10-10,
+  orchestrator-first study item 6). The same thing had up to seven ways in, and each door the
+  person meets is one more to learn and keep in step.
+  - **Starting an agent** keeps ⌘T (the last choice at once), "New agent…" and the menu bar's
+    mirror. The palette's "New `agent` agent" lines are gone; "New agent…" asks the agent.
+    Their tests go with them (`per_agent_lines_skip_the_agent_step`,
+    `an_open_palette_takes_the_agents_as_they_arrive`, `the_plus_menus_machine_is_not_asked_again`),
+    and so does the palette's refresh when a machine's agents change, which only they needed.
+  - **The title bar's "+" menu** is deleted with its machine step (`new_on`): every row was
+    also a palette line and a File-menu item. A new tile goes to the worker in context
+    (`context_worker`). A phone's "…" still leads with the new tiles, since it has no menu
+    bar.
+  - **The "…" menu** holds Settings and Add a machine. Stream stats stays in the palette and
+    the View menu; "Command palette" stays in the "…" menu on a phone only.
+  - **⌃⌘⇧P is kept**, unlike the study's list: inside a remote window ⌘⇧P belongs to the
+    remote app, so it is the only way to the palette there.
+  - **"Close other tabs"** in a pane tab's menu reads "Close other tiles", since it closes the
+    pane's tiles, not the project's tabs.
+  - **The editor** loses "Add next match", "Select all matches" and "Jump to symbol" (see
+    "No symbol list, ⌘D or ⌘⇧L" above). ⌘D is split right everywhere, and ⌘⇧O is the review's
+    file list.
+  - Tests: `workspace::tests::palette::no_palette_line_repeats_another`;
+    `keymap::tests::the_table_reads_and_holds_no_clash` holds the keymap to one command per
+    chord in a context.
+
+- ✅ **Files cross one way each, and the foot bar has no frame time** (2026-10-10,
+  orchestrator-first study §C.8).
+  - **One save.** "Save a copy…" of a file tile and "Download…" of a folder's entry are one
+    save in two words (`Bringing::Save`, one "Saved ~/path" notice); see `workspace.md`.
+  - **Upload on a taken drop.** A remote tile's files go up once a drop is taken, not as the
+    drag enters, so a big folder passed over a tile sends nothing. The trade-off: small files
+    no longer arrive during the hover, so a drop waits for its upload, tens of milliseconds
+    for a screenshot over a tailnet. Representations and a Kitty program's accepted data
+    still go during the hover; see `audio.md`, "Transfer first", amended.
+  - **No frame time in the foot.** With the stream stats on (⌘⇧I) the foot printed the app's
+    median frame time, a debug readout the stats overlay on every remote window already
+    shows. It is deleted with its once-a-second clock (`Readouts::frame_text`, `keep_clock`,
+    `FRAME_READOUT_EVERY`); ⌘⇧I toggles the overlays alone. Supersedes the frame time in "the
+    foot bar" entries above.
+  - Tests: `workspace::tests::save_copy`, `workspace::tests::remote::{a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis,
+    a_drops_files_are_listed_and_cancel_lets_go_of_the_drop}`,
+    `workspace::tests::bars::the_readouts_count_what_is_shared_and_say_no_machine`.
+
+- ✅ **No "Name this project…", no members** (2026-10-10, orchestrator-first study item 3, the
+  UI half of `Project::members` leaving the wire). A project is its orchestrator now: it is
+  made by handing a goal over, not by naming a group of tiles. The palette line, its header
+  field (`Field::Project`), `NameProject` and the matchers built from a group's values
+  (`members_of`) are deleted, and a declared project claims only the tiles in its
+  repository's clones. Putting one tile in a project by hand ("Add to …", the item's
+  `project` fact) stays. Supersedes the naming half of "The navigator groups by project".
+  - "Start" on a planned task sends `TaskSpawn` with its pin and the orchestrator's agent
+    alone: the server gives the agent its brief, so the client no longer reads it first.
+  - An exit whose status is not known (a shell rescued from a lost ptyd) reads "Exited", with
+    the neutral mark, never as a code 0 or a failure.
+  - The new notices, work ready to merge and a goal met, post as finished work: notes to look
+    at, not to answer. Their own rows and the note's Merge come with items 12 and 13.
+  - Tests: `workspace::tests::pins::adding_a_tile_to_a_project_pins_it_there`,
+    `workspace::tests::projects::a_task_never_started_is_started_from_its_card`,
+    `workspace::tests::tiles` (the exited pills).

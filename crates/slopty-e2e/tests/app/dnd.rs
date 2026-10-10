@@ -1,7 +1,8 @@
 //! Drags from this Mac onto a remote display or a terminal's program, in the real app against a
 //! real worker: the app's drop destination is handed each step of the drag as the platform's
-//! would hand it (`Command::DragOver`, `DragDrop`, `DragLeave`), and the files go up into the
-//! drag's landing on the worker as it hovers. The worker carries a drag over the drawn display
+//! would hand it (`Command::DragOver`, `DragDrop`, `DragLeave`). Files dropped on a display go
+//! up into the drag's landing on the worker once dropped; a program asking for drops has what
+//! it accepts sent while the drag hovers. The worker carries a drag over the drawn display
 //! (`SLOPTY_SYNTHETIC_SCREEN`) and records its drops (`SLOPTY_DND_RECORD`): no helper starts and
 //! no system drag runs there, a scripted one answers each step with the operation the test
 //! chose, and each release writes what the landing held at that moment. A drag over a terminal
@@ -184,9 +185,9 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Files dragged from this Mac onto the drawn display go up into the drag's landing while it
-/// hovers, the worker's target answers copy and the badge says so, and the drop is let go on
-/// the worker only once every file is whole there: the record of the release holds each file
+/// Files dragged from this Mac onto the drawn display: the worker's target answers copy and
+/// the badge says so, the files go up into the drag's landing once dropped, and the drop is let
+/// go on the worker only once every file is whole there: the record of the release holds each file
 /// with the digest of its source here.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -215,8 +216,8 @@ async fn files_dropped_on_a_display_are_whole_on_the_worker_when_it_lets_go() {
 }
 
 /// A worker whose every target refuses: its word reaches the badge, so the drop is refused here
-/// and slides back, and the worker never lets go. Neither that drag's landing nor one left before
-/// its drop stays on the worker, whole files and partial ones alike.
+/// and slides back, and the worker never lets go. Nothing of that drag, nor of one left before
+/// its drop, is on the worker: its files go up only on a drop that was taken.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_refused_or_left_drag_leaves_nothing_on_the_worker() {
@@ -231,7 +232,6 @@ async fn a_refused_or_left_drag_leaves_nothing_on_the_worker() {
     let (refused, answered) = hover(drv, &paths, at, "none").await;
     println!("MEASURE refusing target: first step → none {:.1} ms", answered.as_secs_f64() * 1e3);
     let landing = drops.join(&refused);
-    whole(&landing.join("note.txt"), 20).await;
     assert!(!drv.drag_drop(at.0, at.1).await.unwrap(), "refused here: it slides back");
     let cleared = gone(&landing).await;
     println!("MEASURE refused drop: its landing gone {:.1} ms after", cleared.as_secs_f64() * 1e3);
@@ -239,7 +239,6 @@ async fn a_refused_or_left_drag_leaves_nothing_on_the_worker() {
     let (left, _answered) = hover(drv, &paths, at, "none").await;
     assert_ne!(left, refused, "a drag of its own");
     let landing = drops.join(&left);
-    whole(&landing.join("note.txt"), 20).await;
     drv.ok(&Command::DragLeave).await.unwrap();
     let cleared = gone(&landing).await;
     println!("MEASURE left drag: its landing gone {:.1} ms after", cleared.as_secs_f64() * 1e3);

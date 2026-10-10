@@ -236,8 +236,8 @@ pub enum TerminalViewEvent {
     },
     /// Bell.
     Bell,
-    /// The child exited.
-    Exited(i32),
+    /// The child exited, with its status when that is known.
+    Exited(Option<i32>),
     /// Something the human should read in the top bar for a moment (a picture refused).
     Notice(String),
     /// The program's progress report changed ([`TerminalView::progress`]): the tile's header

@@ -1,15 +1,17 @@
-//! "Review a pull request…": the palette asks which repository, then which pull request of it
-//! by number, and the machine's usual agent starts on it in a new worktree that checks the
-//! pull request out (`NewWorktree::pull`). Its composer holds "Review pull request #N", to be
+//! "Review a pull request…": one step, where the pull request's number or page is typed and
+//! each repository it may be in is a line ("Review #123 in atlas"), and the machine's usual
+//! agent starts on the one picked in a new worktree that checks the pull request out
+//! (`NewWorktree::pull`). Its composer holds "Review pull request #N", to be
 //! sent as it is or added to, and once the thread is there its review opens beside it on the
 //! whole branch, read against the branch the pull request merges into as the forge names it
 //! ([`crate::review::Scope::WholeBranch`]).
 //!
 //! The repositories are those the focused tile is in, then every one a shell or a thread
 //! stands in, on each machine that can start an agent, each clone once: a thread in one of
-//! the clone's worktrees names the clone. With one, the number step comes at once. The number
-//! is typed: `123`, `#123`, or the pull request's page; a GitLab merge request's `!123` or its
-//! page, which its words then name as one ("Review merge request !123").
+//! the clone's worktrees names the clone. A page names its repository, whose line then leads;
+//! otherwise the focused tile's comes first, so ↩ takes it. The number is typed: `123`, `#123`,
+//! or the pull request's page; a GitLab merge request's `!123` or its page, which its words
+//! then name as one ("Review merge request !123").
 
 use gpui::{Context, Window};
 use slopty_client::layout::WorkerKey;
@@ -18,16 +20,13 @@ use slopty_proto::git::Forge;
 use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
-use super::actions::{ReviewPull, ReviewPullIn, ReviewPullNumber, StartThread};
+use super::actions::{ReviewPull, ReviewPullNumber, StartThread};
 use crate::palette::PaletteItem;
 
 /// The palette's line.
 pub(super) const REVIEW_PULL: &str = "Review a pull request\u{2026}";
 
-/// What the repository step's field says.
-const PICK_REPO: &str = "Which repository";
-
-/// What the number step's field says.
+/// What the step's field says.
 const PICK_NUMBER: &str = "Which pull request, by its number or page";
 
 /// What the number step says until a number is typed.
@@ -79,6 +78,16 @@ pub(super) fn typed_pull(text: &str) -> Option<(u32, Option<Forge>)> {
     Some((number, forge))
 }
 
+/// The repository a pull request's page names: the last part of its path before `/pull/`, or
+/// before GitLab's `/-/merge_requests/`. `None` for a bare number.
+fn page_repo(text: &str) -> Option<&str> {
+    let typed = text.trim();
+    let (before, _) =
+        typed.rsplit_once("/merge_requests/").or_else(|| typed.rsplit_once("/pull/"))?;
+    let before = before.strip_suffix("/-").unwrap_or(before);
+    before.rsplit('/').next().filter(|name| !name.is_empty())
+}
+
 /// What the start's composer asks of a request typed as `number` on `forge`: its forge's noun
 /// and mark where the text said which, a pull request's where it did not.
 pub(super) fn review_words(number: u32, forge: Option<Forge>) -> String {
@@ -87,7 +96,8 @@ pub(super) fn review_words(number: u32, forge: Option<Forge>) -> String {
 }
 
 impl WorkspaceView {
-    /// "Review a pull request…": which repository; with one, straight to the number.
+    /// "Review a pull request…": one step, where what is typed makes a line for each
+    /// repository the pull request may be in.
     pub(super) fn review_pull(
         &mut self,
         _: &ReviewPull,
@@ -95,38 +105,58 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let repos = self.pull_repos(cx);
-        match repos.as_slice() {
-            [] => self.show_notice(NO_REPO.to_owned(), cx),
-            [(worker, repo)] => self.pick_pull(*worker, repo.clone(), window, cx),
-            [(first, _), rest @ ..] => {
-                let first = *first;
-                let machines = rest.iter().any(|(w, _)| *w != first);
-                let lines = repos
-                    .into_iter()
-                    .map(|(worker, repo)| {
-                        let name = self.repo_name(worker, &repo);
-                        let shown = if machines {
-                            format!("{name} on {}", self.worker_name(worker))
-                        } else {
-                            name
-                        };
-                        let action = Box::new(ReviewPullIn { worker, repo });
-                        PaletteItem::new(&shown, action, &[])
-                    })
-                    .collect();
-                self.pull_step(lines, PICK_REPO, window, cx);
-            }
-        }
-    }
-
-    /// A repository picked: which pull request of it.
-    pub(super) fn review_pull_in(
-        &mut self,
-        pick: &ReviewPullIn,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.pick_pull(pick.worker, pick.repo.clone(), window, cx);
+        let Some((first, _)) = repos.first() else {
+            self.show_notice(NO_REPO.to_owned(), cx);
+            return;
+        };
+        let first = *first;
+        let machines = repos.iter().any(|(w, _)| *w != first);
+        // Each repository with its folder's name, and the words its line ends in.
+        let named: Vec<(WorkerKey, String, String, String)> = repos
+            .into_iter()
+            .map(|(worker, repo)| {
+                let name = self.repo_name(worker, &repo);
+                let shown = if machines {
+                    format!("{name} on {}", self.worker_name(worker))
+                } else {
+                    name.clone()
+                };
+                (worker, repo, name, shown)
+            })
+            .collect();
+        self.pull_step(Vec::new(), PICK_NUMBER, window, cx);
+        let Some(palette) = self.palette.clone() else { return };
+        palette.update(cx, |p, cx| {
+            p.set_empty(TYPE_NUMBER, cx);
+            p.set_typed(
+                move |text| {
+                    let Some((number, forge)) = typed_pull(text) else { return Vec::new() };
+                    let mark = forge.unwrap_or(Forge::GitHub).mark();
+                    let mut order: Vec<&(WorkerKey, String, String, String)> =
+                        named.iter().collect();
+                    if let Some(page) = page_repo(text) {
+                        order.sort_by_key(|(_, _, name, _)| name != page);
+                    }
+                    order
+                        .into_iter()
+                        .map(|(worker, repo, _, shown)| {
+                            let action = Box::new(ReviewPullNumber {
+                                worker: *worker,
+                                repo: repo.clone(),
+                                number,
+                                forge,
+                            });
+                            PaletteItem::new(
+                                &format!("Review {mark}{number} in {shown}"),
+                                action,
+                                &[],
+                            )
+                        })
+                        .collect()
+                },
+                cx,
+            );
+        });
     }
 
     /// A pull request named: the machine's usual agent starts on it in a new worktree that
@@ -164,38 +194,6 @@ impl WorkspaceView {
         self.ask_review(key, thread, Some(crate::review::Scope::WholeBranch));
         self.faces_dirty = true;
         cx.notify();
-    }
-
-    /// The number step for `repo` on `worker`: what is typed makes its one line.
-    fn pick_pull(
-        &mut self,
-        worker: WorkerKey,
-        repo: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = self.repo_name(worker, &repo);
-        self.pull_step(Vec::new(), PICK_NUMBER, window, cx);
-        if let Some(palette) = self.palette.clone() {
-            palette.update(cx, |p, cx| {
-                p.set_empty(TYPE_NUMBER, cx);
-                p.set_typed(
-                    move |text| {
-                        let Some((number, forge)) = typed_pull(text) else { return Vec::new() };
-                        let mark = forge.unwrap_or(Forge::GitHub).mark();
-                        let shown = format!("Review {mark}{number} in {name}");
-                        let action = Box::new(ReviewPullNumber {
-                            worker,
-                            repo: repo.clone(),
-                            number,
-                            forge,
-                        });
-                        vec![PaletteItem::new(&shown, action, &[])]
-                    },
-                    cx,
-                );
-            });
-        }
     }
 
     /// The repositories a pull request may be reviewed in, each clone once: the focused
@@ -269,7 +267,7 @@ impl WorkspaceView {
 mod tests {
     use slopty_proto::git::Forge;
 
-    use super::{review_words, typed_pull};
+    use super::{page_repo, review_words, typed_pull};
 
     /// A GitLab merge request is typed as `!12` or its page and named as one; a pull request's
     /// page says its host's forge; a bare number names none and reads as a pull request.
@@ -285,5 +283,8 @@ mod tests {
         assert_eq!(typed_pull("!x"), None);
         assert_eq!(review_words(12, Some(Forge::GitLab)), "Review merge request !12");
         assert_eq!(review_words(12, None), "Review pull request #12");
+        assert_eq!(page_repo(page), Some("atlas"));
+        assert_eq!(page_repo(github), Some("atlas"));
+        assert_eq!(page_repo("#12"), None);
     }
 }

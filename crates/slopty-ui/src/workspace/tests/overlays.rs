@@ -130,7 +130,7 @@ fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
 fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let theme = Theme::default();
     // From the sheet's outer edge: its hairline and its pad, which with a row's radius make
     // the sheet's.
@@ -143,16 +143,15 @@ fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
         );
         f32::from(row.left() - sheet.left())
     };
-    let click = |cx: &mut VisualTestContext, selector: &'static str| {
-        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}"));
-        cx.simulate_click(at.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-    };
-
-    click(cx, "more");
-    let at = inset(cx, "menu", "menu-Command palette");
+    let row: &'static str =
+        Box::leak(format!("nav-tile-{}", shell.item.as_uuid()).into_boxed_str());
+    let at = cx.debug_bounds(row).expect("the tile's row");
+    cx.simulate_mouse_down(at.center(), gpui::MouseButton::Right, gpui::Modifiers::default());
+    cx.run_until_parked();
+    let at = inset(cx, "menu", "menu-Rename");
     assert!((at - pad).abs() < 0.5, "a menu's row: {at}");
-    click(cx, "more");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
 
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();

@@ -2,12 +2,13 @@
 //! (`docs/decisions/audio.md`, "Drag and drop lands at the point, both ways").
 //!
 //! The platform asks what each point of a drag is over ([`Sink`]). Over a remote window or
-//! display's body the drag is the tile's: as it enters, what it carries is read once, its files
-//! start up into the drag's landing on the worker and its big data goes up beside them, and
-//! the tile carries the drag on to the worker ([`crate::screen::ScreenView::drag_enter`]).
-//! Anywhere else GPUI's own drop handling takes it. A drop of promised files waits for them to
-//! be written here, then names them and sends them up. How the drop ended comes back from the
-//! worker through the tile, and a drop that did not land says why.
+//! display's body the drag is the tile's: as it enters, what it carries is read once, its big
+//! data goes up, and the tile carries the drag on to the worker
+//! ([`crate::screen::ScreenView::drag_enter`]). Its files go up into the drag's landing on the
+//! worker only once it is dropped, which waits for them there: a big folder passed over a tile
+//! on its way elsewhere sends nothing. Anywhere else GPUI's own drop handling takes it. A drop
+//! of promised files waits for them to be written here, then names them and sends them up. How the
+//! drop ended comes back from the worker through the tile, and a drop that did not land says why.
 //!
 //! A drag out of a worker's app that comes back over a tile of that same worker carries the
 //! worker's own files by their paths there, and nothing comes down or goes up for it.
@@ -93,6 +94,9 @@ struct OverTile {
     /// A drag out of this tile's worker, back: its files are already there.
     #[cfg(target_os = "macos")]
     back: bool,
+    /// This device's files the drag carries, which go up into its landing once it is dropped.
+    #[cfg(target_os = "macos")]
+    files: Vec<std::path::PathBuf>,
 }
 
 /// A drop on a remote tile, waiting for the files its promises write here.
@@ -138,9 +142,9 @@ impl WorkspaceView {
     }
 
     /// A drag carrying `carried` is at `p`: what it is over. Entering a remote tile begins
-    /// the worker's drag and the drag's upload; leaving one ends both. A drag this window
-    /// began, back over a tile of the worker it came from, carries that worker's own files,
-    /// and uploads nothing.
+    /// the worker's drag, and leaving one ends it; its files go up only on the drop. A drag this
+    /// window began, back over a tile of the worker it came from, carries that worker's own
+    /// files, and uploads nothing.
     #[cfg(target_os = "macos")]
     pub fn drag_over(
         &mut self,
@@ -177,23 +181,21 @@ impl WorkspaceView {
             |items| dnd::Read { items, files: Vec::new(), pushes: Vec::new() },
         );
         if read.is_empty() {
-            state.over = Some(OverTile { tile, drag: None, back: is_back });
+            state.over = Some(OverTile { tile, drag: None, back: is_back, files: Vec::new() });
             return Over::Remote(DragOp::None);
         }
         let drag = screen.update(cx, |v, cx| v.drag_enter(p, &read, allowed, cx));
         let promises = (0_u16..).zip(&read.items).filter(|(_, i)| i.promised.is_some());
         let promises = promises.map(|(n, _)| n).collect();
         tracing::info!(%drag, items = read.items.len(), files = read.files.len(), back = is_back, "drag over a remote tile");
-        if !read.files.is_empty() {
-            let _started = self.upload(tile, &read.files, Upload::to_drag(tile, drag), cx);
-        }
         if let Some(remote) = self.remote(tile.worker) {
             for push in read.pushes {
                 let rep = RepRef { source: Source::Drag(drag), item: push.item, kind: push.kind };
                 remote.send_clip(rep, Fetched::Data(push.bytes), false);
             }
         }
-        state.over = Some(OverTile { tile, drag: Some((drag, promises)), back: is_back });
+        let files = read.files;
+        state.over = Some(OverTile { tile, drag: Some((drag, promises)), back: is_back, files });
         Over::Remote(screen.update(cx, |v, _cx| v.drag_move(p)))
     }
 
@@ -335,12 +337,13 @@ impl WorkspaceView {
         }
     }
 
-    /// `drag` was dropped: the files going up into its landing are what the drop waits for,
-    /// listed with the transfers and holding a quit until they are in.
+    /// `over`'s drag was dropped: its files start up into its landing, what the drop waits
+    /// for, listed with the transfers and holding a quit until they are in.
     #[cfg(target_os = "macos")]
-    fn drop_made(&mut self, drag: DragId, cx: &mut Context<Self>) {
-        for upload in self.uploads.values_mut().filter(|u| u.drag == Some(drag)) {
-            upload.dropped = true;
+    fn drop_made(&mut self, over: &OverTile, drag: DragId, cx: &mut Context<Self>) {
+        if !over.files.is_empty() {
+            let upload = Upload { dropped: true, ..Upload::to_drag(over.tile, drag) };
+            let _started = self.upload(over.tile, &over.files, upload, cx);
         }
         cx.notify();
     }
@@ -405,12 +408,12 @@ impl WorkspaceView {
         if promised == 0 {
             let taken = screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx));
             if taken {
-                self.drop_made(drag, cx);
+                self.drop_made(&over, drag, cx);
             }
             return sent(taken);
         }
         screen.update(cx, |v, cx| v.drag_hold(p, cx));
-        self.drop_made(drag, cx);
+        self.drop_made(&over, drag, cx);
         state.waiting = Some(Waiting { tile: over.tile, drag, at: p, items, term: None });
         Taken::CallIn
     }

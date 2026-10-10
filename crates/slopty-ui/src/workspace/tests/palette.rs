@@ -290,13 +290,11 @@ fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
 }
 
-/// The empty workspace's agent starts where the machine's shells last stood, and on the
-/// machine "+" chose.
+/// The empty workspace's agent starts where the machine's shells last stood.
 #[gpui::test]
 fn the_empty_workspaces_agent_starts_in_the_machines_latest_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    let mut laptop = connect(&view, cx, 2, "laptop");
     let shell = SessionId::new();
     let _tile = opens(&view, cx, &studio, shell, studio.me, 1);
     let key = studio.key;
@@ -315,11 +313,7 @@ fn the_empty_workspaces_agent_starts_in_the_machines_latest_place(cx: &mut TestA
         cx.run_until_parked();
         thread_starts(fake).into_iter().next().map(|(_, cwd, _)| cwd)
     };
-    view.update_in(cx, |v, _w, _cx| v.new_on = Some(key));
     assert_eq!(started(cx, &mut studio).as_deref(), Some("/Users/me/oss/slopty"), "its latest");
-    let other = laptop.key;
-    view.update_in(cx, |v, _w, _cx| v.new_on = Some(other));
-    assert_eq!(started(cx, &mut laptop).as_deref(), Some("~"), "the laptop has none: its home");
 }
 
 fn listing(title: &str) -> ScreenEvent {
@@ -835,4 +829,34 @@ fn the_palette_splits_into_everything_commands_and_files(cx: &mut TestAppContext
         .any(|m| matches!(m, ClientMsg::FindFiles { query, .. } if query == "ma"));
     assert!(asked, "what is typed is asked of the machine's files");
     assert!(shown(cx).iter().all(|(s, _)| *s != Section::Commands), "no command among them");
+}
+
+/// No two lines of the palette run the same action or read the same: each thing has one door
+/// there (`.research/orchestrator-first-2026-10-10.md`, item 6). Checked with nothing open and
+/// with a shell focused on one of two machines, where the most lines are offered.
+#[gpui::test]
+fn no_palette_line_repeats_another(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _laptop = connect(&view, cx, 2, "laptop");
+    let check = |cx: &mut VisualTestContext, when: &str| {
+        let lines = view.update_in(cx, |v, window, cx| v.offered_lines(window, cx));
+        let mut labels = HashSet::new();
+        for (ix, line) in lines.iter().enumerate() {
+            assert!(labels.insert(line.label.as_str()), "{when}: {:?} twice", line.label);
+            let PaletteRun::Action(action) = &line.run else { continue };
+            let again = lines.iter().skip(ix.saturating_add(1)).find(|other| {
+                matches!(&other.run, PaletteRun::Action(o) if o.partial_eq(action.as_ref()))
+            });
+            assert!(
+                again.is_none(),
+                "{when}: {:?} and {:?} run one action",
+                line.label,
+                again.map(|o| &o.label)
+            );
+        }
+    };
+    check(cx, "nothing open");
+    opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    check(cx, "a shell");
 }

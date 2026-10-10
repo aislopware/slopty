@@ -28,7 +28,6 @@ pub mod open_with;
 mod preview;
 mod reading;
 mod search;
-mod symbols;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,7 +55,6 @@ use slopty_core::{ItemId, WallMs};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
 use slopty_theme::{Theme, alpha};
-pub use symbols::SYMBOLS_CTX;
 
 use crate::authorship::{self, Authored, Opens};
 use crate::colors::{hsla, hsla_alpha};
@@ -92,23 +90,14 @@ mod actions {
             ToggleSoftWrap,
             /// Open the find bar with its replace field, or close the replace field.
             ToggleReplace,
-            /// List the file's symbols to go to one.
-            GoToSymbol,
-            /// Close the symbol list, the caret back where it was.
-            CloseSymbols,
-            /// The next symbol in the list.
-            NextSymbol,
-            /// The previous symbol in the list.
-            PreviousSymbol,
             /// Show a Markdown file's preview in place of its source, or back.
             TogglePreview,
         ]
     );
 }
 pub use actions::{
-    CloseGoToLine, CloseSymbols, DuplicateLine, FinishEdit, GoToLine, GoToSymbol, JumpToBracket,
-    MoveLineDown, MoveLineUp, NextSymbol, PreviousSymbol, SaveFile, ToggleComment, TogglePreview,
-    ToggleReplace, ToggleSoftWrap,
+    CloseGoToLine, DuplicateLine, FinishEdit, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
+    SaveFile, ToggleComment, TogglePreview, ToggleReplace, ToggleSoftWrap,
 };
 
 /// The key context of a file tile; ⌘S is bound in it.
@@ -444,8 +433,6 @@ pub struct FileView {
     bracket_at: Option<(usize, u64)>,
     /// The "go to line" field, while open.
     goto: Option<editing::GoTo>,
-    /// The symbol list, while open.
-    symbols: Option<symbols::Symbols>,
     /// Who wrote the file's lines as last read, while the worker has said
     /// ([`Self::set_authored`]).
     authored: Option<Authored>,
@@ -529,7 +516,6 @@ impl FileView {
             bracket: None,
             bracket_at: None,
             goto: None,
-            symbols: None,
             authored: None,
             stamped: None,
             _editor_events: [events, redraw],
@@ -1699,7 +1685,6 @@ impl Render for FileView {
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let goto = self.goto.as_ref().map(|g| self.render_goto(g, cx));
-        let symbols = self.symbols.as_ref().map(|l| self.render_symbols(l, cx));
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
         let author = self.render_author(cx);
@@ -1786,7 +1771,6 @@ impl Render for FileView {
             .children(author)
             .children(search)
             .children(goto)
-            .children(symbols)
     }
 }
 

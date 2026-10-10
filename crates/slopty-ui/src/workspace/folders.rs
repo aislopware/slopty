@@ -431,7 +431,7 @@ impl WorkspaceView {
         match ask {
             FilesAsk::Import(tile) | FilesAsk::Photos(tile) => Self::open_files(*tile, cx),
             FilesAsk::Export { worker, path, .. } => {
-                self.bring_down_as(*worker, path.clone(), super::remote::Bringing::Download, cx);
+                self.bring_down_as(*worker, path.clone(), super::remote::Bringing::Save, cx);
             }
         }
     }

@@ -43,6 +43,10 @@ impl WorkspaceView {
 
     /// Focus a tile: the layout moves to it, and its terminal (if it is one) takes the keyboard.
     pub fn focus_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
+        // A task's agent is a row until it is looked at: it opens as the helper preview.
+        if !self.layout.contains(tile) && self.item(tile).is_some() {
+            self.open_helper(tile);
+        }
         self.layout.focus(tile);
         self.after_focus_moved(cx);
         self.layout_touched(cx);
@@ -441,7 +445,6 @@ impl WorkspaceView {
     /// ⌘⇧I: the stats overlay on every remote window.
     pub fn toggle_stats(&mut self, _: &ToggleStats, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_stats = !self.show_stats;
-        self.readouts.forget_frame_time();
         for view in self.screens.values() {
             view.update(cx, |v, cx| v.set_hud(self.show_stats, cx));
         }
@@ -532,17 +535,16 @@ impl WorkspaceView {
 
     // ----- opening -----------------------------------------------------------------------------
 
-    /// ⌘⇧T: a shell in a tab of its own, on the focused tile's worker (or the one "+" chose),
+    /// ⌘⇧T: a shell in a tab of its own, on the worker in context,
     /// in the focused shell's directory when it is on that worker.
     pub fn new_terminal(&mut self, _: &NewTerminal, _window: &mut Window, cx: &mut Context<Self>) {
         self.new_terminal_as(Opening::Tab, cx);
     }
 
-    /// Where a new tile goes, taking the choice "+" made: the worker, and the focused shell's
-    /// directory when it is on that worker.
-    pub(super) fn new_tile_target(&mut self) -> Option<(WorkerKey, Option<String>)> {
-        let chosen = self.new_on.take().filter(|k| self.workers.contains_key(k));
-        let key = chosen.or_else(|| self.context_worker())?;
+    /// Where a new tile goes: the worker in context, and the focused shell's directory when it
+    /// is on that worker.
+    pub(super) fn new_tile_target(&self) -> Option<(WorkerKey, Option<String>)> {
+        let key = self.context_worker()?;
         let here = self.focused().is_some_and(|t| t.worker == key);
         Some((key, here.then(|| self.active_cwd()).flatten()))
     }
@@ -1246,7 +1248,6 @@ impl WorkspaceView {
                     self.propose(rename.tile.worker, op, cx);
                 }
                 Field::Address => self.load_address(rename.tile, &text, cx),
-                Field::Project => self.name_project_as(rename.tile, &text, cx),
             }
         }
         if back {

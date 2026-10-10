@@ -138,7 +138,7 @@ mod tests {
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
         // The breadcrumb names the workspace.
         assert!(dump.a11y_node("Button", Some("e2e-worker")).is_some(), "{:#?}", dump.a11y);
-        for label in ["Navigator", "New", "Needs you", "More"] {
+        for label in ["Navigator", "Needs you", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 

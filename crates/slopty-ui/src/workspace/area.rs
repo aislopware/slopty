@@ -972,10 +972,9 @@ impl WorkspaceView {
         crate::a11y::tab_stop(row, s.focus)
     }
 
-    /// The worker a way to begin opens on: the one "+" chose, else the one in context.
+    /// The worker a way to begin opens on: the one in context.
     fn begin_target(&self) -> Option<String> {
-        let chosen = self.new_on.filter(|k| self.workers.contains_key(k));
-        let key = chosen.or_else(|| self.context_worker())?;
+        let key = self.context_worker()?;
         self.workers.get(&key).map(|w| w.name.clone())
     }
 

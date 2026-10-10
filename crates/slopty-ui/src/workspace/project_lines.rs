@@ -7,27 +7,21 @@
 //! ranks only the palette's projects, a transient switcher: the navigator's groups and the
 //! panes keep their places.
 
-use gpui::{AppContext as _, Context, Window};
-use gpui_kit::component::input::InputState;
-use slopty_client::groups::{self, GroupKey, fact};
+use gpui::{Context, Window};
+use slopty_client::groups::{GroupKey, fact};
 use slopty_client::layout::TileRef;
 use slopty_core::WallMs;
 use slopty_proto::items::ItemOp;
-use slopty_proto::orchestration::Verb;
-use slopty_proto::project::{LimitsChange, Matcher, Project};
 
-use super::actions::{NameProject, PinToProject, ScopeTo};
+use super::WorkspaceView;
+use super::actions::{PinToProject, ScopeTo};
 use super::grouping::group_glyph;
 use super::rollup::Rollup;
-use super::{Field, WorkspaceView};
 use crate::icons::Status;
 use crate::palette::PaletteItem;
 
 /// What the palette calls letting go of a scope.
 pub(super) const CLEAR_SCOPE: &str = "Clear the scope";
-
-/// What the palette calls naming the focused tile's project.
-pub(super) const NAME_PROJECT: &str = "Name this project…";
 
 /// The key of an item's fact that pins it to a project: the key of the group it joins.
 pub(super) const PIN: &str = fact::PROJECT;
@@ -82,29 +76,6 @@ impl WorkspaceView {
         rows.into_iter().map(|(_, _, line)| line).collect()
     }
 
-    /// The members that keep `group`'s tiles in a project named after it: each value the group
-    /// is known by, a place spelled as its machine's name and the directory, as a person or an
-    /// agent would write it.
-    fn members_of(&self, group: &groups::Group) -> Vec<Matcher> {
-        let mut members: Vec<Matcher> = Vec::new();
-        for value in &group.values {
-            let place = groups::place(value)
-                .and_then(|(worker, path)| Some((self.workers.get(&worker)?.name.clone(), path)));
-            let member: Matcher = match place {
-                Some((machine, path)) => {
-                    [(fact::MACHINE.to_owned(), machine), (fact::CWD.to_owned(), path.to_owned())]
-                        .into()
-                }
-                None => [(group.fact.clone(), value.clone())].into(),
-            };
-            if !members.contains(&member) && Project::member_fits(&member) {
-                members.push(member);
-            }
-        }
-        members.truncate(Project::MEMBERS_MAX);
-        members
-    }
-
     /// "Scope to `project`" for each project, and the way back out while one is scoped.
     pub(super) fn scope_lines(&self) -> Vec<PaletteItem> {
         let grouping = self.project_groups();
@@ -126,9 +97,8 @@ impl WorkspaceView {
         lines
     }
 
-    /// For the focused tile: "Add to `project`" for each project it is not in, "Take out of
-    /// `project`" for the one it is pinned to, and "Name this project…" for a project the
-    /// server does not keep yet.
+    /// For the focused tile: "Add to `project`" for each project it is not in, and "Take out
+    /// of `project`" for the one it is pinned to.
     pub(super) fn pin_lines(&self) -> Vec<PaletteItem> {
         let Some(tile) = self.focused() else { return Vec::new() };
         let Some(item) = self.item(tile) else { return Vec::new() };
@@ -143,9 +113,6 @@ impl WorkspaceView {
                 .map_or_else(|| pinned.value().to_owned(), |g| self.group_name(g));
             let action = PinToProject { project: None };
             lines.push(PaletteItem::new(&format!("Take out of {name}"), Box::new(action), &[]));
-        }
-        if own.is_some_and(|g| g.key.worker().is_none() && g.fact != fact::PROJECT) {
-            lines.push(PaletteItem::new(NAME_PROJECT, Box::new(NameProject), &[]));
         }
         lines.extend(
             grouping
@@ -175,52 +142,6 @@ impl WorkspaceView {
         let op = ItemOp::SetFact { id: tile.item, key: PIN.to_owned(), value };
         self.propose(tile.worker, op, cx);
         cx.notify();
-    }
-
-    /// "Name this project…": a field in the focused tile's header, the project's name in it.
-    pub(super) fn name_project(
-        &mut self,
-        _: &NameProject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tile) = self.focused() else { return };
-        let grouping = self.project_groups();
-        let Some(group) = grouping.group_of(tile) else { return };
-        let name = self.group_name(group);
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder(name.clone()).default_value(name));
-        self.open_field(tile, Field::Project, input, window, cx);
-    }
-
-    /// Keep `tile`'s project on the server as `title`, with the members that hold its tiles
-    /// now; a blank title keeps the name it has.
-    pub(super) fn name_project_as(&mut self, tile: TileRef, title: &str, cx: &mut Context<Self>) {
-        let grouping = self.project_groups();
-        let Some(group) = grouping.group_of(tile).filter(|g| g.key.worker().is_none()) else {
-            return;
-        };
-        let title =
-            if title.trim().is_empty() { self.group_name(group) } else { title.trim().to_owned() };
-        let mirror = &self.projects.mirror;
-        let Some(project) = super::projects::project_name(&title, |id| mirror.get(id).is_some())
-        else {
-            self.show_notice(format!("No name is left for a project called {title}"), cx);
-            return;
-        };
-        let verb = Verb::ProjectCreate {
-            project,
-            title,
-            members: self.members_of(group),
-            repo: String::new(),
-            target: String::new(),
-            verifier: None,
-            push: false,
-            orchestrator: None,
-            limits: LimitsChange::default(),
-            metadata: None,
-        };
-        self.send_to_server(verb, |_, _| {}, cx);
     }
 
     /// "Scope to …" from the palette.

@@ -945,6 +945,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `.partial`, BLAKE3, resume and cancel. A typical hover of 0.5–2 s finishes small files
       before the drop. Promised files join the upload once called in. `Leave` cancels and
       removes the partials. A folder keeps its tree.
+      *Amended 2026-10-10 (orchestrator-first study §C.8): the files upload from the drop,
+      not from `Enter`.* A big folder passed over a tile on its way elsewhere started a full
+      upload. The worker's drop already waits for files still going up (as it does for
+      promised ones), so a drop now waits for the whole upload; for a screenshot over a
+      tailnet that is tens of milliseconds. The data under `INLINE_CLIP_BYTES` and the larger
+      representations still go up on `Enter`, and a program asking for drops in a terminal
+      still has what it accepted sent while the drag hovers. Tests:
+      `workspace::tests::remote::a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis`,
+      `a_drops_files_are_listed_and_cancel_lets_go_of_the_drop`; e2e
+      `dnd::a_refused_or_left_drag_leaves_nothing_on_the_worker`.
     - *Worker.* A `DragIn` state machine per drag in `apps/slopty-worker/src/conn.rs`, beside the
       paste `Held`.
       1. On `Enter` it raises a window stream's window, since the HID route hits whatever is

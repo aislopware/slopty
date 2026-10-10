@@ -21,8 +21,8 @@
 //!
 //! On a phone the bar is a navigation bar: the focused tile's title (else the project's name),
 //! which opens the tab's other panes and the project's tabs while there are some
-//! ([`MenuKind::Switch`]), and what "+" opens folded into "…". It has no room for the
-//! readouts, and its notices hang under its middle.
+//! ([`MenuKind::Switch`]), and "…", which leads with the new tiles a phone has no menu bar
+//! for. It has no room for the readouts, and its notices hang under its middle.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
@@ -43,7 +43,7 @@ use slopty_proto::items::ItemKind;
 
 use super::actions::{
     AddWindow, FilterNavigator, GoBack, GoForward, NewAgent, NewNote, NewTerminal, OpenCommands,
-    OpenPalette, ToggleNavigator, ToggleStats,
+    OpenPalette, ToggleNavigator,
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
@@ -70,9 +70,6 @@ pub(super) const LEADING_INSET: f32 = 12.0;
 /// The bell's hover group, which its badge's cut-out ring follows.
 const BELL: &str = "bell";
 
-/// What "+" is called: it opens a menu of things to open.
-pub(super) const NEW: &str = "New";
-
 /// What the magnifier beside the navigator's toggle is called.
 pub(super) const SEARCH: &str = "Search";
 
@@ -96,8 +93,6 @@ pub(super) enum MenuKind {
     Projects,
     /// The breadcrumb's checkout: the same repository's other checkouts.
     Checkouts,
-    /// "+": what to open.
-    New,
     /// "…": everything else, the app's entries included.
     More,
     /// A machine's "…" in the navigator: what it says of itself, and what can be done to it.
@@ -280,7 +275,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         if self.menu == Some(which) {
-            self.dismiss_menu(window, cx);
+            self.close_menu(window, cx);
         } else {
             self.menu = Some(which);
             self.menu_at = None;
@@ -298,13 +293,6 @@ impl WorkspaceView {
         }
         self.return_keyboard(window, cx);
         cx.notify();
-    }
-
-    /// Close the bar's menu with nothing chosen from it: a machine "+" was pointed at goes
-    /// with it, so the next ⌘T is not sent there unasked.
-    pub(super) fn dismiss_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_on = None;
-        self.close_menu(window, cx);
     }
 
     /// The navigator's toggle, at the far leading edge past the traffic lights wherever it
@@ -419,25 +407,6 @@ impl WorkspaceView {
         let hidden = has_workers && !phone && self.nav.drawn.is_none();
         let search = hidden.then(|| self.search_button(false, cx));
         let new_agent = hidden.then(|| self.new_agent_button("bar-new-agent", cx));
-        // A phone's "+" is a row of "…": the bar keeps the name, the bell and the menu.
-        let new = (has_workers && !phone).then(|| {
-            let at = Rc::clone(&self.anchors.at);
-            let measure = canvas(
-                move |bounds, _window, _cx| {
-                    at.borrow_mut().insert(MenuKind::New, bounds);
-                },
-                |_bounds, (), _window, _cx| {},
-            )
-            .absolute()
-            .inset_0();
-            kit::icon_button(theme, "new-menu", Symbol::Plus, NEW)
-                .relative()
-                .aria_expanded(self.menu == Some(MenuKind::New))
-                .child(measure)
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.toggle_menu(MenuKind::New, window, cx);
-                }))
-        });
 
         // Back and forward through the tabs visited, then where the focused work is, then
         // the project's tabs, "+" after the last.
@@ -558,8 +527,7 @@ impl WorkspaceView {
                     .children(phone_title)
                     .children(visits)
                     .children(where_)
-                    .children(tabs)
-                    .children(new),
+                    .children(tabs),
             )
             .children(strip)
             .children(lane)
@@ -696,40 +664,8 @@ impl WorkspaceView {
         (label.into(), rollup)
     }
 
-    /// "+"'s choice of worker, where there are several: a row each, the one a new tile goes to
-    /// checked. Choosing one keeps the menu open on the kinds of tile.
-    fn target_entries(&self, entity: &gpui::WeakEntity<Self>) -> Vec<MenuEntry> {
-        if self.workers.len() < 2 {
-            return Vec::new();
-        }
-        let target = self.new_on.or_else(|| self.context_worker());
-        self.workers
-            .iter()
-            .map(|(key, w)| {
-                let key = *key;
-                let entity = entity.clone();
-                MenuEntry {
-                    group: MenuGroup::Target,
-                    label: w.name.clone().into(),
-                    detail: if target == Some(key) {
-                        "\u{2713}".into()
-                    } else {
-                        SharedString::default()
-                    },
-                    run: Rc::new(move |_window, cx| {
-                        let _gone = entity.update(cx, |this, cx| {
-                            this.new_on = Some(key);
-                            this.menu = Some(MenuKind::New);
-                            cx.notify();
-                        });
-                    }),
-                }
-            })
-            .collect()
-    }
-
-    /// What "+" opens, as `entry` makes a row: the palette's names for the same actions,
-    /// which the rows run as the keys do.
+    /// A phone's new tiles, leading its "…" as `entry` makes a row: the palette's names for the
+    /// same actions, which the rows run as the keys do.
     fn new_entries(
         entry: &impl Fn(MenuGroup, &'static str, Option<&dyn gpui::Action>, MenuAction) -> MenuEntry,
     ) -> Vec<MenuEntry> {
@@ -798,12 +734,7 @@ impl WorkspaceView {
             }
             MenuKind::Checkouts => self.checkout_entries(&entity),
             MenuKind::Switch => self.switch_entries(&entity),
-            // The palette's names for the same actions, which the rows run as the keys do.
-            MenuKind::New => {
-                self.target_entries(&entity).into_iter().chain(Self::new_entries(&entry)).collect()
-            }
             MenuKind::More => {
-                // A phone's bar has no "+": what it opens leads its "…".
                 let phone = self.phone;
                 // A phone's bar is the focused tile's: its own rows lead its "…".
                 let mut entries: Vec<MenuEntry> = if phone {
@@ -814,14 +745,13 @@ impl WorkspaceView {
                 } else {
                     Vec::new()
                 };
-                entries.extend([
-                    action("Command palette", &OpenCommands, |this, w, cx| {
+                // A Mac opens the palette by its keys and its menu bar; a phone, with neither,
+                // by this row.
+                if phone {
+                    entries.push(action("Command palette", &OpenCommands, |this, w, cx| {
                         this.open_commands(&OpenCommands, w, cx);
-                    }),
-                    action("Stream stats", &ToggleStats, |this, w, cx| {
-                        this.toggle_stats(&ToggleStats, w, cx);
-                    }),
-                ]);
+                    }));
+                }
                 entries.extend(self.more_entries.iter().cloned());
                 entries.sort_by_key(|entry| entry.group);
                 entries
@@ -863,7 +793,7 @@ impl WorkspaceView {
             .when(!leaving, |el| {
                 el.occlude().on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _ev, window, cx| this.dismiss_menu(window, cx)),
+                    cx.listener(|this, _ev, window, cx| this.close_menu(window, cx)),
                 )
             })
             .child(match self.menu_at {
@@ -875,8 +805,8 @@ impl WorkspaceView {
                     .into_any_element(),
                 None => div()
                     .absolute()
-                    // "+" and the breadcrumb hang their menus from their own left edges, as a
-                    // menu bar's menus do; a machine's from its "…", under its row.
+                    // The breadcrumb's menus hang from their own left edges, as a menu
+                    // bar's menus do; a machine's from its "…", under its row.
                     .map(|el| {
                         let at = self.anchors.at.borrow().get(&which).copied();
                         let under_bar = px(titlebar_height(theme) + gap) + safe.top;
@@ -884,10 +814,9 @@ impl WorkspaceView {
                             el.left(at.map_or_else(|| px(spacing.inset()), |b| b.origin.x))
                         };
                         match which {
-                            MenuKind::New
-                            | MenuKind::Projects
-                            | MenuKind::Checkouts
-                            | MenuKind::Switch => left(el.top(under_bar)),
+                            MenuKind::Projects | MenuKind::Checkouts | MenuKind::Switch => {
+                                left(el.top(under_bar))
+                            }
                             // The server's readout sits among the trailing ones: its menu ends
                             // on the readout's right edge.
                             MenuKind::Server => el.top(under_bar).right(at.map_or_else(
@@ -934,7 +863,7 @@ impl WorkspaceView {
             },
         )
         .on_dismiss(move |w, cx| {
-            let _gone = dismissing.update(cx, |this, cx| this.dismiss_menu(w, cx));
+            let _gone = dismissing.update(cx, |this, cx| this.close_menu(w, cx));
         })
         .head(head)
         .keyed(self.menu_keyed)
@@ -990,7 +919,6 @@ fn phone_heading(theme: &slopty_theme::Theme, label: SharedString) -> gpui::Stat
 /// What a bar's menu is called, as a screen reader names it.
 const fn menu_name(which: MenuKind) -> &'static str {
     match which {
-        MenuKind::New => NEW,
         MenuKind::More => "More",
         MenuKind::Machine(_) => "Machine",
         MenuKind::Projects => "Projects",

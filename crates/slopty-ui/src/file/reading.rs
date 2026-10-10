@@ -4,7 +4,7 @@
 //! A `.md` file tile opens on the preview once its text is in, unless it was opened to edit: at a
 //! line, under a program waiting on it, or with nothing written yet. ⌘⇧V, the header's toggle
 //! and the palette swap it with the source, and anything that works on the source (find, go to
-//! line, the symbols) swaps to it first. The preview draws the editor's text, so an edit not
+//! line) swaps to it first. The preview draws the editor's text, so an edit not
 //! saved yet shows in it too. A box ticked in the preview changes its line in the editor, and a
 //! file that was saved before the tick is saved again at once, since a tick is the whole edit.
 //!
@@ -126,7 +126,6 @@ impl FileView {
         if on {
             self.search = None;
             self.goto = None;
-            self.symbols = None;
             window.focus(&self.focus_handle, cx);
         } else {
             self.editor.update(cx, |e, cx| e.focus(window, cx));

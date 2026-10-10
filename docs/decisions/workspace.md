@@ -1104,7 +1104,11 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     Download asks the save panel, in `~/Downloads` on the entry's name, where the folder tile's
     selected entry goes. It comes down beside the chosen path and is renamed into place, so a
     half-arrived file never sits under that name, as "Save a copy…" does. The person hears
-    "Downloaded ~/Downloads/report.pdf", or "<name> was not downloaded: <why>".
+    "Saved ~/Downloads/report.pdf", or "<name> was not saved: <why>".
+  - **One save in two words** (amended 2026-10-10, orchestrator-first study §C.8). "Save a
+    copy…" of a file tile and "Download…" of a folder's entry were two paths with two notices
+    for one act. Both now ask `ask_files`'s export, one kind of transfer (`Bringing::Save`), one
+    notice; only the words that fit each tile stay apart.
   - A top-level entry whose name is taken where it goes lands beside it under the next free
     name, as Finder's Keep Both names it (`report 2.pdf`, `proj 2`, `archive 2.tar.gz`). A file
     is renamed into place only where nothing is, so nothing is written over. A folder drop
@@ -2230,7 +2234,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `workspace::tests::approvals::a_notes_answer_goes_through_the_server_while_its_worker_is_away`.
 - ✅ **An orchestrator's helpers open beside it, and their rows sit under its row**
   (2026-10-09, MonoCode audit row 21, M27 `queueWorkerPanes` and
-  `OrchestrationSidebarAgents`).
+  `OrchestrationSidebarAgents`). Superseded on 2026-10-10 by "Task agents are rows, not
+  tiles" in `ui.md`: a helper no longer takes a pane; only the navigator's nesting of one the
+  person opened stays.
   - **Their tiles.** Any other tile from elsewhere is a background tab of its project. A
     task's agent started by an orchestrator instead takes a pane right of the orchestrator's
     tile, in that tile's tab. The next ones join that pane as its tabs, so a lead with many

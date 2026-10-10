@@ -1814,7 +1814,6 @@ mod tests {
             crate::workspace::NO_WORKERS_NEXT,
             crate::workspace::ADD_WORKER,
             crate::workspace::CHROME_WORDS[0],
-            crate::workspace::CHROME_WORDS[1],
             crate::screen::waiting_text(slopty_proto::screen::SourceState::Idle),
             crate::screen::waiting_text(slopty_proto::screen::SourceState::Live),
         ];

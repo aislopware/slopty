@@ -566,11 +566,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         .collect();
     let boards = (0..BOARDS)
         .map(|n| {
-            let mut board = crate::project::fixtures::project(&format!("board-{n}"), None);
-            board.members = vec![
-                [(fact::CWD.to_owned(), format!("/Users/me/src/project_{}", n.saturating_mul(3)))]
-                    .into(),
-            ];
+            let board = crate::project::fixtures::project(&format!("board-{n}"), None);
             crate::project::fixtures::status(board, Vec::new(), Vec::new())
         })
         .collect();

@@ -1,5 +1,6 @@
-//! "Save a copy…" on a file tile: the worker's file comes down whole to the path the save panel
-//! gives (the test platform's, which shows nothing).
+//! "Save a copy…" on a file tile and "Download…" on a folder tile, one save in two words: the
+//! worker's file comes down whole to the path the save panel gives (the test platform's, which
+//! shows nothing), and the person is told where it went.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -179,14 +180,14 @@ fn download_brings_the_selected_entry_where_the_save_panel_says(cx: &mut TestApp
     let gone = download(cx);
     assert!(!gone.exists(), "nothing lands for an entry the worker cannot send");
     let said = view.read_with(cx, |v, _| v.toast_texts());
-    let refused = "gone.txt was not downloaded: No such file or directory";
+    let refused = "gone.txt was not saved: No such file or directory";
     assert!(said.iter().any(|t| t == refused), "{said:?}");
 
     cx.simulate_keystrokes("down");
     let dest = download(cx);
     assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF-1.7", "the worker's bytes, renamed");
     let said = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(said.iter().any(|t| *t == format!("Downloaded {}", dest.display())), "{said:?}");
+    assert!(said.iter().any(|t| *t == format!("Saved {}", dest.display())), "{said:?}");
     let left: Vec<_> =
         std::fs::read_dir(here.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(left.len(), 1, "no staging is left beside it: {left:?}");

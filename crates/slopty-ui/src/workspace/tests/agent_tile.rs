@@ -343,7 +343,7 @@ fn a_thread_with_no_live_terminal_keeps_its_own_tile(cx: &mut TestAppContext) {
     let session = SessionId::new();
     ended.meta.terminal = Some(session);
     let mut exited = summary(session, None);
-    exited.state = SessionState::Exited { status: 0 };
+    exited.state = SessionState::Exited { status: Some(0) };
     view.update_in(cx, |v, _w, cx| v.session_opened(key, exited, cx));
     table(&view, cx, key, 1, &[&free, &ended]);
     studio.drain();
@@ -415,7 +415,7 @@ fn an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again(cx: &mut Tes
         v.focus_tile(tile, cx);
     });
     let mut exited = summary(gone, None);
-    exited.state = SessionState::Exited { status: 0 };
+    exited.state = SessionState::Exited { status: Some(0) };
     view.update_in(cx, |v, _w, cx| v.session_opened(key, exited, cx));
     settle(cx);
     studio.drain();

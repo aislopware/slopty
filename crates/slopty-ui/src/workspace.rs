@@ -129,7 +129,7 @@ pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
 /// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
 /// badge's description and what "+" is called.
 #[cfg(test)]
-pub(crate) const CHROME_WORDS: [&str; 2] = [agents::SHOW_PROMPT, titlebar::NEW];
+pub(crate) const CHROME_WORDS: [&str; 1] = [agents::SHOW_PROMPT];
 pub use titlebar::titlebar_height;
 use tokio::sync::mpsc;
 
@@ -706,8 +706,6 @@ enum Field {
     Name,
     /// A page's address.
     Address,
-    /// The name of the tile's project ("Name this project…").
-    Project,
 }
 
 /// The field open in a tile's header: its name, or a page's address.
@@ -964,9 +962,6 @@ pub struct WorkspaceView {
     menu_at: Option<gpui::Point<Pixels>>,
     /// What a press on a tile or a project opened, while it shows.
     context_menu: Option<context_menus::ContextMenu>,
-    /// The worker "+" chose for the next new tile, where there are several; the focused tile's
-    /// worker otherwise.
-    new_on: Option<WorkerKey>,
     /// Where the bar's buttons that hang a menu were last laid out.
     anchors: titlebar::Anchors,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
@@ -1255,7 +1250,6 @@ impl WorkspaceView {
             menu_leaving: None,
             menu_at: None,
             context_menu: None,
-            new_on: None,
             anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),
             readouts: readouts::Readouts::default(),
@@ -1947,7 +1941,7 @@ impl WorkspaceView {
         if self.menu.is_some() && ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified()
         {
             cx.stop_propagation();
-            self.dismiss_menu(window, cx);
+            self.close_menu(window, cx);
         }
     }
 
@@ -2221,13 +2215,11 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::resume_session))
             .on_action(cx.listener(Self::review_pull))
             .when(!self.to_review().is_empty(), |el| el.on_action(cx.listener(Self::review_next)))
-            .on_action(cx.listener(Self::review_pull_in))
             .on_action(cx.listener(Self::review_pull_number))
             .on_action(cx.listener(Self::remove_machine))
             .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
-            .on_action(cx.listener(Self::name_project))
             .on_action(cx.listener(Self::share_clipboard))
             .on_action(cx.listener(Self::edit_machine_settings));
         // Only while they apply to the focus ([`actions::Applies`]).

@@ -262,7 +262,7 @@ impl WorkspaceView {
                 Way::Down { source, dest, versions } => {
                     tracing::info!(xfer = %kept.xfer, %source, "a download taken up again");
                     let down = Down { worker: key, xfer: kept.xfer, source, dest, versions };
-                    self.bring_down(down, Bringing::Download, cx);
+                    self.bring_down(down, Bringing::Save, cx);
                 }
             }
         }
@@ -383,8 +383,7 @@ impl WorkspaceView {
         let Some(download) = download else { return };
         let Download { name, dest, bringing, .. } = download;
         let text = match (result, bringing) {
-            (Ok(()), Bringing::Copy) => Some(format!("Saved a copy of {name}")),
-            (Ok(()), Bringing::Download) => Some(format!("Downloaded {}", super::tildes(&dest))),
+            (Ok(()), Bringing::Save) => Some(format!("Saved {}", super::tildes(&dest))),
             (Ok(()), Bringing::Files) => {
                 let saved = dest.file_name().map_or(name, |n| n.to_string_lossy().into_owned());
                 Some(format!("Saved {saved} in Files"))

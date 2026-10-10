@@ -494,7 +494,12 @@ impl Attention {
         };
         let why = match heard.kind {
             NoticeKind::NeedsYou => Why::Asks,
-            NoticeKind::Failed | NoticeKind::Finished | NoticeKind::Project => Why::Finished,
+            // Work ready to merge and a goal met are the person's to look at, not to answer.
+            NoticeKind::Failed
+            | NoticeKind::Finished
+            | NoticeKind::Project
+            | NoticeKind::ReadyToMerge
+            | NoticeKind::GoalDone => Why::Finished,
         };
         self.post(session, why, note);
         if why == Why::Asks {

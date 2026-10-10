@@ -54,6 +54,10 @@ pub(super) const CLOSE_OTHER_TABS: &str = "Close other tabs";
 pub(super) const CLOSE_TABS_RIGHT: &str = "Close tabs to the right";
 pub(super) const CLOSE_TABS_LEFT: &str = "Close tabs to the left";
 
+/// A pane tab's menu's row that closes the pane's other tiles: tiles, not the title bar's
+/// tabs, which "Close other tabs" closes.
+pub(super) const CLOSE_OTHER_TILES: &str = "Close other tiles";
+
 /// A project's menu's rows that pin it above the rest, and mute its notifications.
 pub(super) const PIN_TO_TOP: &str = "Pin to top";
 pub(super) const UNPIN: &str = "Unpin";
@@ -210,7 +214,7 @@ impl WorkspaceView {
 
     /// `tile`'s rows: Open (from the navigator), from its header an agent's other faces to show
     /// and a page's reload, then Rename, Zoom pane, Split out to the right (from a tab), Copy
-    /// path where it has one, then Close and, from a tab, Close other tabs.
+    /// path where it has one, then Close and, from a tab, Close other tiles.
     ///
     /// The header holds no button at rest and touch has no hover, so its long press is where a
     /// finger finds the face toggle and close; a page's reload is here and the palette's, as ⌘R
@@ -306,7 +310,7 @@ impl WorkspaceView {
         if pressed == Pressed::Tab {
             rows.push((
                 MenuGroup::Removal,
-                "Close other tabs",
+                CLOSE_OTHER_TILES,
                 None,
                 Rc::new(move |this, window, cx| {
                     for other in this.pane_tiles(tile).into_iter().filter(|t| *t != tile) {

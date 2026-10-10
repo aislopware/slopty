@@ -31,7 +31,9 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         limits: Limits::default(),
         metadata: None,
         created_ms: AT,
-        members: Vec::new(),
+        goal: None,
+        autonomy: slopty_proto::project::Autonomy::default(),
+        progress: None,
     }
 }
 

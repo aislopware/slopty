@@ -1,8 +1,7 @@
 //! "New agent…", the start by steps (⌘T starts at once, [`super::tabs`]): the palette asks which
 //! agent, then on which machine, then in which folder, and the agent's thread opens in a tile of
 //! its own. Each step lists the last choice first, so ↩ ↩ ↩ starts the last combination again, and
-//! a step with one choice is passed over. The palette's "New `agent` agent" lines start at the
-//! machine.
+//! a step with one choice is passed over.
 //!
 //! What a machine can start comes from its own link: the agents its capabilities found
 //! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
@@ -215,48 +214,26 @@ impl WorkspaceView {
         last.cloned().or_else(|| offered.into_iter().next())
     }
 
-    /// The palette's "New `agent` agent" lines: each starts at the machine step.
-    pub(super) fn agent_lines(&self) -> Vec<PaletteItem> {
-        let mut agents = self.startable_agents();
-        agents.sort_by_key(|a| agent_label(a).to_lowercase());
-        agents
-            .into_iter()
-            .map(|agent| {
-                let label = format!("New {} agent", agent_label(&agent));
-                PaletteItem::new(&label, Box::new(NewAgentOf { agent }), &[])
-            })
-            .collect()
-    }
-
-    /// "New agent…": which agent, the last one first; with one, straight to the machine. A machine
-    /// the "+" menu chose first is not asked again: its agents, then its folders.
+    /// "New agent…": which agent, the last one first; with one, straight to the machine.
     pub fn new_agent(&mut self, _: &NewAgent, window: &mut Window, cx: &mut Context<Self>) {
-        let chosen = self.new_on.take().filter(|k| self.workers.contains_key(k));
-        let mut agents = match chosen {
-            Some(worker) => self.startable_on(worker),
-            None => self.startable_agents(),
-        };
+        let mut agents = self.startable_agents();
         if let Some(at) =
             self.starts.last().and_then(|last| agents.iter().position(|a| *a == last.agent))
         {
             let agent = agents.remove(at);
             agents.insert(0, agent);
         }
-        match (agents.as_slice(), chosen) {
-            ([], _) => self.show_notice(NO_AGENT.to_owned(), cx),
-            ([agent], Some(worker)) => self.pick_folder(agent, worker, For::Agent, window, cx),
-            ([agent], None) => self.pick_machine(agent, For::Agent, window, cx),
+        match agents.as_slice() {
+            [] => self.show_notice(NO_AGENT.to_owned(), cx),
+            [agent] => self.pick_machine(agent, For::Agent, window, cx),
             _ => {
                 let lines = agents
                     .into_iter()
                     .map(|agent| {
                         let label = agent_label(&agent);
                         let mark = crate::icons::Mark::agent(&agent.0);
-                        let action: Box<dyn gpui::Action> = match chosen {
-                            Some(worker) => Box::new(NewAgentOn { agent, worker }),
-                            None => Box::new(NewAgentOf { agent }),
-                        };
-                        PaletteItem::new(&label, action, &[]).with_icon(mark)
+                        PaletteItem::new(&label, Box::new(NewAgentOf { agent }), &[])
+                            .with_icon(mark)
                     })
                     .collect();
                 self.open_step(lines, PICK_AGENT, window, cx);

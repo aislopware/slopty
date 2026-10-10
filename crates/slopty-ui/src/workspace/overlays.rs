@@ -118,7 +118,6 @@ impl WorkspaceView {
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
         items.extend(self.project_rows());
-        items.extend(self.agent_lines());
         items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
@@ -535,22 +534,6 @@ impl WorkspaceView {
         self.pending_focus_palette = true;
         self.palette = Some(palette);
         cx.notify();
-    }
-
-    /// What the palette's lines are drawn from changed: an open palette over the workspace's
-    /// own list takes the new one, so what arrives while it is open is there to choose.
-    pub(super) fn refresh_palette(&self, cx: &mut Context<Self>) {
-        let Some(palette) = self.palette.clone() else { return };
-        if !palette.read(cx).is_live() {
-            return;
-        }
-        let hidden = &self.palette_hidden;
-        let items = self
-            .palette_lines(cx)
-            .into_iter()
-            .filter(|line| run_action(line).is_none_or(|a| !hidden.contains(&a.as_any().type_id())))
-            .collect();
-        palette.update(cx, |p, cx| p.set_items(items, cx));
     }
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's
