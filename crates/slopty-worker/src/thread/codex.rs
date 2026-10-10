@@ -8,7 +8,10 @@
 //! approval's answer, a turn, a steer, an interrupt, a switch of the model, its reasoning effort
 //! or the approval policy (`thread/settings/update`, for the thread's next turns, the TUI's
 //! included). Nothing is typed into the TUI. The models a thread can switch to are Codex's own
-//! list (`model/list`), asked once as the worker joins.
+//! list (`model/list`), asked once as the worker joins. A thread's commands are its skills
+//! (`skills/list`, asked as it is followed and again on `skills/changed`), and its background
+//! work is the commands Codex left running (`thread/backgroundTerminals/list`, asked as it is
+//! followed and whenever a call or a turn ends).
 //!
 //! A thread is followed by `thread/resume`, which brings back what Codex holds of it and keeps
 //! this connection subscribed, so the thread stays loaded while the worker runs. A thread is
@@ -792,6 +795,16 @@ enum Waiting {
     Unarchive {
         native: String,
     },
+    /// The skills of Codex thread `native`'s folder, its composer's commands.
+    Skills {
+        native: String,
+    },
+    /// The commands Codex left running in the background on thread `native`, the pages before
+    /// this one gathered.
+    Terminals {
+        native: String,
+        gathered: Vec<p::ThreadBackgroundTerminal>,
+    },
 }
 
 /// A followed thread.
@@ -1109,7 +1122,7 @@ impl Session {
                 match rpc::response::<p::ThreadResumeParams>(result) {
                     Ok(resumed) => {
                         self.unarchived.remove(&native);
-                        self.follow(&resumed.thread);
+                        self.follow(&resumed.thread).await?;
                         let settings = Settings {
                             approval: resumed.approval_policy,
                             sandbox: &resumed.sandbox,
@@ -1183,7 +1196,7 @@ impl Session {
                 let outcome = match rpc::response::<p::ThreadStartParams>(result) {
                     Ok(started) => {
                         if !self.threads.contains_key(&started.thread.id) {
-                            self.follow(&started.thread);
+                            self.follow(&started.thread).await?;
                         }
                         let settings = Settings {
                             approval: started.approval_policy,
@@ -1224,7 +1237,7 @@ impl Session {
                 let outcome = match rpc::response::<p::ThreadForkParams>(result) {
                     Ok(forked) => {
                         if !self.threads.contains_key(&forked.thread.id) {
-                            self.follow(&forked.thread);
+                            self.follow(&forked.thread).await?;
                         }
                         let settings = Settings {
                             approval: forked.approval_policy,
@@ -1310,9 +1323,66 @@ impl Session {
                     self.host.apply(thread, actions);
                 }
             }
+            (Waiting::Skills { native }, Ok(result)) => {
+                match rpc::response::<p::SkillsListParams>(result) {
+                    Ok(said) => {
+                        if let Some(followed) = self.threads.get_mut(&native) {
+                            let actions = followed.shared.skills(&said);
+                            self.host.apply(followed.id, actions);
+                        }
+                    }
+                    Err(e) => tracing::debug!(%native, "Codex's skills did not read: {e}"),
+                }
+            }
+            // Without its skills a thread offers no commands.
+            (Waiting::Skills { native }, Err(e)) => {
+                tracing::debug!(%native, "Codex listed no skills: {e}");
+            }
+            (Waiting::Terminals { native, mut gathered }, Ok(result)) => {
+                match rpc::response::<p::ThreadBackgroundTerminalsListParams>(result) {
+                    Ok(page) => {
+                        gathered.extend(page.data);
+                        let Some(followed) = self.threads.get_mut(&native) else { return Ok(()) };
+                        if let Some(cursor) = page.next_cursor {
+                            let next = p::ThreadBackgroundTerminalsListParams {
+                                cursor: Some(cursor),
+                                ..followed.shared.terminals_list()
+                            };
+                            return self
+                                .request(&next, Waiting::Terminals { native, gathered })
+                                .await;
+                        }
+                        let actions = followed.shared.terminals(&gathered, WallMs::now());
+                        if !actions.is_empty() {
+                            self.host.apply(followed.id, actions);
+                        }
+                    }
+                    Err(e) => tracing::debug!(%native, "Codex's background work did not read: {e}"),
+                }
+            }
+            // The tray keeps what it last showed.
+            (Waiting::Terminals { native, .. }, Err(e)) => {
+                tracing::debug!(%native, "Codex listed no background work: {e}");
+            }
             (Waiting::Turn { .. }, _) => {}
         }
         Ok(())
+    }
+
+    /// Ask Codex for the skills of followed thread `native`'s folder.
+    async fn ask_skills(&mut self, native: &str) -> Result<(), String> {
+        let Some(followed) = self.threads.get(native) else { return Ok(()) };
+        let params = followed.shared.skills_list();
+        self.request(&params, Waiting::Skills { native: native.to_owned() }).await
+    }
+
+    /// Ask Codex for the commands it left running in the background on followed thread
+    /// `native`.
+    async fn ask_terminals(&mut self, native: &str) -> Result<(), String> {
+        let Some(followed) = self.threads.get(native) else { return Ok(()) };
+        let params = followed.shared.terminals_list();
+        let waiting = Waiting::Terminals { native: native.to_owned(), gathered: Vec::new() };
+        self.request(&params, waiting).await
     }
 
     /// Follow Codex thread `native` from now on, unless it is already.
@@ -1393,7 +1463,7 @@ impl Session {
     }
 
     /// Host Codex thread `thread`, as it now stands.
-    fn follow(&mut self, thread: &p::Thread) {
+    async fn follow(&mut self, thread: &p::Thread) -> Result<(), String> {
         let terminal = self.tuis.running.get(&slopty_agent::codex::shared::thread_of(&thread.id));
         let (shared, actions) = Shared::new(thread, terminal.copied());
         let id = shared.meta().id;
@@ -1404,7 +1474,7 @@ impl Session {
         };
         if let Err(e) = begun {
             tracing::warn!(thread = %id, "a Codex thread could not begin: {e}");
-            return;
+            return Ok(());
         }
         self.native.insert(id, thread.id.clone());
         self.adopt(id, &actions);
@@ -1431,6 +1501,8 @@ impl Session {
         for start in self.reopening.remove(&thread.id).unwrap_or_default() {
             self.answer_start(start, Outcome::Started { thread: id });
         }
+        self.ask_skills(&thread.id).await?;
+        self.ask_terminals(&thread.id).await
     }
 
     /// The starts that took Codex thread `native` up again, refused with `reason`.
@@ -1497,6 +1569,14 @@ impl Session {
             }
             return Ok(());
         }
+        if let ServerNotification::SkillsChanged(_) = note {
+            // Codex names no thread: every followed one asks again for its folder's.
+            let natives: Vec<String> = self.threads.keys().cloned().collect();
+            for native in natives {
+                self.ask_skills(&native).await?;
+            }
+            return Ok(());
+        }
         let Some(native) = thread else { return Ok(()) };
         // A client rewrote the thread's history (`thread/revert`): it is read again whole, its
         // held messages kept.
@@ -1520,6 +1600,11 @@ impl Session {
                 if let Some((params, taken)) = next {
                     self.host.apply(id, taken);
                     self.request(params.as_ref(), Waiting::Turn { thread: id }).await?;
+                }
+                // Codex says nothing when a command left in the background exits, so its list
+                // is read again whenever a call or a turn ends.
+                if slopty_agent::codex::shared::terminals_due(note) {
+                    self.ask_terminals(&native).await?;
                 }
             }
             // A thread let go is taken up again only when it works: its unloading is no news.

@@ -59,11 +59,22 @@ mod codex {
     type Ws = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
     /// The next frame the worker sent, handed to `heard`. Its ask for Codex's models, made once
-    /// as it joins, is answered here with [`catalog`] and passed over.
+    /// as it joins, is answered here with [`catalog`] and passed over. Its asks for a followed
+    /// thread's skills and background commands are answered with none and not handed on: the
+    /// test of those plays its own daemon ([`background`]).
     async fn next(ws: &mut Ws, heard: &mpsc::UnboundedSender<Value>) -> Option<Value> {
         loop {
             let Some(Ok(Message::Text(text))) = ws.next().await else { return None };
             let msg: Value = serde_json::from_str(&text).unwrap();
+            let none = json!({ "data": [], "nextCursor": null });
+            let quiet = match msg["method"].as_str() {
+                Some("skills/list" | "thread/backgroundTerminals/list") => Some(none),
+                _ => None,
+            };
+            if let Some(result) = quiet {
+                say(ws, &json!({ "id": msg["id"], "result": result })).await;
+                continue;
+            }
             heard.send(msg.clone()).unwrap();
             if msg["method"] != "model/list" {
                 return Some(msg);
@@ -1375,5 +1386,104 @@ mod codex {
         let (state, _) = host.state(thread).unwrap();
         assert_eq!(state.turns.len(), 1, "the undone turn is gone");
         assert!(state.pending.is_empty(), "taken off the queue: {:?}", state.pending);
+    }
+
+    /// A stand-in daemon that has the recording's thread loaded. It lists two skills for the
+    /// thread's folder, one of them turned off, and two commands left running in the
+    /// background, a page each, until the turn `turn` ends; after that, none. On `cue` it says
+    /// the skills changed (`"skills"`) or that the recording's turn completed (`"turn"`). Every
+    /// frame the worker sent goes to `heard`.
+    async fn background(
+        listener: UnixListener,
+        heard: mpsc::UnboundedSender<Value>,
+        mut cue: mpsc::UnboundedReceiver<&'static str>,
+    ) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let resumed = resumed();
+        let native = resumed["result"]["thread"]["id"].clone();
+        let completed = lines.iter().find(|l| l.msg["method"] == "turn/completed").unwrap();
+        let completed = completed.msg.clone();
+        let mut ended = false;
+        let skill = |name: &str, enabled: bool| {
+            json!({ "name": name, "description": format!("{name} it"), "enabled": enabled,
+                "path": format!("/skills/{name}/SKILL.md"), "scope": "repo" })
+        };
+        let terminal = |id: &str, command: &str| json!({ "processId": id, "command": command, "cwd": "/w", "itemId": format!("call-{id}") });
+        loop {
+            let msg = tokio::select! {
+                frame = ws.next() => match frame {
+                    Some(Ok(Message::Text(text))) => serde_json::from_str::<Value>(&text).unwrap(),
+                    _ => return,
+                },
+                Some(said) = cue.recv() => {
+                    if said == "skills" {
+                        say(&mut ws, &json!({ "method": "skills/changed", "params": {} })).await;
+                    } else {
+                        ended = true;
+                        say(&mut ws, &completed).await;
+                    }
+                    continue;
+                }
+            };
+            heard.send(msg.clone()).unwrap();
+            let result = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg["result"].clone(),
+                Some("thread/loaded/list") => json!({ "data": [native], "nextCursor": null }),
+                Some("thread/resume") => resumed["result"].clone(),
+                Some("model/list") => catalog(),
+                Some("skills/list") => json!({ "data": [{
+                    "cwd": msg["params"]["cwds"][0], "errors": [],
+                    "skills": [skill("deploy", true), skill("lint", false)] }] }),
+                Some("thread/backgroundTerminals/list") if ended => {
+                    json!({ "data": [], "nextCursor": null })
+                }
+                Some("thread/backgroundTerminals/list") if msg["params"]["cursor"].is_null() => {
+                    json!({ "data": [terminal("p1", "npm run dev")], "nextCursor": "2" })
+                }
+                Some("thread/backgroundTerminals/list") => {
+                    json!({ "data": [terminal("p2", "cargo watch")], "nextCursor": null })
+                }
+                _ => continue,
+            };
+            say(&mut ws, &json!({ "id": msg["id"], "result": result })).await;
+        }
+    }
+
+    /// A followed thread's commands are its folder's enabled skills, asked again when Codex says
+    /// they changed; its background work is the commands Codex left running, read page by page
+    /// as it is followed, and read again when a turn ends, which here shows them gone.
+    #[tokio::test]
+    async fn a_thread_offers_its_skills_and_shows_what_runs_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let (cue, cues) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(background(listener, tx, cues));
+        let host = host(dir.path());
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+
+        let state = polled(&host, thread, |s| !s.commands.is_empty() && s.tasks.len() == 2).await;
+        let names: Vec<&str> = state.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["deploy"], "the enabled skill only");
+        let running: Vec<&str> = state.tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(running, ["npm run dev", "cargo watch"], "both pages");
+        let sent = until_sent(&mut heard, "thread/backgroundTerminals/list").await;
+        let asked = &sent.last().unwrap()["params"];
+        assert_eq!(asked["threadId"], native.as_str());
+        let skills = sent.iter().find(|m| m["method"] == "skills/list").unwrap();
+        assert_eq!(skills["params"]["cwds"][0], state.meta.cwd.as_str(), "the thread's folder");
+
+        cue.send("skills").unwrap();
+        until_sent(&mut heard, "skills/list").await;
+        cue.send("turn").unwrap();
+        until_sent(&mut heard, "thread/backgroundTerminals/list").await;
+        polled(&host, thread, |s| s.tasks.is_empty()).await;
     }
 }
