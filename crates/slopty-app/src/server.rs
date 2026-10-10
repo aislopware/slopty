@@ -329,7 +329,7 @@ impl Workspace {
     /// One thing the server link said.
     pub(crate) fn server_event(&mut self, event: ServerEvent, cx: &mut Context<Self>) {
         match event {
-            ServerEvent::Linked { name, link } => {
+            ServerEvent::Linked { name, link, .. } => {
                 tracing::info!(%name, link, "server linked");
                 if let Some(slot) = &mut self.server {
                     slot.other_build = None;

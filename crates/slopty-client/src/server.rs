@@ -53,6 +53,9 @@ pub enum ServerEvent {
         name: String,
         /// Its number for this link ([`slopty_proto::thread::attention::Present::link`]).
         link: u64,
+        /// Its build ([`slopty_proto::wire::this_build`] there), to tell an older server on the
+        /// same wire.
+        build: String,
     },
     /// A message from it: the directory, a worker's change, an event.
     Message(Box<FromServer>),
@@ -349,9 +352,9 @@ async fn pump(
 ) -> Option<String> {
     let Up { calls, presence, phone, resume } = up;
     tracing::debug!(server = %link.remote, name = %link.name, "server linked");
-    let ServerLink { conn, name, link, tx: mut up, mut rx, .. } = link;
+    let ServerLink { conn, name, link, build, tx: mut up, mut rx, .. } = link;
     let close = || conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
-    if tx.send(ServerEvent::Linked { name, link }).await.is_err() {
+    if tx.send(ServerEvent::Linked { name, link, build }).await.is_err() {
         close();
         return None;
     }

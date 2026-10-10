@@ -60,7 +60,11 @@ mod tests {
         let mut link = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
         assert!(matches!(link.role, Role::Client { .. }), "{:?}", link.role);
         link.tx
-            .send(&FromServer::Welcome { name: "hub".to_owned(), link: 1, build: String::new() })
+            .send(&FromServer::Welcome {
+                name: "hub".to_owned(),
+                link: 1,
+                build: "0.1.0.commit.abc".to_owned(),
+            })
             .await
             .unwrap();
         link.tx.send(&FromServer::Directory(directory)).await.unwrap();
@@ -80,10 +84,11 @@ mod tests {
         let mut dir = Directory::default();
 
         let mut link = welcome(&listener, vec![worker(id, Liveness::Online)]).await;
-        let ServerEvent::Linked { name, link: number } = next(&mut events).await else {
+        let ServerEvent::Linked { name, link: number, build } = next(&mut events).await else {
             panic!("not linked")
         };
         assert_eq!(number, 1, "the number the server gave the link");
+        assert_eq!(build, "0.1.0.commit.abc", "the build the server said");
         assert_eq!(name, "hub");
         dir.set_server(ServerState::Linked { name, link: number });
         let ServerEvent::Message(msg) = next(&mut events).await else { panic!("no directory") };
