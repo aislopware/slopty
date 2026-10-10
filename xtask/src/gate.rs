@@ -455,9 +455,13 @@ fn lock(gate_dir: &Utf8Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
-/// Where the tests lane keeps the main run's test report beside the VideoToolbox run's, which
-/// writes `junit.xml` after it.
-const MAIN_JUNIT: &str = "junit-main.xml";
+/// Where the tests lane keeps the VideoToolbox run's test report, beside the main run's
+/// `junit.xml`, for the summary and CI's timings.
+const VIDEOTOOLBOX_JUNIT: &str = "junit-videotoolbox.xml";
+
+/// The nextest profile the VideoToolbox tests run in on a runner (`.config/nextest.toml`): the
+/// lane's, with a report directory of its own, since they run beside the lane's run.
+const VIDEOTOOLBOX_PROFILE: &str = "ci-videotoolbox";
 
 /// The nextest profile of the tests `land` runs (`.config/nextest.toml`).
 const NEXTEST_LAND_PROFILE: &str = "land";
@@ -617,7 +621,7 @@ fn report(results: &[(&str, Result<()>)], started: Instant, junit: &Utf8Path) ->
         return Ok(());
     }
     if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
-        let tests: Vec<String> = [junit.to_owned(), junit.with_file_name(MAIN_JUNIT)]
+        let tests: Vec<String> = [junit.to_owned(), junit.with_file_name(VIDEOTOOLBOX_JUNIT)]
             .iter()
             .filter_map(|path| std::fs::read_to_string(path).ok())
             .flat_map(|x| failed_tests(&x))
@@ -1002,29 +1006,46 @@ fn test_lane(
     // Beside the JUnit report, which CI keeps.
     let log = tree.join("target").join("nextest").join(profile).join("ptys.log");
     let ptys = crate::ptys::Sampler::start(std::process::id(), &tree, Some(log));
-    let tests = nextest_step(
-        profile,
-        cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
-            .env(crate::runner::RUNNER_VAR, &runner),
-    );
-    let videotoolbox = if apart {
-        // nextest writes its report to one path a profile, so the second run's would replace the
-        // first's, and the summary and CI's timings would lose every test but the encoder's.
-        let report = tree.join("target").join("nextest").join(profile).join("junit.xml");
-        match std::fs::rename(&report, report.with_file_name(MAIN_JUNIT)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
-        }
-        let expr = only
-            .map_or_else(|| VIDEOTOOLBOX.to_owned(), |only| format!("({only}) & {VIDEOTOOLBOX}"));
-        videotoolbox_step(
-            cmd!(sh, "cargo nextest run {p...} --profile {profile} --no-tests=pass -E {expr}")
+    // On a runner the VideoToolbox tests run beside the rest, not after them: they mostly wait
+    // on the encoder, and after the rest they added 75–135 s to the worker shard, the run's
+    // critical path (`.research/dev-speed-2026-10-10.md` item 6). They report under a profile
+    // of their own, so neither run's JUnit file replaces the other's.
+    let side = sh.clone();
+    let (only_ref, runner_ref, tree_ref) = (only.as_ref(), &runner, &tree);
+    let (tests, videotoolbox) = std::thread::scope(|scope| {
+        let videotoolbox = scope.spawn(move || {
+            if !apart {
+                return Ok(());
+            }
+            let expr = only_ref.map_or_else(
+                || VIDEOTOOLBOX.to_owned(),
+                |only| format!("({only}) & {VIDEOTOOLBOX}"),
+            );
+            let ran = videotoolbox_step(
+                cmd!(
+                    side,
+                    "cargo nextest run {p...} --profile {VIDEOTOOLBOX_PROFILE} --no-tests=pass -E {expr}"
+                )
+                .env(crate::runner::RUNNER_VAR, runner_ref),
+                &Probe { sh: &side, packages: p, runner: runner_ref },
+            );
+            let nextest = tree_ref.join("target").join("nextest");
+            let report = nextest.join(VIDEOTOOLBOX_PROFILE).join("junit.xml");
+            let beside = nextest.join(profile).join(VIDEOTOOLBOX_JUNIT);
+            match std::fs::rename(&report, &beside) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    both(ran, Err(anyhow::anyhow!("move {report} to {beside}: {e}")))
+                }
+                _ => ran,
+            }
+        });
+        let tests = nextest_step(
+            profile,
+            cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
                 .env(crate::runner::RUNNER_VAR, &runner),
-            &Probe { sh, packages: p, runner: &runner },
-        )
-    } else {
-        Ok(())
-    };
+        );
+        (tests, join(videotoolbox))
+    });
     let ptys = ptys.finish();
     print!("{}", ptys.report());
     both(both(tests, videotoolbox), ptys.verdict())

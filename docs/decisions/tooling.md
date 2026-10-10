@@ -1468,3 +1468,17 @@ more full-window layer.
     depends on the hakari workspace hack, whose manifest a bump rewrites, so the scope came out
     as every member in nearly every such batch. Linux clippy by default: 2 reds in 44 do not pay
     for compiling another triple here.
+
+- 🧪 **On a runner, the VideoToolbox tests run beside the rest of the tests lane** (2026-10-10).
+  - **Why.** The worker shard ran them after its main nextest run, which added 75–135 s, 300 s
+    when the runner's encoder stopped (run 38036213336). With the proc macros unoptimised, the
+    worker shard's build fell from 395 s to 214 s while its job stayed at 15 min: the serial
+    encoder step is now its tail (`.research/dev-speed-2026-10-10.md` item 6).
+  - **The change.** `test_lane` runs the probe and the encoder tests in a thread beside the main
+    run, under a nextest profile of their own, `ci-videotoolbox` (inherits `ci`). Its report is
+    moved beside the main one as `junit-videotoolbox.xml`, which the summary and CI's timings
+    read. The deadline and the "the runner's encoder stopped" verdict are unchanged.
+  - **The risk.** Three cores shared: the encoder tests mostly wait on the encoder, but the
+    timing tests of the main run (`threads-required = "num-test-threads"`) now have company.
+  - **Kept if,** over the next ten gate runs, no new VideoToolbox TIMEOUT appears and no timing
+    test fails in the main run. Otherwise it goes back to running after it.

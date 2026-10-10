@@ -202,6 +202,12 @@ not (
 # every test of the run it judged (run 37931699857).
 [profile.encoder-probe]
 
+# The VideoToolbox tests on a runner (`xtask` gate, `test_lane`): the lane's profile, run beside
+# the lane's own run, so its report goes to a directory of its own and is moved beside the
+# lane's as `junit-videotoolbox.xml`.
+[profile.ci-videotoolbox]
+inherits = "ci"
+
 # `cargo xtask deep miri`: the pure crates' tests under the interpreter, 50–100 times slower than
 # native. A test still running after 20 minutes is ended and fails, so one slow test is a finding
 # and not a night.
