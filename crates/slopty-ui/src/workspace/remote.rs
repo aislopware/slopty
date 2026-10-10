@@ -213,6 +213,8 @@ impl WorkspaceView {
             self.app_active = active;
             if active {
                 self.release_held_toasts(cx);
+                // The tile in front is looked at again: its thread's turn is read.
+                self.see_focused(cx);
             } else {
                 // The app may be ended while it is away (iOS ends a suspended one): what the
                 // person wrote is on the disk before it goes.

@@ -212,7 +212,8 @@ pub struct Turn {
 pub struct Look {
     /// The agents waiting on the human.
     pub asking: Vec<Asking>,
-    /// The agents whose turn finished unwatched and is unread.
+    /// The agents whose turn finished unwatched while this device heard their worker, and is
+    /// unread.
     pub turns: Vec<Turn>,
     /// The bell's count: the icon badge.
     pub unread: usize,
@@ -569,6 +570,14 @@ impl Attention {
                 self.post(turn.route.about, Why::Finished, note);
             }
         }
+        // A turn read since, here or on another device, takes its note back.
+        let read: Vec<About> = self.turns.difference(&turns).copied().collect();
+        for about in read {
+            if self.posted.get(&about) == Some(&Why::Finished) {
+                self.posted.remove(&about);
+                self.notifier.withdraw(&about.note_id());
+            }
+        }
         self.turns = turns;
         if self.badge != Some(look.unread) {
             self.badge = Some(look.unread);
@@ -709,6 +718,10 @@ impl WorkspaceView {
                     }
                 };
                 let done = self.finished.get(&about)?;
+                // One found unread as its worker was first heard was told by whoever heard it.
+                if !done.turn.is_some_and(|t| t.fresh) {
+                    return None;
+                }
                 let command = super::tile::command_words(&done.command);
                 let body = format!("{command} \u{b7} {}", done.label());
                 Some(Turn { route, title, body })

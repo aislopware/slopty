@@ -1110,7 +1110,12 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
     let session = SessionId::new();
     let tile = opens(&view, cx, &fake, session, fake.me, 1);
     let _other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
-    let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(6) };
+    let done = Finished {
+        command: "make".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(6),
+        turn: None,
+    };
     let full = done.label();
     view.update_in(cx, |v, _w, cx| {
         v.finished.insert(attention::About::Session(session), done);
@@ -1320,8 +1325,12 @@ fn shells_that_read_alike_are_named_by_their_last_command(cx: &mut TestAppContex
         opens(&view, cx, &studio, sessions[2], studio.me, 3),
     ];
     for (session, command) in [(sessions[0], "make"), (sessions[1], "cd ~/srv && cargo test")] {
-        let done =
-            Finished { command: command.into(), exit: Some(0), elapsed: Duration::from_secs(40) };
+        let done = Finished {
+            command: command.into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(40),
+            turn: None,
+        };
         view.update_in(cx, |v, _w, cx| v.command_finished(session, done, cx));
     }
     cx.run_until_parked();

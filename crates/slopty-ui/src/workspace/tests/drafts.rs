@@ -27,7 +27,7 @@ fn a_composer_s_words_come_back_after_a_relaunch(cx: &mut TestAppContext) {
         view.update(cx, |v, cx| v.set_drafts_path(path.clone(), cx));
         let composer = thread_tile(&view, cx, thread);
         composer.update_in(cx, |c, window, cx| c.restore_draft("Half a thought", window, cx));
-        view.update(cx, |v, cx| v.keep_drafts_now(cx));
+        view.update(cx, WorkspaceView::keep_drafts_now);
     }
     let (view, cx) = workspace(cx);
     view.update(cx, |v, cx| v.set_drafts_path(path.clone(), cx));
@@ -39,7 +39,7 @@ fn a_composer_s_words_come_back_after_a_relaunch(cx: &mut TestAppContext) {
     );
 
     composer.update_in(cx, |c, window, cx| c.restore_draft("", window, cx));
-    view.update(cx, |v, cx| v.keep_drafts_now(cx));
+    view.update(cx, WorkspaceView::keep_drafts_now);
     let left = std::fs::read_to_string(&path).expect("the drafts file");
     assert!(!left.contains("Half a thought"), "an emptied composer leaves nothing: {left}");
 }

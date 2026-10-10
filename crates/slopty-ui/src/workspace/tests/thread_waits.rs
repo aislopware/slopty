@@ -603,9 +603,17 @@ fn a_threads_finished_turn_without_a_terminal_is_to_review(cx: &mut TestAppConte
     };
     let turn = |row: &mut ThreadRow, cx: &mut VisualTestContext, from: u64, to: u64| {
         row.status = at(Phase::Working, from);
+        let next = row.ended.map_or(1, |e| e.turn.0.saturating_add(1));
+        row.ended = None;
         table(&view, cx, key, vec![row.clone()]);
         row.status = at(Phase::Done, to);
         row.last_line = Some("Fixed the flaky test".to_owned());
+        row.ended = Some(slopty_proto::thread::wire::TurnEnded {
+            turn: slopty_proto::thread::TurnId(next),
+            at_ms: WallMs::from_millis(to),
+            ran_ms: to.saturating_sub(from),
+            answered: true,
+        });
         table(&view, cx, key, vec![row.clone()]);
     };
 
@@ -638,6 +646,107 @@ fn a_threads_finished_turn_without_a_terminal_is_to_review(cx: &mut TestAppConte
     view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
     turn(&mut row, cx, 70_000, 71_000);
     assert!(view.read_with(cx, |v, _| v.to_review().is_empty()), "a short turn earns nothing");
+}
+
+/// A thread at rest whose latest turn, `turn`, the agent answered after running `ran_ms`, and
+/// which the person has seen through `seen`.
+fn ended(turn: u32, ran_ms: u64, seen: u32) -> ThreadRow {
+    use slopty_proto::thread::TurnId;
+    use slopty_proto::thread::wire::TurnEnded;
+    let mut row = resting(1_000);
+    let at_ms = WallMs::from_millis(90_000);
+    row.ended = Some(TurnEnded { turn: TurnId(turn), at_ms, ran_ms, answered: true });
+    row.seen = TurnId(seen);
+    row.last_line = Some("Fixed the flaky test".to_owned());
+    row
+}
+
+/// The seen marks `drained` sent, by thread.
+fn seen_sent(drained: &[ClientMsg]) -> Vec<(ThreadId, u32)> {
+    use slopty_proto::thread::wire::{Intent, ThreadRequest};
+    drained
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                thread,
+                intent: Intent::Seen { turn },
+                ..
+            }) => Some((*thread, turn.0)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What is unread is the worker's word: a turn that ended while this app was not running is
+/// to review once its table comes, with no note (whoever heard it end told of it), and a turn
+/// read on another device leaves the bell and *To review* here as the row's seen mark moves.
+#[gpui::test]
+fn a_turn_read_on_another_device_leaves_the_bell(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let row = ended(3, 120_000, 2);
+    let thread = row.id;
+    table(&view, cx, key, vec![row.clone()]);
+    view.update(cx, |v, _| {
+        let review = v.to_review();
+        assert!(
+            matches!(review.as_slice(), [agents::Step::Thread(w)] if w.thread == thread),
+            "unread from the first table: {review:?}"
+        );
+        assert_eq!(v.bell_count(), 1);
+        assert!(v.attention_look().turns.is_empty(), "found, not heard ending: no note");
+    });
+    assert!(cx.debug_bounds(leak(format!("nav-review-{thread}"))).is_some());
+
+    let seen = ThreadRow { seen: slopty_proto::thread::TurnId(3), ..row };
+    table(&view, cx, key, vec![seen]);
+    view.update(cx, |v, _| {
+        assert!(
+            v.to_review().is_empty() && v.bell_count() == 0,
+            "read elsewhere: {:?}",
+            v.to_review()
+        );
+    });
+    assert!(cx.debug_bounds(leak(format!("nav-review-{thread}"))).is_none());
+}
+
+/// Looking at a thread's tile marks its latest turn seen on its worker, once, so every other
+/// device reads it as read; the mark shows here at once, before the worker says it back. A turn
+/// that ends while its tile is in front is seen as it ends.
+#[gpui::test]
+fn looking_at_a_thread_marks_it_seen_on_its_worker(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let row = ended(4, 120_000, 0);
+    let thread = row.id;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.txt".to_owned() }, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    table(&view, cx, key, vec![row.clone()]);
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1);
+    studio.drain();
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    assert_eq!(seen_sent(&studio.drain()), [(thread, 4)], "the mark goes to the worker");
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 0, "and shows at once");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    assert_eq!(seen_sent(&studio.drain()), [], "once");
+
+    let next = ThreadRow {
+        ended: ended(5, 120_000, 0).ended,
+        seen: slopty_proto::thread::TurnId(4),
+        ..row
+    };
+    table(&view, cx, key, vec![next]);
+    assert_eq!(seen_sent(&studio.drain()), [(thread, 5)], "seen as it ends, in front");
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 0);
 }
 
 /// A thread whose worker says its changes wait unkept stays under *To review* after its tile

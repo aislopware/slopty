@@ -613,15 +613,31 @@ impl Worker {
     }
 }
 
-/// A shell command that finished while nobody was looking: what the header badge says.
+/// A shell command, or an agent's turn, that finished while nobody was looking: what the
+/// header badge says.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Finished {
-    /// What was typed.
+    /// What was typed, or what the agent said of its turn.
     pub command: String,
     /// Its exit status, when the shell said.
     pub exit: Option<u8>,
     /// How long it ran.
     pub elapsed: Duration,
+    /// The agent's turn it is, as its worker's table says it ended unread; none for a shell
+    /// command.
+    pub turn: Option<AgentTurn>,
+}
+
+/// An agent's turn that ended unread ([`Finished::turn`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AgentTurn {
+    /// The thread it is a turn of.
+    pub thread: slopty_proto::thread::ThreadId,
+    /// Which turn.
+    pub turn: slopty_proto::thread::TurnId,
+    /// It ended while this device heard its worker, so a note may tell of it; one found
+    /// unread in a worker's first table was told by whoever heard it end.
+    pub fresh: bool,
 }
 
 impl Finished {

@@ -61,6 +61,9 @@ impl WorkspaceView {
         match self.item(tile).map(|i| i.kind.clone()) {
             Some(ItemKind::Terminal { session }) => {
                 self.finished.remove(&About::Session(session));
+                if let Some(thread) = self.session_thread(session) {
+                    self.see_thread(thread, cx);
+                }
                 self.see_program(session);
                 self.pending_focus = Some(session);
             }
@@ -76,6 +79,7 @@ impl WorkspaceView {
             // A thread's keyboard is its composer's.
             Some(ItemKind::Thread { thread }) => {
                 self.finished.remove(&About::Thread(thread));
+                self.see_thread(thread, cx);
                 self.focus_thread_item(tile.item, cx);
             }
             // A thread on its way: the composer writing its first message.

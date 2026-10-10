@@ -300,6 +300,7 @@ impl ThreadView {
     /// for what it now matches. What the composer said about an attachment has been read.
     pub(super) fn composer_changed(&mut self, cx: &mut Context<Self>) {
         cx.emit(ThreadViewEvent::Drafted);
+        self.draft_changed(cx);
         if self.composing.armed.is_none() {
             self.composing.notice = None;
         }

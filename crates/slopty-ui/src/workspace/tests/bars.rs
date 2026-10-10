@@ -71,7 +71,12 @@ fn shell_in_repo(
 }
 
 fn finished(command: &str, exit: u8) -> Finished {
-    Finished { command: command.to_owned(), exit: Some(exit), elapsed: Duration::from_secs(40) }
+    Finished {
+        command: command.to_owned(),
+        exit: Some(exit),
+        elapsed: Duration::from_secs(40),
+        turn: None,
+    }
 }
 
 /// A shell's place is its repository, else its directory, and nothing at home: what a project

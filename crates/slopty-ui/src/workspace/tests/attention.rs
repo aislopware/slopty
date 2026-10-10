@@ -126,8 +126,12 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
         projects: HashMap::new(),
         muted: HashSet::new(),
     });
-    let done =
-        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
+    let done = Finished {
+        command: "cargo build".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(60),
+        turn: None,
+    };
     attention.command_finished(route(3), "build".into(), &done, Duration::from_secs(5));
     assert_eq!(memory.posted().len(), 1, "nothing new while the Mac is in front of them");
 
@@ -198,8 +202,12 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
     attention.look(&Look::default());
     assert_eq!(memory.withdrawn(), [a.about.note_id()], "answered, its note goes");
 
-    let done =
-        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
+    let done = Finished {
+        command: "cargo build".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(60),
+        turn: None,
+    };
     attention.command_finished(route(3), "build".into(), &done, Duration::from_secs(5));
     assert_eq!(memory.posted().len(), 3, "a shell's moment is this client's own");
 
@@ -231,7 +239,12 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
         projects: HashMap::new(),
         muted: HashSet::new(),
     });
-    let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
+    let done = Finished {
+        command: "make".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(9),
+        turn: None,
+    };
     attention.command_finished(a, "api".into(), &done, Duration::from_secs(5));
     let ids: Vec<String> = memory.posted().into_iter().map(|n| n.id).collect();
     assert_eq!(
@@ -252,8 +265,12 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
     let (mut attention, memory) = attention();
     let a = route(1);
     let slow = Duration::from_secs(5);
-    let long =
-        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(12) };
+    let long = Finished {
+        command: "cargo build".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(12),
+        turn: None,
+    };
     let short = Finished { elapsed: Duration::from_secs(2), ..long.clone() };
     attention.command_finished(a, "api".into(), &long, slow);
     assert!(memory.posted().is_empty(), "in front, nothing");
@@ -289,8 +306,12 @@ fn only_needs_you_breaks_through_a_focus() {
     });
     let held = Asking { approval: Some("7".into()), ..asking(a, "Run cargo test") };
     own.look(&Look { asking: vec![held], ..Look::default() });
-    let done =
-        Finished { command: "cargo build".into(), exit: Some(1), elapsed: Duration::from_secs(60) };
+    let done = Finished {
+        command: "cargo build".into(),
+        exit: Some(1),
+        elapsed: Duration::from_secs(60),
+        turn: None,
+    };
     own.command_finished(c, "build".into(), &done, Duration::from_secs(5));
     own.program(d, "vim".into(), "Saved".into());
     let urgent: Vec<(String, bool)> =
@@ -326,8 +347,12 @@ fn only_needs_you_breaks_through_a_focus() {
 fn notes_turned_off_are_said_once_on_coming_back() {
     let (mut attention, memory) = attention();
     let a = route(1);
-    let long =
-        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(12) };
+    let long = Finished {
+        command: "cargo build".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(12),
+        turn: None,
+    };
     let slow = Duration::from_secs(5);
     let away_and_back = |attention: &mut Attention| {
         attention.set_active(false);
@@ -1277,7 +1302,12 @@ fn back_in_front_stale_pushed_notes_go_and_a_live_ask_stays() {
         projects: HashMap::new(),
         muted: HashSet::new(),
     });
-    let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
+    let done = Finished {
+        command: "make".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(9),
+        turn: None,
+    };
     attention.command_finished(shell, "api".into(), &done, Duration::from_secs(5));
     let finished = shell.about.note_id();
     // While the app was suspended, the server pushed the asks of the two threads and a project's

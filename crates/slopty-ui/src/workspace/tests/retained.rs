@@ -228,8 +228,12 @@ fn a_command_that_ends_beside_is_drawn_as_from_scratch(cx: &mut TestAppContext) 
     let ended = marked_frame(3, &[("~ % sleep 6", prompt(None)), ("~ % ", prompt(Some(0)))], 1);
     view.update_in(cx, |v, _w, cx| {
         v.term_event(slow, ended, cx);
-        let done =
-            Finished { command: "sleep 6".into(), exit: Some(0), elapsed: Duration::from_secs(6) };
+        let done = Finished {
+            command: "sleep 6".into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(6),
+            turn: None,
+        };
         v.command_finished(slow, done, cx);
     });
     fresh(cx, "it ended");

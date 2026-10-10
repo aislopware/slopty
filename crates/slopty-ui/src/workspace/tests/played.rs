@@ -8,12 +8,12 @@ use std::collections::HashMap;
 
 use gpui::Context;
 use slopty_agent::observed::{ASK_GRACE, Observed, Out, terminal_thread};
-use slopty_agent::status::AgentEvent;
+use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::attention::{Ladder, Ranked, Rung, ThreadAt};
-use slopty_proto::thread::wire::TableFrame;
-use slopty_proto::thread::{Cursor, ThreadState};
+use slopty_proto::thread::wire::{TableFrame, TurnEnded};
+use slopty_proto::thread::{Cursor, ThreadState, TurnId};
 
 use crate::workspace::WorkspaceView;
 
@@ -22,6 +22,9 @@ use crate::workspace::WorkspaceView;
 #[derive(Default)]
 struct Played {
     codecs: HashMap<SessionId, (Observed, Option<ThreadState>)>,
+    /// Each terminal's turns as its transcript would give them to the worker (hooks alone carry
+    /// none): how many ended, when the one under way began, and the last that ended.
+    turns: HashMap<SessionId, (u32, Option<WallMs>, Option<TurnEnded>)>,
     ladder: Vec<Ranked>,
     seq: u64,
 }
@@ -96,12 +99,31 @@ impl Agents for WorkspaceView {
                     }
                 }
             }
-            (state.as_ref().map(|s| s.row(event.since_ms)), seq)
+            let row = state.as_ref().map(|s| s.row(event.since_ms));
+            let (ended, began, last) = p.turns.entry(session).or_default();
+            match event.status {
+                AgentStatus::Working | AgentStatus::Tool { .. } => {
+                    began.get_or_insert(event.since_ms);
+                    *last = None;
+                }
+                AgentStatus::Done => {
+                    if let Some(from) = began.take() {
+                        *ended = ended.saturating_add(1);
+                        let at_ms = event.since_ms;
+                        let ran_ms = at_ms.as_millis().saturating_sub(from.as_millis());
+                        *last =
+                            Some(TurnEnded { turn: TurnId(*ended), at_ms, ran_ms, answered: true });
+                    }
+                }
+                AgentStatus::Blocked(_) | AgentStatus::Waiting { .. } => {}
+                _ => *began = None,
+            }
+            (row.map(|r| slopty_proto::thread::wire::ThreadRow { ended: *last, ..r }), seq)
         });
         let Some(mut played) = played else { return };
         // What the agent said of a turn it ended is its transcript's last line, read by the
         // worker beside the hooks.
-        if event.status == slopty_agent::status::AgentStatus::Done
+        if event.status == AgentStatus::Done
             && let Some(said) = event.detail
         {
             played.last_line = Some(said);
@@ -111,6 +133,7 @@ impl Agents for WorkspaceView {
                 row.status = played.status;
                 row.requests = played.requests;
                 row.doing = played.doing;
+                row.ended = played.ended;
                 if played.last_line.is_some() {
                     row.last_line = played.last_line;
                 }
@@ -133,7 +156,7 @@ impl Agents for WorkspaceView {
         event: AgentEvent,
         cx: &mut Context<WorkspaceView>,
     ) {
-        use slopty_agent::status::{AgentStatus, BlockReason};
+        use slopty_agent::status::BlockReason;
         let session = event.session;
         let rung = match &event.status {
             AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt => Some(Rung::NeedsYou),

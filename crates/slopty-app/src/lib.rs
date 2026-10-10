@@ -783,8 +783,12 @@ impl Workspace {
             let heard =
                 cx.subscribe(&terminal, move |ws: &mut Self, _terminal, event, cx| match event {
                     TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
-                        let done =
-                            Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
+                        let done = Finished {
+                            command: command.clone(),
+                            exit: *exit,
+                            elapsed: *elapsed,
+                            turn: None,
+                        };
                         ws.command_finished(session, &done, cx);
                     }
                     TerminalViewEvent::Notification { title, body } => {

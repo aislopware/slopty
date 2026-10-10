@@ -738,3 +738,95 @@ fn a_right_click_on_a_message_quotes_or_copies_it(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("message-menu").is_none(), "Esc closes it");
 }
+
+/// The composer's words follow the person across devices through the thread's worker: an empty
+/// composer takes up the draft another device kept; the words go to the worker once the person
+/// pauses, not on every key; a sent message clears the draft there, and the worker's echo of
+/// this device's own words never brings a sent message back.
+#[gpui::test]
+fn the_draft_follows_the_person_through_the_worker(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{Draft, TableFrame};
+
+    use crate::conversation::thread::view::sharing::DRAFT_SHARE_PAUSE;
+
+    let (hub, sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    let table = |draft: Option<(&str, u64)>, seq: u64| {
+        let mut row = state.row(WallMs::ZERO);
+        row.draft =
+            draft.map(|(text, at)| Draft { text: text.to_owned(), at_ms: WallMs::from_millis(at) });
+        TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, rows: vec![row] }
+    };
+    let drafts = |sent: &super::Sent| -> Vec<String> {
+        intents(sent)
+            .into_iter()
+            .filter_map(|i| match i {
+                Intent::Draft { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    };
+    hub.update(cx, |hub, cx| hub.table(&table(Some(("Begun on the phone", 5)), 1), cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "Begun on the phone", "taken up");
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    assert!(drafts(&sent).is_empty(), "the worker's own words are not sent back");
+
+    cx.simulate_input(", ended here");
+    cx.run_until_parked();
+    assert!(drafts(&sent).is_empty(), "not on every key");
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    assert_eq!(drafts(&sent), ["Begun on the phone, ended here"], "once the person pauses");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "", "sent");
+    // The worker's echo of this device's words lands after the send.
+    let echo = table(Some(("Begun on the phone, ended here", 9)), 2);
+    hub.update(cx, |hub, cx| hub.table(&echo, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "", "a sent message never comes back");
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    assert_eq!(drafts(&sent).last().map(String::as_str), Some(""), "the draft there is cleared");
+}
+
+/// Words this device kept and opened with give way to a worker draft kept later on another
+/// device, heard once the table comes; nothing goes to the worker before then.
+#[gpui::test]
+fn words_kept_here_give_way_to_a_later_draft_from_elsewhere(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{Draft, TableFrame};
+
+    use crate::conversation::thread::view::sharing::DRAFT_SHARE_PAUSE;
+
+    let (hub, sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    view.update_in(cx, |v, window, cx| {
+        v.restore_kept_draft("Kept here", Some(WallMs::from_millis(1)), window, cx);
+    });
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    let drafted =
+        |sent: &super::Sent| intents(sent).iter().any(|i| matches!(i, Intent::Draft { .. }));
+    assert!(!drafted(&sent), "nothing goes before the worker's draft is heard");
+    let mut row = state.row(WallMs::ZERO);
+    row.draft = Some(Draft { text: "Kept later".to_owned(), at_ms: WallMs::from_millis(5) });
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
+    hub.update(cx, |hub, cx| hub.table(&table, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "Kept later");
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    assert!(!drafted(&sent), "the worker already holds them");
+}

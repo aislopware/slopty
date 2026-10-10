@@ -130,6 +130,7 @@ mod pictures;
 mod plan;
 mod proposed;
 pub mod screens;
+pub(super) mod sharing;
 mod tools;
 mod trail;
 mod tray;
@@ -236,6 +237,8 @@ pub struct ThreadView {
     /// The thread not started yet that this view writes the first message of, drawn on its
     /// own state rather than the hub's ([`super::draft`]).
     draft: Option<Entity<Draft>>,
+    /// The composer's words as its worker holds them for other devices ([`sharing`]).
+    sharing: sharing::Sharing,
     /// Its brief came from elsewhere (a project's orchestrator, or its task): it is never asked
     /// what to do, even before its first row.
     briefed: bool,
@@ -459,17 +462,21 @@ impl ThreadView {
                 InputEvent::Change => this.composer_changed(cx),
                 _ => {}
             });
-        let hearing = cx.subscribe(&hub, |this, _hub, event, cx| match event {
+        let hearing = cx.subscribe_in(&hub, window, |this, _hub, event, window, cx| match event {
             HubEvent::Thread(t) if *t == this.thread => {
                 this.rebuild(cx);
                 this.chase(cx);
                 this.go_on(cx);
             }
+            HubEvent::Table => {
+                this.hear_row_draft(window, cx);
+                cx.notify();
+            }
             HubEvent::Hits => this.refind(cx),
             HubEvent::Started { from, thread, intent, aside: true } if *from == this.thread => {
                 this.aside_started(*intent, *thread, cx);
             }
-            HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
+            HubEvent::Expanded(_) => cx.notify(),
             // The changes card reads its turn's review.
             HubEvent::Review(t) if *t == this.thread => this.rebuild(cx),
             // A draft's place chip reads its folder's branches.
@@ -497,7 +504,13 @@ impl ThreadView {
                 this.trail.iter().map(trail::Above::thread).chain([this.thread]).collect();
             // An aside left open goes with the view: nothing else shows it.
             let aside = this.aside();
+            // Words not yet shared go as the view does.
+            let unshared = this.unshared(cx);
+            let thread = this.thread;
             this.hub.update(cx, |hub, cx| {
+                if let Some(text) = unshared {
+                    let _id = hub.intent(thread, Intent::Draft { text }, cx);
+                }
                 for thread in shown {
                     hub.close(thread, cx);
                 }
@@ -513,6 +526,7 @@ impl ThreadView {
             hub,
             thread,
             draft,
+            sharing: sharing::Sharing::default(),
             briefed: false,
             orchestrates: false,
             photos: cfg!(target_os = "ios"),

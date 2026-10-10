@@ -202,8 +202,12 @@ fn a_finished_badge_goes_with_its_session_and_its_worker(cx: &mut TestAppContext
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(s1, _), (s2, _), _] = three_shells(&view, cx, &studio);
-    let done =
-        || Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
+    let done = || Finished {
+        command: "make".into(),
+        exit: Some(0),
+        elapsed: Duration::from_secs(40),
+        turn: None,
+    };
     view.update_in(cx, |v, _w, cx| {
         v.command_finished(s1, done(), cx);
         v.command_finished(s2, done(), cx);

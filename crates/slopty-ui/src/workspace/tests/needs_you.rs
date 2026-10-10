@@ -11,7 +11,12 @@ fn leak(selector: String) -> &'static str {
 }
 
 fn finished(command: &str, exit: u8) -> Finished {
-    Finished { command: command.to_owned(), exit: Some(exit), elapsed: Duration::from_secs(40) }
+    Finished {
+        command: command.to_owned(),
+        exit: Some(exit),
+        elapsed: Duration::from_secs(40),
+        turn: None,
+    }
 }
 
 fn click(cx: &mut VisualTestContext, selector: &'static str) {

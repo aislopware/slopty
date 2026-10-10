@@ -9736,3 +9736,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::a_merge_blocked_on_running_checks_is_offered_when_ready`,
     `…::a_required_failure_leaves_the_merge_waiting`, `…::a_draft_is_marked_ready_from_the_sheet`
     (slopty-ui).
+
+- ✅ **What is unread and what is drafted follow the person, not the device** (2026-10-12,
+  readiness audit item 19's A half).
+  - **The defect.** Each device kept its own set of unread turns, filled only by a turn it saw
+    end and cleared only by a focus there. A turn read on the phone stayed in the Mac's bell,
+    and a turn that ended while the phone app was not running never showed there. A message
+    begun on the phone was not on the Mac.
+  - **Unread is the worker's word.** The per-device set is deleted. Each thread row carries
+    its latest ended turn and the person's seen mark (lane W). A turn is unread when the agent
+    answered it, it ran at least the slow-command threshold, and it is past the mark
+    (`turns_heard`). Looking at a tile (focus, or the app coming to the front on it) sends
+    `Intent::Seen` for its thread's latest turn, once. The mark shows here at once and is held
+    until the row says it back. A turn that ends on the tile in front is seen as it ends.
+    Every device reads the same account, so a turn read anywhere leaves every bell and its
+    note is taken back.
+  - **Notes stay single.** A turn found unread in a worker's first table (it ended while
+    this device was not listening) is listed and counted but posts no local note: whoever
+    heard it end, the server's push included, already told of it.
+  - **Drafts.** A thread's composer is also the thread's draft on its worker. The words go two
+    seconds after the person pauses, not on every key, since each change is a row every
+    device hears, and they go at once as the app leaves the front or the view closes. An empty
+    composer takes up a draft another device kept. Words this device kept and opened with
+    give way to a worker draft kept later. Nothing goes until the worker's draft has been heard
+    over a live link, so old words never land on newer ones. The worker's echo of this device's
+    own words is never taken back, so a message sent before its echo arrived does not return.
+    A sent message clears the draft there. Whoever writes last holds it. A draft past the
+    row's limit stays in the local drafts file only.
+  - Tests: `workspace::tests::thread_waits::a_turn_read_on_another_device_leaves_the_bell`,
+    `…::looking_at_a_thread_marks_it_seen_on_its_worker`,
+    `…::a_threads_finished_turn_without_a_terminal_is_to_review`;
+    `conversation::thread::tests::composing::the_draft_follows_the_person_through_the_worker`,
+    `…::words_kept_here_give_way_to_a_later_draft_from_elsewhere`;
+    `workspace::drafts::tests::drafts_come_back_and_old_ones_go` (slopty-ui).

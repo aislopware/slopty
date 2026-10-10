@@ -1221,18 +1221,6 @@ impl WorkspaceView {
             })
             .map(|(id, _)| *id)
             .collect();
-        // Where each agent moved, for its turn's length: a terminal's, or a thread's with none.
-        let turned: Vec<(super::attention::About, thread::Phase, slopty_core::WallMs)> = stands
-            .iter()
-            .filter_map(|(id, stand)| {
-                let now = stand.status.as_ref()?;
-                let about = stand
-                    .terminal
-                    .map_or(super::attention::About::Thread(*id), super::attention::About::Session);
-                let was = old.get(id).and_then(|w| w.status.as_ref()).map(|s| s.phase);
-                (was != Some(now.phase)).then_some((about, now.phase, now.since_ms))
-            })
-            .collect();
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
         self.faces.threads.stands.extend(stands);
         self.faces.threads.heard.insert(key);
@@ -1258,11 +1246,7 @@ impl WorkspaceView {
                 None => self.faces.threads.terminals.remove(&row.id),
             };
         }
-        for (about, phase, since) in turned {
-            if let Some(elapsed) = self.agent_turn(about, phase, since) {
-                self.agent_finished(about, elapsed, cx);
-            }
-        }
+        self.turns_heard(key, !heard, cx);
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
         for thread in came_to_need.into_iter().filter(|_| linked) {
             cx.emit(WorkspaceEvent::Attention(thread));
@@ -1314,11 +1298,11 @@ impl WorkspaceView {
             } else {
                 let hub = self.thread_hub(key, cx);
                 let theme = self.theme.clone();
-                let draft = self.drafts.thread(thread).map(str::to_owned);
+                let draft = self.opening_draft(key, thread, cx);
                 cx.new(|cx| {
                     let mut view = ThreadView::new(hub, thread, theme, window, cx);
-                    if let Some(draft) = draft {
-                        view.restore_draft(&draft, window, cx);
+                    if let Some((draft, kept)) = draft {
+                        view.restore_kept_draft(&draft, kept, window, cx);
                     }
                     view
                 })
@@ -1417,11 +1401,11 @@ impl WorkspaceView {
             }
             let hub = self.thread_hub(key, cx);
             let theme = self.theme.clone();
-            let draft = self.drafts.thread(thread).map(str::to_owned);
+            let draft = self.opening_draft(key, thread, cx);
             let view = cx.new(|cx| {
                 let mut view = ThreadView::new(hub, thread, theme, window, cx);
-                if let Some(draft) = draft {
-                    view.restore_draft(&draft, window, cx);
+                if let Some((draft, kept)) = draft {
+                    view.restore_kept_draft(&draft, kept, window, cx);
                 }
                 view
             });
@@ -1907,6 +1891,9 @@ impl WorkspaceView {
                     status: None,
                     doing: None,
                     resets: None,
+                    // What is unread is its worker's table's word, heard only over a link.
+                    ended: None,
+                    seen: TurnId::BEFORE,
                 };
                 (r.at.thread, stand)
             })
@@ -1955,6 +1942,20 @@ impl WorkspaceView {
         };
         let spoken = stand.terminal.and_then(|s| self.agent_state(s)).is_some();
         (!spoken).then_some(stand)
+    }
+
+    /// `key`'s threads as its own table last said, whichever speaks for them: what is unread
+    /// is the table's word ([`super::turns`]).
+    pub(super) fn table_stands(
+        &self,
+        key: WorkerKey,
+    ) -> impl Iterator<Item = (ThreadId, &ThreadStand)> {
+        self.faces.threads.stands.iter().filter(move |(_, s)| s.worker == key).map(|(t, s)| (*t, s))
+    }
+
+    /// `thread` as its worker's own table last said ([`Self::table_stands`]).
+    pub(super) fn table_stand(&self, thread: ThreadId) -> Option<&ThreadStand> {
+        self.faces.threads.stands.get(&thread)
     }
 
     /// Every thread whose row speaks for it ([`Self::thread_stand`]), on every worker, each
@@ -2026,6 +2027,10 @@ pub(super) struct ThreadStand {
     pub doing: Option<String>,
     /// When the usage limit it stopped on lifts, as its plan's windows say.
     pub resets: Option<slopty_core::WallMs>,
+    /// Its latest turn that ended, as its worker's table says; none while one is under way.
+    pub ended: Option<thread::wire::TurnEnded>,
+    /// The last turn the person has seen, on any device: its worker's mark.
+    pub seen: TurnId,
 }
 
 impl ThreadStand {
@@ -2103,6 +2108,8 @@ fn stands_of<'a>(
                 status: Some(r.status.clone()),
                 doing: r.doing.clone(),
                 resets: limit_resets(r),
+                ended: r.ended,
+                seen: r.seen,
             };
             (r.id, stand)
         })

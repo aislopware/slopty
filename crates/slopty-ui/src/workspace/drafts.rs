@@ -3,6 +3,10 @@
 //! comments and the files marked viewed in it, and a commit sheet's message and pull request
 //! words (held by each worker's hub while the app runs, by machine and folder).
 //!
+//! A thread's composer is also the thread's draft on its worker, so a message begun on one
+//! device is there on the next (`conversation::thread::view::sharing`). A composer opens with
+//! whichever was kept last, this device's words or the worker's.
+//!
 //! One store, one file (`drafts.json` beside the layout), replaced whole by
 //! `slopty_platform::fs::replace`, so a crash mid-write leaves the one before. It holds every
 //! draft by what it is about, not by the view that held it: a thread's by the thread (in its
@@ -24,6 +28,7 @@ use gpui::{Context, Task};
 use serde::{Deserialize, Serialize};
 use slopty_client::layout::WorkerKey;
 use slopty_core::WallMs;
+use slopty_proto::thread::wire::Draft;
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
@@ -117,10 +122,21 @@ pub(super) struct Drafts {
 }
 
 impl Drafts {
-    /// `thread`'s composer as it was left.
-    pub(super) fn thread(&self, thread: ThreadId) -> Option<&str> {
+    /// `thread`'s composer as it was left here, or as `row` (its worker's draft, kept by any
+    /// device) has it: whichever was kept last, with when this device kept it when the words
+    /// are its own.
+    pub(super) fn thread(
+        &self,
+        thread: ThreadId,
+        row: Option<&Draft>,
+    ) -> Option<(String, Option<WallMs>)> {
         let key = thread.to_string();
-        self.held.threads.iter().find(|d| d.thread == key).map(|d| d.text.as_str())
+        let here = self.held.threads.iter().find(|d| d.thread == key);
+        match (here, row) {
+            (Some(here), Some(row)) if row.at_ms > here.kept_ms => Some((row.text.clone(), None)),
+            (Some(here), _) => Some((here.text.clone(), Some(here.kept_ms))),
+            (None, row) => row.map(|r| (r.text.clone(), None)),
+        }
     }
 
     /// Keep `text` as `thread`'s composer; nothing for an empty one.
@@ -267,9 +283,32 @@ impl WorkspaceView {
 
     /// Write every draft now, as the app goes to the background or quits: on this thread,
     /// so it is on the disk before the app can be ended.
-    pub fn keep_drafts_now(&mut self, cx: &Context<Self>) {
+    pub fn keep_drafts_now(&mut self, cx: &mut Context<Self>) {
         self.drafts.pass = None;
         self.keep_drafts(true, cx);
+        // The worker holds the words for the next device: they go now, not after the pause.
+        let views: Vec<_> = self
+            .thread_faces()
+            .map(|(_, v)| v.clone())
+            .chain(self.thread_items().map(|(_, v)| v.clone()))
+            .collect();
+        for view in views {
+            view.update(cx, crate::conversation::thread::ThreadView::share_draft);
+        }
+    }
+
+    /// `thread`'s words to open its composer with, on `key`'s worker: this device's, or its
+    /// worker's draft where that was kept since.
+    pub(super) fn opening_draft(
+        &self,
+        key: WorkerKey,
+        thread: ThreadId,
+        cx: &Context<Self>,
+    ) -> Option<(String, Option<WallMs>)> {
+        let row = self.held_hub(key).and_then(|hub| {
+            hub.read(cx).threads().rows().rows.get(&thread).and_then(|r| r.draft.clone())
+        });
+        self.drafts.thread(thread, row.as_ref())
     }
 
     /// Read every live draft into the store and write it, `now` on this thread, else off it.
@@ -325,7 +364,7 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{AgentId, ThreadId};
 
-    use super::{CommitDraft, Drafts, Held, KEPT_FOR, ReviewDraft, write};
+    use super::{CommitDraft, Draft, Drafts, Held, KEPT_FOR, ReviewDraft, write};
 
     /// A thread's, a start's, a review's and a commit sheet's drafts go to the file and come
     /// back; an empty one
@@ -352,7 +391,26 @@ mod tests {
         write(&path, &serde_json::to_vec(&drafts.held).unwrap()).unwrap();
 
         let back = Drafts { held: Drafts::read(&path, now), ..Drafts::default() };
-        assert_eq!(back.thread(thread), Some("Half a thought"));
+        assert_eq!(back.thread(thread, None).map(|(t, _)| t).as_deref(), Some("Half a thought"));
+        let newer = Draft {
+            text: "From the phone".to_owned(),
+            at_ms: WallMs::from_millis(now.as_millis() + 1),
+        };
+        assert_eq!(
+            back.thread(thread, Some(&newer)).map(|(t, _)| t).as_deref(),
+            Some("From the phone"),
+            "kept since"
+        );
+        let older = Draft { text: "Old".to_owned(), at_ms: WallMs::ZERO };
+        assert_eq!(
+            back.thread(thread, Some(&older)).map(|(t, _)| t).as_deref(),
+            Some("Half a thought")
+        );
+        assert_eq!(
+            back.thread(ThreadId::new(), Some(&older)).map(|(t, _)| t).as_deref(),
+            Some("Old"),
+            "none here"
+        );
         assert_eq!(back.start(worker, &agent, "~/code"), Some("Fix the build"));
         assert_eq!(back.review("thread:x"), Some(&review));
         assert_eq!(back.commits_on(worker), [("/w".to_owned(), words)], "a commit sheet's words");

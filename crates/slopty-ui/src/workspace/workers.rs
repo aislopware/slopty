@@ -990,7 +990,12 @@ impl WorkspaceView {
             }
             TerminalViewEvent::Notice(text) => this.show_notice(text.clone(), cx),
             TerminalViewEvent::CommandFinished { command, exit, elapsed } => {
-                let done = Finished { command: command.clone(), exit: *exit, elapsed: *elapsed };
+                let done = Finished {
+                    command: command.clone(),
+                    exit: *exit,
+                    elapsed: *elapsed,
+                    turn: None,
+                };
                 this.command_finished(sid, done, cx);
                 // The row's last command and the tile's state changed with the new prompt.
                 this.chrome.notify(cx);

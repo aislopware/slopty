@@ -615,7 +615,12 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
 
 #[test]
 fn a_finished_badge_says_the_status_and_the_time() {
-    let done = |exit| Finished { command: "make".into(), exit, elapsed: Duration::from_secs(3) };
+    let done = |exit| Finished {
+        command: "make".into(),
+        exit,
+        elapsed: Duration::from_secs(3),
+        turn: None,
+    };
     assert!(done(Some(0)).label().starts_with("Done · "), "{}", done(Some(0)).label());
     assert!(done(Some(2)).label().starts_with("Exit 2 · "), "{}", done(Some(2)).label());
 }

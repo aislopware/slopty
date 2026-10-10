@@ -453,7 +453,6 @@ impl WorkspaceView {
         if watched || !slow {
             return;
         }
-        self.turns.command_ended(session);
         self.finished.insert(About::Session(session), done);
         cx.notify();
     }
@@ -524,6 +523,8 @@ mod tests {
             }),
             doing: None,
             resets: None,
+            ended: None,
+            seen: slopty_proto::thread::TurnId::BEFORE,
         }
     }
 

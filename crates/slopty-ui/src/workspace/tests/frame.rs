@@ -324,6 +324,7 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
             command: "cargo build".into(),
             exit: Some(0),
             elapsed: Duration::from_secs(40),
+            turn: None,
         };
         v.command_finished(built, done, cx);
     });
@@ -430,6 +431,7 @@ fn a_workers_tiles_come_in_order_of_attention(cx: &mut TestAppContext) {
             command: "cargo build".into(),
             exit: Some(0),
             elapsed: Duration::from_secs(40),
+            turn: None,
         };
         v.command_finished(built, done, cx);
     });
@@ -461,8 +463,12 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
     let check = selector("nav-unseen", tile.item);
     assert!(cx.debug_bounds(check).is_none(), "nothing unseen yet");
     view.update_in(cx, |v, _w, cx| {
-        let done =
-            Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
+        let done = Finished {
+            command: "make".into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(40),
+            turn: None,
+        };
         v.command_finished(built, done, cx);
     });
     cx.run_until_parked();
@@ -474,8 +480,12 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l.starts_with("make, ") && l.ends_with(", unseen")), "{said:?}");
     view.update_in(cx, |v, _w, cx| {
-        let failed =
-            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(40) };
+        let failed = Finished {
+            command: "make".into(),
+            exit: Some(2),
+            elapsed: Duration::from_secs(40),
+            turn: None,
+        };
         v.command_finished(built, failed, cx);
     });
     cx.run_until_parked();

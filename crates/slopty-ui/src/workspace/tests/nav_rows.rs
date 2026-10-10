@@ -405,8 +405,12 @@ fn a_folded_worker_rolls_up_what_its_tiles_want(cx: &mut TestAppContext) {
     assert!(!shown(cx, rollup), "at rest, nothing");
 
     view.update_in(cx, |v, _w, cx| {
-        let done =
-            Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
+        let done = Finished {
+            command: "make".into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(40),
+            turn: None,
+        };
         v.command_finished(first, done, cx);
     });
     cx.run_until_parked();
