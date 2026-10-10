@@ -394,7 +394,16 @@ mod tests {
         let header = download_header(first, "out/big.bin", big.len(), 0);
         let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
         send.write_all(&big[..1_000_000]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Cut only once some of it is on the client's disk: a reset before any byte arrived
+        // leaves nothing partial to resume, which a loaded runner hit after a fixed wait.
+        let partial = into.path().join("out/big.bin.partial");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while std::fs::metadata(&partial).map_or(0, |m| m.len()) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("some of the big file reaches the client");
         send.reset(0_u32.into()).unwrap();
 
         let cancelled = expect(&mut client, |m| match m {
@@ -416,7 +425,6 @@ mod tests {
         assert_eq!(name, "out/big.bin");
         assert_eq!(held[0].size, big.len() as u64, "of the version sent");
         assert!(durable > 0 && durable <= 1_000_000, "held {durable}");
-        let partial = into.path().join("out/big.bin.partial");
         assert_eq!(std::fs::metadata(&partial).unwrap().len(), durable, "durable on disk");
 
         let begin = XferMsg::Begin { xfer: second, dest: None, files: 2, bytes };
