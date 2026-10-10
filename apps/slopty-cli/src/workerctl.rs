@@ -361,6 +361,7 @@ mod tests {
             pasteboard: PasteboardAccess::Allowed,
             clients: 2,
             sessions: 3,
+            turns: 0,
             uptime_secs: 61,
         };
         let report = doctor_report(&h, true);
