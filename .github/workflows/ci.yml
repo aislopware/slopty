@@ -326,14 +326,19 @@ jobs:
           git push origin "$GITHUB_SHA:refs/heads/main"
           echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
       # The app's e2e on the main just promoted, once four hours have passed since the last one
-      # started. A schedule cannot do it: this job's push is not an event to GitHub, so a
+      # started and none is queued or running, since each holds a macOS slot the gate's five
+      # jobs share. A schedule cannot do it: this job's push is not an event to GitHub, so a
       # scheduled run checked out the last commit a person pushed (e2e.yml).
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
           last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 1 \
             --json createdAt --jq '.[0].createdAt // empty')
-          if [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 14400 ]; then
+          busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 10 \
+            --json status --jq '[.[] | select(.status != "completed")] | length')
+          if [ "${busy:-0}" -gt 0 ]; then
+            echo "the app's e2e is still running; none started" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 14400 ]; then
             gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref main
             echo "the app's e2e started on main" >> "$GITHUB_STEP_SUMMARY"
           fi

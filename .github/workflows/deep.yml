@@ -1,14 +1,17 @@
 name: Deep
 
 # The bug-catching checks too slow for every commit (`cargo xtask deep`, docs/TESTING.md "Beyond
-# the layers"). They run here and not on the Mac someone works on. Every night at 02:00 Bangkok
-# time; mutation testing once a week; and on demand
+# the layers"). They run here and not on the Mac someone works on. Every day at 04:37 UTC, in the
+# gate's calmest hours (05–08Z, 7–8 gate runs an hour against 15 in the old 23–04Z window), off
+# the top of the hour, which GitHub delays under load (02:00 Bangkok started up to 4 h late),
+# since the macOS job holds one of the five slots for hours
+# (.research/dev-speed-2026-10-10.md item 5); mutation testing once a week; and on demand
 # (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing). Each check is a job of
 # its own, so a slow one holds no other, on Linux where its crates build there and on macOS where
 # they need Apple's frameworks. A failure opens (or adds to) the "Deep checks failing" issue.
 on:
   schedule:
-    - cron: "0 19 * * *"
+    - cron: "37 4 * * *"
     - cron: "0 7 * * 6"
   workflow_dispatch:
     inputs:
