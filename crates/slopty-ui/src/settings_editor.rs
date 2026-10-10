@@ -833,11 +833,11 @@ mod tests {
         let quiet = crate::settings_form::NO_MATCHES;
         assert!(tree.iter().any(|n| n.is("Status", Some(quiet))), "{tree:#?}");
         cx.simulate_keystrokes("cmd-a backspace");
-        cx.simulate_input("max_bitrate");
+        cx.simulate_input("live_agents");
         cx.run_until_parked();
-        assert_eq!(value_of(cx, "SpinButton", "Bitrate ceiling").as_deref(), Some("30 Mb/s"));
+        assert_eq!(value_of(cx, "SpinButton", "Live agents").as_deref(), Some("24"));
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Heading", Some("Streams"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Heading", Some("Agents"))), "{tree:#?}");
     }
 
     /// The page's head stands on the search field's line, so the columns start together: the

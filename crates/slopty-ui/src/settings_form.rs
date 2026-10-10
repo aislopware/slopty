@@ -1984,7 +1984,8 @@ impl SettingsForm {
         };
         let (min, max, step, unit) = (n.min, n.max, n.step, n.unit.as_str());
         let value = self.number(row);
-        let joined = unit.starts_with(|c: char| !c.is_alphanumeric());
+        // No space before a unit that is a sign (`×`, `%`), nor before none at all.
+        let joined = unit.is_empty() || unit.starts_with(|c: char| !c.is_alphanumeric());
         let readout =
             format!("{}{}{unit}", schema::figure(value, step), if joined { "" } else { " " });
         let side = 2.0_f32.mul_add(-spacing.xxs, theme.density.row);

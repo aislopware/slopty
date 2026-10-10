@@ -348,9 +348,9 @@ mod tests {
                 unit: "pt".to_owned()
             })
         );
-        let ceiling = field("remote", "max_bitrate_mbps");
-        assert!(matches!(&ceiling.kind, Kind::Number(n) if n.integer));
-        assert_eq!(ceiling.default, Value::Number(30.0));
+        let live = field("server.projects", "live_agents");
+        assert!(matches!(&live.kind, Kind::Number(n) if n.integer));
+        assert_eq!(live.default, Value::Number(24.0));
         let Kind::Choice(options) = &field("terminal", "option_as_alt").kind else {
             panic!("a choice")
         };

@@ -308,7 +308,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `default_file_round_trips`, and `schema::tests::a_value_is_checked_by_its_key`.
 
 - ✅ **`[remote]` is the bitrate ceiling alone** (2026-10-05, readiness deletions, feature
-  audit #13). `muted` and `sharp_text` are gone.
+  audit #13). `muted` and `sharp_text` are gone. The ceiling went too on 2026-10-10 ("The bitrate
+  ceiling is not a setting", below).
   - **`muted`.** The stream's pill silences a worker's sound for all its streams, and the
     choice holds on the connection. A default for new streams was a second way to the same
     switch, and it needed the client's "not chosen yet" state only to keep a later tile's
@@ -513,3 +514,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   grid line. They are ruled in decisions/terminal.md ("The cursor, bold and the wheel are the
   program's and the system's"). A file that still has one loads, with an unknown-key warning
   for it. Test: `terminal_keys`.
+
+- ✅ **The bitrate ceiling is not a setting** (2026-10-10, orchestrator-first audit §C.5).
+  `[remote] max_bitrate_mbps` was the last key of `[remote]`, and it held a whole page of the
+  form. The worker's rate controller already grows a stream toward its ceiling as the link
+  allows (`slopty-media` `rate.rs`), so a second ceiling set once by hand only capped it.
+  - **Gone.** `[remote]`, `RemoteSettings`, `bounds::MBPS`, the Streams page, and
+    `Theme::behaviour.stream` (`StreamPrefs`).
+  - **Now.** A stream asks for the wire's default ceiling (`Quality::default`, 30 Mbit/s), and
+    a theme change asks nothing of a live stream (`ScreenView::set_theme`).
+  - A file that still has `[remote]` loads, with an unknown-key warning.
+  - A number with no unit reads without a trailing space ("24", not "24 ").
+  - Tests: `remote_keys` (slopty-settings), `a_theme_change_asks_nothing_of_a_live_stream`
+    (slopty-ui `screen`), `a_search_finds_rows_by_their_words_and_their_key` (slopty-ui
+    `settings_editor`, now on `live_agents`).

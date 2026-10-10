@@ -955,35 +955,24 @@ pub const ASKED_CHROMA: Chroma = Chroma::Subsampled;
 
 /// The quality a stream is asked for: its screen's refresh, the ceiling, and [`ASKED_CHROMA`].
 ///
-/// The rate is the refresh of the screen the view is on ([`stream_fps`]), and the ceiling the
-/// settings' at `scale`.
+/// The rate is the refresh of the screen the view is on ([`stream_fps`]), at `scale`. The ceiling
+/// is the wire's default, which the worker's rate controller grows toward as the link allows.
 #[must_use]
-pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz: u16) -> Quality {
+pub fn quality_of(scale: f32, refresh_hz: u16) -> Quality {
     Quality {
         fps: stream_fps(refresh_hz),
-        bitrate_bps: prefs.max_bitrate_bps,
         scale,
-        region: None,
         codec: VideoCodec::Hevc,
         chroma: ASKED_CHROMA,
+        ..Quality::default()
     }
 }
 
 impl ScreenView {
-    /// Swap the theme: chrome colours, and the stream settings, which a live stream asks
-    /// the worker for at once (the scale it holds stays; that follows the width the tile is drawn
-    /// at).
+    /// Swap the theme: chrome colours alone, which ask nothing of the stream.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
             return;
-        }
-        let wanted = Quality {
-            region: self.quality.region,
-            ..quality_of(theme.behaviour.stream, self.quality.scale, self.refresh_hz())
-        };
-        if wanted != self.quality {
-            self.quality = wanted;
-            self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
         }
         self.theme = theme;
         cx.notify();
@@ -1008,11 +997,6 @@ impl ScreenView {
             self.quality.fps = fps;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
         }
-    }
-
-    /// The refresh of the screen the view is drawn on, hertz; 0 when it is not known.
-    fn refresh_hz(&self) -> u16 {
-        self.screen.map_or(0, |(_, hz)| hz)
     }
 
     /// The frames a second this stream asks for now.
@@ -4077,30 +4061,19 @@ mod tests {
         (view, rx)
     }
 
-    /// A settings change to the stream's ceiling reaches a live stream as a `SetQuality` at the
-    /// scale it holds, still asking for the client's chroma; a chrome-only change asks nothing.
+    /// A stream is asked for 8-bit HEVC at the client's chroma and the wire's ceiling, which the
+    /// worker's rate grows toward; a theme change asks nothing of a live stream.
     #[gpui::test]
-    fn new_stream_settings_are_asked_of_a_live_stream(cx: &mut gpui::TestAppContext) {
+    fn a_theme_change_asks_nothing_of_a_live_stream(cx: &mut gpui::TestAppContext) {
+        let quality = quality_of(1.0, 60);
+        assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
+        assert_eq!(quality.chroma, ASKED_CHROMA, "the worker's gate decides 4:4:4");
+        assert_eq!(quality.bitrate_bps, Quality::default().bitrate_bps, "the wire's ceiling");
         let (view, mut rx) = view(cx);
         let mut theme = Theme::default();
         theme.behaviour.copy_on_select = true;
-        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        assert!(sent(&mut rx).is_empty(), "nothing about the stream changed");
-        theme.behaviour.stream.max_bitrate_bps = 8_000_000;
-        view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        let asked = sent(&mut rx);
-        let [ScreenRequest::SetQuality { stream: StreamId(4), quality }] = asked.as_slice() else {
-            panic!("{asked:?}");
-        };
-        assert_eq!(quality.bitrate_bps, 8_000_000);
-        assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
-        assert_eq!(quality.chroma, ASKED_CHROMA, "the worker's gate decides 4:4:4");
-        assert!(
-            (quality.scale - 1.0).abs() < f32::EPSILON,
-            "the scale follows the tile's width, not the theme"
-        );
         view.update(cx, |v, cx| v.set_theme(theme, cx));
-        assert!(sent(&mut rx).is_empty(), "the same theme again asks nothing");
+        assert!(sent(&mut rx).is_empty(), "nothing about the stream changed");
     }
 
     /// The stream asks for the refresh of the screen it is drawn on, up to 120, whenever its
@@ -4111,8 +4084,7 @@ mod tests {
         assert_eq!(stream_fps(60), 60);
         assert_eq!(stream_fps(144), 120, "the ceiling holds");
         assert_eq!(stream_fps(0), 60, "a screen that does not say");
-        let prefs = slopty_theme::StreamPrefs::default();
-        assert_eq!(quality_of(prefs, 1.0, 120).fps, 120);
+        assert_eq!(quality_of(1.0, 120).fps, 120);
         assert_eq!(hz_of(Some(Duration::from_micros(8_333))), 120);
         assert_eq!(hz_of(Some(Duration::from_micros(16_667))), 60);
         assert_eq!(hz_of(None), 0);

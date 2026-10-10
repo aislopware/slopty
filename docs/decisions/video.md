@@ -803,7 +803,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   depth change rebuilds its encoder, as `set_quality` already ruled. `hdr` selects HEVC
   Main 10 (P010 capture); it is the client's choice, since the host cannot know what the
   client's display shows. (`hdr` superseded 2026-09-24 and removed from the settings
-  2026-09-25, see "420f and BT.709 end to end" and "HDR is not carried".) Out-of-range values (fps outside 15–120, a ceiling outside 1–200
+  2026-09-25, see "420f and BT.709 end to end" and "HDR is not carried".) (`max_bitrate_mbps` cut on
+  2026-10-10: a stream asks for the wire's default ceiling and the rate controller adapts,
+  `docs/decisions/settings.md`, "The bitrate ceiling is not a setting".) Out-of-range values (fps outside 15–120, a ceiling outside 1–200
   Mbit/s) read as the defaults, as the font sizes do. Tests: `remote_keys`,
   `remote_settings_ride_on_the_theme`, `new_stream_settings_are_asked_of_a_live_stream`.
 

@@ -1042,14 +1042,6 @@ impl WorkspaceView {
         let _news = self.copy_shell(session, cx);
     }
 
-    /// Requested quality for a new stream: the settings' ceilings and depth at full scale, at
-    /// the main screen's refresh; the view then asks for a scale matching the width it paints
-    /// at, and for the refresh of the screen it is drawn on.
-    fn quality_for(&self) -> Quality {
-        let refresh = crate::screen::main_refresh_hz();
-        crate::screen::quality_of(self.theme.behaviour.stream, 1.0, refresh)
-    }
-
     /// Open streams for remote tiles that should have one and lack it; let go of the rest.
     /// A tile off screen for [`super::STREAM_GRACE`] is parked: its stream goes and comes back
     /// when the tile is on screen again.
@@ -1064,7 +1056,7 @@ impl WorkspaceView {
         for id in parked {
             self.parked.insert(id);
         }
-        let quality = self.quality_for();
+        let quality = quality_for();
         let key = self.desktop_key();
         let awaiting = self.awaiting_sized();
         let mut keep: Vec<ItemId> = Vec::new();
@@ -1182,7 +1174,7 @@ impl WorkspaceView {
             }
             ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
                 let theme = self.theme.clone();
-                let quality = self.quality_for();
+                let quality = quality_for();
                 let (show_stats, pinned) = (self.show_stats, self.pinned_rtt);
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 let Some(link) = w.link.clone() else { return };
@@ -1714,4 +1706,11 @@ impl WorkspaceView {
         let said = format!("Restarting Slopty on {name}\u{2026}");
         self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
     }
+}
+
+/// Requested quality for a new stream: full scale at the main screen's refresh. The view then
+/// asks for a scale matching the width it paints at, and for the refresh of the screen it is
+/// drawn on.
+fn quality_for() -> Quality {
+    crate::screen::quality_of(1.0, crate::screen::main_refresh_hz())
 }

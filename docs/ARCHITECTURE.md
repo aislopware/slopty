@@ -1613,8 +1613,7 @@ ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty
 option_as_alt = false | true | left | right` (the ratio rides on `TerminalPalette`,
 copy-on-select and option-as-alt on `Theme::behaviour`,
 the last travelling on every `KeyEvent` to the worker's encoder, the alert is
-read by the app's bell and agent handlers, see decisions/terminal.md), `[remote] max_bitrate_mbps` (`Theme::behaviour.stream`;
-a live stream re-asks its quality on change, see decisions/video.md and decisions/settings.md), `[colors.light]` and `[colors.dark]`
+read by the app's bell and agent handlers, see decisions/terminal.md), `[colors.light]` and `[colors.dark]`
 `foreground | background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings
 laid over that appearance's `TerminalPalette`, see decisions/settings.md),
 `[keys.<context>] <action> = "chord" | ["chord", …] | ""` (the
