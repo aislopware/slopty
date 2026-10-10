@@ -1177,3 +1177,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::facts::a_workers_health_shows_only_when_something_is_wrong`,
     `workspace::tests::bodies::a_window_refused_for_screen_recording_offers_the_restart`
     (slopty-ui).
+
+- ✅ **A pocketed phone hears its notes by push alone** (2026-10-12, readiness 10-12
+  deletions). It replaces "Five seconds before the background grace runs out … it says
+  `listening: false`" in "Notes reach a pocketed phone".
+  - **Why.** Through the grace the phone still heard notices on its link and posted them as
+    local notes. That made a second path beside the push. A note heard that way was never
+    recorded for take-back, so it stayed on the phone with live buttons after the person
+    answered at the Mac (item 22).
+  - **Now.** The moment the app leaves the front it says `listening: false` (`set_listening`,
+    sent with the presence the window gives at once). The server pushes from then on, and it
+    takes its pushes back. The grace is still begun and held until the app returns, but only
+    so the links stay up for transfers under way. The countdown that read the grace's time
+    left (`until_deaf`, `STOP_BEFORE`, `LOOK_AGAIN`, `BackgroundGrace::remaining`) is deleted.
+  - Not covered by a host test: the code is iOS-only. `Attention::set_listening` keeps its
+    own tests, and the simulator lane exercises a pocketed phone.

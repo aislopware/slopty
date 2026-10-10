@@ -594,9 +594,9 @@ pub struct Workspace {
     /// How the worker loops dial: over the network, or a test's stand-in.
     dial: Dialer,
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
-    /// stay up for what arrives just after the phone is pocketed.
+    /// stay up for the transfers under way when the phone is pocketed.
     #[cfg(target_os = "ios")]
-    grace: Option<slopty_platform::notify::BackgroundGrace>,
+    _grace: Option<slopty_platform::notify::BackgroundGrace>,
     /// What the server may push to while the phone is pocketed, and when it stops listening.
     #[cfg(target_os = "ios")]
     pushing: push::Pushing,
@@ -741,7 +741,7 @@ impl Workspace {
             presenting: presence::Presenting::default(),
             dial,
             #[cfg(target_os = "ios")]
-            grace: None,
+            _grace: None,
             #[cfg(target_os = "ios")]
             pushing: push::Pushing::default(),
             #[cfg(target_os = "ios")]
@@ -842,9 +842,9 @@ impl Workspace {
     }
 
     /// The app came to the front or left it: back in front, it says once a run that
-    /// notifications are off when a note went unsaid meanwhile. On iOS, leaving holds the
-    /// background grace, and stops the link's notices just before it runs out; either way the
-    /// server hears again what it may push to.
+    /// notifications are off when a note went unsaid meanwhile. On iOS, leaving stops the
+    /// link's notices at once and holds the background grace for the transfers under way;
+    /// either way the server hears again what it may push to.
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.attention.set_active(active);
         if active && self.attention.unsaid_while_off() {
@@ -861,12 +861,12 @@ impl Workspace {
         }
         #[cfg(target_os = "ios")]
         {
-            self.grace = if active {
+            self._grace = if active {
                 None
             } else {
                 slopty_platform::notify::BackgroundGrace::begin("Slopty keeps its links")
             };
-            self.listen_while(active, cx);
+            self.set_listening(active);
             self.tell_phone(cx);
             if active && self.server_caller().is_some() {
                 Self::look_at_notes(cx);

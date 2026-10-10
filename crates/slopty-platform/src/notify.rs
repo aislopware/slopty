@@ -1244,20 +1244,6 @@ mod ios {
             tracing::debug!(reason, "background grace");
             Some(Self { task, mtm })
         }
-
-        /// How much of the grant is left; `None` while the app is in front, where the system
-        /// counts none, or once the grant is given back.
-        #[must_use]
-        pub fn remaining(&self) -> Option<std::time::Duration> {
-            // SAFETY: as in `begin`.
-            let invalid = unsafe { UIBackgroundTaskInvalid };
-            if self.task.get() == invalid {
-                return None;
-            }
-            let left = UIApplication::sharedApplication(self.mtm).backgroundTimeRemaining();
-            // In front, UIKit says `DBL_MAX`.
-            (left < f64::from(u32::MAX)).then(|| std::time::Duration::from_secs_f64(left.max(0.0)))
-        }
     }
 
     impl Drop for BackgroundGrace {

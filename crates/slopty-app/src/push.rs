@@ -5,9 +5,10 @@
 //! On every link, whenever APNs hands the app a new token, and on each move to or from the
 //! front, the phone says who it is, its token, the public half of its key, and how long a turn
 //! must run before its end is worth a note ([`device`]). While notes don't reach the person, it
-//! takes that back instead: a pushed note would not show either. Just before the background
-//! grace runs out, it says it no longer listens ([`until_deaf`]), so the server pushes what it
-//! would have sent on the link, and the app posts none of it.
+//! takes that back instead: a pushed note would not show either. The moment it leaves the
+//! front it says it no longer listens, so a pocketed phone gets its notes by push alone: one
+//! path, which the server takes back when the person answers elsewhere. The background grace
+//! still keeps the links up a while, for the transfers under way.
 //!
 //! Nothing on iOS asks for notes by itself until the first note is posted, and that happens
 //! only away from the front, so a new phone would never be pushed to. Once its server link is
@@ -26,14 +27,6 @@ use slopty_proto::push::PushDevice;
 
 #[cfg(target_os = "ios")]
 use crate::Workspace;
-
-/// How long before the background grace runs out the phone says it no longer listens: time
-/// enough for the word to leave on the link before the system suspends the app.
-pub(crate) const STOP_BEFORE: Duration = Duration::from_secs(5);
-
-/// How often the grace is read while the system counts none of it yet: the app is out of front
-/// but not in the background (a system alert over it, Control Center pulled down).
-pub(crate) const LOOK_AGAIN: Duration = Duration::from_secs(1);
 
 /// The app's bundle identifier, APNs' topic for its pushes.
 pub(crate) const TOPIC: &str = "dev.aislopware.slopty";
@@ -57,27 +50,12 @@ pub(crate) fn device(
     })
 }
 
-/// How long to wait before reading the grace again, given what is `left` of it; `None` when the
-/// phone should stop listening now. The system counts nothing (`left` is `None`) while the app
-/// is merely out of front.
-pub(crate) const fn until_deaf(left: Option<Duration>) -> Option<Duration> {
-    match left {
-        None => Some(LOOK_AGAIN),
-        Some(left) => match left.checked_sub(STOP_BEFORE) {
-            Some(wait) if !wait.is_zero() => Some(wait),
-            Some(_) | None => None,
-        },
-    }
-}
-
 /// The phone's push state, kept by the app.
 #[cfg(target_os = "ios")]
 #[derive(Debug, Default)]
 pub(crate) struct Pushing {
     /// This installation's id and the public half of its key, read once both could be.
     me: Option<(slopty_core::ClientId, [u8; 32])>,
-    /// The clock that stops the phone listening near the grace's end, while the app is away.
-    ending: Option<gpui::Task<()>>,
     /// The system's question about notes is up: a second press waits for its answer.
     asking: bool,
 }
@@ -171,45 +149,12 @@ impl Workspace {
         .detach();
     }
 
-    /// The app came to the front or left it. In front it hears its link again. Away, it hears
-    /// until just before the grace runs out, or not at all when the system granted none.
-    pub(crate) fn listen_while(&mut self, active: bool, cx: &Context<Self>) {
-        if active {
-            self.pushing.ending = None;
-            self.set_listening(true);
-            return;
-        }
-        if self.grace.is_none() {
-            self.set_listening(false);
-            return;
-        }
-        self.pushing.ending = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let next = this.update(cx, |ws, _cx| {
-                    until_deaf(
-                        ws.grace
-                            .as_ref()
-                            .and_then(slopty_platform::notify::BackgroundGrace::remaining),
-                    )
-                });
-                match next {
-                    Ok(Some(wait)) => cx.background_executor().timer(wait).await,
-                    Ok(None) => {
-                        let _gone = this.update(cx, |ws, cx| {
-                            ws.set_listening(false);
-                            ws.tell_presence(cx);
-                        });
-                        break;
-                    }
-                    Err(_gone) => break,
-                }
-            }
-        }));
-    }
-
-    /// Whether the app still hears notices on its link: the next presence says so, and while
-    /// it does not, the server's pushes say what the app would have posted.
-    fn set_listening(&mut self, listening: bool) {
+    /// Whether the app hears notices on its link: in front it does; away it does not, from the
+    /// moment it leaves, so notes come by push alone and a note heard on the link in the grace
+    /// never outlives its answer at another device. The presence the window sends next says
+    /// so, and while it does not listen the server's pushes say what the app would have
+    /// posted.
+    pub(crate) fn set_listening(&mut self, listening: bool) {
         if listening != self.presenting.listening() {
             tracing::debug!(listening, "notices on the link");
         }
@@ -243,14 +188,5 @@ mod tests {
         for alerts in [Alerts::Denied, Alerts::Unasked, Alerts::Unavailable] {
             assert_eq!(device(Some("ab01"), alerts, KEY, QUIET), None, "{alerts:?} withdraws");
         }
-    }
-
-    #[test]
-    fn the_phone_stops_listening_just_before_its_grace_runs_out() {
-        assert_eq!(until_deaf(None), Some(LOOK_AGAIN), "out of front, no grace counted yet");
-        assert_eq!(until_deaf(Some(Duration::from_secs(30))), Some(Duration::from_secs(25)));
-        assert_eq!(until_deaf(Some(STOP_BEFORE)), None, "at the margin it stops");
-        assert_eq!(until_deaf(Some(Duration::from_secs(1))), None);
-        assert_eq!(until_deaf(Some(Duration::ZERO)), None, "a spent grace stops it too");
     }
 }
