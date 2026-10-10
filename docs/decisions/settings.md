@@ -553,3 +553,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The form's colour footers say so.
   - Tests: `a_terminal_background_leaves_the_chrome_alone` (slopty-theme),
     `a_custom_background_is_the_terminal_s_alone` (slopty-app `settings`).
+
+- ✅ **`[clipboard.workers]` is keyed by worker id** (2026-10-10, orchestrator-first audit
+  §C.5). This amends "`[clipboard] sync` and `[clipboard.workers]`" above and the palette's
+  per-machine sharing (decisions/workspace.md). A worker's name is what its Mac calls itself:
+  renaming the Mac lost the choice, and two Macs of one name shared it. The key is now the
+  worker's id as `WorkerId` writes it (a hyphenated UUID), which the server's directory hands
+  out once and never changes.
+  - **Now.** The app writes the person's word from the palette or a machine's menu by the
+    worker's id (`settings::with_clipboard_shared(text, WorkerId, share)`). The workspace looks
+    a worker up by the id behind its key (`workspace::workers::shares_clipboard`).
+  - A name left in the file matches no worker, so that worker follows `sync`. Showing the
+    entries by machine name in the form is the form's to do.
+  - Tests: `the_clipboard_is_shared_by_default_and_per_worker_by_id` (slopty-settings),
+    `the_clipboard_is_kept_off_for_one_machine_by_id` (slopty-app),
+    `the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row` and
+    `a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it` (slopty-ui).

@@ -251,11 +251,12 @@ impl WorkspaceView {
         }
     }
 
-    /// The workers' names or the settings moved: which keys the clipboard is not shared with.
+    /// The workers or the settings moved: which keys the clipboard is not shared with.
     pub(super) fn clip_sharing_changed(&self) {
         let sharing = &self.clip_sharing;
-        let off = self.workers.iter().filter(|(_, w)| !sharing.shared_with(&w.name));
-        *self.clip_unshared.borrow_mut() = off.map(|(key, _)| *key).collect();
+        let off =
+            self.workers.keys().filter(|key| !super::workers::shares_clipboard(sharing, **key));
+        *self.clip_unshared.borrow_mut() = off.copied().collect();
     }
 
     /// Whether the clipboard is shared with `key`.

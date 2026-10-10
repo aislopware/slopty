@@ -56,7 +56,7 @@ impl Stopped {
 
 impl WorkspaceView {
     /// "Stop sharing the clipboard with …" or "Share the clipboard with …": applied at once
-    /// and said, and handed to the app to keep in the settings by the machine's name.
+    /// and said, and handed to the app to keep in the settings by the machine's worker id.
     pub(super) fn share_clipboard(
         &mut self,
         share: &super::actions::ShareClipboard,
@@ -64,8 +64,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(name) = self.workers.get(&share.worker).map(|w| w.name.clone()) else { return };
+        let Some(id) = super::projects::worker_id(share.worker) else { return };
         let mut sharing = self.clip_sharing.clone();
-        sharing.workers.insert(name.clone(), share.share);
+        sharing.workers.insert(id.to_string(), share.share);
         self.set_clipboard_sharing(sharing, cx);
         let said = if share.share {
             format!("The clipboard is shared with {name}")
@@ -76,10 +77,10 @@ impl WorkspaceView {
         cx.emit(WorkspaceEvent::ClipboardShared { worker: share.worker, share: share.share });
     }
 
-    /// Whether the clipboard is shared with `key`, as the settings say by its name.
+    /// Whether the clipboard is shared with `key`, as the settings say by its worker id.
     #[must_use]
     pub fn clipboard_shared(&self, key: WorkerKey) -> bool {
-        self.workers.get(&key).is_none_or(|w| self.clip_sharing.shared_with(&w.name))
+        !self.workers.contains_key(&key) || shares_clipboard(&self.clip_sharing, key)
     }
 
     /// "Stop sharing the clipboard with …" for each machine it is shared with, and "Share the
@@ -88,7 +89,7 @@ impl WorkspaceView {
         self.workers
             .iter()
             .map(|(key, w)| {
-                let shared = self.clip_sharing.shared_with(&w.name);
+                let shared = shares_clipboard(&self.clip_sharing, *key);
                 let label = if shared {
                     format!("Stop sharing the clipboard with {}", w.name)
                 } else {
@@ -1713,4 +1714,12 @@ impl WorkspaceView {
 /// drawn on.
 fn quality_for() -> Quality {
     crate::screen::quality_of(1.0, crate::screen::main_refresh_hz())
+}
+
+/// Whether `sharing` shares the clipboard with the worker behind `key`, by its worker id.
+pub(super) fn shares_clipboard(
+    sharing: &slopty_settings::ClipboardSettings,
+    key: WorkerKey,
+) -> bool {
+    super::projects::worker_id(key).is_none_or(|id| sharing.shared_with(&id.to_string()))
 }

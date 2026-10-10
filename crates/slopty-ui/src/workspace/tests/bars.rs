@@ -539,7 +539,7 @@ fn a_sleeping_worker_is_woken_from_the_palette_and_its_row(cx: &mut TestAppConte
 }
 
 /// The palette, or the machine's menu on its row, stops sharing the clipboard with
-/// one machine and shares it again, by its name: the navigator marks the machine it is not
+/// one machine and shares it again, by its worker id: the navigator marks the machine it is not
 /// shared with, the app is told to keep the choice, and the other machine is left as it was.
 #[gpui::test]
 fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row(
@@ -596,6 +596,9 @@ fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_
     };
     run(cx, "Stop sharing the clipboard with laptop");
     assert!(!view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
+    let laptop_id = crate::workspace::projects::worker_id(laptop_key).expect("an id").to_string();
+    let kept = view.read_with(cx, |v, _| v.clip_sharing.workers.clone());
+    assert_eq!(kept, [(laptop_id, false)].into(), "kept by its id, not its name");
     assert!(view.read_with(cx, |v, _| v.clipboard_shared(studio_key)), "the other is kept");
     assert!(off(cx, laptop_key) && !off(cx, studio_key), "the navigator marks the laptop");
     assert_eq!(

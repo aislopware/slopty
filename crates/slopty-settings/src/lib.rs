@@ -383,9 +383,11 @@ pub struct ClipboardSettings {
     /// crosses either way; a terminal's own copy and paste still work.
     #[schemars(title = "Share the clipboard")]
     pub sync: bool,
-    /// Each machine named here keeps its own setting.
+    /// Each machine listed here keeps its own setting.
     ///
-    /// A Mac others use can be kept out of it.
+    /// By the machine's worker id, which the app writes when the clipboard is turned off or
+    /// on for one machine, so a renamed machine keeps its choice and two of one name do not
+    /// share it. A Mac others use can be kept out of it.
     #[schemars(title = "By machine")]
     pub workers: BTreeMap<String, bool>,
 }
@@ -397,10 +399,10 @@ impl Default for ClipboardSettings {
 }
 
 impl ClipboardSettings {
-    /// Whether the clipboard is shared with the worker called `name`.
+    /// Whether the clipboard is shared with the worker whose id is `worker`.
     #[must_use]
-    pub fn shared_with(&self, name: &str) -> bool {
-        self.workers.get(name).copied().unwrap_or(self.sync)
+    pub fn shared_with(&self, worker: &str) -> bool {
+        self.workers.get(worker).copied().unwrap_or(self.sync)
     }
 }
 
@@ -900,10 +902,11 @@ option_as_alt = {option_as_alt}
 # Share the clipboard with the machines: copy on one, paste here or on another.
 # Off, nothing crosses either way; a terminal's own copy and paste still work.
 sync = {clipboard_sync}
-# Machines by name, each shared with or not whatever sync says.
+# Machines by worker id, each shared with or not whatever sync says; the app
+# writes them when the clipboard is turned off or on for one machine.
 #
 # [clipboard.workers]
-# shared-mac = false
+# 01999b6e-7c2a-7d4e-9f10-3a5b6c7d8e9f = false
 
 [colors.light]
 # Terminal colours as \"#rrggbb\" in the light appearance; \"\" keeps the
@@ -1248,15 +1251,17 @@ mod tests {
         assert_eq!(Settings::parse(&back).settings.keys, *keys, "written back as read:\n{back}");
     }
 
-    /// The clipboard is shared with every worker unless `sync` says not; a worker named under
-    /// `[clipboard.workers]` is shared with or not whatever `sync` says. Both default to
+    /// The clipboard is shared with every worker unless `sync` says not; a worker listed by its
+    /// id under `[clipboard.workers]` is shared with or not whatever `sync` says. Both default to
     /// sharing, and the alert to sounding while Slopty is hidden.
     #[test]
-    fn the_clipboard_is_shared_by_default_and_per_worker_by_name() {
+    fn the_clipboard_is_shared_by_default_and_per_worker_by_id() {
+        const STUDIO: &str = "01999b6e-7c2a-7d4e-9f10-3a5b6c7d8e9f";
+        const SHARED: &str = "01999b6e-7c2a-7d4e-9f10-000000000002";
         let d = Settings::default();
-        assert!(d.clipboard.sync && d.clipboard.shared_with("studio"));
+        assert!(d.clipboard.sync && d.clipboard.shared_with(STUDIO));
         let loaded = Settings::parse(
-            "[terminal]\nalert = \"never\"\n[clipboard]\nsync = false\n[clipboard.workers]\nstudio = true\n",
+            "[terminal]\nalert = \"never\"\n[clipboard]\nsync = false\n[clipboard.workers]\n01999b6e-7c2a-7d4e-9f10-3a5b6c7d8e9f = true\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         let s = &loaded.settings;
@@ -1265,10 +1270,10 @@ mod tests {
         let heard = ways.map(|a| (a.sounds(false), a.sounds(true)));
         assert_eq!(heard, [(false, false), (true, false), (true, true)], "hidden, then in front");
         assert!(Settings::parse("[terminal]\nalert = true\n").error.is_some(), "no bool");
-        assert!(s.clipboard.shared_with("studio"), "named: shared");
-        assert!(!s.clipboard.shared_with("shared-mac"), "the rest follow sync");
-        let shared = Settings::parse("[clipboard.workers]\nshared-mac = false\n").settings;
-        assert!(!shared.clipboard.shared_with("shared-mac") && shared.clipboard.shared_with("x"));
+        assert!(s.clipboard.shared_with(STUDIO), "listed: shared");
+        assert!(!s.clipboard.shared_with(SHARED), "the rest follow sync");
+        let shared = Settings::parse(&format!("[clipboard.workers]\n{SHARED} = false\n")).settings;
+        assert!(!shared.clipboard.shared_with(SHARED) && shared.clipboard.shared_with(STUDIO));
     }
 
     #[test]

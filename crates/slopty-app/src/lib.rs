@@ -2361,15 +2361,14 @@ impl Workspace {
     }
 
     /// Keep the person's word on sharing the clipboard with `worker` in the settings file, by
-    /// its name; what could not be written is said, and the workspace keeps it until the app
-    /// quits.
+    /// its worker id; what could not be written is said, and the workspace keeps it until the
+    /// app quits.
     fn keep_clipboard_shared(&mut self, worker: WorkerKey, share: bool, cx: &mut Context<Self>) {
-        let Some(name) = self.workers.iter().find(|w| w.key == worker).map(|w| w.name.clone())
-        else {
+        let Some(id) = self.workers.iter().find(|w| w.key == worker).map(|w| w.id) else {
             return;
         };
         let text = settings::editable_text(&self.settings_path);
-        let kept = settings::with_clipboard_shared(&text, &name, share)
+        let kept = settings::with_clipboard_shared(&text, id, share)
             .and_then(|text| settings::save(&self.settings_path, &text, &mut self.settings_seen));
         match kept {
             Ok(loaded) => self.settings = loaded.settings,
