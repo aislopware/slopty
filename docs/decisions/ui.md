@@ -9863,3 +9863,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::a_failed_commit_offers_to_ask_the_agent_to_fix_it`,
     `…::a_sheet_with_words_stays_and_its_words_come_back`;
     `workspace::tests::tab_commands::cmd_t_keeps_the_last_starts_worktree_choice` (slopty-ui).
+
+- ✅ **A background task's line opens what it is** (2026-10-10, readiness audit "below the
+  line"). The tray listed the agent's background work and could open none of it.
+  - **A subagent** left running opens its thread in the view, under the way back, as its
+    call's card does, once the threads table has it.
+  - **A command** shows what it printed under its line, in the code face, its last lines as
+    a call's well shows them; a second press folds it. While it runs and is folded, its last
+    line stays under its title.
+  - Work with neither stays a plain status line, with no disclosure and nothing to press.
+  - Test: `conversation::thread::tests::steps::a_background_task_opens_from_its_line`
+    (slopty-ui).

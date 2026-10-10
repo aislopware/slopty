@@ -298,6 +298,8 @@ pub struct ThreadView {
     plan_open: bool,
     /// The panel of the work the agent runs in the background is open.
     tasks_open: bool,
+    /// The background tasks whose output is open under their line, by the agent's id.
+    tasks_shown: HashSet<String>,
     /// The meter's panel is open in the tray: the context, each window and its reset, what the
     /// session cost, and Compact where the agent takes it.
     meter_open: bool,
@@ -554,6 +556,7 @@ impl ThreadView {
             asked_at: 0,
             plan_open: false,
             tasks_open: false,
+            tasks_shown: HashSet::new(),
             meter_open: false,
             diffs: RefCell::default(),
             clock: None,

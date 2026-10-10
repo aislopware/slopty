@@ -19,7 +19,9 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{AskId, BackgroundTask, Cap, Delivery, Drive, ItemId, Request};
+use slopty_proto::thread::{
+    AskId, BackgroundTask, Cap, Delivery, Drive, ItemBody, ItemId, Request,
+};
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, tail};
@@ -298,7 +300,7 @@ impl ThreadView {
         }
         if self.tasks_open && !bar.tasks.is_empty() {
             let mut tasks = vec![self.tasks_head(cx)];
-            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task)));
+            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task, state, cx)));
             groups.push(tasks);
         }
         if self.meter_open {
@@ -1147,7 +1149,16 @@ impl ThreadView {
 
     /// One piece of background work in the panel: its kind, what it is, the end of what it
     /// printed, and how it stands and for how long.
-    fn task_line(&self, task: &BackgroundTask) -> AnyElement {
+    ///
+    /// The line opens what the work is: a subagent's thread, as its call's card opens it, once
+    /// the table has it; else what it printed, under the line in the code face, its last
+    /// [`PEEK_LINES`] lines, and a second press folds it. Work with neither is a line alone.
+    fn task_line(
+        &self,
+        task: &BackgroundTask,
+        state: &slopty_proto::thread::ThreadState,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let running = task.is_running();
@@ -1161,19 +1172,37 @@ impl ThreadView {
             };
             self.icon(icon, s.text_muted)
         };
-        let last = task
+        let child = task
+            .item
+            .as_ref()
+            .filter(|_| task.kind == BackgroundTask::AGENT)
+            .and_then(|item| state.item(item))
+            .and_then(|item| match &item.body {
+                ItemBody::Tool(call) => call.child,
+                _ => None,
+            })
+            .filter(|c| self.hub.read(cx).threads().rows().rows.contains_key(c));
+        let printed = task
             .output
             .as_ref()
-            .and_then(|o| o.text.lines().rev().find(|l| !l.trim().is_empty()))
+            .map(|o| o.text.trim_end().to_owned())
+            .filter(|t| !t.trim().is_empty());
+        let last = printed
+            .as_deref()
+            .and_then(|t| t.lines().rev().find(|l| !l.trim().is_empty()))
             .map(|l| l.trim().to_owned());
+        let shown = child.is_none() && printed.is_some() && self.tasks_shown.contains(&task.id);
         let took = (!task.started_ms.is_zero()).then(|| {
             let end = task.ended_ms.unwrap_or_else(slopty_core::WallMs::now);
             kit::duration(Duration::from_secs(end.millis_since(task.started_ms) / 1_000))
         });
-        let state = sentence(&task.state);
-        let standing = took.map_or_else(|| state.clone(), |t| format!("{state} \u{b7} {t}"));
+        let state_words = sentence(&task.state);
+        let standing =
+            took.map_or_else(|| state_words.clone(), |t| format!("{state_words} \u{b7} {t}"));
         let tag = task.id.clone();
-        let label = SharedString::from(format!("{}: {state}", task.title));
+        let label = SharedString::from(format!("{}: {state_words}", task.title));
+        let opens = child.is_some() || printed.is_some();
+        let disclosure = if shown { Symbol::ChevronDown } else { Symbol::ChevronRight };
         let head = div()
             .w_full()
             .flex()
@@ -1194,13 +1223,55 @@ impl ThreadView {
                     .flex_none()
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(standing)),
-            );
-        self.two_lines(head, last.filter(|_| running))
+            )
+            .when(opens, |el| el.child(self.icon(disclosure, s.text_muted)));
+        let output = printed.filter(|_| shown).map(|t| {
+            let tag = task.id.clone();
+            div()
+                .w_full()
+                .pl(px(super::TOOL_ROW + theme.spacing.xs))
+                .pb(px(theme.spacing.xs))
+                .child(
+                    kit::inset(div(), theme)
+                        .debug_selector(move || format!("task-output-{tag}"))
+                        .w_full()
+                        .overflow_hidden()
+                        .rounded(px(theme.radii.sm))
+                        .px(px(theme.spacing.sm))
+                        .py(px(theme.spacing.xs))
+                        .font_family(self.mono())
+                        .text_color(hsla(s.text_secondary))
+                        .whitespace_normal()
+                        .child(SharedString::from(tail(&t, PEEK_LINES))),
+                )
+        });
+        let line = self
+            .two_lines(head, last.filter(|_| running && !shown))
+            .children(output)
             .id(ElementId::Name(format!("task-{tag}").into()))
             .debug_selector(move || format!("task-{tag}"))
-            .role(Role::Status)
             .aria_label(label)
-            .text_color(hsla(s.text_secondary))
+            .text_color(hsla(s.text_secondary));
+        if !opens {
+            return line.role(Role::Status).into_any_element();
+        }
+        let id = task.id.clone();
+        let called = task.title.clone();
+        line.role(Role::Button)
+            .when(child.is_none(), |el| el.aria_expanded(shown))
+            .cursor_pointer()
+            .hover(|el| el.bg(hsla(s.hover)))
+            .rounded(px(theme.radii.sm))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                if let Some(child) = child {
+                    this.open_subagent(child, called.clone(), window, cx);
+                    return;
+                }
+                if !this.tasks_shown.remove(&id) {
+                    this.tasks_shown.insert(id.clone());
+                }
+                cx.notify();
+            }))
             .into_any_element()
     }
 }

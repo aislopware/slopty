@@ -8,8 +8,8 @@ use slopty_proto::ClientMsg;
 use slopty_proto::thread::detail::{ExecDetail, ExecStatus};
 use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
 use slopty_proto::thread::{
-    Changed, Clipped, Cursor, Item, ItemBody, ItemId, Link, ThreadId, ToolCall, ToolDetail,
-    ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
+    BackgroundTask, Changed, Clipped, Cursor, Item, ItemBody, ItemId, Link, ThreadId, ToolCall,
+    ToolDetail, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
 };
 
 use super::{asked, hub, snapshot, view};
@@ -146,6 +146,65 @@ fn a_subagent_s_call_opens_its_thread_and_esc_leads_back(cx: &mut TestAppContext
     assert!(cx.debug_bounds("thread-trail").is_none());
     assert!(follows(&sent).contains(&ThreadRequest::Unfollow { thread: sub }), "let go");
     assert!(cx.debug_bounds("tool-agent").is_some(), "drawn at once");
+}
+
+/// A line of the work in the background opens what it is: a subagent left running opens its
+/// thread, as its call's card does; a command shows what it printed under its line, and a
+/// second press folds it. Work with nothing to show is a line alone.
+#[gpui::test]
+fn a_background_task_opens_from_its_line(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut parent = fixtures::empty();
+    let mut child = fixtures::empty();
+    child.meta.parent = Some(Link { thread: parent.meta.id, item: ItemId("agent".to_owned()) });
+    let (main, sub) = (parent.meta.id, child.meta.id);
+    parent.turns = vec![turn(1, TurnState::Active)];
+    parent.items = vec![user("u", 1), call("agent", 1, kind::AGENT, None, Some(sub))];
+    let task = |id: &str, kind: &str, item: Option<&str>, output: Option<&str>| BackgroundTask {
+        id: id.to_owned(),
+        kind: kind.to_owned(),
+        title: format!("task {id}"),
+        state: BackgroundTask::RUNNING.to_owned(),
+        item: item.map(|i| ItemId(i.to_owned())),
+        output: output.map(Clipped::whole),
+        started_ms: WallMs::from_millis(1_000),
+        ended_ms: None,
+    };
+    parent.tasks = vec![
+        task("b1", BackgroundTask::SHELL, None, Some("Compiling a\nFinished dev\n")),
+        task("a1", BackgroundTask::AGENT, Some("agent"), None),
+        task("q1", BackgroundTask::SHELL, None, None),
+    ];
+    let rows = vec![parent.row(WallMs::ZERO), child.row(WallMs::ZERO)];
+    hub.update(cx, ThreadHub::connected);
+    hub.update(cx, |hub, cx| {
+        hub.table(&TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows }, cx);
+    });
+    let (view, cx) = view(cx, &hub, main);
+    hub.update(cx, |hub, cx| hub.frame(main, snapshot(parent, 2), cx));
+    cx.run_until_parked();
+    let click = |cx: &mut gpui::VisualTestContext, what: &'static str| {
+        let at = cx.debug_bounds(what).unwrap_or_else(|| panic!("{what} is drawn")).center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+    };
+    click(cx, "thread-tasks");
+
+    assert!(cx.debug_bounds("task-output-b1").is_none(), "folded until asked");
+    click(cx, "task-b1");
+    let output = cx.debug_bounds("task-output-b1").expect("what it printed, under its line");
+    let line = cx.debug_bounds("task-b1").expect("its line");
+    assert!(output.top() > line.top() && output.bottom() <= line.bottom(), "inside the line");
+    click(cx, "task-b1");
+    assert!(cx.debug_bounds("task-output-b1").is_none(), "a second press folds it");
+
+    click(cx, "task-q1");
+    assert!(cx.debug_bounds("task-output-q1").is_none(), "nothing printed, nothing to open");
+    assert_eq!(view.read_with(cx, |v, _| v.shown()), main);
+
+    click(cx, "task-a1");
+    assert_eq!(view.read_with(cx, |v, _| v.shown()), sub, "the subagent's thread on show");
+    assert!(cx.debug_bounds("thread-trail").is_some(), "with the way back");
 }
 
 /// ⌃O opens every settled turn and each of its steps; again, they fold.
