@@ -2733,7 +2733,7 @@ impl ScreenView {
             std::mem::take(&mut self.held).into_iter().partition(|&code| is_modifier(code));
         for code in plain.into_iter().chain(modifiers) {
             let action = KeyAction::Release;
-            self.send_input(ScreenInput::Key { code, action, mods: Mods::empty() });
+            self.send_input(ScreenInput::Key { code, action, mods: Mods::empty(), chord: None });
         }
         self.modifiers = Modifiers::default();
     }
@@ -4309,7 +4309,7 @@ mod tests {
     fn modifier_keys_go_to_the_worker_as_they_move(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
         let key = |req: &ScreenRequest| match req {
-            ScreenRequest::Input { input: ScreenInput::Key { code, action, mods }, .. } => {
+            ScreenRequest::Input { input: ScreenInput::Key { code, action, mods, .. }, .. } => {
                 Some((*code, *action, *mods))
             }
             _ => None,
@@ -5255,7 +5255,8 @@ mod tests {
             ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
         });
         let mv = |x: f32| ScreenInput::Move { x, y: 0.0 };
-        let key = |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::SUPER };
+        let key =
+            |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::SUPER, chord: None };
         let button = |down| ScreenInput::Button {
             button: ProtoButton::Left,
             down,

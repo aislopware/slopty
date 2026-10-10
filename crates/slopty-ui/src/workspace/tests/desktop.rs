@@ -548,7 +548,7 @@ fn a_remote_window_keeps_its_chords_and_reaches_ours_with_control(cx: &mut TestA
             .into_iter()
             .filter_map(|m| match m {
                 ClientMsg::Screen(ScreenRequest::Input {
-                    input: ScreenInput::Key { code, action: KeyAction::Press, mods },
+                    input: ScreenInput::Key { code, action: KeyAction::Press, mods, .. },
                     ..
                 }) => Some((code, mods)),
                 _ => None,

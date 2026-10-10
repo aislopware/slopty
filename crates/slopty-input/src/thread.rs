@@ -385,7 +385,7 @@ mod tests {
     }
 
     fn key(code: KeyCode, action: KeyAction) -> ScreenInput {
-        ScreenInput::Key { code, action, mods: Mods::SUPER }
+        ScreenInput::Key { code, action, mods: Mods::SUPER, chord: None }
     }
 
     /// A stream dropped mid-⌘-drag (the connection went, or the stream closed) leaves nothing

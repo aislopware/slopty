@@ -45,6 +45,7 @@
 
 #[cfg(target_os = "macos")]
 pub mod backend;
+pub mod chords;
 #[cfg(target_os = "macos")]
 mod injector;
 #[cfg(target_os = "macos")]

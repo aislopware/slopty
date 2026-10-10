@@ -564,9 +564,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worker matches it by character under its own layout, and the US place is where every Latin
     QWERTY layout, and the ASCII layout macOS matches ⌘ against under a non-Latin one, puts
     that character, so ⌘A typed on AZERTY stays ⌘A there instead of quitting as ⌘Q. The
-    client does not know the worker's layout, so an AZERTY or QWERTZ worker that refused the
-    client's source still reads a few letters elsewhere; its release goes to the key its press
-    went as. Under the client's source the key's own place is right. Once the worker
+    client does not know the worker's layout, so it also names the character, and the worker
+    presses the key that types it under its own layout ("A shortcut goes by its character",
+    below); its release goes to the key its press went as. Under the client's source the key's own place is right. Once the worker
     answers, a local `NSEvent` monitor takes every key without ⌘ or ⌃ off
     `-[NSApplication sendEvent:]`, ahead of the window and the input method, and the view
     sends it as it is, so the remote app composes inline. The chords still reach GPUI, whose
@@ -1162,3 +1162,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `UiPointerClick` through the fork's own delivery: a primary click focuses a pane, a
     secondary click on its tab opens the tile's menu (on a phone, whose pane has no tab, the shell's own menu on its rows), and the pointer
     reads `beam` over the shell and `system` over a button (`Dump::pointer`).
+
+- ✅ **A shortcut goes by its character** (2026-10-10, readiness audit item on ⌘ chords under
+  a different layout). Refines "Keys go by position" above. While the worker was not under the
+  client's input source, a ⌘ or ⌃ chord went by its character's place on a US keyboard, which an
+  AZERTY or QWERTZ worker reads as another letter: ⌘A became ⌘Q and quit the app, ⌘Z on a German
+  keyboard became ⌘Y.
+  - *The wire.* `ScreenInput::Key` gains `chord: Option<String>`: for a ⌘ or ⌃ chord while
+    the worker has not answered `applied`, the character the client's layout puts on the key,
+    ignoring every modifier but Shift. Every other key leaves it `None` and goes by position
+    alone.
+  - *The worker, Mac.* `slopty_input::chords::ChordTable` maps each character to the virtual
+    key that types it under the worker's current layout, lowercased: a key that types it bare
+    wins over one that needs Shift, then the lower code, so the main row beats the keypad. It
+    is built from `UCKeyTranslate` over the 128 virtual keys as each goes down with ⌘ held, and
+    with ⌘ and Shift, dead keys off, from `TISCopyCurrentKeyboardLayoutInputSource`'s
+    `kTISPropertyUnicodeKeyLayoutData` (`slopty_platform::input_source::layout_keys`). With ⌘,
+    because that is what an app matches a shortcut against, and layouts differ there: Russian
+    types Latin letters at their US places under ⌘, and "Dvorak - QWERTY ⌘" types QWERTY, while
+    bare they type Cyrillic and Dvorak. It is rebuilt where the worker hears its
+    source change (`Sources::heard`, on the main run loop, which HIToolbox needs), and shared
+    by every stream through one `KeyLayout`. The injector presses a chord at the place the
+    table gives, else at the position the client sent, and remembers each held key's virtual
+    key, so its repeats and release hit the key its press went to even when the layout
+    changes between them. A press costs one read lock and one hash lookup with no allocation,
+    about 220 ns (`docs/MEASUREMENTS.md`, "a chord by its character").
+  - *Linux.* Not applicable yet: a Linux worker has no screen input injector (the platform
+    gives `NoInput` there), so there is nothing to place a chord for. The xkb keymap's
+    keysym-to-keycode table is where it goes when one lands.
+  - *The client* fills `chord` (lane A's half); until it does every chord goes by position as
+    before.
+  - Tests: `chords::tests` (AZERTY `a` on Q's place and `q` on A's, QWERTZ `z` on Y's, bare
+    before shifted, the main row before the keypad, uppercase and several characters) and
+    `a_chord_goes_by_its_character_and_lets_go_where_it_went` (`slopty-input`);
+    `a_layout_names_the_key_each_character_is_on` (`slopty-platform`'s main-thread harness),
+    which reads French, German, US, Russian and both Dvorak layouts macOS ships without
+    selecting any; the `client_screen_key` golden (`slopty-proto`).

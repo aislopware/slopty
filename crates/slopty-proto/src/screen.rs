@@ -325,6 +325,12 @@ pub enum ScreenInput {
         action: KeyAction,
         /// Modifiers, with their side when the client knows it.
         mods: Mods,
+        /// For a ⌘ or ⌃ chord while the worker is not under the client's input source: the
+        /// character the client's layout puts on the key, ignoring every modifier but Shift,
+        /// lowercased. The worker presses the key that types it under its current layout, else
+        /// `code`, so ⌘Z means undo whichever layouts the two run (`docs/decisions/input.md`,
+        /// "A shortcut goes by its character").
+        chord: Option<String>,
     },
     /// A trackpad pinch, for the app under the pointer (`NSEventTypeMagnify`): the worker posts
     /// it as the trackpad would (`docs/decisions/input.md`, "Trackpad gestures reach the remote

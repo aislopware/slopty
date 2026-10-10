@@ -117,6 +117,8 @@ objc2-core-foundation = { workspace = true, features = [
     "CFRunLoop",
     # The input source's changes, heard from HIToolbox (`input_source`).
     "CFNotificationCenter",
+    # The keyboard layout's own data, which a chord's character is looked up in (`input_source`).
+    "CFData",
 ] }
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",

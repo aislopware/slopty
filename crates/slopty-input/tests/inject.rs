@@ -859,6 +859,7 @@ mod gestures {
             code: slopty_proto::input::KeyCode::A,
             action,
             mods: Mods::empty(),
+            chord: None,
         };
         let said = post_all(
             &app,

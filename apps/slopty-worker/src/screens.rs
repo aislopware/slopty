@@ -2197,7 +2197,12 @@ mod fields {
             pipeline.close().await;
         });
         let key = |code| {
-            Command::Input(ScreenInput::Key { code, action: KeyAction::Press, mods: Mods::empty() })
+            Command::Input(ScreenInput::Key {
+                code,
+                action: KeyAction::Press,
+                mods: Mods::empty(),
+                chord: None,
+            })
         };
         // The fake display is 800 × 500 points at the origin.
         let caret = Rect { x: 100.0, y: 50.0, w: 1.0, h: 17.0 };
@@ -2294,6 +2299,7 @@ mod sourcing {
             code: KeyCode::A,
             action: KeyAction::Press,
             mods: Mods::empty(),
+            chord: None,
         })
     }
 

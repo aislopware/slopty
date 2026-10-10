@@ -456,7 +456,7 @@ impl ScreenView {
     fn press_key(&mut self, code: KeyCode, repeat: bool, mods: Mods) {
         self.hold_key(code);
         let action = if repeat { KeyAction::Repeat } else { KeyAction::Press };
-        self.send_input(ScreenInput::Key { code, action, mods });
+        self.send_input(ScreenInput::Key { code, action, mods, chord: None });
     }
 
     /// `code` is down on the worker until its release goes.
@@ -470,7 +470,7 @@ impl ScreenView {
     fn release_key(&mut self, code: KeyCode, mods: Mods) -> bool {
         let Some(at) = self.held.iter().position(|&c| c == code) else { return false };
         self.held.swap_remove(at);
-        self.send_input(ScreenInput::Key { code, action: KeyAction::Release, mods });
+        self.send_input(ScreenInput::Key { code, action: KeyAction::Release, mods, chord: None });
         true
     }
 
@@ -563,15 +563,25 @@ impl ScreenView {
         let mods = keys::screen_mods(keystroke.modifiers);
         if paste && code != KeyCode::Unidentified {
             self.send_input(ScreenInput::PasteChord { code, mods });
-            self.send_input(ScreenInput::Key { code, action: KeyAction::Release, mods });
+            self.send_input(ScreenInput::Key {
+                code,
+                action: KeyAction::Release,
+                mods,
+                chord: None,
+            });
         } else if code == KeyCode::Unidentified {
             let text = keystroke.key_char.filter(|t| !t.is_empty());
             if let Some(text) = text.filter(|_| !mods.intersects(Mods::CTRL | Mods::SUPER)) {
                 self.send_input(ScreenInput::Text { text });
             }
         } else {
-            self.send_input(ScreenInput::Key { code, action: KeyAction::Press, mods });
-            self.send_input(ScreenInput::Key { code, action: KeyAction::Release, mods });
+            self.send_input(ScreenInput::Key { code, action: KeyAction::Press, mods, chord: None });
+            self.send_input(ScreenInput::Key {
+                code,
+                action: KeyAction::Release,
+                mods,
+                chord: None,
+            });
         }
         cx.notify();
     }
@@ -603,8 +613,18 @@ impl ScreenView {
                 self.send_input(ScreenInput::Text { text: std::mem::take(&mut run) });
             }
             let mods = Mods::empty();
-            self.send_input(ScreenInput::Key { code: key, action: KeyAction::Press, mods });
-            self.send_input(ScreenInput::Key { code: key, action: KeyAction::Release, mods });
+            self.send_input(ScreenInput::Key {
+                code: key,
+                action: KeyAction::Press,
+                mods,
+                chord: None,
+            });
+            self.send_input(ScreenInput::Key {
+                code: key,
+                action: KeyAction::Release,
+                mods,
+                chord: None,
+            });
         }
         if !run.is_empty() {
             self.send_input(ScreenInput::Text { text: run });

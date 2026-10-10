@@ -112,7 +112,7 @@ fn inputs(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<ScreenInput> {
 }
 
 fn key(code: KeyCode, action: KeyAction, mods: Mods) -> ScreenInput {
-    ScreenInput::Key { code, action, mods }
+    ScreenInput::Key { code, action, mods, chord: None }
 }
 
 fn text(t: &str) -> ScreenInput {

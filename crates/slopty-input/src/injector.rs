@@ -12,6 +12,7 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 use slopty_proto::screen::{CaptureTarget, ScreenInput, ScrollPhase};
 
 use crate::backend::{Backend, Event, Gesture, Post, Route, System};
+use crate::chords::KeyLayout;
 use crate::nudge::{self, Nudge};
 use crate::{DragStep, InputError, PointerWatch, keymap, text};
 
@@ -83,8 +84,12 @@ pub struct Injector<B: Backend = System> {
     at: Option<CGPoint>,
     /// The same, for the stream's cursor samples.
     placed: PointerWatch,
-    /// Keys pressed and not released, in press order.
-    keys: Vec<KeyCode>,
+    /// Keys pressed and not released, in press order, each with the virtual key it went down
+    /// as: a chord's is where the worker's layout types its character ([`crate::chords`]), and
+    /// its release goes there too, whatever the layout became meanwhile.
+    keys: Vec<(KeyCode, objc2_core_graphics::CGKeyCode)>,
+    /// The worker's keyboard layout, where a chord's character is looked up.
+    layout: KeyLayout,
     /// Modifier flags from the latest event, kept so bare modifier presses post correctly.
     flags: CGEventFlags,
     /// This injector's place among those holding Caps Lock ([`CapsClaims`]).
@@ -409,6 +414,7 @@ impl<B: Backend> Injector<B> {
             at: None,
             placed,
             keys: Vec::new(),
+            layout: KeyLayout::system(),
             flags: CGEventFlags::empty(),
             caps: CapsHolder { claims, id, holding: false },
             gestures: false,
@@ -520,19 +526,19 @@ impl<B: Backend> Injector<B> {
                 self.gestures = *remote;
                 Ok(())
             }
-            ScreenInput::Key { code, action, mods } => {
+            ScreenInput::Key { code, action, mods, chord } => {
                 if !matches!(action, KeyAction::Release) {
                     self.ensure_active();
                 }
                 self.flags = flags_for(*mods);
-                self.post_key(*code, *action)
+                self.post_key(*code, *action, chord.as_deref())
             }
             // Held by the connection until the client's clipboard is on the pasteboard; here it
             // is the press it stands for.
             ScreenInput::PasteChord { code, mods } => {
                 self.ensure_active();
                 self.flags = flags_for(*mods);
-                self.post_key(*code, KeyAction::Press)
+                self.post_key(*code, KeyAction::Press, None)
             }
             ScreenInput::Text { text } => {
                 self.ensure_active();
@@ -632,7 +638,7 @@ impl<B: Backend> Injector<B> {
         self.release_buttons();
         self.close_gestures();
         let (modifiers, plain): (Vec<KeyCode>, Vec<KeyCode>) =
-            std::mem::take(&mut self.keys).into_iter().partition(|&c| keymap::is_modifier(c));
+            self.keys.iter().map(|(code, _)| *code).partition(|&c| keymap::is_modifier(c));
         for code in plain {
             self.release_key(code);
         }
@@ -923,7 +929,7 @@ impl<B: Backend> Injector<B> {
     }
 
     fn release_key(&mut self, code: KeyCode) {
-        if let Err(e) = self.post_key(code, KeyAction::Release) {
+        if let Err(e) = self.post_key(code, KeyAction::Release, None) {
             tracing::debug!(target = ?self.target, ?code, error = %e, "release");
         }
     }
@@ -934,6 +940,12 @@ impl<B: Backend> Injector<B> {
         let now = self.backend.event_clock();
         let begins = matches!(phase, ScrollPhase::Began | ScrollPhase::MayBegin);
         self.timeline.place(client_us, now, begins)
+    }
+
+    /// Look a chord's character up in `layout` rather than the worker's own.
+    #[cfg(test)]
+    fn use_layout(&mut self, layout: KeyLayout) {
+        self.layout = layout;
     }
 
     /// Bounds read somewhere else at `at`, so the next pointer event need not read them. Older
@@ -1063,23 +1075,34 @@ impl<B: Backend> Injector<B> {
         }
     }
 
-    fn post_key(&mut self, code: KeyCode, action: KeyAction) -> Result<(), InputError> {
+    fn post_key(
+        &mut self,
+        code: KeyCode,
+        action: KeyAction,
+        chord: Option<&str>,
+    ) -> Result<(), InputError> {
         // Caps Lock is a lock the client sets (`ScreenInput::Lock`); its key would toggle it
         // on its press, whatever the client's state.
-        let Some(vk) = keymap::virtual_key(code).filter(|_| code != KeyCode::CapsLock) else {
+        let Some(at) = keymap::virtual_key(code).filter(|_| code != KeyCode::CapsLock) else {
             tracing::debug!(?code, "no virtual key; dropped");
             return Ok(());
         };
         let down = !matches!(action, KeyAction::Release);
         let modifier = keymap::is_modifier(code);
+        let held = self.keys.iter().find(|(held, _)| *held == code).map(|(_, vk)| *vk);
+        // A repeat and a release go where the press went; a chord's press where the worker's
+        // layout types its character, else at its position.
+        let vk = held.unwrap_or_else(|| {
+            chord.filter(|_| down && !modifier).and_then(|c| self.layout.place(c)).unwrap_or(at)
+        });
         let posted = self.post(
             None,
             Event::Key { vk, down, modifier, repeat: matches!(action, KeyAction::Repeat) },
         );
         if !down {
-            self.keys.retain(|&held| held != code);
-        } else if posted.is_ok() && !self.keys.contains(&code) {
-            self.keys.push(code);
+            self.keys.retain(|(held, _)| *held != code);
+        } else if posted.is_ok() && held.is_none() {
+            self.keys.push((code, vk));
         }
         posted
     }
@@ -1318,6 +1341,7 @@ mod tests {
             code: KeyCode::A,
             action: KeyAction::Press,
             mods: Mods::empty(),
+            chord: None,
         })
         .unwrap();
         let routes: Vec<Route> = inj.backend().posts.iter().map(|p| p.route).collect();
@@ -1563,6 +1587,59 @@ mod tests {
         ));
     }
 
+    /// A chord goes where the worker's layout types its character: ⌘ on the client's Z key
+    /// of a German layout (`chord: "z"`, sent from its Y position) lands on a German worker's
+    /// own Z key. Its repeat and release go to the key its press went to, even once the layout
+    /// changed; with no layout read, or for a character the layout has no key for, the position
+    /// the client sent stands.
+    #[test]
+    fn a_chord_goes_by_its_character_and_lets_go_where_it_went() {
+        use crate::chords::{ChordTable, KeyLayout};
+        let (y_place, z_place) = (0x10, 0x06);
+        let qwertz =
+            ChordTable::from_keys([(y_place, Some('z'), None), (z_place, Some('y'), None)]);
+        let layout = KeyLayout::default();
+        let mut inj = window();
+        inj.use_layout(layout.clone());
+        let key = |action: KeyAction, chord: &str| ScreenInput::Key {
+            code: KeyCode::Z,
+            action,
+            mods: Mods::SUPER,
+            chord: Some(chord.to_owned()),
+        };
+        inj.inject(&key(KeyAction::Press, "z")).unwrap();
+        inj.inject(&key(KeyAction::Release, "z")).unwrap();
+        layout.set(qwertz);
+        inj.inject(&key(KeyAction::Press, "z")).unwrap();
+        layout.set(ChordTable::default());
+        inj.inject(&key(KeyAction::Repeat, "z")).unwrap();
+        inj.inject(&key(KeyAction::Release, "z")).unwrap();
+        inj.inject(&key(KeyAction::Press, "ж")).unwrap();
+        inj.release_all();
+        let vks: Vec<(u16, bool)> = inj
+            .backend()
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Key { vk, down, .. } => Some((*vk, *down)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            vks,
+            [
+                (z_place, true),
+                (z_place, false),
+                (y_place, true),
+                (y_place, true),
+                (y_place, false),
+                (z_place, true),
+                (z_place, false),
+            ],
+            "no layout: the position; then where `z` is typed, held there; else the position"
+        );
+    }
+
     /// A key goes by position with its modifiers and no text, activates the owner once, and
     /// its release goes too (`keys_carry_no_unicode_string` checks the built event).
     #[test]
@@ -1572,6 +1649,7 @@ mod tests {
             code: KeyCode::Q,
             action,
             mods: Mods::SUPER | Mods::SUPER_RIGHT,
+            chord: None,
         };
         inj.inject(&key(KeyAction::Press)).unwrap();
         inj.inject(&key(KeyAction::Repeat)).unwrap();
@@ -1601,6 +1679,7 @@ mod tests {
             code: KeyCode::ShiftLeft,
             action: KeyAction::Press,
             mods: Mods::SHIFT,
+            chord: None,
         })
         .unwrap();
         assert!(matches!(
@@ -1621,6 +1700,7 @@ mod tests {
             code: KeyCode::MetaLeft,
             action: KeyAction::Press,
             mods: Mods::SUPER,
+            chord: None,
         })
         .unwrap();
         let text = "Tiếng Việt có dấu và 日本語の文章";
@@ -1652,6 +1732,7 @@ mod tests {
             code: KeyCode::CapsLock,
             action: KeyAction::Press,
             mods: Mods::empty(),
+            chord: None,
         })
         .unwrap();
         inj.inject(&ScreenInput::Lock { caps: false }).unwrap();
@@ -1864,7 +1945,8 @@ mod tests {
     #[test]
     fn release_all_lets_go_of_every_button_key_and_modifier() {
         let mut inj = display();
-        let key = |code, mods| ScreenInput::Key { code, action: KeyAction::Press, mods };
+        let key =
+            |code, mods| ScreenInput::Key { code, action: KeyAction::Press, mods, chord: None };
         let button = |button| ScreenInput::Button {
             button,
             down: true,
@@ -1926,7 +2008,12 @@ mod tests {
     #[test]
     fn released_keys_are_not_released_again() {
         let mut inj = display();
-        let key = |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::empty() };
+        let key = |action| ScreenInput::Key {
+            code: KeyCode::A,
+            action,
+            mods: Mods::empty(),
+            chord: None,
+        };
         inj.inject(&key(KeyAction::Press)).unwrap();
         inj.inject(&key(KeyAction::Repeat)).unwrap();
         inj.inject(&key(KeyAction::Release)).unwrap();
@@ -1969,6 +2056,7 @@ mod tests {
             code: KeyCode::MetaLeft,
             action: KeyAction::Press,
             mods: Mods::SUPER,
+            chord: None,
         })
         .unwrap();
         drop(inj);
@@ -2015,6 +2103,7 @@ mod tests {
                 code: KeyCode::A,
                 action: KeyAction::Press,
                 mods: Mods::empty(),
+                chord: None,
             })
             .unwrap();
         }
@@ -2491,6 +2580,7 @@ mod tests {
             code: KeyCode::MetaLeft,
             action: KeyAction::Press,
             mods: Mods::SUPER | Mods::ALT | Mods::CAPS_LOCK,
+            chord: None,
         })
         .unwrap();
         inj.press_at(0.0, 0.0).unwrap();

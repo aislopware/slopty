@@ -951,6 +951,7 @@ mod golden {
                 code: KeyCode::Q,
                 action: KeyAction::Press,
                 mods: Mods::SUPER | Mods::SUPER_RIGHT | Mods::FN,
+                chord: Some("a".to_owned()),
             }),
         );
         snap(

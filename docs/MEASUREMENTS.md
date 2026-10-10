@@ -15884,3 +15884,28 @@ The batches differ in what they touched: one run each, indicative.
 gh run view <id> --log | grep -E "✓ (nextest build|clippy|rustdoc)"
 gh run view <id> --json jobs --jq '.jobs[] | "\(.name) \(.startedAt) \(.completedAt)"'
 ```
+
+## 2026-10-10 — a chord by its character
+
+A ⌘ or ⌃ chord now carries the character the client's layout puts on its key. While the worker
+is not under the client's input source, the injector presses the key that types that character
+under the worker's layout (`docs/decisions/input.md`, "A shortcut goes by its character"). The
+lookup sits on every such press: one read lock on the shared table and one hash lookup, with no
+allocation. The test times a ⌘Z press and its release through the injector, with nothing built
+or posted, 200 000 pairs per round, three rounds. Debug test profile, mac-studio.
+
+| the press goes | ns a press and its release |
+| --- | --- |
+| by position (no chord) | 363–373 |
+| by character, no layout read yet | 402–407 |
+| by character, placed by the layout (QWERTZ, `z` on Y's place) | 587–603 |
+
+- **About 220 ns a chord.** That is a few hundred nanoseconds on a press the window server then
+  takes tens of microseconds to post (a scroll's post is 25–38 µs on this Mac, "the injector's
+  own work per input"). Only chords pay it: a plain key carries no character. The release goes
+  to the key its press went to, so it never looks anything up.
+
+```sh
+cargo nextest run -p slopty-input --test cost --run-ignored only \
+  -E 'test(a_chord_s_cost_by_its_character)' --no-capture
+```

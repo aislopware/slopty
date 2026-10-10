@@ -1,6 +1,8 @@
 //! What only the main thread can see (macOS): a download's progress as Finder sees it
-//! (`slopty_platform::continued`), a browser page's Web Inspector (`slopty_platform::web`), and
-//! a self-test window's size on a screen too short for it (`slopty_platform::asked_size`).
+//! (`slopty_platform::continued`), a browser page's Web Inspector (`slopty_platform::web`), a
+//! self-test window's size on a screen too short for it (`slopty_platform::asked_size`), and
+//! what a keyboard layout's keys type (`slopty_platform::input_source`, which `HIToolbox` asks
+//! of the main thread).
 //!
 //! Finder subscribes to the progress published for a file URL, and Foundation hands the publish
 //! to a subscriber on its main thread; a `WKWebView` is made only there. libtest never gives a
@@ -27,7 +29,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 4] = [
+    pub const TESTS: [(&str, fn()); 5] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -41,7 +43,41 @@ mod mac {
             "a_self_test_window_keeps_its_size_on_a_short_screen",
             a_self_test_window_keeps_its_size_on_a_short_screen,
         ),
+        (
+            "a_layout_names_the_key_each_character_is_on",
+            a_layout_names_the_key_each_character_is_on,
+        ),
     ];
+
+    /// What a ⌘ chord's character is on, read from layouts macOS ships, none of them selected.
+    /// French AZERTY types `a` on Q's place and `q` on A's, German QWERTZ `z` on Y's. Under ⌘
+    /// Russian types Latin letters at their US places and "Dvorak - QWERTY ⌘" types QWERTY,
+    /// while plain Dvorak keeps its own: what a key types with ⌘ held is what an app matches.
+    fn a_layout_names_the_key_each_character_is_on() {
+        use slopty_platform::input_source::{SelectError, layout_keys_of};
+        for (id, vk, with_command) in [
+            ("com.apple.keylayout.French", 0x0c_u16, 'a'),
+            ("com.apple.keylayout.French", 0x00, 'q'),
+            ("com.apple.keylayout.German", 0x10, 'z'),
+            ("com.apple.keylayout.German", 0x06, 'y'),
+            ("com.apple.keylayout.US", 0x06, 'z'),
+            ("com.apple.keylayout.Russian", 0x08, 'c'),
+            ("com.apple.keylayout.DVORAK-QWERTYCMD", 0x08, 'c'),
+            ("com.apple.keylayout.Dvorak", 0x22, 'c'),
+        ] {
+            let keys = layout_keys_of(id).unwrap();
+            let key = keys.iter().find(|(at, ..)| *at == vk).copied();
+            assert!(
+                key.is_some_and(|(_, typed, _)| typed == Some(with_command)),
+                "{id} {vk:#04x} types {with_command:?} with ⌘: {key:?}"
+            );
+        }
+        assert_eq!(
+            layout_keys_of("com.apple.keylayout.Nonexistent"),
+            Err(SelectError::Unknown),
+            "a layout this Mac does not have",
+        );
+    }
 
     /// AppKit fits a plain window into a screen too short for it; a window class the self-test
     /// asked to keep its sizes keeps the frame it is given, and is asked only once. No window

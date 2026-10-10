@@ -1059,7 +1059,7 @@ mod tests {
         let input = |stream, input| ClientMsg::Screen(ScreenRequest::Input { stream, input });
         let moved = |stream| input(stream, ScreenInput::Move { x: 1.0, y: 2.0 });
         let key = |stream, code, mods| {
-            input(stream, ScreenInput::Key { code, action: KeyAction::Press, mods })
+            input(stream, ScreenInput::Key { code, action: KeyAction::Press, mods, chord: None })
         };
         let quality = |stream| {
             ClientMsg::Screen(ScreenRequest::SetQuality { stream, quality: Quality::default() })

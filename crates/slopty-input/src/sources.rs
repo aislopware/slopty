@@ -28,6 +28,8 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 
+use crate::chords::{ChordTable, KeyLayout};
+
 /// The most an answer waits for its switch to be heard.
 ///
 /// The switch reaches every app, the worker included, as `HIToolbox`'s distributed
@@ -206,6 +208,11 @@ pub trait Tis: Send + Sync + 'static {
     fn select(&self, id: &str) -> Result<bool, String>;
     /// Turn `id` off.
     fn disable(&self, id: &str);
+    /// What the current keyboard layout types where, for a chord's character
+    /// ([`crate::chords`]); `None` where no layout is read, which leaves the one read before.
+    fn layout(&self) -> Option<ChordTable> {
+        None
+    }
 }
 
 /// A platform with no input sources to select: every claim is refused, and the client composes.
@@ -255,6 +262,8 @@ struct Inner {
     refusing: AtomicBool,
     /// Where the worker's own source is kept while a claim holds, and what was written there.
     kept: parking_lot::Mutex<(Option<PathBuf>, Option<Kept>)>,
+    /// The layout a chord's character is looked up in, read again at each switch heard.
+    layout: KeyLayout,
 }
 
 impl std::fmt::Debug for Sources {
@@ -306,6 +315,7 @@ impl Sources {
             hearing: AtomicBool::new(false),
             refusing: AtomicBool::new(false),
             kept: parking_lot::Mutex::new((None, None)),
+            layout: KeyLayout::system(),
         }))
     }
 
@@ -360,8 +370,13 @@ impl Sources {
     }
 
     /// The worker switched to `current` (the platform's notification). Every report counts,
-    /// the same source again included: an answer waits for one made after its switch.
+    /// the same source again included: an answer waits for one made after its switch. Called
+    /// where TIS may be called (the notification's own thread, the main one on macOS): the
+    /// layout a chord's character is looked up in is read again here.
     pub fn heard(&self, current: Option<String>) {
+        if let Some(table) = self.0.tis.layout() {
+            self.0.layout.set(table);
+        }
         self.0.heard.send_replace(current);
     }
 
@@ -536,7 +551,7 @@ mod mac {
     use dispatch2::DispatchQueue;
     use slopty_platform::input_source;
 
-    use super::Tis;
+    use super::{ChordTable, Tis};
 
     /// Text Input Sources Services, which asserts it is called on the main queue.
     #[derive(Debug, Clone, Copy)]
@@ -563,6 +578,10 @@ mod mac {
             if let Err(e) = input_source::disable(id) {
                 tracing::info!(source = id, error = %e, "keyboard input source left on");
             }
+        }
+
+        fn layout(&self) -> Option<ChordTable> {
+            input_source::layout_keys().map(ChordTable::from_keys)
         }
     }
 }

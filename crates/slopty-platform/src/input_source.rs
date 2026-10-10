@@ -26,13 +26,44 @@ unsafe extern "C" {
     static kTISPropertyInputSourceIsEnabled: &'static CFString;
     static kTISPropertyInputSourceIsSelectCapable: &'static CFString;
     static kTISNotifySelectedKeyboardInputSourceChanged: &'static CFString;
+    static kTISPropertyUnicodeKeyLayoutData: &'static CFString;
     fn TISCopyCurrentKeyboardInputSource() -> *mut Source;
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> *mut Source;
     fn TISGetInputSourceProperty(source: *const Source, key: &CFString) -> *const c_void;
     fn TISCreateInputSourceList(properties: &CFDictionary, include_all: u8) -> *mut CFArray;
     fn TISEnableInputSource(source: *const Source) -> i32;
     fn TISDisableInputSource(source: *const Source) -> i32;
     fn TISSelectInputSource(source: *const Source) -> i32;
 }
+
+// `<HIToolbox/Events.h>` and `<CarbonCore/UnicodeUtilities.h>`; objc2 binds neither.
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn LMGetKbdType() -> u8;
+    fn UCKeyTranslate(
+        layout: *const c_void,
+        virtual_key: u16,
+        action: u16,
+        modifiers: u32,
+        keyboard: u32,
+        options: u32,
+        dead_keys: *mut u32,
+        most: usize,
+        length: *mut usize,
+        text: *mut u16,
+    ) -> i32;
+}
+
+/// `kUCKeyActionDown`: what a key types as it goes down.
+const KEY_ACTION_DOWN: u16 = 0;
+/// `kUCKeyTranslateNoDeadKeysMask`: a dead key gives its own character rather than waiting.
+const NO_DEAD_KEYS: u32 = 1;
+/// `cmdKey >> 8`, as `UCKeyTranslate` takes the modifiers.
+const COMMAND: u32 = 0x01;
+/// `shiftKey >> 8`, as `UCKeyTranslate` takes the modifiers.
+const SHIFT: u32 = 0x02;
+/// One past the highest virtual key code a layout maps.
+const VIRTUAL_KEYS: u16 = 128;
 
 /// Why an input source was not selected.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,6 +123,78 @@ pub fn current() -> Option<String> {
     // SAFETY: on the main thread, as TIS requires; the answer follows the Create Rule.
     let source = owned(unsafe { TISCopyCurrentKeyboardInputSource() }.cast::<CFType>())?;
     id_of(&source)
+}
+
+/// One key of a keyboard layout: its virtual key code, then the one character it types with ⌘
+/// held and with ⌘ and Shift (`None` for none, or for more than one).
+///
+/// With ⌘, because that is what an app matches a shortcut against: Russian types Latin letters
+/// at their US places under ⌘, and "Dvorak - QWERTY ⌘" types QWERTY.
+pub type LayoutKey = (u16, Option<char>, Option<char>);
+
+/// What each key of this Mac's current keyboard layout types ([`LayoutKey`]).
+///
+/// `None` off the main thread or when the layout gives no Unicode data. An input method's own
+/// layout is the one it types through, which this reads.
+#[must_use]
+pub fn layout_keys() -> Option<Vec<LayoutKey>> {
+    MainThreadMarker::new()?;
+    // SAFETY: on the main thread, as TIS requires; the answer follows the Create Rule.
+    let source = owned(unsafe { TISCopyCurrentKeyboardLayoutInputSource() }.cast::<CFType>())?;
+    keys_of(&source)
+}
+
+/// What each key of the installed keyboard layout `id` types, enabled or not, without selecting
+/// it ([`LayoutKey`]). Main thread only.
+///
+/// # Errors
+///
+/// Off the main thread, an id this Mac does not have, and a source with no Unicode layout data
+/// (an input method rather than a layout) as [`SelectError::Unknown`].
+pub fn layout_keys_of(id: &str) -> Result<Vec<LayoutKey>, SelectError> {
+    keys_of(&find(id)?).ok_or(SelectError::Unknown)
+}
+
+/// What each key of the keyboard layout `source` types. Main thread only.
+fn keys_of(source: &CFRetained<CFType>) -> Option<Vec<LayoutKey>> {
+    let source_ptr = CFRetained::as_ptr(source).as_ptr().cast::<Source>().cast_const();
+    // SAFETY: `source` is a live input source, the key HIToolbox's own constant; the answer is a
+    // CFData the source owns (the Get Rule), read below while `source` is held.
+    let data = unsafe { TISGetInputSourceProperty(source_ptr, kTISPropertyUnicodeKeyLayoutData) };
+    // SAFETY: `kTISPropertyUnicodeKeyLayoutData`'s value is a CFDataRef, or null.
+    let data = unsafe { data.cast::<objc2_core_foundation::CFData>().as_ref() }?;
+    let layout = data.byte_ptr().cast::<c_void>();
+    // SAFETY: `LMGetKbdType` reads the keyboard type the event system last saw; no argument.
+    let keyboard = u32::from(unsafe { LMGetKbdType() });
+    let typed = |vk: u16, modifiers: u32| {
+        let mut dead = 0_u32;
+        let mut text = [0_u16; 4];
+        let mut length = 0_usize;
+        // SAFETY: `layout` points at the `UCKeyboardLayout` the CFData holds, alive while
+        // `source` is; `text` has room for `text.len()` units and `length` says how many were
+        // written; `dead` is the translation's state, fresh each time.
+        let status = unsafe {
+            UCKeyTranslate(
+                layout,
+                vk,
+                KEY_ACTION_DOWN,
+                modifiers,
+                keyboard,
+                NO_DEAD_KEYS,
+                &raw mut dead,
+                text.len(),
+                &raw mut length,
+                text.as_mut_ptr(),
+            )
+        };
+        let units = text.get(..length).filter(|_| status == 0)?;
+        let mut chars = char::decode_utf16(units.iter().copied());
+        match (chars.next(), chars.next()) {
+            (Some(Ok(c)), None) if !c.is_control() => Some(c),
+            _ => None,
+        }
+    };
+    Some((0..VIRTUAL_KEYS).map(|vk| (vk, typed(vk, COMMAND), typed(vk, COMMAND | SHIFT))).collect())
 }
 
 /// The installed input source `id`, enabled or not. Main thread only.

@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
-        ScreenInput::Key { code, action: KeyAction::Press, mods }
+        ScreenInput::Key { code, action: KeyAction::Press, mods, chord: None }
     }
 
     fn opened(id: SessionId) -> WorkerMsg {
