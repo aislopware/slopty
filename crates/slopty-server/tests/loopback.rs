@@ -246,7 +246,10 @@ mod tests {
         assert_eq!(info.liveness, Liveness::Unreachable);
         let lease = slopty_net::endpoint::LEASE_IDLE_TIMEOUT;
         assert!(took >= lease.checked_sub(Duration::from_secs(1)).unwrap(), "{took:?}");
-        assert!(took < lease.checked_add(Duration::from_secs(2)).unwrap(), "{took:?}");
+        // The ceiling only tells the lease apart from a far longer wait: the server, the relay
+        // and the client share this test's one thread, and a loaded CI runner held it 2.4 s
+        // past the lease (run 38089410990).
+        assert!(took < lease.checked_add(Duration::from_secs(5)).unwrap(), "{took:?}");
         server.shutdown().await;
     }
 }
