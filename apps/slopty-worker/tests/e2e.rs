@@ -1203,18 +1203,24 @@ mod tests {
         let program = format!("sh -c 'echo once >> {}; exec sleep 120'\n", ran.display());
         worker.tx.send(&type_in(program)).await.unwrap();
         // The screen is on disk once a checkpoint after the marker reached the worker's keeper,
-        // at most `restore::KEEP_EVERY` after the one before it.
-        let kept = dir.path().join("data").join("sessions").join(format!("{session}.vt"));
+        // `restore::KEEP_SOON` after the one before it for a screen this small. The recipe with
+        // the directory follows the screen, so a machine going down between the two writes
+        // comes back in the directory before: wait for both.
+        let sessions = dir.path().join("data").join("sessions");
+        let (kept, recipe) =
+            (sessions.join(format!("{session}.vt")), sessions.join(format!("{session}.json")));
         let marker = b"kept-marker";
-        tokio::time::timeout(Duration::from_secs(40), async {
+        let deeper = place.display().to_string();
+        tokio::time::timeout(STEP, async {
             while !(ran.exists()
-                && std::fs::read(&kept).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker)))
+                && std::fs::read(&kept).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker))
+                && std::fs::read_to_string(&recipe).is_ok_and(|r| r.contains(&deeper)))
             {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("the screen is kept");
+        .expect("the screen and its directory are kept");
 
         // The machine goes down: the worker and ptyd end, and the shell and its program with
         // them, since nothing holds the master any more.

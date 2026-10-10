@@ -2078,7 +2078,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     directory, title, size, when the screen was saved, and whether the session was itself
     restored. `<id>.vt` holds the newest checkpoint. The directory is 0700 because a
     scrollback holds whatever was printed. The recipe is written at open. Each checkpoint
-    updates the directory, title and size, and is written at most every 10 s. The worker
+    updates the directory, title and size, and is written paced by its size
+    (`restore::pace`, 2026-10-11): its bytes at 512 KiB/s, no sooner than 500 ms and no later
+    than 10 s after the last. A shell's few kilobytes are on disk within 500 ms, so a crash
+    loses at most that much of its screen beyond the session's own checkpoint wait; a full
+    scrollback is still written every 10 s, so no session writes more than before. The worker
     writes what it holds on its way down, which covers a reboot (launchd stops it with
     SIGTERM) and ptyd ending (it exits after its ptyd). Closing a session deletes both files.
     Cost: MEASUREMENTS 2026-09-29, "Keeping a session's screen on disk".

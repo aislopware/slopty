@@ -15906,3 +15906,50 @@ or posted, 200 000 pairs per round, three rounds. Debug test profile, mac-studio
 cargo nextest run -p slopty-input --test cost --run-ignored only \
   -E 'test(a_chord_s_cost_by_its_character)' --no-capture
 ```
+
+## 2026-10-11 — A lost shell's session: the restore is 0.1 s, the kept screen was 10 s stale
+
+Mac Studio M1 Max, macOS 27.0, test profile (unoptimized), other sessions building in the same
+checkout. CI failed `a_session_whose_shell_was_lost_comes_back_in_its_directory`
+(`apps/slopty-worker/tests/e2e.rs`), and locally it took 11.4 s every time. Timestamps printed
+at each phase of the test (temporary `eprintln!`s, not kept), and the worker's own debug log:
+
+```sh
+cargo build --profile test -p slopty-ptyd -p slopty-workerd --bins
+RUST_LOG=slopty_worker=debug,slopty_workerd=debug,info SLOPTY_BINS_FRESH=1 \
+  cargo test -p slopty-workerd --test e2e -- a_session_whose_shell_was_lost --nocapture
+```
+
+| phase | before | after |
+| --- | --- | --- |
+| the marker's checkpoint formatted, after the typed line | 2.0 s | 2.0 s |
+| that checkpoint on disk, after the one before | 10.0 s | at once (its pace, 0.5 s, had passed) |
+| a new ptyd and worker up, to the restored session's first full frame | 0.11 s | 0.11 s |
+| the whole test, three runs | 11.5–12.6 s | 3.5–4.3 s |
+
+- **The restore was never slow.** A new ptyd and worker spawned, listening, reopened the lost
+  session and sent its first full frame, with the old scrollback and divider, in 0.11 s. That
+  is 0.03 s for ptyd, 0.04 s for the worker to listen, and 3 ms for the frame. The new shell
+  answered `pwd` 10 ms later.
+- **The 10 s was the keeper's write pace** (`restore::KEEP_EVERY`): every session's screen was
+  written at most every 10 s, and the test waited for the marker to reach the disk. For a
+  person, that is how much of a shell's screen a crash of the whole machine could lose. The
+  checkpoint here was 613 bytes, and a write took 2–4 ms.
+- **The fix paces each write by its size** (`restore::pace`): its bytes at 512 KiB/s, clamped
+  to 0.5–10 s. A shell's few kilobytes are on disk within 0.5 s of the last write, which
+  matches the session's own 0.5 s wait for quiet output (2 s after typing). A full 6 MiB
+  scrollback is still written every 10 s, so no session writes more to the disk than before.
+- **The first worker a test spawns starts 1.1–1.5 s late, before its `main`.** Earlier runs
+  under load showed up to 18 s. A worker started from Python with the test's arguments, fresh
+  home and data dir reaches `main` in 18 ms and prints its address in 0.11–0.22 s. The
+  second worker the same test spawns reaches `main` in 8 ms. Only the test harness's first
+  spawn pays, so it is the test process, not the worker. The likely cause is macOS validating
+  the large ad-hoc-signed test binary as the responsible process; launchd starts the shipped
+  worker. It is not a product latency, but it is why a loaded CI machine runs these tests
+  close to their limits.
+- **The CI failure was the test's race, not the restore.** It failed after 30.4 s: the 10 s
+  keep wait, then 20 s in the last `wait_for_text`, for the new shell's `at:<dir>`. The test
+  ended both daemons once the screen held its marker. The keeper writes the screen, then the
+  recipe holding the directory OSC 7 reported, so a kill between the two writes brings the
+  shell back in the directory before. A loaded runner widens that gap. The test now waits for
+  the recipe too, polling every 20 ms within its 20 s step. It passes in 3.4 s.

@@ -17,9 +17,11 @@
 //! A conversation Claude Code still runs in the background (`claude --bg`, in its session
 //! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
 //!
-//! The checkpoints reach the keeper as ptyd gets them, and each session's is written at most
-//! every [`KEEP_EVERY`], off the session's thread: a state is megabytes, and the formatter
-//! already made one twice a second at most. A worker going down writes what it holds first.
+//! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
+//! session's thread, paced by its size (`pace`): a small screen is on disk within
+//! [`KEEP_SOON`] of the last, and a full scrollback, megabytes, no more often than
+//! [`KEEP_RATE`] allows, at most every [`KEEP_EVERY`]. A worker going down writes what it holds
+//! first.
 
 use std::collections::HashMap;
 use std::io;
@@ -37,6 +39,17 @@ use tokio::time::Instant;
 /// What a crash of the whole machine loses is at most this much of the scrollback; a reboot
 /// loses nothing, since the worker writes on its way down.
 pub const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The shortest wait between two writes of one session's screen: the session formats a
+/// checkpoint once its output has been quiet this long anyway (`session::CHECKPOINT_AFTER`).
+pub const KEEP_SOON: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The bytes a second one session's screens are written at, at most, while it changes.
+///
+/// A write waits its size's worth of this after the last. 512 KiB/s is below what a full
+/// scrollback (about 6 MiB) every [`KEEP_EVERY`] wrote before, so no session wears the disk
+/// more than it did, while a shell's few kilobytes are kept within [`KEEP_SOON`].
+pub const KEEP_RATE: u64 = 512 * 1024;
 
 /// Where a session stands, as its checkpoints carry it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -389,33 +402,32 @@ fn screen_path(dir: &Path, id: SessionId) -> PathBuf {
     dir.join(format!("{id}.vt"))
 }
 
-/// Apply the jobs in order, writing each session's newest checkpoint once [`KEEP_EVERY`] has
-/// passed since its last, until every [`Keeper`] is gone; then write what is left.
+/// Apply the jobs in order, writing each session's newest checkpoint once its last write's
+/// [`pace`] has passed, until every [`Keeper`] is gone; then write what is left.
 async fn write_loop(
     dir: PathBuf,
     mut recipes: HashMap<SessionId, Recipe>,
     mut jobs: mpsc::UnboundedReceiver<Job>,
 ) {
     let mut waiting: HashMap<SessionId, Vec<u8>> = HashMap::new();
-    let mut written: HashMap<SessionId, Instant> = HashMap::new();
+    // When each session written before may be written again.
+    let mut next: HashMap<SessionId, Instant> = HashMap::new();
     loop {
-        let due = waiting
-            .keys()
-            .map(|id| written.get(id).map_or_else(Instant::now, |at| next_write(*at)))
-            .min();
+        let due = waiting.keys().map(|id| next.get(id).copied().unwrap_or_else(Instant::now)).min();
         let job = tokio::select! {
             job = jobs.recv() => job,
             () = sleep_until(due) => {
                 let now = Instant::now();
                 let ready: Vec<SessionId> = waiting
                     .keys()
-                    .filter(|id| written.get(id).is_none_or(|at| next_write(*at) <= now))
+                    .filter(|id| next.get(id).is_none_or(|at| *at <= now))
                     .copied()
                     .collect();
                 for id in ready {
                     if let Some(state) = waiting.remove(&id) {
+                        let size = state.len();
                         write_screen(&dir, &mut recipes, id, state).await;
-                        written.insert(id, Instant::now());
+                        next.insert(id, next_write(Instant::now(), size));
                     }
                 }
                 continue;
@@ -456,7 +468,7 @@ async fn write_loop(
             Some(Job::Forget(id)) => {
                 recipes.remove(&id);
                 waiting.remove(&id);
-                written.remove(&id);
+                next.remove(&id);
                 let paths = [recipe_path(&dir, id), screen_path(&dir, id)];
                 let removed = tokio::task::spawn_blocking(move || {
                     for path in paths {
@@ -475,8 +487,9 @@ async fn write_loop(
             }
             Some(Job::Flush(reply)) => {
                 for (id, state) in std::mem::take(&mut waiting) {
+                    let size = state.len();
                     write_screen(&dir, &mut recipes, id, state).await;
-                    written.insert(id, Instant::now());
+                    next.insert(id, next_write(Instant::now(), size));
                 }
                 let _told = reply.send(());
             }
@@ -484,9 +497,17 @@ async fn write_loop(
     }
 }
 
-/// When a session last written at `at` may be written again.
-fn next_write(at: Instant) -> Instant {
-    at.checked_add(KEEP_EVERY).unwrap_or(at)
+/// When a session whose screen of `size` bytes was written at `at` may be written again.
+fn next_write(at: Instant, size: usize) -> Instant {
+    at.checked_add(pace(size)).unwrap_or(at)
+}
+
+/// How long a session waits between writes of a screen of `size` bytes: its size at
+/// [`KEEP_RATE`], no less than [`KEEP_SOON`] and no more than [`KEEP_EVERY`].
+fn pace(size: usize) -> std::time::Duration {
+    let size = u64::try_from(size).unwrap_or(u64::MAX);
+    let micros = size.saturating_mul(1_000_000).checked_div(KEEP_RATE).unwrap_or(u64::MAX);
+    std::time::Duration::from_micros(micros).clamp(KEEP_SOON, KEEP_EVERY)
 }
 
 async fn sleep_until(due: Option<Instant>) {
@@ -850,7 +871,8 @@ mod tests {
         assert!(found[&a].agent.is_some());
     }
 
-    /// A burst of checkpoints is one write now and one after [`KEEP_EVERY`], of the newest.
+    /// A burst of checkpoints is one write now and one of the newest once the first one's pace
+    /// has passed: [`KEEP_SOON`] for a shell's few bytes.
     #[tokio::test(start_paused = true)]
     async fn a_burst_of_checkpoints_is_written_twice() {
         let dir = tempfile::tempdir().unwrap();
@@ -858,14 +880,30 @@ mod tests {
         let id = SessionId::new();
         keeper.opened(id, recipe(&[]));
         let place = Place { cwd: None, title: None, size: TermSize::default() };
+        let start = Instant::now();
         keeper.checkpoint(id, b"one".to_vec(), place.clone());
         let screen = screen_path(dir.path(), id);
         until(|| std::fs::read(&screen).is_ok_and(|b| b == b"one")).await;
         keeper.checkpoint(id, b"two".to_vec(), place.clone());
         keeper.checkpoint(id, b"three".to_vec(), place);
-        tokio::time::sleep(KEEP_EVERY / 2).await;
+        tokio::time::sleep(KEEP_SOON / 2).await;
         assert_eq!(std::fs::read(&screen).unwrap(), b"one", "held back");
         until(|| std::fs::read(&screen).is_ok_and(|b| b == b"three")).await;
+        let soon = start.checked_add(KEEP_SOON.saturating_mul(2)).unwrap();
+        assert!(Instant::now() < soon, "kept soon after");
+    }
+
+    /// A screen waits its size's worth of [`KEEP_RATE`] before the next write, between
+    /// [`KEEP_SOON`] for a shell's kilobytes and [`KEEP_EVERY`] for a full scrollback.
+    #[test]
+    fn a_screen_s_pace_follows_its_size() {
+        assert_eq!(pace(0), KEEP_SOON);
+        assert_eq!(pace(64 * 1024), KEEP_SOON);
+        assert_eq!(pace(1024 * 1024), std::time::Duration::from_secs(2));
+        assert_eq!(pace(4 * 1024 * 1024), std::time::Duration::from_secs(8));
+        assert_eq!(pace(6 * 1024 * 1024), KEEP_EVERY, "a full scrollback, as before");
+        assert_eq!(pace(64 * 1024 * 1024), KEEP_EVERY);
+        assert_eq!(pace(usize::MAX), KEEP_EVERY);
     }
 
     /// What keeping a full scrollback costs the keeper's writer: a 200-column session holding
