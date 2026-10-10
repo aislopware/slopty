@@ -60,6 +60,9 @@ define_class!(
             _options: Option<&NSDictionary<UIApplicationLaunchOptionsKey, AnyObject>>,
         ) -> bool {
             init_logging();
+            // A press of "Allow" or "Deny" that launched the app in the background finds no
+            // window to answer it; it is answered without one, through the server.
+            slopty_platform::notify::answer_unheard(slopty_app::verdict::answer_unheard);
             slopty_platform::notify::install();
             // A self-test plays the app delegate and hands the app its device token: a real
             // one from APNs (which a simulator on Apple silicon gets) would replace it in the

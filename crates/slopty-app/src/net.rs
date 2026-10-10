@@ -236,6 +236,20 @@ pub fn serve_directory(
     Ok(slopty_client::server::spawn(&runtime, endpoint, address, server_role(), first))
 }
 
+/// A link to the server at `address` on an endpoint of its own. Must run on the runtime.
+///
+/// It is for work on a runtime that ends with it. The process's endpoint is bound to the
+/// app's runtime, and one first bound on a short-lived runtime would die with it.
+///
+/// # Errors
+///
+/// When the endpoint cannot be bound.
+pub fn serve_alone(address: HostAddr) -> Result<(ServerTask, mpsc::Receiver<ServerEvent>), String> {
+    let endpoint = bind_client().map_err(|e| format!("{e:#}"))?;
+    let runtime = tokio::runtime::Handle::current();
+    Ok(slopty_client::server::spawn(&runtime, endpoint, address, server_role(), None))
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_net::NetError;

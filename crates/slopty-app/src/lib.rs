@@ -36,6 +36,7 @@ pub mod ssh;
 pub mod this_mac;
 #[cfg(target_os = "macos")]
 mod update;
+pub mod verdict;
 pub mod window;
 pub mod workers;
 

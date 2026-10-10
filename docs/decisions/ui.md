@@ -9638,3 +9638,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **What did not go.** An edit turned down says so ("Not changed on mini: …"), and the file
     is read again so the rows show what it holds. A machine that cannot be read says why.
   - Test: `settings_form::tests::another_machines_settings_are_read_and_edited_there`.
+
+- ✅ **Allow and Deny on a phone's note answer with no window** (2026-10-11, readiness audit
+  item 20, the whole fix; it replaces the interim above).
+  - **The defect.** A press of "Allow" or "Deny" on a note can launch an app iOS ended, in the
+    background and with no scene. GPUI, and with it the links to the workers, starts only
+    when a scene connects. The answer therefore waited until the person opened the app, and
+    the agent's held prompt timed out first. The interim brought the app forward on every
+    press.
+  - **The fix.** The buttons act where the note is again, on iOS as on a Mac. The app delegate
+    installs an answer for a press that finds nothing listening for taps
+    (`notify::answer_unheard`) before the notification delegate. A press that arrives with no
+    window goes there instead of waiting in the inbox, and so does one whose listener is gone.
+  - **How it is answered** (`slopty_app::verdict`). The answer takes the request, and the
+    thread or the terminal's agent, from the note. It then links to the server the settings
+    name, on a thread and a runtime of its own, over an endpoint of its own, because the
+    process's endpoint is bound to the app's runtime. Through that link it reads the thread's
+    open requests for the choice that allows or denies once, then answers with it: the same
+    route the workspace takes for a worker it is not linked to. It gives up after 20 seconds,
+    inside the time iOS grants, and then tells the system the press is done.
+  - **What stays.** While the app runs with its window, a press is answered by the workspace as
+    before. The note itself and "Show" still open the app.
+  - Tests: `verdict::tests::a_press_names_its_thread_or_terminal_and_its_request`,
+    `…::a_verdict_answers_with_the_choice_that_allows_or_denies_once` (slopty-app), and
+    `notify::tests::a_tap_before_the_app_listens_arrives_once_it_does_exactly_once`, now
+    including the unheard press (slopty-platform).
+  - Not covered by a test: pressing a delivered note's button on the simulator. That needs
+    XCUITest or synthetic input, and the session rules forbid the latter. The person checks it
+    on a device.

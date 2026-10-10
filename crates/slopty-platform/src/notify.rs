@@ -17,10 +17,11 @@
 //! process-wide queue until the app listens ([`taps`]).
 //!
 //! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
-//! held permission prompt, on a Mac where the note is, without bringing the app forward (on
-//! iOS they bring it forward: an app iOS ended cannot answer from the background), and "Show"
-//! opens the tile. The categories are registered with the centre when [`System`] is made, which
-//! does not prompt either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
+//! held permission prompt where the note is, without bringing the app forward, and "Show" opens
+//! the tile. A press that finds nothing listening for taps (an iOS app the press launched in the
+//! background, with no window) goes to the answer the app installed for it ([`answer_unheard`]).
+//! The categories are registered with the centre when [`System`] is made, which does not prompt
+//! either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
 //!
 //! A button answered in the background ([`Tap::finished_later`]) may have woken a suspended
 //! app, and the system lets it run until the delegate says it is done with the response. So
@@ -169,16 +170,10 @@ pub const DENY: &str = "deny";
 /// [`APPROVAL`]'s button that opens the app at the agent.
 pub const SHOW: &str = "show";
 
-/// How "Allow" and "Deny" are pressed: where the note is on a Mac, but bringing the app forward
-/// on iOS. iOS may have ended the app, and a press in the background then launches it with no
-/// scene: GPUI and the links to the workers start only with one, so the answer would wait
-/// until the person opened the app, and the agent's held prompt would time out first. Brought
-/// forward, the app links up and sends the answer the note held.
-const VERDICT: (ActionKind, ActionKind) = if cfg!(target_os = "ios") {
-    (ActionKind::Foreground, ActionKind::Foreground)
-} else {
-    (ActionKind::Unlocked, ActionKind::Destructive)
-};
+/// How "Allow" and "Deny" are pressed: where the note is, the app left in the background. On
+/// iOS a press may launch an app the system ended, with no scene and so no GPUI and no links;
+/// the app answers such a press without them ([`answer_unheard`]).
+const VERDICT: (ActionKind, ActionKind) = (ActionKind::Unlocked, ActionKind::Destructive);
 
 /// An agent asking for a permission that "Allow" or "Deny" answers whole.
 pub const APPROVAL: Category = Category {
@@ -330,8 +325,8 @@ impl Notifier for Memory {
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{
-    System, ask, ask_quietly, content_of, delivered, install, open_settings, settings, take_back,
-    taps, taps_finished,
+    System, answer_unheard, ask, ask_quietly, content_of, delivered, install, open_settings,
+    settings, take_back, taps, taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -411,9 +406,40 @@ mod apple {
         (own.unwrap_or_else(|| shown.clone()), shown)
     }
 
-    /// Hand `tap` to the app, or hold it until the app listens.
+    /// What answers a press nobody listens for, once the app installed it ([`answer_unheard`]).
+    static UNHEARD: Mutex<Option<fn(Tap)>> = Mutex::new(None);
+
+    /// Answer with `answer` every press that acts where the note is, while nothing listens.
+    ///
+    /// Such a press is one [`Tap::finished_later`] says so of. An iOS app the press launched or
+    /// woke in the background has no window, and so nothing that listens for taps. `answer`
+    /// owns the press, and says [`taps_finished`] once its answer is out or given up. It is
+    /// installed while the app finishes launching, before the press can arrive.
+    pub fn answer_unheard(answer: fn(Tap)) {
+        *UNHEARD.lock() = Some(answer);
+    }
+
+    /// Hand `tap` to the app, or hold it until the app listens. A press that answers where the
+    /// note is goes to [`answer_unheard`]'s answer instead, while nothing listens.
     pub(super) fn deliver(tap: Tap) {
+        let unheard = *UNHEARD.lock();
         let mut inbox = INBOX.lock();
+        let unheld = match &*inbox {
+            Inbox::Held(_) => true,
+            Inbox::Listening(listener) => listener.is_closed(),
+        };
+        if let Some(answer) = unheard
+            && unheld
+            && tap.finished_later()
+        {
+            drop(inbox);
+            tracing::debug!(
+                id = tap.id,
+                "a press with nothing listening: answered without a window"
+            );
+            answer(tap);
+            return;
+        }
         let tap = match &*inbox {
             Inbox::Listening(listener) => match listener.send(tap) {
                 Ok(()) => return,
@@ -1210,19 +1236,14 @@ mod tests {
     }
 
     /// The approval note carries "Allow", "Deny" and "Show", registered with every other
-    /// category. On a Mac the answers act where the note is (allowing only on an unlocked
-    /// device) and only "Show" brings the app forward; on iOS every button does
-    /// ([`VERDICT`]).
+    /// category. The answers act where the note is (allowing only on an unlocked device), on
+    /// iOS too ([`answer_unheard`]); only "Show" brings the app forward.
     #[test]
     fn the_approval_note_answers_in_place_and_shows_on_demand() {
         assert!(CATEGORIES.contains(&APPROVAL));
         let kinds: Vec<(&str, &str, ActionKind)> =
             APPROVAL.actions.iter().map(|a| (a.id, a.title, a.kind)).collect();
-        let (allow, deny) = if cfg!(target_os = "ios") {
-            (ActionKind::Foreground, ActionKind::Foreground)
-        } else {
-            (ActionKind::Unlocked, ActionKind::Destructive)
-        };
+        let (allow, deny) = (ActionKind::Unlocked, ActionKind::Destructive);
         assert_eq!(
             kinds,
             [(ALLOW, "Allow", allow), (DENY, "Deny", deny), (SHOW, "Show", ActionKind::Foreground),]
@@ -1242,9 +1263,8 @@ mod tests {
             info: BTreeMap::new(),
             action: action.map(str::to_owned),
         };
-        let in_place = !cfg!(target_os = "ios");
-        assert_eq!(tap(Some(ALLOW)).finished_later(), in_place);
-        assert_eq!(tap(Some(DENY)).finished_later(), in_place);
+        assert!(tap(Some(ALLOW)).finished_later());
+        assert!(tap(Some(DENY)).finished_later());
         assert!(!tap(Some(SHOW)).finished_later());
         assert!(!tap(None).finished_later());
         assert!(!tap(Some("maybe")).finished_later());
@@ -1288,6 +1308,7 @@ mod tests {
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_tap_before_the_app_listens_arrives_once_it_does_exactly_once() {
+        static ANSWERED: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
         let tap = |id: &str| Tap { id: id.to_owned(), ..Tap::default() };
         apple::deliver(tap("launch"));
         let mut listening = taps();
@@ -1309,5 +1330,23 @@ mod tests {
             "a tap nobody heard waits for the next listener"
         );
         assert!(again.try_recv().is_err(), "with nothing replayed");
+        drop(again);
+
+        // With nothing listening, a press that answers where the note is goes to the answer
+        // the app installed for it; the note's own tap and "Show" still wait for the window.
+        answer_unheard(|tap| ANSWERED.lock().push(tap.id));
+        let press = |id: &str, action: &str| Tap {
+            id: id.to_owned(),
+            action: Some(action.to_owned()),
+            ..Tap::default()
+        };
+        apple::deliver(press("allowed", ALLOW));
+        apple::deliver(press("shown", SHOW));
+        assert_eq!(*ANSWERED.lock(), ["allowed"], "answered without a window");
+        let mut window = taps();
+        assert_eq!(window.try_recv().ok().map(|t| t.id), Some("shown".to_owned()), "held");
+        apple::deliver(press("while up", DENY));
+        assert_eq!(window.try_recv().ok().map(|t| t.id), Some("while up".to_owned()));
+        assert_eq!(*ANSWERED.lock(), ["allowed"], "a window listening answers itself");
     }
 }
