@@ -21,6 +21,7 @@ fn with_agents(agents: &[AgentId]) -> WorkerCaps {
             agent: agent.clone(),
             version: "1.0".to_owned(),
             offers: slopty_proto::thread::Offers::default(),
+            managed_hooks_off: false,
         })
         .collect();
     WorkerCaps { agents: installed, ..healthy() }
@@ -442,6 +443,7 @@ fn a_workers_hub_knows_the_agents_it_can_start(cx: &mut TestAppContext) {
         agent: AgentId::named(AgentId::CODEX),
         version: "0.50".into(),
         offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
     });
     view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, caps, cx));
     assert_eq!(agents(cx), Some(vec![claude, AgentId::named(AgentId::CODEX)]), "caps moved");
@@ -1524,6 +1526,7 @@ fn a_relaunch_starts_where_the_last_run_left_off(cx: &mut TestAppContext) {
         agent: agent.clone(),
         version: "1.0".to_owned(),
         offers,
+        managed_hooks_off: false,
     };
     let claude = AgentId::named(AgentId::CLAUDE_CODE);
     let caps = WorkerCaps {

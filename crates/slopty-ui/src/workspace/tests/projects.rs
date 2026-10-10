@@ -834,6 +834,7 @@ fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAp
         agent: AgentId::named(a),
         version: "1.0".to_owned(),
         offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
     });
     let caps = WorkerCaps { agents: agents.to_vec(), ..healthy() };
     view.update_in(cx, |v, _w, cx| {

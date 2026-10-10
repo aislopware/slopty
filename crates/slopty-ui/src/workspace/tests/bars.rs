@@ -341,6 +341,7 @@ fn a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it(cx: &mut Test
             agent: AgentId(id.to_owned()),
             version: version.to_owned(),
             offers: slopty_proto::thread::Offers::default(),
+            managed_hooks_off: false,
         };
         let caps = WorkerCaps {
             os_version: "26.5".to_owned(),

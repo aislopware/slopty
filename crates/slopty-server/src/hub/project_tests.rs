@@ -51,6 +51,7 @@ pub(super) fn worker_again(
         agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
         version: "2.1.0".to_owned(),
         offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
     }];
     let lease = hub.register(registration, ip, tx).unwrap();
     (worker, lease, rx)

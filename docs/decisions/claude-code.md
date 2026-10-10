@@ -2293,3 +2293,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Notice::INFO`. One that failed, blocked a call or stopped the turn stays `Notice::HOOK`,
   which now means only that. Test: `calls_keep_their_times_and_hooks_and_mcp_failures_are_said`
   (slopty-agent `tests/codex.rs`).
+
+- ✅ **A machine whose company policy keeps Slopty's hooks off says so** (2026-10-11, readiness
+  10-11 deletions, `runs_own_hooks` wired).
+  - **Where the fact lives.** `ManagedSettings::runs_own_hooks` decided only what a run was
+    wired with, so the person never learned why a thread there showed less. It is a fact of the
+    machine, so it goes on the worker's caps, on Claude Code's installed-agent entry
+    (`InstalledAgent::managed_hooks_off`). The entry is false for every other agent.
+  - **When it is true.** The managed settings turn off every hook (`disableAllHooks`), allow
+    only managed hooks (`allowManagedHooksOnly`), or take hooks only from plugins
+    (`strictPluginOnlyCustomization`).
+  - **Kept current.** `follow_agents` also follows the two files the settings come from
+    (`ManagedSettings::files`: the system file and the server-delivered cache), so a policy
+    change is published without a restart.
+  - **The GUI.** Lane A shows the fact.
+  - Tests: `managed_settings_that_keep_the_hooks_off_are_said_as_they_change` (slopty-worker
+    `caps.rs`), and the `machine_hello_ack` golden.

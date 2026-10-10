@@ -23,6 +23,7 @@ fn with_claude() -> WorkerCaps {
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         version: "2.1.295 (Claude Code)".to_owned(),
         offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
     };
     WorkerCaps { agents: vec![installed], ..healthy() }
 }

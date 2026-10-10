@@ -65,6 +65,7 @@ fn a_start_names_the_mode_it_begins_in(cx: &mut TestAppContext) {
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             version: "2.1.295 (Claude Code)".to_owned(),
             offers: claude_offers(),
+            managed_hooks_off: false,
         }],
         ..healthy()
     };

@@ -59,6 +59,7 @@ fn a_typed_path_completes_from_the_machines_folders(cx: &mut TestAppContext) {
             agent: codex,
             version: "1.0".to_owned(),
             offers: slopty_proto::thread::Offers::default(),
+            managed_hooks_off: false,
         }],
         ..healthy()
     };

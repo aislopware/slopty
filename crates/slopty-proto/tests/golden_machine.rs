@@ -26,7 +26,12 @@ mod golden_machine {
     }
 
     fn agent(name: AgentId, version: &str) -> InstalledAgent {
-        InstalledAgent { agent: name, version: version.to_owned(), offers: Offers::default() }
+        InstalledAgent {
+            agent: name,
+            version: version.to_owned(),
+            offers: Offers::default(),
+            managed_hooks_off: false,
+        }
     }
 
     /// A machine's greeting names its settings file, so a client edits that machine's settings
@@ -61,6 +66,7 @@ mod golden_machine {
                         }],
                         commands: Vec::new(),
                     },
+                    managed_hooks_off: true,
                     ..agent(AgentId::named(AgentId::CLAUDE_CODE), "2.1.286 (Claude Code)")
                 },
                 agent(AgentId::named(AgentId::CODEX), "codex-cli 0.157.0"),

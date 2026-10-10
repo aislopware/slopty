@@ -129,10 +129,14 @@ impl ManagedSettings {
     /// A file that is missing or does not parse says nothing.
     #[must_use]
     pub fn read(home: &Path) -> Self {
-        Self::from_files(&[
-            PathBuf::from(SYSTEM_FILE),
-            home.join(".claude").join("remote-settings.json"),
-        ])
+        Self::from_files(&Self::files(home))
+    }
+
+    /// The files [`Self::read`] reads, for `home`: the system file, then the server-delivered
+    /// cache. What follows the settings watches these.
+    #[must_use]
+    pub fn files(home: &Path) -> [PathBuf; 2] {
+        [PathBuf::from(SYSTEM_FILE), home.join(".claude").join("remote-settings.json")]
     }
 
     /// [`Self::read`] for this user.

@@ -555,10 +555,12 @@ fn watch_caps(
     tokio::spawn(async move {
         let dirs = slopty_worker::facts::agent_dirs().await;
         let own = own_acp.borrow_and_update().clone();
-        let found = slopty_worker::caps::installed_agents(&dirs, &own).await;
+        let managed =
+            slopty_agent::managed::ManagedSettings::files(&slopty_platform::dirs::home()).to_vec();
+        let found = slopty_worker::caps::installed_agents(&dirs, &own, &managed).await;
         let (installed, agents) = tokio::sync::watch::channel(found);
         tokio::spawn(slopty_worker::caps::watch(caps, load, agents, host));
-        slopty_worker::caps::follow_agents(dirs, own_acp, installed).await;
+        slopty_worker::caps::follow_agents(dirs, own_acp, managed, installed).await;
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {

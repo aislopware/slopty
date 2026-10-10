@@ -120,6 +120,10 @@ pub struct InstalledAgent {
     pub version: String,
     /// What a new thread of it can be started with here.
     pub offers: crate::thread::Offers,
+    /// Claude Code only: this machine's managed settings keep the hooks Slopty registers from
+    /// running (every hook off, only managed hooks, or hooks only from plugins), so its threads
+    /// are followed without them and the person is told why. `false` for every other agent.
+    pub managed_hooks_off: bool,
 }
 
 /// What a worker can do, sent at registration and whenever it changes.
