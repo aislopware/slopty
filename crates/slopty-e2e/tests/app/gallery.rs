@@ -174,11 +174,11 @@ fn this_mac_report(
             address: server.address().to_owned(),
             link: slopty_proto::ctl::LinkState::Linked,
         }),
-        version: "0.1.0".to_owned(),
         exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
         caps: slopty_proto::server::WorkerCaps {
             can_capture: screen_recording,
             can_inject: true,
+            build: "0.1.0".to_owned(),
             ..slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs)
         },
         listen: "[::]:45550".to_owned(),

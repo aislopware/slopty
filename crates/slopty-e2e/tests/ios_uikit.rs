@@ -375,7 +375,8 @@ mod tests {
             worked_ms: None,
             via: None,
         };
-        let body = slopty_proto::codec::encode_body(&PushBody { notice, ask: None }).unwrap();
+        let body = slopty_proto::codec::encode_body(&PushBody { notice, ask: None, quiet: false })
+            .unwrap();
         let sealed = slopty_push::seal::seal(&key, &hex, &body).unwrap();
         let note = apns::Note {
             urgent: true,
