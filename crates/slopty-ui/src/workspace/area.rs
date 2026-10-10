@@ -630,12 +630,13 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let muted = hsla(s.text_muted);
-        let title = |text: &'static str| {
+        let title_of = |text: SharedString| {
             kit::typed(kit::inset_x(div(), theme), theme.roles().panel_title)
                 .pb(px(spacing.xs))
                 .text_color(hsla(s.text))
                 .child(text)
         };
+        let title = |text: &'static str| title_of(text.into());
         // A section: its quiet label, then its rows; a section apart from the one above by
         // space alone, no rule.
         let section = |id: &'static str, label: &'static str| {
@@ -646,7 +647,38 @@ impl WorkspaceView {
             )
         };
         let column = div().w_full().max_w(px(EMPTY_W)).flex().flex_col();
-        let column = if self.workers.is_empty() {
+        // With the server out of reach, no machine is listed because nobody lists them: the
+        // page says so first, with its doors, rather than send the person to add a machine.
+        let server_down = self.workers.is_empty().then(|| self.server_status.clone()).flatten();
+        let column = if let Some(status) = server_down {
+            let doors = self.server_entries.iter().enumerate().map(|(ix, entry)| {
+                let run = Rc::clone(&entry.run);
+                let icon = if ix == 0 { Symbol::ArrowClockwise } else { Symbol::Link };
+                self.door_row(
+                    if ix == 0 { "empty-server-retry" } else { "empty-server-other" },
+                    icon,
+                    entry.label.clone(),
+                    ix == 0,
+                )
+                .on_click(move |_ev, window, cx| run(window, cx))
+            });
+            let add = self.add_worker_run().map(|run| {
+                self.door_row("empty-add-worker", Symbol::Plus, ADD_WORKER.into(), false)
+                    .on_click(move |_ev, window, cx| run(window, cx))
+            });
+            column
+                .child(title_of(SharedString::from(super::readouts::sentence(&status))))
+                .child(kit::inset_x(div(), theme).text_color(muted).child(SERVER_DOWN_NEXT))
+                .child(
+                    div()
+                        .w_full()
+                        .pt(px(spacing.md))
+                        .flex()
+                        .flex_col()
+                        .children(doors)
+                        .children(add),
+                )
+        } else if self.workers.is_empty() {
             let add = self.add_worker_run().map(|run| {
                 div().w_full().pt(px(spacing.md)).child(
                     self.begin_row("empty-add-worker", Symbol::Plus, ADD_WORKER, "", true)
@@ -950,6 +982,35 @@ impl WorkspaceView {
     /// One way to begin: its icon, what it does, where it opens and, with a keyboard to press
     /// it on, its keys; `primary` wears the palette's selected fill, the row Enter would run
     /// there.
+    /// A row of the empty page that opens a door, not a tile: its glyph and its words, the
+    /// first door raised as the one ↵ would take.
+    fn door_row(
+        &self,
+        id: &'static str,
+        icon: Symbol,
+        label: SharedString,
+        primary: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let selector = id.to_owned();
+        let icon_ink = if primary { s.text } else { s.text_secondary };
+        let row = kit::row(theme, kit::Row::One)
+            .id(id)
+            .debug_selector(move || selector)
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(label.clone())
+            .w_full()
+            .rounded(px(theme.radii.sm))
+            .cursor_pointer()
+            .when(primary, |el| el.bg(hsla(s.selected)))
+            .when(!primary, |el| el.hover(|st| st.bg(hsla(s.hover))))
+            .active(|st| st.bg(hsla(s.pressed)))
+            .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
+            .child(div().flex_none().text_color(hsla(s.text)).child(label));
+        crate::a11y::tab_stop(row, s.focus)
+    }
+
     fn begin_row(
         &self,
         id: &'static str,
@@ -1027,6 +1088,9 @@ pub(super) struct RecentPlace {
 /// What the empty workspace says with no worker to begin on.
 pub(crate) const NO_WORKERS: &str = "No machines yet";
 pub(crate) const NO_WORKERS_NEXT: &str = "A machine runs your shells, agents and windows.";
+/// What the empty workspace says under the server's state while it is out of reach.
+pub(crate) const SERVER_DOWN_NEXT: &str =
+    "The server lists your machines. Machines you reach directly still work.";
 /// The empty workspace's way to a first worker, as the "…" menu words it.
 pub(crate) const ADD_WORKER: &str = "Add a machine";
 /// The empty workspace's first way to begin: an agent, asked its task in its own tile.

@@ -541,6 +541,20 @@ pub fn defaults() -> Vec<Command> {
             c(Page, "select_all", ws::PageSelectAll, &["cmd-a"], &[PAGE_HELD]),
         ]);
     }
+    // An iPad's Magic Keyboard has no Esc key; ⌘. is the Mac's old Escape, and iPadOS gives
+    // it no other meaning in an app that takes the keys.
+    if cfg!(target_os = "ios") {
+        out.extend([
+            c(Terminal, "send_escape", t::SendEscape, &["cmd-."], &[TERMINAL]),
+            c(
+                Workspace,
+                "send_escape_to_remote_window",
+                t::SendEscape,
+                &["cmd-."],
+                &[Some("Screen")],
+            ),
+        ]);
+    }
     out.extend(crate::project::key_bindings());
     out.extend(crate::review::key_bindings());
     out

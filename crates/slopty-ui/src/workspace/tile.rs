@@ -19,6 +19,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::Worktree;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
+use slopty_proto::server::Os;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 use slopty_theme::{Theme, Typography};
@@ -486,6 +487,15 @@ impl BodyState {
     }
 }
 
+/// What a remote tile says while `name`'s Mac cannot take input: the setting, and the program
+/// to turn it on for, as that Mac's list names it.
+pub(crate) fn no_input(name: &str) -> String {
+    format!(
+        "{name} cannot take your clicks and keys. On {name}, turn on slopty-worker in System \
+         Settings \u{25b8} Privacy & Security \u{25b8} Accessibility."
+    )
+}
+
 /// What the pill of a worker on a different build shows of its update, where the app can run
 /// one ([`add_worker::Updates`]): the offer, the step under way with its bar, or why it failed.
 struct UpdateState {
@@ -494,9 +504,13 @@ struct UpdateState {
     detail: Option<String>,
     bar: Option<add_worker::Bar>,
     failed: bool,
+    /// It stopped at a password or a host key: its next step opens the SSH sheet.
+    in_sheet: bool,
     /// "Update" is on offer, so "Copy command" steps back to the secondary tone.
     offered: bool,
     start: Option<add_worker::Update>,
+    /// Stops the update under way; only while one runs.
+    cancel: Option<add_worker::Update>,
 }
 
 /// [`UpdateState`] for `state`; `None` for any other state, and where no update can run.
@@ -511,8 +525,10 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
             detail: Some(notice.detail()),
             bar: None,
             failed: false,
+            in_sheet: false,
             offered: true,
             start: Some(start),
+            cancel: None,
         });
     };
     if let Some(failed) = &run.failed {
@@ -522,8 +538,10 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
             detail: failed.hint.clone().or_else(|| failed.lines.last().cloned()),
             bar: None,
             failed: true,
+            in_sheet: failed.in_sheet,
             offered: start.is_some(),
             start,
+            cancel: None,
         });
     }
     let step = run.current();
@@ -533,8 +551,10 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
         detail: step.and_then(|s| s.detail.clone()),
         bar: Some(run.bar),
         failed: false,
+        in_sheet: false,
         offered: false,
         start: None,
+        cancel: updates.cancel.clone(),
     })
 }
 
@@ -2797,7 +2817,8 @@ impl WorkspaceView {
             BodyState::NeedsUpdate(notice) => {
                 let command = notice.command();
                 let running = update.as_ref().is_some_and(|u| u.bar.is_some());
-                let copy = (!running).then(|| {
+                // A phone or an iPad cannot run the command, so it has none to copy.
+                let copy = (!running && !cfg!(target_os = "ios")).then(|| {
                     button("copy-command", COPY_COMMAND).on_click(move |_ev, _w, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
                     })
@@ -2849,10 +2870,21 @@ impl WorkspaceView {
             _ => String::new(),
         };
         let again = update.as_ref().is_some_and(|u| u.failed);
+        let in_sheet = update.as_ref().is_some_and(|u| u.in_sheet);
+        let cancel_update = update.as_ref().and_then(|u| u.cancel.clone()).map(|cancel| {
+            let host = host.clone();
+            button("cancel-update", "Cancel")
+                .on_click(move |_ev, window, cx| cancel(&host, window, cx))
+        });
         let update_button = start.map(|start| {
-            let label = if again { add_worker::TRY_AGAIN } else { add_worker::UPDATE };
+            let label = match (in_sheet, again) {
+                (true, _) => add_worker::CONTINUE,
+                (false, true) => add_worker::TRY_AGAIN,
+                (false, false) => add_worker::UPDATE,
+            };
             button("update-worker", label).on_click(move |_ev, window, cx| start(&host, window, cx))
         });
+        let update_button = update_button.or(cancel_update);
         let bar = update.as_ref().and_then(|u| u.bar).and_then(|bar| {
             add_worker::bar(theme, bar, "update-progress").map(|bar| {
                 div()
@@ -3035,6 +3067,18 @@ impl WorkspaceView {
         let empty = std::cell::Cell::new(false);
         let content = self.render_content(placed, item, &empty, window, cx);
         let content = self.set_back_in_doubt(placed.tile, content);
+        let content = match self.no_input_notice(placed.tile, item) {
+            Some(notice) => div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(notice)
+                .child(content)
+                .into_any_element(),
+            None => content,
+        };
         let Some(state) = state else { return content };
         // A body with nothing in it says what is so in its middle, not at its foot.
         let pill = self.render_state_pill(placed.tile, &state, empty.get(), cx);
@@ -3048,6 +3092,51 @@ impl WorkspaceView {
             .child(content)
             .child(pill)
             .into_any_element()
+    }
+
+    /// A slim line over a remote window or display whose Mac cannot take input: clicks and keys
+    /// there would do nothing, which looked like a frozen picture. It says why, and what to
+    /// turn on, on that Mac.
+    fn no_input_notice(&self, tile: TileRef, item: &Item) -> Option<gpui::AnyElement> {
+        if !matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. }) {
+            return None;
+        }
+        let worker = self.workers.get(&tile.worker)?;
+        worker.caps.as_ref().filter(|c| c.os == Os::MacOs && !c.can_inject)?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let said = SharedString::from(no_input(&worker.name));
+        let id = tile.item;
+        Some(
+            div()
+                .id("no-input")
+                .debug_selector(move || format!("no-input-{}", id.as_uuid()))
+                .role(Role::Status)
+                .aria_label(said.clone())
+                .flex_none()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.inset()))
+                .py(px(theme.spacing.xxs))
+                .bg(hsla(s.chrome))
+                .border_b(kit::HAIR)
+                .border_color(hsla(s.sash))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.text_secondary))
+                .child(
+                    crate::icons::icon(
+                        theme,
+                        Symbol::ExclamationmarkTriangle,
+                        IconSize::Inline,
+                        hsla(s.text_muted),
+                    )
+                    .flex_none(),
+                )
+                .child(div().min_w_0().child(said))
+                .into_any_element(),
+        )
     }
 
     /// A body that may show what is no longer so ([`Self::set_back`]), set back: its worker

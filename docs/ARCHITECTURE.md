@@ -5,8 +5,8 @@ and agents) expose shells, agents, windows and displays. One **server** keeps th
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
 iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show the workers'
 items as tiles in one tiled workspace (projects, their tabs, each tab a split layout of panes),
-several workers mixed, with Claude Code
-agents surfaced as first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
+several workers mixed. Every agent (Claude Code, Codex, pi, any ACP agent) is one thread in
+one agent-neutral model. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 
@@ -995,7 +995,9 @@ The title bar holds, in order:
 - the readouts, each only while it has something to say (`workspace::readouts`);
 - the bell and "…".
 
-There is no bar along the bottom.
+Along the window's foot runs the foot bar (`workspace::foot`): the plan's usage and the
+focused agent on the left; the ports, the transfers, the frame time while the stats show, and a
+chip for each shell whose command runs out of sight on the right.
 
 A shell's title is, first that says something, the command it runs, a title its program set
 (not the shell's own name, a path or a `user@host:path` prompt), its repository or directory,

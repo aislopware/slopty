@@ -115,13 +115,16 @@ mod actions {
             /// Keyboard copy mode: a cursor of its own walks the history with vi's keys,
             /// selects and copies, and the program hears none of it.
             CopyMode,
+            /// Escape, for a keyboard with no Esc key (an iPad's Magic Keyboard): ⌘. there,
+            /// to the program in a terminal and to the app in a remote window.
+            SendEscape,
         ]
     );
 }
 pub use actions::{
     AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
     CopyMode, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, SendEscape,
 };
 
 /// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
@@ -129,6 +132,11 @@ pub use actions::{
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
     crate::keymap::current().bindings(|scope| scope == crate::keymap::Scope::Terminal)
+}
+
+/// The Escape key, pressed alone.
+pub(crate) fn escape() -> Keystroke {
+    Keystroke { modifiers: gpui::Modifiers::default(), key: "escape".to_owned(), key_char: None }
 }
 
 /// The open search bar.
@@ -1235,10 +1243,10 @@ impl TerminalView {
         self.selection = Some(Selection::run(start, end));
     }
 
-    /// A touch long press over the terminal. On the phone a plain drag scrolls the strip, so
-    /// selection follows the platform convention: hold to select the word under the finger,
-    /// keep holding and move to extend it. Returns whether the press was claimed (the element
-    /// then keeps the gesture away from the strip).
+    /// A touch long press over the terminal. A plain drag scrolls the history, so selection
+    /// follows the platform convention: hold to select the word under the finger, keep holding
+    /// and move to extend it. Returns whether the press was claimed (the element then keeps the
+    /// gesture away from the panes).
     pub fn long_press(
         &mut self,
         event: &LongPressEvent,
@@ -1261,9 +1269,17 @@ impl TerminalView {
                 if !self.touch_selecting {
                     return false;
                 }
-                if let Some((col, row)) = self.metrics.map(|m| m.cell_at_clamped(event.position))
-                    && let Some(selection) = &mut self.selection
-                {
+                let Some(m) = self.metrics else { return true };
+                let (col, row) = m.cell_at_clamped(event.position);
+                // Past the grid's top or bottom the history scrolls under the finger, as a
+                // drag with the pointer does, so a selection runs past the screen.
+                let past = super::element::rows_past_edge(&m, event.position.y);
+                if past == 0 {
+                    self.autoscroll = None;
+                } else {
+                    self.start_autoscroll(past.clamp(-AUTOSCROLL_MAX, AUTOSCROLL_MAX), col, cx);
+                }
+                if let Some(selection) = &mut self.selection {
                     let head = (self.state.index_at_row(row), col);
                     if selection.head != head {
                         selection.head = head;
@@ -1273,6 +1289,7 @@ impl TerminalView {
                 true
             }
             TouchPhase::Ended => {
+                self.autoscroll = None;
                 let selecting = std::mem::take(&mut self.touch_selecting);
                 if selecting {
                     self.copy_on_select(cx);
@@ -1280,6 +1297,7 @@ impl TerminalView {
                 selecting
             }
             TouchPhase::Cancelled => {
+                self.autoscroll = None;
                 if std::mem::take(&mut self.touch_selecting) {
                     self.selection = None;
                     cx.notify();
@@ -3382,6 +3400,11 @@ impl TerminalView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        // A tap brings back the soft keyboard the key bar's Hide put away: the terminal kept
+        // the focus, so focusing it again would not.
+        if cfg!(target_os = "ios") {
+            window.request_virtual_keyboard();
+        }
         if self.block_menu.take().is_some() {
             cx.notify();
         }
@@ -3706,7 +3729,7 @@ impl TerminalView {
     /// that came into view. False ends the loop.
     fn autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((lines, col)) = self.autoscroll else { return false };
-        if !self.selecting {
+        if !self.selecting && !self.touch_selecting {
             self.autoscroll = None;
             return false;
         }
@@ -4119,6 +4142,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::attach_block))
             .on_action(cx.listener(Self::attach_selection))
             .on_action(cx.listener(Self::clear_screen))
+            .on_action(cx.listener(|this, _: &SendEscape, _window, cx| this.press(escape(), cx)))
             .on_action(cx.listener(Self::scroll_page_up))
             .on_action(cx.listener(Self::scroll_page_down))
             .on_action(cx.listener(Self::scroll_to_top))
@@ -8534,6 +8558,46 @@ mod tests {
         cx.simulate_event(press(cell_center(&view, cx, 1.0, 2.0)));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("third"));
+    }
+
+    /// A long press held and dragged above the grid scrolls into history a tick at a time, as
+    /// the pointer's drag does, the head riding the top row; lifting the finger ends it.
+    #[gpui::test]
+    fn a_long_press_dragged_past_the_top_scrolls_into_history(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(100, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        let at = cell_center(&view, cx, 3.0, 1.0);
+        let event = |phase, position| LongPressEvent { phase, start_position: at, position };
+        cx.simulate_event(event(TouchPhase::Started, at));
+        cx.run_until_parked();
+        cx.simulate_event(event(TouchPhase::Moved, cell_center(&view, cx, 3.0, -2.0)));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.autoscroll), Some((2, 3)));
+        cx.executor().advance_clock(Duration::from_millis(55));
+        cx.run_until_parked();
+        let (offset, head) =
+            view.read_with(cx, |v, _| (v.state.view_offset(), v.selection.map(|s| s.head)));
+        assert_eq!(offset, 2, "one tick, two lines");
+        assert_eq!(head, Some((LineIndex(98), 3)), "the head on the top row");
+        cx.simulate_event(event(TouchPhase::Ended, cell_center(&view, cx, 3.0, -2.0)));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(110));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 2, "lifted, it stops");
+    }
+
+    /// ⌘. (bound on iOS, for a keyboard with no Esc key) sends Escape to the program.
+    #[gpui::test]
+    fn send_escape_types_escape(cx: &mut TestAppContext) {
+        let (_view, mut rx, cx) = terminal(cx);
+        cx.run_until_parked();
+        drain_input(&mut rx);
+        cx.update(|window, cx| window.dispatch_action(Box::new(SendEscape), cx));
+        cx.run_until_parked();
+        assert_eq!(drain_input(&mut rx), ["escape"]);
     }
 
     /// A root that holds a terminal and can let it go.

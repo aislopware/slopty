@@ -477,6 +477,10 @@ pub enum Fix {
     MoveToApplications,
     /// Open Slopty's settings where a push relay is named.
     SetUpPush,
+    /// Open the Tailscale app here, to turn it on or sign in.
+    OpenTailscale,
+    /// Open Tailscale's download page: none is installed here.
+    GetTailscale,
 }
 
 impl Fix {
@@ -490,6 +494,8 @@ impl Fix {
             Self::EndSessions => "Update anyway",
             Self::MoveToApplications => "Move to Applications",
             Self::SetUpPush => "Set up",
+            Self::OpenTailscale => "Open Tailscale",
+            Self::GetTailscale => "Get Tailscale",
         }
     }
 }
@@ -595,19 +601,19 @@ pub fn checklist(flow: &Flow, logs: &str, server_logs: &str) -> [Line; 5] {
             Check::Tailnet,
             Mark::Advisory,
             &format!("Tailscale is {}, so only this Mac reaches it.", tailscale_state(*state)),
-            None,
+            Some(Fix::OpenTailscale),
         ),
         Some(Tailnet::Unreachable) => line(
             Check::Tailnet,
             Mark::Advisory,
             "Tailscale is not answering, so only this Mac reaches it.",
-            None,
+            Some(Fix::OpenTailscale),
         ),
         Some(Tailnet::Absent) => line(
             Check::Tailnet,
             Mark::Advisory,
             "No Tailscale here. Your other devices reach it over your VPN.",
-            None,
+            Some(Fix::GetTailscale),
         ),
         None => line(Check::Tailnet, Mark::Unknown, "Your other devices reach it there.", None),
     };
@@ -1385,7 +1391,7 @@ mod tests {
                 None,
                 Some(Fix::Open(Place::Privacy(Pane::ScreenRecording))),
                 Some(Fix::Open(Place::Privacy(Pane::Accessibility))),
-                None
+                Some(Fix::OpenTailscale)
             ]
         );
         assert_eq!(lines[2].detail, TURN_ON, "one line; the button opens the list");
@@ -1411,6 +1417,10 @@ mod tests {
         assert_eq!(lines[4].detail, "Your devices reach it as studio.tail1234.ts.net.");
         let lines = checklist_of(Worker::Up(doctor(true, true, Tailnet::Absent)), "");
         assert_eq!(marks(&lines), [Ok, Ok, Ok, Ok, Advisory], "no Tailscale is no stop either");
+        assert_eq!(lines[4].fix, Some(Fix::GetTailscale), "where to get it");
+        assert_eq!(lines[4].status(), Idle, "a door, not a stop");
+        let lines = checklist_of(Worker::Up(doctor(true, true, Tailnet::Unreachable)), "");
+        assert_eq!(lines[4].fix, Some(Fix::OpenTailscale), "the app, to see why");
     }
 
     /// Ready is both grants, whatever the tailnet says; the app coming back rereads a worker

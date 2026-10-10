@@ -1156,9 +1156,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ThreadMeta.modes`; a thread with its own TUI but no `SET_MODE` says the mode is changed
     there.
   - **"Machine", not "worker",** in what these surfaces say (rulings §8).
-  - **Left:** driving Claude Code for API-key users (§5c) is not built. Edited allows (§5a)
-    were deleted ("Sleep, waits on another thread, queue reordering and edited allows are
-    gone"), and threads with no terminal take uploads (the composer's attachments).
+  - Edited allows (§5a) were deleted ("Sleep, waits on another thread, queue reordering and
+    edited allows are gone"), and threads with no terminal take uploads (the composer's
+    attachments).
   - Tests: `conversation::thread::tests::doors::*` and the attachment, queue and `/compact` tests
     in `tests::composing`; `review::tests::a_refused_keep_says_why_on_its_hunk`;
     `codex::form::tests::*`; `a_queued_message_waits_for_the_turn_and_goes_as_the_next` and
@@ -1460,8 +1460,6 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a machine out of reach by then is not asked. Test:
     `workspace::tests::thread_start::a_past_session_is_found_by_what_was_asked_in_it`.
   - Every machine with the agent is asked at once since 2026-10-09 (`docs/decisions/workspace.md`).
-  - **Not yet.** `slopty prompts` and an MCP tool are not built. Claude Code driven over
-    stream-json may not write its prompt history; that is checked when the driven drive is used.
   - Tests: `claude_codes_history_gives_prompts_with_their_pastes`,
     `codex_gives_prompts_from_its_history_and_rollouts`, `pi_gives_prompts_from_its_session_files`,
     `a_slash_command_is_no_prompt` (`slopty-agent::history`);
@@ -1594,8 +1592,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **The client's half.** The composer sets a time only as "Continue at" a usage limit's reset
     (`conversation/thread/view/later.rs`), the scope kept when `After` and "Send later…" went.
     Test: `a_thread_a_limit_stopped_continues_when_it_lifts`
-    (`conversation::thread::tests::composing`). **Not built:** a server project task on a
-    schedule.
+    (`conversation::thread::tests::composing`).
   - Tests: `a_message_goes_at_its_time` (`thread::schedule`);
     `a_scheduled_message_waits_on_the_worker_and_outlives_a_restart` and
     `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
@@ -1777,8 +1774,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     taken one thread at a time (`Host::visit`).
   - **The client's half.** The palette's Threads section, which asks every linked machine
     (2026-10-06, `docs/decisions/workspace.md`, "The palette finds words said in any thread, on
-    every machine"). **Not built:** a CLI verb, which waits on a control-socket request of its
-    own.
+    every machine").
   - Tests: `every_word_is_found_in_what_was_said_the_best_and_newest_first` and
     `a_hit_shows_its_match_and_the_limit_counts_what_it_left_out` (`thread::search`); goldens
     `client_thread_search` and `link_worker_thread_hits`.

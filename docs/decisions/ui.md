@@ -4600,9 +4600,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   churned, and the title bar drew a name a frame behind the tile (the e2e stale-frame check
   caught it). With nothing on it, it is "New workspace". The e2e stack's first shell is at its private home, so its goldens now read
   `e2e-worker` where they read "Workspace 1". An agent started from the empty workspace is
-  titled by its prompt from the first frame, before its face has read a word.
-  Not yet: an agent started from a shell is called "Claude Code" until its face reads the
-  first prompt; the thread model (Lane W) carries the title from the worker, which ends that.
+  titled by its prompt from the first frame, before its face has read a word. An agent started
+  from a shell is named by its thread's title, which the worker makes (`ThreadMeta::title`).
   Test: `workspace::tests::bars::a_workspace_is_named_by_where_its_first_shell_is`.
 
 - ✅ **What the keyboard opens arrives whole** (2026-10-01, plan.md §4.4). The palette and the
@@ -9463,3 +9462,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::projects::a_board_with_no_orchestrator_to_show_it_opens_in_a_tile_of_its_own`,
     `…::a_task_on_a_machine_gone_away_says_so`, `…::a_task_never_started_is_started_from_its_card`,
     `workspace::tests::relaunch::a_relaunch_puts_a_board_tile_back`.
+
+- ✅ **Setup says where it stands, and the phone's terminal works by touch** (2026-10-11,
+  readiness audit items 19, 20 (interim) and 21).
+  - **The server away, no machine listed** (21). The empty page sent the person to add a
+    machine while the real cause was the server, which lists the machines. With no worker and
+    the server out of reach, the page now leads with the server's state ("Server offline").
+    Under it come what that means and the server menu's own doors, with "Retry now" raised;
+    adding a machine comes after. A phone's title bar has no readouts, so its navigator says the
+    same under its header (`nav-server`), with "Retry now" on the line's end.
+  - **Tailscale** (21). On the "Use this Mac" checklist, a tailnet line that is stopped or not
+    answering offers "Open Tailscale" (the installed app, else its download page), and a Mac
+    with none offers "Get Tailscale". Both stay quiet advisories, not stops.
+  - **A remote Mac that takes no input** (21). A window or display tile whose Mac has not
+    granted Accessibility used to take clicks that did nothing; only the navigator said
+    "Accessibility off". It now shows a slim line over the picture that names the Mac and the
+    setting to turn on there.
+  - **A phone's first run** (21). The server panel on an iPhone or iPad first says "On your
+    Mac, open Connect a phone or iPad and scan its code with the Camera."
+  - **Copy command** on a worker tile of another build is gone on iOS: a phone cannot run it.
+  - **Touch terminal** (19).
+    - A phone's key bar ends in "Hide", held at the trailing edge while the row scrolls. It
+      puts the soft keyboard away and leaves the focus in the terminal; a tap on the terminal
+      brings the keyboard back. An iPad's own keyboard has a key for this, so its bar has no
+      Hide.
+    - A long press dragged past the grid's top or bottom scrolls the history a tick at a time,
+      as a drag with the pointer does, so a selection can run past the screen.
+    - On iOS, ⌘. sends Escape in a terminal and in a remote window, for a Magic Keyboard with no
+      Esc key.
+  - **Allow and Deny on a note** (20, interim). On iOS they now bring the app forward. iOS may
+    have ended the app, and a background press then launches it with no scene, so GPUI and the
+    links never start and the agent's held prompt times out. Brought forward, the app links up
+    and sends the answer the note held. On a Mac they still answer where the note is. The whole
+    fix, a headless answer from the app delegate, is still to come.
+  - Tests: `workspace::tests::setup_doors::*`,
+    `terminal::view::tests::a_long_press_dragged_past_the_top_scrolls_into_history`,
+    `…::send_escape_types_escape`, `this_mac::tests::the_doctor_maps_to_lines_and_buttons`,
+    `notify::tests::the_approval_note_answers_in_place_and_shows_on_demand`. The keyboard calls
+    themselves (`request_virtual_keyboard`, `dismiss_virtual_keyboard`) do nothing on a Mac, so
+    the iOS e2e's key bar scenario is the layer that sees them.

@@ -101,10 +101,18 @@ const ADD_PANEL_W: f32 = 440.0;
 /// Chosen by the room, not by the input: a 440 pt Connect button under its field on a 1032 pt
 /// iPad was the phone's stack.
 const FIELD_ROW_FROM: f32 = 600.0;
+/// Where Tailscale's Mac app is installed, from the App Store and from Tailscale's site alike.
+const TAILSCALE_APP: &str = "/Applications/Tailscale.app";
+/// Where Tailscale is downloaded for a Mac.
+const TAILSCALE_DOWNLOAD: &str = "https://tailscale.com/download/mac";
 /// This device can ask Tailscale what is on the tailnet: not on iOS, where no app can read it.
 const LISTS_TAILNET: bool = !cfg!(target_os = "ios");
 /// What the panel says where it cannot look on the tailnet, so its absence has a reason.
 const UNLISTED: &str = "This device cannot list your tailnet, so type an address.";
+/// What a phone or iPad's server panel says first: the Mac's code is the quick way in.
+fn scan_from_a_mac() -> String {
+    format!("On your Mac, open {} and scan its code with the Camera.", invite::TITLE)
+}
 /// The machine panel's line where this device can add none (an iPhone, an iPad).
 const FROM_A_MAC: &str = "Machines are added from a Mac.";
 /// How, under it.
@@ -159,6 +167,8 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 15] = [
     (ALT_CAP, "alt", None),
     ("⌘", "cmd", None),
 ];
+/// The key bar's cap that puts the soft keyboard away.
+const HIDE_CAP: &str = "Hide";
 /// The key bar's sticky Control.
 const CONTROL_CAP: &str = "⌃";
 /// The key bar's sticky Alt, sent as Meta.
@@ -2199,6 +2209,16 @@ impl Workspace {
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
             this_mac::Fix::SetUpPush => self.open_setting("server.push", "relay", window, cx),
+            this_mac::Fix::OpenTailscale => {
+                // The app where it is installed, else where to get it.
+                let app = std::path::Path::new(TAILSCALE_APP);
+                if app.exists() {
+                    cx.open_with_system(app);
+                } else {
+                    cx.open_url(TAILSCALE_DOWNLOAD);
+                }
+            }
+            this_mac::Fix::GetTailscale => cx.open_url(TAILSCALE_DOWNLOAD),
         }
     }
 
@@ -2630,7 +2650,15 @@ impl Workspace {
             sections.push(connect.into_any_element());
             sections.extend(set_up_server.map(IntoElement::into_any_element));
         } else if !in_flow {
+            // A phone or iPad finds the server most easily from a Mac that knows it: the
+            // Mac's code, read by the Camera, fills the address in ([`invite`]).
+            let scan = (adding.mode == Panel::Server && !LISTS_TAILNET).then(|| {
+                kit::meta(div(), theme)
+                    .debug_selector(|| "add-worker-scan".to_owned())
+                    .child(scan_from_a_mac())
+            });
             sections.extend(use_this_mac.map(IntoElement::into_any_element));
+            sections.extend(scan.map(IntoElement::into_any_element));
             sections.extend(tailnet);
             sections.extend(unlisted.map(IntoElement::into_any_element));
             if serving {
@@ -3061,6 +3089,12 @@ impl Workspace {
             KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, width, cx),
             KeyTarget::Screen(screen) => self.screen_key_bar(screen, width, cx),
         };
+        // A phone's row scrolls, and then the Hide cap ([`Self::hide_key`]) holds the trailing
+        // edge, which the row gives up.
+        let spacing = self.theme.spacing;
+        let hiding = overflow > 0.0;
+        let hide_w = cap_width(HIDE_CAP, spacing) + spacing.xs.mul_add(2.0, 1.0);
+        let overflow = if hiding { overflow + hide_w } else { overflow };
         // The extent comes from the caps, not the last layout, so a bar just shown, turned or
         // resized fades right on its first frame.
         let scrolled = -f32::from(self.key_bar_scroll.offset().x);
@@ -3070,13 +3104,28 @@ impl Workspace {
             right: f32::from(trailing),
             ..gpui::Edges::default()
         });
+        // A phone's soft keyboard has no key that puts it away, so its bar ends in one, held
+        // still at the trailing edge while the row scrolls; an iPad's keyboard has its own.
+        let hide = hiding.then(|| {
+            div()
+                .flex_none()
+                .h_full()
+                .flex()
+                .items_center()
+                .px(px(self.theme.spacing.xs))
+                .border_l(kit::HAIR)
+                .border_color(hsla(self.theme.surfaces.border))
+                .child(self.hide_key("key-hide"))
+        });
         // The caps fade per pixel; the bar's surface is outside the fade.
         div()
             .w_full()
+            .flex()
             .bg(hsla(self.theme.content()))
             .border_t(kit::HAIR)
             .border_color(hsla(self.theme.surfaces.border))
-            .child(gpui::edge_fade(row, ends))
+            .child(div().flex_1().min_w_0().child(gpui::edge_fade(row, ends)))
+            .children(hide)
             .into_any_element()
     }
 
@@ -3364,6 +3413,18 @@ impl Workspace {
         keys.push(("Find", find.into_any_element()));
         let (row, overflow) = self.key_row_of(keys, width);
         (row.into_any_element(), overflow)
+    }
+
+    /// The bar's last cap: it puts the soft keyboard away and leaves the focus where it is, so
+    /// the screen is the program's whole; a tap on the terminal brings the keyboard back.
+    fn hide_key(&self, id: &str) -> gpui::Stateful<gpui::Div> {
+        let key = self
+            .key_cap(id.to_owned(), HIDE_CAP, false)
+            .role(Role::Button)
+            .aria_label("Hide the keyboard")
+            .child(HIDE_CAP);
+        tab_stop(key, self.theme.surfaces.focus)
+            .on_click(|_ev, window, _cx| window.dismiss_virtual_keyboard())
     }
 }
 

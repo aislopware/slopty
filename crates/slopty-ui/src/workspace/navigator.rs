@@ -2750,6 +2750,7 @@ impl WorkspaceView {
             .key_context(NAVIGATOR_CTX)
             .on_key_down(cx.listener(Self::navigator_key))
             .child(self.navigator_header(window, cx))
+            .children(self.phone.then(|| self.phone_server_line()).flatten())
             .child(rows)
             .into_any_element()
     }

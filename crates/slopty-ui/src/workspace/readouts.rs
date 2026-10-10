@@ -682,6 +682,54 @@ impl WorkspaceView {
     }
 }
 
+impl WorkspaceView {
+    /// The server's line on a phone, whose bar has no room for the readouts: under the
+    /// navigator's header while the server is out of reach, what that means, and its first
+    /// door (try it now) on the line's end.
+    pub(super) fn phone_server_line(&self) -> Option<gpui::AnyElement> {
+        let status = self.server_status.as_ref()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let text = SharedString::from(sentence(status));
+        let retry = self.server_entries.first().map(|entry| {
+            let run = Rc::clone(&entry.run);
+            let el = button("nav-server-retry", entry.label.clone(), theme)
+                .flex_none()
+                .text_color(hsla(s.accent))
+                .child(entry.label.clone());
+            tab_stop(el, s.focus).on_click(move |_ev, window, cx| run(window, cx))
+        });
+        Some(
+            div()
+                .id("nav-server")
+                .debug_selector(|| "nav-server".to_owned())
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .aria_description(SERVER_DOWN_MEANS)
+                .flex_none()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.inset()))
+                .py(px(theme.spacing.xxs))
+                .text_size(px(theme.typography.small()))
+                .child(icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_color(hsla(s.text_secondary)).child(text))
+                        .child(div().text_color(hsla(s.text_muted)).child(SERVER_DOWN_MEANS)),
+                )
+                .children(retry)
+                .into_any_element(),
+        )
+    }
+}
+
 /// Where a popover rises from the foot bar, as offsets from the window's edges.
 struct Rise {
     bottom: gpui::Pixels,
@@ -690,7 +738,7 @@ struct Rise {
 }
 
 /// `text` in sentence case: the app and the link words come lowercase.
-fn sentence(text: &str) -> String {
+pub(super) fn sentence(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }

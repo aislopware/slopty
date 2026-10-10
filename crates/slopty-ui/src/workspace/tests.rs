@@ -1702,6 +1702,7 @@ mod save_copy;
 mod search;
 mod seating;
 mod settings_page;
+mod setup_doors;
 mod shell_drag;
 mod soak;
 mod start_mode;

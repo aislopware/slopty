@@ -17,9 +17,10 @@
 //! process-wide queue until the app listens ([`taps`]).
 //!
 //! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
-//! held permission prompt where the note is, without bringing the app forward, and "Show" opens
-//! the tile. The categories are registered with the centre when [`System`] is made, which does
-//! not prompt either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
+//! held permission prompt, on a Mac where the note is, without bringing the app forward (on
+//! iOS they bring it forward: an app iOS ended cannot answer from the background), and "Show"
+//! opens the tile. The categories are registered with the centre when [`System`] is made, which
+//! does not prompt either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
 //!
 //! A button answered in the background ([`Tap::finished_later`]) may have woken a suspended
 //! app, and the system lets it run until the delegate says it is done with the response. So
@@ -168,12 +169,23 @@ pub const DENY: &str = "deny";
 /// [`APPROVAL`]'s button that opens the app at the agent.
 pub const SHOW: &str = "show";
 
+/// How "Allow" and "Deny" are pressed: where the note is on a Mac, but bringing the app forward
+/// on iOS. iOS may have ended the app, and a press in the background then launches it with no
+/// scene: GPUI and the links to the workers start only with one, so the answer would wait
+/// until the person opened the app, and the agent's held prompt would time out first. Brought
+/// forward, the app links up and sends the answer the note held.
+const VERDICT: (ActionKind, ActionKind) = if cfg!(target_os = "ios") {
+    (ActionKind::Foreground, ActionKind::Foreground)
+} else {
+    (ActionKind::Unlocked, ActionKind::Destructive)
+};
+
 /// An agent asking for a permission that "Allow" or "Deny" answers whole.
 pub const APPROVAL: Category = Category {
     id: "slopty.approval",
     actions: &[
-        Action { id: ALLOW, title: "Allow", kind: ActionKind::Unlocked },
-        Action { id: DENY, title: "Deny", kind: ActionKind::Destructive },
+        Action { id: ALLOW, title: "Allow", kind: VERDICT.0 },
+        Action { id: DENY, title: "Deny", kind: VERDICT.1 },
         Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
     ],
 };
@@ -1198,20 +1210,22 @@ mod tests {
     }
 
     /// The approval note carries "Allow", "Deny" and "Show", registered with every other
-    /// category: the answers act where the note is (allowing only on an unlocked device), and
-    /// only "Show" brings the app forward.
+    /// category. On a Mac the answers act where the note is (allowing only on an unlocked
+    /// device) and only "Show" brings the app forward; on iOS every button does
+    /// ([`VERDICT`]).
     #[test]
     fn the_approval_note_answers_in_place_and_shows_on_demand() {
         assert!(CATEGORIES.contains(&APPROVAL));
         let kinds: Vec<(&str, &str, ActionKind)> =
             APPROVAL.actions.iter().map(|a| (a.id, a.title, a.kind)).collect();
+        let (allow, deny) = if cfg!(target_os = "ios") {
+            (ActionKind::Foreground, ActionKind::Foreground)
+        } else {
+            (ActionKind::Unlocked, ActionKind::Destructive)
+        };
         assert_eq!(
             kinds,
-            [
-                (ALLOW, "Allow", ActionKind::Unlocked),
-                (DENY, "Deny", ActionKind::Destructive),
-                (SHOW, "Show", ActionKind::Foreground),
-            ]
+            [(ALLOW, "Allow", allow), (DENY, "Deny", deny), (SHOW, "Show", ActionKind::Foreground),]
         );
         assert_eq!(APPROVAL.action(DENY).map(|a| a.title), Some("Deny"));
         assert_eq!(APPROVAL.action("maybe"), None);
@@ -1228,8 +1242,9 @@ mod tests {
             info: BTreeMap::new(),
             action: action.map(str::to_owned),
         };
-        assert!(tap(Some(ALLOW)).finished_later());
-        assert!(tap(Some(DENY)).finished_later());
+        let in_place = !cfg!(target_os = "ios");
+        assert_eq!(tap(Some(ALLOW)).finished_later(), in_place);
+        assert_eq!(tap(Some(DENY)).finished_later(), in_place);
         assert!(!tap(Some(SHOW)).finished_later());
         assert!(!tap(None).finished_later());
         assert!(!tap(Some("maybe")).finished_later());
