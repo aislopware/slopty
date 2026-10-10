@@ -59,8 +59,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   only flashes the card, whatever the flag. `cursor_blink` is ghostty's `cursor-style-blink`
   (`Behaviour::cursor_blink`: `program` leaves DECSCUSR alone, `always`/`never` override it
   either way); the element applies it where it decides whether the cursor ticks the blink
-  clock, so an unfocused card stays steady as before. `paste_protection` (default on) is
-  the confirmation before a paste that would run, ruled in decisions/terminal.md.
+  clock, so an unfocused card stays steady as before. `paste_protection` (default on) was
+  the confirmation before a paste that would run, ruled in decisions/terminal.md. It was cut on
+  2026-10-10 ("Four terminal switches are decided on", below).
 - ✅ **`[font] ligatures`, `[terminal] bold_is_bright | hide_pointer_while_typing |
   scroll_multiplier`, `[remote] muted`** (2026-09-15): the terminal ones are ruled in
   decisions/terminal.md; ligatures ride on `Typography`, bold-is-bright on
@@ -69,7 +70,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stream silenced on this client; `ScreenView::set_theme` moves the switch only when the
   setting itself changes, so the title-bar pill's own toggle survives an unrelated theme
   change (test: the tail of `new_stream_settings_are_asked_of_a_live_stream`). `[remote]
-  muted` was cut on 2026-10-05 ("`[remote]` is the bitrate ceiling alone", below).
+  muted` was cut on 2026-10-05 ("`[remote]` is the bitrate ceiling alone", below), and
+  `hide_pointer_while_typing` on 2026-10-10 ("Four terminal switches are decided on").
 - ✅ **`[colors]` lays a palette over the theme** (2026-09-15). ghostty ships hundreds of
   schemes and every terminal takes a custom palette; Slopty's two variants were fixed. The
   section has `foreground | background | cursor | cursor_text | selection` and `ansi` (a
@@ -121,10 +123,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **`[terminal] confirm_close`** (2026-09-13): ghostty's `confirm-close-surface`, default
   on, on `Theme::behaviour`; ruled in decisions/terminal.md ("Closing a busy shell asks").
+  Cut on 2026-10-10 ("Four terminal switches are decided on", below).
 
 - ✅ **`[terminal] natural_editing`** (2026-09-13): ghostty's macOS "natural text editing"
   keybinds (⌘← ⌘→ ⌘⌫ ⌥← ⌥→, plus ⌥⌫) as one switch, default on, on `Theme::behaviour`;
-  ruled in decisions/terminal.md ("The line is edited with the Mac's keys").
+  ruled in decisions/terminal.md ("The line is edited with the Mac's keys"). Cut on 2026-10-10
+  ("Four terminal switches are decided on", below).
 
 - ✅ **`[remote] hdr` is gone** (2026-09-25): it stopped reaching a stream when the stream
   became 8-bit only, and it went with the wire fields that echoed it; ruled in
@@ -484,3 +488,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - `the_person_edits_the_server_s_own_settings` (slopty-server);
     - `daemon::tests` (slopty-settings): edits in place, refusals that write nothing, a missing
       file made, problems said.
+
+- ✅ **Four terminal switches are decided on** (2026-10-10, orchestrator-first audit §C.5).
+  `[terminal] paste_protection`, `hide_pointer_while_typing`, `confirm_close` and
+  `natural_editing` are gone, along with their `Theme::behaviour` fields and their rows in the
+  form. Each was on by default and is right for everyone, so the switch only offered a way to
+  be worse off.
+  - **Paste protection.** A paste goes out unconfirmed, and the worker holds back what would
+    run.
+  - **Pointer hiding.** A key that goes to the program hides the pointer until it moves.
+  - **Close confirmation.** Closing a shell whose command still runs asks first.
+  - **The Mac's editing keys.** ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ send readline's bytes.
+  - `font.ligatures` and `font.mono_line_height` stay.
+  - A file that still has one of the four loads, with an unknown-key warning for it.
+  - Tests: `terminal_keys` (slopty-settings), `terminal_settings_ride_on_the_theme`
+    (slopty-app), and in the terminal view `a_paste_the_worker_holds_back_waits_for_a_confirmation`,
+    `closing_a_busy_shell_asks_first` and `the_macs_editing_keys_edit_the_line`.

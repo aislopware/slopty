@@ -140,15 +140,11 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         OptionAsAlt::Left => slopty_theme::OptionAsAlt::Left,
         OptionAsAlt::Right => slopty_theme::OptionAsAlt::Right,
     };
-    theme.behaviour.paste_protection = settings.terminal.paste_protection;
-    theme.behaviour.confirm_close = settings.terminal.confirm_close;
-    theme.behaviour.natural_editing = settings.terminal.natural_editing;
     theme.behaviour.secure_entry = match settings.terminal.secure_keyboard_entry {
         SecureEntry::Passwords => slopty_theme::SecureEntry::Passwords,
         SecureEntry::Always => slopty_theme::SecureEntry::Always,
         SecureEntry::Never => slopty_theme::SecureEntry::Never,
     };
-    theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
         hundredths(sized(settings.terminal.scroll_multiplier, &bounds::SCROLL, 1.0));
@@ -378,24 +374,14 @@ mod tests {
         let t = theme_for(&s, true);
         assert_eq!(t.terminal.minimum_contrast, 450);
         assert!(t.behaviour.copy_on_select);
-        assert!(t.behaviour.paste_protection);
-        s.terminal.paste_protection = false;
-        assert!(!theme_for(&s, true).behaviour.paste_protection);
-        assert!(t.behaviour.confirm_close);
-        s.terminal.confirm_close = false;
-        assert!(!theme_for(&s, true).behaviour.confirm_close);
-        assert!(t.behaviour.natural_editing);
-        s.terminal.natural_editing = false;
-        assert!(!theme_for(&s, true).behaviour.natural_editing);
         assert_eq!(t.behaviour.secure_entry, slopty_theme::SecureEntry::Passwords);
         s.terminal.secure_keyboard_entry = SecureEntry::Always;
         let secure = theme_for(&s, true).behaviour.secure_entry;
         assert_eq!(secure, slopty_theme::SecureEntry::Always);
-        assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
-        s.terminal.hide_pointer_while_typing = false;
+        assert!(!t.terminal.bold_is_bright);
         s.terminal.bold_is_bright = true;
         let t = theme_for(&s, true);
-        assert!(!t.behaviour.hide_pointer_while_typing && t.terminal.bold_is_bright);
+        assert!(t.terminal.bold_is_bright);
         assert!(t.typography.ligatures);
         s.font.ligatures = false;
         assert!(!theme_for(&s, true).typography.ligatures);

@@ -862,8 +862,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   rule is `paste_is_safe`: outside bracketed paste a `\n` or `\r` is unsafe; inside it only
   the bracket's end sequence (`ESC [ 201 ~`) is, so an editor or a shell with mode 2004
   (zsh, fish, bash 5.1+) takes a multi-line paste straight, as ghostty does. Deliberate
-  pastes (`run_text`: Rerun, the agent's typed command) bypass it. `[terminal]
-  paste_protection` turns it off (`Theme::behaviour.paste_protection`, default on). Since
+  pastes (`run_text`: Rerun, the agent's typed command) bypass it. `The
+  `[terminal] paste_protection` switch that turned it off was cut on 2026-10-10 (settings.md,
+  "Four terminal switches decided on"). Since
   2026-09-30 the worker applies the rule to the mode as it is when the paste arrives (ui.md,
   "A paste is judged by the mode when it arrives"). Test:
   `a_paste_the_worker_holds_back_waits_for_a_confirmation`.
@@ -875,7 +876,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   tint read as they were drawn), `[font] ligatures` (on: the font's own; off: `calt`
   disabled through GPUI's `FontFeatures::disable_ligatures`, so `=>` stays two glyphs —
   part of the shaped-word cache key, since the same cells shape differently) and
-  `[terminal] hide_pointer_while_typing` (on, as Terminal.app and iTerm2: a key that goes
+  pointer hiding (always on since 2026-10-10, when `[terminal] hide_pointer_while_typing` was
+  cut; as Terminal.app and iTerm2: a key that goes
   to the program calls `NSCursor.setHiddenUntilMouseMoves`, AppKit unhides on the next
   move; nothing on iOS, and nothing without a running `NSApplication`: in a headless test
   the AppKit call stalled ten seconds on a window server connection, which is how the
@@ -979,10 +981,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Pending` for both — names the command and offers Close / Keep; ↩ closes, Esc keeps, any
   other key keeps and goes on to the program. The canvas asks the view before sending
   `Close` and sends it on `TerminalViewEvent::CloseConfirmed`; an idle shell, an exited one
-  and every other card kind close as before. `[terminal] confirm_close = false` turns it
-  off. Tests:
-  `closing_a_busy_shell_asks_first` (view: asks while running, ↩ confirms, Esc keeps, off
-  by setting), `a_busy_shell_closes_only_when_confirmed` (canvas: no `Close` until the
+  and every other card kind close as before. The `[terminal] confirm_close` switch was cut on
+  2026-10-10: it always asks. Tests:
+  `closing_a_busy_shell_asks_first` (view: asks while running, ↩ confirms, Esc keeps), `a_busy_shell_closes_only_when_confirmed` (canvas: no `Close` until the
   view says so).
 
 - ✅ **A closed shell can be taken back for five seconds** (2026-09-13). The bar above
@@ -1037,13 +1038,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   editing" defaults). ⌘← and ⌘→ went up to the app as unbound chords and did nothing; ⌥←
   and ⌥→ reached the host's encoder as `CSI 1;3 D/C`, which zsh, bash and fish bind to
   nothing, so a word could not be stepped over without ⌥b/⌥f, which need option-as-alt.
-  Ruling: with `[terminal] natural_editing` on (the default) the view sends what ghostty's
+  Ruling: the view sends what ghostty's
   macOS keybinds send, as raw bytes: ⌘← `^A`, ⌘→ `^E`, ⌘⌫ `^U`, ⌥← `ESC b`, ⌥→ `ESC f`,
   and ⌥⌫ `ESC DEL` (readline's and zle's backward-kill-word; ghostty leaves that one to
   its encoder, which sends it only with option-as-alt). They are taken after the search
   field, the composer and a selection's ⇧-arrows have had their say, so nothing else moves;
-  a program under the alternate screen gets the same bytes, as under ghostty. Off, the
-  chords go where they went. On the phone the key bar's armed ⌘ with ← → ⌫ is the same
+  a program under the alternate screen gets the same bytes, as under ghostty. The
+  `[terminal] natural_editing` switch that turned it off was cut on 2026-10-10. On the phone the key bar's armed ⌘ with ← → ⌫ is the same
   chord (`press`), so a line can be edited without a hardware keyboard. Tests:
   `natural_editing_keys` (keys: the table, other chords none),
   `the_macs_editing_keys_edit_the_line` (view: ⌘← is `^A` on the wire, ⌥⌫ `ESC DEL`, the

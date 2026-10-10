@@ -1749,19 +1749,10 @@ pub struct Behaviour {
     pub cursor_blink: CursorBlink,
     /// The cursor's shape: the program's, or one fixed.
     pub cursor_style: CursorStyle,
-    /// A paste that could run commands (a newline outside bracketed paste, the bracket's end
-    /// sequence inside it) waits for a confirmation.
-    pub paste_protection: bool,
-    /// The pointer hides while typing into a terminal, until it moves (Terminal.app's way).
-    pub hide_pointer_while_typing: bool,
     /// What a wheel or trackpad line is worth in grid lines, in hundredths (`100` = one).
     pub scroll_multiplier: u16,
     /// ⌥ as Alt: sent with every key, since the encoder is the worker's.
     pub option_as_alt: OptionAsAlt,
-    /// Closing a terminal whose command is still running asks first.
-    pub confirm_close: bool,
-    /// ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ edit the shell's line as the Mac's text fields do.
-    pub natural_editing: bool,
     /// When typing is kept from other programs on this Mac (secure event input).
     pub secure_entry: SecureEntry,
     /// What a remote window or display stream asks the worker for.
@@ -1774,12 +1765,8 @@ impl Default for Behaviour {
             copy_on_select: false,
             cursor_blink: CursorBlink::Program,
             cursor_style: CursorStyle::Program,
-            paste_protection: true,
-            hide_pointer_while_typing: true,
             scroll_multiplier: 100,
             option_as_alt: OptionAsAlt::False,
-            confirm_close: true,
-            natural_editing: true,
             secure_entry: SecureEntry::Passwords,
             stream: StreamPrefs::default(),
         }

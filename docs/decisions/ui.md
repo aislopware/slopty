@@ -3863,8 +3863,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   alone has the mode as it is, now judges it (`Engine::paste_is_safe`): `TermRequest::Paste`
   carries `confirmed`, and an unconfirmed paste that would run something comes back unwritten
   as `TermEvent::PasteHeld`, which puts up the confirmation strip; ↩ sends it again confirmed.
-  The client's own check is gone. With `[terminal] paste_protection` off, and for what the
-  person composed (the conversation face's composer, an agent's first prompt), a paste goes
+  The client's own check is gone. For what the person composed (the conversation face's composer, an agent's first prompt), a paste goes
   out confirmed. Tests: `a_paste_that_would_run_under_the_mode_now_comes_back_unwritten` in
   `slopty-worker`'s `session_actor`,
   `terminal::view::tests::a_paste_the_worker_holds_back_waits_for_a_confirmation`, and

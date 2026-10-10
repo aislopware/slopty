@@ -414,22 +414,11 @@ pub struct TerminalSettings {
     /// or underline.
     #[schemars(title = "Shape")]
     pub cursor_style: CursorStyle,
-    /// A paste that would run a command waits for a confirmation.
-    ///
-    /// A paste that could run commands (a newline into a shell that did not ask for
-    /// bracketed paste) waits for a confirmation (ghostty's `clipboard-paste-protection`).
-    #[schemars(title = "Paste protection")]
-    pub paste_protection: bool,
     /// Bold text in the first eight colours takes their bright forms.
     ///
     /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (ghostty's `bold-is-bright`).
     #[schemars(title = "Bold is bright")]
     pub bold_is_bright: bool,
-    /// It comes back when it moves.
-    ///
-    /// The pointer hides while typing into a terminal, until it moves.
-    #[schemars(title = "Hide pointer while typing")]
-    pub hide_pointer_while_typing: bool,
     /// Grid lines per wheel or trackpad line.
     ///
     /// What a wheel or trackpad line scrolls, in grid lines (ghostty's
@@ -446,17 +435,6 @@ pub struct TerminalSettings {
     /// `true` sends an escape prefix for readline's ⌥b/⌥f, `left`/`right` one side each.
     #[schemars(title = "Option as Alt")]
     pub option_as_alt: OptionAsAlt,
-    /// Closing a terminal whose command still runs asks first.
-    ///
-    /// Ghostty's `confirm-close-surface`.
-    #[schemars(title = "Confirm close")]
-    pub confirm_close: bool,
-    /// Edit the line with ⌘ and ⌥ and the arrows, as text fields do.
-    ///
-    /// The Mac's line-editing keys in a shell (ghostty's macOS "natural text editing"
-    /// keybinds): ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ sent as readline's bytes.
-    #[schemars(title = "Natural text editing")]
-    pub natural_editing: bool,
     /// Keeps passwords typed here from other apps, as Terminal does.
     ///
     /// When macOS keeps what is typed into Slopty from other programs on this Mac (secure
@@ -475,13 +453,9 @@ impl Default for TerminalSettings {
             alert: Alert::Hidden,
             cursor_blink: CursorBlink::Program,
             cursor_style: CursorStyle::Program,
-            paste_protection: true,
             bold_is_bright: false,
-            hide_pointer_while_typing: true,
             scroll_multiplier: 1.0,
             option_as_alt: OptionAsAlt::False,
-            confirm_close: true,
-            natural_editing: true,
             secure_keyboard_entry: SecureEntry::Passwords,
         }
     }
@@ -1078,22 +1052,13 @@ alert = {alert}
 cursor_blink = {cursor_blink}
 # \"program\" (the shell or editor decides), \"block\", \"bar\" or \"underline\".
 cursor_style = {cursor_style}
-# A paste with a newline into a shell that did not ask for bracketed paste
-# (so it would run) waits for a confirmation.
-paste_protection = {paste_protection}
 # Paint bold text in ANSI colours 0-7 with the bright 8-15.
 bold_is_bright = {bold_is_bright}
-# Hide the pointer while typing into a terminal, until it moves.
-hide_pointer_while_typing = {hide_pointer_while_typing}
 # Grid lines per wheel or trackpad line (0.1 to 10).
 scroll_multiplier = {scroll_multiplier}
 # Option as Alt: false types the layout's symbol (⌥b is ∫); true sends the
 # escape prefix readline's ⌥b/⌥f want; \"left\" or \"right\" keep one side each.
 option_as_alt = {option_as_alt}
-# Closing a terminal whose command is still running asks first.
-confirm_close = {confirm_close}
-# ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ edit the shell's line as the Mac's text fields do.
-natural_editing = {natural_editing}
 
 [remote]
 # Ceiling for one stream in megabits per second (1 to 200); the machine grows
@@ -1184,13 +1149,9 @@ editor = \"\"
             clipboard_sync = d.clipboard.sync,
             cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
             cursor_style = toml_string(cursor_style_name(d.terminal.cursor_style)),
-            paste_protection = d.terminal.paste_protection,
             bold_is_bright = d.terminal.bold_is_bright,
-            hide_pointer_while_typing = d.terminal.hide_pointer_while_typing,
             scroll_multiplier = toml_float(d.terminal.scroll_multiplier),
             option_as_alt = toml_string(option_as_alt_name(d.terminal.option_as_alt)),
-            confirm_close = d.terminal.confirm_close,
-            natural_editing = d.terminal.natural_editing,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
         )
     }
@@ -1417,9 +1378,7 @@ mod tests {
         assert_eq!(d.terminal.alert, Alert::Hidden, "heard while Slopty is hidden");
         assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
         assert_eq!(d.terminal.cursor_style, CursorStyle::Program, "and its shape");
-        assert!(d.terminal.paste_protection, "a pasted newline asks first");
         assert!(!d.terminal.bold_is_bright, "bold is a weight, as in ghostty");
-        assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
         assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
         assert!(d.font.ligatures, "the font's own");
         assert_eq!(d.remote.max_bitrate_mbps, 30);
@@ -1559,20 +1518,23 @@ mod tests {
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\nconfirm_close = false\nnatural_editing = false\n",
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\ncursor_blink = \"never\"\nbold_is_bright = true\nscroll_multiplier = 3\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert!(!loaded.settings.terminal.confirm_close);
-        assert!(!loaded.settings.terminal.natural_editing);
         assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);
         assert_eq!(loaded.settings.terminal.alert, Alert::Always);
         assert_eq!(loaded.settings.terminal.cursor_blink, CursorBlink::Never);
-        assert!(!loaded.settings.terminal.paste_protection);
         assert!(loaded.settings.terminal.bold_is_bright);
-        assert!(!loaded.settings.terminal.hide_pointer_while_typing);
         assert_eq!(loaded.settings.terminal.scroll_multiplier, 3.0);
+        let gone = Settings::parse("[terminal]\nconfirm_close = false\nnatural_editing = false\n");
+        assert!(gone.error.is_none(), "{:?}", gone.error);
+        assert_eq!(
+            gone.warnings,
+            ["unknown key `terminal.confirm_close`", "unknown key `terminal.natural_editing`"],
+            "decided on: a switch left in the file is only warned of"
+        );
         let loaded = Settings::parse("[font]\nligatures = false\n");
         assert!(!loaded.settings.font.ligatures);
         for (text, want) in [

@@ -169,27 +169,14 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (Section::Terminal, "Cursor", &["terminal.cursor_style", "terminal.cursor_blink"]),
     (Section::Terminal, "Text", &["terminal.minimum_contrast", "terminal.bold_is_bright"]),
-    (Section::Terminal, "Behaviour", &["terminal.confirm_close", "terminal.alert"]),
-    (
-        Section::Input,
-        "Keys",
-        &["terminal.option_as_alt", "terminal.natural_editing", "terminal.secure_keyboard_entry"],
-    ),
+    (Section::Terminal, "Behaviour", &["terminal.alert"]),
+    (Section::Input, "Keys", &["terminal.option_as_alt", "terminal.secure_keyboard_entry"]),
     (
         Section::Input,
         "Clipboard",
-        &[
-            "clipboard.sync",
-            "clipboard.workers",
-            "terminal.copy_on_select",
-            "terminal.paste_protection",
-        ],
+        &["clipboard.sync", "clipboard.workers", "terminal.copy_on_select"],
     ),
-    (
-        Section::Input,
-        "Pointer",
-        &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
-    ),
+    (Section::Input, "Pointer", &["terminal.scroll_multiplier"]),
     (Section::Agents, "ACP agents", &["worker.acp"]),
     (
         Section::Agents,

@@ -2116,8 +2116,7 @@ impl TerminalView {
         self.state.scroll_to_bottom();
         // Whether it could run something is the worker's to judge, by the program's mode as it
         // is when the paste arrives (`TermEvent::PasteHeld`); the last frame's may be stale.
-        let confirmed = !self.theme.behaviour.paste_protection;
-        self.send(TermRequest::Paste { text, confirmed }, cx);
+        self.send(TermRequest::Paste { text, confirmed: false }, cx);
         cx.notify();
     }
 
@@ -2163,14 +2162,11 @@ impl TerminalView {
         }
     }
 
-    /// The workspace is about to close this shell: with a command running and the setting
-    /// on, the bar asks first and this says so (`true`); otherwise nothing stands in the
-    /// way. A shell whose program exited has nothing left to lose.
+    /// The workspace is about to close this shell: with a command running the bar asks first and
+    /// this says so (`true`); otherwise nothing stands in the way. A shell whose program exited
+    /// has nothing left to lose.
     pub fn ask_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.theme.behaviour.confirm_close
-            || !self.state.command_running()
-            || self.state.exited().is_some()
-        {
+        if !self.state.command_running() || self.state.exited().is_some() {
             return false;
         }
         let command = self
@@ -2399,7 +2395,6 @@ impl TerminalView {
         }
         // An armed ⌘ with the bar's ← → ⌫ is the Mac's line-editing chord, as on the desktop.
         if self.sticky_command
-            && self.theme.behaviour.natural_editing
             && let Some(bytes) = keys::natural_editing(&Keystroke {
                 modifiers: gpui::Modifiers { platform: true, ..gpui::Modifiers::default() },
                 key: keystroke.key.clone(),
@@ -2415,7 +2410,6 @@ impl TerminalView {
         }
         // An armed Alt with the bar's ← → is the Mac's word motion, as ⌥← ⌥→ are on the desktop.
         if self.sticky_alt
-            && self.theme.behaviour.natural_editing
             && let Some(bytes) = keys::natural_editing(&Keystroke {
                 modifiers: gpui::Modifiers { alt: true, ..gpui::Modifiers::default() },
                 key: keystroke.key.clone(),
@@ -3238,9 +3232,7 @@ impl TerminalView {
         }
         // The Mac's line-editing chords, sent as readline's bytes (ghostty's macOS "natural
         // text editing" keybinds).
-        if self.theme.behaviour.natural_editing
-            && let Some(bytes) = keys::natural_editing(&event.keystroke)
-        {
+        if let Some(bytes) = keys::natural_editing(&event.keystroke) {
             self.selection = None;
             self.pin_blink();
             if self.state.view_offset() != 0 {
@@ -3275,7 +3267,7 @@ impl TerminalView {
         let shown = self.type_key(event.keystroke.clone(), event.is_held, cx);
         // After the key is on its way: the AppKit call costs the echo nothing there, and a
         // pointer already hidden by the last key is not hidden again.
-        if self.theme.behaviour.hide_pointer_while_typing && !self.pointer_hidden {
+        if !self.pointer_hidden {
             slopty_platform::hide_pointer_until_moved();
             self.pointer_hidden = true;
         }
@@ -5389,7 +5381,7 @@ mod tests {
     /// Paste protection is the worker's to judge, by the program's mode when the paste
     /// arrives: every paste goes out unconfirmed, whatever the last frame said. One the worker
     /// sends back waits at the tile's foot: ↩ sends it again confirmed, Esc drops it, another
-    /// key drops it and types. With the setting off a paste goes out confirmed.
+    /// key drops it and types.
     #[gpui::test]
     fn a_paste_the_worker_holds_back_waits_for_a_confirmation(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -5448,15 +5440,6 @@ mod tests {
         cx.run_until_parked();
         assert!(pastes(&mut rx).is_empty(), "another key drops it");
         assert_eq!(pending(cx), None);
-
-        view.update_in(cx, |view, _window, cx| {
-            let mut theme = Theme::new(slopty_theme::Variant::Dark);
-            theme.behaviour.paste_protection = false;
-            view.set_theme(theme, cx);
-        });
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(pastes(&mut rx), [(run, true)], "protection off: confirmed as sent");
     }
 
     /// A picture copied here with no text reaches the worker's pasteboard ahead of ⌘V and ⌃V:
@@ -5533,8 +5516,7 @@ mod tests {
 
     /// ⌘W on a shell whose command is running asks first: the workspace's `ask_close` puts the
     /// bar up and says so; ↩ confirms (the workspace hears `CloseConfirmed`), Esc keeps the
-    /// shell, any other key keeps it and goes to the program; an idle shell, a shell with
-    /// the setting off, never ask.
+    /// shell, any other key keeps it and goes to the program; an idle shell never asks.
     #[gpui::test]
     fn closing_a_busy_shell_asks_first(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -5616,13 +5598,6 @@ mod tests {
         assert!(!view.read_with(cx, |v, _| v.close_asked()));
         assert_eq!(drain_input(&mut rx), ["x"], "the key reached the program");
         assert_eq!(confirmed.get(), 1);
-        // The setting off: closes at once.
-        view.update_in(cx, |view, _window, cx| {
-            let mut theme = Theme::new(slopty_theme::Variant::Dark);
-            theme.behaviour.confirm_close = false;
-            view.set_theme(theme, cx);
-        });
-        assert!(!view.update(cx, TerminalView::ask_close), "off: closes at once");
     }
 
     /// ⌘⇧C copies the output of the last finished command; with no marks it copies nothing.
@@ -7280,8 +7255,8 @@ mod tests {
         assert!(shown(cx) <= 0.0, "then it is gone");
     }
 
-    /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes; with the setting off the
-    /// chords are not the terminal's (⌘← goes up to the app, ⌥⌫ to the encoder as a key).
+    /// ⌘← is `^A` on the wire and ⌥⌫ `ESC DEL`, as raw bytes, always: the Mac's line-editing
+    /// chords are the terminal's.
     #[gpui::test]
     fn the_macs_editing_keys_edit_the_line(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -7310,15 +7285,6 @@ mod tests {
         });
         assert_eq!(raw(&mut rx), [b"\x15".to_vec()], "armed ⌘⌫ is ^U");
         assert!(!view.read_with(cx, |v, _| v.sticky_command()), "one key");
-
-        view.update(cx, |view, cx| {
-            let mut theme = Theme::default();
-            theme.behaviour.natural_editing = false;
-            view.set_theme(theme, cx);
-        });
-        cx.simulate_keystrokes("cmd-left");
-        cx.simulate_keystrokes("alt-backspace");
-        assert_eq!(raw(&mut rx), [b"key:Backspace".to_vec()], "off: ⌘← passes up, ⌥⌫ is a key");
     }
 
     /// Every key the terminal received, oldest first, with the paste texts in between.

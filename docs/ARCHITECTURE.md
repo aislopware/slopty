@@ -123,8 +123,8 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   block's prompt is a range query, not a walk. Mouse selection is client-side too
   (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`, which the worker
   sends back as `PasteHeld` for a confirmation strip when it holds a newline and the program,
-  as it is when the paste arrives, has not asked for bracketed paste (`Engine::paste_is_safe`,
-  `[terminal] paste_protection`); drag, ⌥-drag for a
+  as it is when the paste arrives, has not asked for bracketed paste (`Engine::paste_is_safe`);
+  drag, ⌥-drag for a
   rectangle, double/triple click, ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
   keeps scrolling through the cache at a pace set by the distance); nothing reaches the worker,
   except a plain click on the shell's input line, which becomes the arrow keys that put the
@@ -1610,11 +1610,10 @@ applies it, a parse error stays under the field).
 ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
 `[terminal] minimum_contrast | copy_on_select | alert = never | hidden | always | cursor_blink = program | always |
-never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
-hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right |
-confirm_close | natural_editing` (the ratio and bold-is-bright ride on `TerminalPalette`,
-copy-on-select, the blink override, paste protection, the pointer hide, the multiplier,
-option-as-alt, the close confirmation and the natural editing keys on `Theme::behaviour`,
+never | cursor_style = program | block | bar | underline | bold_is_bright | scroll_multiplier |
+option_as_alt = false | true | left | right` (the ratio and bold-is-bright ride on
+`TerminalPalette`, copy-on-select, the blink override, the multiplier and option-as-alt on
+`Theme::behaviour`,
 the last travelling on every `KeyEvent` to the worker's encoder, the alert is
 read by the app's bell and agent handlers, see decisions/terminal.md), `[remote] max_bitrate_mbps` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change, see decisions/video.md and decisions/settings.md), `[colors.light]` and `[colors.dark]`
