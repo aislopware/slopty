@@ -17,7 +17,7 @@ use slopty_proto::git::Forge;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Fact, Merge, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
-    ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    ProjectUpdate, ProjectsPart, StepKind, StepState, Task, TaskCard, TaskId, TaskState, TaskStep,
     TimelineEntry, VerifierRun, WorkerFacts,
 };
 use slopty_proto::thread::wire::{PullSeen, PullStands};
@@ -248,8 +248,10 @@ pub enum TaskAction {
     AddressComments,
     /// Tell its agent, as the person, to resolve the conflicts its rebase met.
     ResolveConflicts,
-    /// Push its target to the forge again, after the push that went with its merge failed.
-    PushAgain,
+    /// Push its target to the forge: a merge the project did not push (pushing is off unless the
+    /// person turns it on), or one whose push failed. The target goes as it is, so every merged
+    /// task not pushed yet is pushed with it.
+    Push,
     /// Give it up: it holds its paths no more and leaves the merge queue, and it may be
     /// planned again. Its agent, if one runs, is left to the person.
     Cancel,
@@ -275,7 +277,7 @@ impl TaskAction {
             Self::FixCi => "Fix CI",
             Self::AddressComments => "Address comments",
             Self::ResolveConflicts => "Resolve conflicts",
-            Self::PushAgain => "Push again",
+            Self::Push => "Push",
             Self::Cancel => "Cancel task",
             Self::Stop => "Stop its agent",
             Self::StartFresh => "Start fresh",
@@ -301,7 +303,7 @@ impl TaskAction {
             Self::FixCi => "fix-ci",
             Self::AddressComments => "address-comments",
             Self::ResolveConflicts => "resolve-conflicts",
-            Self::PushAgain => "push-again",
+            Self::Push => "push",
             Self::Cancel => "cancel",
             Self::Stop => "stop",
             Self::StartFresh => "start-fresh",
@@ -725,14 +727,13 @@ impl Board {
     ///
     /// Checking a failure again unchanged would fail the same way, so a failed verifier or
     /// rebase offers Retry only when no agent runs to fix it. A task that only reads has
-    /// nothing to merge, and a merged one only a push again, when its push failed.
+    /// nothing to merge, and a merged one only a push, while its merge is not on the forge.
     #[must_use]
     pub fn actions(&self, task: TaskId) -> Vec<TaskAction> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
         if card.state == TaskState::Merged {
-            let push_failed =
-                matches!(card.merge, Some(Merge::Merged { push_failed: Some(_), .. }));
-            return if push_failed { vec![TaskAction::PushAgain] } else { Vec::new() };
+            let unpushed = matches!(card.merge, Some(Merge::Merged { pushed: false, .. }));
+            return if unpushed { vec![TaskAction::Push] } else { Vec::new() };
         }
         if card.read_only {
             return Vec::new();
@@ -850,9 +851,17 @@ impl Board {
             TaskAction::ResolveConflicts => {
                 let step = card.step.as_ref().filter(|s| s.kind == StepKind::Rebase)?;
                 let StepState::Failed { why } = &step.state else { return None };
+                // On another machine the target is in its clone as the queue sent it, under a
+                // name of the server's: the clone's own target lacks what the queue merged.
+                let onto = if self.remote(task) {
+                    let branch = Task::target_branch(&self.project.id);
+                    format!("{branch}, the queue's {target} as sent to your clone")
+                } else {
+                    target.clone()
+                };
                 Some(format!(
                     "Resolve the conflicts. Your work does not rebase onto {target}: {}. Rebase \
-                     onto {target}, resolve them, then {then}",
+                     onto {onto}, resolve them, then {then}",
                     crate::kit::first_line(why)
                 ))
             }
@@ -861,7 +870,7 @@ impl Board {
             | TaskAction::Start
             | TaskAction::RunOn
             | TaskAction::Retry
-            | TaskAction::PushAgain
+            | TaskAction::Push
             | TaskAction::Cancel
             | TaskAction::Stop
             | TaskAction::StartFresh
@@ -1000,6 +1009,26 @@ impl Board {
     pub fn progress(&self) -> (usize, usize) {
         let merged = self.tasks.values().filter(|c| c.state == TaskState::Merged).count();
         (merged, self.tasks.len())
+    }
+
+    /// The merged tasks whose merge is not on the forge yet, by number: the project pushes only
+    /// when the person turned pushing on, so what the merge queue landed may sit in the
+    /// orchestrator's clone alone. One push takes them all.
+    #[must_use]
+    pub fn unpushed(&self) -> Vec<TaskId> {
+        self.tasks
+            .values()
+            .filter(|c| matches!(c.merge, Some(Merge::Merged { pushed: false, .. })))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// Whether `task` runs on a machine other than the orchestrator's, so its clone holds the
+    /// project's target only as the queue sends it there ([`Task::target_branch`]).
+    fn remote(&self, task: TaskId) -> bool {
+        let at = self.tasks.get(&task).and_then(|c| c.assignment.as_ref()).map(|a| a.term.worker);
+        let home = self.project.orchestrator.map(|t| t.worker);
+        at.is_some() && home.is_some() && at != home
     }
 
     /// When anything on the board last changed, by the server's clock.

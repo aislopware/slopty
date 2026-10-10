@@ -500,6 +500,21 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     assert!(pull.contains("Pull request #9 has changes requested"), "{pull}");
     let resolve = told(4, TaskAction::ResolveConflicts);
     assert!(resolve.contains("does not rebase onto main: conflicts in a.txt"), "{resolve}");
+    assert!(resolve.contains("Rebase onto main, resolve"), "{resolve}");
+    // On a machine other than the orchestrator's, the target is in its clone under the
+    // server's name for it, as the queue sent it.
+    let home = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+    let mut away = Projects::default();
+    let conflicted = b.tasks.get(&TaskId(4)).cloned().expect("#4");
+    away.apply_part(snapshot(
+        10,
+        vec![status(project("board", Some(home)), vec![conflicted], Vec::new())],
+    ));
+    let resolve = board(&away).told(TaskId(4), TaskAction::ResolveConflicts).expect("words");
+    assert!(
+        resolve.contains("Rebase onto slopty/board/target, the queue's main as sent to your clone"),
+        "{resolve}"
+    );
     assert_eq!(b.told(TaskId(4), TaskAction::FixCi), None, "nothing failed to fix");
     assert_eq!(b.told(TaskId(1), TaskAction::Merge), None);
 }
@@ -599,9 +614,10 @@ fn a_merge_whose_push_failed_says_so() {
     assert_eq!(words(3).as_deref(), Some("into main at abcdef0"));
     let beside_its_stage = merge(1).and_then(|m| merged_words(m, true));
     assert_eq!(beside_its_stage.as_deref(), Some("into main at abcdef0"), "said once");
-    assert_eq!(b.actions(TaskId(1)), [TaskAction::PushAgain], "pushed again on the person's word");
+    assert_eq!(b.actions(TaskId(1)), [TaskAction::Push], "pushed again on the person's word");
     assert_eq!(b.actions(TaskId(2)), Vec::<TaskAction>::new(), "pushed: nothing left to do");
-    assert_eq!(b.actions(TaskId(3)), Vec::<TaskAction>::new(), "never asked to push");
+    assert_eq!(b.actions(TaskId(3)), [TaskAction::Push], "not on the forge: offered all the same");
+    assert_eq!(b.unpushed(), [TaskId(1), TaskId(3)], "what the board's head counts");
 }
 
 /// Each node says where it is: the orchestrator and a running task where their agents run, an

@@ -9769,3 +9769,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::composing::the_draft_follows_the_person_through_the_worker`,
     `…::words_kept_here_give_way_to_a_later_draft_from_elsewhere`;
     `workspace::drafts::tests::drafts_come_back_and_old_ones_go` (slopty-ui).
+
+- ✅ **The board's head says what merged and is not on the forge, and pushes it** (2026-10-12,
+  readiness audit item 16's A half; the server's half is in `projects.md`).
+  - **The defect.** With pushing off, which is the default, the merge queue's work sat in the
+    orchestrator's clone with no way out from the board. A merged card offered a push only
+    after a push had failed. "Resolve conflicts" told an agent on another machine to rebase
+    onto the target by its plain name, though its clone holds the queue's target only under
+    the server's name.
+  - **The head.** While any merged task is not pushed, the header's row says "N merged tasks
+    not pushed" with Push beside it (`Board::unpushed`). One push sends the target as it is
+    and marks every task merged into it pushed, so the head asks once for them all. Each such
+    card offers Push too (`TaskAction::Push`, which replaces "Push again"): a failed push and
+    a push never asked for are the same step. The palette's push action follows the card the
+    board stands on.
+  - **Resolve.** For a task on a machine other than the orchestrator's, the words name
+    `slopty/<project>/target`, the queue's target as sent to that clone, which is what the
+    server's own give-back says.
+  - **Not done.** "Open pull request" from the head needs a client verb that opens one for
+    the target's unpushed work. The wire has none (`LandPull` is the server's to its worker),
+    so the head offers Push alone.
+  - Tests: `project::tests::a_merge_whose_push_failed_says_so`,
+    `project::tests::a_running_agent_is_told_its_next_step_in_the_person_s_words`;
+    `workspace::tests::projects::the_boards_actions_reach_the_server` (slopty-ui).

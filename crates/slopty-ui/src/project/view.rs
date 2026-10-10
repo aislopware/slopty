@@ -720,7 +720,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::FixCi => "fix",
         TaskAction::AddressComments => "address",
         TaskAction::ResolveConflicts => "resolve",
-        TaskAction::PushAgain => "push again",
+        TaskAction::Push => "push",
         TaskAction::Cancel => "cancel",
         TaskAction::Stop => "stop",
         TaskAction::StartFresh => "start fresh",
@@ -826,6 +826,9 @@ impl ProjectView {
         if let Some(progress) = progress {
             title = title.item("progress", Priority::MEDIUM, readout("project-progress", progress));
         }
+        if let Some(unpushed) = self.unpushed(board, cx) {
+            title = title.item("unpushed", Priority::HIGH, unpushed);
+        }
         let title = title
             .item("live", Priority::LOW, live)
             .item("checks", Priority::ESSENTIAL, checks_toggle)
@@ -852,6 +855,58 @@ impl ProjectView {
             .child(title)
             .child(meta)
             .child(self.bar(board))
+    }
+
+    /// What the merge queue landed that is not on the forge yet, while pushing is off or a
+    /// push failed: how many merged tasks wait, and Push, which sends the target with them all.
+    /// None while everything merged is pushed.
+    fn unpushed(&self, board: &Board, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let tasks = board.unpushed();
+        let first = *tasks.first()?;
+        let count = crate::kit::count(tasks.len() as u64, "merged task", "merged tasks");
+        let words = format!("{count} not pushed");
+        let push = div()
+            .id("project-push-now")
+            .debug_selector(|| "project-push-now".to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Push {count} to origin")))
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(px(theme.density.hit))
+            .px(px(sp.sm))
+            .rounded(px(theme.radii.sm))
+            .text_size(px(theme.typography.small()))
+            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .cursor_pointer()
+            .child(TaskAction::Push.label());
+        let push = tab_stop(crate::kit::secondary(push, theme), s.focus).on_click(cx.listener(
+            move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.act(first, TaskAction::Push, cx);
+            },
+        ));
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(sp.xs))
+                .child(
+                    crate::kit::tabular(div())
+                        .id("project-unpushed")
+                        .debug_selector(|| "project-unpushed".to_owned())
+                        .flex_none()
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_secondary))
+                        .child(SharedString::from(words)),
+                )
+                .child(push)
+                .into_any_element(),
+        )
     }
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
@@ -2388,7 +2443,7 @@ impl Render for ProjectView {
                 this.act_on_picked(TaskAction::ResolveConflicts, cx);
             }))
             .on_action(cx.listener(|this, _: &PushTask, _w, cx| {
-                this.act_on_picked(TaskAction::PushAgain, cx);
+                this.act_on_picked(TaskAction::Push, cx);
             }))
             .on_action(cx.listener(|this, _: &CancelTask, _w, cx| {
                 this.act_on_picked(TaskAction::Cancel, cx);

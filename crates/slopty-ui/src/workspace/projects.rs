@@ -722,7 +722,7 @@ impl WorkspaceView {
         let verb = match action {
             TaskAction::Review => return self.review_task(&project, task, cx),
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
-            TaskAction::PushAgain => Verb::TaskPush { project, task },
+            TaskAction::Push => Verb::TaskPush { project, task },
             TaskAction::Start => return self.start_task(&project, task, cx),
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::StartFresh => return self.restart_task(&project, task, None, cx),

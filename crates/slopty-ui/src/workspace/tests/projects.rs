@@ -667,7 +667,14 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     });
     view.update_in(cx, |v, _w, cx| v.project_update(13, task_changed("board", unpushed, None), cx));
     cx.run_until_parked();
-    click(cx, "project-card-push-again-6");
+    // The board's head counts what merged and is not on the forge, and pushes it all at once.
+    assert!(cx.debug_bounds("project-unpushed").is_some(), "the head says it");
+    click(cx, "project-push-now");
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskPush { project: project.clone(), task: TaskId(6) }]
+    );
+    click(cx, "project-card-push-6");
     let refused = |_: &Verb| Outcome::Error {
         code: ErrorCode::Conflict,
         message: "#6 changed under the board".into(),
