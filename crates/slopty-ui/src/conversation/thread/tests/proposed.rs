@@ -1,7 +1,7 @@
 //! What a request's card puts before the person to judge: an edit's change under its file,
 //! cut to its head until asked for all of it, and a plan whole in a well that scrolls.
 
-use gpui::{Modifiers, TestAppContext, px};
+use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point, px};
 use slopty_core::WallMs;
 use slopty_proto::thread::detail::{EditDetail, Hunk};
 use slopty_proto::thread::{
@@ -106,6 +106,39 @@ fn a_long_change_scrolls_in_its_well(cx: &mut TestAppContext) {
     assert!(all.size.height > well.size.height, "it scrolls: {well:?} {all:?}");
     let allow = cx.debug_bounds("answer-a-allow").expect("the answers");
     assert!(allow.bottom() <= px(600.0), "on screen: {allow:?}");
+}
+
+/// A long change scrolls under its file's line, which stays where it is: what is being
+/// approved is named however far down the change is read.
+#[gpui::test]
+fn a_long_change_scrolls_under_its_file(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let change = patch(30);
+    state.items = vec![edit_call(&change)];
+    let mut asks = approval("a");
+    asks.proposed = Some(change);
+    state.requests = vec![asks];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let file = cx.debug_bounds("proposed-file-a").expect("its file's line");
+    let diff = cx.debug_bounds("patch-ask-a").expect("the change");
+    let scroller = cx.debug_bounds("proposed-scroll-a").expect("the change's scroller");
+    assert!(file.bottom() <= scroller.top(), "the line over what scrolls: {file:?} {scroller:?}");
+    cx.simulate_event(ScrollWheelEvent {
+        position: scroller.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+        momentum_phase: None,
+    });
+    cx.run_until_parked();
+    let moved = cx.debug_bounds("patch-ask-a").expect("the change");
+    assert!(moved.top() < diff.top(), "the change scrolled: {diff:?} {moved:?}");
+    assert_eq!(cx.debug_bounds("proposed-file-a"), Some(file), "the file's line stayed");
 }
 
 /// An opened call's long diff shows its head and "Show all N lines"; a press shows the rest.

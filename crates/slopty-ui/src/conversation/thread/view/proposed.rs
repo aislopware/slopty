@@ -105,6 +105,21 @@ impl ThreadView {
                 .children(kit::changes(theme, patch.added, patch.removed))
         });
         let id = request.id.0.clone();
+        let scroll = format!("proposed-scroll-{id}");
+        // The file's line stays put while a long change scrolls under it, so what is being
+        // approved is always named.
+        let diff = div()
+            .id(ElementId::Name(scroll.clone().into()))
+            .debug_selector(move || scroll)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(self.patch_well(
+                &key(request),
+                (path.as_deref().unwrap_or_default(), patch),
+                false,
+                cx,
+            ));
         div()
             .id(ElementId::Name(format!("proposed-{id}").into()))
             .debug_selector(move || format!("proposed-{id}"))
@@ -116,19 +131,13 @@ impl ThreadView {
             .flex_none()
             .min_h_0()
             .max_h(most)
-            .overflow_y_scroll()
             .mx(px(theme.spacing.md))
             .mb(px(theme.spacing.md))
             .flex()
             .flex_col()
             .gap(px(theme.spacing.xxs))
-            .children(head)
-            .child(self.patch_well(
-                &key(request),
-                (path.as_deref().unwrap_or_default(), patch),
-                false,
-                cx,
-            ))
+            .children(head.map(gpui::Styled::flex_none))
+            .child(diff)
             .into_any_element()
     }
 
