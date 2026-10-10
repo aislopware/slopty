@@ -921,21 +921,27 @@ pub struct PullSeen {
     pub running: u32,
 }
 
-/// Where a pull request stands, as the person reads it: the first that holds, in this order.
+/// Where a pull request stands, as the person reads it: the first that holds, in this order
+/// ([`crate::git::PullStatus::standing`]).
+///
+/// Ended first; then what waits on the person, a
+/// conflict before a failed check (a conflicted head's checks are stale) before changes asked
+/// for, even on a draft, since an agent's draft that fails still needs fixing; then a draft,
+/// checks running, and waiting or ready.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PullStands {
     /// Merged.
     Merged,
     /// Closed without a merge.
     Closed,
-    /// Still a draft.
-    Draft,
     /// It conflicts with its base.
     Conflicted,
     /// A check failed.
     ChecksFailed,
     /// Its reviewers asked for changes.
     ChangesRequested,
+    /// Still a draft.
+    Draft,
     /// Checks still run.
     Running,
     /// Waiting on a review, or anything else the forge holds it for.

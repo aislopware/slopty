@@ -1,7 +1,8 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
-use slopty_proto::git::{Forge, GitOp, PullStanding};
+use slopty_proto::git::{Forge, GitOp};
+use slopty_proto::thread::wire::PullStands;
 
 use super::*;
 use crate::repo::commit::{Programs, apply};
@@ -193,7 +194,7 @@ async fn a_pull_request_s_status_is_read_in_the_forge_s_words() {
             ("deploy/preview", "FAILURE", Some("https://preview.example/7")),
         ]
     );
-    assert_eq!(pull.standing(), PullStanding::Failing);
+    assert_eq!(pull.standing(), PullStands::ChecksFailed);
     assert_eq!(asked(dir.path()), [format!("pr view --json {FIELDS}")]);
 }
 
@@ -418,7 +419,7 @@ async fn a_merge_request_is_read_in_a_pull_request_s_words() {
             ("deploy", Some("deploy"), "SKIPPED"),
         ]
     );
-    assert_eq!(pull.standing(), PullStanding::Failing);
+    assert_eq!(pull.standing(), PullStands::ChecksFailed);
     let seen = crate::thread::pulls::seen(&pull);
     assert_eq!(seen.line(), "!12: lint failed");
     assert_eq!(
@@ -441,7 +442,7 @@ async fn a_branch_s_merged_request_is_read_and_none_is_none() {
         panic!("no merged request read")
     };
     assert_eq!((pull.number, pull.state.as_str(), pull.checks.len()), (5, "MERGED", 0));
-    assert_eq!(pull.standing(), PullStanding::Merged);
+    assert_eq!(pull.standing(), PullStands::Merged);
     let calls = asked(dir.path());
     assert_eq!(
         calls.get(1).map(String::as_str),

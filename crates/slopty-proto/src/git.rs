@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::thread::wire::{Against, Review};
+use crate::thread::wire::{Against, PullStands, Review};
 
 /// The most files a status names; the rest are counted ([`GitStatus::more`]).
 pub const FILES_MAX: usize = 2000;
@@ -572,56 +572,31 @@ impl PullCheck {
     }
 }
 
-/// Where a pull request stands for the person, most pressing first by [`Ord`].
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum PullStanding {
-    /// A check failed.
-    Failing,
-    /// It conflicts with its base.
-    Conflicting,
-    /// A reviewer asked for changes.
-    ChangesRequested,
-    /// Ready to merge: checks passed, nothing blocks it.
-    Ready,
-    /// Checks still run.
-    Running,
-    /// Waiting on a review, or on something else the forge says blocks it.
-    Waiting,
-    /// Still a draft.
-    Draft,
-    /// Merged.
-    Merged,
-    /// Closed without merging.
-    Closed,
-}
-
 impl PullStatus {
-    /// Where it stands for the person.
+    /// Where it stands for the person: the first that holds of [`PullStands`]'s ladder, the one
+    /// every surface and the attention ladder read.
     #[must_use]
-    pub fn standing(&self) -> PullStanding {
+    pub fn standing(&self) -> PullStands {
+        let is = |field: &str, value: &str| field.eq_ignore_ascii_case(value);
         let worst = self.checks.iter().map(PullCheck::bucket).max();
-        match self.state.to_ascii_uppercase().as_str() {
-            "MERGED" => return PullStanding::Merged,
-            "CLOSED" => return PullStanding::Closed,
-            _ => {}
-        }
-        if worst == Some(CheckBucket::Failed) {
-            PullStanding::Failing
-        } else if self.mergeable.eq_ignore_ascii_case("CONFLICTING") {
-            PullStanding::Conflicting
-        } else if self.review.eq_ignore_ascii_case("CHANGES_REQUESTED") {
-            PullStanding::ChangesRequested
+        if is(&self.state, "MERGED") {
+            PullStands::Merged
+        } else if is(&self.state, "CLOSED") {
+            PullStands::Closed
+        } else if is(&self.mergeable, "CONFLICTING") || is(&self.merge_state, "DIRTY") {
+            PullStands::Conflicted
+        } else if worst == Some(CheckBucket::Failed) {
+            PullStands::ChecksFailed
+        } else if is(&self.review, "CHANGES_REQUESTED") {
+            PullStands::ChangesRequested
         } else if self.draft {
-            PullStanding::Draft
+            PullStands::Draft
         } else if worst == Some(CheckBucket::Running) {
-            PullStanding::Running
-        } else if self.merge_state.eq_ignore_ascii_case("CLEAN")
-            || self.merge_state.eq_ignore_ascii_case("HAS_HOOKS")
-            || self.merge_state.eq_ignore_ascii_case("UNSTABLE")
-        {
-            PullStanding::Ready
+            PullStands::Running
+        } else if ["CLEAN", "HAS_HOOKS", "UNSTABLE"].iter().any(|v| is(&self.merge_state, v)) {
+            PullStands::Ready
         } else {
-            PullStanding::Waiting
+            PullStands::Waiting
         }
     }
 }

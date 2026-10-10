@@ -13,11 +13,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use slopty_proto::git::{
-    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStanding, PullStatus,
-    RunScripts, Worktrees,
+    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStatus, RunScripts,
+    Worktrees,
 };
 use slopty_proto::thread::Patch;
-use slopty_proto::thread::wire::{Against, Review, ReviewScope};
+use slopty_proto::thread::wire::{Against, PullStands, Review, ReviewScope};
 use slopty_proto::{ClientMsg, RequestId};
 
 /// What an op asked while the machine is out of reach says.
@@ -487,21 +487,21 @@ pub fn branch_line(status: &GitStatus) -> String {
 #[must_use]
 pub fn standing_words(pull: &PullStatus) -> String {
     match pull.standing() {
-        PullStanding::Failing => "Checks failing".to_owned(),
-        PullStanding::Conflicting => format!("Conflicts with {}", pull.base),
-        PullStanding::ChangesRequested => "Changes requested".to_owned(),
-        PullStanding::Ready => "Ready to merge".to_owned(),
-        PullStanding::Running => "Checks running".to_owned(),
-        PullStanding::Waiting if pull.merge_state.eq_ignore_ascii_case("BEHIND") => {
+        PullStands::ChecksFailed => "Checks failing".to_owned(),
+        PullStands::Conflicted => format!("Conflicts with {}", pull.base),
+        PullStands::ChangesRequested => "Changes requested".to_owned(),
+        PullStands::Ready => "Ready to merge".to_owned(),
+        PullStands::Running => "Checks running".to_owned(),
+        PullStands::Waiting if pull.merge_state.eq_ignore_ascii_case("BEHIND") => {
             format!("Behind {}", pull.base)
         }
-        PullStanding::Waiting if pull.review.eq_ignore_ascii_case("REVIEW_REQUIRED") => {
+        PullStands::Waiting if pull.review.eq_ignore_ascii_case("REVIEW_REQUIRED") => {
             "Waiting for review".to_owned()
         }
-        PullStanding::Waiting => "Blocked".to_owned(),
-        PullStanding::Draft => "Draft".to_owned(),
-        PullStanding::Merged => "Merged".to_owned(),
-        PullStanding::Closed => "Closed".to_owned(),
+        PullStands::Waiting => "Blocked".to_owned(),
+        PullStands::Draft => "Draft".to_owned(),
+        PullStands::Merged => "Merged".to_owned(),
+        PullStands::Closed => "Closed".to_owned(),
     }
 }
 

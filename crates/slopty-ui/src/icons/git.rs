@@ -3,7 +3,6 @@
 //! taught them (`docs/decisions/ui.md`, "The chrome's icons are Tabler's, and a file's are
 //! Material's").
 
-use slopty_proto::git::PullStanding;
 use slopty_proto::thread::wire::PullStands;
 use slopty_theme::{Rgb, Theme};
 
@@ -51,22 +50,6 @@ impl GitGlyph {
             Self::Merge => Symbol::ArrowTriangleMerge,
             Self::Commit => Symbol::GitCommit,
             Self::Repo => Symbol::GitRepo,
-        }
-    }
-
-    /// A pull request's glyph by where it `stands`: merged, closed, a draft, else open.
-    #[must_use]
-    pub const fn of_pull(stands: PullStanding) -> Self {
-        match stands {
-            PullStanding::Merged => Self::Merge,
-            PullStanding::Closed => Self::PullRequestClosed,
-            PullStanding::Draft => Self::PullRequestDraft,
-            PullStanding::Failing
-            | PullStanding::Conflicting
-            | PullStanding::ChangesRequested
-            | PullStanding::Ready
-            | PullStanding::Running
-            | PullStanding::Waiting => Self::PullRequest,
         }
     }
 

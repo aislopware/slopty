@@ -40,9 +40,9 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::threads::Mirror;
 use slopty_proto::RequestId;
 use slopty_proto::git::{
-    CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStanding, PullStatus,
+    CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStatus,
 };
-use slopty_proto::thread::wire::{Intent, PullSeen, Review, ReviewScope};
+use slopty_proto::thread::wire::{Intent, PullSeen, PullStands, Review, ReviewScope};
 use slopty_proto::thread::{Cap, Delivery, IntentId, Liveness, ThreadId, TurnState};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -772,7 +772,7 @@ impl CommitSheet {
         let standing = pull.standing();
         let tone = standing_tone(theme, standing);
         let icon = match standing {
-            PullStanding::Merged => Symbol::ArrowTriangleMerge,
+            PullStands::Merged => Symbol::ArrowTriangleMerge,
             _ => Symbol::ArrowTrianglePull,
         };
         let url = pull.url.clone();
@@ -949,7 +949,7 @@ impl CommitSheet {
     /// worktree under its clone's `.claude/worktrees/`, and not once it went. While the sheet's
     /// own agent still runs there the press ends it first, and says so ([`end_and_remove`]).
     fn free_row(&self, pull: &PullStatus, repo: &Repo, cx: &Context<Self>) -> Option<AnyElement> {
-        if pull.standing() != PullStanding::Merged {
+        if pull.standing() != PullStands::Merged {
             return None;
         }
         let root = crate::workspace::worktree_root(&self.repo)?;
@@ -1604,16 +1604,15 @@ fn files_words(n: usize) -> String {
 
 /// The tone a pull request's standing is drawn in: a failure or a conflict in the error tone,
 /// changes asked for in the warning's, ready in the accent, the rest quiet.
-pub(crate) const fn standing_tone(theme: &Theme, standing: PullStanding) -> Rgb {
+pub(crate) const fn standing_tone(theme: &Theme, standing: PullStands) -> Rgb {
     let s = theme.surfaces;
     match standing {
-        PullStanding::Failing | PullStanding::Conflicting => s.error,
-        PullStanding::ChangesRequested => s.warn,
-        PullStanding::Ready | PullStanding::Merged => s.accent,
-        PullStanding::Running
-        | PullStanding::Waiting
-        | PullStanding::Draft
-        | PullStanding::Closed => s.text_muted,
+        PullStands::ChecksFailed | PullStands::Conflicted => s.error,
+        PullStands::ChangesRequested => s.warn,
+        PullStands::Ready | PullStands::Merged => s.accent,
+        PullStands::Running | PullStands::Waiting | PullStands::Draft | PullStands::Closed => {
+            s.text_muted
+        }
     }
 }
 
