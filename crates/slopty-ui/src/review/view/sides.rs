@@ -279,34 +279,36 @@ impl ReviewView {
             .child(SharedString::from(too_large(bytes)))
             .when(opens, |el| {
                 let selector = id.clone();
-                el.child(
-                    div()
-                        .id(ElementId::Name(id.into()))
-                        .debug_selector(move || selector)
-                        .role(Role::Button)
-                        .aria_label(OPEN_WHOLE)
-                        .flex()
-                        .items_center()
-                        .gap(px(theme.spacing.xs))
-                        .cursor_pointer()
-                        .text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.text_color(hsla(s.text)))
-                        .child(
-                            crate::icons::icon(
-                                theme,
-                                Symbol::ArrowUpRight,
-                                IconSize::Inline,
-                                hsla(s.text_muted),
-                            )
-                            .size(px(theme.typography.icon())),
+                // A link's look, as the settings' links have: the words in the text's tone,
+                // underlined under the pointer, then the glyph.
+                let link = div()
+                    .id(ElementId::Name(id.into()))
+                    .debug_selector(move || selector)
+                    .role(Role::Button)
+                    .aria_label(OPEN_WHOLE)
+                    .self_start()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.xs))
+                    .cursor_pointer()
+                    .text_color(hsla(s.text))
+                    .hover(gpui::Styled::underline)
+                    .child(OPEN_WHOLE)
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            Symbol::ArrowUpRight,
+                            IconSize::Inline,
+                            hsla(s.text_muted),
                         )
-                        .child(OPEN_WHOLE)
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
-                            if let Some(path) = this.whole_path(at, cx) {
-                                cx.emit(ReviewEvent::OpenFile { path });
-                            }
-                        })),
-                )
+                        .size(px(theme.typography.icon())),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        if let Some(path) = this.whole_path(at, cx) {
+                            cx.emit(ReviewEvent::OpenFile { path });
+                        }
+                    }));
+                el.child(crate::a11y::tab_stop(link, s.focus))
             })
             .into_any_element()
     }

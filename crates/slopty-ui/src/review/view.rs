@@ -2375,7 +2375,6 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let id = format!("review-uncomment-{ix}");
-        let selector = id.clone();
         let ranged = comment.end > comment.line;
         let (title, rest) = match &comment.by {
             Some(_) => {
@@ -2421,13 +2420,7 @@ impl ReviewView {
                     }),
             )
             .child(
-                div()
-                    .id(ElementId::Name(id.into()))
-                    .debug_selector(move || selector)
-                    .role(Role::Button)
-                    .aria_label("Remove comment")
-                    .cursor_pointer()
-                    .child(self.icon(Symbol::Xmark, s.text_muted))
+                kit::close_box(theme, id, "Remove comment")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.uncomment(ix, cx))),
             )
             .into_any_element()

@@ -9493,8 +9493,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Allow and Deny on a note** (20, interim). On iOS they now bring the app forward. iOS may
     have ended the app, and a background press then launches it with no scene, so GPUI and the
     links never start and the agent's held prompt times out. Brought forward, the app links up
-    and sends the answer the note held. On a Mac they still answer where the note is. The whole
-    fix, a headless answer from the app delegate, is still to come.
+    and sends the answer the note held. On a Mac they still answer where the note is. The
+    whole fix replaced this interim: "Allow and Deny on a phone's note answer with no window",
+    below.
   - Tests: `workspace::tests::setup_doors::*`,
     `terminal::view::tests::a_long_press_dragged_past_the_top_scrolls_into_history`,
     `…::send_escape_types_escape`, `this_mac::tests::the_doctor_maps_to_lines_and_buttons`,

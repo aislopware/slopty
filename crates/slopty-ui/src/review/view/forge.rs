@@ -200,13 +200,9 @@ impl ReviewView {
                     .children(notes),
             )
             .children(url.map(|url| {
-                div()
-                    .id(ElementId::Name(format!("review-forge-open-{ix}").into()))
-                    .debug_selector(move || format!("review-forge-open-{ix}"))
+                let id = format!("review-forge-open-{ix}");
+                kit::small_box(theme, id, Symbol::ArrowUpRight, "Open on the forge")
                     .role(Role::Link)
-                    .aria_label("Open on the forge")
-                    .cursor_pointer()
-                    .child(self.icon(Symbol::ArrowUpRight, s.text_muted))
                     .on_click(move |_ev, _w, cx| cx.open_url(&url))
             }))
             .into_any_element()

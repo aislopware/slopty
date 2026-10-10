@@ -1168,6 +1168,19 @@ pub fn close_box(
     id: impl Into<SharedString>,
     label: &'static str,
 ) -> gpui::Stateful<Div> {
+    small_box(theme, id, crate::icons::Symbol::Xmark, label)
+}
+
+/// [`close_box`]'s square with another glyph: an action at the end of a line of text, such as
+/// a comment's removal or the way to a thread's page, which a full [`icon_button`] would
+/// make taller than its line.
+#[must_use]
+pub fn small_box(
+    theme: &Theme,
+    id: impl Into<SharedString>,
+    glyph: crate::icons::Symbol,
+    label: &'static str,
+) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     let id: SharedString = id.into();
     let selector = id.to_string();
@@ -1189,7 +1202,7 @@ pub fn close_box(
         .text_color(hsla(s.text_secondary))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
-            crate::icons::Drawn::new(theme, crate::icons::Symbol::Xmark, icon)
+            crate::icons::Drawn::new(theme, glyph, icon)
                 .slot(px(icon.slot(theme)), hsla(s.text_secondary)),
         );
     eased(crate::a11y::tab_stop(el, s.focus))
