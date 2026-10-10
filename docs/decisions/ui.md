@@ -9789,6 +9789,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the newer of the device's words and the row's draft wins as before, so the clear reaches
     every device. Test: `a_draft_is_kept_cleared_and_bounded` (slopty-worker `thread::marks`);
     golden `frame_actions`.
+  - **A sent message leaves every composer** (2026-10-11, the orchestrator-first study, item
+    21). The cleared draft reached every device, but a composer holding words still kept them,
+    since words of its own outrank a draft. A composer whose words are still what it last
+    shared or took up now empties on an empty draft: those words were the draft, and the draft
+    was sent or wiped. Words changed since stay. Drafts go only while the worker is linked,
+    since an intent kept in the outbox for later could land over a draft kept since; words
+    written while away go once the link is back and the row is heard. Test:
+    `conversation::thread::tests::composing::a_message_sent_elsewhere_leaves_this_composer`.
   - Tests: `workspace::tests::thread_waits::a_turn_read_on_another_device_leaves_the_bell`,
     `…::looking_at_a_thread_marks_it_seen_on_its_worker`,
     `…::a_threads_finished_turn_without_a_terminal_is_to_review`;
@@ -10270,3 +10278,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::nav_rows::a_phone_home_is_the_whole_screen_with_what_waits_first`,
     `workspace::tests::nav_projects::a_boards_row_carries_where_its_goal_stands`,
     `workspace::tests::nav_list::the_phone_home_runs_through_the_home_indicator_band`.
+
+- ✅ **The clipboard's machines are read and typed by name** (2026-10-11). `[clipboard.workers]`
+  is keyed by worker id, so a renamed machine keeps its choice, but the settings form showed
+  those ids, and its field wrote whatever name was typed as a key no machine matched. Ruled:
+  each line reads as its machine's name from the server's list; an id the server no longer
+  lists reads "Machine not on the server" with the id's first eight characters; a name typed in
+  the field, case aside, writes that machine's id, and a name no machine has is refused with
+  "No machine is named …". Test:
+  `settings_form::map_tests::the_clipboards_machines_read_by_name_and_are_added_by_name`.

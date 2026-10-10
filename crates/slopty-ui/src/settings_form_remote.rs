@@ -145,6 +145,11 @@ impl SettingsForm {
         cx.notify();
     }
 
+    /// The machines the workspace last handed over: the server and its workers.
+    pub(super) fn machines_listed(&self) -> &[Machine] {
+        &self.machines.list
+    }
+
     /// Whether `list`, and whether there is a way to them, differ from what the form holds.
     #[must_use]
     pub fn machines_differ(&self, list: &[Machine], linked: bool) -> bool {

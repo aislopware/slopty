@@ -387,7 +387,8 @@ pub struct ClipboardSettings {
     ///
     /// By the machine's worker id, which the app writes when the clipboard is turned off or
     /// on for one machine, so a renamed machine keeps its choice and two of one name do not
-    /// share it. A Mac others use can be kept out of it.
+    /// share it; the settings form shows and takes each by its name. A Mac others use can be
+    /// kept out of it.
     #[schemars(title = "By machine")]
     pub workers: BTreeMap<String, bool>,
 }

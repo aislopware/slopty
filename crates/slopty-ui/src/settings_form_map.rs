@@ -1,7 +1,12 @@
 //! The settings form's map rows: names the person picks, each with a value of one kind.
 //!
-//! `[clipboard.workers]` maps a machine's name to a switch, `[worker.acp]` an agent's name to its
-//! command line.
+//! `[clipboard.workers]` maps a machine's worker id to a switch, `[worker.acp]` an agent's name to
+//! its command line.
+//!
+//! A map keyed by machine shows each entry by the machine's name, as the server lists it, and
+//! takes a machine's name in its field, writing its id: the file keeps the id so a renamed
+//! machine keeps its choice, while the person reads and types names. An id the server no longer
+//! lists says so, with the start of the id to tell two apart.
 //!
 //! The row's control is the field a new name is typed in; ↩ adds it, set to its kind's first
 //! value (a switch off, an empty command line), and the keyboard moves to it. Under the row's
@@ -33,6 +38,20 @@ pub const ADD_ENTRY: &str = "Add by name";
 
 /// What takes an entry out, as a screen reader names it.
 pub const REMOVE_ENTRY: &str = "Remove";
+
+/// What a machine-keyed entry says for an id the server does not list.
+pub const UNLISTED_MACHINE: &str = "Machine not on the server";
+
+/// What a machine-keyed map's field says when no machine has the name typed.
+#[must_use]
+pub fn no_machine_named(name: &str) -> String {
+    format!("No machine is named {name}")
+}
+
+/// Whether map row `row` is keyed by a machine's worker id.
+fn keyed_by_machine(row: &Row) -> bool {
+    row.table() == "clipboard" && row.key() == "workers"
+}
 
 /// One entry's own parts.
 pub(super) struct EntryParts {
@@ -95,6 +114,36 @@ const fn first_value(kind: &Kind) -> &'static str {
 }
 
 impl SettingsForm {
+    /// How entry `key` of map row `row` reads: a machine's name for a map keyed by machine,
+    /// else the key as the file writes it.
+    pub(super) fn entry_name(&self, row: &Row, key: &str) -> String {
+        if !keyed_by_machine(row) {
+            return key.to_owned();
+        }
+        let listed =
+            self.machines_listed().iter().find(|m| m.of.is_some_and(|w| w.to_string() == key));
+        listed.map_or_else(
+            || {
+                let start: String = key.chars().take(8).collect();
+                format!("{UNLISTED_MACHINE} ({start})")
+            },
+            |m| m.name.clone(),
+        )
+    }
+
+    /// The key a name typed in map row `row`'s field is written under: for a map keyed by
+    /// machine, the id of the worker of that name (case aside), or why there is none.
+    fn entry_key(&self, row: &Row, typed: &str) -> Result<String, String> {
+        if !keyed_by_machine(row) {
+            return Ok(typed.to_owned());
+        }
+        self.machines_listed()
+            .iter()
+            .find_map(|m| m.of.filter(|_| m.name.eq_ignore_ascii_case(typed)))
+            .map(|w| w.to_string())
+            .ok_or_else(|| no_machine_named(typed))
+    }
+
     /// Map row `row`'s entries in the file, in its order.
     pub(super) fn entries_of(&self, row: &Row) -> Vec<(String, Value)> {
         edit::entries(self.text_for(row), row.table(), row.key())
@@ -191,10 +240,20 @@ impl SettingsForm {
         let Some(row) = rows().get(ix) else { return };
         let Some(kind) = entry_kind(row) else { return };
         let Some(Some(adding)) = self.fields.get(ix).cloned() else { return };
-        let name = adding.read(cx).value().trim().to_owned();
-        if name.is_empty() {
+        let typed = adding.read(cx).value().trim().to_owned();
+        if typed.is_empty() {
             return;
         }
+        let name = match self.entry_key(row, &typed) {
+            Ok(name) => name,
+            Err(why) => {
+                if let Some(error) = self.errors.get_mut(ix) {
+                    *error = Some(why);
+                }
+                cx.notify();
+                return;
+            }
+        };
         let held = self.entries_of(row).iter().any(|(held, _)| *held == name);
         if !held {
             if !self.write_entry(ix, &name, first_value(kind)) {
@@ -262,7 +321,10 @@ impl SettingsForm {
         }
         let lines: Vec<AnyElement> = entries
             .into_iter()
-            .filter_map(|(name, value)| self.entry_line(ix, kind, name, &value, cx))
+            .filter_map(|(key, value)| {
+                let shown = self.entry_name(row, &key);
+                self.entry_line(ix, kind, (key, shown), &value, cx)
+            })
             .collect();
         Some(
             div()
@@ -278,12 +340,13 @@ impl SettingsForm {
         )
     }
 
-    /// One entry's line: its name, the control that sets it, and the way to take it out.
+    /// One entry's line: its name as it reads (`shown`), the control that sets it, and the way
+    /// to take it out. `name` is the key the file writes it under.
     fn entry_line(
         &self,
         ix: usize,
         kind: &Kind,
-        name: String,
+        (name, shown): (String, String),
         value: &Value,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
@@ -293,6 +356,7 @@ impl SettingsForm {
         let parts = self.entries.get(&key)?;
         let (_, name) = key.clone();
         let slug = format!("settings-entry-{ix}-{name}");
+        let label = SharedString::from(shown.clone());
         let control = if let Some(field) = &parts.field {
             well(theme)
                 .flex_1()
@@ -303,7 +367,7 @@ impl SettingsForm {
                         .appearance(false)
                         .px_0()
                         .text_size(px(theme.typography.ui_size))
-                        .aria_label(SharedString::from(name.clone())),
+                        .aria_label(label.clone()),
                 )
                 .into_any_element()
         } else {
@@ -316,13 +380,13 @@ impl SettingsForm {
             let el = self
                 .switch_el(format!("{slug}-switch"), format!("{slug}-knob"), on, turned, cx)
                 .track_focus(&parts.handle)
-                .aria_label(SharedString::from(name.clone()))
+                .aria_label(label.clone())
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.toggle_entry(ix, &toggled, cx);
                 }));
             crate::a11y::tab_stop(el, s.focus).into_any_element()
         };
-        let gone = name.clone();
+        let gone = name;
         let remove =
             crate::kit::icon_button(theme, format!("{slug}-remove"), Symbol::Xmark, REMOVE_ENTRY)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
@@ -334,7 +398,7 @@ impl SettingsForm {
                 .id(SharedString::from(slug.clone()))
                 .debug_selector(move || slug)
                 .role(gpui::accesskit::Role::ListItem)
-                .aria_label(SharedString::from(name.clone()))
+                .aria_label(label)
                 .pl_0()
                 .child(
                     crate::kit::typed(div(), theme.roles().chrome)
@@ -344,7 +408,7 @@ impl SettingsForm {
                         .whitespace_nowrap()
                         .text_color(hsla(s.text))
                         .when(switched, gpui::Styled::flex_1)
-                        .child(name),
+                        .child(shown),
                 )
                 .child(control)
                 .child(remove)

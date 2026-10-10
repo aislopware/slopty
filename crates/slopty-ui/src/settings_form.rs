@@ -2746,6 +2746,9 @@ mod map_tests {
             cx.add_window_view(|window, cx| SettingsForm::new(file, Theme::default(), window, cx));
         cx.simulate_resize(size(px(900.0), px(1400.0)));
         cx.run_until_parked();
+        let mine = slopty_core::WorkerId::new();
+        let machine = remote::Machine { of: Some(mine), name: "my mac".to_owned() };
+        form.update(cx, |f, cx| f.set_machines(vec![machine], None, cx));
         let ix = rows()
             .iter()
             .position(|r| r.table() == "clipboard" && r.key() == "workers")
@@ -2765,18 +2768,78 @@ mod map_tests {
         cx.simulate_input("my mac");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        assert!(text(cx).ends_with("laptop = true\n\"my mac\" = false\n"), "{}", text(cx));
-        assert!(cx.debug_bounds(entry("my mac")).is_some(), "added, a line");
-        let focused = form.read_with(cx, |f, _| {
-            f.entries.get(&(ix, "my mac".to_owned())).map(|p| p.handle().clone())
-        });
+        let id = mine.to_string();
+        assert!(text(cx).ends_with(&format!("laptop = true\n{id} = false\n")), "{}", text(cx));
+        assert!(cx.debug_bounds(entry(&id)).is_some(), "added, a line");
+        let focused =
+            form.read_with(cx, |f, _| f.entries.get(&(ix, id.clone())).map(|p| p.handle().clone()));
         let focused = focused.expect("its parts");
         assert!(cx.update(|window, _| focused.is_focused(window)), "the keyboard went to it");
 
         click(cx, leak(format!("settings-entry-{ix}-laptop-remove")));
-        click(cx, leak(format!("settings-entry-{ix}-my mac-remove")));
+        click(cx, leak(format!("settings-entry-{ix}-{id}-remove")));
         assert_eq!(text(cx), "# Mine.\n[clipboard]\nsync = true\n", "no empty table left");
         assert!(cx.debug_bounds(entry("laptop")).is_none(), "and no lines");
+    }
+
+    /// The clipboard's map is keyed by worker id but read and typed by machine name: each line
+    /// is its machine's name from the server's list, an id the server does not list says so,
+    /// and a name typed in the field writes its machine's id, or says no machine has it.
+    #[gpui::test]
+    fn the_clipboards_machines_read_by_name_and_are_added_by_name(cx: &mut TestAppContext) {
+        use super::remote::{Machine, SERVER};
+        use super::schema::Section;
+
+        cx.update(gpui_kit::init);
+        let (mini, studio, gone) = (
+            slopty_core::WorkerId::new(),
+            slopty_core::WorkerId::new(),
+            slopty_core::WorkerId::new(),
+        );
+        let file = format!("[clipboard.workers]\n\"{mini}\" = false\n\"{gone}\" = true\n");
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new(&file, Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let machines = vec![
+            Machine { of: None, name: SERVER.to_owned() },
+            Machine { of: Some(mini), name: "mini".to_owned() },
+            Machine { of: Some(studio), name: "Studio".to_owned() },
+        ];
+        form.update(cx, |f, cx| f.set_machines(machines, None, cx));
+        let ix = rows()
+            .iter()
+            .position(|r| r.table() == "clipboard" && r.key() == "workers")
+            .expect("the map's row");
+        click(cx, leak(format!("settings-section-{}", Section::Input.index())));
+        cx.update(|window, _| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let items = |cx: &mut VisualTestContext| -> Vec<String> {
+            let tree = cx.update(|window, _| crate::a11y::tree(window));
+            tree.into_iter().filter(|n| n.role == "ListItem").filter_map(|n| n.label).collect()
+        };
+        let start: String = gone.to_string().chars().take(8).collect();
+        let unlisted = format!("{} ({start})", map::UNLISTED_MACHINE);
+        let said = items(cx);
+        assert!(said.iter().any(|l| l == "mini"), "by its name: {said:?}");
+        assert!(said.contains(&unlisted), "an id the server lost says so: {said:?}");
+        assert!(!said.iter().any(|l| *l == mini.to_string()), "no id shown: {said:?}");
+
+        let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
+        click(cx, leak(format!("settings-field-{ix}")));
+        cx.simulate_input("studio");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(text(cx).ends_with(&format!("{studio} = false\n")), "its id: {}", text(cx));
+        assert!(items(cx).iter().any(|l| l == "Studio"), "and read by its name");
+
+        click(cx, leak(format!("settings-field-{ix}")));
+        cx.simulate_input("nowhere");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let error = form.read_with(cx, |f, _| f.errors.get(ix).cloned().flatten());
+        assert_eq!(error, Some(map::no_machine_named("nowhere")), "nothing written for it");
+        assert!(!text(cx).contains("nowhere"), "{}", text(cx));
     }
 
     /// A map of command lines takes each entry's line as a field, written once the hand
