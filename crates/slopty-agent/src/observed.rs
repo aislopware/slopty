@@ -908,14 +908,15 @@ impl Observed {
         }
     }
 
-    /// The status line's meters.
+    /// The status line's meters. A Claude Code thread shows no effort: Slopty does not follow
+    /// it past the start, so the meters never claim one.
     pub fn meters(&mut self, meters: &conv::Meters) -> Vec<Out> {
         let limits = [("five-hour", meters.five_hour), ("seven-day", meters.seven_day)];
         let mapped = Meters {
             model: meters.model.clone(),
             model_id: meters.model_id.clone(),
             mode: self.meters.mode.clone(),
-            effort: self.meters.effort.clone(),
+            effort: None,
             context_tokens: meters
                 .context_used_pct
                 .zip(meters.context_window)
