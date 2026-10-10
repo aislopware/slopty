@@ -506,6 +506,7 @@ async fn held_up_work_is_said_by_what_held_it() {
     card.merge = Some(Merge::Merged {
         target: "main".to_owned(),
         head: "abc".to_owned(),
+        from: "def".to_owned(),
         at_ms: WallMs::ZERO,
         pushed: false,
         push_failed: Some("rejected (non-fast-forward)".to_owned()),

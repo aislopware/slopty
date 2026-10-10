@@ -606,6 +606,9 @@ pub enum Merge {
         target: String,
         /// The commit the target was moved to, in hex.
         head: String,
+        /// The task's own commit that was rebased onto the target, in hex: what its worktree's
+        /// branch holds on the machine it ran on, where the rebased `head` may never be.
+        from: String,
         /// When, by the server's clock.
         at_ms: WallMs,
         /// Whether the target was pushed to its clone's `origin` too.
@@ -621,6 +624,8 @@ pub enum Merge {
         target: String,
         /// The commit that went up.
         head: String,
+        /// The task's own commit that was rebased into `head`, in hex ([`Self::Merged::from`]).
+        from: String,
         /// The pull request's number.
         number: u32,
         /// Its page.
@@ -1235,14 +1240,16 @@ impl TaskCard {
             self.verified.as_ref().map_or(0, VerifierRun::approx_bytes),
             self.merge.as_ref().map_or(0, |m| match m {
                 Merge::Queued { .. } => 16,
-                Merge::Merged { target, head, push_failed, .. } => target
+                Merge::Merged { target, head, from, push_failed, .. } => target
                     .len()
                     .saturating_add(head.len())
+                    .saturating_add(from.len())
                     .saturating_add(push_failed.as_deref().map_or(0, str::len))
                     .saturating_add(32),
-                Merge::Pull { target, head, url, .. } => target
+                Merge::Pull { target, head, from, url, .. } => target
                     .len()
                     .saturating_add(head.len())
+                    .saturating_add(from.len())
                     .saturating_add(url.len())
                     .saturating_add(32),
             }),

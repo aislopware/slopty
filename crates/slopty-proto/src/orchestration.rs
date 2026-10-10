@@ -836,7 +836,9 @@ pub enum Verb {
     /// in one of `landed` by patch (`git cherry`), so work the merge queue rebased counts as
     /// landed; otherwise the branch is kept. Answered with [`Outcome::WorktreeRemoved`];
     /// [`ErrorCode::Conflict`] while a terminal works in it or something in it is not
-    /// committed, [`ErrorCode::Invalid`] for a path that is no such worktree.
+    /// committed, [`ErrorCode::Invalid`] for a path that is no such worktree. A project's
+    /// verify checkout (`<VERIFY_PLACES>/<project>`, [`crate::project::VERIFY_PLACES`]) is the
+    /// server's own: it goes by force, and one already gone answers as removed.
     RemoveWorktree {
         /// Where.
         worker: WorkerId,
@@ -1505,6 +1507,8 @@ pub enum Outcome {
         /// The rebased commit, in hex; the head given when it already held `onto` and every
         /// trailer.
         head: String,
+        /// The commit given to rebase, in hex.
+        from: String,
         /// The target's commit it is on top of, in hex.
         onto: String,
         /// Its tree is the very tree of the commit last verified: only messages changed, so

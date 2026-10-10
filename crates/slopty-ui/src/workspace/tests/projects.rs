@@ -660,6 +660,7 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     unpushed.merge = Some(slopty_proto::project::Merge::Merged {
         target: "main".into(),
         head: "abcdef0123".into(),
+        from: "0123abcdef".into(),
         at_ms: fixtures::AT,
         pushed: false,
         push_failed: Some("could not read Username".into()),

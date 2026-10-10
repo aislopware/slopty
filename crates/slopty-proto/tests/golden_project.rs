@@ -564,7 +564,12 @@ mod golden_project {
         );
         snap(
             "rebased",
-            &reply(Outcome::Rebased { head: commit('d'), onto: commit('c'), verified: true }),
+            &reply(Outcome::Rebased {
+                head: commit('d'),
+                from: commit('a'),
+                onto: commit('c'),
+                verified: true,
+            }),
         );
         snap(
             "test_diff",
@@ -665,6 +670,7 @@ mod golden_project {
         let merged = Merge::Merged {
             target: "main".to_owned(),
             head: commit('d'),
+            from: commit('a'),
             at_ms: at(),
             pushed: true,
             push_failed: None,
@@ -674,6 +680,7 @@ mod golden_project {
         let unpushed = Merge::Merged {
             target: "main".to_owned(),
             head: commit('d'),
+            from: commit('a'),
             at_ms: at(),
             pushed: false,
             push_failed: Some("! [rejected] main -> main (fetch first)".to_owned()),
@@ -697,6 +704,7 @@ mod golden_project {
         let waiting = Merge::Pull {
             target: "main".to_owned(),
             head: commit('d'),
+            from: commit('a'),
             number: 12,
             url,
             since_ms: at(),

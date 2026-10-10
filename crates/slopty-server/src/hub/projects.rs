@@ -16,7 +16,7 @@ use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, T
 use slopty_proto::project::{
     ASKING_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
     PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV,
-    Task, TaskId, TaskLaunch, TaskState, TimelineEntry, WorkerFacts,
+    Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -32,8 +32,8 @@ use super::{
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Installed, Wanted};
 use crate::project::{
-    Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,
-    Watched, clipped,
+    Assignee, Caller, Cleanup, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting,
+    Teller, Watched, clipped,
 };
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
@@ -291,6 +291,25 @@ pub(super) fn agent_scope(
         _ => {}
     }
     Ok(verb)
+}
+
+/// What letting `project` go leaves on its workers: its tasks' worktrees, the branches the
+/// server named in its clones, and the checkout its work was verified in on the orchestrator's
+/// worker ([`VERIFY_PLACES`]).
+fn left_by(state: &State, project: &ProjectId) -> Vec<Cleanup> {
+    let worktrees = state
+        .projects
+        .worktrees_of(project)
+        .into_iter()
+        .map(|(worker, worktree, landed)| Cleanup::Worktree { worker, worktree, landed });
+    let branches = super::steps::server_branches(state, project)
+        .into_iter()
+        .map(|((worker, repo), branches)| Cleanup::Branches { worker, repo, branches });
+    let verify = state.projects.project(project).ok().and_then(|p| p.orchestrator).map(|o| {
+        let worktree = format!("{VERIFY_PLACES}/{project}");
+        Cleanup::Worktree { worker: o.worker, worktree, landed: Vec::new() }
+    });
+    worktrees.chain(branches).chain(verify).collect()
 }
 
 /// Stop watching the terminal `session`, and have the store forget it.
@@ -834,17 +853,20 @@ impl Hub {
 
     /// The person lets `project` go: its record, its lane's work and the reports waiting in
     /// it. Every client is sent the projects afresh, which a snapshot's first part replaces
-    /// whole, as no change says a project is gone.
+    /// whole, as no change says a project is gone. What it left on its workers goes, each kept
+    /// until its worker answers ([`Self::clean_up`]): its tasks' worktrees, each kept by its
+    /// worker while anything in it is not committed or a terminal works in it, with the branch
+    /// of work that did not land; the branches the server named in its clones; and its verify
+    /// checkout.
     pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
-        let branches = super::steps::server_branches(state, project);
-        let worktrees = state.projects.worktrees_of(project);
+        let cleanups = left_by(state, project);
         if let Err(refused) = state.projects.delete(project) {
             return refused;
         }
-        self.clear_away(branches, worktrees);
         keep(state, Keep::Forget(project.clone()));
+        self.clean_up(state, cleanups);
         let projects = Self::projects_snapshot(state);
         let seq = self.inner.log.lock().next.saturating_sub(1);
         for part in parts(seq, projects) {
@@ -853,32 +875,6 @@ impl Hub {
         drop(guard);
         tracing::info!(%project, "project let go");
         Outcome::Done
-    }
-
-    /// What a project let go leaves on its workers goes: the branches the server named in its
-    /// clones, and its tasks' worktrees, each kept by its worker while anything in it is not
-    /// committed or a terminal works in it, with the branch of work that did not land.
-    fn clear_away(
-        &self,
-        branches: Vec<((WorkerId, String), Vec<String>)>,
-        worktrees: Vec<(WorkerId, String, Vec<String>)>,
-    ) {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        let hub = self.clone();
-        tokio::spawn(async move {
-            for (worker, worktree, landed) in worktrees {
-                let verb = Verb::RemoveWorktree { worker, worktree: worktree.clone(), landed };
-                let went = hub.forward(None, verb).await;
-                tracing::info!(%worker, %worktree, ?went, "a let-go project's worktree");
-            }
-            for ((worker, repo), branches) in branches {
-                let verb = Verb::DropBranches { worker, repo: repo.clone(), branches };
-                let went = hub.forward(None, verb).await;
-                tracing::info!(%worker, %repo, ?went, "a let-go project's branches");
-            }
-        });
     }
 
     pub(super) fn projects_snapshot(state: &mut State) -> Vec<ProjectStatus> {

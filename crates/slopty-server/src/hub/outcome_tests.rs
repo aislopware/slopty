@@ -19,6 +19,7 @@ use super::project_tests::{
 use super::settle::SETTLE_AFTER;
 use super::tests::summary;
 use super::*;
+use crate::project::Cleanup;
 
 /// The next batch the worker's link is sent, skipping everything else: paused, the clock runs
 /// on to it.
@@ -319,8 +320,26 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
         assert_eq!(hub.settle_due(&mut resting, t0), []);
         assert_eq!(hub.settle_due(&mut resting, t0.checked_add(SETTLE_AFTER).unwrap()), [term]);
 
-        let (id, verb) = request(&mut rx).await;
+        let (mut id, verb) = request(&mut rx).await;
         assert_eq!(verb, Verb::Close { term });
+        if n == 1 {
+            // A close that does not take is tried again a whole wait later, and frees then.
+            let failed = Outcome::Error { code: ErrorCode::Failed, message: "busy".to_owned() };
+            answer(&lease, id, failed);
+            let mut again = Vec::new();
+            for wait in 2..500 {
+                let at = t0.checked_add(SETTLE_AFTER.saturating_mul(wait)).unwrap();
+                again = hub.settle_due(&mut resting, at);
+                if !again.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(again, [term]);
+            let (retry, verb) = request(&mut rx).await;
+            assert_eq!(verb, Verb::Close { term });
+            id = retry;
+        }
         answer(&lease, id, Outcome::Done);
         let reason = slopty_proto::terminal::CloseReason::Requested;
         lease.handle(ToServer::SessionClosed { session: term.session, reason });
@@ -490,4 +509,99 @@ async fn a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled() {
     let main = vec!["main".to_owned(), "origin/main".to_owned()];
     assert_eq!(verb, Verb::RemoveWorktree { worker, worktree: third_path, landed: main });
     answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });
+}
+
+/// A merged task's worktree its worker kept is not asked again on its own, but letting the
+/// project go asks once more. A project let go while its worker is away leaves that worktree
+/// and the project's verify checkout waiting, kept across a restart of the server, and both are
+/// asked as the worker registers again; answered, nothing waits any more.
+#[tokio::test]
+async fn a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_worker_is_back() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrating = SessionId::new();
+    let (worker, lease, mut rx) =
+        worker_on(&hub, "studio", Os::MacOs, vec![summary(orchestrating)]);
+    create(&hub, Some(TermRef { worker, session: orchestrating })).await;
+    let task = new_task(&hub, None).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+    let term = opened(&lease, &request(&mut rx).await);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let path = "/w/demo/.claude/worktrees/slopty-demo-1".to_owned();
+    let worktree = Worktree {
+        name: "slopty-demo-1".to_owned(),
+        path: path.clone(),
+        branch: Some("worktree-slopty-demo-1".to_owned()),
+        original_cwd: "/w/demo".to_owned(),
+        original_branch: Some("main".to_owned()),
+    };
+    let branch = AgentBranch { session: term.session, worktree: Some(worktree) };
+    lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+    for state in [TaskState::Done, TaskState::Merged] {
+        let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
+        let verb = Verb::TaskUpdate { project: project(), task, change };
+        assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+    }
+    let landed = vec!["main".to_owned(), "origin/main".to_owned()];
+    let remove = Verb::RemoveWorktree { worker, worktree: path.clone(), landed };
+    let reason = slopty_proto::terminal::CloseReason::Requested;
+    lease.handle(ToServer::SessionClosed { session: term.session, reason });
+    let next = |rx: &mut mpsc::Receiver<FromServer>| {
+        let mut verbs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let FromServer::Request { id, verb, .. } = msg {
+                verbs.push((id, verb));
+            }
+        }
+        verbs
+    };
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, remove);
+    let kept = "worktree has changes not committed: M a.txt".to_owned();
+    answer(&lease, id, Outcome::Error { code: ErrorCode::Conflict, message: kept });
+    let mut said = false;
+    for _ in 0..500 {
+        said = status(&hub).await.timeline.iter().any(|e| {
+            matches!(&e.what, Moment::Note { text } if text.starts_with("Its worktree is kept"))
+        });
+        if said {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(said, "the timeline says it is kept");
+    // Kept: another terminal of the worker closing asks nothing.
+    let other = SessionId::new();
+    announce(&lease, other, false);
+    lease.handle(ToServer::SessionClosed { session: other, reason });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(next(&mut rx).iter().all(|(_, v)| !matches!(v, Verb::RemoveWorktree { .. })));
+
+    // Let go while the worker is away: both wait, and outlive a restart.
+    drop(lease);
+    assert_eq!(hub.dispatch(Verb::ProjectDelete { project: project() }).await, Outcome::Done);
+    let checkout = Verb::RemoveWorktree {
+        worker,
+        worktree: format!("{}/slopty", slopty_proto::project::VERIFY_PLACES),
+        landed: Vec::new(),
+    };
+    let waiting: Vec<Verb> = hub.projects_file(0).cleanups.iter().map(Cleanup::verb).collect();
+    assert_eq!(waiting, [remove.clone(), checkout.clone()]);
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    drop(hub);
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let (_, lease, mut rx) = worker_again(&hub, worker, "studio", Os::MacOs, Vec::new());
+    for want in [remove, checkout] {
+        let (id, verb) = request(&mut rx).await;
+        assert_eq!(verb, want);
+        let gone = Outcome::WorktreeRemoved { branch: None, branch_removed: false };
+        answer(&lease, id, gone);
+    }
+    for _ in 0..500 {
+        if hub.projects_file(0).cleanups.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(hub.projects_file(0).cleanups, [], "answered, nothing waits");
 }

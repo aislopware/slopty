@@ -1062,8 +1062,8 @@ impl Orchestrator {
                 )
                 .await
                 .map_err(|f| verify_failure(&f))?;
-                let crate::repo::verify::Rebased { head, onto, verified } = made;
-                Ok(Outcome::Rebased { head, onto, verified })
+                let crate::repo::verify::Rebased { head, from, onto, verified } = made;
+                Ok(Outcome::Rebased { head, from, onto, verified })
             }
             Verb::TestDiff { worker, repo, head, target, test_paths } => {
                 self.mine(worker)?;
@@ -1120,6 +1120,20 @@ impl Orchestrator {
                     Failure::new(ErrorCode::Unsupported, "this worker has no git")
                 })?;
                 let worktree = crate::file::expand_home(Path::new(&worktree));
+                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
+                // A project's verify checkout, the server's own: it goes by force.
+                if let Some(name) = worktree
+                    .strip_prefix(&places)
+                    .ok()
+                    .and_then(|rest| rest.to_str())
+                    .filter(|name| crate::repo::verify::place(&places, name).is_ok())
+                {
+                    let place = places.join(name);
+                    crate::repo::verify::drop_checkout(git, &place)
+                        .await
+                        .map_err(|failed| verify_failure(&failed))?;
+                    return Ok(Outcome::WorktreeRemoved { branch: None, branch_removed: false });
+                }
                 let cwds: Vec<PathBuf> = self
                     .inner
                     .worker

@@ -81,12 +81,13 @@ async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
 
     let up_to_date = rebase(git, &repo, &place, (&task, "main"), &[], Some(&task)).await;
     let up_to_date = up_to_date.expect("as it is");
-    assert_eq!(up_to_date.head, task, "main is where the task left it");
+    assert_eq!((&up_to_date.head, &up_to_date.from), (&task, &task), "main is where it left it");
     assert!(up_to_date.verified, "the very commit verified");
 
     let moved = commit(&repo, "c.txt", "main moved on\n");
-    let rebased = rebase(git, &repo, &place, (&task, "main"), &[], Some(&task)).await;
+    let rebased = rebase(git, &repo, &place, ("slopty/demo/1", "main"), &[], Some(&task)).await;
     let rebased = rebased.expect("rebased");
+    assert_eq!(rebased.from, task, "the branch given, as its commit");
     assert!(!rebased.verified, "main's change is in its tree");
     assert_eq!(rebased.onto, moved);
     assert_ne!(rebased.head, task);
@@ -302,4 +303,32 @@ async fn the_clone_s_target_catches_up_with_origin_s() {
     assert_eq!(diverged, Err(Failed::Diverged(theirs)), "commits origin's lacks");
     assert_eq!(git_in(&repo, &["rev-parse", "main"]), ahead, "nothing moved");
     assert_ne!(first, merged);
+}
+
+/// A project let go takes its checkout with it, by force: what a verifier built and left
+/// behind goes, and the clone forgets the worktree. One already gone is answered as gone, and
+/// one whose clone is gone too goes as a plain directory.
+#[tokio::test]
+async fn a_let_go_project_s_checkout_goes_by_force() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, _first, _task) = clone_with_a_task(&root);
+    let place = place(&root.join("verify"), "demo").expect("a name");
+    checkout(git, &repo, &place, "slopty/demo/1", "main").await.expect("checked out");
+    std::fs::create_dir_all(place.join("target")).expect("mkdir");
+    std::fs::write(place.join("target/warm"), "built").expect("write");
+    std::fs::write(place.join("stray.txt"), "left by a run").expect("write");
+    std::fs::write(place.join("b.txt"), "changed by a run").expect("write");
+
+    assert_eq!(drop_checkout(git, &place).await, Ok(true));
+    assert!(!place.exists(), "gone, with what was built");
+    let listed = git_in(&repo, &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("verify"), "the clone forgets it: {listed}");
+    assert_eq!(drop_checkout(git, &place).await, Ok(false), "gone already");
+
+    checkout(git, &repo, &place, "slopty/demo/1", "main").await.expect("checked out");
+    std::fs::remove_dir_all(&repo).expect("the clone goes");
+    assert_eq!(drop_checkout(git, &place).await, Ok(true));
+    assert!(!place.exists(), "a plain directory now");
 }

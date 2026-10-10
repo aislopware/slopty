@@ -64,6 +64,7 @@ use crate::project::{
 };
 
 mod awake;
+mod cleanup;
 mod codex;
 mod ladder;
 mod outcomes;
@@ -209,6 +210,8 @@ struct State {
     keeper: Option<mpsc::UnboundedSender<Keep>>,
     /// What the server does for tasks around their agents: clones, branches brought home.
     steps: steps::Steps,
+    /// What projects let go left on workers, until each answers.
+    cleanups: cleanup::Cleanups,
     /// The projects' lanes running: their verifiers and merge queues.
     lanes: queue::Lanes,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
@@ -452,6 +455,7 @@ impl Hub {
             }
         }
         state.steps.adopt_merges(file.merges.drain(..));
+        state.cleanups.adopt(file.cleanups.drain(..));
         state.projects = Projects::restore(file);
     }
 
@@ -473,6 +477,7 @@ impl Hub {
         file.keys = changes.chain(starts).collect();
         file.keys.sort_by_key(|k| k.at);
         file.merges = state.steps.merges();
+        file.cleanups = state.cleanups.kept();
         file
     }
 
@@ -638,6 +643,7 @@ impl Hub {
             .collect();
         for old in &replaced {
             tracing::info!(worker = %old, name = %info.name, by = %worker, "worker replaced");
+            Self::cleanups_moved(&mut state, *old, worker);
             if let Some(gone) = state.workers.remove(old) {
                 self.close_all(&mut state, *old, &gone.sessions);
                 self.happen(Happening::WorkerRemoved { worker: *old, name: gone.info.name });
@@ -707,6 +713,7 @@ impl Hub {
         let ended = state.projects.reconcile(worker, &open, WallMs::now());
         self.projects_moved(&mut state, ended);
         self.free_closed(&mut state, worker);
+        self.clean_up_on(&mut state, worker);
         for summary in opened {
             let term = TermRef { worker, session: summary.id };
             self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
@@ -1334,11 +1341,22 @@ impl Hub {
 
     /// Log and push each project change, and send the store what it keeps. Called under the
     /// state lock, as [`Self::happen`] is, so the store and every link see the changes in the
-    /// order they were made.
+    /// order they were made. A merged task with a worktree whose agent's terminal is closed
+    /// already, however it merged (the queue, its pull request, the person), frees it now
+    /// ([`Self::free_closed`]).
     fn projects_moved(&self, state: &mut State, mut changes: Vec<Change>) {
         changes.extend(self.hear(state));
         if changes.is_empty() {
             return;
+        }
+        let mut freeing: Vec<WorkerId> = Vec::new();
+        for task in changes.iter().filter_map(|c| c.kept.task.as_ref()) {
+            if let (slopty_proto::project::TaskState::Merged, Some(_), Some(a)) =
+                (task.state, &task.worktree, &task.assignment)
+                && !freeing.contains(&a.term.worker)
+            {
+                freeing.push(a.term.worker);
+            }
         }
         for change in changes {
             ladder::tell_project(state, &change.kept);
@@ -1346,6 +1364,9 @@ impl Hub {
             if change.durable {
                 projects::keep(state, Keep::Project(Box::new(change.kept)));
             }
+        }
+        for worker in freeing {
+            self.free_closed(state, worker);
         }
         self.unpark_deliveries(state);
     }

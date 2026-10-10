@@ -75,8 +75,68 @@ pub struct ProjectsFile {
     pub keys: Vec<KeptKey>,
     /// The merges the person asked for that wait for their task's branch to come home.
     pub merges: Vec<(ProjectId, TaskId)>,
+    /// What projects let go left for workers to remove, until each worker answers.
+    pub cleanups: Vec<Cleanup>,
     /// How many changes it holds: the store's log goes on from the next.
     pub through: u64,
+}
+
+/// What a project let go leaves for a worker to remove, kept until the worker answers: one away
+/// then is asked again once it registers, so nothing is left behind on a machine that was off.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Cleanup {
+    /// A task's worktree, or the project's verify checkout
+    /// ([`slopty_proto::project::VERIFY_PLACES`]), with where the work landed
+    /// ([`Verb::RemoveWorktree`]).
+    Worktree {
+        /// Where.
+        worker: WorkerId,
+        /// The worktree.
+        worktree: String,
+        /// Where its work landed.
+        landed: Vec<String>,
+    },
+    /// The branches the server named in a clone ([`Verb::DropBranches`]).
+    Branches {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The branches.
+        branches: Vec<String>,
+    },
+}
+
+impl Cleanup {
+    /// The worker it is for.
+    #[must_use]
+    pub const fn worker(&self) -> WorkerId {
+        match self {
+            Self::Worktree { worker, .. } | Self::Branches { worker, .. } => *worker,
+        }
+    }
+
+    /// The same, for `worker` instead: the machine came back under a new id.
+    #[must_use]
+    pub const fn on(mut self, to: WorkerId) -> Self {
+        match &mut self {
+            Self::Worktree { worker, .. } | Self::Branches { worker, .. } => *worker = to,
+        }
+        self
+    }
+
+    /// The verb that asks it of its worker.
+    #[must_use]
+    pub fn verb(&self) -> Verb {
+        match self.clone() {
+            Self::Worktree { worker, worktree, landed } => {
+                Verb::RemoveWorktree { worker, worktree, landed }
+            }
+            Self::Branches { worker, repo, branches } => {
+                Verb::DropBranches { worker, repo, branches }
+            }
+        }
+    }
 }
 
 /// What an agent did to a terminal.
@@ -123,6 +183,13 @@ pub enum Keep {
         project: ProjectId,
         /// The task.
         task: TaskId,
+        /// Whether it waits.
+        waits: bool,
+    },
+    /// A cleanup now waits for its worker's answer (`waits`), or no longer does.
+    Cleanup {
+        /// What.
+        cleanup: Cleanup,
         /// Whether it waits.
         waits: bool,
     },
@@ -235,6 +302,12 @@ impl ProjectsFile {
                 self.merges.retain(|m| *m != merge);
                 if *waits {
                     self.merges.push(merge);
+                }
+            }
+            Keep::Cleanup { cleanup, waits } => {
+                self.cleanups.retain(|c| c != cleanup);
+                if *waits {
+                    self.cleanups.push(cleanup.clone());
                 }
             }
         }
@@ -450,8 +523,12 @@ pub(crate) struct Projects {
     /// ([`Self::machine_seen`]).
     away: HashSet<(ProjectId, TaskId)>,
     /// The tasks whose worktree is being freed, until how it went is heard ([`Self::freed`]):
-    /// one is asked of its worker once.
+    /// one is asked of its worker once at a time.
     freeing: HashSet<(ProjectId, TaskId)>,
+    /// The tasks whose worktree its worker kept, for something in it not committed or a
+    /// terminal at work in it: not asked again on their own, as the person frees one from the
+    /// worktree list, but letting the project go asks once more ([`Self::worktrees_of`]).
+    kept: HashSet<(ProjectId, TaskId)>,
 }
 
 /// Which way a worker's link went, for its tasks ([`Projects::machine_seen`]).
@@ -683,15 +760,19 @@ fn open_term(t: &Task) -> Option<TermRef> {
 /// Whether a task's work is over (merged, or given up) and its agent is not at work: its
 /// terminal counts against no limit, though it may still be open. An agent that works again
 /// counts again, so giving up its own task frees no agent that goes on working.
-/// Where `t`'s work landed, for its worktree's branch to go with it: the merge's head and its
-/// target, or the project's target, and the target on `origin`.
+/// Where `t`'s work landed, for its worktree's branch to go with it: the task's own commit the
+/// merge took and the merge's head, or the project's target, and the target on `origin`. The
+/// own commit is what a worker other than the orchestrator's holds, as the merge happened in
+/// the orchestrator's clone.
 fn landed_of(record: &Record, t: &Task) -> Vec<String> {
-    let (head, target) = match &t.merge {
-        Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
-        _ => (None, record.project.target.clone()),
+    let (took, target) = match &t.merge {
+        Some(Merge::Merged { target, head, from, .. }) => {
+            (vec![from.clone(), head.clone()], target.clone())
+        }
+        _ => (Vec::new(), record.project.target.clone()),
     };
     let origin = format!("origin/{target}");
-    head.into_iter().chain([target, origin]).collect()
+    took.into_iter().chain([target, origin]).collect()
 }
 
 const fn finished(t: &Task) -> bool {
@@ -926,7 +1007,14 @@ impl Projects {
     /// Every project, as the store keeps it after `through` changes, beside `watched`.
     pub(crate) fn file(&self, watched: Vec<Watched>, through: u64) -> ProjectsFile {
         let projects = self.records.values().cloned().collect();
-        ProjectsFile { projects, watched, keys: Vec::new(), merges: Vec::new(), through }
+        ProjectsFile {
+            projects,
+            watched,
+            keys: Vec::new(),
+            merges: Vec::new(),
+            cleanups: Vec::new(),
+            through,
+        }
     }
 
     /// The person's policy.
@@ -1027,7 +1115,10 @@ impl Projects {
     /// Let `id` go with its tasks, its queue and its timeline. Its terminals are not the
     /// store's: they run on, as terminals.
     pub(crate) fn delete(&mut self, id: &ProjectId) -> Result<(), Refused> {
-        self.records.remove(id).map(|_| ()).ok_or_else(|| unknown_project(id))
+        self.records.remove(id).ok_or_else(|| unknown_project(id))?;
+        self.freeing.retain(|(p, _)| p != id);
+        self.kept.retain(|(p, _)| p != id);
+        Ok(())
     }
 
     pub(crate) fn project(&self, id: &ProjectId) -> Result<&Project, Refused> {
@@ -1935,7 +2026,15 @@ impl Projects {
         let record = self.records.get(id)?;
         let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
         let free = (t.worktree.clone()?, landed_of(record, t));
-        self.freeing.insert((id.clone(), task)).then_some(free)
+        let at = (id.clone(), task);
+        (!self.kept.contains(&at) && self.freeing.insert(at)).then_some(free)
+    }
+
+    /// Freeing `task`'s worktree did not get as far as its worker's answer: its agent's
+    /// terminal did not close, or the worker went away. It is asked again, by the settle loop
+    /// or once the worker is back ([`Self::unfreed`]).
+    pub(crate) fn unfree(&mut self, id: &ProjectId, task: TaskId) {
+        self.freeing.remove(&(id.clone(), task));
     }
 
     /// The merged tasks on `worker` whose worktree is still there though their agent's
@@ -1960,15 +2059,18 @@ impl Projects {
         }
         found
             .into_iter()
-            .filter(|((id, task, ..), _)| self.freeing.insert((id.clone(), *task)))
+            .filter(|((id, task, ..), _)| {
+                let at = (id.clone(), *task);
+                !self.kept.contains(&at) && self.freeing.insert(at)
+            })
             .map(|((id, task, term, worktree), landed)| (id, task, term, worktree, landed))
             .collect()
     }
 
     /// What letting project `id` go leaves on the workers: each task's worktree its agent
     /// reported, on the worker it ran on, with where its work would have landed, but those being
-    /// freed already. Freeing one keeps anything not committed in it, and the branch of work
-    /// that did not land.
+    /// freed already; one its worker kept before is asked again. Freeing one keeps anything not
+    /// committed in it, and the branch of work that did not land.
     pub(crate) fn worktrees_of(&self, id: &ProjectId) -> Vec<(WorkerId, String, Vec<String>)> {
         let Some(record) = self.records.get(id) else { return Vec::new() };
         record
@@ -1992,8 +2094,12 @@ impl Projects {
         now: WallMs,
     ) -> Vec<Change> {
         // One kept is not asked again on its own: the person frees it from the worktree list.
-        if went.is_ok() {
-            self.freeing.remove(&(id.clone(), task));
+        let at = (id.clone(), task);
+        self.freeing.remove(&at);
+        if went.is_err() {
+            self.kept.insert(at);
+        } else {
+            self.kept.remove(&at);
         }
         let Ok(record) = self.record(id) else { return Vec::new() };
         let Ok(t) = record.task_mut(task) else { return Vec::new() };
@@ -2293,13 +2399,14 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 /// merged there, it is merged; closed without a merge, it waits for the person's Merge again.
 /// The move, for the timeline.
 fn landed(t: &mut Task, pull: Option<&PullSeen>, now: WallMs) -> Option<Moment> {
-    let Some(Merge::Pull { target, head, number, .. }) = &t.merge else { return None };
+    let Some(Merge::Pull { target, head, from, number, .. }) = &t.merge else { return None };
     let pull = pull.filter(|p| p.number == *number)?;
     match pull.stands {
         PullStands::Merged if t.state.may_become(TaskState::Merged) => {
             let merged = Merge::Merged {
                 target: target.clone(),
                 head: head.clone(),
+                from: from.clone(),
                 at_ms: now,
                 pushed: true,
                 push_failed: None,

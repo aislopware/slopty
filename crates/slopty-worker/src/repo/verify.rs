@@ -72,6 +72,8 @@ pub struct Rebased {
     /// What it made, in hex; the head itself when that already held the target and nothing
     /// was to be added to its commits.
     pub head: String,
+    /// The commit given to rebase, in hex.
+    pub from: String,
     /// The target's commit it is on top of, in hex.
     pub onto: String,
     /// What it made has the very tree of the commit last verified: only the messages changed.
@@ -157,7 +159,7 @@ pub async fn rebase(
     let holds = is_ancestor(git, repo, &onto, &head).await;
     if holds && (amend.is_none() || head == onto) {
         let verified = same_tree(git, repo, &head, verified).await;
-        return Ok(Rebased { head, onto, verified });
+        return Ok(Rebased { from: head.clone(), head, onto, verified });
     }
     prepare(git, repo, place, &head).await?;
     let mut args = identity(git, place).await;
@@ -184,9 +186,9 @@ pub async fn rebase(
             Failed::Conflict(conflicts)
         });
     }
-    let head = commit_of(git, place, "HEAD").await?;
-    let verified = same_tree(git, place, &head, verified).await;
-    Ok(Rebased { head, onto, verified })
+    let made = commit_of(git, place, "HEAD").await?;
+    let verified = same_tree(git, place, &made, verified).await;
+    Ok(Rebased { head: made, from: head, onto, verified })
 }
 
 /// The command `git rebase --exec` runs after each commit to add `trailers` to it, none when
@@ -443,6 +445,40 @@ async fn prepare(git: &Path, repo: &Path, place: &Path, commit: &str) -> Result<
         bundle::run(git, place, &update).await?;
     }
     Ok(())
+}
+
+/// The project's checkout at `place` gone, for a project let go; whether there was one.
+///
+/// It is Slopty's own and holds nothing of the person's, so it goes by force, with what a
+/// verifier built in it, and its clone forgets it. One already gone is answered as gone; one
+/// whose clone is gone too goes as a plain directory.
+///
+/// # Errors
+/// The directory could not be removed.
+pub async fn drop_checkout(git: &Path, place: &Path) -> Result<bool, Failed> {
+    if tokio::fs::symlink_metadata(place).await.is_err() {
+        return Ok(false);
+    }
+    let found =
+        bundle::run(git, place, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .await
+            .ok()
+            .map(|common| PathBuf::from(common.trim()));
+    let at = place.to_string_lossy().into_owned();
+    if let Some(common) = &found {
+        let remove = ["worktree", "remove", "--force", "--force", "--end-of-options", &at];
+        if bundle::run(git, common, &remove).await.is_ok() {
+            return Ok(true);
+        }
+    }
+    tokio::fs::remove_dir_all(place)
+        .await
+        .map_err(|e| Failed::Other(format!("{}: {e}", place.display())))?;
+    if let Some(common) = &found {
+        // Only the clone's own record of it is left, and a prune that fails leaves no more.
+        let _pruned = bundle::run(git, common, &["worktree", "prune"]).await;
+    }
+    Ok(true)
 }
 
 /// A rebase left stopped in `place` (a run cut short) undone.

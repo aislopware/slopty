@@ -247,7 +247,12 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
     let provenance = [("Slopty-Task".to_owned(), format!("slopty#{task}"))];
     assert_eq!(trailers.as_slice(), provenance, "no thread is known for a terminal's agent");
     assert_eq!(verified.as_deref(), Some(commit('a').as_str()));
-    let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true };
+    let rebased = Outcome::Rebased {
+        head: commit('a'),
+        from: commit('a'),
+        onto: commit('b'),
+        verified: true,
+    };
     answer(&studio.lease, id, rebased);
     let (id, verb) = studio.request().await;
     let Verb::FastForward { repo, target, from, to, push, .. } = &verb else { panic!("{verb:?}") };
@@ -446,7 +451,12 @@ async fn the_queue_verifies_a_rebased_head_again_and_holds_for_the_person_s_chan
         let (id, verb) = studio.request().await;
         let Verb::Rebase { head, .. } = &verb else { panic!("{verb:?}") };
         assert_eq!(head, &commit(judged.0), "the last commit verified goes on");
-        let made = Outcome::Rebased { head: commit(rebased), onto: commit(onto), verified: false };
+        let made = Outcome::Rebased {
+            head: commit(rebased),
+            from: commit(judged.0),
+            onto: commit(onto),
+            verified: false,
+        };
         answer(&studio.lease, id, made);
         let asked = studio.request().await;
         let Verb::Verify { head, .. } = &asked.1 else { panic!("{:?}", asked.1) };
@@ -599,7 +609,12 @@ async fn a_rebase_that_kept_the_verified_tree_is_not_verified_again() {
     merge(&hub, task).await;
     let (id, verb) = studio.request().await;
     assert!(matches!(verb, Verb::Rebase { .. }), "{verb:?}");
-    let rebased = Outcome::Rebased { head: commit('c'), onto: commit('b'), verified: true };
+    let rebased = Outcome::Rebased {
+        head: commit('c'),
+        from: commit('a'),
+        onto: commit('b'),
+        verified: true,
+    };
     answer(&studio.lease, id, rebased);
     let (id, verb) = studio.request().await;
     let Verb::FastForward { from, to, .. } = &verb else { panic!("not verified again: {verb:?}") };
@@ -683,7 +698,12 @@ async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
     answer(
         &studio.lease,
         id,
-        Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true },
+        Outcome::Rebased {
+            head: commit('a'),
+            from: commit('a'),
+            onto: commit('b'),
+            verified: true,
+        },
     );
     let (id, _forward) = studio.request().await;
     let rejected = Some("rejected: fetch first".to_owned());
@@ -782,7 +802,12 @@ async fn a_protected_target_takes_the_work_through_a_pull_request() {
     until_state(&hub, task, TaskState::Done).await;
     merge(&hub, task).await;
     let (id, _rebase) = studio.request().await;
-    let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true };
+    let rebased = Outcome::Rebased {
+        head: commit('a'),
+        from: commit('a'),
+        onto: commit('b'),
+        verified: true,
+    };
     answer(&studio.lease, id, rebased);
     let (id, verb) = studio.request().await;
     assert!(matches!(verb, Verb::FastForward { push: true, .. }), "{verb:?}");
@@ -849,4 +874,90 @@ async fn a_protected_target_takes_the_work_through_a_pull_request() {
     );
     let caught = Outcome::FastForwarded { head: commit('c'), pushed: false, push_failed: None };
     answer(&studio.lease, id, caught);
+}
+
+/// A merge held after the queue rebased a task's work goes on from what that rebase made, and
+/// still names the task's own commit, which is all a branch on a machine other than the
+/// orchestrator's holds. Once merged, a task whose agent's terminal closed already frees its
+/// worktree at once, that own commit first among where its work landed.
+#[tokio::test]
+async fn a_held_merge_keeps_the_task_s_own_commit_and_frees_a_closed_agent_s_worktree() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    let worktree = slopty_proto::agent::Worktree {
+        name: "slopty-slopty-1".to_owned(),
+        path: TREE.to_owned(),
+        branch: Some(BRANCH.to_owned()),
+        original_cwd: "/w/demo".to_owned(),
+        original_branch: Some("main".to_owned()),
+    };
+    let branch = AgentBranch { session: agent.session, worktree: Some(worktree) };
+    studio.lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+    done(&hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, _close) = studio.past_screens(&["ok"]).await;
+    answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
+
+    // Rebased and verified again, the fast-forward is held by the person's checkout.
+    let (id, verb) = studio.request().await;
+    assert!(matches!(&verb, Verb::Rebase { head, .. } if *head == commit('a')), "{verb:?}");
+    let made = Outcome::Rebased {
+        head: commit('c'),
+        from: commit('a'),
+        onto: commit('d'),
+        verified: false,
+    };
+    answer(&studio.lease, id, made);
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('c', 'd'));
+    let (id, _close) = studio.past_screens(&["ok"]).await;
+    answer(&studio.lease, id, Outcome::Done);
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::FastForward { .. }), "{verb:?}");
+    let message = "error: Your local changes would be overwritten by merge: a.txt".to_owned();
+    answer(&studio.lease, id, Outcome::Error { code: ErrorCode::Failed, message });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !task_now(&hub, task)
+            .await
+            .step
+            .is_some_and(|s| matches!(s.state, StepState::Failed { .. }))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // The person closes the agent's terminal, then merges again.
+    let reason = slopty_proto::terminal::CloseReason::Requested;
+    studio.lease.handle(ToServer::SessionClosed { session: agent.session, reason });
+    merge(&hub, task).await;
+    let (id, verb) = studio.request().await;
+    assert!(matches!(&verb, Verb::Rebase { head, .. } if *head == commit('c')), "{verb:?}");
+    let held = Outcome::Rebased {
+        head: commit('c'),
+        from: commit('c'),
+        onto: commit('d'),
+        verified: true,
+    };
+    answer(&studio.lease, id, held);
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::FastForward { .. }), "{verb:?}");
+    let moved = Outcome::FastForwarded { head: commit('c'), pushed: true, push_failed: None };
+    answer(&studio.lease, id, moved);
+    until_state(&hub, task, TaskState::Merged).await;
+    let card = task_now(&hub, task).await;
+    let Some(Merge::Merged { head, from, .. }) = card.merge else { panic!("{card:?}") };
+    assert_eq!((head, from), (commit('c'), commit('a')), "the task's own commit, not the rebase's");
+
+    let (_, verb) = studio.request().await;
+    let landed = vec![commit('a'), commit('c'), "main".to_owned(), "origin/main".to_owned()];
+    assert_eq!(
+        verb,
+        Verb::RemoveWorktree { worker: agent.worker, worktree: TREE.to_owned(), landed },
+        "freed at the merge, as its terminal had closed"
+    );
 }

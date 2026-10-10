@@ -653,7 +653,8 @@ mod tests {
 
     /// Changes a hub made: a project, then a task in it, then that task noted, two terminals
     /// watched, one of them then no longer, a change and a start made under keys, the start
-    /// then answered, and two merges waiting, one of them then no longer.
+    /// then answered, two merges waiting, one of them then no longer, and two cleanups
+    /// waiting, one of them then answered.
     fn changes() -> (Vec<Keep>, ProjectsFile) {
         use std::collections::HashSet;
 
@@ -662,8 +663,8 @@ mod tests {
         use slopty_proto::project::{LimitsChange, ProjectId, TaskChange, TaskId, TaskSpec};
 
         use crate::project::{
-            Caller, Drove, First, KeptKey, NewProject, Projects, Remembered, Running, StartKept,
-            Watched,
+            Caller, Cleanup, Drove, First, KeptKey, NewProject, Projects, Remembered, Running,
+            StartKept, Watched,
         };
 
         let now = WallMs::from_millis(1_790_000_000_000);
@@ -715,10 +716,28 @@ mod tests {
             merge(2, true),
             merge(2, false),
         ]);
+        let worker = WorkerId::new();
+        let worktree = Cleanup::Worktree {
+            worker,
+            worktree: "/w/demo/.claude/worktrees/slopty-demo-1".to_owned(),
+            landed: vec!["main".to_owned()],
+        };
+        let branches = Cleanup::Branches {
+            worker,
+            repo: "/w/demo".to_owned(),
+            branches: vec!["slopty/slopty/target".to_owned()],
+        };
+        let cleanup = |cleanup: &Cleanup, waits| Keep::Cleanup { cleanup: cleanup.clone(), waits };
+        kept.extend([
+            cleanup(&worktree, true),
+            cleanup(&branches, true),
+            cleanup(&worktree, false),
+        ]);
         let through = u64::try_from(kept.len()).unwrap();
         let mut whole = p.file(vec![kept_on], through);
         whole.keys = vec![made, key("open-1", answered)];
         whole.merges = vec![(id, TaskId(1))];
+        whole.cleanups = vec![branches];
         (kept, whole)
     }
 

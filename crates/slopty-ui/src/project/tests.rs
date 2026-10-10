@@ -571,6 +571,7 @@ fn a_merge_whose_push_failed_says_so() {
         c.merge = Some(Merge::Merged {
             target: "main".into(),
             head: "abcdef0123".into(),
+            from: "0123abcdef".into(),
             at_ms: AT,
             pushed,
             push_failed: push_failed.map(str::to_owned),
@@ -767,6 +768,7 @@ fn work_waiting_in_a_pull_request_says_where() {
     waiting.merge = Some(Merge::Pull {
         target: "main".to_owned(),
         head: "a".repeat(40),
+        from: "b".repeat(40),
         number: 12,
         url: "https://github.com/o/demo/pull/12".to_owned(),
         since_ms: AT,

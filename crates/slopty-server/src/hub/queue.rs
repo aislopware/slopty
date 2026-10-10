@@ -18,7 +18,7 @@
 //! checkout has changes in the way) stops the lane with the reason on the task's step, and the
 //! next change that concerns it starts it again.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
@@ -54,6 +54,10 @@ pub(super) struct Lanes {
     running: HashSet<ProjectId>,
     /// Asked to look again once the job under way ends.
     again: HashSet<ProjectId>,
+    /// What the queue's last rebase of each task made, with the task's own commit it took:
+    /// a merge held after it goes on from what it made, which only the orchestrator's clone
+    /// holds, and still says which commit of the task's own landed.
+    rebased: HashMap<(ProjectId, TaskId), (String, String)>,
 }
 
 /// Where a project's work is verified and merged, and with what.
@@ -621,6 +625,10 @@ impl Hub {
             commits: None,
         };
         let running = |phase: String| step(StepState::Running { phase, percent: None });
+        // The task's own commit, as the first rebase read it: a later try rebases what the
+        // last one made, which only this clone holds.
+        let held = self.inner.state.lock().lanes.rebased.remove(&(project.clone(), task));
+        let mut own = held.filter(|(made, _)| *made == candidate).map(|(_, own)| own);
         for _ in 0..MERGE_TRIES {
             self.progress(at, running(format!("Rebasing onto {}", place.target)));
             let judged = {
@@ -638,7 +646,13 @@ impl Hub {
                 verified: passed.clone(),
             };
             let (rebased, onto, same_tree) = match self.forward(None, rebase).await {
-                Outcome::Rebased { head, onto, verified } => (head, onto, verified),
+                Outcome::Rebased { head, from, onto, verified } => {
+                    let own = own.get_or_insert(from).clone();
+                    let mut state = self.inner.state.lock();
+                    state.lanes.rebased.insert((project.clone(), task), (head.clone(), own));
+                    drop(state);
+                    (head, onto, verified)
+                }
                 Outcome::Error { code: ErrorCode::Conflict, message } => {
                     let onto = onto_words(&place.target, &self.send_target(at, place.worker).await);
                     let told = format!(
@@ -697,12 +711,16 @@ impl Hub {
             };
             match self.forward(None, forward).await {
                 Outcome::FastForwarded { head, pushed, push_failed } => {
-                    self.merged(at, &place, &head, (pushed, push_failed), step);
+                    self.inner.state.lock().lanes.rebased.remove(&(project.clone(), task));
+                    let from = own.unwrap_or_else(|| rebased.clone());
+                    self.merged(at, &place, (&head, from), (pushed, push_failed), step);
                     return Went::Next;
                 }
                 // The forge protects the target: the work lands through a pull request there.
                 Outcome::Error { code: ErrorCode::Protected, .. } => {
-                    return self.land_pull(at, &place, &rebased, step).await;
+                    self.inner.state.lock().lanes.rebased.remove(&(project.clone(), task));
+                    let from = own.unwrap_or_else(|| rebased.clone());
+                    return self.land_pull(at, &place, (&rebased, from), step).await;
                 }
                 // The target moved since the rebase: the rebased work goes on top of it.
                 Outcome::Error { code: ErrorCode::Conflict, .. } => candidate = rebased,
@@ -846,13 +864,14 @@ impl Hub {
         self.advance(at, Advance { step: Some(step), moment, ..Advance::default() });
     }
 
-    /// `task`'s work is on the target at `head`. The orchestrator hears. A task reported done
-    /// again while it merged keeps its new state, and its newer work goes through again.
+    /// `task`'s work, its own commit `from`, is on the target at `head`. The orchestrator
+    /// hears. A task reported done again while it merged keeps its new state, and its newer
+    /// work goes through again.
     fn merged(
         &self,
         (project, task): (&ProjectId, TaskId),
         place: &Place,
-        head: &str,
+        (head, from): (&str, String),
         (pushed, push_failed): (bool, Option<String>),
         step: impl Fn(StepState) -> TaskStep,
     ) {
@@ -873,6 +892,7 @@ impl Hub {
         let merge = Merge::Merged {
             target: place.target.clone(),
             head: head.to_owned(),
+            from,
             at_ms: now,
             pushed,
             push_failed: push_failed.clone(),
@@ -928,7 +948,7 @@ impl Hub {
         &self,
         (project, task): (&ProjectId, TaskId),
         place: &Place,
-        head: &str,
+        (head, from): (&str, String),
         step: impl Fn(StepState) -> TaskStep,
     ) -> Went {
         let at = (project, task);
@@ -971,6 +991,7 @@ impl Hub {
         let merge = Merge::Pull {
             target: place.target.clone(),
             head: head.to_owned(),
+            from,
             number,
             url: crate::project::clipped(&url, slopty_proto::project::REF_MAX),
             since_ms: now,
@@ -1022,7 +1043,8 @@ impl Hub {
             Ok(card) => card,
             Err(refused) => return error(ErrorCode::Invalid, &said(&refused)),
         };
-        let Some(Merge::Merged { target, head, at_ms, pushed, push_failed }) = card.merge.clone()
+        let Some(Merge::Merged { target, head, from, at_ms, pushed, push_failed }) =
+            card.merge.clone()
         else {
             return error(ErrorCode::Invalid, &format!("task {task} is not merged"));
         };
@@ -1071,8 +1093,14 @@ impl Hub {
             None => step(StepState::Done { detail }),
             Some(_) => step(StepState::Failed { why: detail }),
         };
-        let merge =
-            Merge::Merged { target, head, at_ms, pushed: now_pushed, push_failed: now_failed };
+        let merge = Merge::Merged {
+            target,
+            head,
+            from,
+            at_ms,
+            pushed: now_pushed,
+            push_failed: now_failed,
+        };
         let advance = Advance {
             moment: Some(Moment::Step(done.clone())),
             step: Some(done),

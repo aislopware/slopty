@@ -24,6 +24,7 @@ use slopty_proto::terminal::SessionState;
 use tokio::time::Instant;
 
 use super::projects::live;
+use super::queue::unreachable;
 use super::steps::said;
 use super::{Hub, State, WeakHub};
 
@@ -129,13 +130,21 @@ impl Hub {
                 && let failed @ Outcome::Error { .. } =
                     hub.forward(None, Verb::Close { term }).await
             {
+                // Its agent goes on in it: the settle loop closes it again a whole wait later.
                 tracing::debug!(?failed, "a terminal not closed");
+                hub.inner.state.lock().projects.unfree(&project, task);
                 return;
             }
             let remove =
                 Verb::RemoveWorktree { worker: term.worker, worktree: worktree.clone(), landed };
             let went = match hub.forward(None, remove).await {
                 Outcome::WorktreeRemoved { branch, branch_removed } => Ok((branch, branch_removed)),
+                // Freed once the worker is back ([`Hub::free_closed`] as it registers).
+                other if unreachable(&other) => {
+                    tracing::debug!(?other, %worktree, "a worktree not freed yet");
+                    hub.inner.state.lock().projects.unfree(&project, task);
+                    return;
+                }
                 other => Err(said(&other)),
             };
             let mut state = hub.inner.state.lock();

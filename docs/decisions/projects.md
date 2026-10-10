@@ -2601,3 +2601,42 @@ reordering and edited allows are gone" in `agents.md`.*
   - Tests: `a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds`
     (slopty-server `hub/project_tests.rs`), with the earlier start tests now answering the
     target's trip; `a_dependent_starts_once_its_dependency_is_merged` (`project/tests.rs`).
+
+- ✅ **Letting a project go cleans up on every machine, and merged work frees its branch
+  wherever it ran** (2026-10-12, readiness 10-12 rank 15).
+  - **A remote task's branch.** The merge queue rebases in the orchestrator's clone, so the
+    merge's head exists only there. A branch on another machine held none of it and was always
+    judged "did not land", then kept. `Merge::Merged` and `Merge::Pull` now carry `from`, the
+    task's own commit that the merge took, in hex, and `RemoveWorktree`'s `landed` names it
+    first. The worker resolves the commit (`Outcome::Rebased::from`), because a merge with no
+    verifier knows only the branch's name.
+    - A merge held after a rebase goes on from what that rebase made, which only the
+      orchestrator's clone holds. The lane remembers the task's own commit beside it
+      (`Lanes::rebased`), in memory. After a server restart, the rebased commit stands in, and
+      the branch elsewhere is kept: the safe side.
+  - **A kept worktree.** One the worker kept, for work not committed or a terminal in it, stayed
+    in the "being freed" set forever, so even letting the project go skipped it. It now moves to
+    a kept set. That set is never asked again on its own, since the person frees it from the
+    worktree list, but letting the project go asks once more.
+    - A close that failed, or a worker unreachable mid-free, leaves the task free to be asked
+      again: by the settle loop a whole wait later, or once the worker is back.
+  - **Merged with its terminal closed already.** Freeing followed only a terminal's end or a
+    worker's registration. Now any change that leaves a task Merged with a worktree runs the
+    same pass (`Hub::projects_moved`), whether the queue, its pull request or the person
+    merged it.
+  - **An offline machine, and the verify checkout.** Delete was fire-and-forget. Each removal
+    (worktrees, the server's branches, and now the project's verify checkout
+    `~/slopty/verify/<project>`) is a `Cleanup` the store keeps (`ProjectsFile::cleanups`,
+    `Keep::Cleanup`). The kept removal goes once its worker answers, however it answers. One
+    whose worker is unreachable waits and is asked as that worker registers, across a server
+    restart too. A machine back under a new id takes its own.
+    - No verb was needed for the checkout. `RemoveWorktree` given a path in `VERIFY_PLACES`
+      removes it by force (`repo::verify::drop_checkout`): it is Slopty's own, and a build
+      there holds gigabytes. No archive script runs. One already gone answers as removed, and
+      one whose clone is gone goes as a plain directory.
+  - Tests: `a_held_merge_keeps_the_task_s_own_commit_and_frees_a_closed_agent_s_worktree`
+    (`hub/queue/tests.rs`); `a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_worker_is_back`
+    and the retried close in `a_merged_task_s_worktree_goes_once_its_agent_is_closed`
+    (`hub/outcome_tests.rs`); the cleanup lines in the store's replay tests;
+    `a_let_go_project_s_checkout_goes_by_force` and `Rebased::from` in slopty-worker's
+    `repo/verify/tests.rs`.
