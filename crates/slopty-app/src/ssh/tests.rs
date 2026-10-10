@@ -201,6 +201,7 @@ fn deployed() -> Deployed {
             pasteboard: PasteboardAccess::Allowed,
             clients: 0,
             sessions: 0,
+            turns: 0,
             uptime_secs: 1,
         },
         server: "hub:45560".to_owned(),

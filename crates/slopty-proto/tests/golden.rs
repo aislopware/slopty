@@ -2436,6 +2436,7 @@ mod ctl {
             pasteboard: PasteboardAccess::Allowed,
             clients: 2,
             sessions: 5,
+            turns: 0,
             uptime_secs: 86_400,
         }
     }

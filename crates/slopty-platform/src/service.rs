@@ -850,11 +850,12 @@ impl Ptyd {
 
 /// What `slopty --json worker install --plan` prints for a deploy to read first.
 ///
-/// That is what the install does to the running ptyd, the build it installs, and the build of
-/// the worker running there, so a deploy never takes a machine back to an older build.
+/// That is what the install does to the running ptyd, the build it installs, the build of the
+/// worker running there, so a deploy never takes a machine back to an older build, and the
+/// turns that end with that worker.
 ///
-/// As JSON, the ptyd's plan with the two builds beside it:
-/// `{"ptyd": "kept", "build": "0.4.0+wire…", "running": "0.4.0+wire…"}`.
+/// As JSON, the ptyd's plan with the rest beside it:
+/// `{"ptyd": "kept", "build": "0.4.0+wire…", "running": "0.4.0+wire…", "turns": 1}`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct InstallPlan {
     /// What it does to the running ptyd.
@@ -864,9 +865,25 @@ pub struct InstallPlan {
     pub build: String,
     /// The build of the worker running there, as its doctor says; none when none answers.
     pub running: Option<String>,
+    /// The turns running in threads that worker drives itself (pi, an ACP agent), which end
+    /// when it stops ([`slopty_proto::ctl::Health::turns`]).
+    pub turns: usize,
 }
 
 impl InstallPlan {
+    /// Whether carrying it out ends anything running: a ptyd's sessions, or a driven turn. A
+    /// person is asked before that.
+    #[must_use]
+    pub const fn ends_work(&self) -> bool {
+        self.ptyd.ends_sessions() || self.turns > 0
+    }
+
+    /// What carrying it out ends, as a sentence names it: "2 sessions and 1 agent turn".
+    #[must_use]
+    pub fn ended(&self) -> String {
+        ended_said(self.ptyd, self.turns)
+    }
+
     /// Whether carrying it out takes the machine back to an older build than the one running.
     #[must_use]
     pub fn older(&self) -> bool {
@@ -874,6 +891,28 @@ impl InstallPlan {
             slopty_proto::wire::newer(&self.build, running)
                 == Some(slopty_proto::wire::Newer::There)
         })
+    }
+}
+
+/// What an install that does `ptyd` with `turns` running ends, as a sentence names it: "3
+/// sessions", "1 agent turn", "every session and 2 agent turns"; empty when it ends nothing.
+#[must_use]
+pub fn ended_said(ptyd: Ptyd, turns: usize) -> String {
+    let sessions = match ptyd {
+        Ptyd::Restarts { sessions: Some(0) } | Ptyd::Starts | Ptyd::Kept => None,
+        Ptyd::Restarts { sessions: Some(1) } => Some("1 session".to_owned()),
+        Ptyd::Restarts { sessions: Some(n) } => Some(format!("{n} sessions")),
+        Ptyd::Restarts { sessions: None } => Some("every session".to_owned()),
+    };
+    let turns = match turns {
+        0 => None,
+        1 => Some("1 agent turn".to_owned()),
+        n => Some(format!("{n} agent turns")),
+    };
+    match (sessions, turns) {
+        (Some(sessions), Some(turns)) => format!("{sessions} and {turns}"),
+        (Some(one), None) | (None, Some(one)) => one,
+        (None, None) => String::new(),
     }
 }
 

@@ -22,8 +22,8 @@ use slopty_proto::thread::wire::{
     ThreadFrame, ThreadHits, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, Liveness,
-    ThreadId, ThreadState, TreeRef, TurnId,
+    Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, Drive, IntentId, Liveness,
+    Phase, ThreadId, ThreadState, TreeRef, TurnId,
 };
 use slopty_worker::conversation::{ORCHESTRATION, Seen};
 use slopty_worker::manager::Worker;
@@ -1449,6 +1449,19 @@ impl Threads {
         &self.host
     }
 
+    /// How many turns run now in threads this worker drives itself (pi, an ACP agent): their
+    /// agents are this daemon's children, so they end with it, where a terminal's agent goes on
+    /// in ptyd and Codex in its own daemon. An update says so before it ends them.
+    pub fn driven_turns(&self) -> usize {
+        let TableFrame::Snapshot { rows, .. } = self.host.table(None) else { return 0 };
+        rows.iter()
+            .filter(|row| {
+                ends_with_daemon(&row.drive, row.parent.is_some(), row.status.liveness)
+                    && mid_turn(row.status.phase)
+            })
+            .count()
+    }
+
     /// The whole of `content`, clipped in `thread`, from the adapter that made it.
     async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
         let meta = self.host.state(thread).map(|(state, _)| state.meta);
@@ -1590,9 +1603,41 @@ impl Threads {
     }
 }
 
+/// Whether a thread driven as `drive`, under another thread when `nested`, with `liveness`,
+/// runs as this daemon's child and so ends with it: a driven thread's agent, live, counted once
+/// for its family (a subagent runs in its parent's process).
+fn ends_with_daemon(drive: &Drive, nested: bool, liveness: Liveness) -> bool {
+    drive.is(Drive::DRIVEN) && !nested && matches!(liveness, Liveness::Live)
+}
+
+/// Whether a thread at `phase` is in the middle of a turn: working, waiting on its own work, or
+/// asking the person.
+const fn mid_turn(phase: Phase) -> bool {
+    matches!(phase, Phase::Working | Phase::Waiting | Phase::NeedsYou)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a live driven thread's turn ends with the daemon: a terminal's agent (observed)
+    /// goes on in ptyd and Codex (shared) in its own daemon, a subagent is its parent's, and a
+    /// thread at rest or ended loses nothing.
+    #[test]
+    fn only_a_driven_thread_mid_turn_ends_with_the_daemon() {
+        let live = Liveness::Live;
+        let driven = Drive::named(Drive::DRIVEN);
+        assert!(ends_with_daemon(&driven, false, live));
+        assert!(!ends_with_daemon(&driven, true, live), "a subagent is its parent's");
+        for other in [Drive::OBSERVED, Drive::SHARED] {
+            assert!(!ends_with_daemon(&Drive::named(other), false, live), "{other}");
+        }
+        assert!(!ends_with_daemon(&driven, false, Liveness::Exited { resumable: true }));
+        let mid = [Phase::Working, Phase::Waiting, Phase::NeedsYou];
+        assert!(mid.into_iter().all(mid_turn));
+        let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
+        assert!(!resting.into_iter().any(mid_turn));
+    }
 
     /// A review asked for again stops the one still being read, and the stream's end stops the
     /// last: only the latest is read.

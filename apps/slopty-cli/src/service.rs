@@ -170,10 +170,12 @@ pub async fn install(
     let session = Session::native();
     if opts.plan {
         let source = binaries_source(opts.bin_dir.as_deref())?;
+        let running = running_worker(data_dir).await;
         let plan = InstallPlan {
             ptyd: session.ptyd_plan(&source, data_dir),
             build: slopty_proto::wire::this_build(),
-            running: running_build(data_dir).await,
+            running: running.as_ref().and_then(|r| r.build.clone()),
+            turns: running.map_or(0, |r| r.turns),
         };
         if json {
             println!("{}", serde_json::to_string(&plan)?);
@@ -185,6 +187,9 @@ pub async fn install(
                 Some(running) => println!("runs {running}"),
                 None => println!("no worker answers here"),
             }
+            if plan.turns > 0 {
+                println!("ends {}", platform::ended_said(Ptyd::Kept, plan.turns));
+            }
         }
         return Ok(());
     }
@@ -195,22 +200,42 @@ pub async fn install(
 /// How long the plan waits for the running worker's doctor.
 const PLAN_ASK: Duration = Duration::from_secs(5);
 
-/// The build of the worker running with its data in `data_dir`, as its doctor says; none when
-/// none answers. The report is read loosely, for only its build, so an older worker's still
-/// names it.
-async fn running_build(data_dir: &Path) -> Option<String> {
+/// What the plan reads of the worker running here.
+struct Running {
+    /// Its build, when it says one.
+    build: Option<String>,
+    /// The turns it drives that end with it ([`Health::turns`]).
+    turns: usize,
+}
+
+/// The worker running with its data in `data_dir`, as its doctor says; none when none
+/// answers. The report is read loosely, for only what the plan needs, so an older worker's
+/// still says its build.
+async fn running_worker(data_dir: &Path) -> Option<Running> {
     let socket = Layout::new(data_dir).worker_socket();
     let mut line = serde_json::to_vec(&CtlRequest::Doctor).ok()?;
     line.push(b'\n');
     let reply = tokio::time::timeout(PLAN_ASK, platform::ask(&socket, &line)).await.ok()?.ok()?;
     let report: serde_json::Value = serde_json::from_str(&reply).ok()?;
-    let build = report.get("caps")?.get("build")?.as_str()?;
-    Some(build.to_owned()).filter(|b| !b.is_empty())
+    let build = report.get("caps").and_then(|caps| caps.get("build")).and_then(|b| b.as_str());
+    let turns = report.get("turns").and_then(serde_json::Value::as_u64).unwrap_or_default();
+    Some(Running {
+        build: build.filter(|b| !b.is_empty()).map(str::to_owned),
+        turns: usize::try_from(turns).unwrap_or(usize::MAX),
+    })
 }
 
-/// Why an install that would end `ptyd`'s sessions stopped, before it changed anything.
-fn ends_sessions(ptyd: Ptyd) -> anyhow::Error {
-    anyhow!("the new build restarts slopty-ptyd ({ptyd}); pass --end-sessions to go on")
+/// Why an install that would end `ptyd`'s sessions, or `turns` driven turns, stopped, before
+/// it changed anything.
+fn ends_sessions(ptyd: Ptyd, turns: usize) -> anyhow::Error {
+    let ended = platform::ended_said(ptyd, turns);
+    if ptyd.ends_sessions() {
+        anyhow!(
+            "the new build restarts slopty-ptyd ({ptyd}), ending {ended}; pass --end-sessions to go on"
+        )
+    } else {
+        anyhow!("the update ends {ended}; pass --end-sessions to go on")
+    }
 }
 
 /// [`install`] in `session`, giving the daemon `within` to answer as the one just installed.
@@ -227,8 +252,9 @@ async fn install_in(
         bail!("a worker is installed here already; pass --update to replace it");
     }
     let ptyd = session.ptyd_plan(&source, data_dir);
-    if ptyd.ends_sessions() && !opts.end_sessions {
-        return Err(ends_sessions(ptyd));
+    let turns = if installed { running_worker(data_dir).await.map_or(0, |r| r.turns) } else { 0 };
+    if (ptyd.ends_sessions() || turns > 0) && !opts.end_sessions {
+        return Err(ends_sessions(ptyd, turns));
     }
     let mut worker = opts.worker();
     let previous = if opts.update && installed {
@@ -807,6 +833,7 @@ mod tests {
                 pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
                 clients: 0,
                 sessions: 0,
+                turns: 0,
                 uptime_secs,
             }
         }

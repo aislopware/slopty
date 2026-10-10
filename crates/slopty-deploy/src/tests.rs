@@ -139,6 +139,7 @@ fn health() -> Health {
         pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
         clients: 0,
         sessions: 0,
+        turns: 0,
         uptime_secs: 1,
     }
 }
@@ -164,7 +165,7 @@ fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
 }
 
 /// What the machine says an update does to its ptyd: keeps it.
-const KEPT: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d","running":null}"#;
+const KEPT: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d","running":null,"turns":0}"#;
 /// What it says its services are: both running, outliving the person's logout.
 const REPORT: &str = r#"{"ptyd":{"running":700},"worker":{"running":701},"stops_at_logout":null}"#;
 
@@ -911,7 +912,7 @@ async fn an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown(
 /// stops at logout.
 fn restarts(script: &str) -> (i32, &'static str, &'static str) {
     if script.contains("--plan") {
-        (0, r#"{"ptyd":"restarts","sessions":2,"build":"0.4.0","running":"0.4.0"}"#, "")
+        (0, r#"{"ptyd":"restarts","sessions":2,"build":"0.4.0","running":"0.4.0","turns":0}"#, "")
     } else if script.contains("worker service") {
         let report = r#"{"ptyd":{"running":700},"worker":{"running":701},
             "stops_at_logout":"it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps running"}"#;
@@ -962,6 +963,31 @@ async fn an_update_that_ends_sessions_stops_until_the_person_says_so() {
     assert!(!fresh.ran().iter().any(|s| s.contains("--plan")), "{:?}", fresh.ran());
 }
 
+/// A machine whose worker drives a pi turn now, with ptyd kept.
+fn driving(script: &str) -> (i32, &'static str, &'static str) {
+    const TURN: &str = r#"{"ptyd":"kept","build":"0.4.0","running":"0.4.0","turns":1}"#;
+    if script.contains("--plan") { (0, TURN, "") } else { healthy(script) }
+}
+
+/// A turn of pi or an ACP agent ends with the worker, which an update restarts: the deploy stops
+/// before anything changes and says so, until the person says to go on, as for sessions.
+#[tokio::test]
+async fn an_update_that_ends_a_driven_turn_stops_until_the_person_says_so() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted::new(driving);
+    let (done, _) = run(&runner, &plan(&source, true)).await;
+    let stopped = done.unwrap_err();
+    assert_eq!(stopped.ends_sessions(), Some(Ptyd::Kept), "the person may say to go on");
+    assert_eq!(install_script(&runner.ran()), "", "no install ran: {:?}", runner.ran());
+    let failure = stopped.failure();
+    assert_eq!(failure.title, "Updating ends 1 agent turn on mini");
+    assert!(failure.hint.as_deref().is_some_and(|h| h.contains("once they rest")), "{failure:?}");
+    let told = Plan { end_sessions: true, ..plan(&source, true) };
+    let (done, _) = run(&runner, &told).await;
+    assert_eq!(done.unwrap().ptyd, Some(Ptyd::Kept));
+    assert!(install_script(&runner.ran()).ends_with("--update --end-sessions"));
+}
+
 /// A plan the machine cannot say, and an unknown count, read as such.
 #[tokio::test]
 async fn a_plan_that_is_not_one_fails_and_an_uncounted_restart_ends_every_session() {
@@ -979,7 +1005,11 @@ async fn a_plan_that_is_not_one_fails_and_an_uncounted_restart_ends_every_sessio
     assert_eq!(failed.failure().title, "The new worker could not say what it changes");
     let uncounted = |script: &str| {
         if script.contains("--plan") {
-            (0, r#"{"ptyd":"restarts","sessions":null,"build":"0.4.0","running":null}"#, "")
+            (
+                0,
+                r#"{"ptyd":"restarts","sessions":null,"build":"0.4.0","running":null,"turns":0}"#,
+                "",
+            )
         } else {
             healthy(script)
         }
@@ -996,13 +1026,13 @@ const NEWER: &str = "0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T093
 
 /// A machine running [`NEWER`], to which the update would bring [`OLDER`].
 fn running_newer(script: &str) -> (i32, &'static str, &'static str) {
-    const BACK: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z"}"#;
+    const BACK: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z","turns":0}"#;
     if script.contains("--plan") { (0, BACK, "") } else { healthy(script) }
 }
 
 /// A machine running [`OLDER`], to which the update would bring [`NEWER`].
 fn running_older(script: &str) -> (i32, &'static str, &'static str) {
-    const FORWARD: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z"}"#;
+    const FORWARD: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z","turns":0}"#;
     if script.contains("--plan") { (0, FORWARD, "") } else { healthy(script) }
 }
 

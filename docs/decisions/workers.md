@@ -1331,3 +1331,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     not answer, or whose build cannot be ordered, is updated as before.
   - Tests: `an_update_never_takes_a_machine_back` (slopty-deploy); `the_bundle_names_its_commit`
     (xtask).
+
+- ✅ **An update asks before it ends a pi or ACP turn, and a worker's restart alarms nobody**
+  (2026-10-12, readiness audit item 12).
+  - **Driven turns.** pi and ACP agents run as the worker's own children, so they end with it.
+    Claude Code goes on in ptyd and Codex in its own daemon. The update plan counted only
+    ptyd's sessions. The worker's doctor now says the turns its driven threads have running
+    (`Health::turns`: working, waiting on their own work, or asking the person; a subagent is
+    its parent's). The install's plan carries that count (`InstallPlan::turns`). A deploy, a
+    hand-run `slopty worker install --update`, and this Mac's own update stop before anything
+    changes while any runs, as they do for sessions: "Updating ends 1 agent turn on mini", and
+    the person tries again once they rest or goes on now (`--end-sessions`, the same word).
+    - Rejected: SIGTERM waiting for driven turns to rest. launchd kills a job 20 s after
+      SIGTERM, and a turn runs for minutes, so the wait would save only the tail end of a turn
+      and still lose most of them without a word. Asking is honest.
+  - **No false alarm.** A dropped lease told every orchestrator at once that its tasks there
+    were stuck and to start them elsewhere, so Update all invited a fleet of needless
+    restarts. The Away note now goes only when the worker stays away for `GONE_AFTER` (20 s)
+    (`Hub::expire`), and a relink inside that window says nothing. The place a task's agent
+    held against the bounds still frees at once, since that is counted from live links.
+  - Tests: `only_a_driven_thread_mid_turn_ends_with_the_daemon` (slopty-workerd);
+    `an_update_that_ends_a_driven_turn_stops_until_the_person_says_so` (slopty-deploy);
+    `a_worker_back_within_the_grace_tells_nobody` and the reworded
+    `a_task_s_machine_going_away_is_said_and_frees_its_place` (slopty-server).

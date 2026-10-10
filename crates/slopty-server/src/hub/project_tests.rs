@@ -857,9 +857,9 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     assert!(matches!(merged, Outcome::Task(_)), "the person's own shell: {merged:?}");
 }
 
-/// A task's machine that stops answering mid-task is said on the task's timeline and to its
-/// orchestrator at once, and its agent no longer holds a place against the person's bound;
-/// back, the task and its orchestrator hear so, once.
+/// A task's machine that stops answering mid-task, and stays away, is said on the task's
+/// timeline and to its orchestrator, and its agent no longer holds a place against the
+/// person's bound at once; back, the task and its orchestrator hear so, once.
 #[tokio::test(start_paused = true)]
 async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -930,6 +930,52 @@ async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
     assert!(said.contains("task 1's machine mini answers again"), "{said}");
     let back = notes().await;
     assert_eq!(back.iter().filter(|n| n.contains("answers again")).count(), 1, "{back:?}");
+    delivering.abort();
+}
+
+/// A worker that restarts, as every update does, is back within the grace: its tasks and
+/// their orchestrator hear nothing of it, and no task is told to start again elsewhere.
+#[tokio::test(start_paused = true)]
+async fn a_worker_back_within_the_grace_tells_nobody() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let (orchestrator, working) = (SessionId::new(), SessionId::new());
+    let (studio, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    let (mini, mini_lease, _mini_rx) = worker_on(&hub, "mini", Os::MacOs, Vec::new());
+    announce(&mini_lease, working, true);
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, None).await;
+    let assigned =
+        hub.assign_for_test(&project(), task, TermRef { worker: mini, session: working });
+    assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
+    let next_batch = async |rx: &mut mpsc::Receiver<FromServer>, within: Duration| loop {
+        match tokio::time::timeout(within, rx.recv()).await {
+            Ok(Some(FromServer::Deliver { session, batch, reports })) => {
+                return Some((session, batch, reports.text()));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => return None,
+        }
+    };
+    let (session, batch, _role) = next_batch(&mut rx, Duration::from_mins(10)).await.unwrap();
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+
+    let clock = task_now(&hub, task).await.spent;
+    drop(mini_lease);
+    tokio::time::sleep(GONE_AFTER.checked_sub(Duration::from_secs(5)).unwrap()).await;
+    let (_, _mini_back, _rx_back) =
+        worker_again(&hub, mini, "mini", Os::MacOs, vec![summary(working)]);
+    let quiet = next_batch(&mut rx, Duration::from_mins(5)).await;
+    assert_eq!(quiet, None, "nothing said of a restart");
+    let timeline = status(&hub).await.timeline;
+    assert!(
+        !timeline
+            .iter()
+            .any(|e| matches!(&e.what, Moment::Note { text } if text.contains("machine"))),
+        "{timeline:?}"
+    );
+    assert_eq!(task_now(&hub, task).await.spent, clock, "its clock as it was");
     delivering.abort();
 }
 

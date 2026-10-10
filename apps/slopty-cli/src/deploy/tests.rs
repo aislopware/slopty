@@ -24,6 +24,7 @@ fn health() -> Health {
         pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
         clients: 0,
         sessions: 0,
+        turns: 0,
         uptime_secs: 1,
     }
 }
@@ -41,7 +42,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
          case $2 in\n\
          *'uname -sm'*) echo 'Darwin arm64' ;;\n\
-         *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2,\"build\":\"0.4.0\",\"running\":null}}' ;;\n\
+         *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2,\"build\":\"0.4.0\",\"running\":null,\"turns\":0}}' ;;\n\
          *'worker service'*) echo '{{\"ptyd\":\"absent\",\"worker\":\"absent\",\
          \"stops_at_logout\":\"it stops when you log out\"}}' ;;\n\
          *'worker install'*) ;;\n\
@@ -68,7 +69,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     let data = tempfile::tempdir().unwrap();
     let refused = deploy(&opts, Some("hub.tail1234.ts.net"), data.path(), source.path());
     let refused = format!("{:#}", refused.await.unwrap_err());
-    assert!(refused.contains("ending 2 sessions; pass --end-sessions"), "{refused}");
+    assert!(refused.contains("ends 2 sessions on studio; pass --end-sessions"), "{refused}");
     let opts = DeployOpts { end_sessions: true, ..opts };
     let deployed = deploy(&opts, Some("hub.tail1234.ts.net"), data.path(), source.path());
     let deployed = deployed.await.unwrap();

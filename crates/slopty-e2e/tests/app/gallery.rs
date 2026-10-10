@@ -190,6 +190,7 @@ fn this_mac_report(
         pasteboard: slopty_proto::ctl::PasteboardAccess::Allowed,
         clients: 0,
         sessions: 0,
+        turns: 0,
         uptime_secs: 1,
     };
     serde_json::to_string(&health).unwrap()

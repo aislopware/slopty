@@ -301,17 +301,20 @@ pub enum DeployError {
         /// The directory.
         path: PathBuf,
     },
-    /// The update restarts `slopty-ptyd` there, ending every session it holds, and the plan did
-    /// not say to ([`Plan::end_sessions`]): nothing was changed.
+    /// The update ends work running there, and the plan did not say to
+    /// ([`Plan::end_sessions`]): it restarts `slopty-ptyd`, ending every session it holds, or
+    /// agent turns run in threads the worker drives itself. Nothing was changed.
     #[error(
-        "the new build restarts slopty-ptyd on {target}, ending {}; pass --end-sessions to go on",
-        sessions_said(*sessions)
+        "the update ends {} on {target}; pass --end-sessions to go on",
+        slopty_platform::service::ended_said(*ptyd, *turns)
     )]
     EndsSessions {
         /// The machine.
         target: String,
-        /// How many sessions it would end, when they could be counted.
-        sessions: Option<u32>,
+        /// What it would do to `slopty-ptyd`.
+        ptyd: Ptyd,
+        /// The driven turns it would end.
+        turns: usize,
     },
     /// The machine runs a newer build than the one the update would put there: a deploy never
     /// takes a machine back. Nothing was changed.
@@ -382,15 +385,6 @@ pub enum DeployError {
         /// Why that is not a report.
         error: serde_json::Error,
     },
-}
-
-/// `sessions` as a sentence says them: "3 sessions", "1 session", "every session".
-fn sessions_said(sessions: Option<u32>) -> String {
-    match sessions {
-        Some(1) => "1 session".to_owned(),
-        Some(n) => format!("{n} sessions"),
-        None => "every session".to_owned(),
-    }
 }
 
 /// How a sign-in ended, as its error says it.
@@ -546,15 +540,22 @@ impl DeployError {
             Self::Install { target, tail, .. } => {
                 plain(format!("The install on {target} failed"), tail.clone())
             }
-            Self::EndsSessions { target, sessions } => Failure {
+            Self::EndsSessions { target, ptyd, turns } => Failure {
                 ends_sessions: self.ends_sessions(),
                 ..Failure::new(
-                    format!("Updating ends {} on {target}", sessions_said(*sessions)),
-                    Some(
+                    format!(
+                        "Updating ends {} on {target}",
+                        slopty_platform::service::ended_said(*ptyd, *turns)
+                    ),
+                    Some(if ptyd.ends_sessions() {
                         "Its shell keeper changed too, so every shell and agent turn there ends. \
                          Try again to update anyway."
-                            .to_owned(),
-                    ),
+                            .to_owned()
+                    } else {
+                        "pi and ACP agents there stop mid-turn when it restarts. Try again once \
+                         they rest, or now to update anyway."
+                            .to_owned()
+                    }),
                     Vec::new(),
                 )
             },
@@ -580,7 +581,7 @@ impl DeployError {
     #[must_use]
     pub const fn ends_sessions(&self) -> Option<Ptyd> {
         match self {
-            Self::EndsSessions { sessions, .. } => Some(Ptyd::Restarts { sessions: *sessions }),
+            Self::EndsSessions { ptyd, .. } => Some(*ptyd),
             _ => None,
         }
     }
@@ -921,12 +922,9 @@ async fn ptyd_plan(
     }
     let ptyd = install.ptyd;
     on(Event::Ptyd(ptyd));
-    if ptyd.ends_sessions() && !plan.end_sessions {
-        let sessions = match ptyd {
-            Ptyd::Restarts { sessions } => sessions,
-            Ptyd::Starts | Ptyd::Kept => None,
-        };
-        return Err(DeployError::EndsSessions { target: runner.target().to_owned(), sessions });
+    if install.ends_work() && !plan.end_sessions {
+        let target = runner.target().to_owned();
+        return Err(DeployError::EndsSessions { target, ptyd, turns: install.turns });
     }
     Ok(ptyd)
 }

@@ -163,6 +163,7 @@ async fn doctor(daemon: &Daemon) -> Health {
         pasteboard: pasteboard_access(daemon.clip.access()),
         clients: daemon.wake.lock().counts().0,
         sessions: daemon.worker.session_count(),
+        turns: daemon.threads.as_ref().map_or(0, crate::threads::Threads::driven_turns),
         uptime_secs: daemon.started_at.elapsed().as_secs(),
     }
 }

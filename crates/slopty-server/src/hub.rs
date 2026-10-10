@@ -1420,11 +1420,12 @@ impl Hub {
         let info = entry.info.clone();
         tracing::info!(%worker, name = %info.name, "worker unreachable");
         let (name, liveness) = (info.name.clone(), info.liveness);
-        self.happen(Happening::Worker { worker, name: name.clone(), liveness });
+        self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));
-        self.machine_seen(&mut state, worker, &name, Seen::Away);
         self.persist(&state);
         drop(state);
+        // Its tasks hear it went away only once it stays away ([`Self::expire`]): a worker that
+        // restarts, as every update does, is back well within that, and nothing needs saying.
         // A lease dropped as the runtime shuts down has no timer to run; the next start lists
         // the worker as gone anyway.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -1438,8 +1439,8 @@ impl Hub {
         }
     }
 
-    /// The machine of `worker` went away or came back: its tasks' timelines say so, and each
-    /// task's orchestrator hears of it, at once when it went away.
+    /// The machine of `worker` went away (it stayed away [`GONE_AFTER`]) or came back: its
+    /// tasks' timelines say so, and each task's orchestrator hears of it, at once.
     fn machine_seen(&self, state: &mut State, worker: WorkerId, name: &str, seen: Seen) {
         let (changes, told) = state.projects.machine_seen(worker, name, seen, WallMs::now());
         self.projects_moved(state, changes);
@@ -1477,7 +1478,8 @@ impl Hub {
         tracing::info!(%worker, name = %entry.info.name, "worker gone");
         let info = entry.info.clone();
         let name = info.name.clone();
-        self.happen(Happening::Worker { worker, name, liveness: Liveness::Gone });
+        self.happen(Happening::Worker { worker, name: name.clone(), liveness: Liveness::Gone });
+        self.machine_seen(&mut state, worker, &name, Seen::Away);
         drop(state);
         self.announce(FromServer::Worker(info));
     }

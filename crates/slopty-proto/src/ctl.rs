@@ -257,6 +257,10 @@ pub struct Health {
     pub clients: usize,
     /// Sessions the worker runs, exited ones kept for their last screen included.
     pub sessions: usize,
+    /// Turns running now (working, waiting on their own work, or asking the person) in threads
+    /// the daemon drives itself: pi's and an ACP agent's, which end with the daemon, where a
+    /// terminal's agent goes on in ptyd and Codex in its own daemon.
+    pub turns: usize,
     /// Seconds since the daemon started.
     pub uptime_secs: u64,
 }
