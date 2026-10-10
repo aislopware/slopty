@@ -9,6 +9,7 @@ mod acp;
 mod bench;
 mod bundle;
 mod check;
+mod ci_profile;
 mod claude;
 mod claude_mod;
 mod codex;
@@ -128,6 +129,9 @@ enum Cmd {
     Promote(land::PromoteOpts),
     /// nextest's setup script: build every binary a test spawns before the first test starts.
     SpawnedBins,
+    /// Write `.cargo/ci-profile.toml`, which CI compiles every proc-macro dependency with
+    /// unoptimised, for the dependencies `Cargo.lock` holds now.
+    CiProfile,
     /// Delete the build units and incremental caches nothing has used for a while, in every
     /// target dir under `target/`, then the least recently used until `target/` is within its
     /// budget and its volume above the free-space floor (also run, skipping busy dirs, after
@@ -347,6 +351,7 @@ pub fn main() -> Result<()> {
         Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),
+        Cmd::CiProfile => ci_profile::write(&sh),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {
             let mut limits = prune::Limits::from_env()?;
             if let Some(gb) = budget_gb {

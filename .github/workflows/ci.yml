@@ -112,6 +112,10 @@ jobs:
             ${{ github.ref == 'refs/heads/gate'
             && (matrix.lane == 'tools' || matrix.lane == 'clippy-host') }}
       - uses: cargo-bins/cargo-binstall@main
+      # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
+      # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
+      # overrides from config files only.
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # libghostty-vt-sys builds its library with zig in every lane that compiles, the version it
       # pins: Homebrew's `zig` moved to 0.17, which Ghostty's build.zig does not take.
       - if: matrix.lane != 'tools'
@@ -244,6 +248,10 @@ jobs:
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
+      # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
+      # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
+      # overrides from config files only.
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # libghostty-vt-sys builds its library with zig, the version it pins.
       - uses: mlugg/setup-zig@v2
         with:

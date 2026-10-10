@@ -1,0 +1,212 @@
+# Written by `cargo xtask ci-profile` (xtask/src/ci_profile.rs): every proc-macro dependency
+# unoptimised on CI, where sccache cannot cache one. CI copies this to `$CARGO_HOME/config.toml`.
+
+[profile.dev.package.arg_enum_proc_macro]
+opt-level = 0
+
+[profile.dev.package.asn1-rs-derive]
+opt-level = 0
+
+[profile.dev.package.asn1-rs-impl]
+opt-level = 0
+
+[profile.dev.package.async-recursion]
+opt-level = 0
+
+[profile.dev.package.async-trait]
+opt-level = 0
+
+[profile.dev.package.bytemuck_derive]
+opt-level = 0
+
+[profile.dev.package.clap_derive]
+opt-level = 0
+
+[profile.dev.package.const-random-macro]
+opt-level = 0
+
+[profile.dev.package.curve25519-dalek-derive]
+opt-level = 0
+
+[profile.dev.package.darling_macro]
+opt-level = 0
+
+[profile.dev.package.defmt-macros]
+opt-level = 0
+
+[profile.dev.package.derive_more-impl]
+opt-level = 0
+
+[profile.dev.package.derive_refineable]
+opt-level = 0
+
+[profile.dev.package.displaydoc]
+opt-level = 0
+
+[profile.dev.package.document-features]
+opt-level = 0
+
+[profile.dev.package.enum-assoc]
+opt-level = 0
+
+[profile.dev.package.enum-iterator-derive]
+opt-level = 0
+
+[profile.dev.package.enumflags2_derive]
+opt-level = 0
+
+[profile.dev.package.enumn]
+opt-level = 0
+
+[profile.dev.package.equator-macro]
+opt-level = 0
+
+[profile.dev.package.foreign-types-macros]
+opt-level = 0
+
+[profile.dev.package.futures-macro]
+opt-level = 0
+
+[profile.dev.package.gpui-component-macros]
+opt-level = 0
+
+[profile.dev.package.gpui_macros]
+opt-level = 0
+
+[profile.dev.package.int-enum]
+opt-level = 0
+
+[profile.dev.package.interpolate_name]
+opt-level = 0
+
+[profile.dev.package.jiff-static]
+opt-level = 0
+
+[profile.dev.package.jni-macros]
+opt-level = 0
+
+[profile.dev.package.jni-sys-macros]
+opt-level = 0
+
+[profile.dev.package.linktime-proc-macro]
+opt-level = 0
+
+[profile.dev.package.multiversion_no_op]
+opt-level = 0
+
+[profile.dev.package.noop_proc_macro]
+opt-level = 0
+
+[profile.dev.package.num-derive]
+opt-level = 0
+
+[profile.dev.package.paste]
+opt-level = 0
+
+[profile.dev.package.pastey]
+opt-level = 0
+
+[profile.dev.package.pest_derive]
+opt-level = 0
+
+[profile.dev.package.phf_macros]
+opt-level = 0
+
+[profile.dev.package.pin-project-internal]
+opt-level = 0
+
+[profile.dev.package.profiling-procmacros]
+opt-level = 0
+
+[profile.dev.package.proptest-macro]
+opt-level = 0
+
+[profile.dev.package.ref-cast-impl]
+opt-level = 0
+
+[profile.dev.package.rmcp-macros]
+opt-level = 0
+
+[profile.dev.package.rust-embed-impl]
+opt-level = 0
+
+[profile.dev.package.rust-i18n-macro]
+opt-level = 0
+
+[profile.dev.package.rustversion]
+opt-level = 0
+
+[profile.dev.package.schemars_derive]
+opt-level = 0
+
+[profile.dev.package.serde_derive]
+opt-level = 0
+
+[profile.dev.package.serde_repr]
+opt-level = 0
+
+[profile.dev.package.serde_with_macros]
+opt-level = 0
+
+[profile.dev.package.simd_helpers]
+opt-level = 0
+
+[profile.dev.package.strum_macros]
+opt-level = 0
+
+[profile.dev.package.thiserror-impl]
+opt-level = 0
+
+[profile.dev.package.time-macros]
+opt-level = 0
+
+[profile.dev.package.tokio-macros]
+opt-level = 0
+
+[profile.dev.package.tracing-attributes]
+opt-level = 0
+
+[profile.dev.package.wasm-bindgen-macro]
+opt-level = 0
+
+[profile.dev.package.wayland-scanner]
+opt-level = 0
+
+[profile.dev.package.windows-implement]
+opt-level = 0
+
+[profile.dev.package.windows-interface]
+opt-level = 0
+
+[profile.dev.package.worker-macros]
+opt-level = 0
+
+[profile.dev.package.xshell-macros]
+opt-level = 0
+
+[profile.dev.package.yoke-derive]
+opt-level = 0
+
+[profile.dev.package.zbus-lockstep-macros]
+opt-level = 0
+
+[profile.dev.package.zbus_macros]
+opt-level = 0
+
+[profile.dev.package.zerocopy-derive]
+opt-level = 0
+
+[profile.dev.package.zerofrom-derive]
+opt-level = 0
+
+[profile.dev.package.zeroize_derive]
+opt-level = 0
+
+[profile.dev.package.zerovec-derive]
+opt-level = 0
+
+[profile.dev.package.ztracing_macro]
+opt-level = 0
+
+[profile.dev.package.zvariant_derive]
+opt-level = 0

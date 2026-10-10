@@ -1420,3 +1420,25 @@ more full-window layer.
   - **Deleted.** The doctest spawns in the tests and Linux lanes, `cargo xtask test`'s and
     `xtask check`'s doctest steps, `shard_libs`, and `Package::lib`.
   - Test: `gate::tests::a_doc_fence_rustdoc_would_compile_is_found` (xtask).
+
+- 🧪 **CI compiles the proc macros unoptimised** (2026-10-10).
+  - **Why.** `[profile.dev.package."*"] opt-level = 3` outranks `build-override` in cargo's
+    precedence, so every proc macro compiled at opt-level 3 by accident; nightly's unit graph
+    shows `serde_derive` at 3. sccache never caches a proc macro, since it links, so each macOS
+    lane paid 190–316 CPU-seconds for them on every run, and every unit that expands one waited
+    for it (`.research/dev-speed-2026-10-10.md` item 4). A scratch build of eleven of them took
+    116 CPU-seconds at 3 and 9.6 at 0.
+  - **The change.** `.cargo/ci-profile.toml` sets `opt-level = 0` for every proc-macro
+    dependency, 70 of them, and the gate and Linux jobs copy it to `$CARGO_HOME/config.toml`,
+    because cargo reads package overrides from config files and not from the environment. `syn`,
+    `quote` and `proc-macro2` are not in it: they are libraries sccache caches, and they do the
+    parsing, so expansion stays fast. The unit graph with the file shows `serde_derive` and
+    `thiserror_impl` at 0, and `syn`, `quote` and `proc_macro2` at 3. What a macro expands to does
+    not depend on how it was compiled.
+  - **Here.** Not used: a target dir here compiles the macros once, and they run on every
+    incremental rebuild.
+  - **Kept honest.** `cargo xtask ci-profile` writes the file from `cargo metadata`, and
+    `ci_profile::tests::the_ci_profile_names_every_proc_macro` (xtask) fails while it is stale.
+  - **Open.** Trial: the first runs pay one cold compile, since every dependent's sccache key
+    names the new macro builds. The build steps' times on the next green runs, against the
+    study's medians, decide whether it stays at 0 or moves to 1.
