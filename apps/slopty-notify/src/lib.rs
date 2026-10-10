@@ -17,7 +17,7 @@
 use std::ffi::{CString, c_char, c_int};
 use std::ptr::NonNull;
 
-use block2::DynBlock;
+use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::{ClassType as _, define_class};
 use objc2_foundation::{NSObject, NSString};
@@ -75,8 +75,9 @@ define_class!(
     struct Service;
 
     impl Service {
-        /// Open the push and hand back its note, at once: it is all done here, so the time
-        /// running out never finds work left.
+        /// Open the push and hand back its note. A question's options as its buttons want
+        /// their category registered first, which takes the centre a moment; anything else is
+        /// handed back at once.
         #[unsafe(method(didReceiveNotificationRequest:withContentHandler:))]
         fn did_receive(
             &self,
@@ -84,24 +85,54 @@ define_class!(
             handler: &DynBlock<dyn Fn(NonNull<UNNotificationContent>)>,
         ) {
             let given = request.content();
-            let content = match note(&given) {
+            let (content, note) = match note(&given) {
                 Ok(note) => {
                     let content = slopty_platform::notify::content_of(&note);
-                    Retained::into_super(content)
+                    (Retained::into_super(content), Some(note))
                 }
                 Err(why) => {
                     tracing::warn!(error = %why, "a push was shown as it came");
-                    given
+                    (given, None)
                 }
             };
-            handler.call((NonNull::from(&*content),));
+            let answer = Answer { handler: handler.copy(), content };
+            match note {
+                Some(note) => slopty_platform::notify::register_then(&note, move || answer.give()),
+                None => answer.give(),
+            }
         }
 
-        /// Nothing waits by then: [`Self::did_receive`] answered at once.
+        /// The category's registration takes the centre well under the time the system
+        /// grants. Should it never answer, the system shows the push as it came once the time
+        /// is up, its relay's fixed words with no buttons.
         #[unsafe(method(serviceExtensionTimeWillExpire))]
         fn will_expire(&self) {}
     }
 );
+
+/// The note to hand back, and the handler it goes to, carried to the centre's queue when a
+/// category is registered first.
+struct Answer {
+    handler: RcBlock<dyn Fn(NonNull<UNNotificationContent>)>,
+    content: Retained<UNNotificationContent>,
+}
+
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "the handler is only called and the content only read, as UserNotifications allows \
+              from any thread"
+)]
+// SAFETY: UserNotifications rule: a service extension's content handler may be called from any
+// thread, once; the block is a heap copy, immutable once made. The content is a finished note
+// that nothing changes after it is made, and is only handed to the handler.
+unsafe impl Send for Answer {}
+
+impl Answer {
+    /// Hand the note to the system: called once.
+    fn give(self) {
+        self.handler.call((NonNull::from(&*self.content),));
+    }
+}
 
 /// The note `given`'s sealed body opens to.
 fn note(given: &UNNotificationContent) -> Result<slopty_platform::notify::Note, pushed::Kept> {

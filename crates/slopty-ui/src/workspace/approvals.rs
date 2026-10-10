@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use gpui::Context;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
+use slopty_platform::notify::Pressed;
 use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
@@ -48,14 +49,14 @@ pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's 
 /// What a note's reply says when it did not reach the agent.
 pub(in crate::workspace) const REPLY_NOT_SENT: &str = "Your reply was not sent";
 
-/// A note's "Allow" or "Deny" whose request is not here yet.
+/// A note's "Allow", "Deny" or pick whose request is not here yet.
 #[derive(Debug)]
 struct Tapped {
     route: Route,
     /// The request's id, as the note carried it.
     ask: AskId,
-    /// "Allow", else "Deny".
-    allow: bool,
+    /// The button pressed.
+    pressed: Pressed,
     /// When it was tapped: it waits [`HOLD_VERDICT`] from then.
     at: Instant,
 }
@@ -114,18 +115,37 @@ impl WorkspaceView {
         allow: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        let pressed = if allow { Pressed::Allow } else { Pressed::Deny };
+        self.answer_pressed(worker, thread, ask, &pressed, cx)
+    }
+
+    /// Answer `thread`'s open request `ask` on `worker` as `pressed` says: Allow and Deny with
+    /// its plain allow or deny while it is a yes or no they answer whole, a pick with its own
+    /// choice while it offers that pick; `false` when it does not, or it was answered here
+    /// already.
+    fn answer_pressed(
+        &mut self,
+        worker: WorkerKey,
+        thread: ThreadId,
+        ask: &AskId,
+        pressed: &Pressed,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let open = self.thread_request(thread).filter(|a| a.id == *ask);
-        let choice = open
-            .filter(|a| answerable(a))
-            .and_then(|a| slopty_proto::thread::once(&a.options, allow));
-        let Some(choice) = choice.map(|c| c.id.clone()) else {
+        let choice = open.and_then(|a| match pressed {
+            Pressed::Allow | Pressed::Deny => answerable(a).then(|| pressed.choice(&a.options))?,
+            Pressed::Pick(choice) => {
+                a.buttons.iter().any(|b| b.choice == *choice).then(|| choice.clone())
+            }
+        });
+        let Some(choice) = choice else {
             tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
             return false;
         };
         if self.approvals.sent.get(&thread) == Some(ask) {
             return false;
         }
-        tracing::info!(%thread, ask = ask.0, allow, "request answered");
+        tracing::info!(%thread, ask = ask.0, ?pressed, "request answered");
         self.approvals.sent.insert(thread, ask.clone());
         let intent = Intent::Answer { ask: ask.clone(), choice, message: None };
         let hub = self.thread_hub(worker, cx);
@@ -141,18 +161,18 @@ impl WorkspaceView {
         self.approvals.sent.get(&thread).filter(|ask| **ask == open.id)
     }
 
-    /// A note's "Allow" (`allow`) or "Deny" for `route`'s request `ask`: answered now when the
-    /// request is open here, else once it arrives, or said to have found none once its
-    /// worker's table has come or the worker could not be reached.
+    /// A note's "Allow", "Deny" or pick, `pressed`, for `route`'s request `ask`: answered now
+    /// when the request is open here, else once it arrives, or said to have found none once
+    /// its worker's table has come or the worker could not be reached.
     pub(in crate::workspace) fn verdict_tapped(
         &mut self,
         route: Route,
         ask: AskId,
-        allow: bool,
+        pressed: Pressed,
         cx: &mut Context<Self>,
     ) {
         let at = cx.background_executor().now();
-        self.approvals.tapped.push(Tapped { route, ask, allow, at });
+        self.approvals.tapped.push(Tapped { route, ask, pressed, at });
         self.settle_taps(cx);
     }
 
@@ -226,7 +246,7 @@ impl WorkspaceView {
                 About::Thread(thread) => Some(thread),
             };
             if let Some(thread) = thread
-                && self.answer_thread(tap.route.worker, thread, &tap.ask, tap.allow, cx)
+                && self.answer_pressed(tap.route.worker, thread, &tap.ask, &tap.pressed, cx)
             {
                 continue;
             }
@@ -289,17 +309,18 @@ impl WorkspaceView {
     }
 
     /// Answer `tap` on `thread` through the server: read the thread's open requests there for
-    /// the choice that allows or denies once, then answer with it, once. A request the server no
+    /// the choice that allows or denies once, or find the request a pick answers, then answer
+    /// with it, once. A request the server no
     /// longer finds, or a server that refuses, is said as a note's answer that found nothing.
     fn answer_through_server(&mut self, tap: Tapped, thread: ThreadId, cx: &Context<Self>) {
         let Some(caller) = self.projects.caller.clone() else { return };
         if self.approvals.sent.get(&thread) == Some(&tap.ask) {
             return;
         }
-        tracing::info!(%thread, ask = tap.ask.0, allow = tap.allow, "answered through the server");
+        tracing::info!(%thread, ask = tap.ask.0, pressed = ?tap.pressed, "answered through the server");
         self.approvals.sent.insert(thread, tap.ask.clone());
         self.approvals.through_server = self.approvals.through_server.saturating_add(1);
-        let Tapped { route, ask, allow, .. } = tap;
+        let Tapped { route, ask, pressed, .. } = tap;
         cx.spawn(async move |this, cx| {
             let read = Verb::ReadThread {
                 of: ThreadOf::Thread(thread),
@@ -312,8 +333,7 @@ impl WorkspaceView {
                     .requests
                     .iter()
                     .find(|r| r.ask == ask)
-                    .and_then(|r| slopty_proto::thread::once(&r.choices, allow))
-                    .map(|c| c.id.clone()),
+                    .and_then(|r| pressed.choice(&r.choices)),
                 _ => None,
             };
             let answered = match choice {

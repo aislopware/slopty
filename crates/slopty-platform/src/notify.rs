@@ -19,7 +19,11 @@
 //! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
 //! held permission prompt where the note is, without bringing the app forward, and "Show" opens
 //! the tile. An agent's other notes ([`REPLYING`]) take a reply typed where the note is, sent to
-//! the agent as a message ([`Tap::text`]). A press that finds nothing listening for taps (an iOS
+//! the agent as a message ([`Tap::text`]). A small question's options are its note's buttons
+//! instead ([`Note::picking`]): their category is made for their labels and registered as the
+//! note goes out, beside the ones already registered ([`register_then`] for a pushed note), and
+//! a press answers with the choice the note kept ([`Pressed`]). A press that finds nothing
+//! listening for taps (an iOS
 //! app the press launched in the background, with no window) goes to the answer the app installed
 //! for it ([`answer_unheard`]). The categories are registered with the centre when [`System`] is
 //! made, which does not prompt either. A pressed button comes back as a [`Tap`] with its
@@ -38,6 +42,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+
+use slopty_proto::thread::wire::NoteChoice;
 
 #[cfg(target_vendor = "apple")]
 pub mod pushed;
@@ -76,6 +82,11 @@ pub struct Note {
     pub thread: Option<String>,
     /// Its buttons, when it has any.
     pub category: Option<Category>,
+    /// A question's options as buttons of their own, in its order ([`Note::picking`]): a
+    /// category of their own, registered as the note goes out, takes [`Self::category`]'s
+    /// place. Each answers the note's request with its choice, kept in [`Self::info`] under
+    /// its button's identifier.
+    pub picks: Vec<NoteChoice>,
     /// No sound: it only says more about a note already up under its identifier, which
     /// sounded when it came.
     pub silent: bool,
@@ -84,6 +95,77 @@ pub struct Note {
     /// uses it, and lets them take it away. The level wants its entitlement, which wants a
     /// provisioning profile; without one the system shows the note as an ordinary one.
     pub urgent: bool,
+}
+
+impl Note {
+    /// `self` with `picks` as its buttons: each a button of its own, `pick.0` on, whose choice
+    /// its `userInfo` keeps under the button's identifier for the press to answer with
+    /// ([`Pressed::of`]). At most [`NoteChoice::MAX`] are offered; none leaves it as it was.
+    #[must_use]
+    pub fn picking(mut self, picks: &[NoteChoice]) -> Self {
+        let picks = picks.get(..picks.len().min(NoteChoice::MAX)).unwrap_or_default();
+        for (n, pick) in picks.iter().enumerate() {
+            self.info.insert(pick_id(n), pick.choice.clone());
+        }
+        self.picks = picks.to_vec();
+        self
+    }
+}
+
+/// The identifier of a note's `n`th pick, its button's and its choice's key in `userInfo`.
+#[must_use]
+pub fn pick_id(n: usize) -> String {
+    format!("{PICK}{n}")
+}
+
+/// The category of a note with `picks` as its buttons: one per set of labels, so notes asking
+/// the same choices share it, named by their FNV-1a hash.
+#[must_use]
+pub fn picking_id(picks: &[NoteChoice]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in picks.iter().flat_map(|p| p.label.bytes().chain(std::iter::once(0x1f))) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{PICKING}{hash:016x}")
+}
+
+/// What a note's button answers its request with: Allow or Deny, which find the choice that
+/// allows or denies once among the request's, or a question's option, whose choice the note
+/// carried.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Pressed {
+    /// "Allow".
+    Allow,
+    /// "Deny".
+    Deny,
+    /// One of a question's options ([`Note::picking`]): the choice it answers with.
+    Pick(String),
+}
+
+impl Pressed {
+    /// What `tap` answers, when it is a press of "Allow", "Deny" or a pick whose choice the note
+    /// carries.
+    #[must_use]
+    pub fn of(tap: &Tap) -> Option<Self> {
+        match tap.action.as_deref()? {
+            ALLOW => Some(Self::Allow),
+            DENY => Some(Self::Deny),
+            action if action.starts_with(PICK) => tap.info.get(action).cloned().map(Self::Pick),
+            _ => None,
+        }
+    }
+
+    /// The choice it answers a request offering `options` with: Allow's and Deny's once, as
+    /// the request words it, and a pick's own.
+    #[must_use]
+    pub fn choice(&self, options: &[slopty_proto::thread::Choice]) -> Option<String> {
+        match self {
+            Self::Allow => slopty_proto::thread::once(options, true).map(|c| c.id.clone()),
+            Self::Deny => slopty_proto::thread::once(options, false).map(|c| c.id.clone()),
+            Self::Pick(choice) => Some(choice.clone()),
+        }
+    }
 }
 
 /// A note the system shows in its Notification Centre ([`delivered`]): one posted here, or
@@ -120,6 +202,10 @@ impl Tap {
     #[must_use]
     pub fn finished_later(&self) -> bool {
         let Some(action) = self.action.as_deref() else { return false };
+        // A pick answers where the note is, as Allow does.
+        if action.starts_with(PICK) {
+            return true;
+        }
         CATEGORIES
             .iter()
             .find_map(|category| category.action(action))
@@ -183,6 +269,10 @@ pub const DENY: &str = "deny";
 pub const SHOW: &str = "show";
 /// [`REPLYING`]'s button that takes a reply to the agent.
 pub const REPLY: &str = "reply";
+/// The start of a pick's button identifier ([`Note::picking`]): `pick.0`, `pick.1`…
+pub const PICK: &str = "pick.";
+/// The start of a picking note's category identifier ([`picking_id`]).
+pub const PICKING: &str = "slopty.pick.";
 
 /// How "Allow" and "Deny" are pressed: where the note is, the app left in the background. On
 /// iOS a press may launch an app the system ended, with no scene and so no GPUI and no links;
@@ -355,7 +445,7 @@ impl Notifier for Memory {
 #[cfg(target_vendor = "apple")]
 pub use apple::{
     System, answer_unheard, ask, ask_quietly, content_of, deliver_launching, delivered, install,
-    open_settings, post_alone, settings, take_back, taps, taps_finished,
+    open_settings, post_alone, register_then, settings, take_back, taps, taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -386,7 +476,7 @@ mod apple {
     use tokio::sync::mpsc::error::SendError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, Notifier, Tap};
+    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, NoteChoice, Notifier, Tap};
 
     /// Where the person's answer stands. Completion handlers write it from the framework's
     /// queues, so it sits behind a lock.
@@ -623,9 +713,7 @@ mod apple {
             }
             install();
             let center = UNUserNotificationCenter::currentNotificationCenter();
-            let categories: Vec<Retained<UNNotificationCategory>> =
-                CATEGORIES.iter().map(category).collect();
-            center.setNotificationCategories(&NSSet::from_retained_slice(&categories));
+            merge_categories(None, || ());
             let state = Arc::new(Mutex::new(State { auth: Auth::Unasked, badge: None }));
             let read = Arc::clone(&state);
             read_settings(move |alerts| {
@@ -1021,6 +1109,106 @@ mod apple {
         )
     }
 
+    /// The category of a note with `picks` as its buttons: each answers where the note is, as
+    /// Allow does, then "Show".
+    fn picking(picks: &[NoteChoice]) -> Retained<UNNotificationCategory> {
+        let mut actions: Vec<Retained<UNNotificationAction>> = picks
+            .iter()
+            .enumerate()
+            .map(|(n, pick)| {
+                UNNotificationAction::actionWithIdentifier_title_options(
+                    &NSString::from_str(&super::pick_id(n)),
+                    &NSString::from_str(&pick.label),
+                    UNNotificationActionOptions::AuthenticationRequired,
+                )
+            })
+            .collect();
+        actions.push(UNNotificationAction::actionWithIdentifier_title_options(
+            &NSString::from_str(super::SHOW),
+            &NSString::from_str("Show"),
+            UNNotificationActionOptions::Foreground,
+        ));
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(&super::picking_id(picks)),
+            &NSArray::from_retained_slice(&actions),
+            &NSArray::new(),
+            UNNotificationCategoryOptions::empty(),
+        )
+    }
+
+    /// The most picking categories the centre keeps: past it the oldest set gives way, and a
+    /// note still up from then shows only its tap.
+    const PICKINGS_KEPT: usize = 64;
+
+    /// Register the app's own categories with the picking ones already registered, and `extra`
+    /// when given, then call `then` once the centre lists them.
+    ///
+    /// The centre holds one set for the app and its notification extension alike, and setting
+    /// it replaces the whole of it, so the picks another process registered are read first
+    /// and kept. Its handlers run on a queue of the centre's own, hence `Send`.
+    fn merge_categories(extra: Option<Vec<NoteChoice>>, then: impl FnOnce() + Send + 'static) {
+        let then = Mutex::new(Some(then));
+        let extra = Mutex::new(extra);
+        let read = RcBlock::new(move |set: std::ptr::NonNull<NSSet<UNNotificationCategory>>| {
+            // SAFETY: UserNotifications rule: the set handed to the completion handler is a
+            // valid object for the duration of the call.
+            let set = unsafe { set.as_ref() };
+            let extra = extra.lock().take();
+            let wanted = extra.as_deref().map(super::picking_id);
+            let mut kept: Vec<Retained<UNNotificationCategory>> = set
+                .iter()
+                .filter(|c| c.identifier().to_string().starts_with(super::PICKING))
+                .filter(|c| Some(c.identifier().to_string()) != wanted)
+                .collect();
+            let had =
+                wanted.is_some() && set.iter().any(|c| Some(c.identifier().to_string()) == wanted);
+            let based = CATEGORIES
+                .iter()
+                .all(|base| set.iter().any(|c| c.identifier().to_string() == base.id));
+            let ready = then.lock().take();
+            if had && based {
+                if let Some(ready) = ready {
+                    ready();
+                }
+                return;
+            }
+            let over = kept.len().saturating_sub(PICKINGS_KEPT.saturating_sub(1));
+            kept.drain(..over);
+            let mut all: Vec<Retained<UNNotificationCategory>> =
+                CATEGORIES.iter().map(category).collect();
+            all.extend(kept);
+            all.extend(extra.as_deref().map(picking));
+            let center = UNUserNotificationCenter::currentNotificationCenter();
+            center.setNotificationCategories(&NSSet::from_retained_slice(&all));
+            // The set takes effect on the centre's queue: a read after it is answered once it
+            // has, so a note added then finds its buttons.
+            let ready = Mutex::new(ready);
+            let settled =
+                RcBlock::new(move |_set: std::ptr::NonNull<NSSet<UNNotificationCategory>>| {
+                    let ready = ready.lock().take();
+                    if let Some(ready) = ready {
+                        ready();
+                    }
+                });
+            center.getNotificationCategoriesWithCompletionHandler(&settled);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationCategoriesWithCompletionHandler(&read);
+    }
+
+    /// Register the category `note`'s picks need, if it has any, then call `then`.
+    ///
+    /// It is what the notification extension does before it hands back a pushed note with a
+    /// question's options as its buttons. Outside an app bundle, or with no picks, `then` runs
+    /// at once.
+    pub fn register_then(note: &Note, then: impl FnOnce() + Send + 'static) {
+        if note.picks.is_empty() || !in_bundle() {
+            then();
+            return;
+        }
+        merge_categories(Some(note.picks.clone()), then);
+    }
+
     /// Hand `note` to the centre now: a nil trigger delivers at once, and the identifier
     /// replaces whatever is up under it.
     fn add(center: &UNUserNotificationCenter, note: &Note) {
@@ -1034,10 +1222,28 @@ mod apple {
         note: &Note,
         then: impl FnOnce() + Send + 'static,
     ) {
-        let content = content_of(note);
+        // A question's options want their category registered before the note goes out.
+        if !note.picks.is_empty() {
+            let note = note.clone();
+            merge_categories(Some(note.picks.clone()), move || {
+                let center = UNUserNotificationCenter::currentNotificationCenter();
+                add_content(&center, &note, &content_of(&note), then);
+            });
+            return;
+        }
+        add_content(center, note, &content_of(note), then);
+    }
+
+    /// Add `content`, `note`'s, to the centre under `note`'s identifier, then call `then`.
+    fn add_content(
+        center: &UNUserNotificationCenter,
+        note: &Note,
+        content: &UNMutableNotificationContent,
+        then: impl FnOnce() + Send + 'static,
+    ) {
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&note.id),
-            &content,
+            content,
             None,
         );
         let id = note.id.clone();
@@ -1081,7 +1287,9 @@ mod apple {
         if note.urgent {
             content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
         }
-        if let Some(category) = note.category {
+        if !note.picks.is_empty() {
+            content.setCategoryIdentifier(&NSString::from_str(&super::picking_id(&note.picks)));
+        } else if let Some(category) = note.category {
             content.setCategoryIdentifier(&NSString::from_str(category.id));
         }
         if let Some(thread) = &note.thread {

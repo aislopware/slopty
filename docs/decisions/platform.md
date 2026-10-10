@@ -1286,3 +1286,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `push_body_choices` golden; `slopty-server`
     `hub::ladder::tests::needs_you_pushes_once_per_ask` (the pocketed phone's push carries a
     question's buttons).
+
+- ✅ **A note answers what its agent asks, not only a yes or no taken at first push**
+  (2026-10-12, readiness 10-12 rank 13, the app's half; the server re-pushes quietly when the
+  request moves and carries the options, lane W).
+  - **Replies.** An agent's note with no yes or no (a question, a plan, a failure, a finish)
+    carries a Reply field (`notify::REPLYING`). The reply goes to the thread as a message:
+    straight to a worker linked here as the thread's composer sends it, else through the
+    server (`Verb::SendMessage`), from a killed app's background answer too. A reply that did
+    not go is said on a note that keeps the field.
+  - **Options as buttons.** A question that asks one thing, takes one answer and offers at
+    most four puts its options on the note in place of Allow and Deny (`Note::picking`,
+    `pick.0` on). Each answers the request with the choice the note keeps for it under the
+    button's id (`notify::Pressed`). Notification categories are fixed sets of buttons, so a
+    category is made for each set of labels (`picking_id`, an FNV-1a hash, so the same
+    options share one). It is registered as the note goes out: by the app for its own notes,
+    and by the notification extension before it hands back a pushed one (`register_then`).
+  - **One set for both processes.** The centre keeps one category set for the app and its
+    extension, and setting it replaces all of it. So each registration reads the set first
+    and keeps the picking categories already there, up to 64; the app's launch keeps them too.
+    The note is added, or handed back, only once a read after the set lists it, so its
+    buttons are there when it shows. If the centre never answers, the system shows the push
+    as it came once the extension's time is up.
+  - **Answering.** A pick is answered where the note is, as Allow is (`Tap::finished_later`):
+    with the workspace when it is up, and only while the open request offers that choice;
+    else with no window, through the server. One that did not land says "Your answer was not
+    sent", with no pick left to press twice.
+  - Tests: `notify::pushed::tests::a_questions_options_are_its_notes_buttons` (slopty-platform);
+    `verdict::tests::a_pick_answers_with_its_own_choice_with_no_window` (slopty-app);
+    `workspace::tests::attention::a_small_question_is_answered_from_its_notes_options`,
+    `workspace::tests::approvals::a_notes_reply_goes_straight_to_a_linked_worker`,
+    `…::a_notes_reply_goes_through_the_server_while_its_worker_is_away` (slopty-ui).

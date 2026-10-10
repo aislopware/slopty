@@ -58,6 +58,7 @@ use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, 
 use slopty_proto::items::ItemKind;
 use slopty_proto::project::ProjectId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
+use slopty_proto::thread::wire::{NoteChoice, RequestCard};
 use slopty_proto::thread::{AskId, ThreadId};
 
 use super::agents::{agent_ask_text, agent_status_word};
@@ -75,11 +76,22 @@ pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 /// sound with each flip.
 pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
-/// Whether `tap` is a note's "Allow", "Deny" or reply, which answers where the note is and may
-/// have woken the app in the background to do it.
+/// Whether `tap` is a note's "Allow", "Deny", pick or reply, which answers where the note is
+/// and may have woken the app in the background to do it.
 #[must_use]
 pub fn answers(tap: &Tap) -> bool {
-    matches!(tap.action.as_deref(), Some(notify::ALLOW | notify::DENY | notify::REPLY))
+    tap.action.as_deref() == Some(notify::REPLY) || notify::Pressed::of(tap).is_some()
+}
+
+/// What a note's buttons answer of `card`, an open request: a yes or no's id, with no picks,
+/// or a small question's id with its options; nothing for anything else, which a note only
+/// opens.
+fn note_buttons(card: Option<&RequestCard>) -> (Option<String>, Vec<NoteChoice>) {
+    match card {
+        Some(card) if !card.buttons.is_empty() => (Some(card.id.0.clone()), card.buttons.clone()),
+        Some(card) if answerable(card) => (Some(card.id.0.clone()), Vec::new()),
+        Some(_) | None => (None, Vec::new()),
+    }
 }
 
 /// What a note is about: a terminal, whose agent or shell it speaks of, or a thread driven
@@ -161,9 +173,12 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_text`), else its state in a word or two.
     pub body: String,
-    /// The yes or no the note's buttons answer, as the note carries it: the request's id on the
-    /// thread the agent runs.
+    /// The request the note's buttons answer, as the note carries it: the request's id on the
+    /// thread the agent runs. A yes or no takes Allow and Deny, a small question its options
+    /// ([`Self::picks`]).
     pub approval: Option<String>,
+    /// A small question's options, the note's buttons in place of Allow and Deny.
+    pub picks: Vec<NoteChoice>,
     /// The request this client answered that its worker's table still shows open.
     pub answered: Option<String>,
     /// This client's own moment: a program waiting on the person (`OSC 7501`), which no
@@ -172,7 +187,8 @@ pub struct Asking {
 }
 
 impl Asking {
-    /// Its note: the approval buttons while a yes or no is open, and a sound unless `silent`.
+    /// Its note: the approval buttons while a yes or no is open, a question's options while
+    /// a small one is, and a sound unless `silent`.
     fn note(&self, silent: bool) -> Note {
         let mut info = self.route.info();
         if let Some(ask) = &self.approval {
@@ -189,10 +205,12 @@ impl Asking {
             } else {
                 (!self.own).then_some(REPLYING)
             },
+            picks: Vec::new(),
             silent,
             urgent: true,
             thread: None,
         }
+        .picking(if self.approval.is_some() { &self.picks } else { &[] })
     }
 }
 
@@ -674,21 +692,19 @@ impl WorkspaceView {
                         title,
                         body,
                         approval: None,
+                        picks: Vec::new(),
                         answered: None,
                         own: true,
                     });
                 };
                 let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
-                let approval = self
-                    .session_request(w.session)
-                    .filter(|a| answerable(a))
-                    .map(|a| a.id.0.clone());
+                let (approval, picks) = note_buttons(self.session_request(w.session));
                 let answered = self
                     .session_thread(w.session)
                     .and_then(|t| self.thread_answered_here(t))
                     .map(|ask| ask.0.clone());
                 let title = self.route_title(route);
-                Some(Asking { route, title, body, approval, answered, own: false })
+                Some(Asking { route, title, body, approval, picks, answered, own: false })
             })
             .chain(self.threads_waiting().into_iter().filter_map(|w| {
                 let stand = self.thread_stand(w.thread)?;
@@ -700,10 +716,9 @@ impl WorkspaceView {
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
-                let approval =
-                    stand.asks.as_ref().filter(|a| answerable(a)).map(|a| a.id.0.clone());
+                let (approval, picks) = note_buttons(stand.asks.as_ref());
                 let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
-                Some(Asking { route, title, body, approval, answered, own: false })
+                Some(Asking { route, title, body, approval, picks, answered, own: false })
             }))
             .collect();
         let turns = self
@@ -871,15 +886,10 @@ impl WorkspaceView {
             }
             return;
         }
-        let allow = match tap.action.as_deref() {
-            Some(notify::ALLOW) => Some(true),
-            Some(notify::DENY) => Some(false),
-            Some(_) | None => None,
-        };
-        if let Some(allow) = allow {
+        if let Some(pressed) = notify::Pressed::of(tap) {
             match (route, tap.info.get(ASK)) {
                 (Some(route), Some(ask)) => {
-                    self.verdict_tapped(route, AskId(ask.clone()), allow, cx);
+                    self.verdict_tapped(route, AskId(ask.clone()), pressed, cx);
                 }
                 // Nothing to answer, but the tap still settles: the system waits on the app's
                 // word that it is done with it.

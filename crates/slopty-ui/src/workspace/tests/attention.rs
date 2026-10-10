@@ -36,6 +36,7 @@ fn asking(route: Route, body: &str) -> Asking {
         title: "api".into(),
         body: body.into(),
         approval: None,
+        picks: Vec::new(),
         answered: None,
         own: false,
     }
@@ -842,6 +843,66 @@ fn thread_on(session: SessionId) -> ThreadState {
     let mut state = crate::conversation::thread::fixtures::thread("edit");
     state.meta.terminal = Some(session);
     state
+}
+
+/// A small question on the agent's thread rides the agent's note as its options: each a pick
+/// carrying its choice in place of Allow and Deny. A press of one answers with that choice
+/// once and moves nothing; a second press sends nothing, and a choice the request does not
+/// offer is not sent.
+#[gpui::test]
+fn a_small_question_is_answered_from_its_notes_options(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::NoteChoice;
+
+    let (view, cx) = workspace(cx);
+    let (session, other) = (SessionId::new(), SessionId::new());
+    let key = WorkerKey::new(7);
+    let (tiles, mut link) = worker(&view, cx, key, "mini", &[session, other]);
+    view.update_in(cx, |v, _window, cx| {
+        v.focus_tile(tiles[1], cx);
+        v.agent_event(blocked_on(session), cx);
+        v.threads_linked(key, cx);
+    });
+    let state = thread_on(session);
+    let pick = |label: &str| NoteChoice {
+        label: label.to_owned(),
+        choice: format!("[{{\"question\":\"Layout?\",\"answer\":\"{label}\"}}]"),
+    };
+    let mut row = asking_row(&state, Some(("q-2", Request::QUESTION)));
+    row.requests[0].options.clear();
+    row.requests[0].buttons = vec![pick("Split"), pick("Unified")];
+    table(&view, cx, key, row);
+    thread_sent(&mut link);
+    let note = view.update(cx, |v, _| {
+        let look = v.attention_look();
+        let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
+        assert_eq!(asks.approval.as_deref(), Some("q-2"), "the note answers the question");
+        asks.note(false)
+    });
+    assert_eq!(note.picks, [pick("Split"), pick("Unified")], "its options are its buttons");
+    let press_pick = |n: usize, info: BTreeMap<String, String>| Tap {
+        id: note.id.clone(),
+        info,
+        action: Some(notify::pick_id(n)),
+        text: None,
+    };
+
+    let mut forged = note.info.clone();
+    forged.insert(notify::pick_id(0), pick("Stacked").choice);
+    view.update_in(cx, |v, _window, cx| v.open_notification(&press_pick(0, forged), cx));
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "a choice not offered is not sent");
+
+    view.update_in(cx, |v, _window, cx| v.open_notification(&press_pick(1, note.info.clone()), cx));
+    let answered = Intent::Answer {
+        ask: AskId("q-2".to_owned()),
+        choice: pick("Unified").choice,
+        message: None,
+    };
+    assert_eq!(intents(&thread_sent(&mut link)), [answered], "answered with its choice, once");
+    view.update_in(cx, |v, _window, cx| {
+        assert_eq!(v.focused(), Some(tiles[1]), "the answer moved nothing");
+        v.open_notification(&press_pick(1, note.info.clone()), cx);
+    });
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "a second press sends nothing");
 }
 
 /// A yes or no on the agent's thread rides the agent's note: "Allow" on the note answers it

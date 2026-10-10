@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WorkerId};
-use slopty_platform::notify::{self, Note, Tap, info};
+use slopty_platform::notify::{self, Note, Pressed, Tap, info};
 use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::{AskId, ThreadId};
 
@@ -28,15 +28,15 @@ use slopty_proto::thread::{AskId, ThreadId};
 /// grants an app it woke for a notification's button.
 pub const ANSWER_WITHIN: Duration = Duration::from_secs(20);
 
-/// What a pressed "Allow" or "Deny" answers.
+/// What a pressed "Allow", "Deny" or pick answers.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Verdict {
     /// The thread, as the server finds it: by its id, or by the terminal its agent runs in.
     pub of: ThreadOf,
     /// Its request.
     pub ask: AskId,
-    /// Allow, or deny.
-    pub allow: bool,
+    /// The button pressed.
+    pub pressed: Pressed,
 }
 
 /// What a press with no window does.
@@ -64,17 +64,13 @@ pub fn press_of(tap: &Tap) -> Option<Press> {
     verdict_of(tap).map(Press::Verdict)
 }
 
-/// What `tap` answers, when it is a press of "Allow" or "Deny" on a note that names its
-/// request and where it was asked.
+/// What `tap` answers, when it is a press of "Allow", "Deny" or a pick on a note that names
+/// its request and where it was asked.
 #[must_use]
 pub fn verdict_of(tap: &Tap) -> Option<Verdict> {
-    let allow = match tap.action.as_deref()? {
-        notify::ALLOW => true,
-        notify::DENY => false,
-        _ => return None,
-    };
+    let pressed = Pressed::of(tap)?;
     let ask = AskId(tap.info.get(info::ASK)?.clone());
-    Some(Verdict { of: thread_of(tap)?, ask, allow })
+    Some(Verdict { of: thread_of(tap)?, ask, pressed })
 }
 
 /// The thread a note is about: by its id, or by the terminal its agent runs in.
@@ -116,7 +112,8 @@ pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
 }
 
 /// Answer `verdict` through the server `caller` reaches: read the thread's open requests for
-/// the choice that allows or denies once, then answer with it.
+/// the choice that allows or denies once, or for the request a pick answers, then answer with
+/// it.
 pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
     let read = Verb::ReadThread {
         of: verdict.of.clone(),
@@ -129,8 +126,7 @@ pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
             .requests
             .iter()
             .find(|r| r.ask == verdict.ask)
-            .and_then(|r| slopty_proto::thread::once(&r.choices, verdict.allow))
-            .map(|c| c.id.clone()),
+            .and_then(|r| verdict.pressed.choice(&r.choices)),
         Outcome::Error { message, .. } => return Answered::Failed(message),
         _ => None,
     };
@@ -157,6 +153,7 @@ pub const ANSWERED_ELSEWHERE: &str = "It was answered elsewhere, or it ended.";
 pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Option<Note> {
     let mut info = tap.info.clone();
     info.remove(info::ASK);
+    info.retain(|key, _| !key.starts_with(notify::PICK));
     let note = Note { id: tap.id.clone(), info, ..Note::default() };
     match answered {
         Answered::Sent => None,
@@ -170,6 +167,7 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
             let (pressed, category) = match tap.action.as_deref() {
                 Some(notify::REPLY) => ("Your reply", Some(notify::REPLYING)),
                 Some(notify::DENY) => ("Deny", None),
+                Some(action) if action.starts_with(notify::PICK) => ("Your answer", None),
                 _ => ("Allow", None),
             };
             let title = machine.map_or_else(
@@ -285,7 +283,11 @@ mod tests {
         let allowed = tap(notify::ALLOW, &[(info::THREAD, thread.to_string()), ask.clone()]);
         assert_eq!(
             verdict_of(&allowed),
-            Some(Verdict { of: ThreadOf::Thread(thread), ask: AskId("a1".into()), allow: true })
+            Some(Verdict {
+                of: ThreadOf::Thread(thread),
+                ask: AskId("a1".into()),
+                pressed: Pressed::Allow
+            })
         );
         let worker = WorkerId::new();
         let session = SessionId::new();
@@ -297,7 +299,7 @@ mod tests {
         let of = ThreadOf::Term(TermRef { worker, session });
         assert_eq!(
             verdict_of(&denied),
-            Some(Verdict { of, ask: AskId("a1".into()), allow: false })
+            Some(Verdict { of, ask: AskId("a1".into()), pressed: Pressed::Deny })
         );
         assert_eq!(
             verdict_of(&tap(notify::SHOW, &[(info::THREAD, thread.to_string()), ask])),
@@ -374,8 +376,11 @@ mod tests {
     #[tokio::test]
     async fn a_verdict_answers_with_the_choice_that_allows_or_denies_once() {
         let thread = ThreadId::new();
-        let verdict =
-            Verdict { of: ThreadOf::Thread(thread), ask: AskId("a1".into()), allow: false };
+        let verdict = Verdict {
+            of: ThreadOf::Thread(thread),
+            ask: AskId("a1".into()),
+            pressed: Pressed::Deny,
+        };
         let (caller, mut queue) = ServerCaller::queued();
         let answering = tokio::spawn(async move { answer(&caller, verdict).await });
         let read = loop {
@@ -426,5 +431,95 @@ mod tests {
         );
         let _sent = sent.1.send(Outcome::Done);
         assert_eq!(answering.await.ok(), Some(Answered::Sent));
+    }
+
+    /// A question's option pressed on its note with no window answers the request with the
+    /// choice the note kept for it, through the server, once the request is still open there.
+    /// One that did not land is said with no pick left on it to answer twice.
+    #[tokio::test]
+    async fn a_pick_answers_with_its_own_choice_with_no_window() {
+        let thread = ThreadId::new();
+        let picked = r#"[{"question":"Layout?","answer":"Unified"}]"#;
+        let note = Note {
+            id: "note".to_owned(),
+            info: BTreeMap::from([
+                (info::THREAD.to_owned(), thread.to_string()),
+                (info::ASK.to_owned(), "a2".to_owned()),
+            ]),
+            ..Note::default()
+        }
+        .picking(&[
+            slopty_proto::thread::wire::NoteChoice {
+                label: "Split".to_owned(),
+                choice: r#"[{"question":"Layout?","answer":"Split"}]"#.to_owned(),
+            },
+            slopty_proto::thread::wire::NoteChoice {
+                label: "Unified".to_owned(),
+                choice: picked.to_owned(),
+            },
+        ]);
+        let pressed = Tap {
+            id: note.id.clone(),
+            info: note.info.clone(),
+            action: Some(notify::pick_id(1)),
+            text: None,
+        };
+        let Some(Press::Verdict(verdict)) = press_of(&pressed) else {
+            panic!("a pick is a verdict: {pressed:?}")
+        };
+        assert_eq!(verdict.pressed, Pressed::Pick(picked.to_owned()));
+        let (caller, mut queue) = ServerCaller::queued();
+        let answering = tokio::spawn(async move { answer(&caller, verdict).await });
+        let read = loop {
+            if let Some(next) = queue.try_next() {
+                break next;
+            }
+            tokio::task::yield_now().await;
+        };
+        let request = RequestRead {
+            ask: AskId("a2".into()),
+            kind: "question".to_owned(),
+            title: "Layout?".to_owned(),
+            choices: Vec::new(),
+            questions: Vec::new(),
+        };
+        let held = ThreadRead {
+            worker: WorkerId::new(),
+            thread,
+            agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
+            title: String::new(),
+            parent: None,
+            phase: slopty_proto::thread::Phase::NeedsYou,
+            wait: None,
+            turns: Vec::new(),
+            requests: vec![request],
+            next: slopty_proto::thread::TurnId(0),
+            truncated: false,
+            skipped: false,
+        };
+        let _sent = read.1.send(Outcome::Thread(Box::new(held)));
+        let sent = loop {
+            if let Some(next) = queue.try_next() {
+                break next;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(
+            sent.0,
+            Verb::AnswerRequest {
+                of: ThreadOf::Thread(thread),
+                ask: AskId("a2".into()),
+                choice: picked.to_owned(),
+                message: None,
+            }
+        );
+        let _sent = sent.1.send(Outcome::Done);
+        assert_eq!(answering.await.ok(), Some(Answered::Sent));
+
+        let failed = Answered::Failed("no link".to_owned());
+        let missed = missed_note(&pressed, &failed, Some("studio")).expect("said");
+        assert_eq!(missed.body, "Your answer was not sent. The agent is still waiting.");
+        assert!(missed.picks.is_empty(), "no pick to press again");
+        assert!(!missed.info.keys().any(|k| k.starts_with(notify::PICK)), "{:?}", missed.info);
     }
 }

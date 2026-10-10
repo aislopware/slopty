@@ -4300,11 +4300,9 @@ pub fn open_workspace(
     let for_notifications = workspace.clone();
     cx.spawn(async move |cx| {
         while let Some(tap) = tapped.recv().await {
-            // "Allow" and "Deny" answer where the note is, leaving the app where it was.
-            let verdict = matches!(
-                tap.action.as_deref(),
-                Some(slopty_platform::notify::ALLOW | slopty_platform::notify::DENY)
-            );
+            // "Allow", "Deny", a pick and a reply answer where the note is, leaving the app
+            // where it was.
+            let verdict = tap.finished_later();
             cx.update(|cx| {
                 if !verdict {
                     // The window comes back to show the tile, if it was closed.

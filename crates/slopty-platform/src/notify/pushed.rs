@@ -56,9 +56,10 @@ pub fn note_id(notice: &Notice) -> String {
 
 /// The note `body` makes on the phone: what the app would have posted for its notice.
 ///
-/// It has the approval's buttons when it carries a yes or no they answer, else, for an agent's
-/// thread, a reply ([`super::REPLYING`]). A quiet push only moves what its buttons answer under
-/// a note already up, so it sounds no second time.
+/// It has a question's options as its buttons when the body offers them, the approval's when it
+/// carries a yes or no they answer, else, for an agent's thread, a reply ([`super::REPLYING`]). A
+/// quiet push only moves what its buttons answer under a note already up, so it sounds no second
+/// time.
 ///
 /// It knows no tile, so it carries no [`info::ITEM`]; the app finds the tile by the session or
 /// the thread. A thread's note with no title says the app's name, which stands in for the tile
@@ -97,6 +98,7 @@ pub fn note_of(body: &PushBody) -> Note {
         Subject::Project { project, .. } => Some(project.as_str().to_owned()),
         Subject::Thread(_) | Subject::Terminal(_) => None,
     };
+    let picks = if body.ask.is_some() { body.choices.as_slice() } else { &[] };
     Note {
         id: note_id(notice),
         title,
@@ -104,15 +106,21 @@ pub fn note_of(body: &PushBody) -> Note {
         info: keys,
         thread,
         category: category_of(body),
+        picks: Vec::new(),
         silent: body.quiet,
         urgent: notice.kind == NoticeKind::NeedsYou,
     }
+    .picking(picks)
 }
 
-/// The buttons a pushed note carries: Allow and Deny on a yes or no, else a reply on an agent's
-/// own moment (one that needs the person, failed or finished). A program's record and a
-/// project's notice have none.
+/// The buttons a pushed note carries: a question's options are its picks ([`Note::picking`]),
+/// which take a category of their own; else Allow and Deny on a yes or no, else a reply on an
+/// agent's own moment (one that needs the person, failed or finished). A program's record and
+/// a project's notice have none.
 fn category_of(body: &PushBody) -> Option<super::Category> {
+    if body.ask.is_some() && !body.choices.is_empty() {
+        return None;
+    }
     if body.ask.is_some() {
         return Some(APPROVAL);
     }
@@ -504,6 +512,47 @@ mod tests {
             ])
         );
         assert_eq!((note.category, note.urgent, note.thread), (None, true, None));
+    }
+
+    /// A small question's options pushed with its request are the note's own buttons: each a
+    /// pick carrying its choice, under a category named by the labels, no Allow or Deny; a
+    /// press of one answers with that choice where the note is. A body with no request offers
+    /// none.
+    #[test]
+    fn a_questions_options_are_its_notes_buttons() {
+        use slopty_proto::thread::wire::NoteChoice;
+
+        use crate::notify::{PICKING, Pressed, Tap, pick_id, picking_id};
+        let at = Subject::Thread(ThreadAt { worker: WorkerId::new(), thread: ThreadId::new() });
+        let pick = |label: &str| NoteChoice {
+            label: label.to_owned(),
+            choice: format!("[{{\"question\":\"Layout?\",\"answer\":\"{label}\"}}]"),
+        };
+        let choices = vec![pick("Split"), pick("Unified")];
+        let body = PushBody {
+            notice: notice(NoticeKind::NeedsYou, at, None),
+            ask: Some(AskId("toolu_02".to_owned())),
+            choices: choices.clone(),
+            quiet: false,
+        };
+        let note = note_of(&body);
+        assert_eq!(note.picks, choices);
+        assert_eq!(note.category, None, "the picks' own category, no Allow or Deny");
+        assert_eq!(note.info.get(&pick_id(1)), Some(&choices[1].choice));
+        assert_eq!(note.info.get(info::ASK).map(String::as_str), Some("toolu_02"));
+        let id = picking_id(&note.picks);
+        assert!(id.starts_with(PICKING), "{id}");
+        assert_eq!(id, picking_id(&choices), "the same labels share a category");
+        assert_ne!(id, picking_id(&[pick("Split"), pick("Stacked")]));
+
+        let pressed =
+            Tap { id: note.id.clone(), info: note.info, action: Some(pick_id(1)), text: None };
+        assert!(pressed.finished_later(), "answered where the note is");
+        assert_eq!(Pressed::of(&pressed), Some(Pressed::Pick(choices[1].choice.clone())));
+        assert_eq!(Pressed::of(&Tap { action: Some(pick_id(3)), ..pressed }), None, "none kept");
+
+        let unasked = note_of(&PushBody { ask: None, ..body });
+        assert!(unasked.picks.is_empty(), "no request, nothing to answer");
     }
 
     /// What the server seals opens on the phone to the note, under its token and key only.
