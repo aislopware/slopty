@@ -2481,8 +2481,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   malfunctions"). That is the shape of the clock test's failure on CI (run 36813467628): one
   frame that did not decode, then 22 refreshes and no picture.
   - *The codec names it.* A frame back with `kVTInvalidSessionErr`, `kVTSessionMalfunctionErr`,
-    `kVTVideoEncoderMalfunctionErr` or `kVTVideoEncoderNotAvailableNowErr`, from the output
-    callback or the submit, marks the session lost, and from then on `encode` refuses every
+    or `kVTVideoEncoderMalfunctionErr`, from the output callback or the submit, marks the
+    session lost, and so does `kVTVideoEncoderNotAvailableNowErr` on every frame for 250 ms
+    (since 2026-10-10, below: one alone is a busy encoder), and from then on `encode` refuses every
     frame as `CodecError::EncoderLost`, the one that found it out included when the callback
     ran inside the submit. The decoder already did the same on its side (`session_lost`).
   - *The geometry tick replaces it.* The first refusal from a session records its number and
@@ -2734,11 +2735,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *What the worker did then.* Every encode answered `EncoderLost`, so the geometry tick
     built new sessions at once, every time: 13 301 builds in one stopped run, each one more
     call into an encoder that no longer answered. A replacement now waits when the one before
-    it was lost too without coding a frame: 250 ms, doubling to `ENCODE_STUCK_MAX` (32 s), and
+    it was lost too without coding a frame: 250 ms, doubling to 2 s (`LOST_RETRY_MAX`), and
     a coded frame brings it back to at once (`LostRetry`). The beat wakes the tick when the
     wait is over, so a lost session is still rebuilt with nothing else moving. A session the
     system takes away once, as the 2026-10-01 entry above has it, is rebuilt at once as
     before.
+  - *Two seconds, and busy is not lost* (2026-10-10). The wait first grew to the stuck
+    encode's 32 s. On CI (run 38045874695) a drawn-screen test then went 10 s without a
+    picture while its sessions were rebuilt: two encodes given up on inside VideoToolbox and
+    eight builds, with the client in order, holding nothing, and its refresh already answered.
+    A real Mac's desktop frozen for half a minute on an encoder that was only busy is worse
+    than what so long a wait spares a stopped one. One build every 2 s costs a stopped encoder
+    nothing, and a busy one is back within 2 s at worst. The codec no longer takes
+    `kVTVideoEncoderNotAvailableNowErr` on its own as a lost session. A frame refused with it
+    is skipped and the session kept, as the thirty-two sessions above showed it should be.
+    Only a run of 250 ms with every frame refused so (`BUSY_LOST`, fifteen frames at 60 fps)
+    loses the session. That still catches the malfunctioned session of 2026-10-01, which
+    answered so for good, and the stopped encoder. A stuck encode's own patience still doubles
+    to `ENCODE_STUCK_MAX`, because each encode given up on leaves a thread inside the encoder.
+    Tests: `replacements_lost_without_a_frame_are_rebuilt_ever_more_slowly` (the waits, 500 ms
+    to 2 s and held there) and `a_busy_encoder_loses_the_session_only_once_it_stays_busy`
+    (`slopty-codec`).
   - *What CI does then.* The VideoToolbox tests are bounded at a minute on CI (they take
     9.2 s at most on a green runner), so a stopped encoder fails the shard in minutes,
     naming its tests, instead of cancelling the job.

@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _,
@@ -165,16 +166,26 @@ const fn submission(options_keyframe: bool, options_refresh: bool, ltr: bool) ->
 /// after it fails too, and only a new session codes.
 ///
 /// That is `kVTInvalidSessionErr` (`mediaserverd` restarting), `kVTSessionMalfunctionErr`, or
-/// the hardware encoder's own malfunction. `kVTVideoEncoderNotAvailableNowErr` is one as well:
-/// on a starved machine a session whose encoder malfunctioned answered every frame after it with
-/// that, for as long as it lived, while new sessions beside it coded (MEASUREMENTS.md, "an
-/// encoder session that malfunctions").
+/// the hardware encoder's own malfunction. `kVTVideoEncoderNotAvailableNowErr` alone is not: a
+/// busy encoder answers some frames with it and codes the next ([`BUSY_LOST`]).
 const fn encoder_lost(status: i32) -> bool {
     status == kVTInvalidSessionErr
         || status == kVTSessionMalfunctionErr
         || status == kVTVideoEncoderMalfunctionErr
-        || status == kVTVideoEncoderNotAvailableNowErr
 }
+
+/// How long a session may answer every frame with `kVTVideoEncoderNotAvailableNowErr`, coding
+/// none in between, before it is taken as gone.
+///
+/// Busy is not stopped. Thirty-two sessions alive at once got that status for some frames and
+/// coded the next at once (`docs/decisions/video.md`, "A virtual Mac's encoder stops for good
+/// past its 1020th client"), so a frame refused with it is skipped and the session kept. But on
+/// a starved machine a session whose encoder malfunctioned answered every frame after it with
+/// that for as long as it lived, while new sessions beside it coded (MEASUREMENTS.md, "an
+/// encoder session that malfunctions"), and a stopped encoder answers so for good. A run as long
+/// as the worker's first wait before rebuilding a lost session again tells the two apart: at
+/// 60 fps it is fifteen refusals in a row.
+const BUSY_LOST: Duration = Duration::from_millis(250);
 
 struct Shared {
     sink: Sink,
@@ -184,11 +195,53 @@ struct Shared {
     /// The status of the first frame that came back from a session gone for good
     /// ([`encoder_lost`]); zero while it codes.
     lost: AtomicI32,
+    /// When the session was made: the clock [`Self::busy_since_us`] counts on.
+    born: Instant,
+    /// Microseconds after [`Self::born`], plus one, of the first refusal in the run of
+    /// `kVTVideoEncoderNotAvailableNowErr` under way; zero while none is ([`BUSY_LOST`]).
+    busy_since_us: AtomicU64,
 }
 
 impl Shared {
     fn new(sink: Sink, codec: VideoCodec) -> Self {
-        Self { sink, codec, dropped: AtomicU64::new(0), lost: AtomicI32::new(0) }
+        Self {
+            sink,
+            codec,
+            dropped: AtomicU64::new(0),
+            lost: AtomicI32::new(0),
+            born: Instant::now(),
+            busy_since_us: AtomicU64::new(0),
+        }
+    }
+
+    /// A frame was refused with `status` at `now`, as it was submitted or when it came back.
+    /// The session is gone when the status says so ([`encoder_lost`]), or when it is the busy
+    /// encoder's and every frame has had it for [`BUSY_LOST`]; a lone busy refusal skips only
+    /// its frame.
+    fn refused(&self, status: i32, now: Instant) {
+        if encoder_lost(status) {
+            self.lose(status);
+            return;
+        }
+        if status != kVTVideoEncoderNotAvailableNowErr {
+            return;
+        }
+        let at = u64::try_from(now.saturating_duration_since(self.born).as_micros())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let since = self
+            .busy_since_us
+            .compare_exchange(0, at, Ordering::AcqRel, Ordering::Acquire)
+            // The run starts here when none was under way, or went on from where it started.
+            .map_or_else(|since| since, |_none| at);
+        if Duration::from_micros(at.saturating_sub(since)) >= BUSY_LOST {
+            self.lose(status);
+        }
+    }
+
+    /// A frame came out: a run of busy refusals is over.
+    fn coded(&self) {
+        self.busy_since_us.store(0, Ordering::Release);
     }
 
     /// A frame came back with `status`, which says the session is gone: the first such status
@@ -708,13 +761,11 @@ impl Encoder {
                 &raw mut flags,
             )
         };
-        if encoder_lost(status) {
-            self.shared.lose(status);
-        } else {
-            check("VTCompressionSessionEncodeFrame", status)?;
-            self.place();
-        }
-        self.shared.lost()
+        self.shared.refused(status, Instant::now());
+        self.shared.lost()?;
+        check("VTCompressionSessionEncodeFrame", status)?;
+        self.place();
+        Ok(())
     }
 
     /// After the first frame, which placed the session: tell it the rate it now runs at, the one
@@ -833,12 +884,11 @@ unsafe extern "C-unwind" fn output_callback(
         // picture it can decode arrives.
         tracing::debug!(status, ?flags, refresh, "encoder dropped a frame");
         shared.dropped.fetch_add(1, Ordering::Relaxed);
-        if encoder_lost(status) {
-            shared.lose(status);
-        }
+        shared.refused(status, Instant::now());
         return;
     }
     let Some(sample) = NonNull::new(sample) else { return };
+    shared.coded();
     // SAFETY: the sample buffer is valid for the duration of the callback.
     let sample: &CMSampleBuffer = unsafe { sample.as_ref() };
     match packet(sample, shared.codec, refresh) {
@@ -1259,10 +1309,10 @@ mod tests {
     }
 
     fn collect(rx: &std::sync::mpsc::Receiver<EncodedPacket>, n: usize) -> Vec<EncodedPacket> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut out = Vec::new();
         while out.len() < n {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let left = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(left) {
                 Ok(p) => out.push(p),
                 Err(_) => break,
@@ -1509,8 +1559,7 @@ mod tests {
         for p in &packets {
             decoder.decode(&p.data.clone().into(), p.pts_us).unwrap();
         }
-        let (format, matrix) =
-            drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
+        let (format, matrix) = drx.recv_timeout(Duration::from_secs(60)).expect("a decoded frame");
         assert_eq!(format, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
         assert_eq!(matrix.as_deref(), Some(bt709.as_str()), "the frame carries the matrix");
     }
@@ -1645,8 +1694,7 @@ mod tests {
         for p in &packets {
             decoder.decode(&p.data.clone().into(), p.pts_us).unwrap();
         }
-        let (format, cb) =
-            drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
+        let (format, cb) = drx.recv_timeout(Duration::from_secs(60)).expect("a decoded frame");
         assert_eq!(format, pixel_format(Chroma::Full), "decoded straight to xf44");
         let swing = cb.windows(2).map(|w| u32::from(w[0].abs_diff(w[1]))).sum::<u32>()
             / u32::try_from(cb.len() - 1).unwrap();
@@ -1750,6 +1798,53 @@ mod tests {
         }
         let out = collect(&rx, 2);
         assert_eq!(out.iter().map(|p| p.pts_us).collect::<Vec<_>>(), [1, 2], "none after it");
+    }
+
+    /// A busy encoder keeps its session: a frame that comes back with
+    /// `kVTVideoEncoderNotAvailableNowErr` is skipped and the next is coded. Only a run of them
+    /// [`BUSY_LOST`] long with no frame coded between loses the session, and a frame coded
+    /// starts the run over.
+    #[test]
+    fn a_busy_encoder_loses_the_session_only_once_it_stays_busy() {
+        let busy = kVTVideoEncoderNotAvailableNowErr;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        let keyframe = FrameOptions { force_keyframe: true, ..FrameOptions::default() };
+        encoder.encode(&frame(0), 1, &keyframe).unwrap();
+        encoder.flush().unwrap();
+        let refcon = Arc::as_ptr(&encoder.shared).cast_mut().cast::<c_void>();
+        // SAFETY: the refcon is the encoder's own `Shared`, alive for the call; a null sample
+        // with a status is what VideoToolbox passes for a frame it gave up.
+        unsafe {
+            output_callback(
+                refcon,
+                ptr::null_mut(),
+                busy,
+                VTEncodeInfoFlags::empty(),
+                ptr::null_mut(),
+            );
+        }
+        encoder.encode(&frame(1), 2, &FrameOptions::default()).unwrap();
+        encoder.flush().unwrap();
+        let out = collect(&rx, 2);
+        assert_eq!(out.iter().map(|p| p.pts_us).collect::<Vec<_>>(), [1, 2], "coded after it");
+
+        let shared = &encoder.shared;
+        let at = |ms: u64| shared.born + Duration::from_millis(ms);
+        let under = BUSY_LOST.saturating_sub(Duration::from_millis(1));
+        shared.refused(busy, at(10_000));
+        shared.refused(busy, at(10_000) + under);
+        assert!(shared.lost().is_ok(), "busy for less than the run");
+        shared.coded();
+        shared.refused(busy, at(20_000));
+        shared.refused(busy, at(20_000) + under);
+        assert!(shared.lost().is_ok(), "a frame coded started the run over");
+        shared.refused(busy, at(20_000) + BUSY_LOST);
+        let refused = encoder.encode(&frame(2), 3, &FrameOptions::default());
+        assert!(
+            matches!(refused, Err(CodecError::EncoderLost { status }) if status == busy),
+            "busy for the whole run: {refused:?}"
+        );
     }
 
     /// A session the system invalidated refuses the frame handed to it as

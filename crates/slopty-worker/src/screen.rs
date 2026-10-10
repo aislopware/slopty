@@ -1630,8 +1630,12 @@ fn micros(d: Duration) -> u64 {
 /// in one test run on a virtual Mac whose encoder had stopped (`docs/decisions/video.md`, "A
 /// virtual Mac's encoder stops for good past its 1020th client").
 const LOST_RETRY: Duration = Duration::from_millis(250);
-/// The longest [`LOST_RETRY`] grows to: the same bound as a stuck encode's patience.
-const LOST_RETRY_MAX: Duration = ENCODE_STUCK_MAX;
+/// The longest [`LOST_RETRY`] grows to: two seconds, not a stuck encode's [`ENCODE_STUCK_MAX`].
+/// A desktop frozen for half a minute on an encoder that was only busy is worse than what so
+/// long a wait spares a stopped one: a build every two seconds costs that nothing, and a busy
+/// encoder is back within two seconds at worst (`docs/decisions/video.md`,
+/// "A virtual Mac's encoder stops for good past its 1020th client").
+const LOST_RETRY_MAX: Duration = Duration::from_secs(2);
 
 /// When the next replacement of a lost session may be built ([`Pipeline::follow_lost`]).
 #[derive(Debug, Default)]
@@ -7604,7 +7608,7 @@ mod tests {
     #[test]
     fn replacements_lost_without_a_frame_are_rebuilt_ever_more_slowly() {
         let mut retry = LostRetry::default();
-        let (first, max) = (micros(LOST_RETRY), micros(LOST_RETRY_MAX));
+        let first = micros(LOST_RETRY);
         assert_eq!(retry.due_us(0), 0, "the first loss: at once");
         retry.started(10_000_000, 5);
         assert_eq!(retry.due_us(6), 10_000_000, "the replacement coded: at once");
@@ -7617,8 +7621,12 @@ mod tests {
             waits.push(due - at);
             at = due;
         }
-        assert_eq!(&waits[..4], &[2 * first, 4 * first, 8 * first, 16 * first]);
-        assert_eq!(waits.last(), Some(&max), "held at the most");
+        let ms: Vec<u64> = waits.iter().map(|wait| wait / 1_000).collect();
+        assert_eq!(
+            ms,
+            [500, 1_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000, 2_000],
+            "held at two seconds"
+        );
         retry.started(at, 5);
         assert_eq!(retry.due_us(7), at, "a frame since: at once again");
         retry.started(at + 1, 7);
