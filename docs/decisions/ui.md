@@ -7465,7 +7465,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is not a column of solids, since nothing holds them.
   - Tests: `project::tests` (the pipeline's failed stages, a failed push). Golden:
     `project-live-lanes`.
-- ✅ **"New project…" starts its orchestrator first** (2026-10-06,
+- ❌ **"New project…" starts its orchestrator first** (2026-10-06; superseded 2026-10-11 by
+  "New goal is one sheet" below,
   `.research/readiness-2026-10-06.md` N12). Starting a project needed a terminal that already
   ran an agent: open a terminal, start an agent in it, then "Start a project here". Away from
   one, the app only said to stand in a terminal.
@@ -7482,7 +7483,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a tile closed first drops the wait.
   - **The words.** Away from a terminal, the refusal now names the way that works: "A project
     is run by an agent in a terminal: start one with "New project…"".
-  - Test: `workspace::tests::projects::new_project_starts_its_orchestrator_then_asks_for_the_project`.
 - ✅ **A phone has one bar, the focused tile's** (2026-10-06, `.research/ux-audit-2026-10-05.md`
   §11 #16, P3). A phone stacked a navigation bar with the workspace's name over the tile's own
   header, so two rows of chrome stood over every screen of work.
@@ -10161,3 +10161,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   settings), since the client cannot see those settings and the agent then asks after all. Each
   level's name, said to a screen reader, says what it lets the agents do.
   - Test: `workspace::tests::projects::the_board_sets_its_autonomy`.
+
+- ✅ **New goal is one sheet** (2026-10-11, the orchestrator-first study, item 9). "New
+  project…" walked New agent's steps (agent, machine, folder), started the agent, and only then
+  opened a sheet asking for a name, a repository and a target: four stops before the person
+  could say what they wanted, and the goal itself was never asked. The study's ruling is that
+  the person hands over a goal and the rest follows from it. Ruled:
+  - **One sheet.** The palette's "New goal…" opens it at once. It holds the goal (a growing,
+    multi-line field: ↵ creates, ⇧↵ breaks the line), the folder filled from the focused tile
+    on that machine, else the last start's, and a muted line naming the agent and machine
+    ("Claude Code on studio orchestrates it"). Only agents that run in a terminal are offered
+    (`agent_start::runs_in_terminal`), the last started first; machines go last-started first,
+    then the focus's, then by name. With no such agent anywhere it says why and opens nothing.
+  - **Under "More".** The agent and the machine, each a segmented track only when there is a
+    choice; the target branch, blank meaning the focused checkout's branch, else the
+    orchestrator's, else `main`; the verifier, guessed from the repository's run scripts the
+    machine has read (the first named gate, check, verify, test or ci); and the autonomy (Ask,
+    Edits, Own). Pushing starts off and is set on the board's head.
+  - **Then.** Create starts the agent at once with nothing said. Once its tile is its terminal's,
+    one `ProjectCreate` carries the goal, the autonomy, the target and the verifier, with that
+    terminal as orchestrator. The project's title is the goal's first line cut at a word within
+    48 characters, its id the title slugged and cut at a word. Once the server agrees, the goal
+    goes to the orchestrator as the person's first message (`TaskTell` with no task), since the
+    server does not start the orchestrator on `Project.goal` itself; the board opens once the
+    mirror names that terminal.
+  - **Deleted.** The "New project" steps (`For`, `StartOrchestrator`, `NewProjectOf`,
+    `NewProjectOn`), the old sheet (`ProjectSheet`) and its refusals.
+  - Test: `workspace::tests::projects::a_new_goal_starts_its_orchestrator_and_hands_it_the_goal`.

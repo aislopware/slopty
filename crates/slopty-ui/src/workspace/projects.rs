@@ -22,18 +22,24 @@ use slopty_proto::project::{
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
-use super::actions::StartOrchestrator;
 use super::agents::{agent_ask_text, agent_mark_of};
 use crate::icons::Status;
-use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
+use crate::project::create::{Filled, GoalSheet, NewGoal, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 /// What a board's action says when no server is linked to take it.
 pub(crate) const NOT_SENT: &str = "Not sent: the server is away";
-/// What the "New project" sheet says away from an agent's terminal, and the way that works.
-pub(crate) const NO_TERMINAL: &str = "A project is run by an agent in a terminal: start one with \u{201c}New project\u{2026}\u{201d}";
+/// The palette's line that opens the "New goal" sheet.
+pub(crate) const NEW_GOAL: &str = "New goal\u{2026}";
+/// What "New goal…" says when no machine can start an agent that runs in a terminal.
+pub(crate) const NO_ORCHESTRATOR: &str =
+    "No machine has an agent that runs in a terminal, and only one can take a goal";
+/// What the sheet says when its goal is empty.
+pub(crate) const WRITE_THE_GOAL: &str = "Write the goal first";
+/// The most a project's name drawn from its goal runs to, in characters.
+const NAME_FROM_GOAL: usize = 48;
 /// How many pages of the timeline a recap reads back from the server, past what the board
 /// holds: far enough for a night away from a busy project.
 const RECAP_PAGES: usize = 8;
@@ -41,15 +47,9 @@ const RECAP_PAGES: usize = 8;
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// What the timeline says of a task the person cancelled from the board.
 pub(crate) const CANCELLED: &str = "Cancelled by the person";
-/// What the "New project" sheet says in a plain shell.
-pub(crate) const NOT_AN_AGENT: &str = "Start an agent in this terminal first: an orchestrator is an agent, and a shell never \
-     hears what the board tells it";
-
-/// The open "New project" sheet.
+/// The open "New goal" sheet.
 pub(super) struct Sheet {
-    view: Entity<ProjectSheet>,
-    /// The terminal whose agent orchestrates the project made.
-    term: TermRef,
+    view: Entity<GoalSheet>,
     /// What the dim and the sheet track: Tab stays inside ([`crate::a11y::trap`]).
     scope: gpui::FocusHandle,
     _events: gpui::Subscription,
@@ -78,11 +78,11 @@ pub(super) struct ProjectsState {
     /// A project just started or given an orchestrator here, whose board shows once the
     /// mirror has that terminal as its orchestrator.
     pub opening: Option<(ProjectId, TermRef)>,
-    /// The "New project" sheet, open over the workspace for the orchestrator it names.
+    /// The "New goal" sheet, open over the workspace.
     pub sheet: Option<Sheet>,
-    /// The tile of an agent "New project…" started, whose sheet opens once it is its
-    /// terminal's tile ([`WorkspaceView::orchestrator_started`]).
-    pub orchestrating: Option<ItemId>,
+    /// The tile of the agent "New goal…" started, and the goal it takes, whose project is
+    /// made once that tile is its terminal's ([`WorkspaceView::orchestrator_started`]).
+    pub orchestrating: Option<(ItemId, NewGoal)>,
     /// How far this client read each project's timeline, as its board last hid.
     pub looked: HashMap<ProjectId, Looked>,
     /// The boards on show at the last hand-over: one not among them opened since.
@@ -167,6 +167,31 @@ pub(super) fn worker_id(key: WorkerKey) -> Option<WorkerId> {
 
 /// A project name made from `name` (a directory's), as [`ProjectId`] takes it, and not one
 /// of `taken`: lowercase, every run of anything else a dash, and `-2`, `-3`… when it is.
+/// A project's name drawn from its goal: the goal's first line, cut at a word within
+/// [`NAME_FROM_GOAL`] characters, with no stop at its end.
+pub(super) fn name_from_goal(goal: &str) -> String {
+    let line = goal.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    let mut name = String::new();
+    for word in line.split_whitespace() {
+        let wider = name
+            .chars()
+            .count()
+            .saturating_add(word.chars().count())
+            .saturating_add(usize::from(!name.is_empty()));
+        if wider > NAME_FROM_GOAL {
+            break;
+        }
+        if !name.is_empty() {
+            name.push(' ');
+        }
+        name.push_str(word);
+    }
+    if name.is_empty() {
+        name = line.chars().take(NAME_FROM_GOAL).collect();
+    }
+    name.trim_end_matches(['.', ',', ';', ':', '!', '?']).to_owned()
+}
+
 pub(super) fn project_name(name: &str, taken: impl Fn(&ProjectId) -> bool) -> Option<ProjectId> {
     let mut slug = String::new();
     for c in name.chars().flat_map(char::to_lowercase) {
@@ -176,8 +201,15 @@ pub(super) fn project_name(name: &str, taken: impl Fn(&ProjectId) -> bool) -> Op
             slug.push('-');
         }
     }
-    // Room for the widest suffix the loop below can add.
-    slug.truncate(ProjectId::MAX_LEN - 4);
+    // Room for the widest suffix the loop below can add, cut back to a whole word.
+    let room = ProjectId::MAX_LEN - 4;
+    if slug.len() > room {
+        let whole = slug.as_bytes().get(room) == Some(&b'-');
+        slug.truncate(room);
+        if !whole && let Some(at) = slug.rfind('-') {
+            slug.truncate(at);
+        }
+    }
     let slug = slug.trim_end_matches('-');
     let slug = if slug.is_empty() { "project" } else { slug };
     (1..1000_u16)
@@ -819,38 +851,141 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// The last step of "New project…": `agent` starts at once in its own tile, with no first
-    /// message, and is what each step lists first next time. Its sheet opens once the tile is
-    /// its terminal's ([`Self::orchestrator_started`]).
-    pub(super) fn start_orchestrator(
+    /// "New goal…": the one sheet, its folder filled from the focus (else the last start), the
+    /// agent and machine from the last start, and the verifier guessed from the repository's
+    /// own scripts where the machine has read them.
+    pub(super) fn new_goal(
         &mut self,
-        start: &StartOrchestrator,
-        _window: &mut Window,
+        _: &super::actions::NewGoal,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let StartOrchestrator { worker, agent, cwd, worktree } = start.clone();
+        if self.projects.sheet.is_some() {
+            return;
+        }
+        let starters = self.goal_starters();
+        let Some(worker) = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)
+        else {
+            self.show_notice(NO_ORCHESTRATOR.to_owned(), cx);
+            return;
+        };
+        let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
+        let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
+        let folder = here.or(last).unwrap_or_else(|| "~".to_owned());
+        let repo = self.repo_at(worker, &folder, cx);
+        let target = self.focused_branch(worker).unwrap_or_default();
+        let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
+        let filled = Filled { folder, target, verifier, starters };
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| GoalSheet::new(theme, filled, window, cx));
+        let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
+            SheetEvent::Create(goal) => this.take_goal(goal.clone(), cx),
+            SheetEvent::Cancel => this.close_project_sheet(cx),
+        });
+        let scope = cx.focus_handle();
+        let home = gpui::Focusable::focus_handle(view.read(cx), cx);
+        crate::a11y::hold(&scope, &home, cx);
+        self.projects.sheet = Some(Sheet { view, scope, _events: events });
+        cx.notify();
+    }
+
+    /// The agents that can take a goal, those that run in a terminal, the last started first,
+    /// each with the machines that can start it: the last start's first, then the focus's,
+    /// then the rest by name. An agent no machine can start is left out.
+    fn goal_starters(&self) -> Vec<Starter> {
+        let mut agents: Vec<AgentId> = self
+            .startable_agents()
+            .into_iter()
+            .filter(super::agent_start::runs_in_terminal)
+            .collect();
+        let last = self.starts.last();
+        if let Some(at) = last.and_then(|l| agents.iter().position(|a| *a == l.agent)) {
+            let agent = agents.remove(at);
+            agents.insert(0, agent);
+        }
+        agents
+            .into_iter()
+            .filter_map(|agent| {
+                let mut machines: Vec<WorkerKey> = self
+                    .workers
+                    .keys()
+                    .copied()
+                    .filter(|k| self.startable_on(*k).contains(&agent))
+                    .collect();
+                machines.sort_by_key(|k| self.worker_name(*k).to_lowercase());
+                for first in [self.context_worker(), last.map(|l| l.worker)] {
+                    if let Some(at) = first.and_then(|k| machines.iter().position(|m| *m == k)) {
+                        let key = machines.remove(at);
+                        machines.insert(0, key);
+                    }
+                }
+                let machines: Vec<(WorkerKey, String)> =
+                    machines.into_iter().map(|k| (k, self.worker_name(k))).collect();
+                (!machines.is_empty()).then(|| Starter {
+                    label: agent_label(&agent),
+                    agent,
+                    machines,
+                })
+            })
+            .collect()
+    }
+
+    /// The branch the focused shell on `worker` stands on, as its session said.
+    fn focused_branch(&self, worker: WorkerKey) -> Option<String> {
+        let tile = self.focused().filter(|t| t.worker == worker)?;
+        let ItemKind::Terminal { session } = self.item(tile)?.kind else { return None };
+        self.summary(session)?.branch.clone()
+    }
+
+    /// A verifier guessed from `repo`'s run scripts on `worker`, as the machine last read them:
+    /// the first whose name reads as a check (`gate`, `check`, `verify`, `test`, `ci`).
+    fn guessed_verifier(&self, worker: WorkerKey, repo: &str, cx: &gpui::App) -> Option<String> {
+        const CHECKS: [&str; 5] = ["gate", "check", "verify", "test", "ci"];
+        let hub = self.held_hub(worker)?;
+        let scripts = hub.read(cx).git().repo(repo)?.scripts.clone()?;
+        CHECKS.iter().find_map(|check| {
+            scripts.list.iter().find(|s| s.name.eq_ignore_ascii_case(check)).map(|s| s.line.clone())
+        })
+    }
+
+    /// The sheet's Create: its goal's agent starts at once in a tile of its own, with no first
+    /// message, and the project is made around it once that tile is its terminal's
+    /// ([`Self::orchestrator_started`]).
+    fn take_goal(&mut self, goal: NewGoal, cx: &mut Context<Self>) {
+        if goal.goal.is_empty() {
+            self.show_notice(WRITE_THE_GOAL.to_owned(), cx);
+            return;
+        }
         let at = crate::clock::now(cx);
         let went = slopty_client::starts::LastStart {
-            agent: agent.clone(),
-            worker,
-            cwd: cwd.clone(),
-            worktree,
+            agent: goal.agent.clone(),
+            worker: goal.worker,
+            cwd: goal.folder.clone(),
+            worktree: false,
             at,
         };
         self.start_went(went, None, cx);
         let item = ItemId::new();
-        let starting = super::starting::Starting::new(worker, agent, cwd, None);
-        self.open_starting(item, starting.in_worktree(worktree), cx);
+        let starting = super::starting::Starting::new(
+            goal.worker,
+            goal.agent.clone(),
+            goal.folder.clone(),
+            None,
+        );
+        self.open_starting(item, starting, cx);
         self.send_start(item, None, cx);
-        self.projects.orchestrating = Some(item);
+        self.projects.orchestrating = Some((item, goal));
+        self.close_project_sheet(cx);
     }
 
-    /// Once a frame: the agent "New project…" started is in its terminal's tile, so the
-    /// "New project" sheet opens for it. While it starts, or its tile waits on its worker's
-    /// word, nothing yet; a start that failed or a tile closed lets it go.
-    fn orchestrator_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.projects.orchestrating else { return };
-        if self.starting.has(item) || self.projects.sheet.is_some() {
+    /// Once a frame: the agent "New goal…" started is in its terminal's tile, so its project is
+    /// made around it. While it starts, or its tile waits on its worker's word, nothing yet; a
+    /// start that failed or a tile closed lets the goal go.
+    fn orchestrator_started(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.projects.orchestrating.as_ref().map(|(item, _)| *item) else {
+            return;
+        };
+        if self.starting.has(item) {
             return;
         }
         let Some(tile) = self.layout.tiles().find(|t| t.item == item) else {
@@ -860,115 +995,74 @@ impl WorkspaceView {
         let Some(ItemKind::Terminal { session }) = self.item(tile).map(|i| i.kind.clone()) else {
             return;
         };
-        self.projects.orchestrating = None;
+        let Some(worker) = worker_id(tile.worker) else { return };
+        let Some((_, goal)) = self.projects.orchestrating.take() else { return };
         self.focus_tile(tile, cx);
-        self.open_project_sheet(session, window, cx);
+        self.create_project(goal, TermRef { worker, session }, cx);
     }
 
-    /// The "New project" sheet for `session`'s agent as its orchestrator; or that terminal's
-    /// project, where it orchestrates one; or why not.
-    fn open_project_sheet(
-        &mut self,
-        session: SessionId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(project) =
-            self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
-        {
-            self.open_project(&project, cx);
-            return;
-        }
-        if self.session_agent(session).is_none() {
-            self.show_notice(NOT_AN_AGENT.to_owned(), cx);
-            return;
-        }
-        let Some(worker) = self.worker_of_session(session).and_then(worker_id) else {
-            self.show_notice(NO_TERMINAL.to_owned(), cx);
-            return;
-        };
-        let summary = self.summary(session);
-        let Some(repo) = summary.and_then(|s| s.repo.clone().or_else(|| s.cwd.clone())) else {
-            self.show_notice("This terminal has no directory to start a project in".to_owned(), cx);
-            return;
-        };
-        let target = summary.and_then(|s| s.branch.clone()).unwrap_or_else(|| "main".to_owned());
-        let title = repo.trim_end_matches('/').rsplit('/').next().unwrap_or(&repo).to_owned();
-        let agent = self
-            .session_agent(session)
-            .map_or_else(String::new, |a| agent_label(&AgentId(a.to_owned())));
-        let machine = self.worker_name(worker_key(worker));
-        let orchestrator = format!("Orchestrated by {agent} on {machine}, in this terminal");
-        let filled = NewProject { title, repo, target, verifier: None };
-        let theme = self.theme.clone();
-        let view = cx.new(|cx| ProjectSheet::new(theme, filled, orchestrator, window, cx));
-        let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
-            SheetEvent::Create(new) => this.create_project(new.clone(), cx),
-            SheetEvent::Cancel => this.close_project_sheet(cx),
-        });
-        let term = TermRef { worker, session };
-        let scope = cx.focus_handle();
-        let home = gpui::Focusable::focus_handle(view.read(cx), cx);
-        crate::a11y::hold(&scope, &home, cx);
-        self.projects.sheet = Some(Sheet { view, term, scope, _events: events });
-        cx.notify();
-    }
-
-    /// Make the project the sheet holds, with its terminal as the orchestrator, and show its
-    /// board once the server has it. A refusal is said and the sheet stays to be put right.
-    fn create_project(&mut self, new: NewProject, cx: &mut Context<Self>) {
-        let Some(term) = self.projects.sheet.as_ref().map(|s| s.term) else { return };
-        if new.title.is_empty() {
-            self.show_notice("Name the project".to_owned(), cx);
-            return;
-        }
+    /// Make the project `goal` names around its orchestrator `term`, then hand the orchestrator
+    /// the goal as the person's first message, and show its board once the server has it. A
+    /// refusal is said.
+    fn create_project(&mut self, goal: NewGoal, term: TermRef, cx: &mut Context<Self>) {
+        let title = name_from_goal(&goal.goal);
         let mirror = &self.projects.mirror;
-        let Some(project) = project_name(&new.title, |id| mirror.get(id).is_some()) else {
-            self.show_notice(format!("No name is left for a project called {}", new.title), cx);
+        let Some(project) = project_name(&title, |id| mirror.get(id).is_some()) else {
+            self.show_notice(format!("No name is left for a project called {title}"), cx);
             return;
         };
-        let target = if new.target.is_empty() { "main".to_owned() } else { new.target };
+        let key = worker_key(term.worker);
+        let summary = self.summary(term.session);
+        let repo = summary
+            .and_then(|s| s.repo.clone())
+            .or_else(|| self.repo_at(key, &goal.folder, cx))
+            .unwrap_or_else(|| goal.folder.clone());
+        let target = if goal.target.is_empty() {
+            summary.and_then(|s| s.branch.clone()).unwrap_or_else(|| "main".to_owned())
+        } else {
+            goal.target
+        };
         let verb = Verb::ProjectCreate {
             project: project.clone(),
-            title: new.title,
-            repo: new.repo,
+            title,
+            goal: Some(goal.goal.clone()),
+            autonomy: goal.autonomy,
+            repo,
             target,
-            verifier: new.verifier,
+            verifier: goal.verifier,
             // Pushing is the board head's one setting, off until the person turns it on.
             push: false,
             orchestrator: Some(term),
             limits: LimitsChange::default(),
             metadata: None,
-            goal: None,
-            autonomy: Autonomy::default(),
         };
+        let told = goal.goal;
         self.send_to_server(
             verb,
             move |this, cx| {
-                this.close_project_sheet(cx);
+                let tell = Verb::TaskTell { project: project.clone(), task: None, text: told };
+                this.send_to_server(tell, |_, _| (), cx);
                 this.open_when_orchestrated(project, term, cx);
             },
             cx,
         );
     }
 
-    /// What the open "New project" sheet holds.
+    /// What the open "New goal" sheet holds.
     #[cfg(test)]
-    pub(super) fn project_sheet_typed(&self, cx: &gpui::App) -> Option<NewProject> {
-        Some(self.projects.sheet.as_ref()?.view.read(cx).typed(cx))
+    pub(super) fn goal_sheet_typed(&self, cx: &gpui::App) -> Option<NewGoal> {
+        self.projects.sheet.as_ref()?.view.read(cx).typed(cx)
     }
 
-    /// Let the "New project" sheet go; the keyboard goes back to the terminal it came from.
+    /// Let the "New goal" sheet go; the keyboard goes back to the focused tile.
     pub(super) fn close_project_sheet(&mut self, cx: &mut Context<Self>) {
-        if let Some(sheet) = self.projects.sheet.take() {
-            if let Some(tile) = self.tile_of_session(sheet.term.session) {
-                self.focus_tile(tile, cx);
-            }
+        if self.projects.sheet.take().is_some() {
+            self.pending_return = true;
             cx.notify();
         }
     }
 
-    /// The "New project" sheet over the workspace, while it is open.
+    /// The "New goal" sheet over the workspace, while it is open.
     pub(super) fn render_project_sheet(
         &self,
         window: &Window,
@@ -976,7 +1070,7 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
         let sheet = self.projects.sheet.as_ref()?;
-        let backdrop = crate::kit::backdrop(&self.theme, window).id("project-sheet-backdrop");
+        let backdrop = crate::kit::backdrop(&self.theme, window).id("goal-sheet-backdrop");
         Some(
             crate::a11y::trap(backdrop, &sheet.scope)
                 .occlude()

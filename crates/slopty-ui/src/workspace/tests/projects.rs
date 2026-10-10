@@ -735,22 +735,23 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     assert!(!shown(&view, cx, orchestrator), "the header's way back to the terminal");
 }
 
-/// "New project…" offers only the agents that run in a terminal, as an orchestrator must: with
-/// Claude Code and pi installed it passes the agent step over for Claude Code, and the one
-/// machine's too. The folder step offers no past sessions. Its pick starts the agent at once,
-/// with nothing said, and the "New project" sheet opens over its tile once that is its
-/// terminal's, filled in from it.
+/// "New goal…" is one sheet: the goal written, the folder filled from the focused shell, and
+/// only the agents that run in a terminal offered, as an orchestrator must (pi is passed over).
+/// ↵ starts the agent at once with nothing said; once its tile is its terminal's, one
+/// `ProjectCreate` makes the project around it, named from the goal, on the shell's branch,
+/// and the goal goes to the orchestrator as the person's first message.
 #[gpui::test]
-fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAppContext) {
+fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppContext) {
+    use slopty_proto::project::{Autonomy, LimitsChange, ProjectId};
     use slopty_proto::server::InstalledAgent;
     use slopty_proto::thread::wire::{IntentDone, Outcome as Done, TableFrame, ThreadRequest};
     use slopty_proto::thread::{AgentId, Cursor};
 
-    use super::super::actions::NewProject;
-    use super::super::agent_start::RESUME_PAST;
+    use super::super::actions::NewGoal;
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let key = studio.key;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let agents = [AgentId::CLAUDE_CODE, AgentId::PI].map(|a| InstalledAgent {
         agent: AgentId::named(a),
         version: "1.0".to_owned(),
@@ -759,27 +760,36 @@ fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAp
     });
     let caps = WorkerCaps { agents: agents.to_vec(), ..healthy() };
     view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
         v.set_worker_caps(key, caps, cx);
         v.threads_linked(key, cx);
     });
     let shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
-    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    view.update_in(cx, |v, _w, cx| {
+        let Some(ItemKind::Terminal { session }) = v.item(shell).map(|i| i.kind.clone()) else {
+            return;
+        };
+        let mut on_trunk = summary(session, Some("/src/app"));
+        on_trunk.branch = Some("trunk".to_owned());
+        v.session_opened(key, on_trunk, cx);
+        v.focus_tile(shell, cx);
+    });
     cx.run_until_parked();
     studio.drain();
 
-    cx.dispatch_action(NewProject);
+    cx.dispatch_action(NewGoal);
     cx.run_until_parked();
-    let lines: Vec<String> = view
-        .read_with(cx, |v, cx| {
-            v.palette
-                .clone()
-                .map(|p| p.read(cx).matches().iter().map(|l| l.label.clone()).collect())
-        })
-        .unwrap_or_default();
-    assert!(!lines.is_empty(), "straight to the folder step");
-    assert!(!lines.iter().any(|l| l == RESUME_PAST), "no past sessions: {lines:?}");
+    assert!(cx.debug_bounds("goal-sheet").is_some(), "the one sheet");
+    cx.simulate_input("Ship the dark mode toggle, with its docs.");
+    let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
+    assert_eq!(
+        (typed.folder.as_str(), typed.agent.clone(), typed.target.as_str()),
+        ("/src/app", AgentId::named(AgentId::CLAUDE_CODE), "trunk"),
+        "filled from the focus; pi has no terminal"
+    );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
+    assert!(cx.debug_bounds("goal-sheet").is_none(), "gone once it is said");
     let started: Vec<_> = studio
         .drain()
         .into_iter()
@@ -789,9 +799,9 @@ fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAp
         })
         .collect();
     let [(intent, start)] = started.as_slice() else { panic!("one start: {started:?}") };
-    assert_eq!(start.agent, AgentId::named(AgentId::CLAUDE_CODE), "pi has no terminal");
+    assert_eq!(start.agent, AgentId::named(AgentId::CLAUDE_CODE));
     assert_eq!((start.cwd.as_str(), start.prompt.as_deref()), ("/src/app", None), "at once");
-    assert!(cx.debug_bounds("project-sheet").is_none(), "not before its terminal");
+    assert_eq!(sent(&mut queue, cx, done), [], "no project before its orchestrator's terminal");
 
     // The worker opens the agent's terminal, its table names the thread there, and the start
     // is answered.
@@ -820,13 +830,34 @@ fn new_project_starts_its_orchestrator_then_asks_for_the_project(cx: &mut TestAp
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("project-sheet").is_some(), "the sheet over the agent's tile");
-    let typed = view.read_with(cx, WorkspaceView::project_sheet_typed).expect("the sheet");
-    assert_eq!((typed.title.as_str(), typed.repo.as_str()), ("app", "/src/app"));
-    view.update_in(cx, |v, _w, cx| v.close_project_sheet(cx));
-    cx.run_until_parked();
-    let on = view.read_with(cx, |v, _| v.focused().and_then(|t| v.item(t)).map(|i| i.kind.clone()));
-    assert_eq!(on, Some(ItemKind::Terminal { session }), "back on the orchestrator");
+    let project = ProjectId::new("ship-the-dark-mode-toggle-with-its").expect("a name");
+    let term =
+        TermRef { worker: super::super::projects::worker_id(key).expect("a worker"), session };
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::ProjectCreate {
+            project: project.clone(),
+            title: "Ship the dark mode toggle, with its docs".to_owned(),
+            goal: Some("Ship the dark mode toggle, with its docs.".to_owned()),
+            autonomy: Autonomy::default(),
+            repo: "/src/app".to_owned(),
+            target: "trunk".to_owned(),
+            verifier: None,
+            push: false,
+            orchestrator: Some(term),
+            limits: LimitsChange::default(),
+            metadata: None,
+        }]
+    );
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskTell {
+            project,
+            task: None,
+            text: "Ship the dark mode toggle, with its docs.".to_owned(),
+        }],
+        "the goal is the orchestrator's first word"
+    );
 }
 
 /// The task the board stands on offers Cancel task until it is merged, after what it waits

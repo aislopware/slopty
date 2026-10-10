@@ -34,9 +34,9 @@ actions!(
         /// "Move to project…": the other projects, as a step; the focused tile goes to a tab of
         /// its own in the one picked.
         MoveToProject,
-        /// "New project…": New agent's steps for the agent that will orchestrate it (one that
-        /// runs in a terminal), then the "New project" sheet over its tile.
-        NewProject,
+        /// "New goal…": the one sheet that hands a goal to a new orchestrator, which starts
+        /// with it as a project.
+        NewGoal,
         /// Put an empty note beside the focused column.
         NewNote,
         /// Put a worker's window or display in the workspace.
@@ -262,8 +262,6 @@ pub struct CloneToStart {
     pub url: String,
     /// Where the clone goes on `worker`: absolute, or `~/…`.
     pub into: String,
-    /// The agent orchestrates a new project ("New project…"), rather than working on its own.
-    pub project: bool,
 }
 
 /// A run script picked in Run's step: it opens on `worker` in a terminal of its own.
@@ -337,39 +335,6 @@ pub struct NewAgentOn {
     pub agent: slopty_proto::thread::AgentId,
     /// On which machine.
     pub worker: slopty_client::layout::WorkerKey,
-}
-
-/// An agent picked in "New project…": the machine to start its orchestrator on is asked next.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct NewProjectOf {
-    /// Which agent.
-    pub agent: slopty_proto::thread::AgentId,
-}
-
-/// A machine picked in "New project…": the folder its orchestrator starts in is asked next.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct NewProjectOn {
-    /// Which agent.
-    pub agent: slopty_proto::thread::AgentId,
-    /// On which machine.
-    pub worker: slopty_client::layout::WorkerKey,
-}
-
-/// The last step of "New project…": `agent` starts on `worker` in `cwd` at once, with no first
-/// message, and the "New project" sheet opens over its terminal's tile once it has one.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct StartOrchestrator {
-    /// Where it runs.
-    pub worker: slopty_client::layout::WorkerKey,
-    /// Which agent.
-    pub agent: slopty_proto::thread::AgentId,
-    /// In which folder, as the worker spells it (`~` its home).
-    pub cwd: String,
-    /// In a new worktree of its own, made from the clone the folder is in.
-    pub worktree: bool,
 }
 
 /// "Group the navigator by …": the fact keys it groups the tiles by, the first a tile has
@@ -453,7 +418,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Split right with a terminal", Box::new(SplitRight)),
         w("Split down with a terminal", Box::new(SplitDown)),
         w("Show or hide the tab's terminal", Box::new(TabTerminal)),
-        w(super::agent_start::NEW_PROJECT, Box::new(NewProject)),
+        w(super::projects::NEW_GOAL, Box::new(NewGoal)),
         w("New note", Box::new(NewNote)),
         w("Add a window or display", Box::new(AddWindow)),
         w("Open file…", Box::new(OpenFile)),

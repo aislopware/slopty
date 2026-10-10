@@ -24,7 +24,7 @@ use slopty_proto::{ClientMsg, RequestId};
 
 use super::WorkspaceView;
 use super::actions::CloneToStart;
-use super::agent_start::{For, start};
+use super::agent_start::start;
 use crate::palette::{CommandPalette, PaletteEvent, PaletteItem};
 
 /// The folder step's line for a repository to clone there: "Clone `origin` into `~/…`".
@@ -38,7 +38,6 @@ pub(super) struct CloneAsked {
     worker: WorkerKey,
     request: RequestId,
     agent: AgentId,
-    purpose: For,
     origin: String,
     into: String,
     /// The step that says how far it is.
@@ -127,12 +126,7 @@ impl WorkspaceView {
 
     /// The folder step's lines that clone a repository another machine has into `worker`, then
     /// start `agent` in it.
-    pub(super) fn clone_lines(
-        &self,
-        agent: &AgentId,
-        worker: WorkerKey,
-        purpose: For,
-    ) -> Vec<PaletteItem> {
+    pub(super) fn clone_lines(&self, agent: &AgentId, worker: WorkerKey) -> Vec<PaletteItem> {
         self.cloneable_here(worker)
             .into_iter()
             .map(|c| {
@@ -143,7 +137,6 @@ impl WorkspaceView {
                     origin: c.origin,
                     url: c.url,
                     into: c.into,
-                    project: purpose == For::Project,
                 });
                 PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Repo)
             })
@@ -158,7 +151,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let CloneToStart { worker, agent, origin, url, into, project } = ask.clone();
+        let CloneToStart { worker, agent, origin, url, into } = ask.clone();
         if !self.workers.get(&worker).is_some_and(super::Worker::is_linked) {
             let text = format!("{} is out of reach", self.worker_name(worker));
             self.show_notice(text, cx);
@@ -169,9 +162,7 @@ impl WorkspaceView {
         self.send(worker, ClientMsg::CloneRepo { request, url, into: into.clone() });
         self.open_step(Vec::new(), THEN_STARTS, window, cx);
         let Some(palette) = self.palette.clone() else { return };
-        let purpose = if project { For::Project } else { For::Agent };
-        let asked =
-            CloneAsked { worker, request, agent, purpose, origin, into, step: palette.entity_id() };
+        let asked = CloneAsked { worker, request, agent, origin, into, step: palette.entity_id() };
         let saying = self.cloning_words(&asked, None);
         palette.update(cx, |p, cx| p.set_empty(saying, cx));
         self.clone_asked = Some(asked);
@@ -260,8 +251,7 @@ impl WorkspaceView {
                     self.show_notice(text, cx);
                     return;
                 };
-                self.palette_action =
-                    Some(start(asked.purpose, key, &asked.agent, cloned.path, false));
+                self.palette_action = Some(start(key, &asked.agent, cloned.path, false));
                 palette.update(cx, |_, cx| cx.emit(PaletteEvent::Dismiss));
                 return;
             }
