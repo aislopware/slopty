@@ -1307,6 +1307,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::approvals::a_notes_reply_goes_straight_to_a_linked_worker`,
     `…::a_notes_reply_goes_through_the_server_while_its_worker_is_away` (slopty-ui).
 
+- ✅ **A pushed note keeps up with its thread** (2026-10-11, orchestrator-first study item 23,
+  the server's half). Three ways a pocketed phone's note fell behind what it said:
+  - **The request moved under it.** A thread that still needed the person while its request
+    changed (a new one opened in the old one's place, or the one shown went) was never pushed
+    again, so its buttons answered a request that was gone. Each phone's note now remembers
+    the request its buttons answer (`Shown::asks`). Every ranking pass compares that request
+    with the thread's current one, for threads that needed the person at the last pass too
+    (`ladder::follow_asks`). When they differ, the note is pushed again with `quiet` set, under
+    the same collapse id, with the new request's words and buttons and no sound
+    (`Phones::follow`). What the buttons answer is kept only in memory. A server started again
+    moves each shown note once, quietly, since it cannot know what the note's buttons answer.
+  - **A need first seen.** A thread was told only when its rung moved from a known one, so a
+    need first seen after a server restart, or after its worker linked again, was never
+    pushed. Now it counts (`Told::first`). It is pushed only when the person is at no client,
+    and only to a phone not already showing it, as when they leave the desk. No link is told,
+    because the clients that held it still do.
+  - **A finished turn already read.** A Finished note stayed on the phone after the person
+    read the turn on the Mac. The note now records its turn (`Shown::finished`, kept in
+    `push.json`). It is taken back once the row's `seen` reaches that turn, or once the thread
+    is gone from a linked worker's table. A later note about the thread replaces it, and with
+    it the record. The file's shape changed again: an old one is set aside.
+  - Tests: `slopty-server` `hub::ladder::tests::a_shown_need_follows_its_request_quietly`,
+    `…::a_need_first_seen_is_pushed_to_a_phone_not_showing_it`,
+    `…::a_finished_note_is_taken_back_once_its_turn_is_seen`.
+
 - ✅ **Save to Files comes down into the folder chosen** (2026-10-10, readiness audit "below
   the line"). On iPhone and iPad, "Save to Files…" and "Save a copy…" brought the whole file
   into the app's outbox before the export sheet showed, with no progress and no stop, and the

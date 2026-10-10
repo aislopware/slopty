@@ -9,7 +9,7 @@ use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
 use slopty_proto::thread::wire::{NoteChoice, PullSeen, PullStands, RequestCard};
 use slopty_proto::thread::{
-    AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Status,
+    AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Status, TurnId,
 };
 
 use super::super::project_tests::{create, project};
@@ -40,7 +40,7 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         pull: None,
         meters: Meters::default(),
         ended: None,
-        seen: slopty_proto::thread::TurnId::BEFORE,
+        seen: TurnId::BEFORE,
         draft: None,
         updated_ms: WallMs::from_millis(since),
         cwd: None,
@@ -1235,4 +1235,169 @@ async fn work_turning_ready_is_pushed_once_with_the_oldest_to_merge() {
     let heard = pushes();
     let [push] = heard.as_slice() else { panic!("one note: {heard:?}") };
     assert_eq!(body(push).notice.text, "4 ready to merge", "the count as it stands");
+}
+
+/// A note that a thread needs the person follows what its buttons answer: a request that
+/// opens in the place of the one it showed pushes it again quietly, under the same collapse
+/// id, its buttons the new request's; one that goes while the thread still waits takes them
+/// away the same way. Nothing moved, nothing is pushed.
+#[tokio::test]
+async fn a_shown_need_follows_its_request_quietly() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push);
+        }
+        out
+    };
+    let phone = Client::sit(&hub, "phone");
+    pocketed_phone(&hub, phone.seated.link(), ClientId::new());
+    let one = row(Phase::Working, 1_000, None);
+    lease.handle(snapshot(vec![one.clone()]));
+    hub.rank_ladder();
+    let needs = approval(&one, 2_000, "Run cargo test?");
+    lease.handle(delta(vec![needs.clone()]));
+    hub.rank_ladder();
+    let first = pushes();
+    let [push] = first.as_slice() else { panic!("{first:?}") };
+    assert_eq!((body(push).ask.clone(), body(push).quiet), (Some(AskId("1".to_owned())), false));
+
+    let mut next = needs;
+    next.requests[0].id = AskId("2".to_owned());
+    next.requests[0].title = "Run cargo build?".to_owned();
+    lease.handle(delta(vec![next.clone()]));
+    hub.rank_ladder();
+    let moved_on = pushes();
+    let [push] = moved_on.as_slice() else { panic!("{moved_on:?}") };
+    let quiet = body(push);
+    assert_eq!((quiet.ask.clone(), quiet.quiet), (Some(AskId("2".to_owned())), true));
+    assert_eq!(quiet.notice.text, "Run cargo build?", "in the new request's words");
+    assert_eq!(quiet.notice.kind, NoticeKind::NeedsYou);
+    hub.rank_ladder();
+    assert!(pushes().is_empty(), "nothing moved, nothing pushed");
+
+    let mut waits = next.clone();
+    waits.requests.clear();
+    lease.handle(delta(vec![waits]));
+    hub.rank_ladder();
+    let gone = pushes();
+    let [push] = gone.as_slice() else { panic!("{gone:?}") };
+    assert_eq!((body(push).ask.clone(), body(push).quiet), (None, true), "no buttons now");
+}
+
+/// `row` asking a plain yes or no of the person, its note's Allow and Deny answering it.
+fn approval(row: &ThreadRow, since: u64, title: &str) -> ThreadRow {
+    use slopty_proto::thread::{Choice, Effect};
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let mut needs = asking(moved(row, Phase::NeedsYou, since), title);
+    needs.requests[0].kind = Request::APPROVAL.to_owned();
+    needs.requests[0].options = vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)];
+    needs
+}
+
+/// A thread first seen already needing the person (the server just started, or its worker
+/// linked again) is pushed to a pocketed phone, once, as a need that came while they were away
+/// would be. A server started again from the store does not push it again to a phone already
+/// showing it, and moves that note quietly once, since it no longer knows what its buttons
+/// answer.
+#[tokio::test]
+async fn a_need_first_seen_is_pushed_to_a_phone_not_showing_it() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let kept = hub.keep_phones(PushKept::default());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let phone = Client::sit(&hub, "phone");
+    let client = ClientId::new();
+    pocketed_phone(&hub, phone.seated.link(), client);
+    let needs = approval(&row(Phase::Working, 1_000, None), 1_000, "Run cargo test?");
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    lease.handle(snapshot(vec![needs.clone()]));
+    hub.rank_ladder();
+    let first = pushed.try_recv().expect("first seen needing the person");
+    assert_eq!((body(&first).notice.kind, body(&first).quiet), (NoticeKind::NeedsYou, false));
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "once");
+
+    let stored = kept.borrow().clone();
+    drop((lease, phone, hub));
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let _kept = hub.keep_phones(stored);
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    lease.handle(snapshot(vec![needs]));
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "the phone shows it already");
+    hub.rank_ladder();
+    let moved_once = pushed.try_recv().expect("its buttons moved once");
+    assert!(body(&moved_once).quiet);
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "then followed as before");
+}
+
+/// A pushed finished turn is taken back once the person has seen that turn on any device, and
+/// kept with the phones so a server started again still does; a turn seen before a later one
+/// ended leaves the later's note up.
+#[tokio::test]
+async fn a_finished_note_is_taken_back_once_its_turn_is_seen() {
+    use slopty_proto::thread::wire::TurnEnded;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let kept = hub.keep_phones(PushKept::default());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let phone = Client::sit(&hub, "phone");
+    let client = ClientId::new();
+    pocketed_phone(&hub, phone.seated.link(), client);
+    let one = row(Phase::Working, 1_000, None);
+    lease.handle(snapshot(vec![one.clone()]));
+    hub.rank_ladder();
+    let ended = |turn: u32| TurnEnded {
+        turn: TurnId(turn),
+        at_ms: WallMs::from_millis(90_000),
+        ran_ms: 89_000,
+        answered: true,
+    };
+    let mut done = moved(&one, Phase::Done, 90_000);
+    done.ended = Some(ended(2));
+    lease.handle(delta(vec![done.clone()]));
+    hub.rank_ladder();
+    let note = pushed.try_recv().expect("a finished turn");
+    assert_eq!(body(&note).notice.kind, NoticeKind::Finished);
+    let at = ThreadAt { worker, thread: one.id };
+    assert!(
+        kept.borrow().finished.get(&client).is_some_and(|f| f.contains(&(at, TurnId(2)))),
+        "kept with the phone"
+    );
+
+    done.seen = TurnId(1);
+    lease.handle(delta(vec![done.clone()]));
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "an earlier turn seen leaves it up");
+    done.seen = TurnId(2);
+    lease.handle(delta(vec![done]));
+    hub.rank_ladder();
+    let back = pushed.try_recv().expect("seen elsewhere");
+    assert_eq!(back.what, Sending::TakeBack(vec![Subject::Thread(at)]));
+    assert!(kept.borrow().finished.is_empty(), "and forgotten");
+    hub.rank_ladder();
+    assert!(pushed.try_recv().is_err(), "once");
 }
