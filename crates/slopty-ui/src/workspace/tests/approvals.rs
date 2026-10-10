@@ -213,3 +213,59 @@ fn a_notes_reply_goes_through_the_server_while_its_worker_is_away(cx: &mut TestA
         [WorkspaceEvent::Unanswered { route, why: REPLY_NOT_SENT }, WorkspaceEvent::TapsSettled]
     );
 }
+
+/// A note's reply to a thread whose worker is linked here goes straight to it, as the thread's
+/// own composer sends a message, and nothing goes through the server; the app may sleep at once.
+#[gpui::test]
+fn a_notes_reply_goes_straight_to_a_linked_worker(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{Intent, TableFrame, ThreadRequest};
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = None;
+    let row = state.row(WallMs::ZERO);
+    let thread = row.id;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.threads_linked(key, cx);
+        let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
+        v.thread_table(key, &table, cx);
+        v.set_app_active(false, cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&events);
+    cx.update(|_window, cx| {
+        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
+            heard.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+
+    let reply = Tap {
+        text: Some("also bump the lockfile".to_owned()),
+        ..tapped(key, thread, "", notify::REPLY)
+    };
+    view.update_in(cx, |v, _w, cx| v.open_notification(&reply, cx));
+    cx.run_until_parked();
+    let sent: Vec<String> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                thread: to,
+                intent: Intent::Send { text, .. },
+                ..
+            }) if to == thread => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, ["also bump the lockfile"], "one message, to its thread");
+    assert!(queue.try_next().is_none(), "nothing through the server");
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "it may sleep");
+}
