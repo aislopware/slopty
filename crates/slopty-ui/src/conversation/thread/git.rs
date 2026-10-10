@@ -71,6 +71,13 @@ pub enum Said {
         /// What gh said.
         said: String,
     },
+    /// The person's review posted to the pull request.
+    Reviewed {
+        /// How many notes on lines went with it.
+        posted: u32,
+        /// Its page, when the forge said.
+        url: Option<String>,
+    },
     /// The worktree removed, and its branch with it unless that holds work not landed.
     Freed {
         /// What went and what stayed, in words.
@@ -357,8 +364,10 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         GitDone::Blob { blob, bytes } => {
             repo.blobs.insert(blob, Blob::Came(Arc::from(bytes)));
         }
-        // Asked by the review tile, which says how it went; nothing here waits on it.
-        GitDone::PullReviewed { .. } => {}
+        GitDone::PullReviewed { url, posted } => {
+            repo.said = Some((request, Said::Reviewed { posted, url }));
+            then.push(Then::Pull);
+        }
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {

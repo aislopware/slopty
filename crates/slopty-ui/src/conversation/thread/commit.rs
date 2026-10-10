@@ -1255,6 +1255,19 @@ impl CommitSheet {
                     )
                     .into_any_element()
             }
+            Said::Reviewed { posted, url } => {
+                let words = if *posted == 0 {
+                    "Posted the review".to_owned()
+                } else {
+                    let notes = kit::count(u64::from(*posted), "comment", "comments");
+                    format!("Posted the review \u{b7} {notes}")
+                };
+                line(Symbol::ArrowTrianglePull, words)
+                    .when_some(url.clone(), |el, url| {
+                        el.cursor_pointer().on_click(move |_ev, _w, cx| cx.open_url(&url))
+                    })
+                    .into_any_element()
+            }
             Said::Merged { said } | Said::Freed { said } => {
                 self.said_block("commit-merged", said, s.text_secondary).into_any_element()
             }

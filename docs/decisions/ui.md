@@ -9592,3 +9592,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `thread_blocks`, so `diff.rs` no longer names `slopty_proto::conversation`.
   - Tests: `review::tests::a_rename_a_mode_and_a_large_file_are_said_in_words`,
     `review::tests::a_picture_shows_both_sides_and_a_large_file_opens_whole`.
+
+- ✅ **A pull request's review threads hang on their lines, and the person's comments post as
+  their review** (2026-10-11, readiness audit item 23; W's half is `GitOp::PullReview` through
+  the person's own `gh` or `glab`).
+  - **The defect.** The open pull request's review threads were read only to count them for
+    "Address the review (N)". The person never read them in place, and their own comments
+    could only go to an agent.
+  - **Threads in the diff.** A thread on a line of the new side that is on show hangs under
+    that line, as a waiting comment does. It shows each note's author and words, and a link to
+    its page. A thread on a line not on show, or on code changed since, hangs at its file's
+    end and names its line ("Line 99", "Line 11, changed since"). A reviewer's words over
+    their whole review stay with the commit sheet's "Address the review".
+  - **Posting.** While the person has comments of their own and the branch has an open pull
+    request whose threads were read, the foot offers "Post 2 comments to #42…". Its menu holds
+    "Post as comments", "Approve" and "Request changes". The comments go as one review,
+    anchored at the head commit last read, each on its last line and side. The agent's
+    findings are left out: they are not the person's to sign.
+  - **What comes back.** Once the forge took the post, its comments go and "Posted 2 comments
+    to #42" is said above the diff, and the pull request is read again. A post turned down
+    keeps every comment and says why in the error's tone ("Review not posted to #42: …").
+    The commit sheet says "Posted the review · 2 comments", with its page.
+  - Test: `review::tests::forge_threads_hang_on_their_lines_and_comments_post_as_a_review`.

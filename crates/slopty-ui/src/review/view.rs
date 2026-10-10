@@ -68,6 +68,7 @@ const LIST_WIDTH: f32 = 240.0;
 
 mod authors;
 mod file_menu;
+mod forge;
 mod gaps;
 mod keys;
 pub(in crate::review) mod sides;
@@ -221,6 +222,9 @@ enum Row {
     Context(usize, usize, usize),
     /// A comment waiting, by its place among them.
     Comment(usize),
+    /// A thread of the branch's pull request, by its place among them, and whether it hangs
+    /// under its line (else at its file's end).
+    Forge(usize, bool),
     /// The field a comment is written in.
     Draft,
 }
@@ -268,6 +272,8 @@ struct Came {
     words: String,
     /// The intent the worker turned down, when it did not run.
     refused: Option<IntentId>,
+    /// It did not go: said in the error's tone.
+    failed: bool,
 }
 
 /// The lines a comment is being written on.
@@ -385,6 +391,12 @@ pub struct ReviewView {
     pictures: std::cell::RefCell<HashMap<String, Arc<gpui::Image>>>,
     /// The blobs of pictures' sides asked of the worker for this tile.
     blobs_asked: std::cell::RefCell<HashSet<String>>,
+    /// The branch's pull request's review threads, as last taken ([`forge`]).
+    forge: Option<Arc<slopty_proto::git::PullComments>>,
+    /// The person's comments on their way to the pull request as their review.
+    posting: Option<forge::Posting>,
+    /// The post's menu of verdicts is open.
+    post_open: bool,
     /// The opened stretches' lines as drawn, by the file's place and the stretch.
     context: HashMap<(usize, usize), Rc<[Line]>>,
     _subscriptions: Vec<Subscription>,
@@ -536,6 +548,9 @@ impl ReviewView {
             sides: HashMap::new(),
             pictures: std::cell::RefCell::default(),
             blobs_asked: std::cell::RefCell::default(),
+            forge: None,
+            posting: None,
+            post_open: false,
             context: HashMap::new(),
             _subscriptions: vec![writing, hearing, watching],
         };
@@ -799,6 +814,7 @@ impl ReviewView {
         if folder && self.model.review().is_some_and(|shown| Arc::ptr_eq(shown, &review)) {
             return;
         }
+        self.take_forge(cx);
         self.show(review);
         if self.take_whole(cx) {
             self.rebuild();
@@ -810,8 +826,10 @@ impl ReviewView {
     /// The repository said something: a folder's changes came, or a commit or a merge went,
     /// after which they are read again.
     fn git_moved(&mut self, cx: &mut Context<Self>) {
-        // A file left out by the review's budget may have come whole, or its reading moved on.
-        if self.take_whole(cx) {
+        // A file left out by the review's budget may have come whole, or its reading moved on;
+        // the pull request's threads may have come, or the person's post been answered.
+        let posted = self.settle_post(cx);
+        if self.take_whole(cx) | self.take_forge(cx) | posted {
             self.rebuild();
         } else {
             self.redraw_left_out();
@@ -874,6 +892,9 @@ impl ReviewView {
             }
             let Some(blocks) = self.blocks.get(&at).filter(|b| !b.is_empty()).cloned() else {
                 rows.push(Row::Bare(at));
+                if let Some(path) = self.model.file(at).map(|f| f.path.clone()) {
+                    self.forge_left(&mut rows, &path, &[]);
+                }
                 continue;
             };
             let path = self.model.file(at).map(|f| f.path.clone()).unwrap_or_default();
@@ -887,6 +908,7 @@ impl ReviewView {
                 }
             }
             self.push_gap(&mut rows, at, blocks.len());
+            self.forge_left(&mut rows, &path, &blocks);
         }
         let old = self.rows.len();
         self.list.splice(0..old, rows.len());
@@ -901,6 +923,7 @@ impl ReviewView {
                 rows.push(Row::Comment(ix));
             }
         }
+        self.forge_under(rows, path, lines);
         if self.drafting.as_ref().is_some_and(|d| d.after == row) {
             rows.push(Row::Draft);
         }
@@ -991,7 +1014,8 @@ impl ReviewView {
         if let Some(words) = refused {
             self.reviewing = None;
             self.pinned = None;
-            self.came = Some(Came { agent: asked.agent, words, refused: Some(asked.intent) });
+            self.came =
+                Some(Came { agent: asked.agent, words, refused: Some(asked.intent), failed: true });
             return;
         }
         let Some(state) = hub.threads().mirror(thread).and_then(Mirror::state) else {
@@ -1018,7 +1042,7 @@ impl ReviewView {
         if !self.model.has_findings() {
             self.pinned = None;
         }
-        self.came = Some(Came { agent, words, refused: None });
+        self.came = Some(Came { agent, words, refused: None, failed: false });
         self.rebuild();
     }
 
@@ -1119,7 +1143,8 @@ impl ReviewView {
             let words =
                 if why.is_empty() { NOT_SENT.to_owned() } else { format!("{NOT_SENT}: {why}") };
             let refused = self.sending.take().map(|(id, _)| id);
-            self.came = Some(Came { agent, words, refused });
+            let failed = refused.is_some();
+            self.came = Some(Came { agent, words, refused, failed });
             return;
         }
         let Some((_, batch)) = self.sending.take() else { return };
@@ -1399,15 +1424,21 @@ impl ReviewView {
     }
 
     /// A small text button.
-    fn action(&self, id: String, label: &'static str, primary: bool) -> gpui::Stateful<Div> {
+    fn action(
+        &self,
+        id: String,
+        label: impl Into<SharedString>,
+        primary: bool,
+    ) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let selector = id.clone();
+        let label: SharedString = label.into();
         let el = div()
             .id(ElementId::Name(id.into()))
             .debug_selector(move || selector)
             .role(Role::Button)
-            .aria_label(label)
+            .aria_label(label.clone())
             .flex_none()
             .px(px(theme.spacing.sm))
             .py(px(theme.spacing.xxs))
@@ -1749,7 +1780,7 @@ impl ReviewView {
         let s = theme.surfaces;
         let notes = self.model.notes().len();
         let (words, tone) = match &self.came {
-            Some(came) if came.refused.is_some() => (came.words.clone(), s.error),
+            Some(came) if came.failed => (came.words.clone(), s.error),
             Some(came) => (came.words.clone(), s.text_secondary),
             None if notes == 1 => ("1 finding not in the diff".to_owned(), s.text_secondary),
             None => (format!("{notes} findings not in the diff"), s.text_secondary),
@@ -1811,7 +1842,7 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         self.came.as_ref().map(|came| {
-            let tone = if came.refused.is_some() { s.error } else { s.text_secondary };
+            let tone = if came.failed { s.error } else { s.text_secondary };
             div()
                 .debug_selector(|| "review-came".to_owned())
                 .w_full()
@@ -2043,6 +2074,7 @@ impl ReviewView {
             Row::Gap(at, gap) => self.gap_row(at, gap, cx),
             Row::Context(at, gap, line) => self.context_row(at, gap, line),
             Row::Comment(c) => self.comment_row(c, cx),
+            Row::Forge(ix, under) => self.forge_row(ix, under),
             Row::Draft => self.draft_row(),
         };
         // One plane: a file is its head on the band and its lines on the content, with no frame
@@ -2479,6 +2511,20 @@ impl ReviewView {
                 row = row.item(FOOT_ADD, kit::Priority(160), add);
             }
             row = row.item("send", kit::Priority::ESSENTIAL, send);
+        }
+        if let Some(words) = self.post_label(cx) {
+            let posting = self.posting.is_some();
+            let post = self
+                .action("review-post".to_owned(), words, false)
+                .aria_expanded(self.post_open)
+                .when(!posting, |el| {
+                    el.on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.post_open = !this.post_open;
+                        cx.notify();
+                    }))
+                });
+            let post = div().relative().flex_none().child(post).children(self.post_menu(cx));
+            row = row.item(forge::FOOT_POST, kit::Priority(150), post);
         }
         if mark {
             let marked = self

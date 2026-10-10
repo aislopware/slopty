@@ -1343,3 +1343,119 @@ fn a_picture_shows_both_sides_and_a_large_file_opens_whole(cx: &mut TestAppConte
     click(cx, "review-open-whole-1");
     assert_eq!(*heard.borrow(), [ReviewEvent::OpenFile { path: "/r/data.json".to_owned() }]);
 }
+
+/// The branch's pull request's review threads hang in the diff: one on a line on show under
+/// that line, one on a line not on show and one on code changed since at their file's end,
+/// and a reviewer's words over the whole nowhere here. The person's own comments go to the
+/// pull request as their review, anchored at its head; once the forge took them they go and
+/// what was posted is said, and a post turned down keeps them and says why.
+#[gpui::test]
+fn forge_threads_hang_on_their_lines_and_comments_post_as_a_review(cx: &mut TestAppContext) {
+    use slopty_proto::git::{
+        GitDone, GitOp, GitOutcome, LineSide, PullComments, PullNote, PullStatus, PullThread,
+        ReviewNote, ReviewVerdict,
+    };
+
+    let (view, hub, sent, cx) = tile(cx, 1200.0);
+    let asked = |sent: &Sent, pick: fn(&GitOp) -> bool| {
+        sent.borrow().iter().rev().find_map(|m| match m {
+            ClientMsg::Git { request, op, .. } if pick(op) => Some((*request, op.clone())),
+            _ => None,
+        })
+    };
+    let (read, _) = asked(&sent, |op| matches!(op, GitOp::PullStatus)).expect("the pull asked");
+    let pull = PullStatus {
+        forge: slopty_proto::git::Forge::GitHub,
+        number: 12,
+        url: "https://github.com/o/r/pull/12".to_owned(),
+        title: "Refresh tokens".to_owned(),
+        state: "OPEN".to_owned(),
+        draft: false,
+        head: "feature".to_owned(),
+        head_commit: "abc".to_owned(),
+        base: "main".to_owned(),
+        review: "CHANGES_REQUESTED".to_owned(),
+        mergeable: "MERGEABLE".to_owned(),
+        merge_state: "BLOCKED".to_owned(),
+        checks: Vec::new(),
+        more_checks: 0,
+    };
+    let done = GitOutcome::Done(GitDone::PullStatus(Some(Box::new(pull))));
+    hub.update(cx, |hub, cx| hub.git_done(read, done, cx));
+    cx.run_until_parked();
+    let (read, _) = asked(&sent, |op| matches!(op, GitOp::PullComments { number: 12 }))
+        .expect("an open pull request's threads are read");
+    let thread = |line: u32, outdated: bool, path: Option<&str>| PullThread {
+        path: path.map(str::to_owned),
+        line: Some(line),
+        outdated,
+        url: Some(format!("https://github.com/o/r/pull/12#r{line}")),
+        notes: vec![PullNote { author: "ana".to_owned(), body: format!("About line {line}") }],
+    };
+    let comments = PullComments {
+        number: 12,
+        threads: vec![
+            thread(11, false, Some("src/lib.rs")),
+            thread(99, false, Some("src/lib.rs")),
+            thread(11, true, Some("src/lib.rs")),
+            thread(1, false, None),
+        ],
+        more: 0,
+    };
+    let done = GitOutcome::Done(GitDone::PullComments(Box::new(comments)));
+    hub.update(cx, |hub, cx| hub.git_done(read, done, cx));
+    cx.run_until_parked();
+    let top = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} drawn")).origin.y
+    };
+    // `src/lib.rs` is the review's second file; its first hunk's third line is new line 11.
+    let under = top(cx, "review-forge-0");
+    assert!(top(cx, "review-line-1-0-2") < under && under < top(cx, "review-line-1-0-3"));
+    let end = top(cx, "review-line-1-1-1");
+    assert!(top(cx, "review-forge-1") > end && top(cx, "review-forge-2") > end, "at its end");
+    assert!(cx.debug_bounds("review-forge-3").is_none(), "words over the whole are not here");
+    assert!(cx.debug_bounds("review-post").is_none(), "nothing of the person's to post");
+
+    let line = cx.debug_bounds("review-line-1-1-1").expect("drawn").center();
+    cx.simulate_mouse_down(line, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(line, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_input("Log at debug");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    click(cx, "review-post");
+    click(cx, "review-post-changes");
+    let (request, op) = asked(&sent, |op| matches!(op, GitOp::PullReview { .. })).expect("posted");
+    let note = ReviewNote {
+        path: "src/lib.rs".to_owned(),
+        line: 41,
+        side: LineSide::New,
+        body: "Log at debug".to_owned(),
+    };
+    assert_eq!(
+        op,
+        GitOp::PullReview {
+            number: 12,
+            verdict: ReviewVerdict::RequestChanges,
+            body: String::new(),
+            notes: vec![note],
+            head: Some("abc".to_owned()),
+        }
+    );
+    let failed = GitOutcome::Failed { said: "pull request moved past abc".to_owned() };
+    hub.update(cx, |hub, cx| hub.git_done(request, failed, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "a post turned down keeps them");
+    let said = view.read_with(cx, |v, _| v.came_words());
+    assert_eq!(said.as_deref(), Some("Review not posted to #12: pull request moved past abc"));
+
+    click(cx, "review-post");
+    click(cx, "review-post-comment");
+    let (request, _) = asked(&sent, |op| matches!(op, GitOp::PullReview { .. })).expect("again");
+    let took = GitDone::PullReviewed { url: None, posted: 1 };
+    hub.update(cx, |hub, cx| hub.git_done(request, GitOutcome::Done(took), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_none(), "taken, they go");
+    let said = view.read_with(cx, |v, _| v.came_words());
+    assert_eq!(said.as_deref(), Some("Posted 1 comment to #12"));
+}
