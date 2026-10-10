@@ -596,7 +596,7 @@ pub struct Workspace {
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
     /// stay up for the transfers under way when the phone is pocketed.
     #[cfg(target_os = "ios")]
-    _grace: Option<slopty_platform::notify::BackgroundGrace>,
+    grace: Option<slopty_platform::notify::BackgroundGrace>,
     /// What the server may push to while the phone is pocketed, and when it stops listening.
     #[cfg(target_os = "ios")]
     pushing: push::Pushing,
@@ -741,7 +741,7 @@ impl Workspace {
             presenting: presence::Presenting::default(),
             dial,
             #[cfg(target_os = "ios")]
-            _grace: None,
+            grace: None,
             #[cfg(target_os = "ios")]
             pushing: push::Pushing::default(),
             #[cfg(target_os = "ios")]
@@ -861,7 +861,7 @@ impl Workspace {
         }
         #[cfg(target_os = "ios")]
         {
-            self._grace = if active {
+            self.grace = if active {
                 None
             } else {
                 slopty_platform::notify::BackgroundGrace::begin("Slopty keeps its links")
