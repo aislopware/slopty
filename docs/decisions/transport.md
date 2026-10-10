@@ -2104,3 +2104,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `Interrupted`, as before.
   - Test: `hub::tests::a_link_that_does_not_drain_holds_a_forward_no_longer_than_its_deadline`
     (slopty-server).
+
+- ✅ **A build mismatch says which side is older** (2026-10-11, readiness 10-11 rank 6, W half).
+  - **The defect.** "It runs X; this build is Y" always told the person to update the other end.
+    So two Macs on different builds would deploy each other back and forth, and a newer worker
+    could be downgraded.
+  - **Stamped builds.** `BUILD` now ends with when its wire last changed, in UTC:
+    `0.1.0+wire.0badf00d.20261011T0812Z`. That is the time of the last commit to touch the
+    goldens, or the time of the edit while they differ from it.
+    - The build script reads it with git, and only when the goldens change (as it reads the
+      fingerprint), so a commit rebuilds nothing.
+    - Without git, the part is left off.
+    - The prefix's layout is unchanged.
+  - **Which is newer.** `WrongBuild::newer` (slopty-net) compares versions, then the stamps.
+    - A peer that says no build is older than any.
+    - Two builds it cannot tell apart answer `None`, and the person is asked rather than told.
+  - **What the person is told.**
+    - `UpdateNotice::newer` and `this_is_older` give the app what it needs to hide Update when
+      this device is the older one.
+    - The CLI's notice then reads "runs a newer build … Update Slopty on this machine to match
+      it" and gives no command.
+    - A worker refused by the server names the side to update.
+  - Tests: `the_newer_build_is_told_by_version_then_by_its_wire_s_date` (slopty-net),
+    `a_newer_peer_says_to_update_this_machine` (slopty-client `update.rs`), and the build test in
+    slopty-proto `wire.rs`.

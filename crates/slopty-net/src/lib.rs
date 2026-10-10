@@ -143,6 +143,63 @@ impl std::fmt::Display for WrongBuild {
 
 impl std::error::Error for WrongBuild {}
 
+/// Which of two builds is the newer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Newer {
+    /// This build: the other end is the one to update.
+    Here,
+    /// The other end's: this machine is the one to update, and putting this build there would
+    /// take it back.
+    There,
+}
+
+impl WrongBuild {
+    /// Which build is the newer: by version, else by when each one's wire last changed (the
+    /// stamp [`slopty_proto::wire::BUILD`] ends with). A build that says none is older than any
+    /// that does. `None` when the two cannot be told apart that way: one without a stamp, or
+    /// two on the same version whose wires changed in the same minute.
+    #[must_use]
+    pub fn newer(&self) -> Option<Newer> {
+        newer(slopty_proto::wire::BUILD, &self.peer)
+    }
+}
+
+/// Which of `here` and `there`, two builds as [`slopty_proto::wire::BUILD`] spells them, is
+/// the newer.
+fn newer(here: &str, there: &str) -> Option<Newer> {
+    use std::cmp::Ordering;
+    if there.is_empty() {
+        return Some(Newer::Here);
+    }
+    let ((here_version, here_stamp), (there_version, there_stamp)) =
+        (build_parts(here), build_parts(there));
+    let by_version = here_version?.cmp(&there_version?);
+    let order = match (by_version, here_stamp, there_stamp) {
+        (Ordering::Equal, Some(here), Some(there)) if here.len() == there.len() => here.cmp(there),
+        (order, ..) => order,
+    };
+    match order {
+        Ordering::Greater => Some(Newer::Here),
+        Ordering::Less => Some(Newer::There),
+        Ordering::Equal => None,
+    }
+}
+
+/// A build's `major.minor.patch` as numbers, and the stamp of when its wire last changed when
+/// it says one.
+fn build_parts(build: &str) -> (Option<[u64; 3]>, Option<&str>) {
+    let (version, metadata) = build.split_once('+').unwrap_or((build, ""));
+    let stamp = metadata.strip_prefix("wire.").and_then(|wire| wire.split('.').nth(1));
+    (version_numbers(version), stamp.filter(|s| !s.is_empty()))
+}
+
+/// `major.minor.patch` as numbers; `None` for anything else, a pre-release among them.
+fn version_numbers(version: &str) -> Option<[u64; 3]> {
+    let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
+    let numbers = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(numbers)
+}
+
 impl NetError {
     /// An I/O error on `context` (a path, or what was being done).
     #[must_use]
@@ -200,7 +257,35 @@ fn closed_with<'e>(e: &'e (dyn std::error::Error + 'static)) -> Option<&'e noq::
 
 #[cfg(test)]
 mod tests {
-    use super::NetError;
+    use super::{NetError, Newer, newer};
+
+    /// The newer build is told by version first, then by when its wire last changed; a build
+    /// older than the prefix is older than any, and two that cannot be told apart are neither.
+    #[test]
+    fn the_newer_build_is_told_by_version_then_by_its_wire_s_date() {
+        let order = [
+            ("0.2.0+wire.0badf00d.20261009T2307Z", "0.1.9+wire.feedface.20261101T0000Z"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface.20261009T2307Z"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", ""),
+            ("0.10.0+wire.0badf00d", "0.9.0+wire.feedface"),
+        ];
+        for (new, old) in order {
+            assert_eq!(newer(new, old), Some(Newer::Here), "{new} over {old}");
+            if !old.is_empty() {
+                assert_eq!(newer(old, new), Some(Newer::There), "{old} under {new}");
+            }
+        }
+        let unknown = [
+            ("0.1.0+wire.0badf00d", "0.1.0+wire.feedface"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface.20261011T0812Z"),
+            ("0.1.0+wire.0badf00d", "not a build"),
+            ("0.1.0-rc.1+wire.0badf00d", "0.1.0+wire.feedface"),
+        ];
+        for (a, b) in unknown {
+            assert_eq!(newer(a, b), None, "{a} beside {b}");
+        }
+    }
 
     #[derive(Debug, thiserror::Error)]
     #[error("connection lost")]

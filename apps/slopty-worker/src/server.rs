@@ -126,13 +126,14 @@ pub async fn run(
             // It changes only when someone updates it or this worker: asked again after a while.
             Err(Ended::WrongBuild(wrong)) => {
                 let (server_build, this) = (wrong.peer_build(), slopty_proto::wire::BUILD);
-                tracing::warn!(
-                    server = %addr, server_build, this,
-                    "the server runs a different build; update whichever is behind"
-                );
+                let update = match wrong.newer() {
+                    Some(slopty_net::Newer::Here) => "update the server",
+                    Some(slopty_net::Newer::There) => "update this worker",
+                    None => "update whichever is behind",
+                };
+                tracing::warn!(server = %addr, server_build, this, "the server runs a different build; {update}");
                 let why = format!(
-                    "the server runs build {server_build} and this worker {this}; update \
-                     whichever is behind"
+                    "the server runs build {server_build} and this worker {this}; {update}"
                 );
                 stands(&daemon, &addr, LinkState::Refused { why });
                 tokio::time::sleep(slopty_net::redial::WRONG_BUILD).await;

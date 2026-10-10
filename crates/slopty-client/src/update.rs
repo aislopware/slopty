@@ -9,6 +9,7 @@
 //! ([`latest_release_feed`], [`newer_release`]): a release is published, never pushed, so the
 //! app asks and says what it found, and the person downloads it.
 
+pub use slopty_net::Newer;
 use slopty_net::{NetError, WrongBuild};
 use slopty_proto::wire::BUILD;
 
@@ -64,6 +65,20 @@ impl UpdateNotice {
         }
     }
 
+    /// Which build is the newer: by version, else by when each one's wire last changed (the
+    /// stamp [`BUILD`] ends with). `None` when the two cannot be told apart that way: a build
+    /// without a stamp, or two on the same version from the same minute.
+    #[must_use]
+    pub fn newer(&self) -> Option<Newer> {
+        WrongBuild { peer: self.peer.clone() }.newer()
+    }
+
+    /// Whether this device runs the older build, so the other end is not the one to update.
+    #[must_use]
+    pub fn this_is_older(&self) -> bool {
+        self.newer() == Some(Newer::There)
+    }
+
     /// What each side runs.
     #[must_use]
     pub fn detail(&self) -> String {
@@ -92,9 +107,14 @@ impl UpdateNotice {
     }
 }
 
-/// The CLI's lines: the host and both builds, then the command.
+/// The CLI's lines: the host and both builds, then what to update: the command for the other
+/// end, or this machine when it is the older.
 impl std::fmt::Display for UpdateNotice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.this_is_older() {
+            writeln!(f, "{} runs a newer build. {}", self.host, self.detail())?;
+            return write!(f, "Update Slopty on this machine to match it.");
+        }
         writeln!(f, "{} runs a different build. {}", self.host, self.detail())?;
         write!(f, "Update it: {}", self.command())
     }
@@ -245,6 +265,21 @@ mod tests {
         let page = answer("v1.0.0", "").replace("https://github.com", "file:///etc");
         assert!(newer_release(page.as_bytes(), "0.1.0").is_none(), "only an https page opens");
         assert!(newer_release(answer("v1.0.0+abc", "").as_bytes(), "0.1.0+wire.1").is_some());
+    }
+
+    /// A notice from a newer peer tells this machine to update and offers no command that
+    /// would put the older build there.
+    #[test]
+    fn a_newer_peer_says_to_update_this_machine() {
+        let notice = UpdateNotice::worker("mini", &wrong("999.0.0+wire.feedface"));
+        assert!(notice.this_is_older());
+        let said = notice.to_string();
+        assert!(said.starts_with("mini runs a newer build."), "{said}");
+        assert!(said.ends_with("Update Slopty on this machine to match it."), "{said}");
+        assert!(!said.contains("deploy"), "{said}");
+        let older = UpdateNotice::worker("mini", &wrong(""));
+        assert_eq!(older.newer(), Some(Newer::Here));
+        assert!(older.to_string().ends_with("Update it: slopty worker deploy mini --update"));
     }
 
     #[test]

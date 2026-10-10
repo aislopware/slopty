@@ -116,7 +116,8 @@ mod tests {
         assert_eq!(fingerprint::of(reversed), first, "the order files are read in does not count");
         assert!(BUILD.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+wire.")), "{BUILD}");
         let hex = format!("{FINGERPRINT:016x}");
-        assert!(BUILD.ends_with(hex.get(..8).unwrap()), "{BUILD}");
+        let shown = BUILD.split_once("+wire.").map(|(_, wire)| wire.split('.').next());
+        assert_eq!(shown.flatten(), hex.get(..8), "{BUILD}");
     }
 
     /// A changed, added or renamed wire golden moves it; the insta header and the control
