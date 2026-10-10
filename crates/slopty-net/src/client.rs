@@ -87,7 +87,8 @@ pub async fn connect_addr(
 
 /// The QUIC handshake alone, on `config` or the endpoint's default client config. A peer that
 /// closes as the handshake ends, to say the tailnet grants this device nothing there or that it
-/// runs another build, fails as that ([`NetError::NotGranted`], [`NetError::WrongBuild`]).
+/// runs another build, fails as that ([`NetError::NotGranted`], [`NetError::WrongBuild`]); one
+/// that refuses it is [`NetError::Refused`], and one that never answers [`NetError::NoAnswer`].
 pub(crate) async fn dial(
     endpoint: &Endpoint,
     addr: SocketAddr,
@@ -101,9 +102,15 @@ pub(crate) async fn dial(
     .map_err(|e| NetError::Connect(format!("{addr}: {e}")))?;
     tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)
         .await
-        .map_err(|_elapsed| NetError::Connect(format!("{addr}: no answer")))?
-        .map_err(|e| match NetError::stream(&e) {
-            said @ (NetError::NotGranted | NetError::WrongBuild(_)) => said,
+        .map_err(|_elapsed| NetError::NoAnswer(addr.to_string()))?
+        .map_err(|e| match (&e, NetError::stream(&e)) {
+            (_, said @ (NetError::NotGranted | NetError::WrongBuild(_))) => said,
+            (noq::ConnectionError::ConnectionClosed(close), _)
+                if close.error_code == noq::TransportErrorCode::CONNECTION_REFUSED =>
+            {
+                NetError::Refused(addr.to_string())
+            }
+            (noq::ConnectionError::TimedOut, _) => NetError::NoAnswer(addr.to_string()),
             _ => NetError::Connect(format!("{addr}: {e}")),
         })
 }

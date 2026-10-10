@@ -312,7 +312,12 @@ mod tests {
         let started = Instant::now();
         let err = connect_addr(&endpoint, not_loopback(port), hello()).await.unwrap_err();
         let took = started.elapsed();
-        assert!(matches!(&err, NetError::Connect(why) if why.contains("refused")), "{err:?}");
+        assert!(matches!(&err, NetError::Refused(_)), "{err:?}");
+        assert_eq!(
+            err.unreached(),
+            Some(slopty_net::Unreached::Refused),
+            "told apart from silence"
+        );
         assert!(took < Duration::from_secs(1), "refused at once, not timed out: {took:?}");
 
         // Loopback is admitted whatever the list says, and it is the first client through.
@@ -330,7 +335,8 @@ mod tests {
         let endpoint = bind_client().unwrap();
         let started = Instant::now();
         let err = connect_addr(&endpoint, addr, hello()).await.unwrap_err();
-        assert!(matches!(err, NetError::Connect(_)), "{err:?}");
+        assert!(matches!(err, NetError::NoAnswer(_)), "{err:?}");
+        assert_eq!(err.unreached(), Some(slopty_net::Unreached::NoAnswer));
         assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     }
 

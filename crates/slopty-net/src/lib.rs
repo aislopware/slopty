@@ -81,9 +81,17 @@ pub enum NetError {
     /// A name that does not resolve.
     #[error("resolve: {0}")]
     Resolve(String),
-    /// Connecting failed.
+    /// Connecting failed, for a reason none of the variants below names.
     #[error("connect: {0}")]
     Connect(String),
+    /// The address did not answer the handshake in time: the machine is asleep, off the
+    /// network, or nothing listens there.
+    #[error("{0}: no answer")]
+    NoAnswer(String),
+    /// The address turned this device away before the handshake (QUIC's `CONNECTION_REFUSED`):
+    /// its admitted ranges, a worker's `[worker] allow`, do not hold this device's address.
+    #[error("{0}: turned this device away")]
+    Refused(String),
     /// A QUIC stream failed.
     #[error("stream: {0}")]
     Stream(String),
@@ -200,7 +208,46 @@ fn version_numbers(version: &str) -> Option<[u64; 3]> {
     parts.next().is_none().then_some(numbers)
 }
 
+/// Why a peer was not reached, in the terms a person is told it: what is said, and what can be
+/// done about it, differ for each.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unreached {
+    /// Its name does not resolve, or its address does not parse.
+    NoSuchHost,
+    /// Nothing answered ([`NetError::NoAnswer`]).
+    NoAnswer,
+    /// It answered and turned this device away by its address ([`NetError::Refused`]).
+    Refused,
+    /// The tailnet grants this device no role there ([`NetError::NotGranted`]).
+    NotGranted,
+    /// It runs another build ([`NetError::WrongBuild`]).
+    WrongBuild,
+    /// The link was made and then ended: closed, reset or lost.
+    Dropped,
+}
+
 impl NetError {
+    /// Why this failure left the peer unreached, when it is about the peer at all: a local
+    /// failure (binding, a file, the codec, a protocol slip) is `None`.
+    #[must_use]
+    pub const fn unreached(&self) -> Option<Unreached> {
+        Some(match self {
+            Self::Address(_) | Self::Resolve(_) => Unreached::NoSuchHost,
+            Self::NoAnswer(_) | Self::TimedOut(_) => Unreached::NoAnswer,
+            Self::Refused(_) => Unreached::Refused,
+            Self::NotGranted => Unreached::NotGranted,
+            Self::WrongBuild(_) => Unreached::WrongBuild,
+            Self::Connect(_) | Self::Stream(_) | Self::Closed | Self::Reset(_) => {
+                Unreached::Dropped
+            }
+            Self::Bind { .. }
+            | Self::Io { .. }
+            | Self::Codec(_)
+            | Self::Protocol(_)
+            | Self::Store(_) => return None,
+        })
+    }
+
     /// An I/O error on `context` (a path, or what was being done).
     #[must_use]
     pub fn io(context: impl std::fmt::Display, source: std::io::Error) -> Self {

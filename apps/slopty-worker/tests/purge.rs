@@ -140,7 +140,7 @@ mod purge {
         let dialing = async {
             loop {
                 match connect_addr(&endpoint, addr, hello.clone()).await {
-                    Err(slopty_net::NetError::Connect(why)) if why.ends_with("no answer") => {}
+                    Err(slopty_net::NetError::NoAnswer(_)) => {}
                     other => break other,
                 }
             }

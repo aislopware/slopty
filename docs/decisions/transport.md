@@ -2128,3 +2128,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `the_newer_build_is_told_by_version_then_by_its_wire_s_date` (slopty-net),
     `a_newer_peer_says_to_update_this_machine` (slopty-client `update.rs`), and the build test in
     slopty-proto `wire.rs`.
+
+- ✅ **A failed dial says what kind of failure it was** (2026-10-11, readiness 10-11 rank 5, W
+  half).
+  - **The defect.** A machine that did not answer and one that turned this device away by its
+    `[worker] allow` ranges both reached the person as `connect: 100.x:45550: …` text. Nothing
+    in that text tells them what to do.
+  - **New errors.** `NetError::NoAnswer` is a handshake that timed out, or a connection that
+    timed out before it was made. `NetError::Refused` is QUIC's `CONNECTION_REFUSED`, which the
+    listener sends at once to a peer outside its admitted ranges. Neither is `Connect` text any
+    more.
+  - **One kind per failure.** `NetError::unreached()` sorts every failure about the peer into an
+    `Unreached` kind: no such host, no answer, refused, not granted, wrong build, or dropped once
+    linked. It is `None` for a local failure. The app maps each kind to a sentence and the action
+    that fixes it (lane A), and the raw chain stays in the log.
+  - Tests: `a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake` and
+    `an_address_with_nothing_behind_it_fails_in_seconds` (slopty-net `tests/loopback.rs`).
