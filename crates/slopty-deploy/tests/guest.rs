@@ -5,7 +5,7 @@
 //! trusted; the deploy then installs this build's worker, which answers there and from this Mac.
 //!
 //! Live (`#[ignore]`), run by `cargo xtask vm deploy --app`, which clones and boots the guest,
-//! admits this Mac's address in its `[worker] allow` and says where everything is:
+//! admits this Mac's address in its `[network] allow` and says where everything is:
 //! `SLOPTY_VM_GUEST` (its address), `SLOPTY_VM_USER`, `SLOPTY_VM_KEY` (the key it trusts),
 //! `SLOPTY_VM_BINS` (this tree's worker, built for this Mac and so for the guest) and
 //! `SLOPTY_VM_HOST_KEY` (the fingerprint of its `ssh_host_ed25519_key`). `ssh` reads no config

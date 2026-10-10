@@ -10,7 +10,7 @@
 //!   defaults a Linux install takes (`~/.local/share/slopty`, `/tmp/slopty-<uid>`). The worker's
 //!   QUIC port is published on a free loopback port of this Mac. A container is not on the tailnet,
 //!   so its settings admit the one address this Mac's packets arrive from, the bridge's gateway, as
-//!   `[worker] allow`. Ctrl-C stops the container, which removes itself.
+//!   `[network] allow`. Ctrl-C stops the container, which removes itself.
 //! - `e2e` does both and runs `crates/slopty-e2e/tests/linux.rs` against the worker from this Mac,
 //!   then removes the container.
 //! - `deploy` proves an install the way a person makes one: it starts a container whose init is
@@ -154,8 +154,7 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
     let mkdir = c.exec(&[], &["mkdir", "-p", &data]).stdin(Stdio::null()).status()?;
     ensure!(mkdir.success(), "mkdir {data}: {mkdir}");
     // This Mac's packets reach the container from its bridge's gateway, and only from it.
-    let settings =
-        format!("[worker]\nallow = [\"{gateway}\"]\n\n[server]\nallow = [\"{gateway}\"]\n");
+    let settings = format!("[network]\nallow = [\"{gateway}\"]\n");
     write_in(&c, &format!("{data}/settings.toml"), &settings)?;
 
     let xtask = std::env::current_exe().context("this binary")?;
@@ -628,7 +627,7 @@ impl Stack {
         let mkdir = c.exec(&[], &["mkdir", "-p", &data]).stdin(Stdio::null()).status()?;
         ensure!(mkdir.success(), "mkdir {data}: {mkdir}");
         // This Mac's packets reach the container from its bridge's gateway, and only from it.
-        let settings = format!("[worker]\nallow = [\"{gateway}\"]\n");
+        let settings = format!("[network]\nallow = [\"{gateway}\"]\n");
         write_in(c, &format!("{data}/settings.toml"), &settings)?;
 
         let log = ["RUST_LOG=info"];

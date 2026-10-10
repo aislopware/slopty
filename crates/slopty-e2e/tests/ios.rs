@@ -234,7 +234,7 @@ mod tests {
         drv.keys("cmd-a").await.unwrap();
         // The server the app follows stays in the file.
         let settings = format!(
-            "{}alert = \"never\"\n\n[client]\nserver = \"{}\"\n",
+            "{}alert = \"never\"\n\n[network]\nserver = \"{}\"\n",
             pinned_settings(APPEARANCE),
             stack.server.address()
         );

@@ -4,7 +4,7 @@
 //! the other end. A peer is let in when it is:
 //!
 //! * on loopback, as anything;
-//! * in a range the settings list (`[worker] allow`, for a plain VPN), as anything, since an
+//! * in a range the settings list (`[network] allow`, for a plain VPN), as anything, since an
 //!   address is all such a network says;
 //! * a node of the tailnet the local Tailscale vouches for: the user's own machines as anything,
 //!   another user's or a tagged node in the roles a tailnet grant gives it

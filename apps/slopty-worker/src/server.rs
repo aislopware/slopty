@@ -38,13 +38,13 @@ use crate::Daemon;
 const OUT_DEPTH: usize = 256;
 
 /// The server to register with: `--server` (or `SLOPTY_SERVER`, which clap folds into it),
-/// else `[worker] server` in `settings.toml`; `None` runs the worker on its own.
+/// else `[network] server` in `settings.toml`; `None` runs the worker on its own.
 pub fn configured(
     flag: Option<&str>,
     settings: &slopty_settings::Settings,
 ) -> Result<Option<HostAddr>> {
     let Some(text) = flag.map(str::trim) else {
-        return Ok(settings.worker.server.clone());
+        return Ok(settings.network.server.clone());
     };
     if text.is_empty() {
         return Ok(None);
@@ -588,7 +588,7 @@ mod tests {
     fn the_flag_wins_over_the_settings_and_the_port_defaults_to_the_servers() {
         let mut settings = slopty_settings::Settings::default();
         assert_eq!(configured(None, &settings).unwrap(), None, "on its own");
-        settings.worker.server = Some(HostAddr::parse_with_port("studio", 45560).unwrap());
+        settings.network.server = Some(HostAddr::parse_with_port("studio", 45560).unwrap());
         let from_file = configured(None, &settings).unwrap().unwrap();
         assert_eq!((from_file.host(), from_file.port()), ("studio", 45560));
         let flag = configured(Some("100.64.0.9:7000"), &settings).unwrap().unwrap();

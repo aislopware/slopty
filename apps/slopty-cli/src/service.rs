@@ -75,13 +75,13 @@ impl InstallOpts {
     }
 }
 
-/// Save `server` as `[worker] server` in the settings file under `data_dir`, keeping the rest of
-/// the file. The daemon reads it when it starts, so this runs before the bootstrap.
-fn save_worker_server(data_dir: &Path, server: &str) -> Result<HostAddr> {
+/// Save `server` as `[network] server` in the settings file under `data_dir`, keeping the rest
+/// of the file: this Mac's worker registers with it and its app and CLI list its machines.
+/// The daemon reads it when it starts, so this runs before the bootstrap.
+fn save_server(data_dir: &Path, server: &str) -> Result<HostAddr> {
     let addr = HostAddr::parse_with_port(server, SERVER_PORT)
         .with_context(|| format!("server address {server:?}"))?;
-    slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Worker, Some(&addr))
-        .map_err(|e| anyhow!(e))?;
+    slopty_settings::save_server(data_dir, Some(&addr)).map_err(|e| anyhow!(e))?;
     Ok(addr)
 }
 
@@ -95,25 +95,22 @@ fn install_error(e: std::io::Error) -> anyhow::Error {
 enum Registers {
     /// This one (the global `--server`, or the one the tailnet answered with): saved first.
     With(String),
-    /// The one `[worker] server` names already.
+    /// The one `[network] server` names already.
     Kept,
-    /// None is set or answers: `slopty-server` is installed beside the worker first, and both
-    /// this machine's worker and its clients use it on loopback.
+    /// None is set or answers: `slopty-server` is installed beside the worker first, and this
+    /// Mac uses it on loopback.
     Beside,
 }
 
-/// Which server an install registers with ([`Registers`]): `server`, else the worker's own,
-/// else this machine's clients', else the first that answers on the tailnet, else one beside it.
+/// Which server an install registers with ([`Registers`]): `server`, else the one this Mac
+/// belongs to, else the first that answers on the tailnet, else one beside it.
 async fn registers(server: Option<&str>, data_dir: &Path) -> Result<Registers> {
     if let Some(server) = server {
         return Ok(Registers::With(server.to_owned()));
     }
     let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
-    if settings.worker.server.is_some() {
+    if settings.network.server.is_some() {
         return Ok(Registers::Kept);
-    }
-    if let Some(client) = settings.client.server {
-        return Ok(Registers::With(client.to_string()));
     }
     let endpoint = slopty_net::client::bind_client()?;
     let found = slopty_net::discover::find(&endpoint).await;
@@ -128,7 +125,7 @@ async fn registers(server: Option<&str>, data_dir: &Path) -> Result<Registers> {
 }
 
 /// Install `slopty-server` from `source` beside the worker, keeping its state in `data_dir`, and
-/// point this machine's worker, and its clients unless they name one, at it on loopback.
+/// point this Mac at it on loopback.
 async fn install_beside(
     session: &Session,
     source: &Path,
@@ -148,13 +145,7 @@ async fn install_beside(
         })?;
     println!("no server answered; installed slopty-server beside it  ({})", path.display());
     let here = HostAddr::new("127.0.0.1", SERVER_PORT);
-    slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Worker, Some(&here))
-        .map_err(|e| anyhow!(e))?;
-    let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
-    if settings.client.server.is_none() {
-        slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Client, Some(&here))
-            .map_err(|e| anyhow!(e))?;
-    }
+    slopty_settings::save_server(data_dir, Some(&here)).map_err(|e| anyhow!(e))?;
     Ok(here)
 }
 
@@ -264,15 +255,17 @@ async fn install_in(
     };
     match registers {
         Registers::With(server) => {
-            save_worker_server(data_dir, server)?;
+            save_server(data_dir, server)?;
         }
         Registers::Kept => {}
         Registers::Beside => {
             install_beside(session, &source, &opts.log, data_dir).await?;
         }
     }
-    let registers_with =
-        slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings.worker.server;
+    let registers_with = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir))
+        .settings
+        .network
+        .server;
     let started = Instant::now();
     let done = platform::install_worker(session, &worker, &source, data_dir, ptyd)
         .await
@@ -434,9 +427,10 @@ pub async fn uninstall(opts: UninstallOpts, data_dir: &Path, json: bool) -> Resu
 }
 
 /// Take the worker off this machine in `session`: its services, and with `purge` its own
-/// files ([`platform::purge_worker`]), Slopty's relay entries in the agent's settings under the
-/// home (no other entry of them), and the server it registered with. The settings file goes
-/// only when nothing else is left in `data_dir`, and the directory then too.
+/// files ([`platform::purge_worker`]) and Slopty's relay entries in the agent's settings under
+/// the home (no other entry of them). `[network] server` stays, since this Mac's app lists its
+/// machines from it; the settings file goes only when nothing else is left in `data_dir`, and
+/// the directory then too.
 ///
 /// # Errors
 ///
@@ -466,10 +460,6 @@ pub async fn remove_worker(
     }
     let settings = slopty_settings::path_in(data_dir);
     if settings.exists() {
-        if slopty_settings::Settings::load(&settings).settings.worker.server.is_some() {
-            slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Worker, None)
-                .map_err(|e| anyhow!("forget the worker's server: {e}"))?;
-        }
         let alone = std::fs::read_dir(data_dir)
             .with_context(|| format!("read {}", data_dir.display()))?
             .flatten()
@@ -619,7 +609,7 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
             Ok(name) => {
                 println!(
                     "\n{name} is up on UDP {port}; point clients at it with `slopty --server \
-                     <this machine's tailnet name or IP>` or `server = \"…\"` under [client] in \
+                     <this machine's tailnet name or IP>` or `server = \"…\"` under [network] in \
                      settings.toml"
                 );
                 if let Some(note) = session.keep_running() {
@@ -662,22 +652,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn install_saves_the_workers_server_and_keeps_the_rest_of_the_file() {
+    fn install_saves_the_server_and_keeps_the_rest_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let fresh = save_worker_server(dir.path(), "studio").unwrap();
+        let fresh = save_server(dir.path(), "studio").unwrap();
         assert_eq!((fresh.host(), fresh.port()), ("studio", SERVER_PORT));
         let path = slopty_settings::path_in(dir.path());
         let loaded = slopty_settings::Settings::load(&path).settings;
-        assert_eq!(loaded.worker.server, Some(fresh), "a missing file starts from the defaults");
-        assert_eq!(loaded.client.server, None, "the client's server is not the worker's");
+        assert_eq!(loaded.network.server, Some(fresh), "a missing file starts from the defaults");
 
         std::fs::write(&path, "[font]\nmono_size = 15.0 # mine\n").unwrap();
-        save_worker_server(dir.path(), "100.64.0.9:7000").unwrap();
+        save_server(dir.path(), "100.64.0.9:7000").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
-        assert!(text.contains("[worker]\nserver = \"100.64.0.9:7000\""), "{text}");
+        assert!(text.contains("[network]\nserver = \"100.64.0.9:7000\""), "{text}");
 
-        save_worker_server(dir.path(), "a b").unwrap_err();
+        save_server(dir.path(), "a b").unwrap_err();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "a bad address writes nothing");
     }
 
@@ -939,8 +928,8 @@ mod tests {
     }
 
     /// With no server named, set or answering, the server is installed beside the worker and
-    /// started before it, and both the worker and this machine's clients use it on loopback; a
-    /// client that names a server of its own keeps it.
+    /// started before it, and this Mac uses it on loopback; a Mac that names a server already
+    /// keeps it, and nothing is installed beside it.
     #[tokio::test(flavor = "multi_thread")]
     async fn worker_install_with_no_server_installs_one_beside_it() {
         let stage = Stage::new();
@@ -959,27 +948,14 @@ mod tests {
         let path = slopty_settings::path_in(&stage.data());
         let settings = slopty_settings::Settings::load(&path).settings;
         let here = HostAddr::new("127.0.0.1", SERVER_PORT);
-        assert_eq!(settings.worker.server, Some(here.clone()), "the worker registers with it");
-        assert_eq!(settings.client.server, Some(here), "and this machine's clients use it");
+        assert_eq!(settings.network.server, Some(here), "this Mac belongs to it");
 
         let other = Stage::new();
-        other.answer_as_installed();
         let studio = HostAddr::new("studio", SERVER_PORT);
-        slopty_settings::save_server(
-            &other.data(),
-            slopty_settings::ServerOf::Client,
-            Some(&studio),
-        )
-        .unwrap();
-        let from = other.binaries("new");
-        std::fs::write(from.join(SERVER.program), "slopty-server new").unwrap();
-        other
-            .install_registering(&Stage::opts(&from, false, true), &Registers::Beside)
-            .await
-            .unwrap();
-        let path = slopty_settings::path_in(&other.data());
-        let settings = slopty_settings::Settings::load(&path).settings;
-        assert_eq!(settings.client.server, Some(studio), "a client's own server is kept");
+        slopty_settings::save_server(&other.data(), Some(&studio)).unwrap();
+        assert_eq!(registers(None, &other.data()).await.unwrap(), Registers::Kept);
+        let named = registers(Some("mini"), &other.data()).await.unwrap();
+        assert_eq!(named, Registers::With("mini".to_owned()), "a named one first");
     }
 
     /// A new build that must restart ptyd, which holds two sessions, refuses before changing
@@ -1011,9 +987,9 @@ mod tests {
     }
 
     /// `--purge` takes the worker off a Mac it shares with the app: its services, its own
-    /// files and the server it registered with, and Slopty's relay entries in Claude Code's
-    /// settings. That file comes back byte for byte as the person had it before the install,
-    /// their own hooks in it; the app's files and the rest of the settings stay.
+    /// files, and Slopty's relay entries in Claude Code's settings. That file comes back byte for
+    /// byte as the person had it before the install, their own hooks in it; the app's files and
+    /// the rest of the settings stay.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_purge_takes_the_worker_off_and_leaves_the_persons_own() {
         use slopty_agent::hooks;
@@ -1029,7 +1005,7 @@ mod tests {
         std::fs::write(data.join("layout.json"), b"{}").unwrap();
         let settings = slopty_settings::path_in(&data);
         std::fs::write(&settings, "[font]\nmono_size = 15.0 # mine\n").unwrap();
-        save_worker_server(&data, "studio").unwrap();
+        save_server(&data, "studio").unwrap();
         let claude = hooks::settings_path(&session.home);
         std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
         let theirs = serde_json::json!({
@@ -1058,7 +1034,8 @@ mod tests {
         let text = std::fs::read_to_string(&settings).unwrap();
         assert!(text.starts_with("[font]\nmono_size = 15.0 # mine\n"), "{text}");
         let loaded = slopty_settings::Settings::load(&settings).settings;
-        assert_eq!(loaded.worker.server, None, "the server it registered with is forgotten");
+        let server = loaded.network.server.map(|s| s.to_string());
+        assert_eq!(server.as_deref(), Some("studio:45560"), "the app's server stays");
         assert!(data.is_dir(), "the data directory holds the app's");
     }
 
@@ -1070,7 +1047,7 @@ mod tests {
         let stage = Stage::new();
         let (session, data) = (&stage.session, stage.data());
         std::fs::write(data.join("worker-id"), b"7").unwrap();
-        save_worker_server(&data, "studio").unwrap();
+        save_server(&data, "studio").unwrap();
         let claude = slopty_agent::hooks::settings_path(&session.home);
         std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
         let spelled = b"{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"slopty hook\"}]}]}}";

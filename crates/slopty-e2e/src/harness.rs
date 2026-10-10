@@ -848,7 +848,7 @@ fn pin_appearance(app_dir: &Path) -> Result<()> {
 fn app_settings(appearance: &str, server: Option<&ServerDaemon>) -> String {
     let pinned = pinned_settings(appearance);
     match server {
-        Some(server) => format!("{pinned}\n[client]\nserver = \"{}\"\n", server.address()),
+        Some(server) => format!("{pinned}\n[network]\nserver = \"{}\"\n", server.address()),
         None => pinned,
     }
 }

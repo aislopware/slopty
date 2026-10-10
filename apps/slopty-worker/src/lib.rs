@@ -1,7 +1,7 @@
 //! `slopty-worker` — the worker daemon.
 //!
 //! Owns the QUIC endpoint, admits clients by source address (loopback, the tailnet, private
-//! LANs, or the `[worker] allow` ranges in `settings.toml`), and bridges control and session
+//! LANs, or the `[network] allow` ranges in `settings.toml`), and bridges control and session
 //! streams to [`slopty_worker::Worker`]. PTY masters live in `slopty-ptyd`, so this process can
 //! restart without killing shells. A local control socket lets `slopty` (the CLI) inspect state
 //! and relay agent hooks.
@@ -85,7 +85,7 @@ struct Args {
     #[arg(long = "bind", env = "SLOPTY_BIND")]
     bind: Option<std::net::IpAddr>,
     /// The server to register with as a worker, `host[:port]` (port 45560 when absent); also
-    /// `SLOPTY_SERVER`, else `[worker] server` in `settings.toml`. Without one the worker runs
+    /// `SLOPTY_SERVER`, else `[network] server` in `settings.toml`. Without one the worker runs
     /// on its own.
     #[arg(long, env = "SLOPTY_SERVER")]
     server: Option<String>,
@@ -107,14 +107,14 @@ struct Args {
 }
 
 /// Who may connect: loopback, the tailnet as this machine's Tailscale vouches for it, and the
-/// `[worker] allow` ranges of `settings.toml` in `data_dir` by address. A range that does not
+/// `[network] allow` ranges of `settings.toml` in `data_dir` by address. A range that does not
 /// parse is logged and skipped.
 fn admission(data_dir: &std::path::Path) -> Admission {
     let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir));
     if let Some(e) = &loaded.error {
         tracing::warn!(error = %e, "settings.toml ignored; admitting no extra ranges");
     }
-    Admission::new(parse_allow(&loaded.settings.worker.allow, "[worker]"))
+    Admission::new(parse_allow(&loaded.settings.network.allow, "[network]"))
 }
 
 /// The clipboard the worker syncs: `NSPasteboard` on macOS.
@@ -429,7 +429,7 @@ fn session_env(
 /// What a change of `settings.toml` from `before` to `now` asks of the running worker.
 #[derive(Debug, Default, PartialEq)]
 struct Changed {
-    /// `[worker] allow` changed: the ranges to let in from the next peer on.
+    /// `[network] allow` changed: the ranges to let in from the next peer on.
     allow: Option<Vec<slopty_net::admission::Cidr>>,
     /// The server to register with changed. `flag` (`--server`, `SLOPTY_SERVER`) holds over
     /// the file, so with one this never is.
@@ -448,8 +448,8 @@ fn changed(
     now: &slopty_settings::Settings,
     flag: Option<&str>,
 ) -> Changed {
-    let allow = (before.worker.allow != now.worker.allow)
-        .then(|| parse_allow(&now.worker.allow, "[worker]"));
+    let allow = (before.network.allow != now.network.allow)
+        .then(|| parse_allow(&now.network.allow, "[network]"));
     let registers = |settings| server::configured(flag, settings).ok().flatten();
     let (was, server) = (registers(before), registers(now));
     let reregister = was != server;
@@ -473,11 +473,10 @@ const fn policy(keep: slopty_settings::KeepAwake) -> slopty_worker::wake::Policy
 }
 
 /// Follow `settings.toml` under `data_dir` for as long as the daemon runs, applying each change
-/// of `[worker]` as it is read ([`Changed`]): the allowed ranges from the next peer on, a new
-/// server registered with at once (`joined`, the registration running now, ended first), the
-/// sleep policy and the input-source sync at once, a client's display's linger from its next
-/// let-go, and the person's ACP agents probed again into `acp`. A file that does not parse
-/// changes nothing.
+/// of `[network]` and `[worker]` as it is read ([`Changed`]): the allowed ranges from the next
+/// peer on, a new server registered with at once (`joined`, the registration running now,
+/// ended first), the sleep policy at once, and the person's ACP agents probed again into `acp`. A
+/// file that does not parse changes nothing.
 async fn follow_settings(
     daemon: Daemon,
     data_dir: PathBuf,
@@ -504,7 +503,7 @@ async fn follow_settings(
             changed(&applied, &now, flag.as_deref());
         if let Some(allow) = allow {
             let ranges: Vec<String> = allow.iter().map(ToString::to_string).collect();
-            tracing::info!(?ranges, "[worker] allow changed: applied");
+            tracing::info!(?ranges, "[network] allow changed: applied");
             daemon.listener.admission().set_ranges(allow);
         }
         if reregister {
@@ -512,10 +511,10 @@ async fn follow_settings(
             let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
             daemon.worker.set_session_env(env);
             if let Some(addr) = server {
-                tracing::info!(server = %addr, "[worker] server changed: registering");
+                tracing::info!(server = %addr, "[network] server changed: registering");
                 joined = join_server(&daemon, addr, &data_dir);
             } else {
-                tracing::info!("[worker] server cleared: running on our own");
+                tracing::info!("[network] server cleared: running on our own");
                 daemon.server_link.send_replace(None);
             }
         }
@@ -1050,8 +1049,8 @@ mod tests {
         let before = slopty_settings::Settings::default();
         assert_eq!(changed(&before, &before, None), Changed::default(), "nothing changed");
         let mut now = before.clone();
-        now.worker.allow = vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()];
-        now.worker.server = Some(slopty_net::HostAddr::new("hub", 45_560));
+        now.network.allow = vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()];
+        now.network.server = Some(slopty_net::HostAddr::new("hub", 45_560));
         now.worker.keep_awake = slopty_settings::KeepAwake::Never;
         now.worker.acp.insert("mine".to_owned(), vec!["/opt/mine".to_owned()]);
         let asked = changed(&before, &now, None);
@@ -1072,7 +1071,7 @@ mod tests {
     fn the_allow_list_comes_from_settings_and_a_bad_range_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         assert!(admission(dir.path()).ranges().is_empty(), "no LAN by default");
-        let settings = "[worker]\nallow = [\"10.0.0.0/8\", \"bogus\"]\n";
+        let settings = "[network]\nallow = [\"10.0.0.0/8\", \"bogus\"]\n";
         std::fs::write(dir.path().join("settings.toml"), settings).unwrap();
         let listed = admission(dir.path());
         let ranges: Vec<String> = listed.ranges().iter().map(ToString::to_string).collect();

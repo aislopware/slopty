@@ -1033,7 +1033,7 @@ impl Workspace {
             };
             self.show_notice(text, cx);
         }
-        let server = loaded.settings.client.server.clone();
+        let server = loaded.settings.network.server.clone();
         let sharing = loaded.settings.clipboard.clone();
         slopty_ui::file::open_with::set_link(loaded.settings.client.editor.clone(), cx);
         self.settings = loaded.settings;
@@ -1893,7 +1893,7 @@ impl Workspace {
         self.connect_from_panel(&address, cx);
     }
 
-    /// Prove the server answers, then save it as `[client] server` and keep its link.
+    /// Prove the server answers, then save it as `[network] server` and keep its link.
     fn connect_from_panel(&mut self, typed: &str, cx: &mut Context<Self>) {
         let address =
             match slopty_net::HostAddr::parse_with_port(typed, slopty_net::endpoint::SERVER_PORT) {
@@ -1913,9 +1913,6 @@ impl Workspace {
                     if let Err(e) = ws.save_server(Some(&address)) {
                         link.close();
                         return ws.panel_failed(e, cx);
-                    }
-                    if let Some(deployer) = &ws.deployer {
-                        deployer.register_here(ws.server_address(), &address);
                     }
                     ws.adding = None;
                     ws.show_notice(format!("Connected to {name}"), cx);
@@ -1938,11 +1935,11 @@ impl Workspace {
     }
 
     /// The server "Use this Mac" registers this Mac with, as far as it is decided: the one this
-    /// app or this Mac's worker is set to, else the one Ready server the tailnet answered with,
-    /// else one started here. `Err` while the tailnet is still being looked on, or when the
-    /// person must say: several answered, or no look could be made.
+    /// app is linked to or this Mac's `[network] server` names, else the one Ready server the
+    /// tailnet answered with, else one started here. `Err` while the tailnet is still being
+    /// looked on, or when the person must say: several answered, or no look could be made.
     fn this_mac_serve(&self) -> Result<this_mac::Serve, Option<Asking>> {
-        let set = self.server_address().or(self.settings.worker.server.as_ref());
+        let set = self.server_address().or(self.settings.network.server.as_ref());
         if let Some(server) = set {
             return Ok(this_mac::Serve::Join(server.clone()));
         }
@@ -2376,11 +2373,11 @@ impl Workspace {
         }
     }
 
-    /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
+    /// Write `[network] server` into `settings.toml`, the rest of the file untouched, and take
     /// it as loaded so the watcher sees nothing new.
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
         let text = settings::editable_text(&self.settings_path);
-        let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Client, server)?;
+        let text = slopty_settings::with_server(&text, server)?;
         let loaded = settings::save(&self.settings_path, &text, &mut self.settings_seen)?;
         self.settings = loaded.settings;
         Ok(())

@@ -84,7 +84,7 @@ mod tests {
         std::fs::write(&path, "[worker]\n").unwrap();
         assert!(seen.changed(&path), "a write from elsewhere");
         assert!(!seen.changed(&path), "seen once");
-        std::fs::write(&path, "[worker]\nallow = []\n").unwrap();
+        std::fs::write(&path, "[network]\nallow = []\n").unwrap();
         seen.saw(&path);
         assert!(!seen.changed(&path), "its own write");
     }

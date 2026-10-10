@@ -208,9 +208,6 @@ pub trait Deployer: std::fmt::Debug {
     fn link_server(&self, address: &HostAddr) -> Pending<Result<ServerLink, String>> {
         Box::pin(std::future::ready(Err(format!("this build links to no server at {address}"))))
     }
-    /// This Mac's worker, when it is installed and registers with no server or with `old` (this
-    /// app's server until now), registers with `server` from now on.
-    fn register_here(&self, _old: Option<&HostAddr>, _server: &HostAddr) {}
     /// Keep `to` as the way to reach the machine of the server at `address`.
     fn remember_server(&self, _address: &HostAddr, _to: &Target) {}
     /// The way the machine of the server at `address` was reached, when it was set up from
@@ -1521,9 +1518,9 @@ impl Workspace {
     }
 
     /// The server the sheet's run `id` set up answered at `address`: it is this app's server
-    /// from now on, as a Connect from the panel makes it, and this Mac's worker registers with
-    /// it if it registered with none or with the server this app used until now. The machine it
-    /// was set up on over `ssh` is kept, so an update reaches it the same way.
+    /// from now on, as a Connect from the panel makes it, and this Mac's worker, following the
+    /// same `[network] server`, registers with it at once. The machine it was set up on over
+    /// `ssh` is kept, so an update reaches it the same way.
     fn served(&mut self, id: u64, address: HostAddr, link: ServerLink, cx: &mut Context<Self>) {
         let Some(run) = self.ssh_run(id) else {
             link.close();
@@ -1539,11 +1536,8 @@ impl Workspace {
             );
             return self.ssh_ended(id, Some(failure), cx);
         }
-        if let Some(deployer) = &self.deployer {
-            deployer.register_here(self.server_address(), &address);
-            if let Some(typed) = &typed {
-                deployer.remember_server(&address, typed);
-            }
+        if let (Some(deployer), Some(typed)) = (&self.deployer, &typed) {
+            deployer.remember_server(&address, typed);
         }
         let name = link.name.clone();
         self.adding = None;
@@ -1599,7 +1593,7 @@ fn not_listed(host: &str, deployed: &Deployed) -> Failure {
         Some(LinkState::Dialling | LinkState::Linked) | None => String::new(),
     };
     let hint = format!(
-        "Check that it reaches the server at {}; on a VPN, list its address under [server] allow.",
+        "Check that it reaches the server at {}; on a VPN, list its address under [network] allow.",
         deployed.server
     );
     let lines = if why.is_empty() { Vec::new() } else { vec![why] };
@@ -1775,7 +1769,6 @@ mod mac {
     };
     use slopty_net::HostAddr;
     use slopty_net::server::ServerLink;
-    use slopty_platform::service::{Session, WORKER};
     use tokio::sync::mpsc;
 
     use super::{Deployer, Target};
@@ -1970,28 +1963,6 @@ mod mac {
 
         fn installed(&self) -> bool {
             here().is_ok_and(|dir| dir.ends_with("Contents/MacOS"))
-        }
-
-        fn register_here(&self, old: Option<&HostAddr>, server: &HostAddr) {
-            let session = Session::native();
-            if !session.file(WORKER).is_file() {
-                return;
-            }
-            let path = slopty_settings::path_in(&self.data);
-            let own = slopty_settings::Settings::load(&path).settings.worker.server;
-            if own.as_ref().is_some_and(|own| Some(own) != old) || own.as_ref() == Some(server) {
-                return;
-            }
-            let saved = slopty_settings::save_server(
-                &self.data,
-                slopty_settings::ServerOf::Worker,
-                Some(server),
-            );
-            // The worker reads its server when it starts.
-            if let Err(e) = saved.and_then(|()| session.restart(WORKER).map_err(|e| e.to_string()))
-            {
-                tracing::warn!(%server, error = %e, "register this Mac's worker");
-            }
         }
     }
 

@@ -816,7 +816,7 @@ fn app_deploy(sh: &Shell, home: &Utf8Path, macos: Macos, keep: bool) -> Result<(
     )
 }
 
-/// Add `host` to `[worker] allow` in the guest's settings, keeping every other key there. A file
+/// Add `host` to `[network] allow` in the guest's settings, keeping every other key there. A file
 /// that already admits it is left alone.
 fn admit(home: &Utf8Path, ip: &str, host: &str) -> Result<()> {
     let file = format!("{GUEST_SETTINGS_DIR}/settings.toml");
@@ -832,19 +832,19 @@ fn admit(home: &Utf8Path, ip: &str, host: &str) -> Result<()> {
     ensure!(status.success(), "write the guest's settings.toml: {status}");
     if !text.is_empty() {
         println!(
-            "  added {host} to [worker] allow in the guest's settings.toml (comments not kept)"
+            "  added {host} to [network] allow in the guest's settings.toml (comments not kept)"
         );
     }
     Ok(())
 }
 
-/// `text` (a settings file) with `host` in `[worker] allow`, or `None` when it is there already.
+/// `text` (a settings file) with `host` in `[network] allow`, or `None` when it is there already.
 fn admitting(text: &str, host: &str) -> Result<Option<String>> {
     let mut settings: toml::Table = text.parse().context("the guest's settings.toml")?;
-    let worker = settings.entry("worker").or_insert_with(|| toml::Table::new().into());
-    let worker = worker.as_table_mut().context("[worker] is not a table")?;
-    let allow = worker.entry("allow").or_insert_with(|| toml::Value::Array(Vec::new()));
-    let allow = allow.as_array_mut().context("[worker] allow is not a list")?;
+    let network = settings.entry("network").or_insert_with(|| toml::Table::new().into());
+    let network = network.as_table_mut().context("[network] is not a table")?;
+    let allow = network.entry("allow").or_insert_with(|| toml::Value::Array(Vec::new()));
+    let allow = allow.as_array_mut().context("[network] allow is not a list")?;
     if allow.iter().any(|a| a.as_str() == Some(host)) {
         return Ok(None);
     }
@@ -1627,17 +1627,17 @@ mod tests {
         assert!(!alive(0) && !alive(u32::MAX), "no such pids");
     }
 
-    /// The guest's settings keep every key; this Mac is added to `[worker] allow` once.
+    /// The guest's settings keep every key; this Mac is added to `[network] allow` once.
     #[test]
     fn admitting_the_host_keeps_the_rest_of_the_settings() {
         let fresh = admitting("", "192.168.64.1").expect("parses").expect("written");
-        assert_eq!(fresh.trim(), "[worker]\nallow = [\"192.168.64.1\"]");
-        let edited = "theme = \"dark\"\n[worker]\nallow = [\"100.64.0.0/10\"]\nport = 7\n";
+        assert_eq!(fresh.trim(), "[network]\nallow = [\"192.168.64.1\"]");
+        let edited = "theme = \"dark\"\n[network]\nallow = [\"100.64.0.0/10\"]\nport = 7\n";
         let merged = admitting(edited, "192.168.64.1").expect("parses").expect("written");
         let merged: toml::Table = merged.parse().expect("toml");
         assert_eq!(merged["theme"].as_str(), Some("dark"));
-        assert_eq!(merged["worker"]["port"].as_integer(), Some(7));
-        let allow = merged["worker"]["allow"].as_array().expect("a list");
+        assert_eq!(merged["network"]["port"].as_integer(), Some(7));
+        let allow = merged["network"]["allow"].as_array().expect("a list");
         assert_eq!(allow.len(), 2, "{allow:?}");
         let again = toml::to_string(&merged).expect("toml");
         assert!(admitting(&again, "192.168.64.1").expect("parses").is_none(), "already there");

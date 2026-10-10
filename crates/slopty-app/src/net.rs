@@ -130,7 +130,7 @@ pub enum DialFailed {
     NoAnswer,
     /// Its name does not resolve.
     NoSuchHost,
-    /// It turned this device away by its `[worker] allow` ranges: this device's address on the
+    /// It turned this device away by its `[network] allow` ranges: this device's address on the
     /// path to it, when the route can be told.
     Refused(Option<std::net::IpAddr>),
     /// The link was made and then ended.

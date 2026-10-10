@@ -5676,7 +5676,7 @@ mod tests {
         println!("a page of {FOLDER_ENTRIES} entries on loopback: {took:?}");
     }
 
-    /// A `[worker] allow` saved while the worker runs lets a peer in with no restart: this
+    /// A `[network] allow` saved while the worker runs lets a peer in with no restart: this
     /// Mac dialing its own LAN address is not loopback, so it is refused until the file lists
     /// that address, and let in once the worker has read it.
     #[tokio::test]
@@ -5696,7 +5696,7 @@ mod tests {
         assert!(refused.is_err(), "{lan} is not let in before the file lists it");
 
         let settings = slopty_settings::path_in(&dir.path().join("data"));
-        std::fs::write(&settings, format!("[worker]\nallow = [\"{lan}/32\"]\n")).unwrap();
+        std::fs::write(&settings, format!("[network]\nallow = [\"{lan}/32\"]\n")).unwrap();
         let admitted = tokio::time::timeout(STEP, async {
             loop {
                 if let Ok(worker) = connect_addr(&endpoint, addr, hello.clone()).await {

@@ -248,14 +248,14 @@ fn bundle_failure(failed: crate::repo::bundle::Failed) -> Failure {
     }
 }
 
-/// The settings file at `path` after `edits` under `root`, as the wire says it; an edit that
+/// The settings file at `path` after `edits` under `roots`, as the wire says it; an edit that
 /// does not hold is [`ErrorCode::Invalid`] and writes nothing.
 ///
 /// # Errors
 /// An edit does not hold, or the file does not read or write.
 pub fn settings_file(
     path: &Path,
-    root: &str,
+    roots: &[&str],
     edits: &[slopty_proto::settings::SettingEdit],
 ) -> Result<slopty_proto::settings::DaemonSettings, Failure> {
     use slopty_settings::daemon::{Edit, File, Refused, read_and_edit};
@@ -268,11 +268,11 @@ pub fn settings_file(
             literal: e.literal.as_deref(),
         })
         .collect();
-    match read_and_edit(path, root, &edits) {
+    match read_and_edit(path, roots, &edits) {
         Ok(File { path, text, problems }) => Ok(slopty_proto::settings::DaemonSettings {
             path: path.to_string_lossy().into_owned(),
             text,
-            tables: vec![root.to_owned()],
+            tables: roots.iter().map(|r| (*r).to_owned()).collect(),
             problems,
         }),
         Err(Refused::Edit(why)) => Err(Failure::new(ErrorCode::Invalid, why)),
@@ -418,9 +418,11 @@ impl Orchestrator {
         let path = self.inner.settings_file.get().cloned().ok_or_else(|| {
             Failure::new(ErrorCode::Unsupported, "this worker follows no settings file")
         })?;
-        let read = tokio::task::spawn_blocking(move || settings_file(&path, "worker", &edits))
-            .await
-            .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))??;
+        let read = tokio::task::spawn_blocking(move || {
+            settings_file(&path, &slopty_settings::daemon::WORKER, &edits)
+        })
+        .await
+        .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))??;
         Ok(Outcome::Settings(Box::new(read)))
     }
 

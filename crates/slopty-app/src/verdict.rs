@@ -195,7 +195,8 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
 fn machine_of(tap: &Tap) -> Option<String> {
     let worker: u128 = tap.info.get(info::WORKER)?.parse().ok()?;
     let worker: WorkerId = format!("{worker:032x}").parse().ok()?;
-    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server?;
+    let server =
+        slopty_settings::Settings::load(&slopty_settings::path()).settings.network.server?;
     slopty_client::directory::Directory::load(&crate::server::cache_path(), &server)
         .into_iter()
         .find(|w| w.worker == worker)
@@ -234,7 +235,7 @@ pub fn answer_alone(tap: &Tap) -> Answered {
             "not an Allow, a Deny or a reply that names its thread".to_owned(),
         );
     };
-    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server;
+    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.network.server;
     let Some(server) = server else {
         return Answered::Failed("no server is set".to_owned());
     };

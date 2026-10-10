@@ -45,10 +45,10 @@ TLS, no endpoint keys, no relays and no pairing. A worker is named by `host[:por
 `MagicDNS` name, a LAN name or an IP; port 45550 by default) and identified by the `WorkerId`
 in its `HelloAck`, which also names the daemon's home directory (a client writes paths under it
 as `~`) and carries its `WorkerCaps`; a later change to those comes as `WorkerMsg::Caps`. It admits a connection once, before any handshake state exists: loopback and the
-`[worker] allow` ranges of its `settings.toml` by address, and a tailnet address
+`[network] allow` ranges of its `settings.toml` by address, and a tailnet address
 (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) only as the machine's Tailscale vouches for it through
 `whois` and the tailnet's grants (`slopty_net::admission`, `slopty-tailnet`). The server
-admits the same way, with the `[server] allow` ranges.
+admits the same way, with the same `[network] allow` ranges.
 
 | Path | QUIC primitive | Payload |
 |---|---|---|
@@ -367,7 +367,7 @@ silently. `cargo xtask sign` (and `xtask run worker`, which calls it) signs both
 requirement the identifier rather than the hash and one approval enough for good.
 
 **Worker link and orchestration.** With a server configured (`--server`, `SLOPTY_SERVER` or
-`[worker] server`), the worker registers with it (`apps/slopty-worker/src/server.rs`). It sends
+`[network] server`, the one the app on that Mac reads too), the worker registers with it (`apps/slopty-worker/src/server.rs`). It sends
 its capabilities (`slopty-worker::caps`), where its listener is bound (the server lists it at
 that address, at the loopback address it dialed from when bound to loopback, or at the machine's
 tailnet address when it listens everywhere and dialed over loopback) and its sessions, forwards

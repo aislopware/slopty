@@ -1,9 +1,9 @@
 //! A daemon's own tables of the file, read and edited from another device.
 //!
 //! A worker reads `[worker]` and the server `[server]` of the `settings.toml` on their own
-//! machine. A settings page on another device sends the edits it would make to its own file
-//! ([`Edit`]), and [`read_and_edit`] makes them here:
-//! - only to the daemon's own tables;
+//! machine, and both read `[network]`. A settings page on another device sends the edits it would
+//! make to its own file ([`Edit`]), and [`read_and_edit`] makes them here:
+//! - only to the daemon's own tables ([`WORKER`], [`SERVER`]);
 //! - only to keys of the file's schema ([`crate::schema::fields`]), each value checked as the form
 //!   checks it;
 //! - only when the file still reads afterwards.
@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 
 use crate::schema::{self, Kind};
 use crate::{Settings, edit};
+
+/// The tables a worker reads and takes edits to.
+pub const WORKER: [&str; 2] = ["worker", "network"];
+/// The tables the server reads and takes edits to.
+pub const SERVER: [&str; 2] = ["server", "network"];
 
 /// One edit, as the settings form makes it to its own file.
 #[derive(Clone, Copy, Debug)]
@@ -58,14 +63,19 @@ pub fn under(table: &str, root: &str) -> bool {
     table == root || table.strip_prefix(root).is_some_and(|rest| rest.starts_with('.'))
 }
 
-/// Make `edits`, in order, to the file at `path`, only under `root`, then read it.
+/// Whether `table` is under one of `roots`.
+fn owned(table: &str, roots: &[&str]) -> bool {
+    roots.iter().any(|root| under(table, root))
+}
+
+/// Make `edits`, in order, to the file at `path`, only under `roots`, then read it.
 ///
 /// No edit is a read. Nothing is written unless every edit holds and the file still reads.
 ///
 /// # Errors
 /// [`Refused::Edit`] for an edit that does not hold; [`Refused::Io`] when the file does not
 /// read or write.
-pub fn read_and_edit(path: &Path, root: &str, edits: &[Edit<'_>]) -> Result<File, Refused> {
+pub fn read_and_edit(path: &Path, roots: &[&str], edits: &[Edit<'_>]) -> Result<File, Refused> {
     let before = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -73,7 +83,7 @@ pub fn read_and_edit(path: &Path, root: &str, edits: &[Edit<'_>]) -> Result<File
     };
     let mut text = before.clone();
     for one in edits {
-        text = apply(&text, root, one).map_err(Refused::Edit)?;
+        text = apply(&text, roots, one).map_err(Refused::Edit)?;
     }
     let loaded = Settings::parse(&text);
     if text != before {
@@ -83,7 +93,7 @@ pub fn read_and_edit(path: &Path, root: &str, edits: &[Edit<'_>]) -> Result<File
         replace(path, &text).map_err(|e| Refused::Io(format!("{}: {e}", path.display())))?;
     }
     let own = |w: &&String| {
-        w.strip_prefix("unknown key `").is_some_and(|key| under(key.trim_end_matches('`'), root))
+        w.strip_prefix("unknown key `").is_some_and(|key| owned(key.trim_end_matches('`'), roots))
     };
     let mut problems: Vec<String> = loaded.warnings.iter().filter(own).cloned().collect();
     problems.extend(loaded.error.map(|e| e.to_string()));
@@ -91,11 +101,12 @@ pub fn read_and_edit(path: &Path, root: &str, edits: &[Edit<'_>]) -> Result<File
 }
 
 /// `text` with `one` made, checked against the schema.
-fn apply(text: &str, root: &str, one: &Edit<'_>) -> Result<String, String> {
+fn apply(text: &str, roots: &[&str], one: &Edit<'_>) -> Result<String, String> {
     let Edit { table, key, entry, literal } = *one;
     let name = format!("{table}.{key}");
-    if !under(table, root) {
-        return Err(format!("{name} is not this daemon's to change; it changes [{root}]"));
+    if !owned(table, roots) {
+        let tables = roots.iter().map(|r| format!("[{r}]")).collect::<Vec<_>>().join(" and ");
+        return Err(format!("{name} is not this daemon's to change; it changes {tables}"));
     }
     let field = schema::fields()
         .iter()
@@ -138,8 +149,9 @@ mod tests {
         Edit { table, key, entry: None, literal }
     }
 
-    /// Edits under the daemon's table land in its file, the rest of it as it was; an entry of a
-    /// map goes in and out on its own; with no edits the file is only read.
+    /// Edits under the daemon's tables, `[network]` among them, land in its file, the rest of it as
+    /// it was; an entry of a map goes in and out on its own; with no edits the file is only
+    /// read.
     #[test]
     fn a_daemon_s_own_keys_are_edited_in_place() {
         let dir = tempfile::tempdir().expect("temp");
@@ -147,6 +159,7 @@ mod tests {
         std::fs::write(&path, "# mine\n[font]\nmono_size = 13.0\n").expect("written");
         let edits = [
             edit("worker", "keep_awake", Some(r#""never""#)),
+            edit("network", "server", Some(r#""studio""#)),
             Edit {
                 table: "worker",
                 key: "acp",
@@ -154,10 +167,12 @@ mod tests {
                 literal: Some(r#"["gemini", "--acp"]"#),
             },
         ];
-        let file = read_and_edit(&path, "worker", &edits).expect("edited");
+        let file = read_and_edit(&path, &WORKER, &edits).expect("edited");
         let read = Settings::load(&path);
         assert!(read.error.is_none());
         assert_eq!(read.settings.worker.keep_awake, crate::KeepAwake::Never);
+        let server = read.settings.network.server.as_ref().map(ToString::to_string);
+        assert_eq!(server.as_deref(), Some("studio:45560"), "[network] is the worker's too");
         assert_eq!(
             read.settings.worker.acp.get("gemini"),
             Some(&vec!["gemini".to_owned(), "--acp".to_owned()])
@@ -167,9 +182,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).expect("read"), file.text);
 
         let gone = Edit { table: "worker", key: "acp", entry: Some("gemini"), literal: None };
-        read_and_edit(&path, "worker", &[gone]).expect("edited");
+        read_and_edit(&path, &WORKER, &[gone]).expect("edited");
         assert!(Settings::load(&path).settings.worker.acp.is_empty());
-        let only = read_and_edit(&path, "worker", &[]).expect("read");
+        let only = read_and_edit(&path, &WORKER, &[]).expect("read");
         assert_eq!(only.text, std::fs::read_to_string(&path).expect("read"));
     }
 
@@ -182,13 +197,13 @@ mod tests {
         std::fs::write(&path, "[worker]\nkeep_awake = \"never\"\n").expect("written");
         let first = edit("worker", "keep_awake", Some(r#""working""#));
         for wrong in [
-            edit("server", "allow", Some(r#"["10.0.0.0/8"]"#)),
+            edit("server.projects", "live_agents", Some("4")),
             edit("font", "mono_size", Some("12.0")),
             edit("worker", "no_such_key", Some("1")),
             edit("worker", "keep_awake", Some(r#""sometimes""#)),
             Edit { table: "worker", key: "keep_awake", entry: Some("x"), literal: Some("1") },
         ] {
-            let refused = read_and_edit(&path, "worker", &[first, wrong]);
+            let refused = read_and_edit(&path, &WORKER, &[first, wrong]);
             assert!(matches!(refused, Err(Refused::Edit(_))), "{wrong:?}: {refused:?}");
         }
         assert_eq!(
@@ -204,14 +219,15 @@ mod tests {
     fn a_missing_file_is_made_and_problems_are_said() {
         let dir = tempfile::tempdir().expect("temp");
         let path = dir.path().join("deeper").join("settings.toml");
-        let read = read_and_edit(&path, "server", &[]).expect("read");
+        let read = read_and_edit(&path, &SERVER, &[]).expect("read");
         assert_eq!((read.text.as_str(), read.problems.len()), ("", 0));
-        let allow = edit("server", "allow", Some(r#"["10.8.0.0/24"]"#));
-        read_and_edit(&path, "server", &[allow]).expect("edited");
-        assert_eq!(Settings::load(&path).settings.server.allow, ["10.8.0.0/24"]);
+        let allow = edit("network", "allow", Some(r#"["10.8.0.0/24"]"#));
+        read_and_edit(&path, &SERVER, &[allow]).expect("edited");
+        assert_eq!(Settings::load(&path).settings.network.allow, ["10.8.0.0/24"]);
 
-        std::fs::write(&path, "[server]\nallowed = []\n[font]\nnope = 1\n").expect("written");
-        let read = read_and_edit(&path, "server", &[]).expect("read");
-        assert_eq!(read.problems, ["unknown key `server.allowed`"]);
+        let text = "[server]\nallowed = []\n[network]\nallows = []\n[font]\nnope = 1\n";
+        std::fs::write(&path, text).expect("written");
+        let read = read_and_edit(&path, &SERVER, &[]).expect("read");
+        assert_eq!(read.problems, ["unknown key `network.allows`", "unknown key `server.allowed`"]);
     }
 }

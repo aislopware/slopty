@@ -135,11 +135,6 @@ impl Deployer for StandIn {
         Box::pin(std::future::ready(Err(format!("nothing answered at {address}"))))
     }
 
-    fn register_here(&self, old: Option<&HostAddr>, server: &HostAddr) {
-        let old = old.map_or_else(String::new, |old| format!(" from {old}"));
-        self.asked.borrow_mut().push(format!("register {server}{old}"));
-    }
-
     fn remember_server(&self, address: &HostAddr, to: &Target) {
         self.servers.borrow_mut().insert(address.to_string(), to.clone());
     }

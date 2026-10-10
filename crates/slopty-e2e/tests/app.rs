@@ -300,7 +300,7 @@ mod tests {
         let settings = stack.dir.path().join("app").join("settings.toml");
         // The server the app follows stays in the file.
         let server = stack.server.address();
-        let file = format!("[font]\nmono_size = 20\n\n[client]\nserver = \"{server}\"\n");
+        let file = format!("[font]\nmono_size = 20\n\n[network]\nserver = \"{server}\"\n");
         std::fs::write(&settings, file).unwrap();
         let dump = drv
             .wait_for("the grid to take the new font size", STEP + Duration::from_secs(2), |d| {
@@ -733,7 +733,7 @@ mod tests {
         }
     }
 
-    /// The app launched with only `[client] server` (and the pinned appearance) in its settings:
+    /// The app launched with only `[network] server` (and the pinned appearance) in its settings:
     /// `slopty-app` from this build with its data in `dir`, its test socket beside it, and a
     /// driver on the socket.
     async fn launch_app_for(
@@ -744,7 +744,7 @@ mod tests {
         let appearance = slopty_e2e::harness::APPEARANCE;
         std::fs::write(
             dir.join("settings.toml"),
-            format!("[client]\nserver = \"{server}\"\n\n[theme]\nappearance = \"{appearance}\"\n"),
+            format!("[network]\nserver = \"{server}\"\n\n[theme]\nappearance = \"{appearance}\"\n"),
         )?;
         let sock = dir.with_extension("sock");
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());

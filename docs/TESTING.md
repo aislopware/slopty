@@ -135,7 +135,7 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,
    on the paths a Linux install takes. The worker's UDP port is published on this Mac's
-   loopback, and its `[worker] allow` admits the bridge gateway its packets come from. From
+   loopback, and its `[network] allow` admits the bridge gateway its packets come from. From
    this Mac, `tests/linux.rs` connects with the client core's link and a `TermState`. The
    greeting must say Linux, aarch64 and Debian, with no capture, input, encoder or display.
    The login shell from passwd must echo a typed command and run it. A folder made there must

@@ -377,9 +377,9 @@ mod tests {
         );
         assert_eq!(field("worker", "acp").kind, Kind::Map(Box::new(Kind::List)));
         assert!(fields().iter().all(|f| f.table != "keys"), "a map of maps is not a row");
-        let server = field("client", "server");
+        let server = field("network", "server");
         assert_eq!((&server.kind, &server.default), (&Kind::Text, &Value::Str(String::new())));
-        assert_eq!(field("worker", "allow").example.as_deref(), Some("100.64.0.0/10, fd00::/8"));
+        assert_eq!(field("network", "allow").example.as_deref(), Some("100.64.0.0/10, fd00::/8"));
     }
 
     /// A value is checked against its key's type alone, and a refusal is the parser's reason.
@@ -389,13 +389,13 @@ mod tests {
         field("colors.light", "cursor").check("\"\"").unwrap();
         let bad = field("colors.light", "cursor").check("\"#12\"").unwrap_err();
         assert!(bad.contains("#rrggbb") && !bad.contains('\n'), "{bad}");
-        field("client", "server").check("\"studio:45560\"").unwrap();
+        field("network", "server").check("\"studio:45560\"").unwrap();
         field("clipboard", "workers").check_entry("my mac", "false").unwrap();
         assert!(field("clipboard", "workers").check_entry("studio", "\"no\"").is_err());
         field("worker", "acp").check_entry("mine", "[\"/opt/mine\", \"--acp\"]").unwrap();
         field("client", "editor").check("\"zed://ssh/{host}{path}\"").unwrap();
         assert!(field("client", "editor").check("\"zed://ssh/{host}\"").is_err());
-        assert!(field("client", "server").check("\"studio:x\"").is_err());
+        assert!(field("network", "server").check("\"studio:x\"").is_err());
         assert!(field("font", "mono_size").check("\"big\"").is_err());
     }
 

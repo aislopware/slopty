@@ -31,7 +31,7 @@ Register Slopty with Claude Code:
 
   claude mcp add slopty -- slopty mcp
 
-The server is --server, else $SLOPTY_SERVER, else `server` under [client] in settings.toml, \
+The server is --server, else $SLOPTY_SERVER, else `server` under [network] in settings.toml, \
 else the first that answers on the tailnet. \
 To pin one: claude mcp add slopty -- slopty mcp --server studio";
 

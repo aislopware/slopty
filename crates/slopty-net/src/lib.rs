@@ -89,7 +89,7 @@ pub enum NetError {
     #[error("{0}: no answer")]
     NoAnswer(String),
     /// The address turned this device away before the handshake (QUIC's `CONNECTION_REFUSED`):
-    /// its admitted ranges, a worker's `[worker] allow`, do not hold this device's address.
+    /// its admitted ranges, a worker's `[network] allow`, do not hold this device's address.
     #[error("{0}: turned this device away")]
     Refused(String),
     /// A QUIC stream failed.

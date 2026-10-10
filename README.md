@@ -94,7 +94,7 @@ blocked.
 | `ports` | TCP ports listening in a machine's terminals |
 | `attach` | A raw terminal straight to a machine, detached with `^]` |
 
-The server comes from `--server`, `$SLOPTY_SERVER`, or `[client] server` in `settings.toml`.
+The server comes from `--server`, `$SLOPTY_SERVER`, or `[network] server` in `settings.toml`.
 
 ## Working on Slopty
 

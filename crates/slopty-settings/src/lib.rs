@@ -504,23 +504,6 @@ impl JsonSchema for Chords {
 #[serde(default)]
 #[schemars(title = "Share this Mac's shells and windows")]
 pub struct WorkerSettings {
-    /// Address ranges let in besides loopback and the tailnet.
-    ///
-    /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect: a
-    /// VPN or LAN Tailscale does not vouch for (`slopty_net::admission`). Applied to the next
-    /// peer as soon as the file changes.
-    #[schemars(title = "Allowed addresses", example = ["100.64.0.0/10", "fd00::/8"])]
-    pub allow: Vec<String>,
-    /// The server it lists itself with; installing it sets one.
-    ///
-    /// The server to register with, `host[:port]` with
-    /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
-    /// empty string in the file) leaves it registered nowhere, serving only the clients that reach
-    /// it already, which no installer leaves it doing. `--server` and `SLOPTY_SERVER`
-    /// take precedence. A change registers it with the new one at once.
-    #[serde(with = "server_address")]
-    #[schemars(title = "Register with", with = "String", example = "studio.local")]
-    pub server: Option<HostAddr>,
     /// ACP agents beside the ones Slopty knows; an empty command hides one.
     ///
     /// A name and the command line that serves the Agent Client Protocol on stdio
@@ -544,12 +527,7 @@ pub struct WorkerSettings {
 
 impl Default for WorkerSettings {
     fn default() -> Self {
-        Self {
-            allow: Vec::new(),
-            server: None,
-            acp: BTreeMap::new(),
-            keep_awake: KeepAwake::Working,
-        }
+        Self { acp: BTreeMap::new(), keep_awake: KeepAwake::Working }
     }
 }
 
@@ -560,12 +538,6 @@ impl Default for WorkerSettings {
 #[serde(default)]
 #[schemars(title = "This Mac as a server")]
 pub struct ServerSettings {
-    /// Address ranges let in besides loopback and the tailnet.
-    ///
-    /// Address ranges whose peers may connect besides loopback and the tailnet, as
-    /// [`WorkerSettings::allow`].
-    #[schemars(title = "Allowed addresses", example = ["10.8.0.0/24"])]
-    pub allow: Vec<String>,
     /// What every project's own limits stay under.
     pub projects: ProjectBounds,
     /// How notes reach a pocketed phone.
@@ -624,19 +596,40 @@ impl Default for ProjectBounds {
     }
 }
 
-/// `[client]`: how the app and the `slopty` CLI find the machines.
+/// `[network]`: the server this Mac belongs to and who may connect to it, for the app, the
+/// `slopty` CLI, the worker and the server alike.
+///
+/// One Mac belongs to one fleet: the server whose directory the app reads is the one its
+/// worker registers with, and the ranges its worker admits are the ones its server admits.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(title = "Server and access")]
+pub struct NetworkSettings {
+    /// Lists your machines, and this Mac's worker registers with it.
+    ///
+    /// The server whose directory lists the machines, `host[:port]` with
+    /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent. The app and
+    /// the CLI read its directory, and this Mac's worker registers with it (`--server` and
+    /// `SLOPTY_SERVER` take precedence for the worker). `None` (an empty string in the file)
+    /// is a Mac not set up yet: the app opens on its first run, and a worker serves only the
+    /// clients that reach it already. A change registers the worker with the new one at once.
+    #[serde(with = "server_address")]
+    #[schemars(title = "Server", with = "String", example = "studio.local")]
+    pub server: Option<HostAddr>,
+    /// Address ranges let in besides loopback and the tailnet.
+    ///
+    /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect to
+    /// this Mac's worker and server: a VPN or LAN Tailscale does not vouch for
+    /// (`slopty_net::admission`). Applied to the next peer as soon as the file changes.
+    #[schemars(title = "Allowed addresses", example = ["100.64.0.0/10", "fd00::/8"])]
+    pub allow: Vec<String>,
+}
+
+/// `[client]`: the app's and the `slopty` CLI's own choices.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "This app")]
 pub struct ClientSettings {
-    /// Lists your machines; empty until this app is set up.
-    ///
-    /// The server whose directory lists the workers, `host[:port]` with
-    /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
-    /// empty string in the file) is an app not set up yet, which opens on its first run.
-    #[serde(with = "server_address")]
-    #[schemars(title = "Server", with = "String", example = "studio.local")]
-    pub server: Option<HostAddr>,
     /// Opens files and folders in your own editor; empty uses the system's.
     ///
     /// A link holding `{path}` (the file or folder on its machine), and optionally `{host}`
@@ -771,11 +764,13 @@ pub struct Settings {
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
     pub keys: KeySettings,
-    /// The worker daemon: who may connect, and the server it registers with.
+    /// The server this Mac belongs to, and who may connect to its daemons.
+    pub network: NetworkSettings,
+    /// The worker daemon's own choices.
     pub worker: WorkerSettings,
-    /// The server daemon: who may connect.
+    /// The server daemon's own choices.
     pub server: ServerSettings,
-    /// The app and the CLI as clients of a server.
+    /// The app's and the CLI's own choices.
     pub client: ClientSettings,
 }
 
@@ -939,20 +934,20 @@ ansi = []
 # [keys.workspace]
 # new_terminal = [\"cmd-t\", \"cmd-n\"]
 
-[worker]
-# allow and server apply as this file changes; the rest when slopty-worker
-# starts again.
-#
-# Who may connect to the worker daemon on this Mac, as address ranges
+[network]
+# The server whose directory lists the machines this app and the slopty CLI
+# reach, \"host\" or \"host:port\" (port 45560 when absent). This Mac's worker
+# registers with it too; --server and SLOPTY_SERVER override that. Empty until
+# the app is set up or the worker installed.
+server = \"\"
+# Who may connect to the worker and the server on this Mac, as address ranges
 # (\"10.8.0.0/24\", \"fd00::/8\", \"192.168.1.20\"), besides loopback and the
 # tailnet, which always connect. A private LAN or a plain VPN is not admitted
 # until it is listed here. Traffic is not encrypted by Slopty: the VPN or
 # tailnet is the boundary.
 allow = []
-# The server this Mac registers with as a worker, \"host\" or \"host:port\"
-# (port 45560 when absent). Installing the worker sets it. --server and
-# SLOPTY_SERVER override it.
-server = \"\"
+
+[worker]
 # Agents that speak ACP on stdio, by name and command line, beside the ones
 # Slopty knows; a known name is started this way instead, and [] hides it.
 #
@@ -960,10 +955,6 @@ server = \"\"
 # mine = [\"/opt/mine/bin/agent\", \"--acp\"]
 
 [client]
-# The server whose directory lists the machines this app and the slopty CLI
-# reach, \"host\" or \"host:port\" (port 45560 when absent). Empty until the
-# app is set up.
-server = \"\"
 # Opens files and folders in your own editor: a link holding {{path}}, and
 # optionally {{host}} and {{line}}, such as \"zed://ssh/{{host}}{{path}}\" or
 # \"vscode://vscode-remote/ssh-remote+{{host}}{{path}}\". Empty uses the system's
@@ -999,59 +990,35 @@ editor = \"\"
     }
 }
 
-/// Which table's `server` key an edit sets.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ServerOf {
-    /// `[client] server`: the directory the app and the CLI read.
-    Client,
-    /// `[worker] server`: the server this Mac registers with as a worker.
-    Worker,
-}
-
-impl ServerOf {
-    const fn table(self) -> &'static str {
-        match self {
-            Self::Client => "client",
-            Self::Worker => "worker",
-        }
-    }
-
-    const fn of(self, settings: &Settings) -> Option<&HostAddr> {
-        match self {
-            Self::Client => settings.client.server.as_ref(),
-            Self::Worker => settings.worker.server.as_ref(),
-        }
-    }
-}
-
-/// `text` (a `settings.toml`, the commented defaults when there is none) with `of`'s `server`
-/// set to `server`, every other line kept as it was, comments included.
+/// `text` (a `settings.toml`, the commented defaults when there is none) with `[network]
+/// server` set to `server`, every other line kept as it was, comments included.
 ///
 /// # Errors
 ///
 /// When `text` does not parse, since editing a broken file would bury the mistake.
-pub fn with_server(text: &str, of: ServerOf, server: Option<&HostAddr>) -> Result<String, String> {
+pub fn with_server(text: &str, server: Option<&HostAddr>) -> Result<String, String> {
     if let Some(error) = Settings::parse(text).error {
         return Err(error.to_string());
     }
-    let table = of.table();
     let value = toml_string(&server.map(ToString::to_string).unwrap_or_default());
-    let out = edit::write(text, table, "server", &value);
+    let out = edit::write(text, "network", "server", &value);
     match Settings::parse(&out) {
-        Loaded { error: None, settings, .. } if of.of(&settings) == server => Ok(out),
-        _ => Err(format!("could not set [{table}] server in settings.toml")),
+        Loaded { error: None, settings, .. } if settings.network.server.as_ref() == server => {
+            Ok(out)
+        }
+        _ => Err("could not set [network] server in settings.toml".to_owned()),
     }
 }
 
-/// Set `of`'s `server` in the `settings.toml` under `data_dir` (starting from the commented
+/// Set `[network] server` in the `settings.toml` under `data_dir` (starting from the commented
 /// defaults when there is none), keeping every other line.
 ///
-/// The file is replaced whole, so the app watching it never reads half of one.
+/// The file is replaced whole, so the app and the worker following it never read half of one.
 ///
 /// # Errors
 ///
 /// When the file cannot be read or written, or does not parse.
-pub fn save_server(data_dir: &Path, of: ServerOf, server: Option<&HostAddr>) -> Result<(), String> {
+pub fn save_server(data_dir: &Path, server: Option<&HostAddr>) -> Result<(), String> {
     let path = path_in(data_dir);
     let shown = |e: std::io::Error| format!("{}: {e}", path.display());
     let text = match std::fs::read_to_string(&path) {
@@ -1059,23 +1026,23 @@ pub fn save_server(data_dir: &Path, of: ServerOf, server: Option<&HostAddr>) -> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default_file(),
         Err(e) => return Err(shown(e)),
     };
-    let text = with_server(&text, of, server).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = with_server(&text, server).map_err(|e| format!("{}: {e}", path.display()))?;
     std::fs::create_dir_all(data_dir).map_err(shown)?;
     slopty_platform::fs::replace(&path, text.as_bytes()).map_err(shown)
 }
 
-/// Have the worker under `data_dir` register with `server`, unless it names one of its own;
-/// the server it registers with now.
+/// Have this Mac under `data_dir` belong to `server`, unless it names one already; the server
+/// it belongs to now.
 ///
 /// # Errors
 ///
 /// As [`save_server`].
 pub fn join_server(data_dir: &Path, server: &HostAddr) -> Result<HostAddr, String> {
     let settings = Settings::load(&path_in(data_dir)).settings;
-    if let Some(own) = settings.worker.server {
+    if let Some(own) = settings.network.server {
         return Ok(own);
     }
-    save_server(data_dir, ServerOf::Worker, Some(server))?;
+    save_server(data_dir, Some(server))?;
     Ok(server.clone())
 }
 
@@ -1424,18 +1391,17 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
     }
 
-    /// A worker made from the app joins the server it is given, and keeps a server of its own.
+    /// A Mac set up from the app joins the server it is given, and keeps a server it has.
     #[test]
-    fn a_worker_joins_the_server_it_is_given_unless_it_has_its_own() {
+    fn a_mac_joins_the_server_it_is_given_unless_it_has_one() {
         let dir = tempfile::tempdir().unwrap();
         let studio: HostAddr = "studio:7000".parse().unwrap();
         assert_eq!(join_server(dir.path(), &studio), Ok(studio.clone()));
         let saved = Settings::load(&path_in(dir.path())).settings;
-        assert_eq!(saved.worker.server, Some(studio.clone()));
-        assert_eq!(saved.client.server, None, "the app's own key is the app's to write");
+        assert_eq!(saved.network.server, Some(studio.clone()));
 
         let own: HostAddr = "100.64.0.9:7000".parse().unwrap();
-        save_server(dir.path(), ServerOf::Worker, Some(&own)).unwrap();
+        save_server(dir.path(), Some(&own)).unwrap();
         assert_eq!(join_server(dir.path(), &studio), Ok(own), "its own wins");
     }
 
@@ -1458,20 +1424,41 @@ mod tests {
         assert!(text.contains("[keys]\n# The app's keys"), "{text}");
     }
 
+    /// `[network]` holds the one server and the one list of ranges every part of this Mac
+    /// reads; the keys they had under `[worker]`, `[server]` and `[client]` are unknown now.
     #[test]
-    fn client_keys() {
-        let loaded = Settings::parse("[client]\nserver = \"studio.tail1234.ts.net\"\n");
+    fn network_keys() {
+        let loaded = Settings::parse(
+            "[network]\nallow = [\"100.64.0.3\", \"fd00::/8\"]\nserver = \"studio.tail1234.ts.net\"\n",
+        );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        let server = loaded.settings.client.server.unwrap();
+        assert_eq!(loaded.settings.network.allow, ["100.64.0.3", "fd00::/8"]);
+        let server = loaded.settings.network.server.unwrap();
         assert_eq!((server.host(), server.port()), ("studio.tail1234.ts.net", 45560));
-        let explicit = Settings::parse("[client]\nserver = \"[fd7a:115c:a1e0::1]:7\"\n");
-        assert_eq!(explicit.settings.client.server.map(|s| s.port()), Some(7));
-        assert_eq!(Settings::default().client.server, None, "workers by address only");
-        let bad = Settings::parse("[client]\nserver = \"studio:x\"\n");
+        let explicit = Settings::parse("[network]\nserver = \"[fd7a:115c:a1e0::1]:7\"\n");
+        assert_eq!(explicit.settings.network.server.map(|s| s.port()), Some(7));
+        let default = Settings::default().network;
+        assert!(default.allow.is_empty(), "the private ranges by default");
+        assert_eq!(default.server, None, "set up by the app or an install");
+        let bad = Settings::parse("[network]\nserver = \"studio:x\"\n");
         assert!(bad.error.is_some_and(|e| e.to_string().contains("bad port")));
-        let blank = Settings::parse("[client]\nserver = \"  \"\n");
-        assert_eq!(blank.settings.client.server, None);
+        let blank = Settings::parse("[network]\nserver = \"  \"\n");
+        assert_eq!(blank.settings.network.server, None);
         assert!(blank.warnings.is_empty(), "the key is known even when empty");
+
+        let gone = Settings::parse(
+            "[worker]\nallow = []\nserver = \"a\"\n[server]\nallow = []\n[client]\nserver = \"a\"\n",
+        );
+        assert!(gone.error.is_none(), "{gone:?}");
+        assert_eq!(
+            gone.warnings,
+            [
+                "unknown key `client.server`",
+                "unknown key `server.allow`",
+                "unknown key `worker.allow`",
+                "unknown key `worker.server`",
+            ]
+        );
     }
 
     /// The editor link fills in the machine, the line and the path, the path percent-encoded so
@@ -1502,43 +1489,26 @@ mod tests {
     #[test]
     fn setting_the_server_keeps_the_rest_of_the_file() {
         let studio = HostAddr::parse_with_port("studio", 45560).unwrap();
-        let text = with_server(&Settings::default_file(), ServerOf::Client, Some(&studio)).unwrap();
+        let text = with_server(&Settings::default_file(), Some(&studio)).unwrap();
         assert!(text.contains("server = \"studio:45560\""), "{text}");
         assert!(text.contains("# The server whose directory"), "comments stay");
         let loaded = Settings::parse(&text);
-        assert_eq!(loaded.settings.client.server.as_ref(), Some(&studio));
-        assert_eq!(loaded.settings.worker.server, None, "the worker's key is another table's");
+        assert_eq!(loaded.settings.network.server.as_ref(), Some(&studio));
 
         let custom = "[font]\nmono_size = 15.0 # mine\n";
-        let set = with_server(custom, ServerOf::Client, Some(&studio)).unwrap();
-        assert_eq!(set, "[font]\nmono_size = 15.0 # mine\n\n[client]\nserver = \"studio:45560\"\n");
-        let cleared = with_server(&set, ServerOf::Client, None).unwrap();
-        assert!(cleared.ends_with("[client]\nserver = \"\"\n"), "{cleared}");
-
-        let keyless = "[client]\n[font]\nmono_size = 15.0\n";
-        let set = with_server(keyless, ServerOf::Client, Some(&studio)).unwrap();
-        assert!(set.starts_with("[client]\nserver = \"studio:45560\"\n[font]"), "{set}");
-
-        with_server("[font\n", ServerOf::Client, Some(&studio)).unwrap_err();
-
-        let worker =
-            with_server(&Settings::default_file(), ServerOf::Worker, Some(&studio)).unwrap();
-        let loaded = Settings::parse(&worker);
-        assert_eq!(loaded.settings.worker.server.as_ref(), Some(&studio));
-        assert_eq!(loaded.settings.client.server, None, "the client's key is another table's");
-    }
-
-    #[test]
-    fn worker_keys() {
-        let loaded = Settings::parse(
-            "[worker]\nallow = [\"100.64.0.3\", \"fd00::/8\"]\nserver = \"studio.tail1234.ts.net\"\n",
+        let set = with_server(custom, Some(&studio)).unwrap();
+        assert_eq!(
+            set,
+            "[font]\nmono_size = 15.0 # mine\n\n[network]\nserver = \"studio:45560\"\n"
         );
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        assert_eq!(loaded.settings.worker.allow, ["100.64.0.3", "fd00::/8"]);
-        let server = loaded.settings.worker.server.unwrap();
-        assert_eq!((server.host(), server.port()), ("studio.tail1234.ts.net", 45560));
-        assert!(Settings::default().worker.allow.is_empty(), "the private ranges by default");
-        assert_eq!(Settings::default().worker.server, None, "on its own by default");
+        let cleared = with_server(&set, None).unwrap();
+        assert!(cleared.ends_with("[network]\nserver = \"\"\n"), "{cleared}");
+
+        let keyless = "[network]\n[font]\nmono_size = 15.0\n";
+        let set = with_server(keyless, Some(&studio)).unwrap();
+        assert!(set.starts_with("[network]\nserver = \"studio:45560\"\n[font]"), "{set}");
+
+        with_server("[font\n", Some(&studio)).unwrap_err();
     }
 
     /// `[worker.labels]` and `[worker.probes]` fed the cut placement rules and are gone: a file

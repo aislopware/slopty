@@ -181,13 +181,9 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Notes on your phone",
         &["server.push.apns_key", "server.push.key_id", "server.push.team_id"],
     ),
-    (Section::Network, THIS_APP, &["client.server", "client.editor"]),
-    (
-        Section::Network,
-        "Share this Mac's shells and windows",
-        &["worker.server", "worker.allow", "worker.keep_awake"],
-    ),
-    (Section::Network, "This Mac as a server", &["server.allow"]),
+    (Section::Network, NETWORK, &["network.server", "network.allow"]),
+    (Section::Network, THIS_APP, &["client.editor"]),
+    (Section::Network, "Share this Mac's shells and windows", &["worker.keep_awake"]),
 ];
 
 /// What a group says under its rows, as System Settings notes a consequence under a group: what
@@ -213,13 +209,11 @@ const FOOTERS: &[(&str, &str)] = &[
         "ACP agents",
         "Each serves the Agent Client Protocol on stdio; an empty command hides a known one",
     ),
-    (THIS_APP, "The server lists your machines; it is empty until this app is set up"),
-    ("Share this Mac's shells and windows", "Loopback and the tailnet are always let in"),
-    ("This Mac as a server", "Loopback and the tailnet are always let in"),
+    (NETWORK, "The server lists your machines; loopback and the tailnet are always let in"),
     ("Projects", "Live agents counts every agent running across the fleet, in a project or not"),
     (
         "Notes on your phone",
-        "A relay you deployed carries notes to your phone; your own APNs key needs none",
+        "Your own APNs key sends notes straight to Apple; without one, none are sent",
     ),
 ];
 
@@ -232,6 +226,9 @@ pub fn footer(group: &str) -> Option<&'static str> {
 /// The group of the app's own keys, which the system's [`System::OpenAtLogin`] closes.
 const THIS_APP: &str = "This app";
 
+/// The group of `[network]`, which this app and the daemons read alike.
+const NETWORK: &str = "Server and access";
+
 /// The page a key of `table` that [`LAYOUT`] does not name goes on: the project bounds' and
 /// the phone's notes' on Agents, any other nested table's (`server.x`) its root table's.
 fn home(table: &str) -> Section {
@@ -242,7 +239,7 @@ fn home(table: &str) -> Section {
     match root {
         "theme" | "colors" => Section::Appearance,
         "clipboard" => Section::Input,
-        "client" | "worker" | "server" => Section::Network,
+        "network" | "client" | "worker" | "server" => Section::Network,
         _ => Section::Terminal,
     }
 }
@@ -353,11 +350,18 @@ static OPEN_AT_LOGIN: LazyLock<Field> = LazyLock::new(|| Field {
     example: None,
 });
 
-/// Whether `table` is read by a daemon rather than by this app: a worker's or the server's,
-/// which another machine's may be ([`super::remote`]).
+/// Whether `table` is read by a daemon, and so may be another machine's
+/// ([`super::remote`]): a worker's, the server's, or `[network]`, which they share with this
+/// app ([`shared`]).
 pub(in crate::settings_form) fn daemons(table: &str) -> bool {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
-    matches!(root, "worker" | "server")
+    matches!(root, "worker" | "server") || shared(table)
+}
+
+/// Whether `table` is read by this app and by the daemons alike (`[network]`): on this device
+/// it is shown whether or not a daemon runs here, and every daemon owns it on its machine.
+pub(in crate::settings_form) fn shared(table: &str) -> bool {
+    table == "network"
 }
 
 /// `fields` as rows: those [`LAYOUT`] names in its order, then the rest on their [`home`] page.

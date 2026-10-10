@@ -1029,9 +1029,10 @@ async fn settings_are_never_an_agent_s() {
     person.abort();
 }
 
-/// The person reads and edits the server's own `[server]` from another device: the edit lands
-/// in the file the server follows and the file comes back. An edit outside `[server]`, or of a
-/// value the key does not take, is refused and writes nothing; a server given no file says so.
+/// The person reads and edits the server's own `[server]` and `[network]` from another device:
+/// the edit lands in the file the server follows and the file comes back. An edit outside them,
+/// or of a value the key does not take, is refused and writes nothing; a server given no file says
+/// so.
 #[tokio::test]
 async fn the_person_edits_the_server_s_own_settings() {
     use slopty_proto::settings::SettingEdit;
@@ -1041,7 +1042,7 @@ async fn the_person_edits_the_server_s_own_settings() {
         entry: None,
         literal: Some(literal.to_owned()),
     };
-    let allow = || edit("server", "allow", r#"["10.8.0.0/24"]"#);
+    let allow = || edit("network", "allow", r#"["10.8.0.0/24"]"#);
     let hub = Hub::new("server".to_owned(), Vec::new());
     let said =
         hub.dispatch_as(Speaker::Person, None, Verb::Settings { of: None, edits: vec![allow()] });
@@ -1050,7 +1051,7 @@ async fn the_person_edits_the_server_s_own_settings() {
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("settings.toml");
     hub.set_settings_file(path.clone());
-    for wrong in [edit("worker", "allow", r#"["0.0.0.0/0"]"#), edit("server", "allow", "8")] {
+    for wrong in [edit("worker", "keep_awake", r#""never""#), edit("network", "allow", "8")] {
         let verb = Verb::Settings { of: None, edits: vec![allow(), wrong] };
         let said = hub.dispatch_as(Speaker::Person, None, verb).await;
         refused(&said, ErrorCode::Invalid);
@@ -1062,10 +1063,10 @@ async fn the_person_edits_the_server_s_own_settings() {
     };
     assert_eq!(
         (read.path.as_str(), read.tables.as_slice()),
-        (&*path.to_string_lossy(), &["server".to_owned()][..])
+        (&*path.to_string_lossy(), &["server".to_owned(), "network".to_owned()][..])
     );
     assert_eq!(std::fs::read_to_string(&path).expect("written"), read.text);
-    assert!(read.text.contains("[server]") && read.text.contains("10.8.0.0/24"), "{}", read.text);
+    assert!(read.text.contains("[network]") && read.text.contains("10.8.0.0/24"), "{}", read.text);
     let Outcome::Settings(again) = hub
         .dispatch_as(Speaker::Person, None, Verb::Settings { of: None, edits: Vec::new() })
         .await

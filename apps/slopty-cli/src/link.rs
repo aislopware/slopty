@@ -41,12 +41,12 @@ pub async fn locate(flag: Option<&str>, data_dir: &Path, endpoint: &Endpoint) ->
     }
     bail!(
         "no server: none answered on the tailnet; pass --server host[:port], set {SERVER_ENV}, \
-         or set `server` under [client] in {}",
+         or set `server` under [network] in {}",
         slopty_settings::path_in(data_dir).display()
     )
 }
 
-/// The server a person named: `--server`, else [`SERVER_ENV`], else `[client] server` in the
+/// The server a person named: `--server`, else [`SERVER_ENV`], else `[network] server` in the
 /// settings file. The port is [`SERVER_PORT`] unless the address names one.
 pub fn configured(flag: Option<&str>, data_dir: &Path) -> Result<Option<HostAddr>> {
     let env = std::env::var(SERVER_ENV).ok();
@@ -55,7 +55,7 @@ pub fn configured(flag: Option<&str>, data_dir: &Path) -> Result<Option<HostAddr
         let loaded = slopty_settings::Settings::load(&settings_path);
         match loaded.error {
             Some(e) => Err(anyhow!(e)),
-            None => Ok(loaded.settings.client.server),
+            None => Ok(loaded.settings.network.server),
         }
     };
     choose(flag, env.as_deref(), file)
@@ -464,10 +464,10 @@ mod tests {
     fn the_client_table_names_the_server() {
         let dir = tempfile::tempdir().unwrap();
         let path = slopty_settings::path_in(dir.path());
-        std::fs::write(&path, "[client]\nserver = \"studio:7\"\n").unwrap();
+        std::fs::write(&path, "[network]\nserver = \"studio:7\"\n").unwrap();
         let found = configured(None, dir.path()).unwrap().unwrap();
         assert_eq!((found.host(), found.port()), ("studio", 7));
-        std::fs::write(&path, "[client]\nserver = 7\n").unwrap();
+        std::fs::write(&path, "[network]\nserver = 7\n").unwrap();
         configured(None, dir.path()).unwrap_err();
     }
 

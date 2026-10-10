@@ -321,7 +321,7 @@ startup disk (any volume of its APFS container, symlinks followed).
   a command in its logged-in session, where events post and the grants hold.
 - `cargo xtask vm deploy`: build `slopty-ptyd`, `slopty-worker` and `slopty` (from cargo's own
   target dir), clone the guest if it does not exist yet, and run `slopty worker deploy` against
-  it. This Mac's address is added to the guest's `[worker] allow`, other settings kept. The worker
+  it. This Mac's address is added to the guest's `[network] allow`, other settings kept. The worker
   answers at `<guest ip>:45550` (`tart ip slopty-26-dev`, with `TART_HOME=/Volumes/Lacie/vms/tart`).
   `--app` instead deploys as the app does, over the system `ssh`, into a fresh clone of the base
   (one that never had a worker): it runs `slopty-deploy`'s `guest` test, which meets the guest's

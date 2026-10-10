@@ -2,7 +2,7 @@
 //!
 //! Workers register over QUIC on `--port` and hold their lease there; clients, the CLI and
 //! agents get the worker directory and send verbs on the same port, an agent's tools through
-//! `slopty mcp` among them. It admits loopback, the tailnet and the `[server] allow` ranges of
+//! `slopty mcp` among them. It admits loopback, the tailnet and the `[network] allow` ranges of
 //! `settings.toml` (a VPN Tailscale does not vouch for). The worker list survives restarts in
 //! `workers.json` in the data directory. Notes reach a pocketed phone once `[server.push]` names an
 //! APNs key.
@@ -44,13 +44,19 @@ struct Args {
 struct Read {
     /// `[server]`.
     server: slopty_settings::ServerSettings,
+    /// `[network] allow`: the ranges let in besides loopback and the tailnet, the worker's too.
+    allow: Vec<String>,
     /// `[worker] keep_awake`: what keeps this machine awake, its worker and its server alike.
     keep_awake: slopty_settings::KeepAwake,
 }
 
 impl Read {
     fn of(settings: slopty_settings::Settings) -> Self {
-        Self { server: settings.server, keep_awake: settings.worker.keep_awake }
+        Self {
+            server: settings.server,
+            allow: settings.network.allow,
+            keep_awake: settings.worker.keep_awake,
+        }
     }
 }
 
@@ -82,10 +88,10 @@ struct Changed {
 
 /// What changed from `before` to `now`, named field by field so a new key is decided here.
 fn changed(before: &Read, now: &Read) -> Changed {
-    let Read { server: slopty_settings::ServerSettings { allow, projects, push }, keep_awake } =
+    let Read { server: slopty_settings::ServerSettings { projects, push }, allow, keep_awake } =
         now;
     Changed {
-        allow: *allow != before.server.allow,
+        allow: *allow != before.allow,
         projects: *projects != before.server.projects,
         push: *push != before.server.push,
         keep_awake: *keep_awake != before.keep_awake,
@@ -163,9 +169,9 @@ async fn follow_settings(
 }
 
 /// Who may connect: loopback, the tailnet as this machine's Tailscale vouches for it, and the
-/// `[server] allow` ranges.
-fn admission(settings: &slopty_settings::ServerSettings) -> Admission {
-    Admission::new(parse_allow(&settings.allow, "[server]"))
+/// `[network] allow` ranges.
+fn admission(allow: &[String]) -> Admission {
+    Admission::new(parse_allow(allow, "[network]"))
 }
 
 /// The person's bounds on projects and the fleet (`[server.projects]`). A project name there
@@ -208,7 +214,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let settings = settings(&data_dir);
-    let admission = admission(&settings.server);
+    let admission = admission(&settings.allow);
     let followed = admission.clone();
     let settings_path = settings_path(&data_dir);
     let config = Config {
@@ -228,8 +234,8 @@ async fn main() -> Result<()> {
     let every = slopty_settings::follow::POLL;
     tokio::spawn(follow_settings(settings_path, every, settings, move |now, changed| {
         if changed.allow {
-            tracing::info!(ranges = ?now.server.allow, "[server] allow changed: applied");
-            followed.set_ranges(parse_allow(&now.server.allow, "[server]"));
+            tracing::info!(ranges = ?now.allow, "[network] allow changed: applied");
+            followed.set_ranges(parse_allow(&now.allow, "[network]"));
         }
         if changed.projects {
             tracing::info!("[server.projects] changed: applied");
@@ -287,20 +293,20 @@ mod tests {
         let applied = settings(&data_dir);
         let follow =
             tokio::spawn(follow_settings(path.clone(), every, applied, move |now, what| {
-                let _heard = told.send((now.server.allow.clone(), what));
+                let _heard = told.send((now.allow.clone(), what));
             }));
         let after_a_poll = || tokio::time::sleep(every * 10);
         std::fs::write(&path, "[font]\nmono_size = 15.0\n").unwrap();
         after_a_poll().await;
         assert!(heard.try_recv().is_err(), "nothing of the server's changed");
-        std::fs::write(&path, "[server]\nallow = [\"10.8.0.0/24\"]\n").unwrap();
+        std::fs::write(&path, "[network]\nallow = [\"10.8.0.0/24\"]\n").unwrap();
         after_a_poll().await;
         let allow = Changed { allow: true, ..Changed::default() };
         assert_eq!(heard.try_recv().ok(), Some((vec!["10.8.0.0/24".to_owned()], allow)));
         std::fs::write(&path, "[server\n").unwrap();
         after_a_poll().await;
         assert!(heard.try_recv().is_err(), "a file that does not parse changes nothing");
-        let text = "[server]\nallow = [\"10.8.0.0/24\"]\n[server.projects]\nlive_agents = 3\n";
+        let text = "[network]\nallow = [\"10.8.0.0/24\"]\n[server.projects]\nlive_agents = 3\n";
         std::fs::write(&path, text).unwrap();
         after_a_poll().await;
         let projects = Changed { projects: true, ..Changed::default() };
@@ -345,10 +351,10 @@ mod tests {
     fn the_allow_list_comes_from_the_shared_settings() {
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path().join("server");
-        assert!(admission(&settings(&data_dir).server).ranges().is_empty(), "no range by default");
-        let text = "[server]\nallow = [\"10.8.0.0/24\", \"bogus\"]\n";
+        assert!(admission(&settings(&data_dir).allow).ranges().is_empty(), "no range by default");
+        let text = "[network]\nallow = [\"10.8.0.0/24\", \"bogus\"]\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
-        let ranges: Vec<String> = admission(&settings(&data_dir).server)
+        let ranges: Vec<String> = admission(&settings(&data_dir).allow)
             .ranges()
             .iter()
             .map(ToString::to_string)

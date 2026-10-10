@@ -116,7 +116,7 @@ fn worker(sh: &Shell, opts: &RunOpts) -> Result<()> {
     let mut ptyd = spawn(sh, "slopty-ptyd", &[], opts)?;
     wait_for_socket(&ptyd_socket(opts), &mut ptyd)?;
     println!(
-        "▶ this worker registers with the server `[worker] server` names in its settings \
+        "▶ this worker registers with the server `[network] server` names in its settings \
          (`cargo xtask run server` runs one); it listens on:"
     );
     let mut worker = spawn(sh, "slopty-worker", &["--print-addr"], opts)?;

@@ -315,10 +315,10 @@ mod tests {
         let file = dir.path().join("data").join("settings.toml");
 
         let outside = SettingEdit {
-            table: "server".to_owned(),
-            key: "allow".to_owned(),
+            table: "server.projects".to_owned(),
+            key: "live_agents".to_owned(),
             entry: None,
-            literal: Some(r#"["0.0.0.0/0"]"#.to_owned()),
+            literal: Some("4".to_owned()),
         };
         let refused = peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![outside] }).await;
         assert!(matches!(&refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
@@ -337,7 +337,7 @@ mod tests {
             panic!("the settings are answered");
         };
         assert_eq!(read.path, file.to_string_lossy());
-        assert_eq!(read.tables, ["worker"]);
+        assert_eq!(read.tables, ["worker", "network"]);
         assert!(read.problems.is_empty(), "{:?}", read.problems);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), read.text);
         let own = slopty_settings::Settings::load(&file).settings.worker.acp;

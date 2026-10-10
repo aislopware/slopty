@@ -382,10 +382,10 @@ impl Hub {
         }
     }
 
-    /// `[server]` of the server's own settings file after `edits`; an edit that does not hold
-    /// is [`ErrorCode::Invalid`] and writes nothing.
+    /// `[server]` and `[network]` of the server's own settings file after `edits`; an edit that
+    /// does not hold is [`ErrorCode::Invalid`] and writes nothing.
     async fn own_settings(&self, edits: Vec<slopty_proto::settings::SettingEdit>) -> Outcome {
-        use slopty_settings::daemon::{Edit, File, Refused, read_and_edit};
+        use slopty_settings::daemon::{Edit, File, Refused, SERVER, read_and_edit};
         let Some(path) = self.inner.settings_file.get().cloned() else {
             return error(ErrorCode::Unsupported, "this server follows no settings file");
         };
@@ -399,7 +399,7 @@ impl Hub {
                     literal: e.literal.as_deref(),
                 })
                 .collect();
-            read_and_edit(&path, "server", &edits)
+            read_and_edit(&path, &SERVER, &edits)
         })
         .await;
         match read {
@@ -407,7 +407,7 @@ impl Hub {
                 Outcome::Settings(Box::new(slopty_proto::settings::DaemonSettings {
                     path: path.to_string_lossy().into_owned(),
                     text,
-                    tables: vec!["server".to_owned()],
+                    tables: SERVER.map(str::to_owned).to_vec(),
                     problems,
                 }))
             }

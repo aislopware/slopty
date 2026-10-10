@@ -569,3 +569,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_clipboard_is_kept_off_for_one_machine_by_id` (slopty-app),
     `the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row` and
     `a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it` (slopty-ui).
+
+- ✅ **One `[network]`: one server and one allow list per Mac** (2026-10-10, orchestrator-first
+  audit §C.5). Before, the file held two server keys and two allow lists:
+  - `[client] server`, the directory the app and the CLI read;
+  - `[worker] server`, the server this Mac's worker registers with;
+  - `[worker] allow` and `[server] allow`, two lists of the same ranges.
+
+  A Mac belongs to one fleet, so the pairs could only agree or be wrong. The installs kept
+  copying one into the other, and "Use this Mac" and the ssh flows patched the worker's key
+  behind the app's (`Deployer::register_here`).
+  - **Now.** `[network] server` and `[network] allow` (`NetworkSettings`) are read by the app,
+    the CLI, the worker and the server alike. `--server` and `SLOPTY_SERVER` still hold over
+    the file for the worker.
+    - The worker follows the file, so saving the app's server registers this Mac's worker at
+      once. `register_here` is gone.
+    - A worker owns `[worker]` and `[network]` when edited from another device, and the server
+      owns `[server]` and `[network]` (`daemon::WORKER`, `daemon::SERVER`;
+      `DaemonSettings::tables` says both).
+    - The form shows them as "Server and access" on the Network page, on any device and for
+      any picked machine.
+  - **Gone.** `ServerOf`. `with_server` and `save_server` take only the server. The CLI's
+    install takes the server it is given, else the one set, else the tailnet's, else one
+    beside it; it no longer copies the client's server.
+  - **Uninstall.** `slopty worker uninstall --purge` keeps `[network] server`, since this Mac's
+    app lists its machines from it. A settings file left alone in the data directory still
+    goes.
+  - The old keys load as unknown-key warnings.
+  - Tests: `network_keys`, `a_mac_joins_the_server_it_is_given_unless_it_has_one`,
+    `setting_the_server_keeps_the_rest_of_the_file` and `daemon::tests` (slopty-settings);
+    `the_person_edits_the_server_s_own_settings` (slopty-server);
+    `an_acp_agent_added_from_afar_lands_in_the_file_and_is_probed` (slopty-workerd);
+    `worker_install_with_no_server_installs_one_beside_it` and
+    `a_purge_takes_the_worker_off_and_leaves_the_persons_own` (slopty-cli); the serverd
+    follow tests.

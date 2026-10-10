@@ -23,7 +23,7 @@ use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::settings::{DaemonSettings, SettingEdit};
 
 use super::SettingsForm;
-use super::schema::{Row, Section, daemons, rows};
+use super::schema::{Row, Section, daemons, rows, shared};
 use crate::colors::hsla;
 use crate::icons::{IconSize, Symbol};
 
@@ -87,10 +87,11 @@ pub(super) struct Remote {
 }
 
 impl Remote {
-    /// Whether `table` is this machine's own: `worker…` for a worker, `server…` for the server.
+    /// Whether `table` is this machine's own: `worker…` for a worker, `server…` for the server,
+    /// and `[network]` for either.
     fn owns(&self, table: &str) -> bool {
         let root = table.split_once('.').map_or(table, |(root, _)| root);
-        if self.machine.of.is_some() { root == "worker" } else { root == "server" }
+        shared(table) || if self.machine.of.is_some() { root == "worker" } else { root == "server" }
     }
 }
 
@@ -175,7 +176,7 @@ impl SettingsForm {
         }
         match &self.remote {
             Some(remote) => remote.owns(row.table()) && remote.reading == Reading::Ready,
-            None => HOSTS_DAEMONS,
+            None => HOSTS_DAEMONS || shared(row.table()),
         }
     }
 
@@ -331,11 +332,7 @@ impl SettingsForm {
         match &self.remote {
             Some(remote) if group.contains("this Mac") || group.starts_with("This Mac") => {
                 let name = &remote.machine.name;
-                group
-                    .replace("This Mac as a server", name)
-                    .replace("this Mac", name)
-                    .replace("This Mac", name)
-                    .into()
+                group.replace("this Mac", name).replace("This Mac", name).into()
             }
             _ => group.into(),
         }
