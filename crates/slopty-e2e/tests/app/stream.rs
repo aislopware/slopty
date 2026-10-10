@@ -532,17 +532,12 @@ async fn the_drawn_display_streams_into_its_tile() {
     stack.shutdown().await;
 }
 
-/// Run `command` from the palette, as its line names it. The palette opens from the title
-/// bar's "…" menu: ⌘⇧P is the remote window's own while its picture has the keyboard.
+/// Run `command` from the palette, as its line names it. While a picture has the keyboard ⌘⇧P
+/// is the remote window's own, so the palette opens by ⌃⌘⇧P there; elsewhere by ⌘⇧P.
 async fn open_command(drv: &mut Driver, command: &str) {
     park(drv).await;
-    click(drv, "Button", "More").await;
-    drv.wait_for("the … menu", STEP, |d| {
-        d.a11y_node("MenuItem", Some("Command palette")).is_some()
-    })
-    .await
-    .unwrap();
-    click(drv, "MenuItem", "Command palette").await;
+    let on_picture = drv.dump().await.unwrap().focused.starts_with("screen:");
+    drv.keys(if on_picture { "ctrl-cmd-shift-p" } else { "cmd-shift-p" }).await.unwrap();
     drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
         .await
         .unwrap();
@@ -559,15 +554,6 @@ async fn open_command(drv: &mut Driver, command: &str) {
         .await
         .unwrap();
     park(drv).await;
-}
-
-/// Click the middle of the `role` node labelled `label`.
-async fn click(drv: &mut Driver, role: &str, label: &str) {
-    let dump = drv.dump().await.unwrap();
-    let node =
-        dump.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{label}: {:#?}", dump.a11y));
-    let [x, y, w, h] = node.bounds;
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
 
 /// The pointer off every tile: over the picture it would be the worker's pointer, drawn.

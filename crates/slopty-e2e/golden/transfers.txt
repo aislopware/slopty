@@ -12,7 +12,6 @@ Tab │ drop-here
 Button │ Close tab
 Tab │ nc -l 47310
 Button │ Close tab
-Button │ New
 Heading │ terminal drop-here
 Button │ Stop upload │ ↑ 0%
 Button │ Needs you

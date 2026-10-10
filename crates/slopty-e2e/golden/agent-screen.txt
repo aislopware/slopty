@@ -21,7 +21,6 @@ TabList
 Tab │ Check the editor
 Image │ Working
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Group │ Terminal

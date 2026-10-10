@@ -10,7 +10,6 @@ Button │ project
 TabList
 Tab │ Changes
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects

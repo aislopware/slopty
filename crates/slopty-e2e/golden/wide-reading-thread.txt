@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Button │ Close tab
-Button │ New
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
 Label │ home
 Button │ Show terminal

@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Terminal
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
@@ -32,8 +31,6 @@ Terminal │ shell
 Group │ Status
 Button │ Show the tab's terminal
 Menu │ More (focused)
-MenuItem │ Command palette
-MenuItem │ Stream stats
 MenuItem │ Settings
 MenuItem │ Connect to another server
 MenuItem │ Add a machine…

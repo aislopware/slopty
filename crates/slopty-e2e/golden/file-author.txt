@@ -29,7 +29,6 @@ TabList
 Tab │ refresh.rs
 Image │ Done
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Status │ 1 new
 Button │ More

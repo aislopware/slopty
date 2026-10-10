@@ -9,7 +9,6 @@ Button │ e2e-worker
 TabList
 Tab │ Synthetic editor
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects

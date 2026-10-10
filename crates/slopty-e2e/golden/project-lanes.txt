@@ -12,9 +12,6 @@ Image │ Needs you
 Button │ Orchestrator
 Image │ Claude Code
 Button │ Close tile
-Button │ #1 Mirror the server's projects
-Image │ Claude Code
-Button │ Close tile
 Heading │ Machines
 Button │ studio
 Button │ New shell on studio
@@ -30,14 +27,11 @@ Tab │ Terminal
 Button │ Close tab
 Tab │ Orchestrator
 Button │ Close tab
-Button │ New
+Heading │ Claude Code Orchestrator
+Button │ Show thread
 Button │ Needs you
 Button │ More
 Group │ Orchestrator
-Heading │ Claude Code Orchestrator
-Image │ Claude Code
-Button │ Show thread
-Button │ Close tile
 Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
 Heading
 Button │ Verifier
@@ -70,16 +64,6 @@ Button │ Merge #6
 List │ Merged
 Button │ Show Merged 1
 MultilineTextInput │ Message the orchestrator
-Button │ Send
-Group │ #1 Mirror the server's projects
-Heading │ Claude Code #1 Mirror the server's projects
-Image │ Claude Code
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
 Button │ Send
 Group │ Status
 Status │ Claude Code

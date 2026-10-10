@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Safari
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
@@ -23,6 +22,6 @@ Tab │ Safari
 Button │ Close tile
 Button │ Close tile
 Status │ Safari did not open. e2e-worker may not record its screen. Turn on Screen Recording for slopty-worker in its System Settings.
-Button │ Choose another window
+Button │ Restart Slopty there
 Group │ Status
 Button │ Show the tab's terminal

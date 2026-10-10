@@ -17,7 +17,6 @@ Button │ e2e-worker
 TabList
 Tab │ scenario:bash run echo hi
 Button │ Close tab
-Button │ New
 Heading │ Claude Code scenario:bash run echo hi
 Label │ home
 Button │ Show terminal

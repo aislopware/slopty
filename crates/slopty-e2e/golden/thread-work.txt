@@ -17,7 +17,6 @@ Button │ e2e-worker
 TabList
 Tab │ The header clips its chips on a narrow window, as here.
 Button │ Close tab
-Button │ New
 Heading │ Claude Code The header clips its chips on a narrow window, as here.
 Label │ home
 Button │ Show terminal
@@ -42,7 +41,7 @@ Button │ Copy message
 Group │ Activity
 Button │ Plan, 1 of 3 done
 Button │ In the background
-Status │ Build the release binary: Completed
+Button │ Build the release binary: Completed
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5

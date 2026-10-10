@@ -9,7 +9,6 @@ Button │ e2e-worker
 TabList
 Tab │ Display 1
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
@@ -19,6 +18,7 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ Display 1
 Button │ Close tile
+Button │ Draw the curtain over the remote Mac
 Button │ Close tile
 Group │ Status
 Button │ Show the tab's terminal

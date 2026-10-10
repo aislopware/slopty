@@ -731,7 +731,7 @@ async fn the_thread_shows_the_work_beyond_words() {
     drv.wait_for("the build in the background", STEP, |d| {
         // The foot bar and the two panels leave the prompt above the fold: it is looked for
         // last, scrolled to.
-        labels(d, "Status").iter().any(|l| l == building)
+        labels(d, "Button").iter().any(|l| l == building)
             && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))
     })
     .await
@@ -749,7 +749,8 @@ async fn the_thread_shows_the_work_beyond_words() {
         .and_then(|mut f| std::io::Write::write_all(&mut f, build_finished().as_bytes()))
         .unwrap();
     drv.wait_for("the build done", STEP, |d| {
-        labels(d, "Status").iter().any(|l| l.starts_with("Build the release binary: Completed"))
+        // A line with what it printed is a button: it opens that output.
+        labels(d, "Button").iter().any(|l| l.starts_with("Build the release binary: Completed"))
     })
     .await
     .unwrap();

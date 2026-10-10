@@ -2696,13 +2696,33 @@ fn threads(d: &Dump) -> Vec<String> {
     d.items.iter().filter(|i| agent_tile(&i.kind)).map(|i| i.id.clone()).collect()
 }
 
-/// Start `agent`'s thread from the palette in the shell's folder; its tile's id.
+/// Whether the step's first line, the one ↩ takes, is `line`.
+fn first_offered(d: &Dump, line: &str) -> bool {
+    d.a11y.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.as_deref()) == Some(line)
+}
+
+/// Start `agent`'s thread by "New agent…" in the shell's folder; its tile's id. The agents
+/// come with the worker's capabilities, which may follow the palette's first opening: until
+/// the agent step offers `agent`, the palette is opened again.
 pub async fn start_thread(t: &mut Threads, agent: &str) -> Option<String> {
     let drv = &mut t.stack.driver;
     drv.reveal(&t.shell).await.unwrap();
     let before = threads(&look(drv).await);
-    let line = format!("New {agent} agent");
-    palette_with(drv, &line.to_lowercase(), &line).await;
+    let started = tokio::time::Instant::now();
+    loop {
+        palette_with(drv, "new agent\u{2026}", "New agent\u{2026}").await;
+        wait(drv, "New agent\u{2026} first", |d| first_offered(d, "New agent\u{2026}")).await;
+        drv.keys("enter").await.unwrap();
+        let offered = drv.wait_for(agent, Duration::from_secs(2), |d| offering(d, agent)).await;
+        if offered.is_ok() {
+            break;
+        }
+        assert!(started.elapsed() < STEP, "New agent\u{2026} never offered {agent}");
+        drv.keys("escape").await.unwrap();
+        wait(drv, "the palette closed", |d| !palette_up(d)).await;
+    }
+    drv.type_text(&agent.to_lowercase()).await.unwrap();
+    wait(drv, agent, |d| first_offered(d, agent)).await;
     drv.keys("enter").await.unwrap();
     // The one machine is passed over; the folder step leads with the shell's folder, and ends
     // with the way to a past session.

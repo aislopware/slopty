@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Terminal
 Button │ Close tab
-Button │ New
 Heading │ terminal Terminal
 Group │ Status
 Button │ Server offline

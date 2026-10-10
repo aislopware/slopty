@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Claude Code
 Button │ Close tab
-Button │ New
 Heading │ Claude Code
 Label │ home
 Label │ Worktree fix-build on worktree-fix-build

@@ -1,8 +1,8 @@
 //! An agent's thread started from the palette in the real app: the machine's facts say which
-//! agents it can start, the palette offers "New … agent" for each, the folder step offers the
-//! shell's folder first, the new thread's own composer takes the first message (here none), and the
-//! agent the machine starts opens in its terminal's tile, on the thread face. Claude Code is
-//! `slopty-stub-claude`, first on the worker's `PATH`; no real agent runs.
+//! agents it can start, "New agent…" passes over the agent step when it has one, the folder step
+//! offers the shell's folder first, the new thread's own composer takes the first message (here
+//! none), and the agent the machine starts opens in its terminal's tile, on the thread face. Claude
+//! Code is `slopty-stub-claude`, first on the worker's `PATH`; no real agent runs.
 
 use std::time::Duration;
 
@@ -11,7 +11,8 @@ use slopty_e2e::{Driver, Dump};
 
 /// A server round trip, the agent's terminal opening, the app hearing of it.
 const STEP: Duration = Duration::from_secs(30);
-const LINE: &str = "New Claude Code agent";
+/// The palette's one start, as it begins.
+const LINE: &str = "New agent\u{2026}";
 /// The new thread's composer, which writes its first message.
 const FIELD: &str = "Message";
 
@@ -30,10 +31,13 @@ async fn claude_installed(stack: &ProjectStack) {
     }
 }
 
+/// Whether the palette's first line, the one ↩ runs, is "New agent…".
 fn offered(d: &Dump) -> bool {
-    d.a11y.iter().any(|n| {
-        n.role == "ListBoxOption" && n.label.as_deref().is_some_and(|l| l.starts_with(LINE))
-    })
+    d.a11y
+        .iter()
+        .find(|n| n.role == "ListBoxOption")
+        .and_then(|n| n.label.as_deref())
+        .is_some_and(|l| l.starts_with(LINE))
 }
 
 fn palette_up(d: &Dump) -> bool {
@@ -47,7 +51,7 @@ async fn palette_offering(drv: &mut Driver) {
     loop {
         drv.keys("cmd-shift-p").await.unwrap();
         drv.wait_for("the palette", STEP, palette_up).await.unwrap();
-        drv.type_text(&LINE.to_lowercase()).await.unwrap();
+        drv.type_text("new agent\u{2026}").await.unwrap();
         let shown = drv.wait_for(LINE, Duration::from_secs(2), offered).await;
         if shown.is_ok() {
             return;
@@ -58,7 +62,7 @@ async fn palette_offering(drv: &mut Driver) {
     }
 }
 
-/// "New Claude Code agent" from the palette asks the folder (one machine, so no machine step),
+/// "New agent…" from the palette asks the folder (one agent and one machine, so neither step),
 /// and ↩ there opens the new thread's tile on its composer, for its first message; ↩ on it
 /// left empty starts Claude Code bare in the focused shell's folder. The agent's terminal takes
 /// that tile, on its thread face with the keyboard in the composer, and no thread tile opens;

@@ -12,11 +12,6 @@ Image │ Working
 Button │ Orchestrator
 Image │ Claude Code
 Button │ Close tile
-Button │ #1 Read a pull request's checks, Working
-Image │ Claude Code
-Button │ Close tile
-Label │ #42: clippy (macos) failed
-Image │ Working
 Heading │ Machines
 Button │ studio
 Button │ New shell on studio
@@ -31,16 +26,12 @@ TabList
 Tab │ Terminal
 Button │ Close tab
 Tab │ Orchestrator
-Image │ Working
 Button │ Close tab
-Button │ New
+Heading │ Claude Code Orchestrator
+Button │ Show thread
 Button │ Needs you
 Button │ More
 Group │ Orchestrator
-Heading │ Claude Code Orchestrator
-Image │ Claude Code
-Button │ Show thread
-Button │ Close tile
 Group │ Project board │ Working 1, Up next 1 (focused)
 Heading
 Button │ Verifier
@@ -52,6 +43,7 @@ Heading │ Working
 ListItem │ Read a pull request's checks, Working, studio · macOS, worktree-slopty-board-1, PR #42, clippy (macos) failed
 Image │ Working
 Label │ PR #42
+Label │ worktree-slopty-board-1
 Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
 Button │ Fix CI #1
 Label │ clippy (macos) failed
@@ -60,20 +52,6 @@ Heading │ Up next
 ListItem │ Draw the pipeline row, Up next
 Image │ Up next
 MultilineTextInput │ Message the orchestrator
-Button │ Send
-Group │ #1 Read a pull request's checks
-Heading │ Claude Code #1 Read a pull request's checks
-Image │ Claude Code
-Link │ #42: clippy (macos) failed
-Label │ Worktree slopty-board-1 on worktree-slopty-board-1
-Status │ Working
-Image │ Working
-Button │ Show terminal
-Button │ Close tile
-Group │ Thread
-MultilineTextInput │ Message
-Button │ Add to the message
-Button │ Model, Claude
 Button │ Send
 Group │ Status
 Status │ Claude Code

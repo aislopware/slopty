@@ -134,16 +134,7 @@ async fn a_project_board_follows_its_orchestration() {
         .unwrap();
     claude_installed(&stack).await;
     let started = stack
-        .slopty(&[
-            "task",
-            "start",
-            "--project",
-            PROJECT,
-            "--title",
-            "Mirror the server's projects",
-            "--cwd",
-            &repo,
-        ])
+        .slopty(&["task", "start", "--project", PROJECT, "--title", "Mirror the server's projects"])
         .await
         .unwrap();
     planned(&stack, "Draw the lanes", &[], &[]).await;
@@ -210,16 +201,14 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
 
-    // The first task's own shell is a tile too: its agent is the terminal its start named.
+    // The first task's agent is the terminal its start named: a row of the board, which takes
+    // a tile only once it is opened (below).
     let agent_session = started_session(&started);
     let d = stack
         .driver
-        .wait_for("the project and its agent in the app", STEP, |d| {
-            let agent =
-                d.items.iter().any(|i| i.session.as_deref() == Some(agent_session.as_str()));
+        .wait_for("the project in the app", STEP, |d| {
             project(d)
                 .is_some_and(|p| p.tasks.len() == 6 && p.lanes.iter().any(|(l, _)| l == "merged"))
-                && agent
         })
         .await
         .unwrap();
@@ -401,7 +390,34 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     std::fs::write(&answer, viewed.to_string()).unwrap();
     std::fs::write(&gh, format!("#!/bin/sh\ncat '{}'\n", answer.display())).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut stack = ProjectStack::launch_with("studio", &[("gh", &gh)], &[]).await.unwrap();
+    // The task's stand-in agent says where it works as Claude Code's hooks carry it, each
+    // with the folder it works in, its worktree; they go to every stand-in the worker starts,
+    // so the orchestrator is given its own below.
+    let hooks = |root: &std::path::Path| {
+        let repo = root.join("repo");
+        let tree = repo.join(".claude/worktrees/slopty-board-1");
+        let (repo, at) = (repo.to_string_lossy(), tree.to_string_lossy());
+        let hooks = serde_json::json!([
+            { "hook_event_name": "SessionStart", "source": "startup", "cwd": at },
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Read the checks with gh",
+                "cwd": at,
+            },
+            {
+                "hook_event_name": "Statusline",
+                "worktree": {
+                    "name": "slopty-board-1",
+                    "path": at,
+                    "branch": "worktree-slopty-board-1",
+                    "original_cwd": repo,
+                    "original_branch": "main",
+                },
+            },
+        ]);
+        vec![("STUB_HOOKS".to_owned(), hooks.to_string())]
+    };
+    let mut stack = ProjectStack::launch_rooted("studio", &[("gh", &gh)], hooks).await.unwrap();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let repo = stack.path("repo").to_string_lossy().into_owned();
     let tree = stack.path("repo/.claude/worktrees/slopty-board-1");
@@ -420,7 +436,10 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     let at = tree.to_string_lossy().into_owned();
     git(&["worktree", "add", "-q", "-b", "worktree-slopty-board-1", &at]);
 
-    let orchestrator = term(&stack.slopty(&["agent", "spawn", "--cwd", &repo]).await.unwrap());
+    // Its own start alone: the worker's script is the task's.
+    let alone = r#"STUB_HOOKS=[{"hook_event_name":"SessionStart","source":"startup"}]"#;
+    let spawned = stack.slopty(&["agent", "spawn", "--cwd", &repo, "--env", alone]).await.unwrap();
+    let orchestrator = term(&spawned);
     let orchestrator_session = session_of(&orchestrator);
     stack
         .slopty(&[
@@ -438,39 +457,11 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         ])
         .await
         .unwrap();
-    // Each with the folder the agent works in, its worktree, as Claude Code's hooks carry it.
-    let hooks = serde_json::json!([
-        { "hook_event_name": "SessionStart", "source": "startup", "cwd": at },
-        { "hook_event_name": "UserPromptSubmit", "prompt": "Read the checks with gh", "cwd": at },
-        {
-            "hook_event_name": "Statusline",
-            "worktree": {
-                "name": "slopty-board-1",
-                "path": tree.to_string_lossy(),
-                "branch": "worktree-slopty-board-1",
-                "original_cwd": repo,
-                "original_branch": "main",
-            },
-        },
-    ]);
-    let env = format!("STUB_HOOKS={hooks}");
     claude_installed(&stack).await;
-    let started = stack
-        .slopty(&[
-            "task",
-            "start",
-            "--project",
-            PROJECT,
-            "--title",
-            "Read a pull request's checks",
-            "--cwd",
-            &repo,
-            "--env",
-            &env,
-        ])
+    stack
+        .slopty(&["task", "start", "--project", PROJECT, "--title", "Read a pull request's checks"])
         .await
         .unwrap();
-    let agent_session = started_session(&started);
     planned(&stack, "Draw the pipeline row", &[], &[]).await;
 
     // The worker reads the pull request on its watcher's round (every 15 s) onto the thread,
@@ -498,11 +489,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     let kept = failing["timeline"].as_array().map_or(0, Vec::len);
     let d = stack
         .driver
-        .wait_for("the checks and the agent in the app", STEP, |d| {
-            let agent =
-                d.items.iter().any(|i| i.session.as_deref() == Some(agent_session.as_str()));
-            project(d).is_some_and(|p| p.timeline >= kept) && agent
-        })
+        .wait_for("the checks in the app", STEP, |d| project(d).is_some_and(|p| p.timeline >= kept))
         .await
         .unwrap();
     assert!(project(&d).is_some_and(|p| p.tasks.len() == 2));
@@ -511,7 +498,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     to_board(&mut stack.driver, PROJECT).await;
     // Time shows from a minute at work, and says "1m" until the second.
     tokio::time::sleep(AT_WORK.saturating_sub(at_work())).await;
-    // The board's tile takes the keys again, whatever the agent's own tile did meanwhile.
+    // The board's tile has the keys, the task's agent a row of it.
     stack.driver.reveal(&orchestrator_session).await.unwrap();
     stack
         .driver

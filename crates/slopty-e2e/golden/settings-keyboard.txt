@@ -10,7 +10,6 @@ Button │ e2e-worker
 TabList
 Tab │ Terminal
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
@@ -145,6 +144,8 @@ ListItem │ Connect a phone or iPad
 Button │ Keys for Connect a phone or iPad
 ListItem │ Copy the tailnet grant for Slopty's clients
 Button │ Keys for Copy the tailnet grant for Slopty's clients
+ListItem │ Copy the tailnet grant for Slopty's machines
+Button │ Keys for Copy the tailnet grant for Slopty's machines
 ListItem │ Update all machines
 Button │ Keys for Update all machines
 ListItem │ Update the server
@@ -272,10 +273,6 @@ ListItem │ Ask aside
 Button │ Keys for Ask aside
 ListItem │ Review changes
 Button │ Keys for Review changes
-ListItem │ Take back from the terminal
-Button │ Keys for Take back from the terminal
-ListItem │ Compact context
-Button │ Keys for Compact context
 ListItem │ Branch from here…
 Button │ Keys for Branch from here…
 ListItem │ Resume the agent
@@ -348,18 +345,6 @@ ListItem │ Toggle whole word │ ⌥⌘W
 Button │ Keys for Toggle whole word │ ⌥⌘W
 ListItem │ Toggle regex │ ⌥⌘R
 Button │ Keys for Toggle regex │ ⌥⌘R
-ListItem │ Jump to symbol │ ⇧⌘O
-Button │ Keys for Jump to symbol │ ⇧⌘O
-ListItem │ Add the next match to the selection │ ⌘D
-Button │ Keys for Add the next match to the selection │ ⌘D
-ListItem │ Select every match │ ⇧⌘L
-Button │ Keys for Select every match │ ⇧⌘L
-ListItem │ Close symbols │ ⎋
-Button │ Keys for Close symbols │ ⎋
-ListItem │ Next symbol │ ↓
-Button │ Keys for Next symbol │ ↓
-ListItem │ Previous symbol │ ↑
-Button │ Keys for Previous symbol │ ↑
 ListItem │ Scroll down │ ↓
 Button │ Keys for Scroll down │ ↓
 ListItem │ Scroll up │ ↑

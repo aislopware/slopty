@@ -8,7 +8,6 @@ Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects

@@ -45,7 +45,6 @@ Tab │ pi
 Button │ Close tab
 Tab │ Codex
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Status │ 1 new
 Button │ More
