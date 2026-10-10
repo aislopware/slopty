@@ -968,3 +968,57 @@ fn removing_a_machine_asks_first_and_says_what_stays(cx: &mut TestAppContext) {
     view.update_in(cx, |v, w, cx| v.remove_machine(&RemoveMachine { worker: laptop_key }, w, cx));
     assert_eq!(words(cx).map(|w| w.title).as_deref(), Some("Remove studio?"), "laptop: none");
 }
+
+/// An update under way offers Cancel on its tile's pill, which stops it at the host the notice
+/// names; one stopped at a password or a host key offers Continue…, the way to the SSH sheet
+/// that asks for them, through the same press as Update.
+#[gpui::test]
+fn an_update_under_way_can_be_cancelled_and_one_stopped_at_a_password_continues(
+    cx: &mut TestAppContext,
+) {
+    use slopty_client::update::{Of, UpdateNotice};
+
+    use crate::add_worker::{Bar, Failed, Install, Update, Updates};
+    type Hosts = Rc<std::cell::RefCell<Vec<String>>>;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (started, cancelled): (Hosts, Hosts) = (Rc::default(), Rc::default());
+    let (s, c) = (Rc::clone(&started), Rc::clone(&cancelled));
+    let running = Install { steps: Vec::new(), bar: Bar::Busy, failed: None };
+    cx.update(|_w, cx| {
+        let start: Update = Rc::new(move |host: &str, _w, _cx| s.borrow_mut().push(host.into()));
+        let cancel: Update = Rc::new(move |host: &str, _w, _cx| c.borrow_mut().push(host.into()));
+        let runs = std::iter::once(("studio.ts.net".to_owned(), running)).collect();
+        cx.set_global(Updates { start: Some(start), cancel: Some(cancel), runs });
+    });
+    let key = studio.key;
+    let notice =
+        UpdateNotice { of: Of::Worker, host: "studio.ts.net".to_owned(), peer: "0.0.9".to_owned() };
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NeedsUpdate(notice), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("update-worker", shell.item)).is_none(), "not while it runs");
+    click(cx, selector("cancel-update", shell.item));
+    assert_eq!(*cancelled.borrow(), ["studio.ts.net"], "Cancel stops it there");
+
+    let stopped = Install {
+        steps: Vec::new(),
+        bar: Bar::Hidden,
+        failed: Some(Failed {
+            title: "studio.ts.net asks for a password".into(),
+            hint: Some("Sign in with it in the sheet.".into()),
+            lines: Vec::new(),
+            in_sheet: true,
+        }),
+    };
+    cx.update(|_w, cx| {
+        cx.global_mut::<Updates>().runs.insert("studio.ts.net".into(), stopped);
+    });
+    view.update(cx, |_v, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("cancel-update", shell.item)).is_none(), "nothing runs");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Button", Some(crate::add_worker::CONTINUE))), "{nodes:#?}");
+    click(cx, selector("update-worker", shell.item));
+    assert_eq!(*started.borrow(), ["studio.ts.net"], "the app opens the sheet from here");
+}

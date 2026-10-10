@@ -472,7 +472,7 @@ impl BodyState {
             }
             Self::Exited(status) => format!("Exited · code {status}").into(),
             Self::Ended => SESSION_ENDED.into(),
-            Self::NeedsUpdate(notice) => notice.title().into(),
+            Self::NeedsUpdate(notice) => update_title(notice).into(),
         }
     }
 
@@ -513,9 +513,39 @@ struct UpdateState {
     cancel: Option<add_worker::Update>,
 }
 
-/// [`UpdateState`] for `state`; `None` for any other state, and where no update can run.
+/// What a pill of a machine on another build is headed: which side is the newer where that can
+/// be told, since a newer machine is not updated from here.
+pub(crate) fn update_title(notice: &slopty_client::update::UpdateNotice) -> String {
+    use slopty_client::update::Of;
+    if !notice.this_is_older() {
+        return notice.title().to_owned();
+    }
+    match notice.of {
+        Of::Worker => "This machine runs a newer build".to_owned(),
+        Of::Server => "The server runs a newer build".to_owned(),
+    }
+}
+
+/// What it says under that: both builds, and, where this device is the older, that it is this
+/// device to update.
+pub(crate) fn update_detail(notice: &slopty_client::update::UpdateNotice) -> String {
+    if notice.this_is_older() {
+        format!("{} {OLDER_HERE}", notice.detail())
+    } else {
+        notice.detail()
+    }
+}
+
+/// What a machine on a newer build asks of this device.
+pub(crate) const OLDER_HERE: &str = "Update Slopty on this device to match it.";
+
+/// [`UpdateState`] for `state`; `None` for any other state, where no update can run, and where
+/// the machine runs a newer build than this one, which an update from here would take back.
 fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
     let BodyState::NeedsUpdate(notice) = state else { return None };
+    if notice.this_is_older() {
+        return None;
+    }
     let updates = cx.try_global::<add_worker::Updates>()?;
     let start = updates.start.clone();
     let Some(run) = updates.runs.get(&notice.host) else {
@@ -569,6 +599,9 @@ impl WorkspaceView {
         let WorkerStatus::NeedsUpdate(notice) = &self.workers.get(&key)?.status else {
             return None;
         };
+        if notice.this_is_older() {
+            return None;
+        }
         let updates = cx.try_global::<add_worker::Updates>()?;
         if updates.runs.get(&notice.host).is_some_and(|run| run.failed.is_none()) {
             return None;
@@ -2817,14 +2850,17 @@ impl WorkspaceView {
             BodyState::NeedsUpdate(notice) => {
                 let command = notice.command();
                 let running = update.as_ref().is_some_and(|u| u.bar.is_some());
-                // A phone or an iPad cannot run the command, so it has none to copy.
-                let copy = (!running && !cfg!(target_os = "ios")).then(|| {
-                    button("copy-command", COPY_COMMAND).on_click(move |_ev, _w, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
-                    })
-                });
-                let said =
-                    update.as_ref().map_or_else(|| Some(notice.detail()), |u| u.detail.clone());
+                // A phone or an iPad cannot run the command, so it has none to copy; nor does
+                // a machine newer than this device, which is the one to update.
+                let copy =
+                    (!running && !cfg!(target_os = "ios") && !notice.this_is_older()).then(|| {
+                        button("copy-command", COPY_COMMAND).on_click(move |_ev, _w, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
+                        })
+                    });
+                let said = update
+                    .as_ref()
+                    .map_or_else(|| Some(update_detail(notice)), |u| u.detail.clone());
                 let detail = said.map(|said| {
                     div()
                         .min_w_0()

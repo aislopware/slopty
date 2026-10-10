@@ -27,6 +27,9 @@ use crate::kit;
 pub const UPDATE: &str = "Update";
 /// The tile's button after an update failed.
 pub const TRY_AGAIN: &str = "Try again";
+/// The tile's button after an update stopped at what only the SSH sheet asks: a password, a
+/// host key to trust.
+pub const CONTINUE: &str = "Continue\u{2026}";
 
 /// How a step stands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -86,6 +89,9 @@ pub struct Failed {
     pub hint: Option<String>,
     /// The last lines the machine printed, oldest first.
     pub lines: Vec<String>,
+    /// It stopped at what only the SSH sheet asks (a password, a host key), so its next step
+    /// opens the sheet on that machine ([`CONTINUE`]) rather than trying again blind.
+    pub in_sheet: bool,
 }
 
 /// An install or an update, as drawn.
@@ -116,6 +122,8 @@ pub type Update = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 pub struct Updates {
     /// The app's update; `None` where it cannot run `ssh` (iOS, the self-test).
     pub start: Option<Update>,
+    /// Stops the update under way at a host: a link that stalls must not hold the tile.
+    pub cancel: Option<Update>,
     /// Each update under way or failed, by the host it runs against.
     pub runs: HashMap<String, Install>,
 }
@@ -126,6 +134,7 @@ impl std::fmt::Debug for Updates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Updates")
             .field("start", &self.start.is_some())
+            .field("cancel", &self.cancel.is_some())
             .field("runs", &self.runs)
             .finish()
     }
@@ -333,7 +342,7 @@ mod tests {
 
     #[test]
     fn the_buttons_are_sentence_case() {
-        for text in [UPDATE, TRY_AGAIN] {
+        for text in [UPDATE, TRY_AGAIN, CONTINUE] {
             let rest: String = text.chars().skip(1).collect();
             assert!(text.starts_with(char::is_uppercase) && !rest.contains(char::is_uppercase));
         }

@@ -9501,3 +9501,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `notify::tests::the_approval_note_answers_in_place_and_shows_on_demand`. The keyboard calls
     themselves (`request_virtual_keyboard`, `dismiss_virtual_keyboard`) do nothing on a Mac, so
     the iOS e2e's key bar scenario is the layer that sees them.
+
+- ✅ **An update from a tile can be cancelled, goes on in the sheet, and never takes a machine
+  back** (2026-10-11, readiness audit items 15 (the tile half) and 6).
+  - **Cancel** (15). While an update runs, the tile's Update gives way to "Cancel". A link
+    that stalled held the tile until the deploy's own timeout; Cancel drops the run and says "The
+    update was stopped", with "Try again" to start it over.
+  - **A password or a host key** (15). An update that stops at what only the SSH sheet asks
+    used to say so and leave the person to find the sheet. It now names the host ("mini asks
+    for a password", "mini's host key is not trusted yet"), and its button reads
+    "Continue…": it opens the sheet on that host with its user and port filled in.
+  - **A machine on a newer build** (6). The update notice used to offer Update whatever the
+    order, so a client a release behind could push its older build over a newer worker. When
+    the other side is newer, the tile says "This machine runs a newer build" (or "The
+    server…") and "Update Slopty on this device to match it.", with no Update and no command
+    to copy, and the navigator row offers none either. Update all skips such a machine.
+  - **When the order cannot be told** (6). Two builds of one version with no stamp to compare
+    cannot be ordered. The first press then stops and says "It may run a newer build than
+    this one"; a second press deploys. Update all touches only machines known to be older.
+  - Tests: `workspace::tests::bars::an_update_under_way_can_be_cancelled_and_one_stopped_at_a_password_continues`,
+    `workspace::tests::tiles::a_worker_on_a_newer_build_asks_this_device_to_update`,
+    `ssh::tests::a_tile_cancels_an_update_and_a_password_goes_to_the_sheet`,
+    `…::a_tile_sends_a_new_machine_s_key_to_the_sheet`,
+    `…::an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell`.

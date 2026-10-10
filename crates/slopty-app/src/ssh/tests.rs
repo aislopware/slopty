@@ -484,7 +484,8 @@ fn a_new_machine_s_key_is_offered_and_trusted_from_the_sheet(cx: &mut TestAppCon
     assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"], "and run again");
 }
 
-/// A tile has no fingerprint to show: a machine new to this Mac sends the person to the sheet.
+/// A tile has no fingerprint to show and no password field: a machine new to this Mac, or one
+/// that takes only a password, sends the person to the sheet, keeping what it stopped at.
 #[test]
 fn a_tile_sends_a_new_machine_s_key_to_the_sheet() {
     let key = HostKey {
@@ -495,12 +496,80 @@ fn a_tile_sends_a_new_machine_s_key_to_the_sheet() {
     };
     let said = on_a_tile(key.offer());
     assert_eq!(said.title, "mini's host key is not trusted yet");
-    assert_eq!(
-        said.hint.as_deref(),
-        Some("Check and trust it from Install on a machine over SSH.")
-    );
-    assert!(said.trust.is_none());
+    assert_eq!(said.hint.as_deref(), Some("Check and trust it in Install on a machine over SSH."));
+    assert!(said.trust.is_some(), "kept, so the pill's next step is the sheet");
+    let mut asks = failure("Permission denied (publickey,password)");
+    asks.password = Some(Box::new(slopty_deploy::PasswordAsk {
+        user: "me".to_owned(),
+        host: "mini".to_owned(),
+        refused: false,
+    }));
+    let said = on_a_tile(asks);
+    assert_eq!(said.title, "mini asks for a password");
+    assert_eq!(said.hint.as_deref(), Some("Sign in with it in Install on a machine over SSH."));
+    assert!(said.password.is_some());
     assert_eq!(on_a_tile(failure("other")), failure("other"));
+}
+
+/// A tile's Cancel stops an update under way: its deploy is dropped, which ends its `ssh`,
+/// and the pill says it stopped, offering Try again. An update that stops at a password says
+/// so with Continue…, which opens the sheet on that machine with its user filled in.
+#[gpui::test]
+fn a_tile_cancels_an_update_and_a_password_goes_to_the_sheet(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, cx| {
+        ws.deployer = Some(shared);
+        ws.publish_updates(cx);
+    });
+    let id = WorkerId::new();
+    let notice = UpdateNotice { of: Of::Worker, host: "mini".to_owned(), peer: String::new() };
+    let view = ws.read_with(cx, |ws, _| ws.view.clone());
+    list(&ws, cx, id, "mini");
+    let key = crate::workers::worker_key(id);
+    view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::NeedsUpdate(notice), cx));
+    cx.run_until_parked();
+    deployer.remember(id, &Target { host: "mini.lan".into(), user: Some("me".into()), port: None });
+    let _dials = deployer.asked();
+    let run = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| cx.global::<Updates>().runs.get("mini").cloned()).expect("kept")
+    };
+
+    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
+    assert_eq!(deployer.asked(), ["deploy mini.lan Some(\"me\") None server=hub:45560"]);
+    let cancel = cx.update(|_, cx| cx.global::<Updates>().cancel.clone()).expect("offered");
+    cx.update(|window, cx| cancel("mini", window, cx));
+    cx.run_until_parked();
+    assert!(deployer.dropped.load(Ordering::SeqCst), "its ssh goes with it");
+    let stopped = run(cx).failed.expect("said");
+    assert_eq!(stopped.title, "The update was stopped");
+    assert!(!stopped.in_sheet, "Try again, not the sheet");
+
+    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
+    let _first = deployer.asked();
+    let mut asks = failure("Permission denied (publickey,password)");
+    asks.password = Some(Box::new(slopty_deploy::PasswordAsk {
+        user: "me".to_owned(),
+        host: "mini.lan".to_owned(),
+        refused: false,
+    }));
+    deployer.end(cx, Err(asks));
+    let failed = run(cx).failed.expect("said");
+    assert_eq!(failed.title, "mini.lan asks for a password");
+    assert!(failed.in_sheet, "Continue…");
+    let start = cx.update(|_, cx| cx.global::<Updates>().start.clone()).expect("offered");
+    cx.update(|window, cx| start("mini", window, cx));
+    cx.run_until_parked();
+    assert!(deployer.asked().is_empty(), "no blind run again");
+    let fields = ws.read_with(cx, |ws, cx| {
+        let sheet = ws.adding.as_ref()?.ssh.as_ref()?;
+        Some((sheet.host.read(cx).value().to_string(), sheet.user.read(cx).value().to_string()))
+    });
+    assert_eq!(fields, Some(("mini.lan".to_owned(), "me".to_owned())), "the sheet, on it");
 }
 
 /// A tile of a worker on a different build offers "Update" beside "Copy command": it deploys
@@ -1092,4 +1161,43 @@ fn a_removal_takes_the_worker_off_then_the_server_forgets_it(cx: &mut TestAppCon
     assert!(verbs.try_next().is_none(), "a failed removal forgets nothing");
     let said = notice(cx).unwrap_or_default();
     assert!(said.starts_with("Could not remove other: Could not reach other"), "{said}");
+}
+
+/// A machine on a newer build is never updated from here, by its tile or by "Update all": this
+/// device is the one to update. One whose build cannot be told newer or older asks on the first
+/// press and deploys on the second.
+#[gpui::test]
+fn an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    let id = WorkerId::new();
+    let view = ws.read_with(cx, |ws, _| ws.view.clone());
+    list(&ws, cx, id, "mini");
+    let key = crate::workers::worker_key(id);
+    let notice =
+        |peer: &str| UpdateNotice { of: Of::Worker, host: "mini".into(), peer: peer.into() };
+    let set = |cx: &mut VisualTestContext, notice: UpdateNotice| {
+        view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::NeedsUpdate(notice), cx));
+        cx.run_until_parked();
+    };
+    let _dials = deployer.asked();
+
+    set(cx, notice("99.0.0+wire.0badf00d"));
+    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
+    cx.dispatch_action(UpdateAllWorkers);
+    assert!(deployer.asked().is_empty(), "a newer machine is not taken back");
+
+    let same = slopty_proto::wire::BUILD.split('+').next().unwrap_or_default().to_owned();
+    set(cx, notice(&same));
+    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
+    assert!(deployer.asked().is_empty(), "the first press asks");
+    let asked = cx.update(|_, cx| cx.global::<Updates>().runs.get("mini").cloned()).expect("kept");
+    assert_eq!(asked.failed.map(|f| f.title).as_deref(), Some(MAYBE_NEWER));
+    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"], "the second goes");
 }

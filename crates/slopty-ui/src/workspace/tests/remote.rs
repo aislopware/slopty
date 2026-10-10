@@ -26,6 +26,10 @@ use crate::conversation::attach::Attachment;
 enum Call {
     Upload(XferId, Vec<PathBuf>, Dest),
     /// An upload an earlier run began, taken up again.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(dead_code, reason = "taking transfers up at a launch is tested on the Mac")
+    )]
     UploadAgain(XferId, Vec<PathBuf>, Dest),
     Cancel(XferId),
     SendClip(RepRef, Fetched, bool),

@@ -407,6 +407,7 @@ impl Progress {
             title: f.title.clone(),
             hint: f.hint.clone(),
             lines: f.lines.clone(),
+            in_sheet: f.trust.is_some() || f.password.is_some(),
         });
         Install { steps, bar, failed }
     }
@@ -549,12 +550,18 @@ impl Sheet {
 #[derive(Debug)]
 pub struct UpdateRun {
     worker: WorkerId,
+    /// Where it runs: the sheet opens on it when the run stops at a password or a host key.
+    target: Target,
     progress: Progress,
     task: Option<gpui::Task<()>>,
 }
 
 /// Every update under way or failed.
 pub type Updating = HashMap<String, UpdateRun>;
+
+/// What a tile's first Update says where which build is the newer cannot be told: it may take
+/// the machine back to an older one, so it asks, and the second press goes on.
+const MAYBE_NEWER: &str = "It may run a newer build than this one";
 
 /// How long a removed machine's worker has to go off the server's list before the removal
 /// says it still answers.
@@ -823,18 +830,40 @@ impl Workspace {
     /// once. The pill follows each step; the link coming up ends it.
     pub(crate) fn update_worker(&mut self, host: &str, cx: &mut Context<Self>) {
         let view = self.view.read(cx);
-        let key = view.workers().find_map(|(key, _, status)| match status {
-            WorkerStatus::NeedsUpdate(notice) if notice.host == host => Some(key),
+        let found = view.workers().find_map(|(key, _, status)| match status {
+            WorkerStatus::NeedsUpdate(notice) if notice.host == host => Some((key, notice.clone())),
             _ => None,
         });
-        let Some(worker) = key.and_then(|key| self.workers.iter().find(|w| w.key == key)) else {
-            return;
-        };
+        let Some((key, notice)) = found else { return };
+        let Some(worker) = self.workers.iter().find(|w| w.key == key) else { return };
         let worker = worker.id;
+        // A machine on a newer build is not taken back to this one: this device is the older.
+        if notice.this_is_older() {
+            self.show_notice(format!("{host} runs a newer build: update Slopty here"), cx);
+            return;
+        }
+        let stopped = self.updates.get(host).filter(|run| run.task.is_none());
+        let said_before = |title: &str| {
+            stopped.and_then(|run| run.progress.failure()).is_some_and(|f| f.title == title)
+        };
+        // Which build is the newer cannot be told: the first press asks, the second is the yes.
+        if notice.newer().is_none() && !said_before(MAYBE_NEWER) {
+            let Some(deployer) = self.deployer.as_ref() else { return };
+            let target = deployer.target_of(worker).unwrap_or_else(|| Target::host(host));
+            let mut progress = Progress::new(host.to_owned(), Kind::Update);
+            progress.failed(Failure::new(
+                MAYBE_NEWER.to_owned(),
+                Some(format!("{} Update again to put this build there anyway.", notice.detail())),
+                Vec::new(),
+            ));
+            self.updates
+                .insert(host.to_owned(), UpdateRun { worker, target, progress, task: None });
+            self.publish_updates(cx);
+            return;
+        }
         // Pressed again after the run stopped to say it ends sessions there: that is the yes.
-        let end_sessions = self.updates.get(host).is_some_and(|run| {
-            run.task.is_none() && run.progress.failure().is_some_and(|f| f.ends_sessions.is_some())
-        });
+        let end_sessions = stopped
+            .is_some_and(|run| run.progress.failure().is_some_and(|f| f.ends_sessions.is_some()));
         self.start_update(worker, host, Said { end_sessions, ..Said::default() }, cx);
     }
 
@@ -850,7 +879,11 @@ impl Workspace {
             .read(cx)
             .workers()
             .filter_map(|(key, _, status)| match status {
-                WorkerStatus::NeedsUpdate(notice) => {
+                // Only where this build is known to be the newer: a newer machine is not taken
+                // back, and one that cannot be told asks on its own tile.
+                WorkerStatus::NeedsUpdate(notice)
+                    if notice.newer() == Some(slopty_client::update::Newer::Here) =>
+                {
                     let slot = self.workers.iter().find(|w| w.key == key)?;
                     Some((slot.id, notice.host.clone()))
                 }
@@ -879,7 +912,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.update_still_wrong(worker, cx);
-        if notice.here() && self.updates_itself() && self.updated_unasked.insert(worker) {
+        // Never back to an older build: an app older than its own Mac's worker leaves it.
+        let older = notice.this_is_older();
+        if notice.here() && !older && self.updates_itself() && self.updated_unasked.insert(worker) {
             tracing::info!(%worker, peer = %notice.peer, "this Mac's worker runs another build");
             self.start_update(worker, &notice.host, Said::default(), cx);
         }
@@ -916,7 +951,8 @@ impl Workspace {
             let _gone = this.update(cx, |ws, cx| ws.update_deployed(&owned, done, cx));
         });
         let progress = Progress::new(host.to_owned(), Kind::Update);
-        self.updates.insert(host.to_owned(), UpdateRun { worker, progress, task: Some(task) });
+        let run = UpdateRun { worker, target: target.clone(), progress, task: Some(task) };
+        self.updates.insert(host.to_owned(), run);
         self.publish_updates(cx);
     }
 
@@ -964,17 +1000,58 @@ impl Workspace {
         self.publish_updates(cx);
     }
 
+    /// A tile's Update, Try again or Continue: on a run that stopped at a password or a host
+    /// key, the sheet on that machine, which asks for them; else the update again.
+    fn update_pressed(&mut self, host: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let at_sheet = self.updates.get(host).filter(|run| run.task.is_none()).and_then(|run| {
+            let failure = run.progress.failure()?;
+            (failure.trust.is_some() || failure.password.is_some()).then(|| run.target.clone())
+        });
+        let Some(target) = at_sheet else { return self.update_worker(host, cx) };
+        self.open_ssh_at(&target.host, window, cx);
+        let Some(sheet) = self.adding.as_ref().and_then(|a| a.ssh.as_ref()) else { return };
+        let (user, port) = (sheet.user.clone(), sheet.port.clone());
+        if let Some(name) = target.user {
+            user.update(cx, |input, cx| input.set_value(name, window, cx));
+        }
+        if let Some(number) = target.port {
+            port.update(cx, |input, cx| input.set_value(number.to_string(), window, cx));
+        }
+    }
+
+    /// A tile's Cancel: the update under way at `host` stops. Its `ssh` goes with it (the
+    /// deploy's children die with the future), and the pill says so, with Try again.
+    pub(crate) fn cancel_update(&mut self, host: &str, cx: &mut Context<Self>) {
+        let Some(run) = self.updates.get_mut(host).filter(|run| run.task.is_some()) else {
+            return;
+        };
+        run.task = None;
+        run.progress.failed(Failure::new(
+            "The update was stopped".to_owned(),
+            Some("Try again to start it over.".to_owned()),
+            Vec::new(),
+        ));
+        self.publish_updates(cx);
+    }
+
     /// Tell the tiles what an update can do and where each stands.
     pub(crate) fn publish_updates(&self, cx: &mut Context<Self>) {
+        let this = cx.weak_entity();
         let start = self.deployer.as_ref().map(|_| {
-            let this = cx.weak_entity();
+            let this = this.clone();
+            let run: add_worker::Update = Rc::new(move |host, window, cx| {
+                let _gone = this.update(cx, |ws, cx| ws.update_pressed(host, window, cx));
+            });
+            run
+        });
+        let cancel = self.deployer.as_ref().map(|_| {
             let run: add_worker::Update = Rc::new(move |host, _window, cx| {
-                let _gone = this.update(cx, |ws, cx| ws.update_worker(host, cx));
+                let _gone = this.update(cx, |ws, cx| ws.cancel_update(host, cx));
             });
             run
         });
         let runs = self.updates.iter().map(|(h, r)| (h.clone(), r.progress.view())).collect();
-        cx.set_global(Updates { start, runs });
+        cx.set_global(Updates { start, cancel, runs });
         self.view.update(cx, |_, cx| cx.notify());
     }
 
@@ -1437,15 +1514,22 @@ fn not_listed(host: &str, deployed: &Deployed) -> Failure {
     )
 }
 
-/// `failure` as a tile's pill says it: a tile has no fingerprint to show or key to trust, so a
-/// machine new to this Mac sends the person to the sheet, which has both.
+/// `failure` as a tile's pill says it: a tile has no fingerprint to show or key to trust, and no
+/// field for a password, so a machine new to this Mac, or one that takes only a password, sends
+/// the person to the sheet, which has them. What it stopped at is kept, so the pill's next step
+/// opens the sheet ([`add_worker::CONTINUE`]).
 fn on_a_tile(failure: Failure) -> Failure {
-    let Some(key) = &failure.trust else { return failure };
-    Failure::new(
-        format!("{}'s host key is not trusted yet", key.target),
-        Some(format!("Check and trust it from {TITLE}.")),
-        Vec::new(),
-    )
+    let (title, hint) = match (&failure.trust, &failure.password) {
+        (Some(key), _) => (
+            format!("{}'s host key is not trusted yet", key.target),
+            format!("Check and trust it in {TITLE}."),
+        ),
+        (None, Some(ask)) => {
+            (format!("{} asks for a password", ask.host), format!("Sign in with it in {TITLE}."))
+        }
+        (None, None) => return failure,
+    };
+    Failure { title, hint: Some(hint), lines: Vec::new(), ..failure }
 }
 
 impl Workspace {

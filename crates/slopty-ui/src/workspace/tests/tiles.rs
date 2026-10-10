@@ -1541,3 +1541,33 @@ fn a_sliding_pane_builds_no_other_pane(cx: &mut TestAppContext) {
     assert_eq!(after.0, before.0, "the pane beside is not built again");
     assert!(after.1.saturating_sub(before.1) <= 16, "at most once a frame of the slide");
 }
+
+/// A machine on a newer build than this device says so, and that this device is the one to
+/// update: no Update, no command to copy, on its tile or its navigator row.
+#[gpui::test]
+fn a_worker_on_a_newer_build_asks_this_device_to_update(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.update(|_w, cx| {
+        let start: crate::add_worker::Update = Rc::new(|_host: &str, _w, _cx| ());
+        cx.set_global(crate::add_worker::Updates { start: Some(start), ..Default::default() });
+    });
+    let notice = UpdateNotice {
+        of: Of::Worker,
+        host: "studio".to_owned(),
+        peer: "99.0.0+wire.0badf00d".to_owned(),
+    };
+    let key = fake.key;
+    let status = WorkerStatus::NeedsUpdate(notice.clone());
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, status, cx));
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Status", Some("This machine runs a newer build"))));
+    assert!(tile::update_detail(&notice).ends_with(tile::OLDER_HERE));
+    for part in ["update-worker", "copy-command"] {
+        assert!(cx.debug_bounds(selector(part, tile.item)).is_none(), "no {part}");
+    }
+    assert!(view.read_with(cx, |v, cx| v.update_run(key, cx)).is_none(), "nor on its row");
+}
