@@ -814,6 +814,11 @@ impl WorkspaceView {
             Some((false, view)) => (None, Some(view)),
             None => (None, None),
         };
+        // A Claude Code start on a machine whose policy keeps the hooks off says so before
+        // its first message, not after its first approval goes unseen.
+        let hooks_off = self
+            .hooks_off_on(starting.worker, &starting.agent.0)
+            .map(|said| self.tile_line("hooks-off", id, said));
         // The thread's own composer under the tile's header, which names the agent.
         let body = Some({
             if let Some(view) = setting_up {
@@ -887,8 +892,13 @@ impl WorkspaceView {
                     }))
                 })
                 .map(|el| {
-                    let inside =
-                        div().flex().flex_col().children(header).children(failed).children(body);
+                    let inside = div()
+                        .flex()
+                        .flex_col()
+                        .children(header)
+                        .children(hooks_off)
+                        .children(failed)
+                        .children(body);
                     el.child(inside.relative().size_full().overflow_hidden())
                 })
                 .into_any_element(),

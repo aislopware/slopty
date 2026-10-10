@@ -9524,3 +9524,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `ssh::tests::a_tile_cancels_an_update_and_a_password_goes_to_the_sheet`,
     `…::a_tile_sends_a_new_machine_s_key_to_the_sheet`,
     `…::an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell`.
+
+- ✅ **A failed dial says what to do, and a machine that keeps Slopty's hooks off says so**
+  (2026-10-11, readiness audit item 5's A half and the `runs_own_hooks` deletion line).
+  - **The defect** (5). A machine that did not answer, and one that turned this device away by
+    its `[worker] allow` ranges, both showed the transport's words ("connect: 100.x:45550: no
+    answer; reconnecting…") with no next step.
+  - **One status per kind** (5). The app maps each of `slopty_net`'s kinds to a
+    `WorkerStatus`, and the raw error goes to the log.
+    - **No answer.** The tile says "mini does not answer", and under it that the machine may be
+      asleep or off the tailnet, or Slopty has stopped there. It offers Wake and Retry now. When
+      the server lists the machine as away, the server's word still wins.
+    - **Turned away.** The tile says "mini turned this device away", and under it "Add
+      100.64.0.9 to Allowed addresses in its Slopty settings." (the settings' name for
+      `[worker] allow`). Its "Copy address" button puts that
+      address on the clipboard. The address is this device's source address on the route to the
+      machine, which a connected UDP socket reads from the routing table without sending a
+      packet. Wake is not offered: the machine answered, so it is awake.
+    - **Not found.** "mini cannot be found": its name does not resolve, so check that this
+      device is on the tailnet.
+    - **Dropped.** A link that ended reads "the link dropped; reconnecting…", not the stream's
+      error text.
+  - **Hooks off by company policy.** A machine's managed settings can keep Slopty's hooks from
+    running (`InstalledAgent::managed_hooks_off`). Its Claude Code approvals and questions then
+    never reach the thread, which looked like an agent stuck for no reason. A Claude Code
+    thread there, and a Claude Code start before its first message, now carry a slim line
+    across the top: "Company policy keeps Slopty's hooks off on mini: answer Claude Code's
+    approvals and questions in its terminal." The machine's facts read "Claude Code 2.1.0,
+    hooks off by company policy". Codex and pi threads carry no line, and it goes as soon as
+    the policy changes.
+  - **A picture paste's offer waits for room** (22, the client half). It used to go on the link
+    with `try_send` and was lost to a full queue, and the worker then held the paste for good.
+    It now waits in the terminal view's own queue of unsent messages, ahead of its chord
+    (`docs/MEASUREMENTS.md`, 2026-10-11: the key's fast path holds).
+  - Tests: `workspace::tests::away::each_kind_of_failed_dial_says_what_to_do`,
+    `terminal::view::tests::a_picture_offer_waits_for_room_ahead_of_its_chord`,
+    `workspace::tests::agent_tile::a_claude_thread_where_policy_keeps_the_hooks_off_says_so`,
+    `net::tests::a_failed_dial_is_told_by_its_kind` and
+    `server::tests::each_kind_of_failed_dial_is_its_own_status` (slopty-app).

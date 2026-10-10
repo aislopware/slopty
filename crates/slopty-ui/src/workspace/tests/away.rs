@@ -572,3 +572,64 @@ fn the_away_pill_says_why_and_offers_the_way_back(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!drawn(cx, "copy-grant"), "no grant to copy, no button");
 }
+
+/// Each kind of failed dial says what is so and what to do, never the transport's words: a
+/// machine that does not answer offers a wake and a dial now; one that turned this device away
+/// by its ranges names this device's address and copies it; one whose name does not resolve
+/// says to check the tailnet.
+#[gpui::test]
+fn each_kind_of_failed_dial_says_what_to_do(cx: &mut TestAppContext) {
+    use std::rc::Rc;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    let none: MenuRun = Rc::new(|_w, _cx| ());
+    let actions =
+        HostActions { connect: Some(Rc::clone(&none)), wake: Some(none), ..HostActions::default() };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_host_actions(std::iter::once((key, actions)).collect(), None, cx);
+    });
+    let drawn = |cx: &mut VisualTestContext, part: &str| {
+        cx.debug_bounds(selector(part, shell.item)).is_some()
+    };
+    let says = |cx: &mut VisualTestContext, status: WorkerStatus| {
+        view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, status, cx));
+        cx.run_until_parked();
+        tree(cx)
+            .iter()
+            .filter(|n| n.role == "Status")
+            .filter_map(|n| n.label.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let said = says(cx, WorkerStatus::NoAnswer);
+    assert!(said.iter().any(|l| l == "studio does not answer"), "{said:?}");
+    assert!(drawn(cx, "away-why") && drawn(cx, "wake-worker") && drawn(cx, "retry-worker"));
+    assert!(!drawn(cx, "copy-address"));
+    let why = tile::away_why(&WorkerStatus::NoAnswer).unwrap_or_default();
+    assert!(why.contains("asleep") && why.contains("tailnet"), "{why}");
+
+    let said = says(cx, WorkerStatus::Refused(Some("100.64.0.9".to_owned())));
+    assert!(said.iter().any(|l| l == "studio turned this device away"), "{said:?}");
+    assert!(!drawn(cx, "wake-worker"), "it is awake: it answered");
+    let why = tile::away_why(&WorkerStatus::Refused(Some("100.64.0.9".to_owned())));
+    assert_eq!(why.as_deref(), Some("Add 100.64.0.9 to Allowed addresses in its Slopty settings."));
+    let at = cx.debug_bounds(selector("copy-address", shell.item)).expect("a copy button");
+    cx.simulate_click(at.center(), Modifiers::default());
+    cx.run_until_parked();
+    let copied = cx.update(|_w, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("100.64.0.9"));
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice, Some(tile::address_copied("studio")));
+
+    says(cx, WorkerStatus::Refused(None));
+    assert!(!drawn(cx, "copy-address"), "no address to copy, no button");
+    let why = tile::away_why(&WorkerStatus::Refused(None)).unwrap_or_default();
+    assert!(why.contains("this device's address"), "{why}");
+
+    let said = says(cx, WorkerStatus::NoSuchHost);
+    assert!(said.iter().any(|l| l == "studio cannot be found"), "{said:?}");
+    assert!(drawn(cx, "away-why") && drawn(cx, "retry-worker") && !drawn(cx, "wake-worker"));
+}

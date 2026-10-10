@@ -15803,3 +15803,27 @@ and reads the 101st prompt's text 50 times each way. Release build, mac-studio, 
 ```sh
 cargo test -p slopty-agent --release --lib expand_cost -- --ignored --nocapture
 ```
+
+## 2026-10-11 — a key into the outbound queue, after a picture's offer joined the wait
+
+A picture paste's offer used to go on the link's queue with `try_send` and was lost when the
+queue was full, which held the worker's paste for good. It now waits for room in the terminal
+view's own queue of unsent messages, ahead of its chord. That queue now holds whole
+`ClientMsg`s rather than `TermRequest`s, so every key is wrapped before the queue is checked.
+That is the key's fast path, so it was measured both ways: the same test binary from HEAD's
+`terminal/view.rs` and from this change, debug test profile, mac-studio at load 3, three runs
+each.
+
+| what | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| a key into the outbound queue, room left, before (ns) | 95.4 | 90.2 | 89.3 |
+| the same, after (ns) | 94.5 | 94.4 | 95.0 |
+
+- **The fast path holds.** The spread between the arms (about 3 ns) is inside one arm's own
+  spread (6 ns). The ~30 ns in the 2026-09-28 entry is from that entry's own A/B binaries, not
+  this profile, so the two tables do not compare.
+
+```sh
+cargo test -p slopty-ui --lib measure_a_key_into_the_outbound_queue -- --ignored --nocapture
+# before: HEAD's crates/slopty-ui/src/terminal/view.rs copied over the file, run, then restored
+```

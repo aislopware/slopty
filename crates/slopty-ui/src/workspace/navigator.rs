@@ -401,6 +401,9 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
             Some((Status::Working, "reconnecting"))
         }
         WorkerStatus::Reconnecting(_) => Some((Status::Away, "reconnecting")),
+        WorkerStatus::NoAnswer => Some((Status::Away, "no answer")),
+        WorkerStatus::NoSuchHost => Some((Status::Away, "not found")),
+        WorkerStatus::Refused(_) => Some((Status::Away, "turned away")),
         WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
         WorkerStatus::Gone => Some((Status::Away, "gone")),
         WorkerStatus::NotGranted => Some((Status::Away, "not granted")),

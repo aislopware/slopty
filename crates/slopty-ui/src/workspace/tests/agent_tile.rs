@@ -628,3 +628,69 @@ fn keeping_a_run_closes_the_message_s_other_runs(cx: &mut TestAppContext) {
     discarded.sort();
     assert_eq!(discarded, closed, "the message's other runs, and nothing else");
 }
+
+/// On a machine whose company policy keeps Slopty's hooks off, a Claude Code thread and a
+/// Claude Code start say so across their top, and where its approvals are answered; a Codex
+/// thread there, and a Claude Code thread once the policy lets the hooks run, say nothing.
+#[gpui::test]
+fn a_claude_thread_where_policy_keeps_the_hooks_off_says_so(cx: &mut TestAppContext) {
+    use crate::workspace::actions::StartThread;
+    use crate::workspace::tile::hooks_off;
+
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let policy = |cx: &mut VisualTestContext, off: bool| {
+        let mut caps = healthy();
+        caps.agents[0].managed_hooks_off = off;
+        view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, caps, cx));
+        settle(cx);
+    };
+    let said = hooks_off("studio");
+    let shown = |cx: &mut VisualTestContext| {
+        tree(cx).iter().filter(|n| n.is("Status", Some(said.as_str()))).count()
+    };
+    policy(cx, true);
+    let mut claude = crate::conversation::thread::fixtures::thread("edit");
+    claude.meta.agent = AgentId::named(AgentId::CLAUDE_CODE);
+    claude.meta.terminal = None;
+    let mut codex = crate::conversation::thread::fixtures::thread("edit");
+    codex.meta.agent = AgentId::named(AgentId::CODEX);
+    codex.meta.terminal = None;
+    codex.meta.id = ThreadId::new();
+    let (ours, theirs) = (claude.meta.id, codex.meta.id);
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread: ours }, 1);
+    let other = arrives(&view, cx, &studio, ItemKind::Thread { thread: theirs }, 2);
+    table(&view, cx, key, 1, &[&claude, &codex]);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    beside(&view, cx, other, tile, slopty_client::layout::Side::Right);
+    settle(cx);
+    assert!(cx.debug_bounds(selector("hooks-off", tile.item)).is_some(), "over Claude Code");
+    assert!(cx.debug_bounds(selector("hooks-off", other.item)).is_none(), "not over Codex");
+    assert_eq!(shown(cx), 1);
+    let facts = view.read_with(cx, |v, _| v.machine_facts(key));
+    assert!(
+        facts.contains(&"Claude Code 2.1.0, hooks off by company policy".to_owned()),
+        "{facts:?}"
+    );
+
+    view.update_in(cx, |v, window, cx| {
+        let agent = AgentId::named(AgentId::CLAUDE_CODE);
+        v.begin_start(
+            StartThread { worker: key, agent, cwd: "~".into(), worktree: false },
+            window,
+            cx,
+        );
+    });
+    settle(cx);
+    let start = focused(&view, cx).expect("the start's tile, focused in a tab of its own");
+    assert!(view.read_with(cx, |v, _| v.item(start).is_none()), "a start, no thread yet");
+    let line = selector("hooks-off", start.item);
+    assert!(cx.debug_bounds(line).is_some(), "a Claude Code start says it before it is sent");
+
+    policy(cx, false);
+    assert!(cx.debug_bounds(line).is_none(), "gone once the hooks may run");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    settle(cx);
+    assert_eq!(shown(cx), 0, "from the thread too");
+}

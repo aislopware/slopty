@@ -3752,7 +3752,8 @@ fn apply_link_event(
             | WorkerMsg::Handoff(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
-            let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
+            tracing::info!(worker = ?key, %why, "link ended");
+            let status = WorkerStatus::Reconnecting(server::DROPPED.to_owned());
             view.update(cx, |v, cx| {
                 v.threads_unlinked(key, cx);
                 v.disconnect_worker(key, status, cx);

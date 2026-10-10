@@ -443,9 +443,10 @@ pub struct TerminalView {
     /// Only the newest waits: answering it answers every marker before it.
     unsent_reached: Option<u64>,
     reached_task: Option<gpui::Task<()>>,
-    /// Requests the outbound queue had no room for, oldest first, and the wait that sends
-    /// them as room frees (running exactly while `unsent` holds something).
-    unsent: VecDeque<TermRequest>,
+    /// Messages the outbound queue had no room for, oldest first, and the wait that sends
+    /// them as room frees (running exactly while `unsent` holds something): this session's
+    /// requests, and a picture paste's offer ahead of its chord.
+    unsent: VecDeque<ClientMsg>,
     unsent_task: Option<gpui::Task<()>>,
     /// The top line the last frame drew while scrolled up (`None` while following): a frame
     /// that draws another has scrolled. Output arriving under a view scrolled up moves neither.
@@ -2124,10 +2125,10 @@ impl TerminalView {
     /// with the input behind it until its pasteboard holds the picture. Both go on the one
     /// outbound queue, so the offer is ahead on the wire.
     fn paste_picture(&mut self, offer: Option<ClientMsg>, chord: PasteChord, cx: &Context<Self>) {
-        if let Some(offer) = offer
-            && let Err(e) = self.out.try_send(offer)
-        {
-            tracing::warn!(session = %self.session, error = %e, "outbound queue");
+        // The worker holds the chord until the picture comes: an offer lost to a full queue
+        // would hold it for good, so it waits for room like any request.
+        if let Some(offer) = offer {
+            self.queue(offer, false, cx);
         }
         self.send(TermRequest::PastePicture(chord), cx);
     }
@@ -3123,38 +3124,41 @@ impl TerminalView {
     /// move never fills the queue ahead of the keys.
     fn post(&mut self, req: TermRequest, cx: &Context<Self>) {
         let motion = is_motion(&req);
+        self.queue(ClientMsg::Term { session: self.session, req }, motion, cx);
+    }
+
+    /// Queue `msg`, a pointer move when `motion`, behind whatever already waits for room.
+    fn queue(&mut self, msg: ClientMsg, motion: bool, cx: &Context<Self>) {
         if let Some(last) = self.unsent.back_mut() {
-            if motion && is_motion(last) {
-                *last = req;
+            if motion && matches!(last, ClientMsg::Term { req, .. } if is_motion(req)) {
+                *last = msg;
             } else {
-                self.unsent.push_back(req);
+                self.unsent.push_back(msg);
             }
             return;
         }
         if motion && self.out.capacity().saturating_mul(2) < self.out.max_capacity() {
-            self.wait_for_room(req, cx);
+            self.wait_for_room(msg, cx);
             return;
         }
-        match self.out.try_send(ClientMsg::Term { session: self.session, req }) {
+        match self.out.try_send(msg) {
             Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(ClientMsg::Term { req, .. })) => {
-                self.wait_for_room(req, cx);
-            }
+            Err(mpsc::error::TrySendError::Full(msg)) => self.wait_for_room(msg, cx),
             Err(e) => tracing::warn!(session = %self.session, error = %e, "outbound queue"),
         }
     }
 
-    /// Hold `req` as the first of [`Self::unsent`] and send it, and whatever joins it, as
+    /// Hold `msg` as the first of [`Self::unsent`] and send it, and whatever joins it, as
     /// the queue frees room.
-    fn wait_for_room(&mut self, req: TermRequest, cx: &Context<Self>) {
-        self.unsent.push_back(req);
+    fn wait_for_room(&mut self, msg: ClientMsg, cx: &Context<Self>) {
+        self.unsent.push_back(msg);
         let out = self.out.clone();
         self.unsent_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 let Ok(permit) = out.reserve().await else { return };
                 let more = this.update(cx, |view, _cx| {
-                    if let Some(req) = view.unsent.pop_front() {
-                        permit.send(ClientMsg::Term { session: view.session, req });
+                    if let Some(msg) = view.unsent.pop_front() {
+                        permit.send(msg);
                     }
                     !view.unsent.is_empty()
                 });
@@ -7459,6 +7463,38 @@ mod tests {
             "MEASURE a key into the outbound queue: {:.1} ns",
             took.as_secs_f64() * 1e9 / f64::from(KEYS)
         );
+    }
+
+    /// A picture paste's offer that meets a full outbound queue waits for room rather than
+    /// being dropped, and still goes ahead of its chord: the worker holds the chord until the
+    /// picture comes, so a lost offer held the paste for good.
+    #[gpui::test]
+    fn a_picture_offer_waits_for_room_ahead_of_its_chord(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::PasteChord;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        cx.run_until_parked();
+        while rx.try_recv().is_ok() {}
+        // A stand-in for the offer: what matters is its place on the queue, not its body.
+        let offer = ClientMsg::Ping { sent_at: slopty_core::MonoTime::from_nanos(7) };
+        view.update_in(cx, |view, _window, cx| {
+            view.send(TermRequest::Raw(b"x".to_vec()), cx);
+            view.paste_picture(Some(offer.clone()), PasteChord::Command, cx);
+        });
+        let mut sent = Vec::new();
+        while sent.len() < 3 {
+            let before = sent.len();
+            sent.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+            cx.run_until_parked();
+            assert!(sent.len() > before || sent.len() == 3, "the queue drains: {sent:?}");
+        }
+        let chord = TermRequest::PastePicture(PasteChord::Command);
+        assert!(matches!(&sent[0], ClientMsg::Term { req: TermRequest::Raw(b), .. } if b == b"x"));
+        assert_eq!(sent[1], offer, "the offer waited for room");
+        assert!(matches!(&sent[2], ClientMsg::Term { req, .. } if *req == chord), "{sent:?}");
     }
 
     /// Keys typed while the outbound queue is full are never dropped: they wait for room and

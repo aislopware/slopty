@@ -123,16 +123,23 @@ const fn away(liveness: Liveness) -> Option<WorkerStatus> {
 /// another build, is reachable, so that is said whatever the server thinks of it; otherwise the
 /// server's word when it has one, else the reason.
 fn failure_status(dial: &Dial, failed: DialFailed) -> WorkerStatus {
-    let why = match failed {
+    let own = match failed {
         DialFailed::NotGranted => return WorkerStatus::NotGranted,
         DialFailed::WrongBuild(notice) => return WorkerStatus::NeedsUpdate(notice),
-        DialFailed::Other(why) => why,
+        DialFailed::Refused(me) => return WorkerStatus::Refused(me.map(|ip| ip.to_string())),
+        DialFailed::NoAnswer => WorkerStatus::NoAnswer,
+        DialFailed::NoSuchHost => WorkerStatus::NoSuchHost,
+        DialFailed::Dropped => WorkerStatus::Reconnecting(DROPPED.to_owned()),
+        DialFailed::Other(why) => WorkerStatus::Reconnecting(why),
     };
     match dial {
-        Dial::Hold(liveness) => away(*liveness).unwrap_or(WorkerStatus::Reconnecting(why)),
-        Dial::At(_) | Dial::Unlisted => WorkerStatus::Reconnecting(why),
+        Dial::Hold(liveness) => away(*liveness).unwrap_or(own),
+        Dial::At(_) | Dial::Unlisted => own,
     }
 }
+
+/// Why a link that was made and then ended is being dialled again.
+pub(crate) const DROPPED: &str = "the link dropped";
 
 /// The titlebar's line while the server turns this app away.
 const fn refused_status(why: Refusal) -> &'static str {
@@ -655,6 +662,29 @@ mod tests {
         );
         assert_eq!(failure_status(&at, other()), WorkerStatus::Reconnecting("no answer".into()));
         assert_eq!(refused_status(Refusal::NotGranted), NOT_GRANTED);
+    }
+
+    /// Each kind of failed dial shows as its own status: a machine that turned this device
+    /// away by its ranges answered, so that is said over the server's word, with this device's
+    /// address; silence and a name that does not resolve yield to the server's word.
+    #[test]
+    fn each_kind_of_failed_dial_is_its_own_status() {
+        let at = Dial::At(HostAddr::new("studio", 45_550));
+        let me = std::net::IpAddr::from([100, 64, 0, 9]);
+        for dial in [at.clone(), Dial::Hold(Liveness::Unreachable)] {
+            assert_eq!(
+                failure_status(&dial, DialFailed::Refused(Some(me))),
+                WorkerStatus::Refused(Some("100.64.0.9".to_owned()))
+            );
+        }
+        assert_eq!(failure_status(&at, DialFailed::NoAnswer), WorkerStatus::NoAnswer);
+        assert_eq!(failure_status(&at, DialFailed::NoSuchHost), WorkerStatus::NoSuchHost);
+        assert_eq!(
+            failure_status(&at, DialFailed::Dropped),
+            WorkerStatus::Reconnecting(DROPPED.to_owned())
+        );
+        let held = Dial::Hold(Liveness::Unreachable);
+        assert_eq!(failure_status(&held, DialFailed::NoAnswer), WorkerStatus::Unreachable);
     }
 
     /// A server that turns this device away says, once and not on every redial, that the

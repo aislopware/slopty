@@ -371,6 +371,15 @@ pub enum WorkerStatus {
     Relinking,
     /// Link lost or the attempt failed; retrying, with the reason.
     Reconnecting(String),
+    /// Nothing answered at its address: it is asleep, off the tailnet, or its worker stopped.
+    /// Still dialled.
+    NoAnswer,
+    /// Its address names nothing here: the name does not resolve. Still dialled.
+    NoSuchHost,
+    /// It answered and turned this device away by its address, which its `[worker] allow`
+    /// ranges do not hold: this device's address as that path shows it, when it can be told.
+    /// Still dialled, as the file is read again when it changes.
+    Refused(Option<String>),
     /// The server says the worker went quiet; dialled again when it is back online.
     Unreachable,
     /// The server has not heard from the worker for long enough to presume it gone.
@@ -395,6 +404,9 @@ impl WorkerStatus {
             }
             Self::Checking => "checking…".to_owned(),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
+            Self::NoAnswer => "not answering".to_owned(),
+            Self::NoSuchHost => "not found".to_owned(),
+            Self::Refused(_) => "closed to this device by its allow ranges".to_owned(),
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
             Self::NotGranted => "closed to this device by the tailnet policy".to_owned(),

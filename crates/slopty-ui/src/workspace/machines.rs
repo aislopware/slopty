@@ -129,9 +129,14 @@ impl WorkspaceView {
             // 0.48.0": the number is what is news, wherever it stands.
             let mut words = installed.version.split_whitespace();
             let number = words.clone().find(|w| w.starts_with(|c: char| c.is_ascii_digit()));
-            match number.or_else(|| words.next()) {
+            let named = match number.or_else(|| words.next()) {
                 Some(version) => format!("{name} {version}"),
                 None => name,
+            };
+            if installed.managed_hooks_off {
+                format!("{named}, hooks off by company policy")
+            } else {
+                named
             }
         });
         system.into_iter().chain(stops).chain(agents).collect()

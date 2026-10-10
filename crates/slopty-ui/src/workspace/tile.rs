@@ -436,9 +436,37 @@ pub(super) fn place_name(cwd: &str, repo: Option<&str>, home: Option<&str>) -> O
 /// What the away pill offers ([`WorkspaceView::away_actions`]).
 #[derive(Default)]
 struct AwayActions {
+    address: Option<SharedString>,
     grant: Option<SharedString>,
     wake: Option<MenuRun>,
     retry: Option<MenuRun>,
+}
+
+/// The away pill's button that copies this device's address, for a machine that turned it away.
+pub const COPY_ADDRESS: &str = "Copy address";
+
+/// Why a machine is out of reach and what to do about it, under what the away pill says;
+/// `None` where the pill's own words and buttons say all.
+pub(super) fn away_why(status: &WorkerStatus) -> Option<String> {
+    Some(match status {
+        WorkerStatus::Reconnecting(why) => kit::first_line(why).to_owned(),
+        WorkerStatus::NoAnswer => {
+            "It may be asleep or off the tailnet, or Slopty has stopped there.".to_owned()
+        }
+        WorkerStatus::NoSuchHost => {
+            "Its name does not resolve here. Check that this device is on the tailnet.".to_owned()
+        }
+        WorkerStatus::Refused(address) => format!(
+            "Add {} to Allowed addresses in its Slopty settings.",
+            address.as_deref().unwrap_or("this device's address")
+        ),
+        _ => return None,
+    })
+}
+
+/// What the app says once this device's address is on the clipboard.
+pub(crate) fn address_copied(name: &str) -> String {
+    format!("Copied this device's address: add it to Allowed addresses on {name}")
 }
 
 /// The away pill's button that copies the tailnet grant.
@@ -493,6 +521,15 @@ pub(crate) fn no_input(name: &str) -> String {
     format!(
         "{name} cannot take your clicks and keys. On {name}, turn on slopty-worker in System \
          Settings \u{25b8} Privacy & Security \u{25b8} Accessibility."
+    )
+}
+
+/// What a Claude Code thread on `name` says while its company policy keeps Slopty's hooks off:
+/// its approvals and questions never reach the thread, so they are answered in its terminal.
+pub(crate) fn hooks_off(name: &str) -> String {
+    format!(
+        "Company policy keeps Slopty's hooks off on {name}: answer Claude Code's approvals and \
+         questions in its terminal."
     )
 }
 
@@ -2772,6 +2809,15 @@ impl WorkspaceView {
             Some(WorkerStatus::NotGranted) => {
                 BodyState::Away(format!("{name} does not let this device in").into())
             }
+            Some(WorkerStatus::NoAnswer) => {
+                BodyState::Away(format!("{name} does not answer").into())
+            }
+            Some(WorkerStatus::NoSuchHost) => {
+                BodyState::Away(format!("{name} cannot be found").into())
+            }
+            Some(WorkerStatus::Refused(_)) => {
+                BodyState::Away(format!("{name} turned this device away").into())
+            }
             _ => {
                 let away =
                     worker.and_then(|w| w.away_since).map(|since| self.now().saturating_sub(since));
@@ -2780,14 +2826,23 @@ impl WorkspaceView {
         })
     }
 
-    /// What the away pill offers for `worker`: the tailnet grant to copy when its policy turns
+    /// What the away pill offers for `worker`: this device's address to copy when the machine
+    /// turned it away by its ranges, the tailnet grant to copy when its policy turns
     /// this device away, a wake while it can be woken, and a dial now while its link is down.
     fn away_actions(&self, worker: WorkerKey) -> AwayActions {
         let status = self.workers.get(&worker).map(|w| &w.status);
         let host = self.host_actions(worker);
         let not_granted = matches!(status, Some(WorkerStatus::NotGranted));
-        let asleep = matches!(status, Some(WorkerStatus::Unreachable | WorkerStatus::Gone));
+        let asleep = matches!(
+            status,
+            Some(WorkerStatus::Unreachable | WorkerStatus::Gone | WorkerStatus::NoAnswer)
+        );
+        let address = match status {
+            Some(WorkerStatus::Refused(Some(address))) => Some(address.clone().into()),
+            _ => None,
+        };
         AwayActions {
+            address,
             grant: self.tailnet_grant.clone().filter(|_| not_granted),
             wake: host.and_then(|h| h.wake.clone()).filter(|_| asleep),
             retry: host.and_then(|h| h.connect.clone()),
@@ -2870,10 +2925,7 @@ impl WorkspaceView {
                 (detail, copy)
             }
             BodyState::Away(_) => {
-                let why = match self.workers.get(&tile.worker).map(|w| &w.status) {
-                    Some(WorkerStatus::Reconnecting(why)) => Some(kit::first_line(why).to_owned()),
-                    _ => None,
-                };
+                let why = self.workers.get(&tile.worker).and_then(|w| away_why(&w.status));
                 let detail = why.filter(|w| !w.trim().is_empty()).map(|said| {
                     div()
                         .debug_selector(move || format!("away-why-{}", id.as_uuid()))
@@ -2894,6 +2946,13 @@ impl WorkspaceView {
             button("copy-grant", COPY_GRANT).on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(grant.to_string()));
                 this.show_notice(GRANT_COPIED.to_owned(), cx);
+            }))
+        });
+        let address = away.address.map(|address| {
+            let name = self.worker_name(tile.worker);
+            button("copy-address", COPY_ADDRESS).on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.to_string()));
+                this.show_notice(address_copied(&name), cx);
             }))
         });
         let wake = away.wake.map(|run| button("wake-worker", "Wake").on_click(in_menu(run)));
@@ -2945,6 +3004,7 @@ impl WorkspaceView {
                 .when_some(update_button, gpui::ParentElement::child)
                 .when_some(copy, gpui::ParentElement::child)
                 .when_some(grant, gpui::ParentElement::child)
+                .when_some(address, gpui::ParentElement::child)
                 .when_some(wake, gpui::ParentElement::child)
                 .when_some(retry, gpui::ParentElement::child);
             let notice = kit::notice(theme, mark, text.clone(), None)
@@ -2972,6 +3032,7 @@ impl WorkspaceView {
             || copy.is_some()
             || update_button.is_some()
             || grant.is_some()
+            || address.is_some()
             || wake.is_some()
             || retry.is_some();
         // What is so, then why, the why ending in its own ellipsis; the buttons go on to a line
@@ -3020,6 +3081,7 @@ impl WorkspaceView {
             .when_some(update_button, gpui::ParentElement::child)
             .when_some(copy, gpui::ParentElement::child)
             .when_some(grant, gpui::ParentElement::child)
+            .when_some(address, gpui::ParentElement::child)
             .when_some(wake, gpui::ParentElement::child)
             .when_some(retry, gpui::ParentElement::child)
             .when_some(bar, |el, bar| el.relative().child(bar));
@@ -3103,7 +3165,7 @@ impl WorkspaceView {
         let empty = std::cell::Cell::new(false);
         let content = self.render_content(placed, item, &empty, window, cx);
         let content = self.set_back_in_doubt(placed.tile, content);
-        let content = match self.no_input_notice(placed.tile, item) {
+        let content = match self.tile_notice(placed.tile, item) {
             Some(notice) => div()
                 .flex_1()
                 .min_h_0()
@@ -3132,47 +3194,72 @@ impl WorkspaceView {
 
     /// A slim line over a remote window or display whose Mac cannot take input: clicks and keys
     /// there would do nothing, which looked like a frozen picture. It says why, and what to
-    /// turn on, on that Mac.
-    fn no_input_notice(&self, tile: TileRef, item: &Item) -> Option<gpui::AnyElement> {
-        if !matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. }) {
-            return None;
-        }
+    /// turn on, on that Mac. Over a Claude Code thread on a machine whose company policy keeps
+    /// Slopty's hooks off, it says the thread shows less, and where the rest is.
+    fn tile_notice(&self, tile: TileRef, item: &Item) -> Option<gpui::AnyElement> {
         let worker = self.workers.get(&tile.worker)?;
-        worker.caps.as_ref().filter(|c| c.os == Os::MacOs && !c.can_inject)?;
+        match item.kind {
+            ItemKind::Window { .. } | ItemKind::Display { .. } => {
+                worker.caps.as_ref().filter(|c| c.os == Os::MacOs && !c.can_inject)?;
+                Some(self.tile_line("no-input", tile.item, no_input(&worker.name)))
+            }
+            ItemKind::Thread { thread } => {
+                let said = self.hooks_off_on(tile.worker, self.thread_agent(thread)?)?;
+                Some(self.tile_line("hooks-off", tile.item, said))
+            }
+            _ => None,
+        }
+    }
+
+    /// What a Claude Code thread or start on `worker` says when the machine's company policy
+    /// keeps Slopty's hooks off ([`slopty_proto::server::InstalledAgent::managed_hooks_off`]);
+    /// `None` for any other agent, or where the hooks run.
+    pub(super) fn hooks_off_on(&self, worker: WorkerKey, agent: &str) -> Option<String> {
+        let w = self.workers.get(&worker)?;
+        let caps = w.caps.as_ref()?;
+        let claude = caps.agents.iter().find(|a| a.agent.0 == AgentId::CLAUDE_CODE)?;
+        (agent == AgentId::CLAUDE_CODE && claude.managed_hooks_off).then(|| hooks_off(&w.name))
+    }
+
+    /// A slim line across a tile's top, under its header: what is so of its machine that the
+    /// body cannot show. Selector `{selector}-{item}`.
+    pub(super) fn tile_line(
+        &self,
+        selector: &'static str,
+        id: ItemId,
+        said: String,
+    ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let said = SharedString::from(no_input(&worker.name));
-        let id = tile.item;
-        Some(
-            div()
-                .id("no-input")
-                .debug_selector(move || format!("no-input-{}", id.as_uuid()))
-                .role(Role::Status)
-                .aria_label(said.clone())
-                .flex_none()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.inset()))
-                .py(px(theme.spacing.xxs))
-                .bg(hsla(s.chrome))
-                .border_b(kit::HAIR)
-                .border_color(hsla(s.sash))
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_secondary))
-                .child(
-                    crate::icons::icon(
-                        theme,
-                        Symbol::ExclamationmarkTriangle,
-                        IconSize::Inline,
-                        hsla(s.text_muted),
-                    )
-                    .flex_none(),
+        let said = SharedString::from(said);
+        div()
+            .id(selector)
+            .debug_selector(move || format!("{selector}-{}", id.as_uuid()))
+            .role(Role::Status)
+            .aria_label(said.clone())
+            .flex_none()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.inset()))
+            .py(px(theme.spacing.xxs))
+            .bg(hsla(s.chrome))
+            .border_b(kit::HAIR)
+            .border_color(hsla(s.sash))
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(s.text_secondary))
+            .child(
+                crate::icons::icon(
+                    theme,
+                    Symbol::ExclamationmarkTriangle,
+                    IconSize::Inline,
+                    hsla(s.text_muted),
                 )
-                .child(div().min_w_0().child(said))
-                .into_any_element(),
-        )
+                .flex_none(),
+            )
+            .child(div().min_w_0().child(said))
+            .into_any_element()
     }
 
     /// A body that may show what is no longer so ([`Self::set_back`]), set back: its worker

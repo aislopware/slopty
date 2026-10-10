@@ -119,15 +119,62 @@ fn hello(client: ClientId) -> Hello {
     Hello { client, name: NAME.to_owned() }
 }
 
-/// Why a dial to a worker failed.
+/// Why a dial to a worker failed, by the kind a person is told: the raw chain goes to the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialFailed {
     /// The worker turned this device away: the tailnet policy grants it no client role there.
     NotGranted,
     /// The worker runs a different build: what to tell the person, and what updates it.
     WrongBuild(slopty_client::update::UpdateNotice),
+    /// Nothing answered at its address.
+    NoAnswer,
+    /// Its name does not resolve.
+    NoSuchHost,
+    /// It turned this device away by its `[worker] allow` ranges: this device's address on the
+    /// path to it, when the route can be told.
+    Refused(Option<std::net::IpAddr>),
+    /// The link was made and then ended.
+    Dropped,
     /// Anything else, as a line for the status.
     Other(String),
+}
+
+impl DialFailed {
+    /// `e` as a person is told it: its kind ([`slopty_net::NetError::unreached`]), or the
+    /// failure's own words where it is about this device and not the machine.
+    fn from_net(host: &str, e: &slopty_net::NetError) -> Self {
+        use slopty_net::Unreached;
+        tracing::info!(%host, error = %format!("{e:#}"), "dial failed");
+        match e.unreached() {
+            Some(Unreached::NotGranted) => Self::NotGranted,
+            Some(Unreached::WrongBuild) => {
+                slopty_client::update::UpdateNotice::for_worker_dial(host, e)
+                    .map_or_else(|| Self::Other(format!("{e:#}")), Self::WrongBuild)
+            }
+            Some(Unreached::NoAnswer) => Self::NoAnswer,
+            Some(Unreached::NoSuchHost) => Self::NoSuchHost,
+            Some(Unreached::Refused) => Self::Refused(match e {
+                slopty_net::NetError::Refused(peer) => peer.parse().ok().and_then(source_toward),
+                _ => None,
+            }),
+            Some(Unreached::Dropped) => Self::Dropped,
+            None => Self::Other(format!("{e:#}")),
+        }
+    }
+}
+
+/// This device's address on the route to `peer`: what a machine that admits by address sees.
+/// A connected UDP socket asks the routing table and sends nothing.
+fn source_toward(peer: std::net::SocketAddr) -> Option<std::net::IpAddr> {
+    let any: std::net::SocketAddr = if peer.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = std::net::UdpSocket::bind(any).ok()?;
+    socket.connect(peer).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
 }
 
 /// Connect to worker `id` at `address` (the directory's) on the shared endpoint.
@@ -136,17 +183,9 @@ pub async fn connect_to(id: WorkerId, address: HostAddr) -> Result<Connected, Di
     let me = client_id().map_err(|e| other(&e))?;
     let endpoint = endpoint().map_err(DialFailed::Other)?;
     tracing::debug!(worker = %id, %address, "dialing");
-    let conn = connect(&endpoint, &address, hello(me)).await.map_err(|e| {
-        if matches!(e, slopty_net::NetError::NotGranted) {
-            DialFailed::NotGranted
-        } else if let Some(notice) =
-            slopty_client::update::UpdateNotice::for_worker_dial(address.host(), &e)
-        {
-            DialFailed::WrongBuild(notice)
-        } else {
-            other(&e)
-        }
-    })?;
+    let conn = connect(&endpoint, &address, hello(me))
+        .await
+        .map_err(|e| DialFailed::from_net(address.host(), &e))?;
     let ack = conn.ack.clone();
     if ack.worker != id {
         conn.close();
@@ -195,4 +234,37 @@ pub fn serve_directory(
     let endpoint = endpoint()?;
     let runtime = tokio::runtime::Handle::current();
     Ok(slopty_client::server::spawn(&runtime, endpoint, address, server_role(), first))
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_net::NetError;
+
+    use super::*;
+
+    /// A failed dial is told by its kind, not its words: a refusal carries this device's address
+    /// on the route to the machine, and only a failure of this device's own keeps its text.
+    #[test]
+    fn a_failed_dial_is_told_by_its_kind() {
+        let from = |e: NetError| DialFailed::from_net("studio", &e);
+        let loopback = std::net::IpAddr::from([127, 0, 0, 1]);
+        assert_eq!(
+            from(NetError::Refused("127.0.0.1:45550".into())),
+            DialFailed::Refused(Some(loopback)),
+            "the address the machine saw"
+        );
+        assert_eq!(from(NetError::Refused("not an address".into())), DialFailed::Refused(None));
+        assert_eq!(from(NetError::NoAnswer("127.0.0.1:45550".into())), DialFailed::NoAnswer);
+        assert_eq!(from(NetError::Resolve("studio".into())), DialFailed::NoSuchHost);
+        assert_eq!(from(NetError::Closed), DialFailed::Dropped);
+        assert_eq!(from(NetError::NotGranted), DialFailed::NotGranted);
+        let local = NetError::Address("bad".into());
+        assert_eq!(from(local), DialFailed::NoSuchHost, "an address that does not parse");
+        let own = NetError::io("the client's id", std::io::Error::other("read-only"));
+        assert_eq!(
+            from(own),
+            DialFailed::Other("the client's id: read-only".into()),
+            "this device's"
+        );
+    }
 }
