@@ -759,31 +759,6 @@ fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppCon
     assert!(cx.debug_bounds(leak(format!("nav-update-{key}"))).is_none(), "not while it runs");
 }
 
-/// The start page names a worker on another build with its Update too: an empty workspace is
-/// what a morning after an app update may open on, and its row opens nothing until then.
-#[gpui::test]
-fn the_start_page_offers_a_worker_on_another_build_its_update(cx: &mut TestAppContext) {
-    use slopty_client::update::{Of, UpdateNotice};
-
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let asked: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
-    let seen = Rc::clone(&asked);
-    cx.update(|_w, cx| {
-        let start: crate::add_worker::Update =
-            Rc::new(move |host: &str, _w, _cx| seen.borrow_mut().push(host.to_owned()));
-        cx.set_global(crate::add_worker::Updates { start: Some(start), ..Default::default() });
-    });
-    assert!(cx.debug_bounds("empty-update-0").is_none(), "nothing to update while linked");
-    let notice =
-        UpdateNotice { of: Of::Worker, host: "studio.ts.net".to_owned(), peer: "0.0.9".to_owned() };
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NeedsUpdate(notice), cx));
-    cx.run_until_parked();
-    click(cx, "empty-update-0");
-    assert_eq!(*asked.borrow(), ["studio.ts.net"], "the start page's Update");
-}
-
 /// The title bar's empty span moves the window as a native title bar does: pressed and moved,
 /// it asks the system to drag the window; a double-click asks for the system's title-bar
 /// action (zoom or minimise, as the person set it). A press on one of its buttons does neither.

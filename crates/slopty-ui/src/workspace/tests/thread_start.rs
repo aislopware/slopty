@@ -1249,8 +1249,7 @@ fn the_folder_step_takes_a_typed_folder_and_a_threads_repository(cx: &mut TestAp
 
 /// Every start lists the places work stood, newest first, with no shell open: a thread's
 /// folder, and the folders the machine lists of the agent's past sessions, as its link comes up
-/// and again as the folder step opens, joining the step that is up. The empty workspace offers
-/// the same places, and one pressed starts the machine's usual agent there.
+/// and again as the folder step opens, joining the step that is up.
 #[gpui::test]
 fn every_start_offers_where_threads_and_past_sessions_worked(cx: &mut TestAppContext) {
     use slopty_proto::thread::wire::{PastSession, PastSessions};
@@ -1330,25 +1329,7 @@ fn every_start_offers_where_threads_and_past_sessions_worked(cx: &mut TestAppCon
 
     let places = view.read_with(cx, |v, cx| v.recent_places(None, cx));
     let cwds: Vec<&str> = places.iter().map(|p| p.cwd.as_str()).collect();
-    assert_eq!(cwds, ["/w/new", "/w/atlas", "/w/old"], "the empty workspace's places");
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    settle(cx);
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let says =
-        |label: &str| tree.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some(label));
-    let labels: Vec<_> =
-        tree.iter().filter(|n| n.role == "Button").map(|n| n.label.clone()).collect();
-    assert!(says("New Claude Code agent in w/atlas"), "a place says what it starts: {labels:?}");
-    let row = cx.debug_bounds("empty-place-1").expect("the second place is drawn");
-    cx.simulate_click(row.center(), Modifiers::default());
-    settle(cx);
-    cx.simulate_input("carry on");
-    cx.simulate_keystrokes("enter");
-    settle(cx);
-    let sent = starts(&mut studio);
-    let [(_, agent, cwd, _)] = sent.as_slice() else { panic!("one start: {sent:?}") };
-    assert_eq!((agent, cwd.as_str()), (&claude, "/w/atlas"), "the usual agent, there");
+    assert_eq!(cwds, ["/w/new", "/w/atlas", "/w/old"], "the places, every start's");
 }
 
 /// The folder step and "Resume a past session…" list the same thing, so one ask goes for both:

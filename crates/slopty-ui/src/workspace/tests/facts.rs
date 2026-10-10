@@ -280,22 +280,6 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     assert_eq!(navigator::host_line(&healthy(), None), "macOS 26.5", "no load heard yet");
 }
 
-/// With several workers the empty workspace's rows each open a shell on theirs, here.
-#[gpui::test]
-fn a_new_tile_can_go_to_any_worker(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let mut laptop = connect(&view, cx, 2, "laptop");
-    let opened = |fake: &mut Fake| {
-        fake.drain().into_iter().any(|m| matches!(m, ClientMsg::OpenSession { .. }))
-    };
-    let order: Vec<WorkerKey> = view.read_with(cx, |v, _| v.workers.keys().copied().collect());
-    let laptop_row = order.iter().position(|k| *k == laptop.key).expect("listed");
-    click(cx, leak(format!("empty-worker-{laptop_row}")));
-    assert!(opened(&mut laptop), "a shell on the row's worker");
-    assert!(!opened(&mut studio));
-}
-
 /// The palette lists tiles from the latest used, agents waiting on the human first and the
 /// focused tile last: nobody goes where they are.
 #[gpui::test]

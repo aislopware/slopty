@@ -618,14 +618,12 @@ impl WorkspaceView {
         }
     }
 
-    /// An empty workspace: a start page composed as a list, never a centred picture. It hangs
-    /// a fifth of the way down, where the palette opens, on one left edge: what this is, then
-    /// the three ways to begin, the first shown as the palette shows the row Enter would run,
-    /// each with its keys in the palette's plain muted glyphs where there is a keyboard to
-    /// press them on; then where shells already stand on the workers ([`Self::recent_places`]),
-    /// each opening another shell there; then the workers, each marked only where its link is
-    /// not up, each opening a shell on itself here. With no worker there is nothing to open,
-    /// and the page says where one comes from and offers the app's way to add one.
+    /// An empty workspace. With a machine to begin on it is the composer page: one question,
+    /// "What should we work on?", over a boxed composer in the reading column, vertically
+    /// centred, whose ↵ hands the goal to an orchestrator as "New goal…" would
+    /// ([`Self::goal_from_page`]); under it one quiet line keeps a terminal and a window one
+    /// press away. With no worker, or the server out of reach, the page says where machines
+    /// come from, a fifth of the way down, with its doors.
     fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -636,16 +634,6 @@ impl WorkspaceView {
                 .pb(px(spacing.xs))
                 .text_color(hsla(s.text))
                 .child(text)
-        };
-        let title = |text: &'static str| title_of(text.into());
-        // A section: its quiet label, then its rows; a section apart from the one above by
-        // space alone, no rule.
-        let section = |id: &'static str, label: &'static str| {
-            div().w_full().pt(px(spacing.lg)).flex().flex_col().child(
-                kit::inset_x(kit::label(theme, label), theme)
-                    .debug_selector(move || id.to_owned())
-                    .pb(px(spacing.xs)),
-            )
         };
         let column = div().w_full().max_w(px(EMPTY_W)).flex().flex_col();
         // With the server out of reach, no machine is listed because nobody lists them: the
@@ -682,155 +670,20 @@ impl WorkspaceView {
         } else if self.workers.is_empty() {
             let add = self.add_worker_run().map(|run| {
                 div().w_full().pt(px(spacing.md)).child(
-                    self.begin_row("empty-add-worker", Symbol::Plus, ADD_WORKER, "", true)
+                    self.door_row("empty-add-worker", Symbol::Plus, ADD_WORKER.into(), true)
                         .on_click(move |_ev, window, cx| run(window, cx)),
                 )
             });
             column
-                .child(title(NO_WORKERS))
+                .child(title_of(NO_WORKERS.into()))
                 .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
                 .children(add)
         } else {
-            let [agent, terminal, window] = &begin_keys();
-            // An agent leads, as ↵ runs it; a shell and a window are the quieter ways in.
-            let begin = div()
-                .w_full()
-                .pt(px(spacing.sm))
-                .flex()
-                .flex_col()
-                .child(
-                    self.begin_row("empty-agent", crate::icons::AGENT, NEW_AGENT, agent, true)
-                        .on_click(cx.listener(|this, _ev, window, cx| this.start_here(window, cx))),
-                )
-                .child(
-                    self.begin_row(
-                        "empty-terminal",
-                        Symbol::Terminal,
-                        NEW_TERMINAL,
-                        terminal,
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.new_terminal(&super::actions::NewTerminal, window, cx);
-                    })),
-                )
-                .child(
-                    self.begin_row("empty-window", Symbol::Macwindow, ADD_WINDOW, window, false)
-                        .on_click(cx.listener(|this, _ev, window, cx| {
-                            this.add_window(&super::actions::AddWindow, window, cx);
-                        })),
-                );
-            let several = self.workers.len() > 1;
-            let places: Vec<gpui::AnyElement> = self
-                .recent_places(None, cx)
-                .into_iter()
-                .take(RECENT_PLACES)
-                .enumerate()
-                .map(|(ix, place)| {
-                    let worker = self.worker_name(place.worker);
-                    let meta = super::rollup::meta_line([
-                        place.branch.as_deref(),
-                        several.then_some(worker.as_str()),
-                    ]);
-                    // A place starts the machine's usual agent there, else a shell.
-                    let what = self.agent_for(place.worker).map_or_else(
-                        || "New terminal".to_owned(),
-                        |agent| format!("New {} agent", super::projects::agent_label(&agent)),
-                    );
-                    let label = if several {
-                        format!("{what} in {} on {worker}", place.name)
-                    } else {
-                        format!("{what} in {}", place.name)
-                    };
-                    let (key, cwd) = (place.worker, place.cwd);
-                    self.place_row(("empty-place", ix), Symbol::Folder, place.name, meta)
-                        .debug_selector(move || format!("empty-place-{ix}"))
-                        .aria_label(SharedString::from(label))
-                        .on_click(cx.listener(move |this, _ev, window, cx| {
-                            this.start_in(key, cwd.clone(), window, cx);
-                        }))
-                        .into_any_element()
-                })
-                .collect();
-            let workers = self.workers.iter().enumerate().map(|(ix, (key, w))| {
-                let key = *key;
-                let health = super::navigator::worker_health(&w.status);
-                // A worker on another build opens nothing until it is updated: its row offers
-                // the update, as its navigator row does.
-                let update = self.update_run(key, cx).map(|run| {
-                    let el = kit::pill_frame(theme)
-                        .id(("empty-update", ix))
-                        .debug_selector(move || format!("empty-update-{ix}"))
-                        .role(gpui::accesskit::Role::Button)
-                        .aria_label(SharedString::from(format!("Update {}", w.name)))
-                        .flex_none()
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(s.accent))
-                        .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.hover)))
-                        .child(crate::add_worker::UPDATE)
-                        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |_this, _ev, window, cx| {
-                            cx.stop_propagation();
-                            let run = Rc::clone(&run);
-                            cx.defer_in(window, move |_this, window, cx| run(window, cx));
-                        }));
-                    crate::a11y::tab_stop(el, s.focus)
-                });
-                let label = match health {
-                    Some((_, word)) => format!("New terminal on {}, {word}", w.name),
-                    None => format!("New terminal on {}", w.name),
-                };
-                // Its words' tier, grey while away; a machine's own colour is the navigator's
-                // head's alone.
-                let away = w.link.is_none();
-                let ink = if away { s.text_muted } else { s.text_secondary };
-                let row = kit::row(theme, kit::Row::One)
-                    .id(("empty-worker", ix))
-                    .debug_selector(move || format!("empty-worker-{ix}"))
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label(SharedString::from(label))
-                    .w_full()
-                    .rounded(px(theme.radii.sm))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(hsla(s.hover)))
-                    .active(|st| st.bg(hsla(s.pressed)))
-                    .child(crate::palette::lead_slot(
-                        theme,
-                        crate::icons::machine(w.caps.as_ref().map(|c| c.form)),
-                        hsla(ink),
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(hsla(s.text))
-                            .child(SharedString::from(w.name.clone())),
-                    )
-                    .children(health.map(|(_, word)| {
-                        div()
-                            .flex_none()
-                            .text_size(px(theme.typography.small()))
-                            .text_color(muted)
-                            .child(word)
-                    }))
-                    .children(update)
-                    .child(crate::icons::status_mark(theme, health.map(|(mark, _)| mark)));
-                crate::a11y::tab_stop(row, s.focus)
-                    .on_click(
-                        cx.listener(move |this, _ev, _window, cx| this.new_terminal_on(key, cx)),
-                    )
-                    .into_any_element()
-            });
-            let recent =
-                (!places.is_empty()).then(|| section("empty-recent", RECENT).children(places));
-            column
-                .child(begin)
-                .children(recent)
-                .child(section("empty-workers", "Machines").children(workers))
+            return kit::pane_surface(theme)
+                .absolute()
+                .inset_0()
+                .child(self.composer_page(cx))
+                .into_any_element();
         };
         // The empty workspace is the page a tile would be, a panel where the tile would stand,
         // not a hole down to the canvas. It starts a fifth of the way down, where a dialog
@@ -838,6 +691,7 @@ impl WorkspaceView {
         // frame behind chrome that comes or goes.
         let page = div()
             .id("empty-workspace")
+            .debug_selector(|| "empty-workspace".to_owned())
             .size_full()
             .overflow_y_scroll()
             .flex()
@@ -847,11 +701,102 @@ impl WorkspaceView {
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .child(div().flex_none().w_full().h(gpui::relative(kit::MODAL_ANCHOR)))
-            // Slopty's mark, centred over the page's words: its cursor lit while a worker is
-            // reachable ([`super::about::Mark`]).
-            .child(div().flex_none().pb(px(spacing.xl)).child(self.empty_mark.clone()))
             .child(column.pb(px(spacing.xl)));
         kit::pane_surface(theme).absolute().inset_0().child(page).into_any_element()
+    }
+
+    /// The composer page: the question, the composer, and the quiet line of a terminal and a
+    /// window, centred in the reading column.
+    fn composer_page(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let question = kit::typed(div(), theme.roles().empty_heading)
+            .id("empty-question")
+            .debug_selector(|| "empty-question".to_owned())
+            .role(gpui::accesskit::Role::Heading)
+            .aria_label(EMPTY_QUESTION)
+            .w_full()
+            .pb(px(spacing.md))
+            .text_color(hsla(s.text))
+            .child(EMPTY_QUESTION);
+        let composer = self.empty_goal.as_ref().map(|(goal, _)| {
+            kit::field(div(), theme)
+                .debug_selector(|| "empty-goal".to_owned())
+                .w_full()
+                .rounded(px(theme.radii.md))
+                .px(px(kit::FIELD_INSET))
+                .py(px(spacing.xs))
+                .child(
+                    gpui_kit::component::input::Textarea::new(goal)
+                        .appearance(false)
+                        .aria_label(EMPTY_QUESTION),
+                )
+        });
+        let [_, terminal, window] = &begin_keys();
+        let ghost = |id: &'static str, label: &'static str, keys: &str| {
+            let keys = self
+                .hardware_keyboard
+                .then(|| SharedString::from(crate::palette::drawn_keys(keys)));
+            let el = kit::typed(div(), theme.roles().metadata)
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .h(px(theme.density.chip))
+                .px(px(spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .cursor_pointer()
+                .text_color(hsla(s.text_secondary))
+                .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .child(label)
+                .children(keys.map(|keys| div().text_color(hsla(s.text_muted)).child(keys)));
+            crate::a11y::tab_stop(el, s.focus)
+        };
+        let line = div()
+            .w_full()
+            .pt(px(spacing.sm))
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .child(ghost("empty-terminal", NEW_TERMINAL, terminal).on_click(cx.listener(
+                |this, _ev, window, cx| {
+                    this.new_terminal(&super::actions::NewTerminal, window, cx);
+                },
+            )))
+            .child(ghost("empty-window", ADD_WINDOW, window).on_click(cx.listener(
+                |this, _ev, window, cx| {
+                    this.add_window(&super::actions::AddWindow, window, cx);
+                },
+            )));
+        div()
+            .id("empty-workspace")
+            .debug_selector(|| "empty-workspace".to_owned())
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .px(px(spacing.xl))
+            .py(px(spacing.xl))
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(crate::conversation::thread::view::COLUMN))
+                    .flex()
+                    .flex_col()
+                    .child(question)
+                    .children(composer)
+                    .child(line),
+            )
+            .into_any_element()
     }
 
     /// Whether no tab is on show: the start page shows.
@@ -863,8 +808,7 @@ impl WorkspaceView {
     /// each: where shells stand, where threads work, the last start's folder and where the
     /// agents' past sessions ran there; of the threads, the start and the past sessions only
     /// `agent`'s, when given. The most recently used tile's first (the tile recency), then the
-    /// newest. What the empty workspace offers as a way back to the work in progress, and what
-    /// a start's folder step lists.
+    /// newest. What a start's folder step lists.
     pub(super) fn recent_places(&self, agent: Option<&AgentId>, cx: &App) -> Vec<RecentPlace> {
         // (tile recency, when, worker, folder, repository, branch)
         type Seen = (Option<usize>, u64, WorkerKey, String, Option<String>, Option<String>);
@@ -929,59 +873,6 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// A row of the empty workspace that goes somewhere: its glyph, its name and, after it,
-    /// its facts in the meta size.
-    fn place_row(
-        &self,
-        id: impl Into<gpui::ElementId>,
-        icon: Symbol,
-        name: String,
-        meta: String,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let row = kit::row(theme, kit::Row::One)
-            .id(id)
-            .role(gpui::accesskit::Role::Button)
-            .w_full()
-            .rounded(px(theme.radii.sm))
-            .cursor_pointer()
-            .hover(|st| st.bg(hsla(s.hover)))
-            .active(|st| st.bg(hsla(s.pressed)))
-            .child(crate::palette::icon_slot(theme, icon, hsla(s.text_secondary)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(name)),
-            )
-            .when(!meta.is_empty(), |el| {
-                el.child(
-                    kit::meta(div(), theme)
-                        .flex_none()
-                        .max_w(px(EMPTY_W / 2.0))
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .child(SharedString::from(meta)),
-                )
-            });
-        crate::a11y::tab_stop(row, s.focus)
-    }
-
-    /// The worker a way to begin opens on: the one in context.
-    fn begin_target(&self) -> Option<String> {
-        let key = self.context_worker()?;
-        self.workers.get(&key).map(|w| w.name.clone())
-    }
-
-    /// One way to begin: its icon, what it does, where it opens and, with a keyboard to press
-    /// it on, its keys; `primary` wears the palette's selected fill, the row Enter would run
-    /// there.
     /// A row of the empty page that opens a door, not a tile: its glyph and its words, the
     /// first door raised as the one ↵ would take.
     fn door_row(
@@ -1010,71 +901,16 @@ impl WorkspaceView {
             .child(div().flex_none().text_color(hsla(s.text)).child(label));
         crate::a11y::tab_stop(row, s.focus)
     }
-
-    fn begin_row(
-        &self,
-        id: &'static str,
-        icon: Symbol,
-        label: &'static str,
-        keys: &str,
-        primary: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let icon_ink = if primary { s.text } else { s.text_secondary };
-        let row = kit::row(theme, kit::Row::One)
-            .id(id)
-            .debug_selector(move || id.to_owned())
-            .role(gpui::accesskit::Role::Button)
-            .aria_label(label)
-            .w_full()
-            .rounded(px(theme.radii.sm))
-            .cursor_pointer()
-            .when(primary, |el| el.bg(hsla(s.selected)))
-            .when(!primary, |el| el.hover(|st| st.bg(hsla(s.hover))))
-            .active(|st| st.bg(hsla(s.pressed)))
-            .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
-            .child(div().flex_none().text_color(hsla(s.text)).child(label))
-            // Where it opens, as its meta: the worker "+" chose, else the one in context.
-            .children(self.begin_target().map(|worker| {
-                div()
-                    .debug_selector(move || format!("{id}-target"))
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(format!("on {worker}")))
-            }))
-            .child(div().flex_1())
-            // A chord is only worth printing where there are keys to press it on.
-            .when(self.hardware_keyboard, |el| {
-                el.child(
-                    div()
-                        .debug_selector(move || format!("{id}-keys"))
-                        .flex_none()
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(crate::palette::drawn_keys(keys))),
-                )
-            });
-        crate::a11y::tab_stop(row, s.focus)
-    }
 }
 
-/// How wide the empty workspace's column stands: room for a directory beside its branch and
-/// worker, narrow enough to read as one block down the strip.
+/// How wide the empty workspace's column stands while it says where machines come from.
 pub(super) const EMPTY_W: f32 = 400.0;
 
-/// How many directories the empty workspace offers.
-const RECENT_PLACES: usize = 5;
+/// The empty workspace's question over its composer.
+pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";
 
-/// The empty workspace's section of the places work stands or stood in.
-pub(super) const RECENT: &str = "Recent";
-
-/// A directory work stands or stood in on a worker: where the empty workspace starts the
-/// usual agent again, and where a start's folder step offers to start one.
+/// A directory work stands or stood in on a worker: where a start's folder step offers to
+/// start one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct RecentPlace {
     pub worker: WorkerKey,
@@ -1093,8 +929,6 @@ pub(crate) const SERVER_DOWN_NEXT: &str =
     "The server lists your machines. Machines you reach directly still work.";
 /// The empty workspace's way to a first worker, as the "…" menu words it.
 pub(crate) const ADD_WORKER: &str = "Add a machine";
-/// The empty workspace's first way to begin: an agent, asked its task in its own tile.
-pub(crate) const NEW_AGENT: &str = "New agent";
 const NEW_TERMINAL: &str = "New terminal";
 const ADD_WINDOW: &str = "Add a window or display";
 

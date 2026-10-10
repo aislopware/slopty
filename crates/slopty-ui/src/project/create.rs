@@ -101,7 +101,7 @@ pub const TARGET_HINT: &str = "Blank: a branch of its own, off the checkout";
 pub const MORE: &str = "More";
 
 /// The most lines the goal field grows to before it scrolls.
-const GOAL_ROWS: usize = 8;
+pub(crate) const GOAL_ROWS: usize = 8;
 
 /// The sheet's fields.
 struct Fields {

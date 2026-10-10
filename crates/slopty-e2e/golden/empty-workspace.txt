@@ -12,10 +12,9 @@ Button │ More
 Navigation │ Projects
 Button │ Search
 Button │ New agent
-Button │ New agent
+Heading │ What should we work on?
+MultilineTextInput │ What should we work on?
 Button │ New terminal
 Button │ Add a window or display
-Button │ New terminal in ~
-Button │ New terminal on e2e-worker
 Group │ Status
 Button │ Show the tab's terminal

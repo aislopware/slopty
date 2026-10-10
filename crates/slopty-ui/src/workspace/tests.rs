@@ -135,19 +135,6 @@ fn healthy() -> WorkerCaps {
     }
 }
 
-/// The thread starts `fake` was sent, as (agent, folder, prompt).
-fn thread_starts(fake: &mut Fake) -> Vec<(String, String, Option<String>)> {
-    fake.drain()
-        .into_iter()
-        .filter_map(|m| match m {
-            ClientMsg::Thread(slopty_proto::thread::wire::ThreadRequest::Start {
-                start, ..
-            }) => Some((start.agent.0, start.cwd, start.prompt)),
-            _ => None,
-        })
-        .collect()
-}
-
 /// What a worker `name` says on a new link: no home, all well, `sessions` alive.
 fn hello(name: &str, sessions: Vec<SessionSummary>) -> HelloAck {
     HelloAck {
@@ -1655,7 +1642,6 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-mod about;
 mod address;
 mod agent_tile;
 mod approval_cards;
@@ -1770,7 +1756,7 @@ fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) 
         })
     };
     let settled = frame(cx);
-    assert!(cx.debug_bounds("empty-worker-0").is_some(), "the empty workspace lists the worker");
+    assert!(cx.debug_bounds("empty-question").is_some(), "the empty workspace asks");
     // What an area laid out taller in the last frame leaves for this one.
     view.update(cx, |v, _cx| {
         let mut was = v.drawn.viewport.get();

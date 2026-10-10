@@ -28,6 +28,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     terminal's cursor rate. It holds steady under Reduce Motion. Lit means connected, and the
     cursor is the unlit level while no worker is reachable. The dock icon stays static, since
     app icons do not animate.
+    Superseded 2026-10-11 by **The empty workspace is the composer page** (`ui.md`): the
+    empty workspace no longer shows the mark, so the app draws it nowhere; the icon keeps it.
   - **The green slot is hue 150.** It belonged to slop-desk, Slopty's retired predecessor,
     which only used green as its chart colour. The brand README now lists slop-desk as retired
     and succeeded by Slopty. The nearest family hues are the org's 55 and slopscale's 240, both

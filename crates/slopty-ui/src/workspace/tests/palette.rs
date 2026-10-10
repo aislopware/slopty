@@ -197,48 +197,64 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     assert!((command_x - tile_x).abs() < 0.5, "an empty slot keeps a command's title on it");
 }
 
-/// The empty workspace leads with a new agent, the row ↵ runs: it opens the agent's tile on the
-/// machine in its latest place, whose field asks the task, and what is typed there starts the
-/// thread with it as its first prompt. A shell and a window are the quieter ways in, with their
-/// keys read from the bindings, and each does what its key does. The workers are listed with
-/// how they are doing.
+/// The empty workspace asks what to work on over a composer, which takes the keyboard: what is
+/// written there and sent starts a goal's orchestrator at once, as "New goal…" does, in the
+/// machine's latest place. A shell and a window stay one press away under it, with their keys
+/// read from the bindings, and each does what its key does. Nothing else stands on the page.
 #[gpui::test]
-fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
+fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
+    use slopty_proto::server::InstalledAgent;
+    use slopty_proto::thread::AgentId;
+    use slopty_proto::thread::wire::ThreadRequest;
+
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
+    let key = fake.key;
+    let claude = InstalledAgent {
+        agent: AgentId::named(AgentId::CLAUDE_CODE),
+        version: "1.0".to_owned(),
+        offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
+    };
+    let caps = WorkerCaps { agents: vec![claude], ..healthy() };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, caps, cx);
+        v.threads_linked(key, cx);
+    });
+    cx.run_until_parked();
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    for label in ["New agent", "New terminal", "Add a window or display", "studio"] {
+    assert!(tree.iter().any(|n| n.is("Heading", Some(EMPTY_QUESTION))), "{tree:#?}");
+    for label in ["New terminal", "Add a window or display"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
+    for gone in ["empty-agent", "empty-recent", "empty-workers", "empty-worker-0", "empty-mark"] {
+        assert!(cx.debug_bounds(gone).is_none(), "{gone}: no launcher, lists or mark");
+    }
     assert_eq!(area::begin_keys(), ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
+    let page = cx.debug_bounds("empty-workspace").expect("the page");
+    let goal = cx.debug_bounds("empty-goal").expect("the composer");
+    assert!((goal.center().y - page.center().y).abs() < page.size.height / 4.0, "centred");
 
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("empty-workspace").is_none(), "the agent's tile is there");
-    assert!(thread_starts(&mut fake).is_empty(), "nothing sent before the task is given");
+    fake.drain();
     cx.simulate_input("Fix the login redirect");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let prompt = "Fix the login redirect".to_owned();
-    let claude = slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned();
-    assert_eq!(
-        thread_starts(&mut fake),
-        [(claude.clone(), "~".to_owned(), Some(prompt))],
-        "an agent's thread, given the task"
-    );
-    // The start's tile closed, the workspace is empty again; its row does what ↵ did.
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    click(cx, "empty-agent");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert_eq!(
-        thread_starts(&mut fake),
-        [(claude, "~".to_owned(), None)],
-        "on nothing an agent starts bare"
-    );
+    let started: Vec<_> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Start { start, .. }) => Some(start),
+            _ => None,
+        })
+        .collect();
+    let [start] = started.as_slice() else { panic!("one start: {started:?}") };
+    assert_eq!(start.agent, AgentId::named(AgentId::CLAUDE_CODE), "an orchestrator");
+    assert_eq!((start.cwd.as_str(), start.prompt.as_deref()), ("~", None), "the goal waits");
+    let goal =
+        view.read_with(cx, |v, _| v.projects.orchestrating.as_ref().map(|(_, g)| g.goal.clone()));
+    assert_eq!(goal.as_deref(), Some("Fix the login redirect"), "for its project");
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
@@ -256,32 +272,6 @@ fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
         "the worker is asked for its windows"
     );
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
-}
-
-/// The empty workspace's agent starts where the machine's shells last stood.
-#[gpui::test]
-fn the_empty_workspaces_agent_starts_in_the_machines_latest_place(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let shell = SessionId::new();
-    let _tile = opens(&view, cx, &studio, shell, studio.me, 1);
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.session_opened(key, summary(shell, Some("/Users/me/oss/slopty")), cx);
-    });
-    // Its tile closed, the workspace is empty and the shell's place is still known.
-    cx.simulate_keystrokes("cmd-w");
-    cx.run_until_parked();
-    let started = |cx: &mut VisualTestContext, fake: &mut Fake| {
-        click(cx, "empty-agent");
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-        // The start's tile goes again, so the page shows again.
-        cx.simulate_keystrokes("cmd-w");
-        cx.run_until_parked();
-        thread_starts(fake).into_iter().next().map(|(_, cwd, _)| cwd)
-    };
-    assert_eq!(started(cx, &mut studio).as_deref(), Some("/Users/me/oss/slopty"), "its latest");
 }
 
 fn listing(title: &str) -> ScreenEvent {

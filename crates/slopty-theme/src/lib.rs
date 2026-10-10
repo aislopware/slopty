@@ -842,10 +842,6 @@ pub mod alpha {
     pub const SCRIM: f32 = 0.40;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
-    /// An unlit dot of the mark on a dark surface (the brand's ink plate).
-    pub const UNLIT: f32 = 0.2;
-    /// An unlit dot of the mark on a light surface, where 0.2 fades into the paper.
-    pub const UNLIT_ON_PAPER: f32 = 0.3;
 }
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`).
@@ -987,9 +983,6 @@ pub struct Surfaces {
     pub solid: Rgb,
     /// Text and glyphs on [`Self::solid`]: the darkest chrome step in dark, white in light.
     pub solid_ink: Rgb,
-    /// Slopty's green, the mark's lit dots: the same in both variants, as a brand colour is
-    /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
-    pub brand: Rgb,
     /// What a remote window or display sits on where its picture does not reach: a neutral
     /// near-black in both variants, as every remote-desktop client letterboxes. A remote screen
     /// is media, and dark bars keep its edge read as a screen's (`docs/decisions/video.md`,
@@ -1405,7 +1398,6 @@ impl Surfaces {
             accent_ink: t.accent_ink.rgb(),
             solid: text,
             solid_ink: at(t.solid_ink),
-            brand: BRAND,
             stage: STAGE,
         }
     }
@@ -1852,15 +1844,6 @@ impl Theme {
     pub const fn variant(&self) -> Variant {
         if self.surfaces.ground.is_light() { Variant::Light } else { Variant::Dark }
     }
-
-    /// How lit an unlit dot of the mark is, over this theme's content.
-    #[must_use]
-    pub const fn brand_unlit(&self) -> f32 {
-        match self.variant() {
-            Variant::Light => alpha::UNLIT_ON_PAPER,
-            Variant::Dark => alpha::UNLIT,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1884,25 +1867,6 @@ mod tests {
         assert_eq!(p.palette(1), p.ansi[1]);
         assert_eq!(p.resolve(Color::Default, true), p.bg);
         assert_eq!(p.resolve(Color::Rgb(1, 2, 3), false), Rgb { r: 1, g: 2, b: 3 });
-    }
-
-    /// The mark is Slopty's green in both variants; its unlit dots stay visible without
-    /// competing: the brand's 0.2 on dark, 0.3 on paper. Its cursor blinks at the terminal's
-    /// cadence.
-    #[test]
-    fn the_mark_is_slopty_green_with_its_unlit_dots_set_back() {
-        let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
-        assert_eq!(dark.surfaces.brand, Rgb { r: 0x4a, g: 0xc0, b: 0x6c });
-        assert_eq!(light.surfaces.brand, dark.surfaces.brand);
-        let unlit = |theme: &Theme| {
-            let content = theme.content();
-            content.mix(theme.surfaces.brand, theme.brand_unlit()).contrast(content)
-        };
-        for theme in [&dark, &light] {
-            let set_back = unlit(theme);
-            assert!((1.2..2.0).contains(&set_back), "{:?}: {set_back}", theme.variant());
-        }
-        assert_eq!(Motion::DEFAULT.blink, std::time::Duration::from_millis(600));
     }
 
     #[test]

@@ -733,10 +733,10 @@ async fn a_tile_kept_nowhere_says_its_worker_is_away() {
     stack.shutdown().await;
 }
 
-/// A worker with nothing open: the workspace says how to begin, once.
+/// A worker with nothing open: the workspace asks what to work on, over its composer.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_empty_workspace_says_how_to_begin() {
+async fn the_empty_workspace_asks_what_to_work_on() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;

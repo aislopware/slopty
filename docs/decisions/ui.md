@@ -3363,6 +3363,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     selected thumbnail does, not the keyboard's ring outside a gap.
   - **An empty workspace says where things open.** Its three ways to begin carry their worker
     as meta ("on e2e-worker"). The recent places and the workers follow as before.
+    (Superseded 2026-10-11 by **The empty workspace is the composer page**.)
   - **A remote window on its way** is one block in the body: the calm mark, "Opening Safari"
     at `small()` in the medium weight, the worker in `meta()` under it. The header's slot
     keeps the kind's glyph until the first frame. The critique asked for the app's icon; the
@@ -10287,3 +10288,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the field, case aside, writes that machine's id, and a name no machine has is refused with
   "No machine is named …". Test:
   `settings_form::map_tests::the_clipboards_machines_read_by_name_and_are_added_by_name`.
+
+- ✅ **The empty workspace is the composer page** (2026-10-11, the MonoCode anatomy study §1g,
+  the orchestrator-first direction). The empty workspace was a 2010s start page: the brand
+  mark, three launcher rows, "Recent" and "Machines". With work handed to orchestrators, the
+  first thing an empty workspace asks is what should get done. Ruled:
+  - **One question and a composer.** "What should we work on?" at the empty heading role
+    (18/24, regular) over a boxed composer (the field's ground at `radii.md`), in the reading
+    column (`thread::view::COLUMN`), centred both ways. The composer takes the keyboard when the
+    page first shows with nothing else holding it, and ↵ on the bare workspace gives it back.
+  - **↵ starts a goal.** What is written there goes as "New goal…"'s Create sends it, with what
+    the sheet would open holding: its first agent on its first machine, the folder from the
+    focus or the last start, a branch of the project's own, the guessed verifier and the
+    default autonomy (`WorkspaceView::goal_from_page`). ⇧↵ is a new line.
+  - **The terminal stays one press away.** Under the composer, one quiet line of two ghost
+    actions at the metadata role: "New terminal" and "Add a window or display", each with its
+    keys where there is a keyboard.
+  - **Deleted:** the brand mark and its live cursor (`workspace::about`, `Surfaces::brand`,
+    `Theme::brand_unlit`, `alpha::UNLIT*`), the launcher rows and ↵'s bare agent start
+    (`start_here`), "Recent" and "Machines" with their per-machine rows and Update pill, which
+    the navigator holds. The page with no machine, or with the server out of reach, is
+    unchanged.
+  - Tests: `workspace::tests::palette::the_empty_workspace_asks_what_to_work_on`,
+    `workspace::tests::the_empty_workspace_is_placed_by_this_frames_layout`; golden
+    `empty-workspace`.

@@ -549,11 +549,6 @@ impl WorkspaceView {
         Some((key, here.then(|| self.active_cwd()).flatten()))
     }
 
-    /// A shell on `key`, in the active workspace: the empty workspace's rows, one per worker.
-    pub(super) fn new_terminal_on(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        self.open_session_on(key, None, Vec::new(), None, cx);
-    }
-
     /// Whether `key` is linked, so what is asked of it now is heard: one out of reach says so
     /// in words, naming `what` would have opened, rather than dropping it unseen.
     pub(super) fn reachable_for(

@@ -1268,21 +1268,6 @@ fn a_place_in_a_repository_is_named_by_it() {
     assert_eq!(repo_place("/Users/me/src", None, None), "~/src");
 }
 
-/// The empty workspace's quieter ways to begin say where they open.
-#[gpui::test]
-fn the_ways_to_begin_say_where_they_open(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let _studio = connect(&view, cx, 1, "studio");
-    cx.run_until_parked();
-    for row in ["empty-terminal", "empty-window"] {
-        let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row}"));
-        let target = cx
-            .debug_bounds(Box::leak(format!("{row}-target").into_boxed_str()))
-            .unwrap_or_else(|| panic!("{row} names its worker"));
-        assert!(at.contains(&target.center()), "{row}: {at:?} {target:?}");
-    }
-}
-
 /// A remote window on its way turns its mark in its body, over what opens and where, and not
 /// in its header's slot as well.
 #[gpui::test]

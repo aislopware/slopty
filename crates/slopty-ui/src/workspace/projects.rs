@@ -1043,18 +1043,10 @@ impl WorkspaceView {
         if self.projects.sheet.is_some() {
             return;
         }
-        let starters = self.goal_starters();
-        let Some(worker) = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)
-        else {
+        let Some(filled) = self.goal_filled(cx) else {
             self.show_notice(NO_ORCHESTRATOR.to_owned(), cx);
             return;
         };
-        let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
-        let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
-        let folder = here.or(last).unwrap_or_else(|| "~".to_owned());
-        let repo = self.repo_at(worker, &folder, cx);
-        let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
-        let filled = Filled { folder, verifier, starters };
         let theme = self.theme.clone();
         let view = cx.new(|cx| GoalSheet::new(theme, filled, window, cx));
         let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
@@ -1066,6 +1058,76 @@ impl WorkspaceView {
         crate::a11y::hold(&scope, &home, cx);
         self.projects.sheet = Some(Sheet { view, scope, _events: events });
         cx.notify();
+    }
+
+    /// What a goal starts with when the person says no more than the goal: the folder from the
+    /// focus, else the last start, else the home; the agents and machines that can take it; the
+    /// verifier guessed from the folder's repository. `None` while no machine can start one.
+    fn goal_filled(&self, cx: &gpui::App) -> Option<Filled> {
+        let starters = self.goal_starters();
+        let worker = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)?;
+        let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
+        let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
+        let folder = here.or(last).unwrap_or_else(|| "~".to_owned());
+        let repo = self.repo_at(worker, &folder, cx);
+        let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
+        Some(Filled { folder, verifier, starters })
+    }
+
+    /// The goal written on the empty workspace's composer: handed to an orchestrator as the
+    /// sheet's Create hands it, with what the sheet would open holding (its first agent on its
+    /// first machine, a branch of the project's own, the default autonomy). Whether it went.
+    pub(super) fn goal_from_page(&mut self, words: &str, cx: &mut Context<Self>) -> bool {
+        let words = words.trim();
+        if words.is_empty() {
+            return false;
+        }
+        let Some(filled) = self.goal_filled(cx) else {
+            self.show_notice(NO_ORCHESTRATOR.to_owned(), cx);
+            return false;
+        };
+        let Some((starter, worker)) =
+            filled.starters.first().and_then(|s| Some((s, s.machines.first()?.0)))
+        else {
+            return false;
+        };
+        let goal = NewGoal {
+            goal: words.to_owned(),
+            folder: filled.folder,
+            worker,
+            agent: starter.agent.clone(),
+            target: String::new(),
+            verifier: filled.verifier,
+            autonomy: Autonomy::default(),
+        };
+        self.take_goal(goal, cx);
+        true
+    }
+
+    /// Once a frame: the empty workspace's composer is made the first time the page shows with
+    /// a machine to begin on, and takes the keyboard where nothing else holds it.
+    pub(super) fn sync_empty_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.empty_goal.is_some() || !self.bare() || self.workers.is_empty() {
+            return;
+        }
+        let goal = cx.new(|cx| {
+            gpui_kit::component::input::TextareaState::new(window, cx)
+                .placeholder(crate::project::create::GOAL_HINT)
+                .auto_grow(2, crate::project::create::GOAL_ROWS)
+                .submit_on_enter(true)
+        });
+        let entered = cx.subscribe_in(&goal, window, |this, goal, event, window, cx| {
+            if let gpui_kit::component::input::InputEvent::PressEnter { shift: false, .. } = event {
+                let words = goal.read(cx).value().to_string();
+                if this.goal_from_page(&words, cx) {
+                    goal.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+            }
+        });
+        if self.focus.is_focused(window) {
+            goal.update(cx, |input, cx| input.focus(window, cx));
+        }
+        self.empty_goal = Some((goal, entered));
     }
 
     /// The agents that can take a goal, those that run in a terminal, the last started first,

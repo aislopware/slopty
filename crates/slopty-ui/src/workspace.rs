@@ -31,7 +31,6 @@
 //! drawn cached: a terminal's echo draws the terminal and the panes around it, never the
 //! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
-mod about;
 pub mod actions;
 mod agent_screens;
 mod agent_start;
@@ -98,7 +97,7 @@ use std::time::{Duration, Instant};
 pub use actions::*;
 pub use agents::{banner_title, program_banner};
 #[cfg(test)]
-pub(crate) use area::{ADD_WORKER, NEW_AGENT, NO_WORKERS, NO_WORKERS_NEXT};
+pub(crate) use area::{ADD_WORKER, EMPTY_QUESTION, NO_WORKERS, NO_WORKERS_NEXT};
 pub use drafts::ReviewDraft;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
@@ -1077,8 +1076,9 @@ pub struct WorkspaceView {
     kept: Option<unsaved::Kept>,
     /// What the person wrote and has not sent, kept on this device.
     drafts: drafts::Drafts,
-    /// Slopty's mark over the empty workspace.
-    empty_mark: Entity<about::Mark>,
+    /// The empty workspace's composer, made the first time the page shows with a machine to
+    /// begin on: the goal written there starts a project ([`Self::goal_from_page`]).
+    empty_goal: Option<(Entity<gpui_kit::component::input::TextareaState>, Subscription)>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// Downloads in flight, and the ledger that keeps transfers across a relaunch.
@@ -1144,8 +1144,6 @@ impl WorkspaceView {
                 crate::icons::hold_steps(cx, until);
             }
         });
-        let empty_mark =
-            gpui::AppContext::new(cx, |_| about::Mark::new(theme.clone(), "empty", false));
         Self {
             base_theme: theme.clone(),
             font_delta: 0.0,
@@ -1317,7 +1315,7 @@ impl WorkspaceView {
             handoff: handoffs::HandoffState::default(),
             kept: None,
             drafts: drafts::Drafts::default(),
-            empty_mark,
+            empty_goal: None,
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
@@ -1692,7 +1690,6 @@ impl WorkspaceView {
             }
         }
         self.theme = theme;
-        self.theme_marks(cx);
         cx.notify();
     }
 
@@ -1779,7 +1776,6 @@ impl WorkspaceView {
         self.sync_clipboard_watch();
         self.sync_focus_report();
         self.sync_approvals(cx);
-        self.light_marks(cx);
         self.chrome.notify(cx);
     }
 
@@ -1917,8 +1913,8 @@ impl WorkspaceView {
 
 impl WorkspaceView {
     /// Tab from the workspace itself (nothing else focused) enters the keyboard ring; inside
-    /// a terminal or a text field Tab is theirs. ↵ there on an empty workspace runs its first
-    /// way to begin, as the palette's selected row would.
+    /// a terminal or a text field Tab is theirs. ↵ there on an empty workspace gives its
+    /// composer the keyboard.
     fn key_down(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) {
             return;
@@ -1931,7 +1927,9 @@ impl WorkspaceView {
             && !self.workers.is_empty()
         {
             cx.stop_propagation();
-            self.start_here(window, cx);
+            if let Some((goal, _)) = &self.empty_goal {
+                goal.update(cx, |input, cx| input.focus(window, cx));
+            }
         }
     }
 
@@ -2128,6 +2126,7 @@ impl gpui::Render for WorkspaceView {
         self.settle_going(cx);
         self.settle_review_writers(cx);
         self.sync_projects(window, cx);
+        self.sync_empty_goal(window, cx);
         self.keep_zoom(cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);

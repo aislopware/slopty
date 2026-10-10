@@ -428,26 +428,7 @@ impl WorkspaceView {
         }
     }
 
-    /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
-    /// in the machine's latest place, its first message asked in its own tile. The machine is
-    /// the one in context.
-    pub(super) fn start_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.context_worker() else { return };
-        if let Some(w) = self.workers.get(&key).filter(|w| w.link.is_none()) {
-            let text = format!("{} is {}", w.name, w.status.text());
-            self.show_notice(text, cx);
-            return;
-        }
-        let Some(agent) = self.agent_for(key) else {
-            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
-            return;
-        };
-        let latest = self.recent_places(Some(&agent), cx).into_iter().find(|p| p.worker == key);
-        let cwd = latest.map_or_else(|| "~".to_owned(), |p| p.cwd);
-        self.begin_start(StartThread { worker: key, agent, cwd, worktree: false }, window, cx);
-    }
-
-    /// A place the empty workspace offers, pressed: a thread of `worker`'s usual agent in
+    /// A place pressed in the navigator: a thread of `worker`'s usual agent in
     /// `cwd`, its first message asked in its own tile; a shell there when it has no agent.
     pub(super) fn start_in(
         &mut self,

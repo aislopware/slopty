@@ -1799,7 +1799,7 @@ mod tests {
             crate::workspace::RECONNECTING,
             crate::workspace::SESSION_ENDED,
             crate::workspace::CLOSE_TILE,
-            crate::workspace::NEW_AGENT,
+            crate::workspace::EMPTY_QUESTION,
             crate::workspace::NO_WORKERS,
             crate::workspace::NO_WORKERS_NEXT,
             crate::workspace::ADD_WORKER,
