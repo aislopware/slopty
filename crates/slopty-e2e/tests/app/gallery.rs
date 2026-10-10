@@ -281,6 +281,185 @@ async fn a_file_too_large_to_edit_says_where_to_read_it() {
     stack.shutdown().await;
 }
 
+/// `git` in `repo`, as Mira, which must succeed.
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "user.name=Mira", "-c", "user.email=mira@localhost"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A shell in `project`, then "Review changes" from the palette: the review of its working
+/// tree, in a tile of its own.
+async fn review_changes(drv: &mut Driver, project: &std::path::Path) {
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.type_text(&format!("cd '{}' && pwd", project.display())).await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the shell in the project", STEP, |d| {
+        d.lines_containing("project").iter().any(|r| r.trim().ends_with("/project"))
+    })
+    .await
+    .unwrap();
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        .await
+        .unwrap();
+    drv.type_text("Review changes").await.unwrap();
+    drv.keys("enter").await.unwrap();
+}
+
+/// A folder's changes that are more than lines, reviewed with "Review changes": a picture
+/// redrawn shows its two sides beside each other, a file moved in its folder says where it was,
+/// a script made executable says so in its head, and a file too large to cut says its size with
+/// the press that opens it whole.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_review_shows_pictures_moves_modes_and_large_files_for_what_they_are() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = dir.join("project");
+    std::fs::create_dir_all(project.join("art")).unwrap();
+    let mark = |hue: [u8; 3]| {
+        image::RgbImage::from_fn(96, 64, move |x, y| {
+            let edge = x < 8 || y < 8 || x >= 88 || y >= 56;
+            image::Rgb(if edge { [236, 236, 232] } else { hue })
+        })
+    };
+    let logo = project.join("art/logo.png");
+    mark([64, 150, 96]).save_with_format(&logo, image::ImageFormat::Png).unwrap();
+    std::fs::write(project.join("art/credits.txt"), "Drawn by Mira\n").unwrap();
+    std::fs::write(project.join("deploy.sh"), "#!/bin/sh\ncargo xtask deploy\n").unwrap();
+    git(&project, &["init", "-q", "-b", "main"]);
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-q", "-m", "the mark"]);
+    // The changes: the mark redrawn, the credits renamed, the script made executable, and a
+    // log past what a review cuts into hunks.
+    mark([70, 110, 190]).save_with_format(&logo, image::ImageFormat::Png).unwrap();
+    // Another name, not another case of it: a Mac's disk takes `CREDITS.txt` for the same file.
+    std::fs::rename(project.join("art/credits.txt"), project.join("art/authors.txt")).unwrap();
+    let script = project.join("deploy.sh");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(project.join("capture.log"), "frame 0042 presented\n".repeat(220_000)).unwrap();
+
+    let drv = &mut stack.driver;
+    review_changes(drv, &project).await;
+    let dump = drv
+        .wait_for("the review of the folder's changes", STEP, |d| {
+            d.a11y_node("Image", Some("After: art/logo.png")).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(dump.a11y_node("Image", Some("Before: art/logo.png")).is_some(), "{:#?}", dump.a11y);
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "review-sides").await;
+    stack.shutdown().await;
+}
+
+/// The forge's review of the branch's pull request, on the lines it is about: a thread still
+/// open hangs under its line with its reply, and one on code changed since waits at the file's
+/// end saying so, each with the way to its page. `gh` is a stand-in on the worker's `PATH`
+/// that answers the pull request and its threads in gh's own words; no forge is asked.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_review_hangs_the_forges_threads_on_their_lines() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let programs = tempfile::tempdir().unwrap();
+    let viewed = serde_json::json!({
+        "number": 42,
+        "url": "https://github.com/aislopware/slopty/pull/42",
+        "title": "Retry the refresh with one key",
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefName": "feature",
+        "headRefOid": "0123abcd",
+        "baseRefName": "main",
+        "reviewDecision": "CHANGES_REQUESTED",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "BLOCKED",
+        "statusCheckRollup": [],
+    });
+    let note = |login: &str, body: &str, at: u32| {
+        serde_json::json!({
+            "author": { "login": login }, "body": body,
+            "url": format!("https://github.com/aislopware/slopty/pull/42#discussion_r{at}"),
+        })
+    };
+    let thread = |line: u32, outdated: bool, notes: Vec<serde_json::Value>| {
+        serde_json::json!({
+            "isResolved": false, "isOutdated": outdated, "path": "src/refresh.rs", "line": line,
+            "comments": { "totalCount": notes.len(), "nodes": notes },
+        })
+    };
+    let threads = serde_json::json!({ "data": { "repository": { "pullRequest": {
+        "reviews": { "nodes": [{
+            "author": { "login": "ana" }, "body": "Close. The retry needs a pause between tries.",
+            "state": "CHANGES_REQUESTED",
+            "url": "https://github.com/aislopware/slopty/pull/42#pullrequestreview-1",
+        }] },
+        "reviewThreads": { "totalCount": 2, "nodes": [
+            thread(3, false, vec![
+                note("ana", "Three tries with no pause between them will meet the rate limit.", 1),
+                note("mira", "Agreed: a jittered backoff, capped at two seconds.", 2),
+            ]),
+            thread(2, true, vec![note("lin", "Name the key for what it guards.", 3)]),
+        ] },
+    } } } });
+    std::fs::write(programs.path().join("view.json"), viewed.to_string()).unwrap();
+    std::fs::write(programs.path().join("threads.json"), threads.to_string()).unwrap();
+    let gh = programs.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\ncase \"$1 $2\" in\n\
+         'pr view') cat '{dir}/view.json' ;;\n\
+         'api graphql') cat '{dir}/threads.json' ;;\n\
+         *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+         esac\n",
+        dir = programs.path().display()
+    );
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", programs.path().display());
+    let mut stack = Stack::launch_with("e2e-worker", &[("PATH", &path)]).await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = dir.join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let before = "pub fn refresh(client: &Client, token: &Token) -> Result<Token> {\n    \
+                  let fresh = client.post(\"/refresh\", token)?;\n    Ok(fresh)\n}\n";
+    std::fs::write(project.join("src/refresh.rs"), before).unwrap();
+    git(&project, &["init", "-q", "-b", "feature"]);
+    git(&project, &["remote", "add", "origin", "https://github.com/aislopware/slopty.git"]);
+    git(&project, &["add", "-A"]);
+    git(&project, &["commit", "-q", "-m", "refresh tokens"]);
+    let after = "pub fn refresh(client: &Client, token: &Token) -> Result<Token> {\n    \
+                 let key = IdempotencyKey::new();\n    \
+                 let fresh = retry(3, || client.post_with(\"/refresh\", token, &key))?;\n    \
+                 Ok(fresh)\n}\n";
+    std::fs::write(project.join("src/refresh.rs"), after).unwrap();
+
+    let drv = &mut stack.driver;
+    review_changes(drv, &project).await;
+    let said = "ana: Three tries with no pause between them will meet the rate limit.";
+    let dump = drv
+        .wait_for("the forge's threads on the diff", STEP, |d| {
+            d.a11y_node("Comment", Some(said)).is_some()
+        })
+        .await
+        .unwrap();
+    let outdated = dump.a11y_node("Comment", Some("lin: Name the key for what it guards."));
+    assert!(outdated.is_some(), "the thread on code changed since: {:#?}", dump.a11y);
+    assert_eq!(labels(&dump, "Link").iter().filter(|l| *l == "Open on the forge").count(), 2);
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "review-forge").await;
+    stack.shutdown().await;
+}
+
 /// A picture opened as a file shows fitted in its tile, decoded by the platform, and says what
 /// it is to a screen reader.
 #[tokio::test]

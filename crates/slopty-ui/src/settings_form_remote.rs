@@ -454,24 +454,32 @@ impl SettingsForm {
     fn machine_menu(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let this = cx.entity().downgrade();
+        // One of a set: the machine on show is ticked.
+        let on_show = self.remote.as_ref().map(|r| &r.machine);
         let mut menu = crate::kit::Menu::new();
         if HOSTS_DAEMONS {
             let to = this.clone();
-            menu.push(crate::kit::MenuItem::new("this", THIS_DEVICE, move |_w, cx| {
-                let _gone = to.update(cx, |form, cx| form.pick_machine(None, cx));
-            }));
+            menu.push(
+                crate::kit::MenuItem::new("this", THIS_DEVICE, move |_w, cx| {
+                    let _gone = to.update(cx, |form, cx| form.pick_machine(None, cx));
+                })
+                .mark(crate::kit::menu::Mark::Radio(on_show.is_none())),
+            );
         }
         for (n, machine) in self.machines.list.iter().enumerate() {
             let to = this.clone();
             let picked = machine.clone();
-            menu.push(crate::kit::MenuItem::new(
-                format!("machine-{n}"),
-                machine.name.clone(),
-                move |_w, cx| {
-                    let picked = picked.clone();
-                    let _gone = to.update(cx, |form, cx| form.pick_machine(Some(picked), cx));
-                },
-            ));
+            menu.push(
+                crate::kit::MenuItem::new(
+                    format!("machine-{n}"),
+                    machine.name.clone(),
+                    move |_w, cx| {
+                        let picked = picked.clone();
+                        let _gone = to.update(cx, |form, cx| form.pick_machine(Some(picked), cx));
+                    },
+                )
+                .mark(crate::kit::menu::Mark::Radio(on_show == Some(machine))),
+            );
         }
         let panel = crate::kit::MenuPanel::new(
             "settings-machines",

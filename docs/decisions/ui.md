@@ -9574,8 +9574,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     ("Made executable", "No longer executable", "Now a symbolic link", "No longer a symbolic
     link", else both modes), after any other status, joined by a middle dot. The words cut
     with an ellipsis rather than push the counts off the row.
-  - **The empty row.** A rename or a change of mode with no change to its lines says so where
-    the lines would be.
+  - **The empty row.** A rename or a change of mode with no change to its lines says "No
+    change to its lines" where the lines would be. The head has already said the rename or the
+    mode, so the row does not say it again.
   - **A picture** shows its two sides beside each other, "Before" and "After" (one of them for
     a picture added or removed), fitted in a 160-point well, with its size under them. Each
     side's bytes are asked of the worker by blob (`GitOp::Blob`), once per tile, the first

@@ -2,10 +2,10 @@
 //! a picture, a file too large to cut into hunks.
 //!
 //! - **A rename** names where the file was, in its head: "Renamed from old.rs" when it kept its
-//!   folder, "Moved from src/old.rs" when it did not. A rename with no change to its lines says so
-//!   where its lines would be.
-//! - **A mode change** says what it means in its head ("Made executable", "Now a symbolic link"); a
-//!   file whose mode alone changed says it where its lines would be.
+//!   folder, "Moved from src/old.rs" when it did not.
+//! - **A mode change** says what it means in its head ("Made executable", "Now a symbolic link").
+//! - **Either with no change to its lines** says only that where its lines would be: the head has
+//!   said the rest.
 //! - **A picture** shows its two sides beside each other, each side's bytes asked of the worker by
 //!   its blob the first time the row is drawn (`GitOp::Blob`) and decoded once.
 //! - **A text file too large to cut** says its size, with a press that opens it whole in a tile of
@@ -90,11 +90,11 @@ pub(in crate::review) fn bare_words(file: &FileDiff) -> String {
         FileKind::Binary => "Binary file".to_owned(),
         FileKind::TooLarge { bytes } => too_large(bytes),
         FileKind::Image { bytes } => format!("Picture, {}", kit::size_label(bytes)),
-        FileKind::Text => match (file.modes, &file.old_path) {
-            (Some(modes), _) => format!("{}, with no change to its lines", mode_words(modes)),
-            (None, Some(_)) => "Moved with no change to its lines".to_owned(),
-            (None, None) => "No lines to show".to_owned(),
-        },
+        // The head says the rename or the mode already; the row says only what is not there.
+        FileKind::Text if file.modes.is_some() || file.old_path.is_some() => {
+            "No change to its lines".to_owned()
+        }
+        FileKind::Text => "No lines to show".to_owned(),
     }
 }
 

@@ -1212,14 +1212,14 @@ fn a_rename_a_mode_and_a_large_file_are_said_in_words() {
     renamed.patch.hunks.clear();
     renamed.old_path = Some("src/old.rs".to_owned());
     assert_eq!(head_words(&renamed).as_deref(), Some("Renamed from old.rs"));
-    assert_eq!(bare_words(&renamed), "Moved with no change to its lines");
+    assert_eq!(bare_words(&renamed), "No change to its lines", "the head says the move");
     renamed.old_path = Some("lib/old.rs".to_owned());
     renamed.modes = Some(Modes { from: 0o100_644, to: 0o100_755 });
     assert_eq!(
         head_words(&renamed).as_deref(),
         Some("Moved from lib/old.rs \u{b7} Made executable")
     );
-    assert_eq!(bare_words(&renamed), "Made executable, with no change to its lines");
+    assert_eq!(bare_words(&renamed), "No change to its lines", "nor the mode again");
 
     let mut added = file("a.png", &[], 0, 0);
     added.from = None;

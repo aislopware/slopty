@@ -122,6 +122,34 @@ async fn the_settings_form_edits_the_file() {
     }
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "settings-input").await;
+    // A page of a daemon's keys says whose they are at the end of its head: this Mac's, which
+    // runs a worker, until another machine is picked; the worker it is linked to is in the
+    // picker's menu.
+    press(drv, &keys, "Tab", "Agents").await;
+    let picked =
+        |d: &Dump| d.a11y_node("ComboBox", Some("Settings of")).and_then(|n| n.value.clone());
+    let agents = drv
+        .wait_for("the agents page with its picker", STEP, |d| {
+            picked(d).as_deref() == Some("This Mac")
+        })
+        .await
+        .unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "settings-agents").await;
+    press(drv, &agents, "ComboBox", "Settings of").await;
+    drv.wait_for("the machines menu", STEP, |d| {
+        d.a11y_node("MenuItemRadio", Some("e2e-worker")).is_some()
+    })
+    .await
+    .unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "settings-machines").await;
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the menu closed", STEP, |d| {
+        d.a11y_node("MenuItemRadio", Some("e2e-worker")).is_none()
+    })
+    .await
+    .unwrap();
     press(drv, &keys, "Tab", "Terminal").await;
     let dump = drv
         .wait_for("back on the terminal's page", STEP, |d| {
