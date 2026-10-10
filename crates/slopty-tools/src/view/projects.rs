@@ -9,9 +9,9 @@ use serde_json::Value;
 use slopty_core::{WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Bounds, Fact, Facts, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, NodeDetail,
-    Project, ProjectStatus, Report, StepKind, StepState, Task, TaskCard, TaskState, TaskStep,
-    TestDiff, TimelineEntry, VerifierRun,
+    Autonomy, Bounds, Fact, Facts, GiveBacks, Limits, Live, Moment, NativeCounts, Natives,
+    NodeDetail, Progress, Project, ProjectStatus, Report, StepKind, StepState, Task, TaskCard,
+    TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::{PullSeen, PullStands};
@@ -92,11 +92,44 @@ pub struct ProjectView<'a> {
     title: &'a str,
     repo: &'a str,
     target: &'a str,
+    /// The goal the person handed over.
+    goal: Option<&'a str>,
+    /// `ask`, `edits` or `own`: how far its agents go before they ask the person.
+    autonomy: &'static str,
+    /// Where the orchestrator last said the goal stands.
+    progress: Option<ProgressView<'a>>,
     verifier: Option<&'a str>,
     orchestrator: Option<String>,
     limits: Limits,
     metadata: Option<Value>,
     created_ms: WallMs,
+}
+
+/// Where the orchestrator last said the goal stands, for JSON.
+#[derive(Debug, Serialize)]
+pub struct ProgressView<'a> {
+    summary: &'a str,
+    next: Option<&'a str>,
+    done: bool,
+    at_ms: WallMs,
+}
+
+/// An autonomy level's word.
+#[must_use]
+pub const fn autonomy_word(autonomy: Autonomy) -> &'static str {
+    match autonomy {
+        Autonomy::Ask => "ask",
+        Autonomy::Edits => "edits",
+        Autonomy::Own => "own",
+    }
+}
+
+/// The autonomy level `word` names ([`autonomy_word`]'s words).
+#[must_use]
+pub fn autonomy_named(word: &str) -> Option<Autonomy> {
+    [Autonomy::Ask, Autonomy::Edits, Autonomy::Own]
+        .into_iter()
+        .find(|a| autonomy_word(*a) == word.trim())
 }
 
 /// A project, for JSON.
@@ -107,6 +140,14 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         title: &p.title,
         repo: &p.repo,
         target: &p.target,
+        goal: p.goal.as_deref(),
+        autonomy: autonomy_word(p.autonomy),
+        progress: p.progress.as_ref().map(|g| ProgressView {
+            summary: &g.summary,
+            next: g.next.as_deref(),
+            done: g.done,
+            at_ms: g.at_ms,
+        }),
         verifier: p.verifier.as_deref(),
         orchestrator: p.orchestrator.map(term_string),
         limits: p.limits,
@@ -419,6 +460,16 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
             ("delivered", format!("{reports} report(s) handed to its agent"))
         }
         Moment::Step(step) => ("step", step_text(step)),
+        Moment::Update(progress) => ("update", progress_text(progress)),
+    }
+}
+
+/// Where the orchestrator says the goal stands, in a line.
+fn progress_text(progress: &Progress) -> String {
+    let met = if progress.done { "goal met: " } else { "" };
+    match &progress.next {
+        Some(next) => format!("{met}{}; next: {next}", progress.summary),
+        None => format!("{met}{}", progress.summary),
     }
 }
 

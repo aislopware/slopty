@@ -216,7 +216,7 @@ mod tests {
         use slopty_agent::pi::rpc::{self, Command, Entries, Incoming, Request};
         use slopty_core::WallMs;
         use slopty_proto::thread::{
-            Action, Answerer, AskId, Cap, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
+            Action, Answerer, AskId, Cap, IntentId, ItemBody, Liveness, Phase, RequestState,
             ThreadState, ToolState, TurnState,
         };
 
@@ -751,62 +751,6 @@ mod tests {
             assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
             assert_eq!(state.status.phase, Phase::Stopped);
             assert_eq!(state.status.liveness, Liveness::Exited { resumable: true });
-        }
-
-        /// The session's entries as the recording ends with them.
-        fn recorded_entries() -> Entries {
-            let data = gate()
-                .into_iter()
-                .find(|l| !l.sent && l.msg["command"] == "get_entries")
-                .map(|l| l.msg["data"].clone())
-                .unwrap();
-            serde_json::from_value(data).unwrap()
-        }
-
-        /// Held by pi's TUI, the thread names its terminal, can only be taken back, and follows
-        /// the entries the TUI appends: a turn the TUI is in stays open and working until the
-        /// model's message that ends it; held by Slopty again, it is driven as before.
-        #[test]
-        fn a_thread_held_by_the_tui_follows_what_it_writes() {
-            let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
-            let mut state = ThreadState::new(driven.meta().clone());
-            let terminal = slopty_core::SessionId::new();
-            for action in begun.iter().chain(&driven.held_by_tui(terminal, WallMs::ZERO)) {
-                state.apply(action);
-            }
-            assert_eq!(state.meta.terminal, Some(terminal));
-            assert!(state.meta.drive.is(Drive::OBSERVED));
-            assert_eq!(state.meta.caps, [Cap::named(Cap::HANDOFF)]);
-            let entries = recorded_entries().entries;
-            let first_answer = entries
-                .iter()
-                .position(|e| matches!(&e.message, Some(rpc::Message::Assistant { .. })))
-                .unwrap();
-            for entry in &entries[..first_answer] {
-                for action in driven.appended(entry, WallMs::ZERO) {
-                    state.apply(&action);
-                }
-            }
-            assert_eq!(state.status.phase, Phase::Working, "the TUI works on it");
-            assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Active));
-            assert!(!driven.rests());
-            for action in driven.appended(&entries[first_answer], WallMs::ZERO) {
-                state.apply(&action);
-            }
-            assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Complete));
-            assert_eq!(state.status.phase, Phase::Done);
-            assert!(driven.rests());
-            for entry in &entries[first_answer + 1..] {
-                for action in driven.appended(entry, WallMs::ZERO) {
-                    state.apply(&action);
-                }
-            }
-            assert_eq!(state.turns.len(), 4);
-            for action in driven.held_by_slopty() {
-                state.apply(&action);
-            }
-            assert_eq!(state.meta.terminal, None);
-            assert!(state.meta.drive.is(Drive::DRIVEN) && state.meta.can(Cap::STEER));
         }
 
         /// The flags a thread was started with are kept with it, and read back.

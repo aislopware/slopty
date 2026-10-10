@@ -13,14 +13,14 @@ mod golden_project {
     use slopty_proto::folder::FsOp;
     use slopty_proto::git::Forge;
     use slopty_proto::orchestration::{
-        BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
+        BranchBundle, ErrorCode, Happening, HubEvent, Outcome, TermRef, Verb,
     };
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Commits, Fact, Facts, GiveBacks, Limits, LimitsChange,
         Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail,
-        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Report, RunOn, Runner,
-        Spent, StepKind, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
-        TaskStep, TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
+        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Report, RunOn, Spent,
+        StepKind, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep,
+        TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::settings::{DaemonSettings, SettingEdit};
@@ -56,11 +56,6 @@ mod golden_project {
         }
     }
 
-    /// A member: the folder at `cwd` on `machine`.
-    fn notes_on(machine: &str, cwd: &str) -> slopty_proto::project::Matcher {
-        [("machine".to_owned(), machine.to_owned()), ("cwd".to_owned(), cwd.to_owned())].into()
-    }
-
     fn project_id() -> ProjectId {
         ProjectId::new("slopty").expect("a name")
     }
@@ -83,7 +78,14 @@ mod golden_project {
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
             created_ms: at(),
-            members: vec![notes_on("studio", "~/notes")],
+            goal: Some("Projects mode, end to end".to_owned()),
+            autonomy: slopty_proto::project::Autonomy::Edits,
+            progress: Some(slopty_proto::project::Progress {
+                summary: "Store and verbs merged; the board runs".to_owned(),
+                next: Some("The phone's inbox".to_owned()),
+                done: false,
+                at_ms: at(),
+            }),
         }
     }
 
@@ -320,17 +322,6 @@ mod golden_project {
         snap("send_message", &request(reply));
     }
 
-    fn launch(run: Runner) -> TaskLaunch {
-        TaskLaunch {
-            pin: None,
-            cwd: "~/src/slopty".to_owned(),
-            run,
-            env: vec![("A".to_owned(), "1".to_owned())],
-            size: Some(Size { cols: 120, rows: 36 }),
-            ignore_dependencies: false,
-        }
-    }
-
     #[test]
     fn project_verbs() {
         let limits = LimitsChange { review: Some(4) };
@@ -346,7 +337,8 @@ mod golden_project {
                 orchestrator: Some(term()),
                 limits,
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
-                members: vec![notes_on("studio", "~/notes")],
+                goal: Some("Projects mode, end to end".to_owned()),
+                autonomy: slopty_proto::project::Autonomy::Own,
             }),
         );
         snap(
@@ -358,7 +350,7 @@ mod golden_project {
                 push: Some(true),
                 limits: LimitsChange { review: Some(2) },
                 metadata: None,
-                members: Some(vec![notes_on("studio", "~/notes"), notes_on("devbox", "/w/notes")]),
+                autonomy: Some(slopty_proto::project::Autonomy::Ask),
             }),
         );
         snap("project_list", &request(Verb::ProjectList));
@@ -401,10 +393,6 @@ mod golden_project {
                 change: Box::new(change),
             }),
         );
-        let claude = Runner::Claude {
-            prompt: Some("Read your brief: slopty task status.".to_owned()),
-            args: vec!["--model".to_owned(), "opus".to_owned()],
-        };
         snap(
             "task_spawn",
             &request(Verb::TaskSpawn {
@@ -412,44 +400,25 @@ mod golden_project {
                 task: TaskId(3),
                 launch: TaskLaunch {
                     pin: Some(term().worker),
-                    ignore_dependencies: true,
-                    ..launch(claude)
+                    agent: AgentId::named(AgentId::CLAUDE_CODE),
                 },
             }),
         );
-        let bench = Runner::Command { argv: vec!["cargo".to_owned(), "bench".to_owned()] };
-        snap(
-            "task_spawn_command",
-            &request(Verb::TaskSpawn {
-                project: project_id(),
-                task: TaskId(4),
-                launch: launch(bench),
-            }),
-        );
-        let codex = Runner::Codex {
-            prompt: Some("Read your brief.".to_owned()),
-            args: vec!["--model".to_owned(), "o3".to_owned()],
-        };
-        snap(
-            "task_spawn_codex",
-            &request(Verb::TaskSpawn {
-                project: project_id(),
-                task: TaskId(5),
-                launch: launch(codex),
-            }),
-        );
-        let pi = Runner::Agent {
-            agent: AgentId::named(AgentId::PI),
-            prompt: Some("Read your brief.".to_owned()),
-            model: Some("sonnet".to_owned()),
-            args: Vec::new(),
-        };
         snap(
             "task_spawn_agent",
             &request(Verb::TaskSpawn {
                 project: project_id(),
                 task: TaskId(6),
-                launch: launch(pi),
+                launch: TaskLaunch { pin: None, agent: AgentId::named(AgentId::PI) },
+            }),
+        );
+        snap(
+            "project_progress",
+            &request(Verb::ProjectProgress {
+                project: project_id(),
+                summary: "Store and verbs merged; the board runs".to_owned(),
+                next: Some("The phone's inbox".to_owned()),
+                done: true,
             }),
         );
         let restart = |agent: Option<AgentId>| Verb::TaskRestart {
@@ -909,6 +878,12 @@ mod golden_project {
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
             Moment::Note { text: "ready".to_owned() },
+            Moment::Update(slopty_proto::project::Progress {
+                summary: "Store merged; verbs next".to_owned(),
+                next: Some("The verbs".to_owned()),
+                done: false,
+                at_ms: at(),
+            }),
             Moment::Step(TaskStep {
                 kind: StepKind::Clone,
                 worker: term().worker,

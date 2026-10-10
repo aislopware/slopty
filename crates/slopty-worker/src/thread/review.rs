@@ -8,8 +8,7 @@
 //! itself once the agent has begun. A thread whose directory is not in git takes none.
 //!
 //! A review is a diff between two snapshots, "now" being one taken for it. Keeping and putting
-//! back act once per intent, each checked against the blobs the review showed. An edit from a
-//! turn puts the folder back to its before-snapshot ([`Snapshots::restore`]).
+//! back act once per intent, each checked against the blobs the review showed.
 //!
 //! An agent's own review ([`Intent::Review`]) takes the change a review showed as commits it can
 //! name ([`Snapshots::review_range`]): Claude Code's `/code-review` takes `base...head`, Codex's
@@ -241,45 +240,6 @@ impl Snapshots {
                     }
                 }
                 done.map_or_else(|e| refused(e.0), |()| Outcome::Done)
-            }
-        };
-        let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));
-        self.picking.lock().remove(&id);
-        recorded
-    }
-}
-
-impl Snapshots {
-    /// Put `thread`'s folder back to `turn`'s before-snapshot for intent `id`, once, what it
-    /// held first kept under the thread's refs as `<turn>-rewound`: a repeat of `id` gets the
-    /// first outcome back, and one that comes meanwhile waits for nothing and gets `None`.
-    pub async fn restore(&self, thread: ThreadId, id: IntentId, turn: TurnId) -> Option<Outcome> {
-        if let Some(outcome) = self.host.outcome(thread, id) {
-            return Some(outcome);
-        }
-        if !self.picking.lock().insert(id) {
-            return None;
-        }
-        let refused = |reason: &str| Outcome::Refused { reason: reason.to_owned() };
-        let before = self.host.update(thread, |s| {
-            (vec![], s.turns.iter().find(|t| t.id == turn).map(|t| t.before.clone()))
-        });
-        let outcome = match (before, self.repo(thread)) {
-            (None, _) => refused("The thread is gone"),
-            (_, None) => refused(NOT_IN_GIT),
-            (Some(None), _) => refused(&format!("There is no turn {} here", turn.0)),
-            (Some(Some(None)), _) => refused("No snapshot was taken before that turn"),
-            (Some(Some(Some(tree))), Some(repo)) => {
-                let lock = self.lock(thread);
-                let _held = lock.lock().await;
-                let name = format!("{}-rewound", turn.0);
-                match repo.restore(thread, &name, &tree).await {
-                    Ok(()) => {
-                        self.judge(thread, &repo, &tree).await;
-                        Outcome::Done
-                    }
-                    Err(e) => refused(&e.0),
-                }
             }
         };
         let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));

@@ -748,14 +748,11 @@ impl ThreadView {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
-    /// The field goes while the agent's own TUI holds the session or its agent has exited for
-    /// good: the keyboard it held stays on the thread, where Take back and Resume are keys, and
-    /// goes back to the field when it returns. A focus on what is no longer drawn would reach
-    /// nothing of the thread's.
+    /// The field goes while its agent has exited for good: the keyboard it held stays on the
+    /// thread, where Resume is a key, and goes back to the field when it returns. A focus on what
+    /// is no longer drawn would reach nothing of the thread's.
     fn keep_keyboard(&mut self, composes: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let field_gone = !composes
-            || self.tui_holds(cx) == Some(true)
-            || self.gone(cx).is_some_and(|g| g != exited::Gone::ByMessage);
+        let field_gone = !composes || self.gone(cx).is_some_and(|g| g != exited::Gone::ByMessage);
         if field_gone && self.composer.focus_handle(cx).is_focused(window) {
             window.focus(&self.focus, cx);
             self.kept_keyboard = true;
@@ -1005,11 +1002,6 @@ impl ThreadView {
         }
         if self.composing.editing() {
             self.save_edit(window, cx);
-            return;
-        }
-        if self.compact_asked(cx) {
-            let _id = self.intent(Intent::Compact, cx);
-            self.composer.update(cx, |c, cx| c.clean(window, cx));
             return;
         }
         if self.composing.uploading() {

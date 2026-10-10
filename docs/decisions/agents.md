@@ -26,8 +26,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
        keystrokes into its TUI sent on the person's word behind the draft guard. It never reads
        the screen to control an agent, never types menu digits or cycles mode keys, and never
        answers for the person.
-    4. The TUI can always take a session over: live beside the face for Codex, by a handoff at
-       idle for a driven agent. A TUI-born agent gets the whole GUI.
+    4. The TUI can always take a session over: live beside the face for Codex, and for a driven
+       agent by resuming the session the agent itself keeps. A TUI-born agent gets the whole GUI.
     5. Slopty launches the user's own unmodified binary, never offers a login and never reads a
        credential. API keys and third-party providers are first-class.
   - **Each agent's drive.** An adapter declares a drive and an open set of capabilities, and the
@@ -36,11 +36,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       transcript and the mod's live blocks. The worker owns the composer and the queue, and
       types on the person's word. Approvals go through the blocking `PermissionRequest` hook.
     - *Claude Code, driven, as an opt-in per profile* (`claude -p` stream-json with the control
-      protocol). Recommended for API keys and third-party providers. Handoff to the TUI at idle.
+      protocol). Recommended for API keys and third-party providers.
     - *Codex, shared.* Slopty is a second live client of the user's app-server daemon socket,
       and `codex` in a PTY attaches to the same thread beside the face.
     - *pi, driven,* over `pi --mode rpc`, with Slopty's permission-gate extension, which fails
-      closed, because pi has no permission system of its own. Handoff to its TUI at idle.
+      closed, because pi has no permission system of its own.
     - *Any ACP agent, driven,* over its stdio with the protocol's own types (see "Any ACP agent
       is driven by one adapter" below).
     - *Any other program:* status only, through `slopty hook report`.
@@ -222,7 +222,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Intents act under the host's lock, once per id.** `Answer` and `Release` go through the
     held prompts the conversation path answers. A repeat, after a reconnect or from another
     client, gets the first outcome back and touches nothing. An intent the thread's caps lack
-    is `Unsupported`, and so is any no adapter acts on yet (mode, compact, stopping a task).
+    is `Unsupported`, and so is any no adapter acts on yet (mode, stopping a task).
     Messages, interrupts and models go to the composer (next entry). `Start` is refused and
     not recorded.
   - **Expansion asks the adapter.** The Claude driver answers an `Expand` from the session's
@@ -792,32 +792,6 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`Intent::Send::attachments`, `slopty-worker/src/thread/pi.rs`). Queueing came on
     2026-10-06: see "One queue on the worker for ACP, Codex and pi".
 
-- ✅ **pi's TUI takes a resting session on the person's word, and gives it back the same way;
-  one writer holds it throughout** (2026-10-02; `Intent::Handoff`, `Intent::TakeBack`,
-  `crates/slopty-worker/src/thread/pi/tui.rs`; `a_session_goes_to_pis_tui_and_comes_back` and
-  `a_tui_the_person_ends_gives_the_session_back` in `crates/slopty-worker/tests/pi.rs`).
-  - **Who holds it is in the meta.** Slopty holding the session is drive `driven` with no
-    terminal; the TUI holding it is drive `observed` with the terminal it runs in and only
-    `handoff` among the caps, so a client offers nothing else while the TUI holds it, and the
-    worker refuses anything else with a reason.
-  - **Handoff waits for rest.** The driven pi is told to end once no run works and no turn is
-    open (`agent_settled` seen), never mid-turn. Only once it is reaped does the worker open a
-    terminal running `pi --session-id <id>` plus the kept flags. The next task starts from the
-    last one's end message, so the two never overlap. The stand-in takes a writer lock on the
-    session file and the tests assert it never clashed.
-  - **Following the TUI.** The TUI has no protocol, so the worker follows the session file pi
-    writes: a stat every 250 ms and a read of only what it grew by, each new entry mapped by the
-    same rule as `get_entries`. A file that shrank, or an entry off the last one (the person
-    moved to another branch), reads the thread again whole. A worker that starts again with a
-    thread held by a TUI follows it again, since the terminal outlives the worker's restart.
-  - **Taking it back.** Take back waits until the TUI's session rests, then closes its terminal,
-    waits for it to exit, and drives pi again, which reads the session from `get_entries` first.
-    A TUI the person ends on their own leaves the session with Slopty, its pi exited and
-    resumable, and the next message starts the driven pi on it.
-  - **Rejected:** reading the TUI's screen to know when it rests (the session file says so, and
-    Slopty never reads a screen to steer an agent), and sending `/quit` into it (keys go into an
-    agent's TUI only on the person's word).
-
 - ✅ **Any ACP agent is driven by one adapter, as the person's own program, asking before it
   acts** (2026-10-02, ACP v1 through `agent-client-protocol-schema` 1.10.2;
   `crates/slopty-agent/src/acp/`, `crates/slopty-worker/src/thread/acp.rs`; the tests in
@@ -1151,16 +1125,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     id is not a session. Codex: a start of `resume <thread>`, as above. pi and an ACP agent that
     loads sessions: the next message, which the composer says. An agent that cannot load its
     session says it cannot.
-  - **Compact and modes.** `/compact` is listed where the thread has `Cap::COMPACT` and the
-    agent lists no such command, and sends `Intent::Compact`. The agent's modes come in
-    `ThreadMeta.modes`; a thread with its own TUI but no `SET_MODE` says the mode is changed
-    there.
+  - **Modes.** The agent's modes come in `ThreadMeta.modes`; a thread with its own TUI but no
+    `SET_MODE` says the mode is changed there.
   - **"Machine", not "worker",** in what these surfaces say (rulings §8).
   - Edited allows (§5a) were deleted ("Sleep, waits on another thread, queue reordering and
     edited allows are gone"), and threads with no terminal take uploads (the composer's
     attachments).
-  - Tests: `conversation::thread::tests::doors::*` and the attachment, queue and `/compact` tests
-    in `tests::composing`; `review::tests::a_refused_keep_says_why_on_its_hunk`;
+  - Tests: `conversation::thread::tests::doors::*` and the attachment and queue tests in
+    `tests::composing`; `review::tests::a_refused_keep_says_why_on_its_hunk`;
     `codex::form::tests::*`; `a_queued_message_waits_for_the_turn_and_goes_as_the_next` and
     `an_mcp_form_is_answered_as_its_content` (`crates/slopty-agent/tests/codex.rs`);
     `an_exited_thread_is_resumed_on_its_own_session_in_a_new_terminal`
@@ -1671,46 +1643,6 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
-- ✅ **Edit from a turn goes back in a new thread, through the agent's own door** (2026-10-04,
-  §11 of the T3 Code UI study). `Intent::Rewind { turn, files }` needs `Cap::REWIND`.
-  - **A branch, never a rewrite.** The conversation goes back only the way the agent offers.
-    Codex branches a session cut before a turn (`thread/fork` with `beforeTurnId`), so its
-    adapter has the cap, and the new thread's `forked_from` names the turn before. The thread
-    edited from keeps every turn: the agent's session stays the record, and no session file is
-    written. Codex's `thread/revert` rewrites a thread's own history in place. It is left
-    unused, because the branch loses nothing and gives the same next turn.
-  - **The other agents, checked and refused.**
-    - pi's RPC `fork { entryId }` moves the running pi onto a new session cut before a message.
-      Taking it means the adapter follows a session that changes under a thread, which it does
-      not do yet. Until then pi has no cap.
-    - ACP has no rollback, and its `session/fork` branches a whole session.
-    - Claude Code goes back through its TUI's own rewind, which Slopty never types into. Its
-      `--resume-session-at` is a hidden flag for print mode only, so it is not a door.
-  - **The prompt returns to the composer.** The client that asked puts the turn's message in
-    the new thread's composer, for the person to change and send. (It first waited on the
-    worker as a `Delivery::Draft`; see "Dollar cost, the carried account and drafts on the
-    worker are gone" below.)
-  - **The files, on the person's word.** With `files`, the folder goes back to the turn's
-    before-snapshot (`refs/slopty/threads/<thread>/<turn>-before`) through the thread's own
-    index (`git restore --source --worktree`). Every file a snapshot holds goes back to its blob
-    and mode, and a file the snapshot lacks is removed. Ignored files, the person's index, `HEAD`
-    and stash are untouched. What the folder held first is kept as
-    `refs/slopty/threads/<thread>/<turn>-rewound`, so nothing is lost. A turn with no
-    before-snapshot is refused before anything happens.
-  - **Order and once.** It is refused while a turn is under way. The branch comes first, since it
-    changes nothing on disk, then the files, then the draft. Each step is kept under an intent of
-    its own, so a repeat finishes what the first left and repeats nothing.
-  - **The client's half.** "Branch from here" on a person's message
-    (`conversation/thread/view/message_menu.rs`) opens the branch panel. On the thread's own
-    agent it edits from just before the message, with the files kept or put back
-    (`conversation/thread/view/branch.rs`). Test:
-    `branching_from_a_message_keeps_or_puts_back_the_files`
-    (`conversation::thread::tests::carry`).
-  - Tests: `an_edit_from_a_turn_branches_before_it_and_puts_its_files_back`
-    (`slopty-worker/tests/codex.rs`, a stand-in Codex daemon and a real git folder);
-    `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`
-    (`slopty-agent/tests/codex.rs`); golden `intent_rewind`.
-
 - ✅ **Model, effort and mode are switched through each agent's own settings door** (2026-10-04).
   `Intent::SetEffort { effort }` joins `SetModel` and `SetMode`, with `Cap::SET_EFFORT`. A thread
   says what it can be switched to: `ThreadMeta::models`, `ThreadMeta::efforts` (new, each an
@@ -1848,22 +1780,6 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_stop_holds_the_queue_until_the_person_sends_again` in
     `slopty-worker/tests/compose.rs` (Claude Code), `slopty-worker/tests/acp.rs` (a stub ACP
     agent) and `slopty-agent/tests/codex.rs` (Codex).
-
-- ✅ **The files go back only while no other thread works in the same folder** (2026-10-04,
-  A10 of the T3 Code delta study, after T3 replaced its path-scoped revert with a refusal,
-  #12306).
-  - `Intent::Rewind { files: true }` restores the whole work tree. So another thread whose
-    folder has the same git root, with a turn under way or waiting on the person, would have
-    its edits go back under it mid-turn.
-  - That rewind is refused before anything happens, in words: "“{title}” is working in the same
-    folder, and its edits would go back too. Go back without the files, or once it rests"
-    (`thread::rewind`).
-  - Going back without the files, which is only the branch, still goes.
-  - T3's blanket refusal is not taken: Slopty keeps what the folder held under `<turn>-rewound`,
-    so the person's own edits are never lost.
-  - Test: `an_edit_from_a_turn_branches_before_it_and_puts_its_files_back`
-    (`slopty-worker/tests/codex.rs`) is first refused while a second stand-in Codex thread works
-    in the same repository, and the files go back once that thread rests.
 
 - ✅ **A Codex goal shows as Codex holds it, read-only** (2026-10-04, A11 of the T3 Code delta
   study; T3's #6777 and #15133, and #7935 for why goal controls stay out).
@@ -2840,3 +2756,19 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `skills/changed`.
   - Tests (slopty-agent `tests/codex.rs`): `codexs_skills_are_its_commands`,
     `commands_left_running_are_its_background_tasks`.
+
+- ✅ **Handing a session to the TUI and back, rewinding and compacting through Slopty are
+  deleted** (2026-10-10, the orchestrator-first study, C.2).
+  - **What went.** `Intent::Handoff` and `Intent::TakeBack` with pi's TUI follower
+    (`thread/pi/tui.rs`), `Intent::Rewind` with the worker's file restore (`thread/rewind.rs`,
+    `Snapshots::restore`) and Codex's cut fork, `Intent::Compact` with every adapter's handler,
+    the caps `HANDOFF`, `REWIND`, `COMPACT` and `LIVE_TEXT`, and in the client the composer's
+    handoff strip, the take-back key, the tray's rewind and the branch panel's files row.
+  - **Why.** Each was a second way to do what the agent's own session already does. A driven
+    agent's session is the agent's, so its own TUI resumes it once Slopty lets it go. Fork
+    stays and is the one way to branch. Agents compact themselves, and a person who wants a
+    compact asks the agent. Rewinding files under a running worktree was the riskiest door
+    Slopty had, for a feature the person reached through the agent anyway.
+  - Goldens: `intent_compact`, `intent_handoff`, `intent_rewind` and `intent_take_back` are
+    deleted; the other intent goldens moved with the variant indices.
+

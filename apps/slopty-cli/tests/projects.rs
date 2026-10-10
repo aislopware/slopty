@@ -13,10 +13,11 @@ mod tests {
     use slopty_core::WorkerId;
     use slopty_proto::orchestration::{Outcome, Verb};
     use slopty_proto::project::{
-        LimitsChange, Moment, Natives, ProjectId, ProjectStatus, Runner, TaskId, TaskLaunch,
-        TaskSpec, TaskState,
+        LimitsChange, Moment, Natives, ProjectId, ProjectStatus, TaskId, TaskLaunch, TaskSpec,
+        TaskState,
     };
     use slopty_proto::server::Liveness;
+    use slopty_proto::thread::AgentId;
     use slopty_server::{Config, Hub, Server};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -52,16 +53,6 @@ mod tests {
     }
 
     /// [`worker`] under `name`.
-    async fn worker_named(
-        dir: &Path,
-        server: SocketAddr,
-        programs: &Path,
-        settings: &str,
-        name: &str,
-    ) -> Vec<Child> {
-        daemons(dir, server, programs, settings, name, &[]).await
-    }
-
     async fn daemons(
         dir: &Path,
         server: SocketAddr,
@@ -139,10 +130,7 @@ mod tests {
                 .find(|w| {
                     w.name == name
                         && w.liveness == Liveness::Online
-                        && w.caps
-                            .agents
-                            .iter()
-                            .any(|a| a.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
+                        && w.caps.agents.iter().any(|a| a.agent.is(AgentId::CLAUDE_CODE))
                 })
                 .map(|w| w.worker)
         })
@@ -194,10 +182,7 @@ mod tests {
         let worker = until("the worker registers with Claude Code installed", async || {
             hub.directory().into_iter().find(|w| {
                 w.liveness == Liveness::Online
-                    && w.caps
-                        .agents
-                        .iter()
-                        .any(|a| a.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
+                    && w.caps.agents.iter().any(|a| a.agent.is(AgentId::CLAUDE_CODE))
             })
         })
         .await
@@ -236,42 +221,11 @@ mod tests {
     /// and server: through the `slopty mcp` on its `--mcp-config`, with no flag, a tool call
     /// that names no project answers its own. What its hooks say becomes the tree: Claude
     /// Code's own subagent and to-do as leaves of its task, the worktree its status line names
-    /// as the task's. Its first prompt is typed once it says it is ready.
+    /// as the task's. Its first prompt, the task's brief, is typed once it says it is ready.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_agent_started_for_a_task_has_the_tools_and_grows_the_tree() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (server, _daemons, worker) = fleet(&root, "").await;
-        let hub = server.hub().clone();
-
-        let project = ProjectId::new("demo").unwrap();
-        let made = hub
-            .dispatch(Verb::ProjectCreate {
-                project: project.clone(),
-                title: "Demo".to_owned(),
-                repo: root.to_string_lossy().into_owned(),
-                target: "main".to_owned(),
-                verifier: None,
-                push: false,
-                orchestrator: None,
-                limits: LimitsChange::default(),
-                metadata: None,
-                members: Vec::new(),
-            })
-            .await;
-        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
-        let task = hub
-            .dispatch(Verb::TaskCreate {
-                project: project.clone(),
-                spec: Box::new(TaskSpec {
-                    title: "Look around".to_owned(),
-                    brief: "Read the code.".to_owned(),
-                    ..TaskSpec::default()
-                }),
-            })
-            .await;
-        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-
         let record = root.join("record.json");
         let worktree = json!({
             "name": "look",
@@ -308,18 +262,44 @@ mod tests {
                 "arguments": { "note": "Read the entry point." },
             },
         ]);
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: root.to_string_lossy().into_owned(),
-            run: Runner::Claude { prompt: Some("go".to_owned()), args: Vec::new() },
-            env: vec![
-                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
-                ("STUB_HOOKS".to_owned(), hooks.to_string()),
-                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-            ],
-            size: None,
-            ignore_dependencies: false,
-        };
+        let env = [
+            ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+            ("STUB_HOOKS".to_owned(), hooks.to_string()),
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+        ];
+        let (server, _daemons, worker) = fleet_with(&root, "", &env).await;
+        let hub = server.hub().clone();
+
+        let project = ProjectId::new("demo").unwrap();
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: root.to_string_lossy().into_owned(),
+                target: "main".to_owned(),
+                verifier: None,
+                push: false,
+                orchestrator: None,
+                limits: LimitsChange::default(),
+                metadata: None,
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        let task = hub
+            .dispatch(Verb::TaskCreate {
+                project: project.clone(),
+                spec: Box::new(TaskSpec {
+                    title: "Look around".to_owned(),
+                    brief: "Read the code.".to_owned(),
+                    ..TaskSpec::default()
+                }),
+            })
+            .await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+
+        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
@@ -334,7 +314,7 @@ mod tests {
                 let typed = seen
                     .as_ref()
                     .and_then(|s| s["typed"].as_array())
-                    .is_some_and(|t| t.iter().any(|l| l == "go"));
+                    .is_some_and(|t| t.iter().any(|l| l == "Read the code."));
                 let answered =
                     seen.as_ref().and_then(|s| s["mcp"].as_array()).is_some_and(|m| m.len() == 2);
                 if let (true, true, Some(seen)) = (typed, answered, seen) {
@@ -346,7 +326,7 @@ mod tests {
         .await
         .unwrap_or_else(|_| {
             let recorded = std::fs::read_to_string(&record).unwrap_or_default();
-            panic!("the agent answered its tool call and took its prompt; it recorded {recorded}")
+            panic!("the agent answered its tool call and took its brief; it recorded {recorded}")
         });
 
         // Its environment: the server with no flag, its project and task, its terminal.
@@ -461,14 +441,16 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// What a worker has reaches `slopty workers` as facts. A command task made and started in one
+    /// What a worker has reaches `slopty workers` as facts. A task made and started in one
     /// `slopty task start` runs on the worker it names, with its project and task in its
-    /// environment.
+    /// agent's environment.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_worker_s_own_facts_are_listed_and_a_command_task_runs_where_it_says() {
+    async fn a_worker_s_own_facts_are_listed_and_a_task_runs_where_it_says() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (server, _daemons, worker) = fleet(&root, "").await;
+        let record = root.join("record.json");
+        let env = [("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())];
+        let (server, _daemons, worker) = fleet_with(&root, "", &env).await;
         let hub = server.hub().clone();
         let addr = server.quic_addr();
 
@@ -485,9 +467,6 @@ mod tests {
         let repo = root.to_string_lossy().into_owned();
         slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
             .await;
-        let out = root.join("ran");
-        let script =
-            format!("printf %s \"$SLOPTY_PROJECT/$SLOPTY_TASK\" > '{}'; exec cat", out.display());
         slopty(
             &root,
             addr,
@@ -503,28 +482,25 @@ mod tests {
                 "--read-only",
                 "--worker",
                 &worker.to_string(),
-                "--command",
-                "--cwd",
-                &repo,
-                "--",
-                "/bin/sh",
-                "-c",
-                &script,
             ],
         )
         .await;
-        let ran = until("the command ran", async || {
-            std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
+        let seen: Value = until("its agent started", async || {
+            serde_json::from_slice(&std::fs::read(&record).ok()?).ok()
         })
         .await;
-        assert_eq!(ran, "demo/1");
+        let env = &seen["env"];
+        assert_eq!(
+            (env["SLOPTY_PROJECT"].as_str(), env["SLOPTY_TASK"].as_str()),
+            (Some("demo"), Some("1"))
+        );
         let project = ProjectId::new("demo").unwrap();
         let now = status(&hub, &project).await;
         let task = &now.tasks[0];
         assert_eq!((task.kind.as_str(), task.read_only), ("check", true));
         let term = task.assignment.as_ref().expect("placed and running").term;
         assert_eq!(term.worker, worker);
-        assert_eq!(now.live.project, 1, "a command task counts: it may be any agent's CLI");
+        assert_eq!(now.live.project, 1, "its agent counts");
 
         server.shutdown().await;
     }
@@ -551,7 +527,8 @@ mod tests {
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -630,7 +607,9 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
         git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
-        let (server, _daemons, worker) = fleet(&root, "").await;
+        let record = root.join("record.json");
+        let env = [("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())];
+        let (server, _daemons, worker) = fleet_with(&root, "", &env).await;
         let hub = server.hub().clone();
 
         let shell = Verb::OpenTerminal {
@@ -656,7 +635,8 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -673,15 +653,7 @@ mod tests {
             })
             .await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let record = root.join("record.json");
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: String::new(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
-            size: None,
-            ignore_dependencies: false,
-        };
+        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
@@ -755,8 +727,16 @@ mod tests {
         // Claude Code has run for this person, so a clone made for an agent is trusted.
         std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
         let programs = root.join("programs");
-        let _linux_daemons =
-            worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
+        let (record, gate) = (root.join("record.json"), root.join("go"));
+        let branch = "worktree-slopty-demo-1";
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": branch } }]);
+        let env = [
+            ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+            ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+        ];
+        let addr = server.quic_addr();
+        let _linux_daemons = daemons(&linux_dir, addr, &programs, "", "linux-box", &env).await;
         let linux_worker = registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
@@ -782,7 +762,8 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -800,21 +781,7 @@ mod tests {
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let (record, gate) = (root.join("record.json"), root.join("go"));
-        let branch = "worktree-slopty-demo-1";
-        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": branch } }]);
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: String::new(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: vec![
-                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
-                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
-            ],
-            size: None,
-            ignore_dependencies: false,
-        };
+        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
@@ -988,7 +955,7 @@ mod tests {
         let config = format!("[url \"file://{}\"]\n\tinsteadOf = {url}\n", forge.display());
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::write(root.join("home/.gitconfig"), &config).unwrap();
-        let (server, daemons, studio) = fleet(&root, "").await;
+        let (server, studio_daemons, studio) = fleet(&root, "").await;
         let hub = server.hub().clone();
         let linux_dir = root.join("linux");
         let linux_home = linux_dir.join("home");
@@ -996,7 +963,15 @@ mod tests {
         std::fs::write(linux_home.join(".gitconfig"), config).unwrap();
         std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
         let programs = root.join("programs");
-        let linux = worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
+        let gate = root.join("go");
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": ACROSS_BRANCH } }]);
+        let mut all = vec![
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+            ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+        ];
+        all.extend(env);
+        let addr = server.quic_addr();
+        let linux = daemons(&linux_dir, addr, &programs, "", "linux-box", &all).await;
         let linux_worker = registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
@@ -1022,7 +997,8 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1039,21 +1015,7 @@ mod tests {
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let gate = root.join("go");
-        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": ACROSS_BRANCH } }]);
-        let mut all = vec![
-            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-            ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
-        ];
-        all.extend(env);
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: String::new(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: all,
-            size: None,
-            ignore_dependencies: false,
-        };
+        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
@@ -1066,7 +1028,7 @@ mod tests {
             _dir: dir,
             root,
             server,
-            _daemons: daemons,
+            _daemons: studio_daemons,
             _linux: linux,
             studio,
             studio_clone,
@@ -1331,13 +1293,20 @@ mod tests {
         git(&repo, &["add", "."]);
         git(&repo, &["commit", "-q", "-m", "first"]);
         git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
-        let tree = repo.join(".claude/worktrees/t1");
-        git(&repo, &["worktree", "add", "-q", "-b", "task-1", &tree.to_string_lossy(), "main"]);
-        std::fs::write(tree.join("a.txt"), "the task's\n").unwrap();
-        std::fs::write(tree.join("work.txt"), "not yet\n").unwrap();
-        git(&tree, &["add", "."]);
-        git(&tree, &["commit", "-q", "-m", "the work, unfinished"]);
-        let (server, _daemons, worker) = fleet(&root, "").await;
+        // The worktree the worker makes for the task, and the branch in it.
+        let tree = repo.join(".claude/worktrees/slopty-demo-1");
+        let branch = "worktree-slopty-demo-1";
+        let (record, gate, later) = (root.join("record.json"), root.join("go"), root.join("later"));
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": branch } }]);
+        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
+        let env = [
+            ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+            ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+            ("STUB_LATER".to_owned(), prompt.to_string()),
+            ("STUB_LATER_AFTER".to_owned(), later.to_string_lossy().into_owned()),
+        ];
+        let (server, _daemons, worker) = fleet_with(&root, "", &env).await;
         let hub = server.hub().clone();
 
         let shell = Verb::OpenTerminal {
@@ -1364,7 +1333,8 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1376,29 +1346,19 @@ mod tests {
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let (record, gate, later) = (root.join("record.json"), root.join("go"), root.join("later"));
-        std::fs::write(&gate, "").unwrap();
-        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": "task-1" } }]);
-        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
-        let launch = TaskLaunch {
-            pin: Some(worker),
-            cwd: tree.to_string_lossy().into_owned(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: vec![
-                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
-                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
-                ("STUB_LATER".to_owned(), prompt.to_string()),
-                ("STUB_LATER_AFTER".to_owned(), later.to_string_lossy().into_owned()),
-            ],
-            size: None,
-            ignore_dependencies: false,
-        };
+        let launch = TaskLaunch { pin: Some(worker), agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
         let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
         let agent = spawned.assignment.unwrap().term;
+        // Its agent's work, unfinished, in the worktree made for it; then it reports.
+        assert_eq!(git_out(&tree, &["branch", "--show-current"]), branch, "made for it");
+        std::fs::write(tree.join("a.txt"), "the task's\n").unwrap();
+        std::fs::write(tree.join("work.txt"), "not yet\n").unwrap();
+        git(&tree, &["add", "."]);
+        git(&tree, &["commit", "-q", "-m", "the work, unfinished"]);
+        std::fs::write(&gate, "").unwrap();
 
         let card = card_when(&hub, &project, "the verifier fails", |card| {
             card.verified.as_ref().is_some_and(|run| !run.passed)

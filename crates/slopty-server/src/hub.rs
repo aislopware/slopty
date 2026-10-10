@@ -824,16 +824,13 @@ impl Hub {
     /// unless the person allows looser starts for the project (`[server.projects]
     /// permission_flags`).
     fn env_of_agent(&self, from: Option<SessionId>, verb: &Verb) -> Result<(), Outcome> {
-        let (envs, project) = match verb {
-            Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (vec![env], None),
-            Verb::TaskSpawn { project, launch, .. } => (vec![&launch.env], Some(project)),
-            _ => return Ok(()),
-        };
-        let mut names = envs.into_iter().flatten().map(|(name, _)| name.as_str());
-        let Some(name) = names.find(|n| steers(n)) else {
+        let (Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. }) = verb else {
             return Ok(());
         };
-        let allowed = projects::allowance(&self.inner.state.lock(), Caller::Agent, from, project);
+        let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
+            return Ok(());
+        };
+        let allowed = projects::allowance(&self.inner.state.lock(), Caller::Agent, from, None);
         if allowed {
             return Ok(());
         }
@@ -921,6 +918,7 @@ impl Hub {
                 self.project_status(&project, since, timeout_ms).await
             }
             Verb::TaskSpawn { project, task, launch } => {
+                let launch = self.launch_for(&project, task, launch);
                 self.task_spawn(caller, key, project, task, launch).await
             }
             Verb::TaskRestart { project, task, agent } => {
@@ -1002,6 +1000,7 @@ impl Hub {
             ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
+            | Verb::ProjectProgress { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskReport { .. }
@@ -1889,6 +1888,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Wake { .. }
         | Verb::ProjectCreate { .. }
         | Verb::ProjectSet { .. }
+        | Verb::ProjectProgress { .. }
         | Verb::ProjectList
         | Verb::ProjectStatus { .. }
         | Verb::TaskCreate { .. }
@@ -2501,11 +2501,11 @@ pub(crate) mod tests {
         lease.handle(ToServer::SessionChanged(summary(session)));
         assert!(events(&hub, Some(next), 0).await.0.is_empty(), "a known session's update");
         let exited =
-            SessionSummary { state: SessionState::Exited { status: 2 }, ..summary(session) };
+            SessionSummary { state: SessionState::Exited { status: Some(2) }, ..summary(session) };
         lease.handle(ToServer::SessionChanged(exited.clone()));
         let (seen, next, _) = events(&hub, Some(next), 0).await;
         assert!(
-            matches!(seen.as_slice(), [HubEvent { what: Happening::SessionExited { term, status: 2 }, .. }]
+            matches!(seen.as_slice(), [HubEvent { what: Happening::SessionExited { term, status: Some(2) }, .. }]
                 if term.session == session),
             "the program's exit is an event: {seen:?}"
         );

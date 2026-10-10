@@ -356,30 +356,6 @@ impl Repo {
         self.run(&["update-ref", "--stdin"], None, Some(deletes.as_bytes())).await.map(|_| ())
     }
 
-    /// Put the working tree back to `tree`, as a snapshot sees it, keeping what it held first
-    /// under `thread`'s ref `name`: every file a snapshot holds goes back to its blob and mode,
-    /// and a file `tree` lacks goes. Ignored files, the person's index, `HEAD` and stash are
-    /// never touched.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn restore(
-        &self,
-        thread: ThreadId,
-        name: &str,
-        tree: &TreeRef,
-    ) -> Result<(), Failed> {
-        let now = self.take().await?;
-        self.pin(thread, name, &now).await?;
-        // Through the thread's index, which holds every file of `now`: a file it holds that
-        // `tree` lacks is removed, which the person's index would not know of.
-        let source = format!("--source={}", tree.0);
-        let index = Some(self.index.as_path());
-        self.run(&["restore", &source, "--worktree", "--", "."], index, None).await?;
-        self.take().await.map(|_now| ())
-    }
-
     /// What `thread`'s person has kept, if they have kept anything.
     ///
     /// # Errors

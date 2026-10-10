@@ -2,5 +2,5 @@
 source: crates/slopty-proto/tests/golden_thread.rs
 expression: hex(&bytes)
 ---
-11 00 00 00 15 07 34 62 38 32 35 64 63 07 39 64
+11 00 00 00 11 07 34 62 38 32 35 64 63 07 39 64
 31 65 37 61 61

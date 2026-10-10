@@ -6,7 +6,7 @@
 //! gate ([`slopty_agent::pi`]), on a session named by the start's intent id, which pi keeps in
 //! its own session directory beside the person's others. One task per running pi carries its
 //! records both ways. What a client asks of the thread ([`Pi::decide`]: a message, an
-//! interrupt, an answer, a model, a compaction) goes to that task.
+//! interrupt, an answer, a model) goes to that task.
 //!
 //! - **The program.** pi is found as the person's terminal finds it: on the daemon's `PATH`, else
 //!   on their login shell's ([`crate::facts::installed`]), and runs with that `PATH`, so the `node`
@@ -22,20 +22,12 @@
 //!   exited and resumable. The next message starts pi again on the same session, with the flags it
 //!   was started with, and the thread is read again from the session's entries before the message
 //!   goes, since the session is the record and the thread a cache of it.
-//! - **Handed to its TUI, and back.** On the person's word ([`Intent::Handoff`]), once pi rests,
-//!   the driven pi ends and pi's own TUI starts on the same session in one of the worker's
-//!   terminals ([`tui::Terminals`]); the thread names that terminal and follows what the TUI writes
-//!   to the session's file ([`tui`]). Taken back ([`Intent::TakeBack`]) once the TUI rests, the
-//!   terminal is closed and pi is driven again; a TUI the person ends gives the session back too.
-//!   Each of the two starts only once the other has ended: the session has one writer throughout.
 
 pub mod driven;
-pub mod tui;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use slopty_agent::pi::driven::Driven;
@@ -51,27 +43,14 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use self::driven::{Ready, Task, start_pi};
-use self::tui::{Terminals, Watch};
 use super::{Host, Seated};
 use crate::facts::Installed;
 
 /// How long pi has to end once its stdin closes, before it is killed.
 pub const SHUTDOWN: Duration = Duration::from_secs(5);
 
-/// What comes after a thread's pi or TUI ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Next {
-    /// Nothing: the session rests with Slopty until the next message.
-    Rest,
-    /// pi's TUI takes the session.
-    Tui,
-    /// pi is driven again.
-    Driven,
-}
-
-/// Where a thread's pi or TUI says it has ended and is reaped, with the asks it did not take
-/// and what comes next.
-type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>, Next)>;
+/// Where a thread's pi says it has ended and is reaped, with the asks it did not take.
+type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>)>;
 
 /// What a client asks of the driven pi threads.
 #[derive(Debug)]
@@ -135,9 +114,6 @@ enum ThreadAsk {
     SetEffort {
         effort: String,
     },
-    Compact,
-    Handoff,
-    TakeBack,
 }
 
 /// Where clients' asks go to the driven pi threads. Cheap to clone.
@@ -210,15 +186,7 @@ impl Pi {
     ) -> Outcome {
         let thread = state.meta.id;
         let live = state.status.liveness == Liveness::Live;
-        let tui = state.meta.terminal.is_some();
-        if tui && !matches!(ask, Intent::Handoff | Intent::TakeBack) {
-            return refused("pi's terminal holds the session; take it back first");
-        }
         let asked = match ask {
-            Intent::Handoff if tui => return refused("pi's terminal holds the session already"),
-            Intent::Handoff => ThreadAsk::Handoff,
-            Intent::TakeBack if !tui => return refused("Slopty holds the session already"),
-            Intent::TakeBack => ThreadAsk::TakeBack,
             Intent::Send { text, attachments, .. }
                 if text.trim().is_empty() && attachments.is_empty() =>
             {
@@ -288,10 +256,8 @@ impl Pi {
                 }
                 ThreadAsk::SetEffort { effort: effort.clone() }
             }
-            Intent::Compact => ThreadAsk::Compact,
             other => return other.unsupported(),
         };
-        let waits = matches!(asked, ThreadAsk::Handoff | ThreadAsk::TakeBack);
         // What is held is the thread's record, answered whether pi runs or not.
         let held = matches!(
             asked,
@@ -300,18 +266,17 @@ impl Pi {
                 | ThreadAsk::Edit { .. }
                 | ThreadAsk::Promote { .. }
         );
-        if !live && !waits && !held {
+        if !live && !held {
             return refused("pi is not running");
         }
         if self.0.send(Ask::Thread { thread, ask: asked }).is_err() {
             return refused("pi threads are not served here");
         }
-        // A handoff happens once the agent rests.
-        if waits { Outcome::Accepted } else { Outcome::Done }
+        Outcome::Done
     }
 }
 
-/// Whether `state` is a pi thread, which this worker drives or whose TUI it follows.
+/// Whether `state` is a pi thread, which this worker drives.
 #[must_use]
 pub fn is_pi(state: &ThreadState) -> bool {
     state.meta.agent.is(AgentId::PI)
@@ -321,14 +286,12 @@ pub fn is_pi(state: &ThreadState) -> bool {
 /// asks of their [`Pi`].
 ///
 /// pi is looked for on `path` alone when it is given, else as the person's terminal finds it
-/// ([`crate::facts::installed`]); its TUI runs in `terminals`. A thread a pi of an earlier worker
-/// drove is told exited first, since that pi ended with it; one whose TUI an earlier worker
-/// followed is followed again, since the TUI is the person's and outlives the worker.
+/// ([`crate::facts::installed`]). A thread a pi of an earlier worker drove is told exited
+/// first, since that pi ended with it.
 pub fn spawn(
     host: Host,
     data_dir: PathBuf,
     path: Option<OsString>,
-    terminals: Arc<dyn Terminals>,
     Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -337,7 +300,6 @@ pub fn spawn(
             host: host.clone(),
             data_dir,
             path,
-            terminals,
             launcher: None,
             running: HashMap::new(),
             ended: ended_tx,
@@ -347,9 +309,7 @@ pub fn spawn(
             if !is_pi(&state) {
                 continue;
             }
-            if let Some(terminal) = state.meta.terminal {
-                served.watch(thread, terminal);
-            } else if state.status.liveness == Liveness::Live {
+            if state.status.liveness == Liveness::Live {
                 host.apply(thread, slopty_agent::pi::driven::gone(&state, WallMs::now()));
             }
         }
@@ -372,11 +332,13 @@ pub fn spawn(
                     }
                     None => return,
                 },
-                Some((thread, left, next)) = ended.recv() => {
+                Some((thread, left)) = ended.recv() => {
                     if served.running.get(&thread).is_some_and(mpsc::UnboundedSender::is_closed) {
                         served.running.remove(&thread);
                     }
-                    served.then(thread, left, next).await;
+                    if !left.is_empty() {
+                        served.route(thread, left).await;
+                    }
                 }
             }
         }
@@ -395,12 +357,11 @@ struct Served {
     host: Host,
     data_dir: PathBuf,
     path: Option<OsString>,
-    terminals: Arc<dyn Terminals>,
     /// Found once it is found; looked for again until then.
     launcher: Option<Launcher>,
-    /// The task of each thread's pi or TUI while it runs: the session's one writer.
+    /// The task of each thread's pi while it runs: the session's one writer.
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
-    /// Told by a task when its pi or TUI has ended.
+    /// Told by a task when its pi has ended.
     ended: Ended,
 }
 
@@ -542,9 +503,8 @@ impl Served {
         outcome
     }
 
-    /// `asks` for `thread`: to its pi or TUI while one runs. Else a message takes the thread up
-    /// again, driven; a handoff starts the TUI; a take-back of a TUI that is gone drives it
-    /// again; anything else is dropped, its intent already answered.
+    /// `asks` for `thread`: to its pi while one runs. Else a message takes the thread up again,
+    /// driven; anything else is dropped, its intent already answered.
     async fn route(&mut self, thread: ThreadId, asks: Vec<ThreadAsk>) {
         let mut left = Vec::new();
         for ask in asks {
@@ -563,22 +523,13 @@ impl Served {
         let Some((state, _)) = self.host.state(thread).filter(|(s, _)| is_pi(s)) else {
             return;
         };
-        if left.iter().any(|ask| matches!(ask, ThreadAsk::Handoff)) {
-            self.tui(thread).await;
-            return;
-        }
-        if state.meta.terminal.is_some() {
-            let (mut driven, _) = driven_of(&state);
-            self.host.apply(thread, driven.held_by_slopty());
-        }
         let left = self.held_at_rest(thread, &state, left);
         let (sends, dropped): (Vec<_>, Vec<_>) =
             left.into_iter().partition(|ask| matches!(ask, ThreadAsk::Send { .. }));
-        let back = dropped.iter().any(|ask| matches!(ask, ThreadAsk::TakeBack));
-        for ask in dropped.iter().filter(|ask| !matches!(ask, ThreadAsk::TakeBack)) {
+        for ask in &dropped {
             tracing::debug!(%thread, ?ask, "an ask of a pi that is not running");
         }
-        if sends.is_empty() && !back {
+        if sends.is_empty() {
             return;
         }
         self.drive(thread, sends).await;
@@ -620,28 +571,6 @@ impl Served {
         left
     }
 
-    /// What follows `thread`'s pi or TUI ending: what it did not take, and `next`.
-    async fn then(&mut self, thread: ThreadId, left: Vec<ThreadAsk>, next: Next) {
-        match next {
-            Next::Rest if left.is_empty() => {}
-            Next::Rest => self.route(thread, left).await,
-            Next::Tui => {
-                self.tui(thread).await;
-                if !left.is_empty() {
-                    self.route(thread, left).await;
-                }
-            }
-            Next::Driven => {
-                let left = match self.host.state(thread) {
-                    Some((state, _)) => self.held_at_rest(thread, &state, left),
-                    None => left,
-                };
-                let sends = left.into_iter().filter(|a| matches!(a, ThreadAsk::Send { .. }));
-                self.drive(thread, sends.collect()).await;
-            }
-        }
-    }
-
     /// Drive `thread`'s pi again, read again from its session, then send `sends`.
     async fn drive(&mut self, thread: ThreadId, sends: Vec<ThreadAsk>) {
         let Some((state, _)) = self.host.state(thread) else { return };
@@ -658,44 +587,6 @@ impl Served {
         let args = kept_args(&state.meta);
         let (driven, _) = driven_of(&state);
         self.run(&launch, thread, driven, &args, Ready::AfterEntries(sends));
-    }
-
-    /// Start pi's TUI on `thread`'s session in a terminal of the worker's, and follow it.
-    async fn tui(&mut self, thread: ThreadId) {
-        let Some((state, _)) = self.host.state(thread) else { return };
-        let launch = match self.launcher().await {
-            Ok(launch) => launch,
-            Err(why) => {
-                let (mut driven, _) = driven_of(&state);
-                self.host.apply(thread, driven.exited(Some(&why), WallMs::now()));
-                return;
-            }
-        };
-        let meta = &state.meta;
-        let mut command = vec![
-            launch.pi.program.to_string_lossy().into_owned(),
-            "--session-id".to_owned(),
-            meta.native.clone(),
-        ];
-        command.extend(kept_args(meta));
-        let path = ("PATH".to_owned(), launch.pi.path.to_string_lossy().into_owned());
-        match self.terminals.open(command, meta.cwd.clone(), vec![path]).await {
-            Ok(terminal) => self.watch(thread, terminal),
-            Err(why) => {
-                tracing::warn!(%thread, "pi's terminal could not open: {why}");
-                let (mut driven, _) = driven_of(&state);
-                let why = format!("pi's terminal could not open: {why}");
-                self.host.apply(thread, driven.exited(Some(&why), WallMs::now()));
-            }
-        }
-    }
-
-    /// Follow `thread` while the TUI in `terminal` holds it.
-    fn watch(&mut self, thread: ThreadId, terminal: slopty_core::SessionId) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let watch = Watch::new(self.host.clone(), thread, terminal);
-        tokio::spawn(watch.follow(Arc::clone(&self.terminals), rx, self.ended.clone()));
-        self.running.insert(thread, tx);
     }
 
     /// Run pi for `thread` with its own `args`, and serve it until it ends.

@@ -466,6 +466,7 @@ impl Orchestrator {
             | Verb::Wake { .. }
             | Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
+            | Verb::ProjectProgress { .. }
             | Verb::TaskMerge { .. }
             | Verb::TaskPush { .. }
             | Verb::ProjectDelete { .. }

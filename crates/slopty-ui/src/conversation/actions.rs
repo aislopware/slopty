@@ -27,10 +27,6 @@ gpui::actions!(
         WatchAgentScreen,
         /// Open the review of the files the last turn changed, as the tray's "Review" does.
         ReviewChanges,
-        /// Take the session back from the agent's own TUI once it rests.
-        TakeBack,
-        /// Ask the agent to compact its context, where it compacts through Slopty.
-        CompactContext,
         /// Open "Branch from here" under the person's last message.
         BranchFromHere,
         /// Take the thread's exited agent up again.

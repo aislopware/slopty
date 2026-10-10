@@ -456,13 +456,9 @@ mod golden_thread {
         snap("intent_aside", &send(Intent::Aside));
         snap("intent_discard", &send(Intent::Discard));
         snap("intent_keep_aside", &send(Intent::KeepAside));
-        snap("intent_compact", &send(Intent::Compact));
-        snap("intent_handoff", &send(Intent::Handoff));
-        snap("intent_take_back", &send(Intent::TakeBack));
         snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
-        snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(3), files: true }));
         snap("intent_seen", &send(Intent::Seen { turn: TurnId(3) }));
         snap("intent_draft", &send(Intent::Draft { text: "and the README".to_owned() }));
     }
@@ -670,11 +666,14 @@ mod golden_thread {
             Action::PullSeen(Some(pull_seen())),
             Action::PullSeen(None),
             Action::Seen(TurnId(3)),
-            Action::DraftSet(Some(slopty_proto::thread::wire::Draft {
+            Action::DraftSet(slopty_proto::thread::wire::Draft {
                 text: "and the README".to_owned(),
                 at_ms: ms(1_727_000_000_900),
-            })),
-            Action::DraftSet(None),
+            }),
+            Action::DraftSet(slopty_proto::thread::wire::Draft {
+                text: String::new(),
+                at_ms: ms(1_727_000_001_000),
+            }),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }
@@ -1200,7 +1199,13 @@ mod golden_thread {
             via: None,
         };
         let ask = Some(AskId("toolu_01".to_owned()));
-        let body = |ask, choices, quiet| PushBody { notice: notice.clone(), ask, choices, quiet };
+        let body = |ask, choices, quiet| PushBody {
+            notice: notice.clone(),
+            ask,
+            choices,
+            quiet,
+            merges: None,
+        };
         snap("push_body", &body(ask.clone(), Vec::new(), false));
         snap("push_body_quiet", &body(ask.clone(), Vec::new(), true));
         let choices = ["Postgres", "SQLite"]
@@ -1221,7 +1226,32 @@ mod golden_thread {
         };
         snap(
             "push_body_program",
-            &PushBody { notice: program, ask: None, choices: Vec::new(), quiet: false },
+            &PushBody {
+                notice: program,
+                ask: None,
+                choices: Vec::new(),
+                quiet: false,
+                merges: None,
+            },
+        );
+        let ready = Notice {
+            kind: NoticeKind::ReadyToMerge,
+            about: Subject::Thread(ThreadAt { worker, thread: thread() }),
+            tile: None,
+            title: "Fix the ladder".to_owned(),
+            text: "Checks pass; ready to merge".to_owned(),
+            worked_ms: Some(1_200_000),
+            via: None,
+        };
+        snap(
+            "push_body_ready_to_merge",
+            &PushBody {
+                notice: ready,
+                ask: None,
+                choices: Vec::new(),
+                quiet: false,
+                merges: Some(slopty_proto::project::TaskId(4)),
+            },
         );
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
     }

@@ -297,8 +297,7 @@ pub enum Verb {
         /// in it, where `cwd` stood in the clone.
         worktree: Option<crate::thread::wire::NewWorktree>,
     },
-    /// Start Claude Code's TUI in a new terminal, optionally with a first prompt; another
-    /// agent starts by its own [`crate::project::Runner`].
+    /// Start Claude Code's TUI in a new terminal, optionally with a first prompt.
     SpawnAgent {
         /// Where.
         worker: WorkerId,
@@ -547,8 +546,11 @@ pub enum Verb {
         project: ProjectId,
         /// What it is for, in a line.
         title: String,
-        /// What else is in it ([`crate::project::Project::members`]).
-        members: Vec<crate::project::Matcher>,
+        /// The goal the person hands over, which its orchestrator is started on
+        /// ([`crate::project::Project::goal`]).
+        goal: Option<String>,
+        /// How far its agents go before they ask the person; only the person sets it.
+        autonomy: crate::project::Autonomy,
         /// The repository its tasks work in.
         repo: String,
         /// The branch finished work lands on.
@@ -565,13 +567,13 @@ pub enum Verb {
         /// Anything its agents keep with it: the text of a JSON object.
         metadata: Option<String>,
     },
-    /// Change a project's members, orchestrator, verifier, pushing, limits or metadata; what is
-    /// absent stays. Answered with [`Outcome::Project`].
+    /// Change a project's orchestrator, verifier, pushing, autonomy, limits or metadata; what
+    /// is absent stays. Answered with [`Outcome::Project`].
     ProjectSet {
         /// Which.
         project: ProjectId,
-        /// Its members, in place of the old ([`crate::project::Project::members`]).
-        members: Option<Vec<crate::project::Matcher>>,
+        /// How far its agents go before they ask the person; only the person sets it.
+        autonomy: Option<crate::project::Autonomy>,
         /// The orchestrator's terminal.
         orchestrator: Option<TermRef>,
         /// The verifier command; empty for none.
@@ -584,10 +586,24 @@ pub enum Verb {
         /// New metadata, in place of the old.
         metadata: Option<String>,
     },
+    /// The orchestrator says where the project's goal stands: a summary, what comes next, and
+    /// whether the goal is met, which tells the person once. Each text is at most
+    /// [`crate::project::Progress::TEXT_MAX`] bytes. Answered with [`Outcome::Project`].
+    ProjectProgress {
+        /// Which.
+        project: ProjectId,
+        /// What is done and what runs.
+        summary: String,
+        /// What comes next.
+        next: Option<String>,
+        /// The goal is met.
+        done: bool,
+    },
     /// Every project; answered with [`Outcome::Projects`].
     ProjectList,
     /// A project whole, its timeline from `since`, waiting up to `timeout_ms` for an entry
-    /// past it when there is none yet; answered with [`Outcome::Project`].
+    /// past it when there is none yet; answered with [`Outcome::Project`]. Only `task_wait`
+    /// waits on it: the `project_status` tool reads it at once.
     ProjectStatus {
         /// Which.
         project: ProjectId,
@@ -1042,6 +1058,7 @@ impl Verb {
             | Self::RestartWorker { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
+            | Self::ProjectProgress { .. }
             | Self::TaskCreate { .. }
             | Self::TaskUpdate { .. }
             | Self::TaskSpawn { .. }
@@ -1181,8 +1198,8 @@ pub enum Happening {
     SessionExited {
         /// Which.
         term: TermRef,
-        /// Exit status, or the signal number negated.
-        status: i32,
+        /// Exit status, or the signal number negated; none when its worker did not see it end.
+        status: Option<i32>,
     },
     /// A project or one of its tasks changed; boxed, being the largest by far.
     Project(Box<ProjectUpdate>),

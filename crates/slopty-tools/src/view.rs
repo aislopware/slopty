@@ -548,7 +548,7 @@ pub fn terminals_json(
         .map(|(worker, s)| {
             let (running, exit_status) = match s.state {
                 SessionState::Running => (true, None),
-                SessionState::Exited { status } => (false, Some(status)),
+                SessionState::Exited { status } => (false, status),
             };
             TerminalView {
                 term: term_string(TermRef { worker: *worker, session: s.id }),
@@ -586,7 +586,8 @@ pub fn terminals_text(
         .map(|(worker, s)| {
             let state = match s.state {
                 SessionState::Running => "running".to_owned(),
-                SessionState::Exited { status } => format!("exited {status}"),
+                SessionState::Exited { status: Some(status) } => format!("exited {status}"),
+                SessionState::Exited { status: None } => "exited".to_owned(),
             };
             vec![
                 short.get(TermRef { worker: *worker, session: s.id }),
@@ -921,7 +922,7 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.kind = "session_exited";
             view.worker = term.worker;
             view.term = Some(term_string(*term));
-            view.exit_status = Some(*status);
+            view.exit_status = *status;
         }
         Happening::Rung { worker, terminal, agent: a } => {
             view.kind = "agent";
@@ -970,7 +971,10 @@ pub fn event_text<S: std::hash::BuildHasher>(
             format!("opened  {}  {}", term(&t), summary.title)
         }
         Happening::SessionClosed { term: t } => format!("closed  {}", term(t)),
-        Happening::SessionExited { term: t, status } => format!("exited  {}  {status}", term(t)),
+        Happening::SessionExited { term: t, status: Some(status) } => {
+            format!("exited  {}  {status}", term(t))
+        }
+        Happening::SessionExited { term: t, status: None } => format!("exited  {}", term(t)),
         Happening::Rung { worker: w, terminal, agent: a } => {
             let at = terminal.map_or_else(
                 || format!("{}/{}", worker(w), a.thread),
@@ -1381,7 +1385,7 @@ mod tests {
             (worker(1), summary(2, "claude", "~/src/slopty", SessionState::Running)),
             (
                 worker(2),
-                summary(3, "cargo test", "~/src/web", SessionState::Exited { status: 101 }),
+                summary(3, "cargo test", "~/src/web", SessionState::Exited { status: Some(101) }),
             ),
         ];
         let agents = vec![

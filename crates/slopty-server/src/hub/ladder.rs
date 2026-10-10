@@ -233,6 +233,7 @@ impl Phones {
                 ask: ask.map(|a| a.id.clone()),
                 choices: ask.map(|a| a.choices.clone()).unwrap_or_default(),
                 quiet: false,
+                merges: None,
             };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
@@ -1434,9 +1435,11 @@ fn text(kind: NoticeKind, row: &ThreadRow) -> String {
             .or(wait)
             .or_else(|| row.pull.as_ref().filter(|p| p.stands.needs_you()).map(PullSeen::line))
             .unwrap_or_default(),
-        NoticeKind::Failed | NoticeKind::Finished | NoticeKind::Project => {
-            wait.or_else(|| row.last_line.clone()).unwrap_or_default()
-        }
+        NoticeKind::Failed
+        | NoticeKind::Finished
+        | NoticeKind::Project
+        | NoticeKind::ReadyToMerge
+        | NoticeKind::GoalDone => wait.or_else(|| row.last_line.clone()).unwrap_or_default(),
     }
 }
 

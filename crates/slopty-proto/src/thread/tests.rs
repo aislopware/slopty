@@ -295,10 +295,11 @@ fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
     state.apply(&Action::Seen(TurnId(1)));
     assert_eq!(state.row(WallMs::ZERO).seen, TurnId(2), "a seen mark never moves back");
     let draft = wire::Draft { text: "and the README".to_owned(), at_ms: WallMs::from_millis(5) };
-    state.apply(&Action::DraftSet(Some(draft.clone())));
+    state.apply(&Action::DraftSet(draft.clone()));
     assert_eq!(state.row(WallMs::ZERO).draft, Some(draft));
-    state.apply(&Action::DraftSet(None));
-    assert_eq!(state.row(WallMs::ZERO).draft, None);
+    let cleared = wire::Draft { text: String::new(), at_ms: WallMs::from_millis(9) };
+    state.apply(&Action::DraftSet(cleared.clone()));
+    assert_eq!(state.row(WallMs::ZERO).draft, Some(cleared), "a tombstone with its time");
 }
 
 /// Appends split one text at chosen char boundaries.

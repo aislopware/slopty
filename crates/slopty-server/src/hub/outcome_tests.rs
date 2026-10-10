@@ -183,7 +183,7 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     create(&hub, None).await;
     let task = new_task(&hub, None).await;
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -232,7 +232,7 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     create(&hub, None).await;
     let task = new_task(&hub, None).await;
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let term = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     for state in [TaskState::Done, TaskState::Merged] {
@@ -296,7 +296,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
     };
     for (n, worker_says) in [(1, removed), (2, kept)] {
         let task = new_task(&hub, None).await;
-        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let term = opened(&lease, &request(&mut rx).await);
         assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
         let path = format!("/w/demo/.claude/worktrees/slopty-demo-{n}");
@@ -450,7 +450,7 @@ async fn a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled() {
     let mut started = Vec::new();
     for n in 1..=3 {
         let task = new_task(&hub, None).await;
-        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let term = opened(&lease, &request(&mut rx).await);
         assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
         let path = format!("/w/demo/.claude/worktrees/slopty-demo-{n}");
@@ -523,7 +523,7 @@ async fn a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_wo
         worker_on(&hub, "studio", Os::MacOs, vec![summary(orchestrating)]);
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
     let task = new_task(&hub, None).await;
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let term = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     let path = "/w/demo/.claude/worktrees/slopty-demo-1".to_owned();

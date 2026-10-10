@@ -16,15 +16,10 @@
 //! - Anything else is unexpected: it is noted and answered with a failure.
 //!
 //! - With `session_file`, the session's file is said to be that one wherever pi names it.
-//! - With `writer_lock`, it holds that file while it runs, in either mode, made only if it is not
-//!   there; finding it there already means two wrote the session at once, which its record says
-//!   (`clash`).
+//! - With `writer_lock`, it holds that file while it runs, made only if it is not there; finding it
+//!   there already means two wrote the session at once, which its record says (`clash`).
 //!
-//! Started without `--mode rpc` it is pi's TUI on the session: it appends the session the
-//! recording ends with (its `get_entries`) to `session_file` as pi's TUI writes it, a header
-//! first when the file is new, in two writes a moment apart. Then it waits for its stdin to
-//! close, as a TUI waits on its terminal, or with `tui_exits` it exits, as when the person ends
-//! it. What it was started with goes to `tui_record`.
+//! Started without `--mode rpc` it refuses: Slopty drives pi only over its RPC mode.
 //!
 //! It reads what to replay from `stub-pi.json` beside the path it was started as (a test puts it
 //! on the worker's `PATH` as `pi`, with the file beside it): `{"fixture": …, "record": …}`. No
@@ -40,7 +35,6 @@ use std::error::Error;
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -89,7 +83,7 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
     let ran = if args.windows(2).any(|pair| pair == ["--mode", "rpc"]) {
         rpc(&config, args, &before, &steps, session_file.as_deref(), clash)
     } else {
-        tui(&config, args, &steps, session_file.as_deref(), clash)
+        Err("the stand-in runs only as pi's RPC mode".into())
     };
     if let Some(lock) = lock.filter(|_| !clash) {
         std::fs::remove_file(lock)?;
@@ -166,62 +160,6 @@ fn rpc(
         }
         out.flush()?;
         save(record_at.as_deref(), &record)?;
-    }
-    Ok(())
-}
-
-/// pi's TUI on the session: the recorded session appended to `file`, then a wait on stdin.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a test program with no runtime, pausing between two writes as a TUI's turns do"
-)]
-fn tui(
-    config: &Value,
-    args: &[String],
-    steps: &[Step],
-    file: Option<&Path>,
-    clash: bool,
-) -> Fallible<()> {
-    let cwd = std::env::current_dir()?;
-    let record = json!({ "argv": args, "cwd": cwd.to_string_lossy(), "clash": clash });
-    let at = config.get("tui_record").and_then(Value::as_str).map(PathBuf::from);
-    save(at.as_deref(), &record)?;
-    let file = file.ok_or("stub-pi.json names no session_file")?;
-    let entries: Vec<Value> = steps
-        .iter()
-        .filter(|s| text(&s.sent, "type") == "get_entries")
-        .flat_map(|s| s.wrote.iter())
-        .find(|w| is_response(w))
-        .and_then(|w| w.get("data")?.get("entries")?.as_array().cloned())
-        .ok_or("the recording has no session to write")?;
-    let mut lines = Vec::new();
-    if !file.exists() {
-        let id = args
-            .iter()
-            .position(|a| a == "--session-id")
-            .and_then(|at| args.get(at.saturating_add(1)))
-            .cloned()
-            .unwrap_or_default();
-        let header =
-            json!({ "type": "session", "version": 3, "id": id, "cwd": cwd.to_string_lossy() });
-        lines.push(header);
-    }
-    lines.extend(entries);
-    let half = lines.len() / 2;
-    let mut session = std::fs::OpenOptions::new().create(true).append(true).open(file)?;
-    for (n, line) in lines.iter().enumerate() {
-        if n == half {
-            session.flush()?;
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        writeln!(session, "{line}")?;
-    }
-    session.flush()?;
-    if config.get("tui_exits").and_then(Value::as_bool) == Some(true) {
-        return Ok(());
-    }
-    for line in std::io::stdin().lock().lines() {
-        drop(line?);
     }
     Ok(())
 }

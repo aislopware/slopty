@@ -28,10 +28,8 @@
 //!   taken back, changed or sent at once, and goes as a prompt of its own once pi has nothing else
 //!   to do ([`Driven::next_queued`]). pi's own `follow_up` is not used: what it holds can only be
 //!   cleared whole (`clear_queue`), not taken back or changed one message at a time.
-//! - **Who holds it.** Slopty drives the session (drive `driven`, no terminal), or pi's own TUI
-//!   holds it in a terminal (drive `observed`, the terminal named), when the thread follows the
-//!   entries the TUI appends to the session's file ([`Driven::appended`]) and can only be taken
-//!   back ([`Driven::held_by_tui`], [`Driven::held_by_slopty`]).
+//! - **Who holds it.** Slopty drives the session (drive `driven`): the person's own pi TUI can
+//!   always open the session by its id once this pi has ended.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -56,14 +54,11 @@ use crate::driven::{OUTPUT, PROSE, caps, choice, replaced_patch, title_of, tool,
 use crate::queue::Queue;
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 13] = [
+pub const CAPS: [&str; 10] = [
     Cap::APPROVALS,
-    Cap::COMPACT,
     Cap::CONTINUE,
     Cap::FORK,
-    Cap::HANDOFF,
     Cap::INTERRUPT,
-    Cap::LIVE_TEXT,
     Cap::SET_EFFORT,
     Cap::SET_MODEL,
     Cap::SCHEDULE,
@@ -71,9 +66,6 @@ pub const CAPS: [&str; 13] = [
     Cap::SNAPSHOTS,
     Cap::STEER,
 ];
-
-/// What a pi whose own TUI holds the session can do through Slopty: be taken back.
-pub const TUI_CAPS: [&str; 1] = [Cap::HANDOFF];
 
 /// The fact that keeps the flags a thread's pi was started with, as a JSON list: a pi started
 /// again for it, driven or in its TUI, gets them too.
@@ -286,40 +278,6 @@ impl Driven {
         vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
-    /// The terminal whose TUI holds the session, when one does.
-    #[must_use]
-    pub const fn held(&self) -> Option<slopty_core::SessionId> {
-        self.meta.terminal
-    }
-
-    /// pi's own TUI in `terminal` holds the session from `now`: the thread follows what it
-    /// writes, and can only be taken back.
-    pub fn held_by_tui(&mut self, terminal: slopty_core::SessionId, now: WallMs) -> Vec<Action> {
-        self.meta.terminal = Some(terminal);
-        self.meta.drive = Drive::named(Drive::OBSERVED);
-        self.meta.caps = caps(&TUI_CAPS);
-        let mut actions = self.withdraw(|_| true);
-        actions.push(Action::Meta(Box::new(self.meta.clone())));
-        self.phase = (self.phase_now(), now);
-        actions.push(self.status_now());
-        actions
-    }
-
-    /// Slopty holds the session again, its TUI gone; the next pi is driven.
-    pub fn held_by_slopty(&mut self) -> Vec<Action> {
-        self.meta.terminal = None;
-        self.meta.drive = Drive::named(Drive::DRIVEN);
-        self.meta.caps = caps(&CAPS);
-        vec![Action::Meta(Box::new(self.meta.clone()))]
-    }
-
-    /// Whether the session rests: no run works and, as its TUI writes it, no turn is open. A
-    /// handoff waits for it.
-    #[must_use]
-    pub const fn rests(&self) -> bool {
-        !self.running && !self.turn_open
-    }
-
     /// Whether a run works now.
     #[must_use]
     pub const fn running(&self) -> bool {
@@ -466,13 +424,6 @@ impl Driven {
         for entry in branch(entries) {
             actions.extend(self.appended_quietly(entry, now));
         }
-        actions.push(self.status(now));
-        actions
-    }
-
-    /// Entry `entry`, which pi's own TUI appended to the session after the last one heard.
-    pub fn appended(&mut self, entry: &rpc::Entry, now: WallMs) -> Vec<Action> {
-        let mut actions = self.appended_quietly(entry, now);
         actions.push(self.status(now));
         actions
     }

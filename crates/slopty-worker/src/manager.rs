@@ -709,7 +709,7 @@ impl Worker {
         let Listed { id, handle, command, exited, started_ms } = listed;
         let snap = handle.snapshot().await.ok()?;
         let state = match exited.or(snap.exited) {
-            Some(status) => SessionState::Exited { status },
+            Some(status) => SessionState::Exited { status: Some(status) },
             None => SessionState::Running,
         };
         Some(SessionSummary {

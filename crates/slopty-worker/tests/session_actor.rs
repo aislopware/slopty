@@ -208,7 +208,7 @@ mod actor {
         let (events, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
                 .await;
-        assert!(events.iter().any(|e| matches!(e, TermEvent::Exited { status: 0 })));
+        assert!(events.iter().any(|e| matches!(e, TermEvent::Exited { status: Some(0) })));
         session.close();
     }
 
@@ -1569,14 +1569,14 @@ done"#
         let (events, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
                 .await;
-        let exits: Vec<i32> = events
+        let exits: Vec<Option<i32>> = events
             .iter()
             .filter_map(|e| match e {
                 TermEvent::Exited { status } => Some(*status),
                 _ => None,
             })
             .collect();
-        assert_eq!(exits, [3]);
+        assert_eq!(exits, [Some(3)]);
         assert_eq!(session.snapshot().await.unwrap().exited, Some(3));
         session.close();
     }

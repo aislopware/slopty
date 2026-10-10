@@ -468,7 +468,7 @@ impl Hub {
                 })
             };
             match session {
-                Some((Some(SessionState::Exited { status }), _)) => break Some(status),
+                Some((Some(SessionState::Exited { status }), _)) => break status,
                 Some((Some(SessionState::Running), _)) => seen = true,
                 // Gone from a worker whose link is up: its terminal was closed.
                 Some((None, true)) if seen || clock.elapsed() > grace => break None,

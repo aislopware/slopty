@@ -274,13 +274,15 @@ fn read_on_a_thread(
 }
 
 /// What ends an attach when the program exits with `status`, and the code this command exits
-/// with: the status itself, as a shell reports it, or 1 when it does not fit one.
-fn exited(status: i32) -> (String, u8) {
+/// with: the status itself, as a shell reports it, or 1 when it does not fit one or is not known.
+fn exited(status: Option<i32>) -> (String, u8) {
     match status {
-        0 => ("exited".to_owned(), 0),
-        _ => {
+        Some(0) => ("exited".to_owned(), 0),
+        Some(status) => {
             (format!("exited {status}"), u8::try_from(status).ok().filter(|c| *c != 0).unwrap_or(1))
         }
+        // Its worker did not see it end: no word on how it went.
+        None => ("exited".to_owned(), 1),
     }
 }
 
@@ -407,10 +409,11 @@ mod tests {
     /// (a signal's negative, or past 255) is still a failure.
     #[test]
     fn an_exited_program_hands_its_status_on() {
-        assert_eq!(exited(0), ("exited".to_owned(), 0));
-        assert_eq!(exited(3), ("exited 3".to_owned(), 3));
-        assert_eq!(exited(256), ("exited 256".to_owned(), 1));
-        assert_eq!(exited(-9), ("exited -9".to_owned(), 1));
+        assert_eq!(exited(Some(0)), ("exited".to_owned(), 0));
+        assert_eq!(exited(Some(3)), ("exited 3".to_owned(), 3));
+        assert_eq!(exited(Some(256)), ("exited 256".to_owned(), 1));
+        assert_eq!(exited(Some(-9)), ("exited -9".to_owned(), 1));
+        assert_eq!(exited(None), ("exited".to_owned(), 1), "not known: no success");
     }
 
     #[test]

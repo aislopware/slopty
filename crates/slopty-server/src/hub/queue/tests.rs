@@ -105,7 +105,10 @@ impl Studio {
         judged: (char, char),
     ) -> TermRef {
         let Verb::Verify { worker, session, .. } = verb else { panic!("{verb:?}") };
-        let exited = SessionSummary { state: SessionState::Exited { status }, ..summary(*session) };
+        let exited = SessionSummary {
+            state: SessionState::Exited { status: Some(status) },
+            ..summary(*session)
+        };
         self.lease.handle(ToServer::SessionChanged(exited));
         let term = TermRef { worker: *worker, session: *session };
         let (head, base) = (commit(judged.0), commit(judged.1));
@@ -142,7 +145,7 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
         push: Some(true),
         limits: LimitsChange::default(),
         metadata: None,
-        members: None,
+        autonomy: None,
     };
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
     let task = new_task(hub, None).await;
@@ -233,7 +236,8 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
     assert_eq!(shown.await.unwrap(), progress, "live, with the terminal to open");
     assert_eq!(task_now(&hub, task).await.state, TaskState::Verifying);
 
-    let exited = SessionSummary { state: SessionState::Exited { status: 0 }, ..summary(*session) };
+    let exited =
+        SessionSummary { state: SessionState::Exited { status: Some(0) }, ..summary(*session) };
     studio.lease.handle(ToServer::SessionChanged(exited));
     let (id, verb) = studio.past_screens(&["test result: ok. 12 passed", ""]).await;
     assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");
@@ -363,7 +367,8 @@ async fn a_verifier_left_running_by_a_restart_is_followed_to_its_verdict() {
     let (id, verb) = studio.request().await;
     assert!(matches!(verb, Verb::ReadScreen { term: t } if t == term), "no second run: {verb:?}");
     answer(&studio.lease, id, screen(&["   Compiling demo"]));
-    let exited = SessionSummary { state: SessionState::Exited { status: 0 }, ..summary(session) };
+    let exited =
+        SessionSummary { state: SessionState::Exited { status: Some(0) }, ..summary(session) };
     studio.lease.handle(ToServer::SessionChanged(exited));
     let (id, verb) = studio.past_screens(&["test result: ok. 12 passed", ""]).await;
     assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");

@@ -1078,11 +1078,8 @@ mod tests {
             "turn/completed",
             &recorded_note("question.jsonl", "turn/completed"),
         );
-        assert_eq!(shared.fork(Some(turn)).unwrap().last_turn_id, Some(codex_turn.clone()));
+        assert_eq!(shared.fork(Some(turn)).unwrap().last_turn_id, Some(codex_turn));
         assert!(shared.fork(Some(TurnId(99))).is_err(), "no such turn");
-        let before = shared.fork_before(turn).unwrap();
-        assert_eq!((before.before_turn_id, before.last_turn_id), (Some(codex_turn), None));
-        assert!(shared.fork_before(TurnId(99)).is_err(), "no such turn");
 
         let lines = fixture("question.jsonl");
         let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();

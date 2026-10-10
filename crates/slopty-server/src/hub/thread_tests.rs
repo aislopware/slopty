@@ -3,27 +3,21 @@
 //! state following its thread's row, and ended when the row goes. Its thread is read where it
 //! is, by its task, its seat or its id.
 
-use slopty_proto::project::{Runner, SEAT_FACT, TASK_ENV, TaskLaunch, TaskState};
+use slopty_proto::project::{SEAT_FACT, TASK_ENV, TaskLaunch, TaskState};
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::TableFrame;
 use slopty_proto::thread::{AgentId, Cursor, Phase, ThreadId};
 
 use super::ladder::tests::{asking, row, snapshot, under};
 use super::project_tests::{
-    answer, claude, create, installed, new_task, opened, project, refused, request, spawn, status,
+    answer, create, installed, new_task, opened, project, refused, request, spawn, status,
     worker_on,
 };
 use super::*;
 
-/// A launch of `agent` as a thread, in a folder of its own so it needs no clone.
-fn as_thread(agent: AgentId, args: &[&str]) -> TaskLaunch {
-    let run = Runner::Agent {
-        agent,
-        prompt: Some("Read your brief.".to_owned()),
-        model: Some("sonnet".to_owned()),
-        args: args.iter().map(|a| (*a).to_owned()).collect(),
-    };
-    TaskLaunch { run, ..claude(&[]) }
+/// A start of `agent`, which runs as a thread, wherever there is room.
+const fn as_thread(agent: AgentId) -> TaskLaunch {
+    TaskLaunch { pin: None, agent }
 }
 
 /// The card of `task`, as the project's status shows it now.
@@ -31,8 +25,8 @@ async fn card(hub: &Hub, task: TaskId) -> slopty_proto::project::TaskCard {
     status(hub).await.tasks.into_iter().find(|t| t.id == task).expect("the card")
 }
 
-/// pi goes only where it is installed, with no flag the server cannot judge, and starts as a
-/// thread seated where the server chose: its role and the task's variables go with it. Its
+/// pi goes only where it is installed, and starts as a thread seated where the server chose,
+/// told the task's brief: its role and the task's variables go with it. Its
 /// tools are known by that seat, it counts as a live agent once its row is in the table, its
 /// task follows the row's phase (a request open blocks it on the person), and the row gone
 /// ends its assignment. An ACP agent no worker has is no start.
@@ -48,20 +42,19 @@ async fn any_agent_runs_a_task_as_a_thread() {
     let spawn_verb = |launch| Verb::TaskSpawn { project: project(), task, launch };
     let pi = || AgentId::named(AgentId::PI);
 
-    let gemini = hub.dispatch(spawn_verb(as_thread(AgentId::acp("gemini"), &[]))).await;
+    let gemini = hub.dispatch(spawn_verb(as_thread(AgentId::acp("gemini")))).await;
     let message = refused(&gemini, ErrorCode::Unplaced);
     assert!(message.contains("box: gemini is not installed"), "{message}");
-    let loose = hub.dispatch(spawn_verb(as_thread(pi(), &["--yolo"]))).await;
-    let message = refused(&loose, ErrorCode::Limit);
-    assert!(message.starts_with("--yolo may give"), "{message}");
 
-    let asked = spawn(&hub, spawn_verb(as_thread(pi(), &[])));
+    let asked = spawn(&hub, spawn_verb(as_thread(pi())));
     let (id, verb) = request(&mut linux_rx).await;
     let Verb::StartThread { worker, start, seat, env, role } = verb else { panic!("{verb:?}") };
     assert_eq!(worker, linux);
-    assert_eq!((start.agent.clone(), start.model.as_deref()), (pi(), Some("sonnet")));
-    assert_eq!(start.cwd, "~/src/slopty");
-    assert_eq!(start.worktree, None, "a named folder: no worktree");
+    assert_eq!((start.agent.clone(), start.model.as_deref()), (pi(), None));
+    assert_eq!(start.prompt.as_deref(), Some("Build it."), "told its brief");
+    let at = (start.cwd.as_str(), start.worktree);
+    assert_eq!(at, ("~/src/slopty", None), "no clone known: the repository it names");
+    assert!(start.args.is_empty(), "the server makes its arguments: none");
     assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == task.to_string()), "{env:?}");
     assert!(role.is_some_and(|r| r.starts_with("You are the agent of task")));
     let thread = ThreadId::new();
@@ -183,10 +176,8 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     create(&hub, None).await;
     let task = new_task(&hub, None).await;
     let pi = AgentId::named(AgentId::PI);
-    let asked = spawn(
-        &hub,
-        Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone(), &[]) },
-    );
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) });
     let (id, verb) = request(&mut rx).await;
     let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
     let thread = ThreadId::new();
@@ -241,12 +232,12 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     assert_eq!(natives().await.len(), 2, "no native from a hooked agent's rows");
 }
 
-/// A Codex task's card carries its pull request as its thread's row names it, read from the
+/// A thread task's card carries its pull request as its thread's row names it, read from the
 /// forge by the worker's one watcher: no status line and no second read. A failed check is on
 /// the card, where the board offers Fix CI, and on the timeline once, where the project tells
 /// the person; the same row again says nothing new.
 #[tokio::test]
-async fn a_codex_task_s_card_shows_its_thread_s_failing_pull_request() {
+async fn a_thread_task_s_card_shows_its_thread_s_failing_pull_request() {
     use slopty_proto::project::Moment;
     use slopty_proto::thread::wire::PullStands;
 
@@ -254,24 +245,21 @@ async fn a_codex_task_s_card_shows_its_thread_s_failing_pull_request() {
 
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    lease.handle(ToServer::Facts(installed(&["codex"])));
+    lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
     let task = new_task(&hub, None).await;
-    let codex = AgentId::named(AgentId::CODEX);
-    let asked = spawn(
-        &hub,
-        Verb::TaskSpawn { project: project(), task, launch: as_thread(codex.clone(), &[]) },
-    );
+    let pi = AgentId::named(AgentId::PI);
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) });
     let (id, verb) = request(&mut rx).await;
-    let Verb::StartThread { seat, start, .. } = verb else { panic!("{verb:?}") };
-    assert_eq!(start.mode.as_deref(), Some("on-request"), "held to asking");
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
     let thread = ThreadId::new();
     answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
     let mut seated = row(Phase::Idle, 1, None);
     seated.id = thread;
-    seated.agent = codex;
+    seated.agent = pi;
     seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
     lease.handle(snapshot(vec![seated.clone()]));
     assert_eq!(card(&hub, task).await.pull, None, "no pull request yet");
@@ -310,10 +298,8 @@ async fn a_task_goes_to_another_agent_and_starts_fresh() {
     let never = hub.dispatch(restart(None)).await;
     assert!(refused(&never, ErrorCode::Invalid).contains("name the agent"), "{never:?}");
 
-    let asked = spawn(
-        &hub,
-        Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone(), &[]) },
-    );
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) });
     let (id, verb) = request(&mut rx).await;
     let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
     let first = ThreadId::new();

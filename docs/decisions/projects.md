@@ -242,7 +242,6 @@ merging on the person's word since 2026-10-04
   it), and a caller never can. So a start whose answer was lost still counts for its 30 s, and
   when its worker announces that id the terminal goes on its task as if the answer had come.
   An agent cannot name another's terminal as its own start.
-- A command task counts like an agent, since it may be another agent's CLI.
 - Since 2026-10-03 one exception: the agent of a task merged or given up counts against no
   limit while it rests, and counts again as soon as it works ("A finished task's agent stops
   counting", below).
@@ -601,8 +600,9 @@ merging on the person's word since 2026-10-04
 - `apps/slopty-cli/tests/projects.rs` runs it under a real server, ptyd and worker. It proves:
   - the env, the MCP config, the hooks, the tool defaulting to the agent's own project, and
     the tree with its natives and branch;
-  - the worker's facts reaching `slopty workers --json`, and a command task made and started in one `slopty task start` on the worker it names, run with
-    its project and task in its env;
+  - the worker's facts reaching `slopty workers --json`, and a task made and started in one
+    `slopty task start` on the worker it names, its agent run with its project and task in its
+    env;
   - an agent started with a stale `SLOPTY_TASK`, then assigned to another task, updating the
     task the server says it is on.
 - The model (`slopty-server::project`), the placement (`slopty-server::placement`) and the hub
@@ -1319,8 +1319,7 @@ card reads its thread's pull request, and `Hub::watch_checks`, `Verb::PullChecks
   `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`).
 
 **Codex runs a task, with Slopty's tools.** ✅ 2026-10-02
-- `Runner::Codex { prompt, args }` (`task_start` with `agent: "codex"`, `slopty task start
-  --agent codex`) opens the person's own `codex`, unmodified. The server gives it its role through
+- A Codex start (`task_start` with `agent: "codex"`, `slopty task start --agent codex`) opens the person's own `codex`, unmodified. The server gives it its role through
   Codex's own `developer_instructions` config (`-c developer_instructions="…"`), the place Codex
   documents for instructions a tool adds, rather than inside the first prompt. The brief stays
   the first prompt the person sees, and the role is not lost when the conversation compacts.
@@ -1359,21 +1358,13 @@ card reads its thread's pull request, and `Hub::watch_checks`, `Verb::PullChecks
   standing in for `codex`), and the codex case of
   `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` (`slopty-tools`).
 
-**A project is a name and its members; orchestration is a part it may have.** ✅ 2026-10-03
+**A project is a name; orchestration is a part it may have.** ✅ 2026-10-03 (its members were
+deleted on 2026-10-10: grouping by repository already does what they did)
 - The person works on a few projects spread over many machines and wants Slopty organised by
   them, with the machine as one fact among others (`.research/organization-2026-10-04.md`).
   Most of the projects a client groups by are derived and never stored: a repository's clones,
   a folder (`docs/decisions/ui.md`, "The navigator groups by project; the machine is a facet").
   A declared project on the server is how the person names one by hand.
-- `Project::members` holds what else is in it besides its repository's clones: a matcher each,
-  an open map of fact key to the value a tile must have, or for a path the directory it must be
-  in (`{repo: github.com/o/api}`, `{machine: studio, cwd: ~/notes}`). So one project may hold
-  two repositories, or one folder name on two machines. Matchers are evaluated on the client
-  over the facts it already assembles, so no expression language runs anywhere.
-- `ProjectCreate` takes the members and `ProjectSet` replaces them whole (absent leaves them).
-  The server trims each value and refuses an empty matcher (it would match nothing), one named
-  twice, more than `Project::MEMBERS_MAX` (32) or a matcher past `Project::member_fits` (8
-  keys, a key with no space, a value up to 1024 bytes).
 - A project with no orchestrator, no repository and no target is kept and listed: its
   repository, target, verifier and orchestrator are the part it gains when it orchestrates.
   `repo` and `target` stay strings, empty for a plain project, since every orchestrating path
@@ -1385,12 +1376,9 @@ card reads its thread's pull request, and `Hub::watch_checks`, `Verb::PullChecks
   is the same on every device. A thread's row says the
   repository its directory is in (`ThreadRow::{cwd, repo, repo_id}`, the origin read from the
   config file once per directory), so an agent with no terminal groups as a shell does.
-- Tests: `slopty-proto` `a_fact_is_said_and_taken_back_within_its_bounds`,
-  `a_member_names_facts_within_bounds` and the goldens `client_item_set_fact`,
-  `worker_item_pinned`, `project_create`, `project_set`, `table_snapshot`; `slopty-worker`
-  `an_item_fact_is_kept_and_broadcast`, `a_thread_row_names_its_repository_once_known`;
-  `slopty-server` `a_project_without_an_orchestrator_is_kept_and_listed`,
-  `members_name_clones_and_folders`.
+- Tests: `slopty-proto` `a_fact_is_said_and_taken_back_within_its_bounds` and the goldens
+  `client_item_set_fact`, `worker_item_pinned`, `table_snapshot`; `slopty-worker`
+  `an_item_fact_is_kept_and_broadcast`, `a_thread_row_names_its_repository_once_known`.
 
 ## What a task's agent came to, finished tasks settle, and the orchestrator speaks to its tasks (2026-10-03)
 
@@ -1568,15 +1556,12 @@ adapter's tool wiring follows in the agents lane)
   but never run a task with Slopty's tools, a role and a count. The whole project model knew
   an agent only by the terminal it ran in.
 - Prior art: T3 Code's `delegate_task`, which targets any provider instance and model.
-- `Runner::Agent { agent, prompt, model, args }` names any agent by the thread model's id.
-  `task_start` and `slopty task start --agent <name>` take `claude` (the default) and `codex`,
-  which keep their own runners in a terminal, and `pi`, `acp:<name>` or an ACP agent's bare
-  registry name, which become `Runner::Agent`. `model` goes as Claude Code's and Codex's
-  `--model`, and as the thread's model for the rest.
+- A start names any agent by the thread model's id. `task_start` and `slopty task start
+  --agent <name>` take `claude` (the default) and `codex`, which run in a terminal, and `pi`,
+  `acp:<name>` or an ACP agent's bare registry name, which run as threads.
 - The start holds it to a worker that has the agent installed, as it does Claude Code and
   Codex: built-in agents under the `agents` facts, ACP agents under `acp` by the registry's
-  name. The server cannot judge pi's or an ACP agent's flags, so without the person's
-  `permission_flags` such an agent takes no arguments, and the first is named in the refusal.
+  name. A start names no arguments (2026-10-10), so there are no flags to judge.
 - The server chooses a seat, a session id, and asks the worker for `StartThread { start,
   seat, env, role, worktree }`. The worker answers `ThreadStarted { thread, worktree }`. The
   assignment keeps the seat as its `term` and the thread as `thread`.
@@ -2568,7 +2553,7 @@ reordering and edited allows are gone" in `agents.md`.*
   - **A pinned start with nothing to work on is refused.** A start with no directory goes beside
     a clone of the project's repository. Pinned to a worker with no clone, and with no address to
     clone from, it used to start in that worker's home. It is now refused (`Unplaced`), saying to
-    clone it there, pin it to a worker that has a clone, or name a cwd. The GUI's Start sends
+    clone it there or pin it to a worker that has a clone. The GUI's Start sends
     exactly such a start.
   - **Restart and push everywhere.** `TaskRestart` reached the server only from the GUI. Now the
     orchestrator has the `task_restart` tool, and the CLI has `slopty task restart [--agent]`.
@@ -2597,7 +2582,7 @@ reordering and edited allows are gone" in `agents.md`.*
   - **Dependencies.** A dependent task could start once its dependency was Done, before that
     work was merged anywhere a new worktree starts from. A dependency now counts only once it
     is Merged (`project::delivered`). A read-only task is the exception: it has nothing to
-    merge, so Done is enough. `ignore_dependencies` still starts it anyway.
+    merge, so Done is enough. Only a restart, whose work is begun, starts it anyway.
   - Tests: `a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds`
     (slopty-server `hub/project_tests.rs`), with the earlier start tests now answering the
     target's trip; `a_dependent_starts_once_its_dependency_is_merged` (`project/tests.rs`).
@@ -2650,9 +2635,8 @@ reordering and edited allows are gone" in `agents.md`.*
   - **At the start.** Without the person's leave (`permission_flags` off), a task's Codex in
     its terminal starts with `--ask-for-approval on-request --sandbox workspace-write`. Flags
     win over `config.toml`. Arguments that name their own policy or sandbox keep them, and the
-    argument check lets those through only when they ask no less. Codex run as a thread starts
-    with the `on-request` mode. Its sandbox is its configuration's, because `Start` carries
-    none.
+    argument check lets those through only when they ask no less. (A task's Codex has run only
+    in its terminal since 2026-10-10, when a start stopped naming its arguments.)
   - **As it runs.** A task's Codex is watched as locked, as Claude Code's terminal is. Its row
     says the effective policy (the thread's mode) and sandbox (its `sandbox` fact), read from
     the app-server whether the TUI or a thread runs it (`Board::codex_moves`). A policy past
@@ -2666,8 +2650,7 @@ reordering and edited allows are gone" in `agents.md`.*
   - Tests: `a_task_s_codex_is_held_to_asking` and
     `a_codex_thread_s_settings_are_judged_as_its_arguments_are` (`hub/codex.rs`); the pinned
     command and the close in `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role`
-    (`hub/project_tests.rs`); the thread's mode in
-    `a_codex_task_s_card_shows_its_thread_s_failing_pull_request` (`hub/thread_tests.rs`).
+    (`hub/project_tests.rs`).
 
 - ✅ **What the merge queue merged can be pushed from the board, and the cards say what waits**
   (2026-10-12, readiness 10-12 rank 16, the server's half).
@@ -2723,3 +2706,51 @@ reordering and edited allows are gone" in `agents.md`.*
       and `a_worktree_of_a_merge_request_checks_out_its_head_and_tracks_it`.
     The `worker_git_status`, `worker_git_pull_status`, `worker_git_merge_request_status`,
     `worker_git_merged` and `worker_git_pushed` goldens moved.
+
+- ✅ **A project carries its goal, the person's autonomy, and where the goal stands; its
+  members are gone** (2026-10-10, the orchestrator-first study, items 3, 9, 10 and 12, the wire
+  half).
+  - **Goal.** `Project.goal` is what the person hands over, the orchestrator's first prompt.
+    It is kept trimmed, within `BRIEF_MAX` as a brief is, and none when empty
+    (`ProjectCreate.goal`).
+  - **Autonomy.** `Project.autonomy` (`Ask`, `Edits`, `Own`; `Ask` by default) is how far the
+    project's agents go before they ask. Only the person sets it, at `ProjectCreate` or through
+    `ProjectSet.autonomy`. An agent naming anything but `Ask` is refused. How each level maps
+    onto each agent's own permission modes is item 10's change, which also replaces
+    `permission_flags`.
+  - **Progress.** `Verb::ProjectProgress { summary, next, done }` is the orchestrator saying
+    where the goal stands. The server keeps it as `Project.progress`, with its time, and logs it
+    as `Moment::Update`. A task's agent may not say it, an empty summary is refused, and each
+    text is at most `Progress::TEXT_MAX` (2048) bytes. Telling the person once on `done`
+    (`NoticeKind::GoalDone`) is item 12's.
+  - **Members are deleted.** Grouping by repository on the client already does what they did,
+    so `Project.members`, the matchers and their bounds are gone.
+  - Tests: `a_project_carries_its_goal_and_the_person_s_autonomy` and
+    `the_orchestrator_says_where_the_goal_stands` (slopty-server `hub/project_tests.rs`); the
+    goldens `project_create`, `project_set`, `project_progress`, `project_snapshot` and
+    `project_pushed`.
+
+- ✅ **A task's start names only the worker and the agent** (2026-10-10, the orchestrator-first
+  study, item 4's wire half).
+  - **Why.** `task_start` took about 22 arguments: a folder, a command, a prompt, a model, the
+    agent's arguments, environment, a size and `ignore_dependencies`. The orchestrator only
+    ever needs to say what the work is, where it runs and which agent does it. Everything else
+    either was the server's to decide or a way around the person's bounds.
+  - **The wire.** `TaskLaunch` is `{ pin, agent }`. The hub builds its own `Launch` from it:
+    the agent told the task's brief first, beside a clone of the project's repository in a
+    worktree of the task's own when it writes. With no clone known, it starts in the
+    repository's path when the project names one, else in the worker's home. A restart builds
+    the same `Launch` with the folder the earlier agent worked in.
+  - **Deleted with it.** Command tasks (`Runner::Command`) and `Runner` itself; judging a
+    start's arguments and environment, since a start names none; Codex run as a task's thread.
+    The CLI's `slopty task start` loses `--cwd`, `--prompt`, `--command`, `--model`, `--env`,
+    the size, `--ignore-dependencies` and the agent's arguments.
+  - **Kept.** A `codex` with loosening flags typed into a terminal an agent opens is now judged
+    as a `claude` there was, since the command task that judged it went.
+  - **One wait.** `project_status` reads at once. `task_wait` is the one wait, so
+    `Verb::ProjectStatus` keeps its `timeout_ms` for it.
+  - Tests: `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` (slopty-tools);
+    `flags_that_loosen_permissions_need_the_person_s_word` and
+    `a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task` (slopty-server); the CLI's
+    `apps/slopty-cli/tests/projects.rs`, its stand-in agent scripted through the worker's
+    environment; the goldens `task_spawn` and `task_spawn_agent`.

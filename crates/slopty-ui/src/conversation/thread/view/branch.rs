@@ -1,21 +1,19 @@
 //! "Branch from here": one way to go on from a point of the thread in a new thread, under a
 //! message of the person's.
 //!
-//! Three doors had led there, each its own control: a fork on a settled turn's fold, "Edit from
-//! here" on a message, and "Continue in…" in the model chip's menu. They are one choice with
-//! four settings, so they are one panel:
+//! Two doors had led there, each its own control: a fork on a settled turn's fold and "Continue
+//! in…" in the model chip's menu. They are one choice with a few settings, so they are one panel:
 //! - **As**: a thread of its own, or an aside: a question beside the work, asked of a fork of the
 //!   whole thread in a sheet over it (`super::aside`), where the agent forks.
 //! - **Machine**: this one, or another that has a clone of the thread's repository ([`Elsewhere`]),
 //!   where a fresh thread starts in that clone.
 //! - **Agent**: this thread's own, or another the machine can start.
-//! - **From**: this message (the new thread starts just before it, the message waiting in its
-//!   composer) or the end (everything so far).
-//! - **Files**: keep them as they are, or put them back as they were before this message.
+//! - **From**: this message (the new thread forks through the turn before it, the message waiting
+//!   in its composer) or the end (everything so far).
 //!
 //! What each setting asks of the worker is the agent's own door, read from its caps
-//! ([`branch_intent`]): an edit from a turn ([`Cap::REWIND`]), a fork ([`Cap::FORK`]), or a
-//! fresh thread ([`Cap::CONTINUE`]), the only door to another agent. A setting the agent has no
+//! ([`branch_intent`]): a fork ([`Cap::FORK`]), or a fresh thread ([`Cap::CONTINUE`]), the only
+//! door to another agent. A setting the agent has no
 //! door for is not offered.
 //!
 //! A fresh thread carries nothing over itself. Its composer opens on a short pointer back
@@ -65,8 +63,6 @@ pub(super) struct Branching {
     pub agent: AgentId,
     /// From the end, rather than from this message.
     pub from_end: bool,
-    /// Put the files back as they were before this message.
-    pub revert: bool,
     /// Ask aside, rather than branch a thread of its own.
     pub aside: bool,
 }
@@ -77,10 +73,10 @@ fn turn_before(state: &ThreadState, turn: TurnId) -> Option<TurnId> {
     at.checked_sub(1).and_then(|before| state.turns.get(before)).map(|t| t.id)
 }
 
-/// Whether the new thread can start from just before the message of `turn` on this agent: by
-/// an edit from the turn, or a fork through the turn before it.
+/// Whether the new thread can start from just before the message of `turn` on this agent: by a
+/// fork through the turn before it.
 fn from_message(meta: &ThreadMeta, state: &ThreadState, turn: TurnId) -> bool {
-    meta.can(Cap::REWIND) || (meta.can(Cap::FORK) && turn_before(state, turn).is_some())
+    meta.can(Cap::FORK) && turn_before(state, turn).is_some()
 }
 
 /// What the panel's settings ask of the worker, by the agent's own doors; `None` for settings
@@ -91,9 +87,6 @@ pub(super) fn branch_intent(state: &ThreadState, b: &Branching) -> Option<Intent
         return meta.can(Cap::CONTINUE).then(|| Intent::Continue { agent: b.agent.clone() });
     }
     if !b.from_end {
-        if meta.can(Cap::REWIND) {
-            return Some(Intent::Rewind { turn: b.turn, files: b.revert });
-        }
         let before = turn_before(state, b.turn)?;
         return meta.can(Cap::FORK).then_some(Intent::Fork { after: Some(before) });
     }
@@ -109,7 +102,7 @@ pub(super) fn branch_intent(state: &ThreadState, b: &Branching) -> Option<Intent
 fn branch_seed(state: &ThreadState, b: &Branching, intent: &Intent) -> Option<String> {
     match intent {
         Intent::Continue { .. } => Some(pointer(&state.meta)),
-        Intent::Rewind { .. } | Intent::Fork { after: Some(_) } => message_of(state, b.turn),
+        Intent::Fork { after: Some(_) } => message_of(state, b.turn),
         _ => None,
     }
 }
@@ -163,9 +156,7 @@ impl ThreadView {
 
     /// Whether the thread can branch at all.
     pub(super) fn branches(&self, cx: &App) -> bool {
-        self.state(cx).is_some_and(|st| {
-            [Cap::FORK, Cap::REWIND, Cap::CONTINUE].iter().any(|c| st.meta.can(c))
-        })
+        self.state(cx).is_some_and(|st| [Cap::FORK, Cap::CONTINUE].iter().any(|c| st.meta.can(c)))
     }
 
     /// Open the panel under the message `item` of `turn`, or shut it when it is open there.
@@ -180,7 +171,6 @@ impl ThreadView {
                 on: None,
                 agent: state.meta.agent.clone(),
                 from_end,
-                revert: false,
                 aside: false,
             });
             cx.emit(ThreadViewEvent::AskElsewhere { thread: self.thread });
@@ -210,7 +200,6 @@ impl ThreadView {
                 b.on = on;
                 b.agent = agent;
                 b.from_end = b.from_end || on.is_some();
-                b.revert = b.revert && on.is_none();
                 b.aside = b.aside && on.is_none();
             },
             cx,
@@ -467,22 +456,6 @@ impl ThreadView {
                 ],
             )
         });
-        let files_row = (!aside && own && !b.from_end && state.meta.can(Cap::REWIND)).then(|| {
-            let choice = |id: &str, label: &'static str, revert: bool| {
-                self.branch_choice(id.to_owned(), label.into(), b.revert == revert, None)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.set_branch(|b| b.revert = revert, cx);
-                    }))
-                    .into_any_element()
-            };
-            self.branch_setting(
-                "Files",
-                vec![
-                    choice("branch-keep", "Keep as they are", false),
-                    choice("branch-revert", "Put back", true),
-                ],
-            )
-        });
         let busy = self.working(cx);
         let ready = aside
             || there.is_some()
@@ -536,7 +509,6 @@ impl ThreadView {
                 .children(machine_row)
                 .children(agent_row)
                 .children(from_row)
-                .children(files_row)
                 .child(
                     div()
                         .w_full()
@@ -600,39 +572,31 @@ mod tests {
         state.turns = vec![turn(1), turn(2)];
         let own = state.meta.agent.clone();
         let codex = AgentId::named(AgentId::CODEX);
-        let b = |agent: &AgentId, from_end, revert| Branching {
+        let b = |agent: &AgentId, from_end| Branching {
             item: ItemId("u".to_owned()),
             turn: TurnId(2),
             on: None,
             agent: agent.clone(),
             from_end,
-            revert,
             aside: false,
         };
-        state.meta.caps = vec![Cap::named(Cap::REWIND), Cap::named(Cap::CONTINUE)];
+        state.meta.caps = vec![Cap::named(Cap::CONTINUE)];
         assert_eq!(
-            branch_intent(&state, &b(&own, false, true)),
-            Some(Intent::Rewind { turn: TurnId(2), files: true })
-        );
-        assert_eq!(
-            branch_intent(&state, &b(&codex, true, false)),
+            branch_intent(&state, &b(&codex, true)),
             Some(Intent::Continue { agent: codex.clone() })
         );
         assert_eq!(
-            branch_intent(&state, &b(&own, true, false)),
+            branch_intent(&state, &b(&own, true)),
             Some(Intent::Continue { agent: own.clone() }),
             "with no fork, the end is a fresh thread with the account"
         );
         state.meta.caps = vec![Cap::named(Cap::FORK)];
         assert_eq!(
-            branch_intent(&state, &b(&own, false, false)),
+            branch_intent(&state, &b(&own, false)),
             Some(Intent::Fork { after: Some(TurnId(1)) }),
             "before this message is through the turn before it"
         );
-        assert_eq!(
-            branch_intent(&state, &b(&own, true, false)),
-            Some(Intent::Fork { after: None })
-        );
-        assert_eq!(branch_intent(&state, &b(&codex, true, false)), None, "no door to Codex");
+        assert_eq!(branch_intent(&state, &b(&own, true)), Some(Intent::Fork { after: None }));
+        assert_eq!(branch_intent(&state, &b(&codex, true)), None, "no door to Codex");
     }
 }

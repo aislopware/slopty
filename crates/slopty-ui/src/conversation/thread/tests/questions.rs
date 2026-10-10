@@ -203,37 +203,6 @@ fn a_question_that_offers_nothing_takes_words(cx: &mut TestAppContext) {
     );
 }
 
-/// A thread that can move to the agent's own TUI offers to while Slopty drives it; once the
-/// TUI holds it, the composer gives way to where it is and the way to take it back.
-#[gpui::test]
-fn a_session_goes_to_the_agents_tui_and_is_taken_back(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.meta.agent = AgentId::named(AgentId::PI);
-    state.meta.drive = Drive::named(Drive::DRIVEN);
-    state.meta.caps = vec![Cap::named(Cap::HANDOFF), Cap::named(Cap::INTERRUPT)];
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-held").is_none());
-    let handoff = cx.debug_bounds("thread-handoff").expect("offered while Slopty drives");
-    cx.simulate_click(handoff.center(), Modifiers::none());
-    assert_eq!(intents(&sent), [Intent::Handoff]);
-
-    state.meta.drive = Drive::named(Drive::OBSERVED);
-    state.meta.terminal = Some(SessionId::new());
-    state.meta.caps = vec![Cap::named(Cap::HANDOFF)];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-composer").is_none(), "the TUI takes the messages");
-    assert!(cx.debug_bounds("thread-handoff").is_none());
-    let take = cx.debug_bounds("thread-take-back").expect("the way back");
-    cx.simulate_click(take.center(), Modifiers::none());
-    assert_eq!(intents(&sent), [Intent::Handoff, Intent::TakeBack]);
-}
-
 /// However much waits in the tray, it stands below the rows and never over them. A request
 /// stands whole, what the person must answer; the plan under it keeps to a line or two and
 /// scrolls; the composer stands whole under the tray. A click above the tray's edge is the

@@ -2108,7 +2108,7 @@ impl Actor {
             }
         }
         if let Some(status) = self.exited {
-            self.send_to(client, &TermEvent::Exited { status });
+            self.send_to(client, &TermEvent::Exited { status: Some(status) });
         }
     }
 
@@ -2345,7 +2345,7 @@ impl Actor {
                     self.moved();
                     self.broadcast(&TermEvent::ProgramStatus(self.program.clone()));
                 }
-                self.broadcast(&TermEvent::Exited { status });
+                self.broadcast(&TermEvent::Exited { status: Some(status) });
             }
             Cmd::Read { read, reply } => {
                 let _ignored = reply.send(self.read(read));

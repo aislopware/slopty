@@ -58,7 +58,8 @@ fn large() -> Large {
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: Some(r#"{"ticket":"SLOP-1234","owner":"platform"}"#.to_owned()),
-            members: Vec::new(),
+            goal: None,
+            autonomy: Autonomy::Ask,
         };
         let Large { projects, terminals, agents, .. } = &mut large;
         let running = Running { terminals, agents, starting: &[] };

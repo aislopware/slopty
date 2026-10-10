@@ -73,14 +73,10 @@ impl Sent {
             | Intent::Promote { .. }
             | Intent::SetModel { .. }
             | Intent::SetMode { .. }
-            | Intent::Compact
-            | Intent::Handoff
-            | Intent::TakeBack
             | Intent::Keep(_)
             | Intent::Revert(_)
             | Intent::Fork { .. }
             | Intent::Continue { .. }
-            | Intent::Rewind { .. }
             | Intent::SetEffort { .. }
             | Intent::Aside
             | Intent::Discard

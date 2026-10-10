@@ -378,8 +378,6 @@ pub enum Intent {
         /// The mode.
         mode: String,
     },
-    /// Compact the context.
-    Compact,
     /// Take a change into what the person has kept ([`ReviewScope::Kept`]): the whole file,
     /// or the hunks named. Refused when the file or what was kept no longer is what the
     /// review showed.
@@ -387,11 +385,6 @@ pub enum Intent {
     /// Put a change back in the working tree as it was: the whole file, or the hunks named.
     /// Refused when the file no longer is what the review showed.
     Revert(Pick),
-    /// Give the session to the agent's own TUI, in a terminal of the worker's, once the agent
-    /// rests ([`Cap::HANDOFF`]).
-    Handoff,
-    /// Take the session back from the agent's own TUI once it rests, and drive it again.
-    TakeBack,
     /// Branch a new thread off this one, sharing its turns through `after`, or all of them
     /// ([`Cap::FORK`]). Answered with [`Outcome::Started`] and the new thread, whose
     /// [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) says where it branched; this
@@ -409,20 +402,6 @@ pub enum Intent {
     Continue {
         /// The agent the new thread runs.
         agent: AgentId,
-    },
-    /// Edit from turn `turn`: go back to just before it, in a new thread ([`Cap::REWIND`]).
-    ///
-    /// The agent branches its session before the turn through its own door, and the client
-    /// that asked puts the turn's message in the new thread's composer for the person to
-    /// change and send. With `files`, the folder goes back to the turn's before-snapshot too,
-    /// what it held first kept under the thread's refs. Refused while a turn is under way.
-    /// Answered with [`Outcome::Started`] and the new thread; this one goes on as it was, and
-    /// no agent's session file is ever written.
-    Rewind {
-        /// The turn gone back to the start of.
-        turn: TurnId,
-        /// The folder goes back to the turn's before-snapshot too.
-        files: bool,
     },
     /// Set how hard the model thinks, by the agent's own name for the level
     /// ([`ThreadMeta::efforts`](super::ThreadMeta::efforts)).
@@ -462,7 +441,8 @@ pub enum Intent {
     },
     /// What the person is writing to the thread and has not sent, as a device last kept it:
     /// its row's [`ThreadRow::draft`], stamped by the worker, so another device takes it up.
-    /// Empty words clear it. Refused past [`Draft::MAX_BYTES`]. Any thread takes it.
+    /// Empty words clear it, leaving a tombstone with its time. Refused past
+    /// [`Draft::MAX_BYTES`]. Any thread takes it.
     Draft {
         /// The words.
         text: String,
@@ -508,13 +488,10 @@ impl Intent {
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,
             Self::SetEffort { .. } => Cap::SET_EFFORT,
-            Self::Compact => Cap::COMPACT,
-            Self::Handoff | Self::TakeBack => Cap::HANDOFF,
             Self::Fork { .. } | Self::Aside | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Review { .. } => Cap::REVIEW,
             Self::Continue { .. } => Cap::CONTINUE,
-            Self::Rewind { .. } => Cap::REWIND,
         })
     }
 
@@ -861,7 +838,7 @@ pub struct ThreadRow {
     /// [`Self::ended`] past it is unread. [`TurnId::BEFORE`] until one is seen.
     pub seen: TurnId,
     /// What the person was writing to it and has not sent, as a device last kept it
-    /// ([`Intent::Draft`]).
+    /// ([`Intent::Draft`]); empty words once cleared; none before any was kept.
     pub draft: Option<Draft>,
     /// When it last changed.
     pub updated_ms: WallMs,
@@ -883,7 +860,8 @@ pub struct TurnEnded {
 /// What the person was writing to a thread and has not sent ([`ThreadRow::draft`]).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Draft {
-    /// The words, never empty.
+    /// The words; empty for words cleared at [`Self::at_ms`], sent or wiped, so a device still
+    /// showing what it last shared clears them too rather than keeping them.
     pub text: String,
     /// When a device last kept them, on the worker's clock: a device holding words of its own
     /// keeps the newer.

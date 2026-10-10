@@ -1784,7 +1784,7 @@ mod tests {
         assert!(!heard.admit(&opened(new)), "told once");
         let mut exited = opened(new);
         if let WorkerMsg::SessionChanged(summary) = &mut exited {
-            summary.state = SessionState::Exited { status: 3 };
+            summary.state = SessionState::Exited { status: Some(3) };
         }
         assert!(heard.admit(&exited), "its program exited: the new state is news");
         assert!(!heard.admit(&exited), "and told once");

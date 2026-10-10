@@ -69,10 +69,11 @@ fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::REWIND)];
+    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::FORK)];
     state.meta.facts.insert("branch".to_owned(), "main".to_owned());
-    state.turns = vec![turn(1, TurnState::Complete)];
-    state.items = vec![user("u", 1)];
+    // A message after the first turn, so its own agent forks from just before it.
+    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
+    state.items = vec![user("t", 1), user("u", 2)];
     let codex = AgentId::named(AgentId::CODEX);
     hub.update(cx, |hub, cx| {
         hub.connected(cx);
@@ -166,17 +167,17 @@ fn interrupt_and_send_waits_in_the_tray(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(Box::leak(bubble.into_boxed_str())).is_none(), "not a bubble");
 }
 
-/// Branching from a message of the person's on its own agent edits from just before it:
-/// the files kept or put back, as chosen. While a turn runs, Branch asks nothing.
+/// Branching from a message of the person's on its own agent forks through the turn before
+/// it. While a turn runs, Branch asks nothing.
 #[gpui::test]
-fn branching_from_a_message_keeps_or_puts_back_the_files(cx: &mut TestAppContext) {
+fn branching_from_a_message_forks_before_it(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::REWIND), Cap::named(Cap::FORK)];
+    state.meta.caps = vec![Cap::named(Cap::FORK)];
     state.status.phase = Phase::Working;
     state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
-    state.items = vec![user("u", 1), user("v", 2)];
+    state.items = vec![user("t", 1), user("u", 2)];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
@@ -189,35 +190,9 @@ fn branching_from_a_message_keeps_or_puts_back_the_files(cx: &mut TestAppContext
     state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
-    click(cx, "branch-revert");
     click(cx, "branch-go");
-    assert_eq!(intents(&sent), [Intent::Rewind { turn: TurnId(1), files: true }]);
+    assert_eq!(intents(&sent), [Intent::Fork { after: Some(TurnId(1)) }]);
     assert!(cx.debug_bounds("branch-panel").is_none(), "the choice is made");
-
-    // Another thread edits the same folder: the worker turns the files down, and going back
-    // without them is one press away.
-    let id = sent
-        .borrow()
-        .iter()
-        .find_map(|m| match m {
-            slopty_proto::ClientMsg::Thread(
-                slopty_proto::thread::wire::ThreadRequest::Intent { id, .. },
-            ) => Some(*id),
-            _ => None,
-        })
-        .expect("sent");
-    let reason = "\u{201c}Docs\u{201d} is working in the same folder".to_owned();
-    let done = IntentDone { id, outcome: Outcome::Refused { reason } };
-    hub.update(cx, |hub, cx| hub.done(&done, cx));
-    cx.run_until_parked();
-    click(cx, Box::leak(format!("refused-no-files-{id}").into_boxed_str()));
-    assert_eq!(
-        intents(&sent).last(),
-        Some(&Intent::Rewind { turn: TurnId(1), files: false }),
-        "the same turn, the files left as they are"
-    );
-    let refused = format!("refused-{id}");
-    assert!(cx.debug_bounds(Box::leak(refused.into_boxed_str())).is_none(), "the refusal goes");
 
     // The new thread's composer holds the message it started before, to change and send.
     let again = sent
@@ -251,7 +226,7 @@ fn branching_onto_another_machine_hands_the_workspace_a_start_there(cx: &mut Tes
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::REWIND)];
+    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::FORK)];
     state.meta.facts.insert("branch".to_owned(), "main".to_owned());
     state.status.phase = Phase::Working;
     state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];

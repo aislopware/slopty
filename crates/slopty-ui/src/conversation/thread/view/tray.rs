@@ -496,29 +496,6 @@ impl ThreadView {
                     .whitespace_normal()
                     .child(SharedString::from(refusal.words.clone())),
             )
-            // Going back with the files was refused (another thread edits the same folder):
-            // going back without them is the next thing to try.
-            .when_some(
-                match refusal.intent {
-                    Some(Intent::Rewind { turn, files: true }) => Some(turn),
-                    _ => None,
-                },
-                |el, turn| {
-                    el.child(
-                        self.button(
-                            format!("refused-no-files-{id}"),
-                            "Without the files",
-                            ButtonKind::Ghost,
-                        )
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
-                            this.dismiss(id, cx);
-                            let seed =
-                                this.state(cx).and_then(|st| super::branch::message_of(st, turn));
-                            this.start(Intent::Rewind { turn, files: false }, seed, cx);
-                        })),
-                    )
-                },
-            )
             .child(
                 self.icon_button(format!("refused-dismiss-{id}"), Symbol::Xmark, "Dismiss")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(id, cx))),
@@ -1106,8 +1083,7 @@ impl ThreadView {
     }
 
     /// The meter's panel: a line for the context and each of the plan's windows with when it
-    /// resets, and "Compact context" where the agent compacts through
-    /// Slopty's door ([`Cap::COMPACT`]). Compacting is the person's press, never Slopty's.
+    /// resets.
     fn meter_panel(
         &self,
         state: &slopty_proto::thread::ThreadState,
@@ -1116,15 +1092,6 @@ impl ThreadView {
         let s = self.theme.surfaces;
         let meters = &state.meters;
         let lines = super::composer::meter_words(meters, crate::clock::now(cx));
-        let compact = super::composing::compacts(state).then(|| {
-            self.button("thread-compact", "Compact context", ButtonKind::Ghost).on_click(
-                cx.listener(|this, _ev, _w, cx| {
-                    let _id = this.intent(Intent::Compact, cx);
-                    this.meter_open = false;
-                    cx.notify();
-                }),
-            )
-        });
         let label = SharedString::from(lines.join(", "));
         self.section()
             .id("thread-meter-panel")
@@ -1143,7 +1110,6 @@ impl ThreadView {
                     .flex_col()
                     .children(lines.into_iter().map(|l| div().child(SharedString::from(l)))),
             )
-            .children(compact)
             .into_any_element()
     }
 

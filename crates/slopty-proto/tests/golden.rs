@@ -2161,7 +2161,7 @@ mod orchestration {
         let exited = HubEvent {
             seq: 43,
             at_ms: WallMs::from_millis(1_790_000_000_000),
-            what: Happening::SessionExited { term: term(), status: -9 },
+            what: Happening::SessionExited { term: term(), status: Some(-9) },
         };
         let answer = Outcome::Events { events: vec![exited], next: 44, missed: 0 };
         snap("server_reply_session_exited", &FromServer::Reply { id: 11, outcome: answer });
@@ -2501,7 +2501,7 @@ mod ctl {
                     started_ms: WallMs::from_millis(1_790_000_000_000),
                     cols: 80,
                     rows: 24,
-                    state: SessionState::Exited { status: 1 },
+                    state: SessionState::Exited { status: Some(1) },
                     viewers: 0,
                     command: vec!["/bin/zsh".to_owned()],
                     progress: None,

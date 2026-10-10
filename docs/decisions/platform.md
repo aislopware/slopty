@@ -1336,3 +1336,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     kept in the transfer ledger; the next run would not hold the folder.
   - Test: `workspace::tests::remote::saving_to_files_comes_down_into_the_chosen_folder`
     (slopty-ui, on the Mac through the same `save_into`).
+
+- ✅ **A note may say work is ready to merge or a goal is met, and carry the task its Merge
+  merges** (2026-10-10, the orchestrator-first study, items 12 and 13, the wire half).
+  - `NoticeKind::ReadyToMerge` is one note per project, its text the count of tasks ready.
+    `PushBody.merges` names the task its Merge action merges, the oldest ready one, so the
+    phone acts without a round trip to learn it. `NoticeKind::GoalDone` is the orchestrator
+    saying its goal is met, once (`Verb::ProjectProgress { done: true }`).
+  - This change carries the wire alone. The server raises neither yet, and the notes'
+    categories and the Merge action are items 12 and 13. The ladder words both kinds as it
+    words a finished one, from the row's last line.
+  - Goldens: `push_body*` (each body gains `merges`) and `push_body_ready_to_merge`.
+

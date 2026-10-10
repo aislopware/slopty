@@ -3,8 +3,8 @@
 //! A [`Project`] lives on the server. Its [`Task`]s are its orchestrator's, one level under it,
 //! and form a graph by [`Task::depends_on`]. Each may be pinned to a
 //! worker ([`Task::pin`]) and, once something runs for it, names that terminal, or the thread any
-//! agent runs as ([`Assignment`]): Claude Code, Codex, pi, an ACP agent, another agent's CLI or a
-//! plain command ([`Runner`]). Claude Code's own subagents and task list inside a session show as
+//! agent runs as ([`Assignment`]): Claude Code, Codex, pi or an ACP agent ([`TaskLaunch`]).
+//! Claude Code's own subagents and task list inside a session show as
 //! [`Natives`] of its node. Everything that happens is kept in the project's timeline
 //! ([`TimelineEntry`]) and pushed to every client as a [`ProjectUpdate`], so the tree is followed
 //! as it grows, never run where nobody can see it.
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
 use crate::agent::AgentBranch;
-use crate::orchestration::{Size, TermRef};
+use crate::orchestration::TermRef;
 use crate::terminal::RepoId;
 use crate::thread::wire::PullSeen;
 
@@ -360,27 +360,55 @@ pub struct Live {
     pub project: u16,
 }
 
-/// What a project's member is known by.
+/// How far a project's agents go before they ask the person, set by the person per project.
 ///
-/// Fact keys a tile has (`repo`, `machine`, `cwd`, any other) to the value it must have, or for
-/// a path the directory it must be in. A tile matches when every key does; an empty one
-/// matches nothing.
-pub type Matcher = BTreeMap<String, String>;
+/// Each agent carries it by its own permission modes, so the agent answers its own prompts at
+/// the level chosen and Slopty answers nothing (`docs/decisions/projects.md`, "Autonomy per
+/// project").
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum Autonomy {
+    /// Every edit and command the agent's own rules do not allow asks the person.
+    #[default]
+    Ask,
+    /// Edits in the task's own worktree go without asking; anything else asks.
+    Edits,
+    /// The agent goes on its own within its sandbox, its own auto mode deciding.
+    Own,
+}
 
-/// A project: its goal's home on the server.
-///
-/// A project is a name and its members; what orchestrates it (its repository, target branch,
-/// verifier, orchestrator and tasks) is a part it may have.
+/// Where a project's goal stands, as its orchestrator last said
+/// ([`crate::orchestration::Verb::ProjectProgress`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Progress {
+    /// What is done and what runs, in a line or two.
+    pub summary: String,
+    /// What comes next, when the orchestrator knows.
+    pub next: Option<String>,
+    /// The goal is met: the person is told once.
+    pub done: bool,
+    /// When it said so, by the server's clock.
+    pub at_ms: WallMs,
+}
+
+impl Progress {
+    /// The longest summary or next step, in bytes.
+    pub const TEXT_MAX: usize = 2048;
+}
+
+/// A project: its goal's home on the server, and the orchestrator that splits it into tasks.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Project {
     /// Its name.
     pub id: ProjectId,
     /// What it is for, in a line.
     pub title: String,
-    /// What else is in it beside its repository's clones: a matcher each, so one project may
-    /// hold two repositories, or one folder name on two machines. At most
-    /// [`Project::MEMBERS_MAX`], each within [`Project::member_fits`].
-    pub members: Vec<Matcher>,
+    /// The goal the person handed over, the orchestrator's first prompt; none for a project
+    /// made around an orchestrator already at work.
+    pub goal: Option<String>,
+    /// How far its agents go before they ask the person.
+    pub autonomy: Autonomy,
+    /// Where the orchestrator last said the goal stands ([`Moment::Update`]).
+    pub progress: Option<Progress>,
     /// The repository its tasks work in, as the orchestrator names it (a path or a URL).
     pub repo: String,
     /// Which repository that is on every machine ([`RepoId`]), learned from where its
@@ -404,30 +432,6 @@ pub struct Project {
     pub metadata: Option<String>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
-}
-
-impl Project {
-    /// The most facts one member's matcher names.
-    pub const MATCHER_KEYS_MAX: usize = 8;
-    /// The longest value a matcher names, in bytes: a path's length.
-    pub const MATCHER_VALUE_MAX: usize = 1024;
-    /// The most members a project names.
-    pub const MEMBERS_MAX: usize = 32;
-
-    /// Whether `matcher` may be a member: one to [`Self::MATCHER_KEYS_MAX`] keys, each within
-    /// [`crate::items::FACT_KEY_MAX`] characters with no space in it, each value not blank and
-    /// at most [`Self::MATCHER_VALUE_MAX`] bytes.
-    #[must_use]
-    pub fn member_fits(matcher: &Matcher) -> bool {
-        (1..=Self::MATCHER_KEYS_MAX).contains(&matcher.len())
-            && matcher.iter().all(|(key, value)| {
-                (1..=crate::items::FACT_KEY_MAX).contains(&key.chars().count())
-                    && !key.chars().any(|c| c.is_whitespace() || c.is_control())
-                    && !value.trim().is_empty()
-                    && value.len() <= Self::MATCHER_VALUE_MAX
-                    && !value.chars().any(char::is_control)
-            })
-    }
 }
 
 /// Where a task stands.
@@ -480,53 +484,13 @@ impl TaskState {
     }
 }
 
-/// What runs in a task's terminal.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Runner {
-    /// Claude Code, with Slopty's tools and hooks, and a first prompt typed once it is ready.
-    Claude {
-        /// The first prompt.
-        prompt: Option<String>,
-        /// Arguments after `claude`.
-        args: Vec<String>,
-    },
-    /// A program and its arguments: another agent's CLI, a build, a benchmark, a script. The
-    /// login shell when empty.
-    Command {
-        /// The program and its arguments.
-        argv: Vec<String>,
-    },
-    /// The person's own Codex, with Slopty's tools on its MCP servers and its brief as its
-    /// first prompt; it goes only where `codex` is installed.
-    Codex {
-        /// The first prompt.
-        prompt: Option<String>,
-        /// Arguments after `codex`, before the prompt.
-        args: Vec<String>,
-    },
-    /// Any agent, run as a thread of the worker's thread host
-    /// ([`crate::orchestration::Verb::StartThread`]): pi, an ACP agent, or Claude Code and
-    /// Codex driven that way. Its adapter gives it Slopty's tools and its role through the
-    /// agent's own doors; it goes only where the agent is installed.
-    Agent {
-        /// The agent.
-        agent: crate::thread::AgentId,
-        /// The first prompt.
-        prompt: Option<String>,
-        /// The model, by the agent's own id.
-        model: Option<String>,
-        /// More arguments for the agent, checked by its adapter.
-        args: Vec<String>,
-    },
-}
-
 /// The terminal, or the thread, working on a task.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Assignment {
     /// Its terminal, or for a thread its seat: the id its Slopty tools speak as, and the
     /// terminal its agent runs in when it runs in one.
     pub term: TermRef,
-    /// The thread its agent runs as, for a task started as one ([`Runner::Agent`]). Whether
+    /// The thread its agent runs as, for a task whose agent runs as one. Whether
     /// it runs, and where its agent is, then come from the worker's thread table, the row
     /// marked with [`SEAT_FACT`].
     pub thread: Option<crate::thread::ThreadId>,
@@ -1387,6 +1351,8 @@ pub enum Moment {
     /// A step for the task began, finished or failed; its progress between is on its card
     /// alone.
     Step(TaskStep),
+    /// The orchestrator said where the goal stands.
+    Update(Progress),
 }
 
 impl TimelineEntry {
@@ -1406,6 +1372,9 @@ impl TimelineEntry {
                 .saturating_add(texts(&report.artifacts))
                 .saturating_add(report.branch.as_deref().map_or(0, text)),
             Moment::Step(step) => step.approx_bytes(),
+            Moment::Update(progress) => {
+                text(&progress.summary).saturating_add(progress.next.as_deref().map_or(0, text))
+            }
             Moment::Created
             | Moment::Orchestrator { .. }
             | Moment::Limits { .. }
@@ -1459,6 +1428,10 @@ impl Project {
             self.target.len(),
             self.verifier.as_deref().map_or(0, str::len),
             self.metadata.as_deref().map_or(0, str::len),
+            self.goal.as_deref().map_or(0, str::len),
+            self.progress.as_ref().map_or(0, |p| {
+                p.summary.len().saturating_add(p.next.as_deref().map_or(0, str::len))
+            }),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
         ]
         .into_iter()
@@ -1521,21 +1494,15 @@ pub enum RunOn {
     Anywhere,
 }
 
-/// How to start what runs for a task.
+/// How to start a task's agent: in a git worktree of its own beside a clone of the project's
+/// repository, its brief as its first prompt, with Slopty's tools and its role, at the project's
+/// [`Autonomy`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskLaunch {
     /// This worker, over the task's pin; the server places it when absent.
     pub pin: Option<WorkerId>,
-    /// Working directory on the worker (usually a repository); the worker's home when empty.
-    pub cwd: String,
-    /// What runs.
-    pub run: Runner,
-    /// Extra environment.
-    pub env: Vec<(String, String)>,
-    /// The grid until a client shows it.
-    pub size: Option<Size>,
-    /// Start it though a task it depends on is not done yet.
-    pub ignore_dependencies: bool,
+    /// The agent: Claude Code, Codex, pi or an ACP agent; it goes only to a worker that has it.
+    pub agent: crate::thread::AgentId,
 }
 
 /// One frame of the projects a client link is sent on connect and after a lag
@@ -1690,25 +1657,6 @@ mod tests {
         let at = |count| GiveBacks { count, held: false };
         assert!(at(0).room() && at(2).room());
         assert!(!at(3).room(), "the fourth goes to the person");
-    }
-
-    /// A member names one to a few facts, each a key with no space and a value that is not
-    /// blank; anything else is refused.
-    #[test]
-    fn a_member_names_facts_within_bounds() {
-        let member = |pairs: &[(&str, &str)]| -> Matcher {
-            pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
-        };
-        assert!(Project::member_fits(&member(&[("repo", "github.com/o/api")])));
-        assert!(Project::member_fits(&member(&[("machine", "studio"), ("cwd", "~/notes")])));
-        assert!(!Project::member_fits(&member(&[])), "an empty one would match nothing");
-        assert!(!Project::member_fits(&member(&[("two words", "v")])));
-        assert!(!Project::member_fits(&member(&[("cwd", " ")])));
-        let long = "/".repeat(Project::MATCHER_VALUE_MAX + 1);
-        assert!(!Project::member_fits(&member(&[("cwd", &long)])));
-        let many: Matcher =
-            (0..=Project::MATCHER_KEYS_MAX).map(|n| (format!("k{n}"), "v".to_owned())).collect();
-        assert!(!Project::member_fits(&many));
     }
 
     #[test]

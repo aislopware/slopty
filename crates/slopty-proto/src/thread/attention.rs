@@ -333,6 +333,11 @@ pub enum NoticeKind {
     /// for it failed (a rebase that conflicts among them), or the push after its merge did not
     /// go. One notice per timeline entry.
     Project,
+    /// A project's verified work waits on the person's merge: one notice for all of it, its
+    /// text the count, its note's Merge merging the oldest ([`crate::push::PushBody::merges`]).
+    ReadyToMerge,
+    /// A project's orchestrator said its goal is met, once.
+    GoalDone,
 }
 
 /// What a notice is about.

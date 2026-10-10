@@ -12,14 +12,14 @@ use slopty_proto::orchestration::{
     WaitUntil, Waited,
 };
 use slopty_proto::project::{
-    BadProjectId, LimitsChange, Moment, NodeDetail, Project, ProjectId, ProjectStatus, Report,
-    Runner, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry,
+    Autonomy, BadProjectId, LimitsChange, Moment, NodeDetail, Project, ProjectId, ProjectStatus,
+    Report, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
 use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
-use slopty_proto::thread::{AskId, TurnId};
+use slopty_proto::thread::{AgentId, AskId, TurnId};
 
 use crate::resolve::Resolver;
 use crate::view::Overview;
@@ -746,6 +746,10 @@ pub struct ProjectSpec {
     pub limits: LimitsChange,
     /// Anything kept with it: the text of a JSON object.
     pub metadata: Option<String>,
+    /// The goal its orchestrator is started on.
+    pub goal: Option<String>,
+    /// How far its agents go before they ask the person.
+    pub autonomy: Autonomy,
 }
 
 /// Make a project.
@@ -766,7 +770,8 @@ pub async fn project_create<D: Dispatch>(
         orchestrator,
         limits: spec.limits,
         metadata: spec.metadata,
-        members: Vec::new(),
+        goal: spec.goal,
+        autonomy: spec.autonomy,
     };
     project_answer(res.dispatch(), key, verb).await
 }
@@ -784,9 +789,11 @@ pub struct ProjectEdit {
     pub limits: LimitsChange,
     /// New metadata.
     pub metadata: Option<String>,
+    /// How far its agents go before they ask the person.
+    pub autonomy: Option<Autonomy>,
 }
 
-/// Change a project's orchestrator, verifier, limits or metadata.
+/// Change a project's orchestrator, verifier, autonomy, limits or metadata.
 pub async fn project_set<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     project: Option<&str>,
@@ -798,9 +805,9 @@ pub async fn project_set<D: Dispatch>(
         Some(term) => Some(res.term(term).await?),
         None => None,
     };
-    let ProjectEdit { verifier, push, limits, metadata, .. } = edit;
+    let ProjectEdit { verifier, push, limits, metadata, autonomy, .. } = edit;
     let verb =
-        Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata, members: None };
+        Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata, autonomy };
     project_answer(res.dispatch(), key, verb).await
 }
 
@@ -812,15 +819,14 @@ pub async fn projects<D: Dispatch>(dispatch: &D) -> Result<Vec<Project>, ToolErr
     }
 }
 
-/// A project whole, its timeline from `since`, waiting up to `timeout_ms` for news past it.
+/// A project whole, and its timeline from `since`, read at once: [`task_wait`] is the one wait.
 pub async fn project_status<D: Dispatch>(
     dispatch: &D,
     project: Option<&str>,
     since: Option<u64>,
-    timeout_ms: u32,
 ) -> Result<ProjectStatus, ToolError> {
     let project = project_named(project, &own(dispatch).await?)?;
-    project_answer(dispatch, None, Verb::ProjectStatus { project, since, timeout_ms }).await
+    project_answer(dispatch, None, Verb::ProjectStatus { project, since, timeout_ms: 0 }).await
 }
 
 /// Let a project go, as the person: its tasks, queue and timeline. Its terminals run on.
@@ -921,9 +927,10 @@ pub enum Which {
 /// Start a task: one the project has, or a new one made first. The one tool and command that
 /// starts work, so a start means one thing wherever it is asked.
 ///
-/// It runs `launch`, Claude Code with the task's brief as its first prompt when it names no
-/// agent and no prompt ([`Verb::TaskSpawn`]). A new task that is made but refused its start is
-/// kept, and the refusal says its number, so a later start names it rather than making it again.
+/// Its `agent` (by [`agent_id`]'s names; Claude Code when absent) starts on `worker` (by name or
+/// id, over the task's pin; one with room when absent), told the task's brief
+/// ([`Verb::TaskSpawn`]). A new task that is made but refused its start is kept, and the refusal
+/// says its number, so a later start names it rather than making it again.
 ///
 /// # Errors
 /// The project or task is not named or known, the new task is refused, or its start is: no
@@ -932,7 +939,7 @@ pub async fn task_start<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     project: Option<&str>,
     which: Which,
-    mut launch: LaunchSpec,
+    (worker, agent): (Option<&str>, Option<&str>),
     key: Option<IdempotencyKey>,
 ) -> Result<Task, ToolError> {
     let (project, task, made) = match which {
@@ -942,23 +949,14 @@ pub async fn task_start<D: Dispatch>(
         }
         Which::New(new) => {
             let project = project_named(project, &own(res.dispatch()).await?)?;
-            let brief = new.brief.clone();
             let made_key = key.as_ref().map(|k| k.part("task_create"));
             let made = task_create(res, &project, *new, made_key).await?;
-            if let Runner::Claude { prompt, .. }
-            | Runner::Codex { prompt, .. }
-            | Runner::Agent { prompt, .. } = &mut launch.run
-                && prompt.is_none()
-                && !brief.trim().is_empty()
-            {
-                *prompt = Some(brief);
-            }
             (project, made.id, Some(made))
         }
     };
-    let pin = res.some_worker(launch.pin.as_deref()).await?;
-    let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = launch;
-    let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
+    let pin = res.some_worker(worker).await?;
+    let agent = agent.map(str::trim).filter(|a| !a.is_empty()).unwrap_or(AgentId::CLAUDE_CODE);
+    let launch = TaskLaunch { pin, agent: agent_id(agent) };
     let started = task_answer(res.dispatch(), key, Verb::TaskSpawn { project, task, launch }).await;
     match (started, made) {
         (Err(refused), Some(made)) => Err(ToolError::new(
@@ -991,8 +989,7 @@ pub async fn task_merge<D: Dispatch>(
 /// The agent a name means: `claude` or Claude Code's id, `codex`, `pi`, an ACP agent by the
 /// registry's name or `acp:<name>`.
 #[must_use]
-pub fn agent_id(name: &str) -> slopty_proto::thread::AgentId {
-    use slopty_proto::thread::AgentId;
+pub fn agent_id(name: &str) -> AgentId {
     match name.trim() {
         "claude" | AgentId::CLAUDE_CODE => AgentId::named(AgentId::CLAUDE_CODE),
         name @ (AgentId::CODEX | AgentId::PI) => AgentId::named(name),
@@ -1247,76 +1244,5 @@ pub async fn task_get<D: Dispatch>(
     match dispatch.call(Verb::TaskGet { project, task }).await {
         Outcome::Node(node) => Ok(*node),
         other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// How to start what runs for a task, the worker unresolved.
-#[derive(Debug)]
-pub struct LaunchSpec {
-    /// A worker by name or id, over the task's pin; the server places it when absent.
-    pub pin: Option<String>,
-    /// Working directory on the worker; the worker's home when empty.
-    pub cwd: String,
-    /// What runs.
-    pub run: Runner,
-    /// Extra environment.
-    pub env: Vec<(String, String)>,
-    /// Its grid until a client shows it.
-    pub size: Option<Size>,
-    /// Start it though a task it depends on is not done.
-    pub ignore_dependencies: bool,
-}
-
-impl LaunchSpec {
-    /// Claude Code with nothing of its own: no prompt, arguments, directory or environment.
-    #[must_use]
-    pub const fn claude() -> Self {
-        Self {
-            pin: None,
-            cwd: String::new(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: Vec::new(),
-            size: None,
-            ignore_dependencies: false,
-        }
-    }
-}
-
-/// What runs for a task whose agent is named `agent`.
-///
-/// Claude Code (`claude`, the default) and Codex (`codex`) run in a terminal with their own
-/// TUI; pi (`pi`), an ACP agent (`acp:<name>`, or the registry's bare name) and any other run
-/// as a thread of the worker's thread host ([`Runner::Agent`]). `model`, by the agent's own id,
-/// goes as Claude Code's and Codex's `--model` argument.
-#[must_use]
-pub fn agent_runner(
-    agent: Option<&str>,
-    prompt: Option<String>,
-    mut model: Option<String>,
-    mut args: Vec<String>,
-) -> Runner {
-    use slopty_proto::thread::AgentId;
-    let mut with_model = |args: &mut Vec<String>| {
-        if let Some(model) = model.take() {
-            args.splice(0..0, ["--model".to_owned(), model]);
-        }
-    };
-    match agent.map(str::trim).filter(|a| !a.is_empty()) {
-        None | Some("claude" | AgentId::CLAUDE_CODE) => {
-            with_model(&mut args);
-            Runner::Claude { prompt, args }
-        }
-        Some(AgentId::CODEX) => {
-            with_model(&mut args);
-            Runner::Codex { prompt, args }
-        }
-        Some(name) => {
-            let agent = if name == AgentId::PI || name.starts_with(AgentId::ACP_PREFIX) {
-                AgentId::named(name)
-            } else {
-                AgentId::acp(name)
-            };
-            Runner::Agent { agent, prompt, model, args }
-        }
     }
 }

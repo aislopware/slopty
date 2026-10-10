@@ -126,15 +126,6 @@ pub fn codex_home() -> Option<PathBuf> {
 /// Why a request is not handed to Codex's own TUI while no daemon runs.
 pub const NO_TUI: &str = "Codex isn't running on this machine, so its own terminal can't join";
 
-/// Where a fork cuts the thread.
-#[derive(Clone, Copy, Debug)]
-enum Cut {
-    /// Through this turn, or the whole thread.
-    Through(Option<TurnId>),
-    /// Before this turn: an edit from there.
-    Before(TurnId),
-}
-
 /// What a client asks of a Codex thread.
 #[derive(Debug)]
 enum Ask {
@@ -181,7 +172,8 @@ enum Ask {
     Fork {
         thread: ThreadId,
         id: IntentId,
-        cut: Cut,
+        /// The last turn the new thread shares; `None` for all of them.
+        after: Option<TurnId>,
         reply: oneshot::Sender<Outcome>,
     },
     Sessions {
@@ -368,19 +360,8 @@ impl Codex {
     /// Branch a new thread off `thread` through turn `after`, or the whole of it, for intent
     /// `id`, once: started when Codex has made it and it is followed here.
     pub async fn fork(&self, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
-        self.cut(thread, id, Cut::Through(after)).await
-    }
-
-    /// Branch a new thread off `thread` with its turns before `turn` and none from it on, for
-    /// intent `id`, once (`thread/fork` with `beforeTurnId`): an edit from that turn. The new
-    /// thread says it came from the turn before it, or from the thread with no turn shared.
-    pub async fn rewind(&self, thread: ThreadId, id: IntentId, turn: TurnId) -> Outcome {
-        self.cut(thread, id, Cut::Before(turn)).await
-    }
-
-    async fn cut(&self, thread: ThreadId, id: IntentId, cut: Cut) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask::Fork { thread, id, cut, reply }).is_err() {
+        if self.0.send(Ask::Fork { thread, id, after, reply }).is_err() {
             return refused("Codex threads are not served here".to_owned());
         }
         outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
@@ -1669,7 +1650,7 @@ impl Session {
                 let _gone = done.send(());
                 result
             }
-            Ask::Fork { thread, id, cut, reply } => {
+            Ask::Fork { thread, id, after, reply } => {
                 if let Some(first) = self.host.outcome(thread, id) {
                     let _gone = reply.send(first);
                     return Ok(());
@@ -1678,10 +1659,7 @@ impl Session {
                     waiting.push(reply);
                     return Ok(());
                 }
-                let params = match self.followed(thread).map(|f| match cut {
-                    Cut::Through(after) => f.shared.fork(after),
-                    Cut::Before(turn) => f.shared.fork_before(turn),
-                }) {
+                let params = match self.followed(thread).map(|f| f.shared.fork(after)) {
                     Some(Ok(params)) => params,
                     Some(Err(why)) => {
                         let _gone = reply.send(once(&self.host, thread, id, refused(why)));
@@ -1694,16 +1672,10 @@ impl Session {
                     }
                 };
                 self.forking.insert(id, (thread, vec![reply]));
-                // A fork of the whole thread shares every turn it has now; one before a turn, the
-                // turns before it.
-                let state = self.host.state(thread).map(|(s, _)| s);
-                let turn = match cut {
-                    Cut::Through(Some(after)) => Some(after),
-                    Cut::Through(None) => state.and_then(|s| s.last_turn().map(|t| t.id)),
-                    Cut::Before(turn) => state.and_then(|s| {
-                        s.turns.iter().take_while(|t| t.id != turn).last().map(|t| t.id)
-                    }),
-                };
+                // A fork of the whole thread shares every turn it has now.
+                let turn = after.or_else(|| {
+                    self.host.state(thread).and_then(|(s, _)| s.last_turn().map(|t| t.id))
+                });
                 self.request(&params, Waiting::Fork { id, from: thread, turn }).await
             }
             Ask::Review { thread, sha, title, reply } => {

@@ -55,6 +55,11 @@ pub enum DragAnswer {
     },
 }
 
+/// How a session's program ended: its status, when its worker saw it end. A program a restarted
+/// worker found gone has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exit(pub Option<i32>);
+
 /// What the UI or connection should do after an event was applied.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Effect {
@@ -82,8 +87,8 @@ pub enum Effect {
         /// Its body.
         body: String,
     },
-    /// The child exited.
-    Exited(i32),
+    /// The child exited, with its status when its worker saw it end.
+    Exited(Option<i32>),
     /// The worker reported an error for a request.
     Error(slopty_proto::terminal::TermError),
     /// Search hits for `needle`.
@@ -148,7 +153,7 @@ pub struct TermState {
     cwd: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
-    exited: Option<i32>,
+    exited: Option<Exit>,
     driving: bool,
     resync_pending: bool,
     frames: u64,
@@ -470,9 +475,9 @@ impl TermState {
         self.branch.as_deref()
     }
 
-    /// Exit status once the child is gone.
+    /// How the child ended, once it is gone.
     #[must_use]
-    pub const fn exited(&self) -> Option<i32> {
+    pub const fn exited(&self) -> Option<Exit> {
         self.exited
     }
 
@@ -575,7 +580,7 @@ impl TermState {
                 Vec::new()
             }
             TermEvent::Exited { status } => {
-                self.exited = Some(status);
+                self.exited = Some(Exit(status));
                 self.running = None;
                 self.progress = Progress::default();
                 vec![Effect::Exited(status)]
@@ -1444,7 +1449,7 @@ mod tests {
             command: vec!["claude".into()],
         };
         assert_eq!(state.apply(TermEvent::Restored(restored.clone())), vec![]);
-        state.apply(TermEvent::Exited { status: 0 });
+        state.apply(TermEvent::Exited { status: Some(0) });
         assert_eq!(state.progress(), Progress::default(), "the exit ends the report");
         assert_eq!(state.restored(), Some(&restored));
     }
@@ -1574,8 +1579,9 @@ mod tests {
         assert!(state.driving());
         // A running command ends with the child.
         state.running = Some((LineIndex(0), "sleep 9".into()));
-        assert_eq!(state.apply(TermEvent::Exited { status: 3 }), vec![Effect::Exited(3)]);
-        assert_eq!(state.exited(), Some(3));
+        let exited = TermEvent::Exited { status: Some(3) };
+        assert_eq!(state.apply(exited), vec![Effect::Exited(Some(3))]);
+        assert_eq!(state.exited(), Some(Exit(Some(3))));
         assert!(state.running.is_none());
     }
 

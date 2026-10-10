@@ -562,7 +562,8 @@ mod tests {
                 orchestrator: None,
                 limits: LimitsChange { review: Some(2) },
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::Ask,
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -682,7 +683,8 @@ mod tests {
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,
-            members: Vec::new(),
+            goal: None,
+            autonomy: slopty_proto::project::Autonomy::Ask,
         };
         let mut all = p.create(new, &running, now).unwrap().1;
         let spec = TaskSpec { title: "Store".to_owned(), ..TaskSpec::default() };

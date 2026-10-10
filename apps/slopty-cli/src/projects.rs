@@ -8,14 +8,14 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_proto::project::{
-    LimitsChange, ProjectStatus, Report, RunOn, Runner, Task, TaskChange, TaskState, VerifierRun,
+    Autonomy, LimitsChange, ProjectStatus, Report, RunOn, Task, TaskChange, TaskState, VerifierRun,
 };
-use slopty_tools::ops::{self, LaunchSpec, NewTask, ProjectEdit, ProjectSpec, Which};
+use slopty_tools::ops::{self, NewTask, ProjectEdit, ProjectSpec, Which};
 use slopty_tools::resolve::Resolver;
 use slopty_tools::view::projects as view;
 
 use crate::link::Link;
-use crate::verbs::{SizeArgs, key_value, print_json};
+use crate::verbs::print_json;
 
 /// A project's limits.
 #[derive(Args, Debug, Default)]
@@ -62,8 +62,14 @@ pub enum ProjectCmd {
         /// Anything to keep with it, as a JSON object.
         #[arg(long)]
         metadata: Option<String>,
+        /// The goal to hand its orchestrator.
+        #[arg(long)]
+        goal: Option<String>,
+        /// How far its agents go before they ask you: `ask`, `edits` or `own`.
+        #[arg(long, default_value = "ask", value_parser = autonomy)]
+        autonomy: Autonomy,
     },
-    /// Change a project's orchestrator, verifier, pushing, limits or metadata.
+    /// Change a project's orchestrator, verifier, pushing, autonomy, limits or metadata.
     Update {
         /// The project (this session's own when omitted).
         project: Option<String>,
@@ -81,6 +87,9 @@ pub enum ProjectCmd {
         /// New metadata, a JSON object.
         #[arg(long)]
         metadata: Option<String>,
+        /// How far its agents go before they ask you: `ask`, `edits` or `own`.
+        #[arg(long, value_parser = autonomy)]
+        autonomy: Option<Autonomy>,
     },
     /// Tell a project's orchestrator something, as the person: the words reach it through its
     /// hooks, and wake it when it is idle.
@@ -105,10 +114,12 @@ pub enum ProjectCmd {
         /// Timeline cursor: the `next` of an earlier call; 0 for everything kept.
         #[arg(long)]
         since: Option<u64>,
-        /// Wait this many milliseconds for a change past `--since`.
-        #[arg(long, default_value_t = 0)]
-        timeout: u32,
     },
+}
+
+/// The autonomy level `--autonomy` names.
+fn autonomy(word: &str) -> Result<Autonomy, String> {
+    view::autonomy_named(word).ok_or_else(|| format!("{word} is not one of ask, edits, own"))
 }
 
 /// Which project and task: this session's own when omitted.
@@ -273,8 +284,7 @@ pub struct StartTask {
     /// A new task: what it is, in a line.
     #[arg(long, required_unless_present = "task")]
     title: Option<String>,
-    /// A new task: what its agent is told to do; its first prompt unless `--prompt` says
-    /// otherwise.
+    /// A new task: what its agent is told to do, as its first prompt.
     #[arg(long, default_value = "")]
     brief: String,
     /// A new task: what sort of work it is, in your words.
@@ -296,52 +306,15 @@ pub struct StartTask {
     /// omitted.
     #[arg(long)]
     worker: Option<String>,
-    /// Working directory on the worker; beside a clone of the project's repository, in a git
-    /// worktree of the task's own when it writes, when omitted.
-    #[arg(long)]
-    cwd: Option<String>,
-    /// The agent's first prompt; a new task's brief when omitted.
-    #[arg(long, conflicts_with = "command")]
-    prompt: Option<String>,
-    /// Run the words after `--` as the program, not as the agent's arguments.
-    #[arg(long)]
-    command: bool,
     /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
-    /// name. Each gets Slopty's tools and its role.
-    #[arg(long, conflicts_with = "command")]
-    agent: Option<String>,
-    /// The model, by the agent's own id.
-    #[arg(long, conflicts_with = "command")]
-    model: Option<String>,
-    /// An environment variable, `KEY=VALUE`; repeatable.
-    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
-    env: Vec<(String, String)>,
-    #[command(flatten)]
-    size: SizeArgs,
-    /// Start it though a task it depends on is not done yet.
+    /// name. Each gets Slopty's tools and its role, and the task's brief as its first prompt.
     #[arg(long)]
-    ignore_dependencies: bool,
-    /// Arguments for the agent, or with `--command` the program and its arguments.
-    #[arg(last = true)]
-    args: Vec<String>,
+    agent: Option<String>,
 }
 
 impl StartTask {
-    /// Which task it starts, and what runs for it.
-    fn which(self) -> (Option<String>, Which, LaunchSpec) {
-        let run = if self.command {
-            Runner::Command { argv: self.args }
-        } else {
-            ops::agent_runner(self.agent.as_deref(), self.prompt, self.model, self.args)
-        };
-        let launch = LaunchSpec {
-            pin: self.worker,
-            cwd: self.cwd.unwrap_or_default(),
-            run,
-            env: self.env,
-            size: self.size.size(),
-            ignore_dependencies: self.ignore_dependencies,
-        };
+    /// Which task it starts, and on which worker and agent.
+    fn which(self) -> (Option<String>, Which, (Option<String>, Option<String>)) {
         let which = match (self.task, self.title) {
             (Some(task), _) => Which::Made(task),
             (None, title) => Which::New(Box::new(NewTask {
@@ -354,7 +327,7 @@ impl StartTask {
                 metadata: self.metadata,
             })),
         };
-        (self.project, which, launch)
+        (self.project, which, (self.worker, self.agent))
     }
 }
 
@@ -377,6 +350,8 @@ pub async fn project(
             orchestrator,
             limits,
             metadata,
+            goal,
+            autonomy,
         } => {
             let spec = ProjectSpec {
                 project,
@@ -388,13 +363,23 @@ pub async fn project(
                 orchestrator,
                 limits: limits.change(),
                 metadata,
+                goal,
+                autonomy,
             };
             let status = ops::project_create(&mut res, spec, key).await?;
             print_status(&mut res, &status, json).await
         }
-        ProjectCmd::Update { project, orchestrator, verifier, push, limits, metadata } => {
+        ProjectCmd::Update {
+            project,
+            orchestrator,
+            verifier,
+            push,
+            limits,
+            metadata,
+            autonomy,
+        } => {
             let limits = limits.change();
-            let edit = ProjectEdit { orchestrator, verifier, push, limits, metadata };
+            let edit = ProjectEdit { orchestrator, verifier, push, limits, metadata, autonomy };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
         }
@@ -417,8 +402,8 @@ pub async fn project(
                 Ok(())
             }
         }
-        ProjectCmd::Status { project, since, timeout } => {
-            let status = ops::project_status(link, project.as_deref(), since, timeout).await?;
+        ProjectCmd::Status { project, since } => {
+            let status = ops::project_status(link, project.as_deref(), since).await?;
             print_status(&mut res, &status, json).await
         }
     }
@@ -446,8 +431,9 @@ pub async fn task(
     let mut res = Resolver::new(link);
     let task = match cmd {
         TaskCmd::Start(start) => {
-            let (project, which, launch) = start.which();
-            ops::task_start(&mut res, project.as_deref(), which, launch, key).await?
+            let (project, which, (worker, agent)) = start.which();
+            let on = (worker.as_deref(), agent.as_deref());
+            ops::task_start(&mut res, project.as_deref(), which, on, key).await?
         }
         TaskCmd::Update(update) => {
             let UpdateTask {

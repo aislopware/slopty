@@ -328,29 +328,6 @@ fn a_secondary_click_on_send_queues_the_message(cx: &mut TestAppContext) {
     );
 }
 
-/// An agent that compacts lists `/compact` even when it lists no such command, and sending
-/// it asks the agent to compact rather than saying the words.
-#[gpui::test]
-fn compact_is_a_command_when_the_agent_compacts(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = state();
-    state.meta.caps.push(Cap::named(Cap::COMPACT));
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
-    cx.run_until_parked();
-
-    let listed =
-        view.read_with(cx, |v, cx| v.commands(cx).into_iter().map(|c| c.name).collect::<Vec<_>>());
-    assert!(listed.iter().any(|c| c == "compact"), "{listed:?}");
-    cx.simulate_input("/compact");
-    cx.simulate_keystrokes("enter");
-    assert!(intents(&sent).is_empty(), "\u{21b5} on the menu writes the command");
-    cx.simulate_keystrokes("enter");
-    assert_eq!(intents(&sent), [Intent::Compact]);
-}
-
 /// `state` with a turn under way.
 fn working(mut state: ThreadState) -> ThreadState {
     state.status.phase = Phase::Working;
@@ -483,13 +460,12 @@ fn command_return_queues_and_option_up_edits_the_last_waiting(cx: &mut TestAppCo
     assert!(cx.debug_bounds("thread-editing").is_some(), "the composer says so");
 }
 
-/// A press on the meter opens its panel in the tray: the context, each window with its reset,
-/// and "Compact context" where the agent compacts through Slopty. No dollar figure is shown.
+/// A press on the meter opens its panel in the tray: the context and each window with its
+/// reset. No dollar figure is shown.
 #[gpui::test]
-fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
+fn the_meter_opens_its_panel_on_a_press(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
     let mut state = state();
-    state.meta.caps.push(Cap::named(Cap::COMPACT));
     state.meters.context_tokens = Some(50_000);
     state.meters.context_window = Some(200_000);
     state.meters.limits =
@@ -510,9 +486,6 @@ fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
     let words: Vec<_> = tree.iter().filter_map(|n| n.label.clone()).collect();
     assert!(!words.iter().any(|w| w.contains('$')), "{words:?}");
     assert!(words.iter().any(|w| w.contains("Five hour 42%")), "{words:?}");
-    let compact = cx.debug_bounds("thread-compact").expect("Compact context").center();
-    cx.simulate_click(compact, Modifiers::none());
-    assert_eq!(intents(&sent), [Intent::Compact]);
 }
 
 fn sent_message(id: &str, words: &str) -> Item {

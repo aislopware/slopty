@@ -444,6 +444,7 @@ mod tests {
             ask: Some(ask),
             choices: Vec::new(),
             quiet: false,
+            merges: None,
         };
         let note = note_of(&body);
         assert_eq!(note.id, session.to_string());
@@ -473,8 +474,13 @@ mod tests {
         let mut done = notice(NoticeKind::Finished, at, None);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
         done.title = " ".to_owned();
-        let note =
-            note_of(&PushBody { notice: done, ask: None, choices: Vec::new(), quiet: false });
+        let note = note_of(&PushBody {
+            notice: done,
+            ask: None,
+            choices: Vec::new(),
+            quiet: false,
+            merges: None,
+        });
         assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
             note.info,
@@ -493,6 +499,7 @@ mod tests {
             ask: None,
             choices: Vec::new(),
             quiet: false,
+            merges: None,
         });
         assert_eq!(note.id, format!("project-{project}-7"));
         assert_eq!(note.thread.as_deref(), Some("ladder"));
@@ -501,8 +508,13 @@ mod tests {
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
         let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile), None);
-        let note =
-            note_of(&PushBody { notice: program, ask: None, choices: Vec::new(), quiet: false });
+        let note = note_of(&PushBody {
+            notice: program,
+            ask: None,
+            choices: Vec::new(),
+            quiet: false,
+            merges: None,
+        });
         assert_eq!(note.id, session.to_string());
         assert_eq!(
             note.info,
@@ -534,6 +546,7 @@ mod tests {
             ask: Some(AskId("toolu_02".to_owned())),
             choices: choices.clone(),
             quiet: false,
+            merges: None,
         };
         let note = note_of(&body);
         assert_eq!(note.picks, choices);
@@ -567,6 +580,7 @@ mod tests {
             ask: None,
             choices: Vec::new(),
             quiet: false,
+            merges: None,
         };
         let bytes = slopty_proto::codec::encode_body(&body).unwrap();
         let sealed = slopty_push::seal::seal(&key.public(), &token, &bytes).unwrap();

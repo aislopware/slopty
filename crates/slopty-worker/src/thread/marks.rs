@@ -13,7 +13,9 @@ use slopty_proto::thread::{Action, ThreadState, TurnId};
 /// What `intent` does to a thread at `state`, at `now` on the worker's clock.
 ///
 /// Its outcome and the actions that carry it: a seen mark moves only up, and never past the
-/// thread's last turn; a draft past [`Draft::MAX_BYTES`] is refused, and empty words clear it.
+/// thread's last turn; a draft past [`Draft::MAX_BYTES`] is refused, and empty words clear it
+/// with an empty draft of their time, so a device that kept the old words sees them cleared
+/// later than it wrote them.
 /// Anything but a mark is refused, as no mark.
 #[must_use]
 pub fn act(state: &ThreadState, intent: &Intent, now: WallMs) -> (Outcome, Vec<Action>) {
@@ -34,12 +36,13 @@ pub fn act(state: &ThreadState, intent: &Intent, now: WallMs) -> (Outcome, Vec<A
             Vec::new(),
         ),
         Intent::Draft { text } if text.trim().is_empty() => {
-            let cleared = state.draft.is_some().then_some(Action::DraftSet(None));
+            let held = state.draft.as_ref().is_some_and(|d| !d.text.is_empty());
+            let cleared = held.then(|| Action::DraftSet(Draft { text: String::new(), at_ms: now }));
             (Outcome::Done, cleared.into_iter().collect())
         }
         Intent::Draft { text } => {
             let draft = Draft { text: text.clone(), at_ms: now };
-            (Outcome::Done, vec![Action::DraftSet(Some(draft))])
+            (Outcome::Done, vec![Action::DraftSet(draft)])
         }
         _ => (Outcome::Refused { reason: "not a mark of the person's".to_owned() }, Vec::new()),
     }
@@ -124,7 +127,8 @@ mod tests {
         assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
         assert_eq!(still.draft, Some(expected));
         let (_, cleared) = after(kept, &Intent::Draft { text: "  \n".to_owned() });
-        assert_eq!(cleared.draft, None);
+        let tombstone = Draft { text: String::new(), at_ms: WallMs::from_millis(7) };
+        assert_eq!(cleared.draft, Some(tombstone), "cleared, with the time it was");
         assert_eq!(act(&cleared, &Intent::Draft { text: String::new() }, WallMs::ZERO).1, []);
     }
 }

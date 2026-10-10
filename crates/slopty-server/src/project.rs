@@ -21,9 +21,9 @@ use slopty_proto::orchestration::{
     ErrorCode, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef, Verb,
 };
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits,
-    LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent,
-    NativeChange, Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Project, ProjectStatus,
+    ARTIFACTS_MAX, AgentReport, Assignment, Autonomy, BRIEF_MAX, DEPENDS_MAX, GiveBacks, KIND_MAX,
+    Limits, LimitsChange, Live, METADATA_MAX, Merge, Moment, NOTE_MAX, Native, NativeAgent,
+    NativeChange, Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Progress, Project, ProjectStatus,
     ProjectUpdate, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch,
     TASKS_MAX, TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES,
     TITLE_MAX, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry,
@@ -463,7 +463,8 @@ pub(crate) struct Starting {
 pub(crate) struct NewProject {
     pub id: ProjectId,
     pub title: String,
-    pub members: Vec<Matcher>,
+    pub goal: Option<String>,
+    pub autonomy: Autonomy,
     pub repo: String,
     pub target: String,
     pub verifier: Option<String>,
@@ -476,7 +477,7 @@ pub(crate) struct NewProject {
 /// A change to a project's own fields.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectChange {
-    pub members: Option<Vec<Matcher>>,
+    pub autonomy: Option<Autonomy>,
     pub orchestrator: Option<TermRef>,
     pub verifier: Option<String>,
     pub push: Option<bool>,
@@ -876,29 +877,13 @@ fn within(name: &str, text: Option<&str>, max: usize) -> Result<(), Refused> {
 }
 
 /// A verifier command as it is kept, within [`SUMMARY_MAX`].
-/// A project's members, each value trimmed: at most [`Project::MEMBERS_MAX`], each within
-/// [`Project::member_fits`], none named twice.
-fn members(members: Vec<Matcher>) -> Result<Vec<Matcher>, Refused> {
-    if members.len() > Project::MEMBERS_MAX {
-        return Err(invalid(format!("a project names at most {} members", Project::MEMBERS_MAX)));
+/// A goal as it is kept: trimmed, none when empty, within [`BRIEF_MAX`] as a task's brief is.
+fn goal(text: Option<String>) -> Result<Option<String>, Refused> {
+    let text = text.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
+    match text {
+        Some(t) if t.len() > BRIEF_MAX => Err(over_bound("a goal's bytes", t.len(), BRIEF_MAX)),
+        text => Ok(text),
     }
-    let mut kept: Vec<Matcher> = Vec::with_capacity(members.len());
-    for member in members {
-        let member: Matcher =
-            member.into_iter().map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned())).collect();
-        if !Project::member_fits(&member) {
-            return Err(invalid(format!(
-                "a member names 1 to {} facts, each a key with no space and a value of at most                  {} bytes",
-                Project::MATCHER_KEYS_MAX,
-                Project::MATCHER_VALUE_MAX
-            )));
-        }
-        if kept.contains(&member) {
-            return Err(invalid("a member is named twice"));
-        }
-        kept.push(member);
-    }
-    Ok(kept)
 }
 
 fn verifier(text: Option<String>) -> Result<Option<String>, Refused> {
@@ -1174,7 +1159,9 @@ impl Projects {
             orchestrator_spent: Spent::default(),
             id: new.id.clone(),
             title,
-            members: members(new.members)?,
+            goal: goal(new.goal)?,
+            autonomy: new.autonomy,
+            progress: None,
             repo: new.repo.trim().to_owned(),
             repo_id: None,
             target: new.target.trim().to_owned(),
@@ -1197,7 +1184,7 @@ impl Projects {
         Ok((status, updates))
     }
 
-    /// Change a project's members, orchestrator, verifier, limits or metadata.
+    /// Change a project's orchestrator, verifier, autonomy, limits or metadata.
     pub(crate) fn set(
         &mut self,
         id: &ProjectId,
@@ -1209,12 +1196,11 @@ impl Projects {
         let limits = limited(record.project.limits, change.limits)?;
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let new_verifier = change.verifier.map(|v| verifier(Some(v))).transpose()?;
-        let new_members = change.members.map(members).transpose()?;
         let mut updates = Vec::new();
         let mut quiet = false;
-        if let Some(members) = new_members {
-            quiet |= record.project.members != members;
-            record.project.members = members;
+        if let Some(autonomy) = change.autonomy {
+            quiet |= record.project.autonomy != autonomy;
+            record.project.autonomy = autonomy;
         }
         if let Some(verifier) = new_verifier {
             quiet |= record.project.verifier != verifier;
@@ -1242,6 +1228,30 @@ impl Projects {
         } else if quiet {
             updates.push(record.record_update(None));
         }
+        let status = self.status(id, None, running)?;
+        Ok((status, updates))
+    }
+
+    /// Keep where the orchestrator says the goal stands, on the project and its timeline.
+    pub(crate) fn progress(
+        &mut self,
+        id: &ProjectId,
+        (summary, next, done): (String, Option<String>, bool),
+        running: &Running<'_>,
+        now: WallMs,
+    ) -> Changed<ProjectStatus> {
+        let record = self.record(id)?;
+        let summary = summary.trim().to_owned();
+        let next = next.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+        if summary.is_empty() {
+            return Err(invalid("say where the goal stands in `summary`"));
+        }
+        within("a summary", Some(&summary), Progress::TEXT_MAX)?;
+        within("a next step", next.as_deref(), Progress::TEXT_MAX)?;
+        let progress = Progress { summary, next, done, at_ms: now };
+        record.project.progress = Some(progress.clone());
+        let entry = record.log(None, Moment::Update(progress), now);
+        let updates = vec![record.record_update(Some(entry))];
         let status = self.status(id, None, running)?;
         Ok((status, updates))
     }
@@ -1550,8 +1560,7 @@ impl Projects {
             return Err(refuse(
                 ErrorCode::Conflict,
                 format!(
-                    "task {task} depends on task {}, which is {:?}; start it once that is merged, \
-                     or say ignore_dependencies",
+                    "task {task} depends on task {}, which is {:?}; start it once that is merged",
                     dep.id, dep.state
                 ),
             ));

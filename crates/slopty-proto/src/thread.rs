@@ -239,19 +239,13 @@ pub struct Cap(pub String);
 impl Cap {
     /// Requests are answered through Slopty ([`wire::Intent::Answer`]).
     pub const APPROVALS: &'static str = "approvals";
-    /// [`wire::Intent::Compact`].
-    pub const COMPACT: &'static str = "compact";
     /// [`wire::Intent::Continue`]: a new thread, on any agent here, that goes on from this one
     /// with a portable account of it as its first message, held for the person to send.
     pub const CONTINUE: &'static str = "continue";
     /// [`wire::Intent::Fork`]: a new thread branched off this one.
     pub const FORK: &'static str = "fork";
-    /// The agent's own TUI takes the session over by a handoff.
-    pub const HANDOFF: &'static str = "handoff";
     /// [`wire::Intent::Interrupt`].
     pub const INTERRUPT: &'static str = "interrupt";
-    /// Text streams as the model writes it ([`Action::Append`]).
-    pub const LIVE_TEXT: &'static str = "live-text";
     /// The agent's own TUI is live beside the face.
     pub const LIVE_TUI: &'static str = "live-tui";
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
@@ -260,9 +254,6 @@ impl Cap {
     /// [`wire::Intent::Review`]: the agent reviews a change through its own door (Claude Code's
     /// `/code-review`, Codex's `review/start`).
     pub const REVIEW: &'static str = "review";
-    /// [`wire::Intent::Rewind`]: the agent branches its session before an earlier turn through
-    /// its own door.
-    pub const REWIND: &'static str = "rewind";
     /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
     /// the message until its moment, or the person's word for a draft.
     pub const SCHEDULE: &'static str = "schedule";
@@ -1279,9 +1270,9 @@ pub enum Action {
     /// The person saw the thread's turns through this one ([`wire::Intent::Seen`]); a mark
     /// below the one held changes nothing.
     Seen(TurnId),
-    /// What the person was writing to it and has not sent ([`wire::Intent::Draft`]); `None`
-    /// once it went or was cleared.
-    DraftSet(Option<wire::Draft>),
+    /// What the person was writing to it and has not sent ([`wire::Intent::Draft`]); empty
+    /// words once it went or was cleared, kept with when, as a tombstone.
+    DraftSet(wire::Draft),
 }
 
 /// A window or display on the thread's worker that its agent drives.

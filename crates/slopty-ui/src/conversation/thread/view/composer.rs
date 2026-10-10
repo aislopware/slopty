@@ -15,7 +15,6 @@ use gpui::{
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
-use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{BackgroundTask, Cap, Delivery};
 use slopty_theme::{Rgb, Theme};
 
@@ -111,89 +110,12 @@ pub(super) fn sentence(mode: &str) -> String {
 }
 
 impl ThreadView {
-    /// Who holds the session, when the thread can move between Slopty and the agent's own
-    /// TUI ([`Cap::HANDOFF`]): `Some(true)` while the TUI does, `Some(false)` while Slopty
-    /// drives it.
-    pub(super) fn tui_holds(&self, cx: &App) -> Option<bool> {
-        let meta = &self.state(cx)?.meta;
-        meta.can(Cap::HANDOFF).then_some(meta.terminal.is_some())
-    }
-
-    /// Whether this client's `intent` is on its way and not yet answered.
-    pub(super) fn moving(&self, cx: &App, intent: &Intent) -> bool {
-        self.hub
-            .read(cx)
-            .threads()
-            .unshown(self.thread)
-            .any(|s| s.outcome.is_none() && s.intent == *intent)
-    }
-
     /// What the thread changed, `(added, removed)` lines over the thread, as the worker's
     /// table counts them.
     fn changed(&self, cx: &App) -> (u32, u32) {
         let threads = self.hub.read(cx).threads();
         let changed = threads.rows().rows.get(&self.thread).map(|r| r.changed).unwrap_or_default();
         (changed.added, changed.removed)
-    }
-
-    /// In the composer's place while the agent's own TUI holds the session: where it is, and
-    /// the way to take it back once it rests.
-    fn held_strip(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let name = self.state(cx).map_or("the agent", |st| agent_name(&st.meta.agent));
-        let taking = self.moving(cx, &Intent::TakeBack);
-        div()
-            .id("thread-held")
-            .debug_selector(|| "thread-held".to_owned())
-            .role(Role::Status)
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.sm))
-            .map(|el| self.shell(el, capped, false))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text_secondary))
-            .child(self.icon(Symbol::Terminal, s.text_muted))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .child(SharedString::from(format!("In {name}'s own terminal now"))),
-            )
-            .child(if taking {
-                div()
-                    .flex_none()
-                    .text_color(hsla(s.text_muted))
-                    .child("Taking it back once it rests")
-                    .into_any_element()
-            } else {
-                self.button("thread-take-back", "Take back", ButtonKind::Secondary)
-                    .on_click(cx.listener(|this, _ev, _w, cx| {
-                        let _id = this.intent(Intent::TakeBack, cx);
-                    }))
-                    .into_any_element()
-            })
-            .into_any_element()
-    }
-
-    /// The composer's way to hand the session to the agent's own TUI, while Slopty drives it.
-    fn handoff_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if self.tui_holds(cx) != Some(false) {
-            return None;
-        }
-        if self.moving(cx, &Intent::Handoff) {
-            return Some(div().child("Handing over once it rests").into_any_element());
-        }
-        Some(
-            self.button("thread-handoff", HANDOFF, ButtonKind::Ghost)
-                .on_click(cx.listener(|this, _ev, _w, cx| {
-                    let _id = this.intent(Intent::Handoff, cx);
-                }))
-                .into_any_element(),
-        )
     }
 
     /// What the thread changed, in the foot, a request on show or not: the edits are the
@@ -747,18 +669,14 @@ impl ThreadView {
         self.width > 0.0 && self.room().is_narrow() && !self.heroed
     }
 
-    /// The composer card. While the agent's own TUI holds the session, where it is instead.
-    /// `capped`: the tray stands on it as its head, so its top corners are square and its top
-    /// edge is the quieter hairline between the two.
+    /// The composer card. `capped`: the tray stands on it as its head, so its top corners are
+    /// square and its top edge is the quieter hairline between the two.
     pub(super) fn composer_box(
         &self,
         capped: bool,
         focused: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
-        if self.tui_holds(cx) == Some(true) {
-            return self.held_strip(capped, cx);
-        }
         if let Some(strip) = self.exited_strip(capped, cx) {
             return strip;
         }
@@ -850,7 +768,6 @@ impl ThreadView {
         let row = item(row, FOOT_SCREEN, self.screen_chip(cx));
         let meter = (!self.on_ledge(cx)).then(|| self.meter(cx)).flatten();
         let row = item(row.end(), FOOT_METER, meter);
-        let row = item(row, FOOT_HANDOFF, self.handoff_button(cx));
         let row = item(row, FOOT_INTERRUPT, self.interrupt_send(cx));
         let row = item(row, FOOT_SEND, Some(self.send_button(cx)));
         row.into_any_element()
@@ -882,8 +799,6 @@ const FOOT_MODE: (&str, kit::Priority) = ("mode", kit::Priority::MEDIUM);
 const FOOT_TASKS: (&str, kit::Priority) = ("tasks", kit::Priority::MEDIUM);
 /// The agent's screen.
 const FOOT_SCREEN: (&str, kit::Priority) = ("screen", kit::Priority(96));
-/// "Continue in the terminal".
-const FOOT_HANDOFF: (&str, kit::Priority) = ("handoff", kit::Priority(48));
 /// The send.
 const FOOT_SEND: (&str, kit::Priority) = ("send", kit::Priority::ESSENTIAL);
 
@@ -1150,14 +1065,6 @@ impl ThreadView {
                         });
                     })
                 }),
-                k if k == FOOT_HANDOFF.0 => {
-                    Some(kit::MenuItem::new("handoff", HANDOFF, move |_w, cx| {
-                        let _gone = to.update(cx, |this, cx| {
-                            this.add_open = false;
-                            let _id = this.intent(Intent::Handoff, cx);
-                        });
-                    }))
-                }
                 k if k == FOOT_INTERRUPT.0 => {
                     Some(kit::MenuItem::new("interrupt", INTERRUPT_SEND, move |window, cx| {
                         let _gone = to.update(cx, |this, cx| {
@@ -1201,9 +1108,6 @@ const CONTEXT: &str = "Context";
 
 /// The "+" menu's row that opens the commit sheet on the repository the thread works in.
 const COMMIT: &str = "Commit\u{2026}";
-
-/// The words of the way to hand the session to the agent's own TUI.
-const HANDOFF: &str = "Continue in the terminal";
 
 /// The words of the way to stop the turn and send the draft.
 const INTERRUPT_SEND: &str = "Interrupt and send";

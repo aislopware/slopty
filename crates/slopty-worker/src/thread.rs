@@ -36,7 +36,6 @@ pub mod offers;
 pub mod pi;
 pub mod pulls;
 pub mod review;
-pub mod rewind;
 pub mod schedule;
 pub mod screens;
 pub mod search;

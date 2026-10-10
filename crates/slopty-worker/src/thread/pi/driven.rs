@@ -13,7 +13,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{Ended, Launcher, Next, SHUTDOWN, ThreadAsk, driven_of};
+use super::{Ended, Launcher, SHUTDOWN, ThreadAsk, driven_of};
 use crate::thread::Host;
 
 /// The lines of pi's stderr kept, to say why it ended when it failed.
@@ -102,8 +102,6 @@ pub(super) struct Task {
     held: Option<Vec<ThreadAsk>>,
     /// Why the thread cannot go on with this pi, once it cannot.
     lost: Option<String>,
-    /// The person handed the session to pi's TUI: this pi ends once it rests.
-    handoff: bool,
 }
 
 impl Task {
@@ -118,13 +116,12 @@ impl Task {
             expect: HashMap::new(),
             held: None,
             lost: None,
-            handoff: false,
         }
     }
 
-    /// Whether this pi is done with: lost, or handed off and at rest.
+    /// Whether this pi is done with: lost.
     const fn done(&self) -> bool {
-        self.lost.is_some() || (self.handoff && self.held.is_none() && self.driven.rests())
+        self.lost.is_some()
     }
 }
 
@@ -201,12 +198,6 @@ impl Task {
         while let Ok(ask) = asks.try_recv() {
             left.push(ask);
         }
-        // Handed off: the TUI takes the session from here, and the thread is read from it.
-        if self.handoff && !worker_gone && self.lost.is_none() {
-            stderr.abort();
-            let _gone = ended.send((self.thread, left, Next::Tui));
-            return;
-        }
         let failed = !worker_gone && status.is_some_and(|s| !s.success());
         let why = if let Some(lost) = self.lost.take() {
             stderr.abort();
@@ -222,7 +213,7 @@ impl Task {
         };
         let exited = self.driven.exited(why.as_deref(), WallMs::now());
         self.host.apply(self.thread, exited);
-        let _gone = ended.send((self.thread, left, Next::Rest));
+        let _gone = ended.send((self.thread, left));
     }
 
     fn apply(&self, actions: Vec<Action>) {
@@ -334,12 +325,6 @@ impl Task {
             ThreadAsk::SetEffort { effort } => {
                 self.ask_for(Driven::set_effort(&effort), None).await;
             }
-            ThreadAsk::Compact => {
-                self.ask_for(Command::Compact { custom_instructions: None }, None).await;
-            }
-            ThreadAsk::Handoff => self.handoff = true,
-            // Slopty holds the session already.
-            ThreadAsk::TakeBack => {}
         }
     }
 

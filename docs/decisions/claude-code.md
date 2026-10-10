@@ -1657,14 +1657,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     argument without opening its menu, so nothing is picked in the TUI. It only works while
     the agent is idle; mid-turn its hint says "After this turn". The permission mode stays
     text, because it only changes through ⇧Tab or a menu.
-  - **Rewind hands over to the TUI.** A prompt's hover row has "Rewind…", which shows the TUI
-    and types `/rewind` and Enter there. The person then picks the point in Claude Code's own
-    menu, and the face shows the `Rewound` rule afterwards.
-    - Ruling: a bare slash command typed because the person clicked is not driving the agent.
-      It is exactly what they would have typed, and every choice after it is made in Claude
-      Code's own UI. What stays forbidden is typing into a menu: its digits, its arrows, its
-      picks.
-    - It only works while the agent is idle, as Compact does.
   - **Recall.** ↑ in an empty composer brings back the prompt sent before it, and ↓ goes
     forward to the empty draft again. A recalled prompt that is edited becomes the person's
     own draft, and ↑ then moves the caret.
@@ -1684,7 +1676,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - the worker: `a_mention_ranks_names_first_and_skips_the_ignored`;
     - the face in a window (`view/tests/composing.rs`): the command menu, a mention's search
       and pick, a question answered by digit, click and Enter, a plan kept then approved,
-      mention chips, recall, the model picker, rewind and the unreachable worker;
+      mention chips, recall, the model picker and the unreachable worker;
     - the pure parts: `menu` (tokens, ranking, picks, mentions), `question` (one question at a
       time) and `approval` (the settled lines).
 

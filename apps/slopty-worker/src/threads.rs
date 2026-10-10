@@ -343,7 +343,7 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let settings = slopty_settings::path_in(&asks.data);
     let own: acp::Own =
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
-    drop(pi::spawn(threads.host.clone(), asks.data, None, terminals, asks.pi));
+    drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
     // A scheduled message goes as the person's own, the way a client's does.
     let (sending, at) = (threads.clone(), daemon.clone());
@@ -594,15 +594,6 @@ impl Following {
             ThreadRequest::Intent { id, thread, intent: Intent::KeepAside } => {
                 let outcome = keep_aside(&threads, thread, id);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
-            }
-            // An edit from a turn branches the thread and may put files back: on a task of its own.
-            ThreadRequest::Intent { id, thread, intent: Intent::Rewind { turn, files } } => {
-                tracing::info!(client = %at.client, %id, %thread, turn = turn.0, files, "rewind");
-                let out = at.out.clone();
-                at.tasks.spawn(async move {
-                    let outcome = rewind(&threads, thread, id, turn, files).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
             }
             // Going on in a new thread starts one: on a task of its own.
             ThreadRequest::Intent { id, thread, intent: Intent::Continue { agent } } => {
@@ -868,29 +859,6 @@ fn keep_aside(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
         threads.host.aside(thread, None);
     }
     threads.host.intent(thread, id, |_| (Outcome::Done, Vec::new())).unwrap_or(Outcome::Done)
-}
-
-/// Edit `thread` from turn `turn` for intent `id`, once, its files going back too with `files`
-/// ([`slopty_worker::thread::rewind`]): only Codex branches a session before a turn, and every
-/// other agent is refused in words.
-async fn rewind(
-    threads: &Threads,
-    thread: ThreadId,
-    id: IntentId,
-    turn: TurnId,
-    files: bool,
-) -> Outcome {
-    let shared = threads.host.state(thread).is_some_and(|(state, _)| codex::is_shared(&state));
-    let branch = async || {
-        if shared {
-            threads.codex.rewind(thread, id, turn).await
-        } else {
-            refused("Only Codex goes back to before a turn through its own door".to_owned())
-        }
-    };
-    let (host, snapshots) = (&threads.host, &threads.snapshots);
-    slopty_worker::thread::rewind::rewind(host, snapshots, (thread, id), (turn, files), branch)
-        .await
 }
 
 /// Who answers for a client: Slopty, on its behalf.

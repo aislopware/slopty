@@ -1,19 +1,18 @@
-//! The thread's buttons on the keyboard: Review, Take back, Compact, Branch from here and
-//! Resume, each an action the palette lists and a key can be bound to.
+//! The thread's buttons on the keyboard: Review, Branch from here and Resume, each an action
+//! the palette lists and a key can be bound to.
 //!
 //! The view answers an action only while its button would show, so the palette never offers a
 //! line that does nothing.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{Context, Div, InteractiveElement as _, Stateful};
-use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{ItemBody, ItemId, TurnId};
 
 use super::exited::Gone;
 use super::{ThreadView, ThreadViewEvent};
 use crate::conversation::thread::activity::Activity;
 use crate::conversation::thread::find;
-use crate::conversation::{BranchFromHere, CompactContext, ResumeAgent, ReviewChanges, TakeBack};
+use crate::conversation::{BranchFromHere, ResumeAgent, ReviewChanges};
 
 impl ThreadView {
     /// `el` answering each of the thread's keyed buttons that would show now.
@@ -22,16 +21,6 @@ impl ThreadView {
         el.when(self.reviewable(cx), |el| {
             el.on_action(cx.listener(move |_this, _: &ReviewChanges, _w, cx| {
                 cx.emit(ThreadViewEvent::Review { thread });
-            }))
-        })
-        .when(self.takes_back(cx), |el| {
-            el.on_action(cx.listener(|this, _: &TakeBack, _w, cx| {
-                let _id = this.intent(Intent::TakeBack, cx);
-            }))
-        })
-        .when(self.state(cx).is_some_and(super::composing::compacts), |el| {
-            el.on_action(cx.listener(|this, _: &CompactContext, _w, cx| {
-                let _id = this.intent(Intent::Compact, cx);
             }))
         })
         .when(self.branches(cx) && self.last_message(cx).is_some(), |el| {
@@ -51,11 +40,6 @@ impl ThreadView {
         self.state(cx).is_some_and(|state| {
             !Activity::of(self.hub.read(cx).threads(), self.thread, state).edited.is_empty()
         })
-    }
-
-    /// The agent's own TUI holds the session and no take-back is on its way.
-    fn takes_back(&self, cx: &Context<Self>) -> bool {
-        self.tui_holds(cx) == Some(true) && !self.moving(cx, &Intent::TakeBack)
     }
 
     /// How the exited agent is taken up again, while the exited line offers "Resume".

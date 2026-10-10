@@ -14,9 +14,9 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
-    ASKING_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
-    PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV,
-    Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
+    ASKING_ENV, Autonomy, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX,
+    PERMISSION_MODE_FLAG, PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, SAFE_MODES,
+    TASK_ENV, Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -209,6 +209,7 @@ pub(super) fn agent_scope(
         verb,
         Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
+            | Verb::ProjectProgress { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
@@ -256,6 +257,15 @@ pub(super) fn agent_scope(
             }
             if let Some(term) = orchestrator {
                 named(project, *term)?;
+            }
+        }
+        Verb::ProjectProgress { project, .. } => {
+            in_own(project)?;
+            if task_of.is_some() {
+                return refuse(
+                    "only the project's orchestrator says where its goal stands; say where your \
+                     task stands with task_update or task_report",
+                );
             }
         }
         Verb::ProjectSet { project, orchestrator, .. } => {
@@ -329,20 +339,6 @@ pub(super) fn keep(state: &mut State, keep: Keep) {
     }
 }
 
-/// What in `args` would loosen the permissions of `agent` run as a thread. Claude Code's and
-/// Codex's are judged as their own starts' are. The server knows no other agent's flags (pi's,
-/// an ACP agent's), so without the person's leave such an agent takes none, and the first is
-/// named.
-fn agent_loosening(agent: &AgentId, args: &[String]) -> Option<String> {
-    if agent.is(AgentId::CLAUDE_CODE) {
-        loosening(args)
-    } else if agent.is(AgentId::CODEX) {
-        codex::loosening(args)
-    } else {
-        args.first().cloned()
-    }
-}
-
 /// The first thing in `args`, Claude Code's own arguments, that loosens its permissions
 /// ([`slopty_agent::loosening::args`]). The server reads no worker's disk and adds none of
 /// Slopty's own flags itself, so a settings file, a hook or a tools server an agent names
@@ -378,6 +374,15 @@ const fn names_push(verb: &Verb) -> bool {
     match verb {
         Verb::ProjectCreate { push, .. } => *push,
         Verb::ProjectSet { push, .. } => push.is_some(),
+        _ => false,
+    }
+}
+
+/// Whether `verb` sets how far a project's agents go before they ask: the person's alone.
+const fn names_autonomy(verb: &Verb) -> bool {
+    match verb {
+        Verb::ProjectCreate { autonomy, .. } => !matches!(autonomy, Autonomy::Ask),
+        Verb::ProjectSet { autonomy, .. } => autonomy.is_some(),
         _ => false,
     }
 }
@@ -744,9 +749,9 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
             ""
         };
         lines.push(format!(
-            "- Its repository is {key} on every worker; {on}. A task started with no cwd goes \
-             beside a clone, in a git worktree of its own when its agent writes.{cloned} A \
-             worker's `repos` fact names where its clones are."
+            "- Its repository is {key} on every worker; {on}. A task goes beside a clone, in a \
+             git worktree of its own when its agent writes.{cloned} A worker's `repos` fact \
+             names where its clones are."
         ));
         lines.push(format!(
             "- When a task done on another machine reports its branch, the server fetches it \
@@ -963,6 +968,13 @@ impl Hub {
                  person sets it",
             );
         }
+        if caller == Caller::Agent && names_autonomy(verb) {
+            return error(
+                ErrorCode::Forbidden,
+                "how far a project's agents go before they ask is the person's to say, so only \
+                 the person sets its autonomy",
+            );
+        }
         if caller == Caller::Agent && names_review_limit(verb) {
             return error(
                 ErrorCode::Forbidden,
@@ -991,7 +1003,8 @@ impl Hub {
             Verb::ProjectCreate {
                 project,
                 title,
-                members,
+                goal,
+                autonomy,
                 repo,
                 target,
                 verifier,
@@ -1003,7 +1016,8 @@ impl Hub {
                 let new = NewProject {
                     id: project,
                     title,
-                    members,
+                    goal,
+                    autonomy,
                     repo,
                     target,
                     verifier,
@@ -1017,7 +1031,7 @@ impl Hub {
             }),
             Verb::ProjectSet {
                 project,
-                members,
+                autonomy,
                 orchestrator,
                 verifier,
                 push,
@@ -1026,7 +1040,7 @@ impl Hub {
             } => known_term(state, orchestrator).and_then(|()| {
                 let before = state.projects.status(&project, None, &running).ok();
                 let change =
-                    ProjectChange { members, orchestrator, verifier, push, limits, metadata };
+                    ProjectChange { autonomy, orchestrator, verifier, push, limits, metadata };
                 let set = state.projects.set(&project, change, &running, now)?;
                 let was = before.and_then(|b| b.project.orchestrator);
                 if orchestrator.is_some() && set.0.project.orchestrator != was {
@@ -1034,6 +1048,10 @@ impl Hub {
                 }
                 Ok((status(set.0), set.1))
             }),
+            Verb::ProjectProgress { project, summary, next, done } => state
+                .projects
+                .progress(&project, (summary, next, done), &running, now)
+                .map(|(s, u)| (status(s), u)),
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
@@ -1350,9 +1368,9 @@ impl Hub {
         Ok((id, term, allowed))
     }
 
-    /// Open a terminal under an id the hub chooses; one whose command is `claude` with flags
-    /// that loosen its permissions is refused. One an agent opens is the agent's: the CLI in it
-    /// speaks for an agent.
+    /// Open a terminal under an id the hub chooses; one whose command is `claude` or `codex`
+    /// with flags that loosen its permissions is refused. One an agent opens is the agent's: the
+    /// CLI in it speaks for an agent.
     pub(super) async fn open_terminal(
         &self,
         caller: Caller,
@@ -1368,9 +1386,11 @@ impl Hub {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
         let allowed = allowance(&self.inner.state.lock(), caller, from, None);
-        if let Some(args) = claude_args(&command)
-            && let Some(flag) = loosening(&args).filter(|_| !allowed)
-        {
+        let flag = claude_args(&command)
+            .as_deref()
+            .and_then(loosening)
+            .or_else(|| codex::args_of(&command).and_then(codex::loosening));
+        if let Some(flag) = flag.filter(|_| !allowed) {
             return loosened(&flag, None);
         }
         // An agent's terminal is held to asking: a `claude` typed there is locked to it as one
@@ -1497,9 +1517,10 @@ impl Hub {
         key: Option<IdempotencyKey>,
         project: ProjectId,
         task: TaskId,
-        launch: TaskLaunch,
+        launch: Launch,
     ) -> Outcome {
-        let verb = Verb::TaskSpawn { project: project.clone(), task, launch: launch.clone() };
+        let asked = TaskLaunch { pin: launch.pin, agent: launch.agent.clone() };
+        let verb = Verb::TaskSpawn { project: project.clone(), task, launch: asked };
         if let Some(key) = &key
             && let Some(answer) = keyed(&mut self.inner.state.lock(), caller, key, &verb)
         {
@@ -1606,34 +1627,35 @@ impl Hub {
             self.projects_moved(&mut state, updates);
             drop(state);
         }
-        let launch = TaskLaunch {
+        let launch = Launch {
             pin: earlier.worker,
             cwd: earlier.cwd.unwrap_or_default(),
-            run: runner_for(agent, restart_prompt(&earlier.brief, earlier.thread)),
-            env: Vec::new(),
-            size: None,
+            prompt: restart_prompt(&earlier.brief, earlier.thread),
+            agent,
             ignore_dependencies: earlier.worker.is_some(),
         };
         self.task_spawn(caller, key, project, task, launch).await
     }
 
-    /// Refused when `launch` would loosen its agent's permissions and the person does not let
-    /// this project's agents.
-    fn loosens(state: &State, project: &ProjectId, launch: &TaskLaunch) -> Result<(), Outcome> {
-        let bounds = state.projects.policy().bounds_for(Some(project));
-        if bounds.permission_flags {
-            return Ok(());
+    /// What a start the person or the orchestrator asks for runs ([`Verb::TaskSpawn`]): the
+    /// agent named on the worker named, beside a clone of the project's repository, told the
+    /// task's brief first.
+    pub(super) fn launch_for(
+        &self,
+        project: &ProjectId,
+        task: TaskId,
+        asked: TaskLaunch,
+    ) -> Launch {
+        let state = self.inner.state.lock();
+        let brief = state.projects.task(project, task).ok().map(|t| t.brief.trim().to_owned());
+        drop(state);
+        Launch {
+            pin: asked.pin,
+            cwd: String::new(),
+            agent: asked.agent,
+            prompt: brief.filter(|b| !b.is_empty()),
+            ignore_dependencies: false,
         }
-        let flag = match &launch.run {
-            Runner::Claude { args, .. } => loosening(args),
-            Runner::Command { argv } => claude_args(argv)
-                .as_deref()
-                .and_then(loosening)
-                .or_else(|| codex::args_of(argv).and_then(codex::loosening)),
-            Runner::Codex { args, .. } => codex::loosening(args),
-            Runner::Agent { agent, args, .. } => agent_loosening(agent, args),
-        };
-        flag.map_or(Ok(()), |flag| Err(loosened(&flag, Some(project))))
     }
 
     /// What a start of `task` asks: the worker the start or the task names, one with a clone
@@ -1642,13 +1664,13 @@ impl Hub {
         state: &State,
         project: &ProjectId,
         task: TaskId,
-        launch: &TaskLaunch,
+        launch: &Launch,
     ) -> Result<Wanted, Outcome> {
         let pin = launch.pin.or(state.projects.task(project, task)?.pin);
         let repo = state.projects.project(project)?.repo_id.as_ref();
         let clone =
             launch.cwd.trim().is_empty() && repo.is_some_and(|id| id.keys().next().is_some());
-        Ok(Wanted { pin, agent: agent_of(&launch.run), clone })
+        Ok(Wanted { pin, agent: Some(installed(&launch.agent)), clone })
     }
 
     /// Everything a start checks before it is placed, read together: what it asks of its
@@ -1657,10 +1679,9 @@ impl Hub {
         state: &mut State,
         project: &ProjectId,
         task: TaskId,
-        launch: &TaskLaunch,
+        launch: &Launch,
     ) -> Result<(Wanted, bool), Outcome> {
         let bounds = state.projects.policy().bounds_for(Some(project));
-        Self::loosens(state, project, launch)?;
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         state.projects.may_start(project, task, launch.ignore_dependencies, &running)?;
@@ -1674,12 +1695,11 @@ impl Hub {
     fn reserve(
         state: &mut State,
         (project, task): (&ProjectId, TaskId),
-        launch: &TaskLaunch,
+        launch: &Launch,
         worker: WorkerId,
     ) -> Result<(u64, TermRef), Outcome> {
         Self::may_start(state, project, task, launch)?;
-        let agent = !matches!(launch.run, Runner::Command { .. });
-        Ok(Self::place(state, worker, Some((project.clone(), task)), agent))
+        Ok(Self::place(state, worker, Some((project.clone(), task)), true))
     }
 
     /// Put the terminal a start opened on its task, and push the change.
@@ -1706,7 +1726,7 @@ impl Hub {
     fn clone_needed(
         &self,
         project: &ProjectId,
-        launch: &TaskLaunch,
+        launch: &Launch,
         worker: WorkerId,
     ) -> Option<String> {
         if !launch.cwd.trim().is_empty() {
@@ -1725,7 +1745,7 @@ impl Hub {
         key: Option<IdempotencyKey>,
         project: &ProjectId,
         task: TaskId,
-        launch: TaskLaunch,
+        launch: Launch,
     ) -> Outcome {
         let chosen = {
             let mut state = self.inner.state.lock();
@@ -1741,13 +1761,13 @@ impl Hub {
                     placement::choose(&candidates, &wanted).map_err(|why| unplaced(&why))?;
                 let beside = candidates.iter().any(|c| c.worker == worker && c.clone);
                 let repo = state.projects.project(project)?.repo_id.as_ref();
-                // Named or chosen, a worker with no directory given gets a clone or has one:
-                // a task's agent started in the worker's home would work on nothing.
+                // Named or chosen, a worker a new start goes to gets a clone or has one: a
+                // task's agent started in the worker's home would work on nothing.
                 match repo.filter(|id| wanted.clone && !beside && id.url.is_none()) {
                     Some(id) => Err(unplaced(&format!(
-                        "with no cwd it goes beside a clone of {}, the worker it would go to has \
-                         none, and no address to clone it from is known: clone it on a worker, \
-                         pin the task to one that has it, or name a cwd",
+                        "it goes beside a clone of {}, the worker it would go to has none, and \
+                         no address to clone it from is known: clone it on a worker, or pin the \
+                         task to one that has it",
                         id.keys().next().unwrap_or_default()
                     ))),
                     None => Ok(worker),
@@ -1773,31 +1793,22 @@ impl Hub {
                     (state.projects.project(project)?, state.projects.task(project, task)?);
                 let clone = launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
                 let at = clone.flatten().map(|path| {
-                    let worktree = match &launch.run {
-                        _ if card.read_only => None,
-                        Runner::Claude { args, .. } if names(args, &WORKTREE_FLAGS) => None,
-                        Runner::Codex { args, .. } if names(args, &[codex::WORKTREE_FLAG]) => None,
-                        Runner::Claude { .. } | Runner::Codex { .. } | Runner::Agent { .. } => {
-                            Some(Worktree::Worker {
-                                name: format!("slopty-{project}-{task}"),
-                                base: record.target.clone(),
-                            })
-                        }
-                        Runner::Command { .. } => None,
-                    };
+                    let worktree = (!card.read_only).then(|| Worktree::Worker {
+                        name: format!("slopty-{project}-{task}"),
+                        base: record.target.clone(),
+                    });
                     Place { path, worktree }
                 });
+                let named = named_dir(&launch.cwd, record);
                 let role = agent_role(record, card, at.as_ref());
                 // Held to asking: Claude Code by its permission mode, Codex by its approval
                 // policy and sandbox, each as its own reports say them.
-                let held_by_server = match &launch.run {
-                    Runner::Claude { .. } | Runner::Codex { .. } => true,
-                    Runner::Agent { agent, .. } => agent.is(AgentId::CODEX),
-                    Runner::Command { .. } => false,
-                };
+                let held_by_server =
+                    launch.agent.is(AgentId::CLAUDE_CODE) || launch.agent.is(AgentId::CODEX);
                 if !permission_flags && held_by_server {
                     watch(&mut state, placed.1, |w| w.locked = true);
                 }
+                let at = at.unwrap_or(Place { path: named, worktree: None });
                 Ok((placed, permission_flags, role, at))
             })
         };
@@ -1806,11 +1817,8 @@ impl Hub {
             Err(refused) => return refused,
         };
         let placed = InFlight { hub: self, id, settled: false };
-        let TaskLaunch { cwd, run, mut env, size, .. } = launch;
-        let (cwd, worktree) = match at {
-            Some(Place { path, worktree }) => (path, worktree),
-            None => (cwd, None),
-        };
+        let Launch { agent, prompt, .. } = launch;
+        let Place { path: cwd, worktree } = at;
         // Its worktree starts from the target as the orchestrator's clone has it, sent there
         // first when that is another clone: with pushing off, only that clone holds what the
         // merge queue merged.
@@ -1827,14 +1835,16 @@ impl Hub {
             }
             None => None,
         };
-        // Last, so they win over the caller's own.
-        env.push((PROJECT_ENV.to_owned(), project.to_string()));
-        env.push((TASK_ENV.to_owned(), task.to_string()));
-        let session = Some(term.session);
-        let (start, conversation) = match run {
-            Runner::Claude { prompt, mut args } => {
+        let env = vec![
+            (PROJECT_ENV.to_owned(), project.to_string()),
+            (TASK_ENV.to_owned(), task.to_string()),
+        ];
+        let (session, size) = (Some(term.session), None);
+        let (start, conversation) = match agent {
+            agent if agent.is(AgentId::CLAUDE_CODE) => {
+                let mut args = Vec::new();
                 let worktree = worktree.map(|Worktree::Worker { name, base }| {
-                    args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name.clone()]);
+                    args.extend([WORKTREE_FLAGS[0].to_owned(), name.clone()]);
                     NewWorktree { name, base: Some(base), pull: None, setup: true }
                 });
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
@@ -1851,25 +1861,12 @@ impl Hub {
                 };
                 (spawn, conversation)
             }
-            Runner::Command { argv } => {
-                let open = Verb::OpenTerminal {
-                    worker,
-                    cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: argv,
-                    env,
-                    name: Some(format!("{project} #{task}")),
-                    size,
-                    session,
-                    worktree: None,
-                };
-                (open, None)
-            }
             // The worker gives it Slopty's tools as it opens (`Worker::as_agent`).
-            Runner::Codex { prompt, args } => {
+            agent if agent.is(AgentId::CODEX) => {
                 let open = Verb::OpenTerminal {
                     worker,
                     cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: codex::command(&role, args, prompt, !permission_flags),
+                    command: codex::command(&role, Vec::new(), prompt, !permission_flags),
                     env,
                     name: Some(format!("{project} #{task}")),
                     size,
@@ -1884,27 +1881,23 @@ impl Hub {
                 (open, None)
             }
             // Its adapter gives it Slopty's tools and its role through the agent's own doors.
-            Runner::Agent { agent, prompt, model, args } => {
+            agent => {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                     name,
                     base: Some(base),
                     pull: None,
                     setup: true,
                 });
-                // Codex as a thread takes its approval policy from the start; its sandbox is its
-                // own configuration's, judged once its row says it (`Hub::codex_settings`).
-                let mode = (!permission_flags && agent.is(AgentId::CODEX))
-                    .then(|| codex::HELD_APPROVAL.to_owned());
                 let start = Start {
                     agent,
                     cwd,
                     drive: None,
                     prompt,
-                    model,
-                    mode,
+                    model: None,
+                    mode: None,
                     effort: None,
                     attachments: Vec::new(),
-                    args,
+                    args: Vec::new(),
                     worktree,
                 };
                 let start = Verb::StartThread {
@@ -2147,16 +2140,22 @@ struct Earlier {
     brief: String,
 }
 
-/// How `agent` runs for a task, told `prompt` first: Claude Code and Codex in their own
-/// terminals, as a task's start names them, any other as a thread.
-fn runner_for(agent: AgentId, prompt: Option<String>) -> Runner {
-    if agent.is(AgentId::CLAUDE_CODE) {
-        Runner::Claude { prompt, args: Vec::new() }
-    } else if agent.is(AgentId::CODEX) {
-        Runner::Codex { prompt, args: Vec::new() }
-    } else {
-        Runner::Agent { agent, prompt, model: None, args: Vec::new() }
-    }
+/// What a task's start runs, as the hub builds it: the person and the orchestrator name only
+/// the worker and the agent ([`TaskLaunch`]), and the hub adds the rest. Claude Code and Codex
+/// run in their own terminals, any other agent as a thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Launch {
+    /// The worker, over the task's pin; one with room when absent.
+    pub pin: Option<WorkerId>,
+    /// The folder on it; beside a clone of the project's repository, in a worktree of the
+    /// task's own when it writes, when empty.
+    pub cwd: String,
+    /// The agent.
+    pub agent: AgentId,
+    /// What it is told first.
+    pub prompt: Option<String>,
+    /// Start it though a task it depends on is not merged: a restart's, whose work is begun.
+    pub ignore_dependencies: bool,
 }
 
 /// A restarted task's first prompt: its brief, then where the earlier agent's work and thread
@@ -2176,22 +2175,27 @@ fn restart_prompt(brief: &str, thread: Option<ThreadId>) -> Option<String> {
     }
 }
 
-/// The agent `run` starts, as a worker's facts name it: a worker must have it installed to be
-/// chosen. A command is judged by its program, so `claude …` run as a command still needs
-/// Claude Code.
-fn agent_of(run: &Runner) -> Option<Installed> {
-    match run {
-        Runner::Claude { .. } => Some(Installed::program(CLAUDE)),
-        Runner::Codex { .. } => Some(Installed::program(codex::PROGRAM)),
-        Runner::Agent { agent, .. } => Some(Installed::of(agent)),
-        Runner::Command { argv } => {
-            let program = argv.first()?;
-            match program.rsplit('/').next().unwrap_or(program) {
-                CLAUDE => Some(Installed::program(CLAUDE)),
-                codex::PROGRAM => Some(Installed::program(codex::PROGRAM)),
-                _ => None,
-            }
-        }
+/// Where a start that goes beside no clone runs: the folder it names, else the project's
+/// repository when that is a path on a machine, else the worker's home.
+fn named_dir(cwd: &str, project: &Project) -> String {
+    let repo = project.repo.trim();
+    if !cwd.trim().is_empty() {
+        cwd.to_owned()
+    } else if repo.starts_with('/') || repo.starts_with('~') {
+        repo.to_owned()
+    } else {
+        "~".to_owned()
+    }
+}
+
+/// `agent` as a worker's facts name it: a worker must have it installed to be chosen.
+fn installed(agent: &AgentId) -> Installed {
+    if agent.is(AgentId::CLAUDE_CODE) {
+        Installed::program(CLAUDE)
+    } else if agent.is(AgentId::CODEX) {
+        Installed::program(codex::PROGRAM)
+    } else {
+        Installed::of(agent)
     }
 }
 
@@ -2395,7 +2399,8 @@ mod tests {
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,
-            members: Vec::new(),
+            goal: None,
+            autonomy: Autonomy::Ask,
         };
         p.create(new, &running, WallMs::ZERO).unwrap();
         let spec = TaskSpec { title: "t".to_owned(), ..TaskSpec::default() };

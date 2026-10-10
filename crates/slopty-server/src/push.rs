@@ -544,7 +544,13 @@ mod tests {
         let out = Outgoing {
             client: ClientId::new(),
             device: device.clone(),
-            what: Sending::Note(PushBody { notice, ask: None, choices: Vec::new(), quiet: false }),
+            what: Sending::Note(PushBody {
+                notice,
+                ask: None,
+                choices: Vec::new(),
+                quiet: false,
+                merges: None,
+            }),
         };
         let push = sealed(&out).unwrap();
         let request = apns::request(&push, &device.topic, "token").unwrap();
@@ -611,7 +617,13 @@ mod tests {
         let note = Outgoing {
             client,
             device: device.clone(),
-            what: Sending::Note(PushBody { notice, ask: None, choices: Vec::new(), quiet: false }),
+            what: Sending::Note(PushBody {
+                notice,
+                ask: None,
+                choices: Vec::new(),
+                quiet: false,
+                merges: None,
+            }),
         };
         let back = Outgoing { client, device, what: Sending::TakeBack(vec![about]) };
         let hub = crate::Hub::new("server".to_owned(), Vec::new());

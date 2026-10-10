@@ -6,7 +6,6 @@
 //! only what a project's orchestrator and its tasks' agents need; every other verb is the
 //! `slopty` command, which an agent runs through its shell like any other.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use rmcp::ErrorData;
@@ -16,21 +15,20 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Size, ThreadView};
-use slopty_proto::project::{Report, Runner, TaskChange, TaskId};
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, ThreadView};
+use slopty_proto::project::{Report, TaskChange, TaskId};
 
-use crate::ops::{self, LaunchSpec, NewTask, Which};
+use crate::ops::{self, NewTask, Which};
 use crate::resolve::Resolver;
 use crate::{Dispatch, ToolError, view};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
 These tools are a Slopty project's: one goal that agents work on side by side across a fleet \
-of machines (workers). project_status shows the whole project, its tasks and its timeline, and \
-with since and timeout_ms waits for the next change; task_get shows one task in full. The \
-orchestrator starts work with task_start: each task is one agent (Claude Code, Codex, pi or an \
-ACP agent) or a command, working from its brief in a worktree of its own on the worker named \
-or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
+of machines (workers). project_status shows the whole project, its tasks and its timeline; \
+task_get shows one task in full. The orchestrator starts work with task_start: each task is \
+one agent (Claude Code, Codex, pi or an ACP agent), working from its brief in a worktree of \
+its own on the worker named or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
 more to a task's agent, task_restart starts its work again with a fresh or another agent, \
 task_wait waits for tasks' news, and task_update changes a task. A \
 task's agent moves its own task with task_update and reports it with task_report; its project \
@@ -87,9 +85,6 @@ struct ProjectStatusArgs {
     /// Timeline cursor: the `next` of the previous call. The latest entries when omitted; 0
     /// for all the server keeps.
     since: Option<u64>,
-    /// Wait this long for a timeline entry past `since`; 0 (the default) answers at once. The
-    /// server caps it at 240000.
-    timeout_ms: Option<u32>,
 }
 
 /// `task_get`.
@@ -114,105 +109,53 @@ struct TaskStartArgs {
     /// A new task: what it is, in a line.
     title: Option<String>,
     /// A new task: what its agent is told to do (the goal, the constraints, how to know it is
-    /// done). Its first prompt, unless `prompt` says otherwise.
+    /// done). Its first prompt.
     #[serde(default)]
     brief: String,
-    /// A new task: what sort of work it is, in your words (`build`, `review`, `bench`).
-    #[serde(default)]
-    kind: String,
-    /// A new task: tasks whose work it needs first; it starts once they are done unless
-    /// `ignore_dependencies`. A dependency never leads back to it.
+    /// A new task: tasks whose work it needs first; it starts once they are merged. A
+    /// dependency never leads back to it.
     #[serde(default)]
     depends_on: Vec<TaskArg>,
     /// A new task: it only reads.
     #[serde(default)]
     read_only: bool,
-    /// A new task: anything to keep with it, as a JSON object.
-    metadata: Option<Map<String, Value>>,
     /// This worker (name or id); one with room when omitted. `slopty --json workers`
     /// shows each worker's facts, and work that needs no Apple platform belongs on Linux.
     worker: Option<String>,
-    /// Working directory on the worker; beside a clone of the project's repository, in a git
-    /// worktree of the task's own when it writes, when omitted.
-    cwd: Option<String>,
-    /// Run this instead of an agent: any program and its arguments, such as a build or a
-    /// benchmark; `[]` for the login shell.
-    command: Option<Vec<String>>,
     /// Which agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
     /// name (`gemini`, `acp:gemini`). Each gets Slopty's tools and its role, and goes only to
     /// a worker with it installed.
     agent: Option<String>,
-    /// The agent's first prompt; a new task's brief when omitted.
-    prompt: Option<String>,
-    /// The model, by the agent's own id.
-    model: Option<String>,
-    /// Arguments for the agent, e.g. `["--effort", "high"]`. Flags that loosen Claude Code's
-    /// permissions are refused unless the person allows them for the project.
-    #[serde(default)]
-    args: Vec<String>,
-    /// Extra environment variables.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    /// Columns (10-1000); with `rows`.
-    cols: Option<u16>,
-    /// Rows (2-500); with `cols`.
-    rows: Option<u16>,
-    /// Start it though a task it depends on is not done yet.
-    #[serde(default)]
-    ignore_dependencies: bool,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
 }
 
+/// What [`TaskStartArgs::start`] asks: the project, the task, the worker and agent, the key.
+type Start = (Option<String>, Which, (Option<String>, Option<String>), Option<String>);
+
 impl TaskStartArgs {
-    /// Which task it starts, and how.
-    fn start(self) -> Result<(Option<String>, Which, LaunchSpec, Option<String>), ToolError> {
-        let run = match (self.command, self.agent) {
-            (Some(argv), None)
-                if self.prompt.is_none() && self.model.is_none() && self.args.is_empty() =>
-            {
-                Runner::Command { argv }
-            }
-            (Some(_), _) => {
-                return Err(ToolError::invalid(
-                    "prompt, model, args and agent are an agent's; a command takes its own \
-                     arguments",
-                ));
-            }
-            (None, agent) => {
-                ops::agent_runner(agent.as_deref(), self.prompt, self.model, self.args)
-            }
-        };
-        let launch = LaunchSpec {
-            pin: self.worker,
-            cwd: self.cwd.unwrap_or_default(),
-            run,
-            env: self.env.into_iter().collect(),
-            size: size(self.cols, self.rows)?,
-            ignore_dependencies: self.ignore_dependencies,
-        };
+    /// Which task it starts, and on what.
+    fn start(self) -> Result<Start, ToolError> {
         let new_fields = self.title.is_some()
             || !self.brief.is_empty()
-            || !self.kind.is_empty()
             || !self.depends_on.is_empty()
-            || self.read_only
-            || self.metadata.is_some();
+            || self.read_only;
         let which = match (self.task, self.title) {
             (Some(task), None) if !new_fields => Which::Made(task.text()),
             (Some(_), _) => {
                 return Err(ToolError::invalid(
-                    "`task` starts one the project has; a new task's fields (title, brief, kind, \
-                     depends_on, read_only, metadata) go without it",
+                    "`task` starts one the project has; a new task's fields (title, brief, \
+                     depends_on, read_only) go without it",
                 ));
             }
             (None, Some(title)) => Which::New(Box::new(NewTask {
                 depends_on: self.depends_on.iter().map(TaskArg::text).collect(),
-                kind: self.kind,
+                kind: String::new(),
                 title,
                 brief: self.brief,
                 read_only: self.read_only,
                 verifier: None,
-                metadata: metadata_text(self.metadata)?,
+                metadata: None,
             })),
             (None, None) => {
                 return Err(ToolError::invalid(
@@ -220,7 +163,7 @@ impl TaskStartArgs {
                 ));
             }
         };
-        Ok((self.project, which, launch, self.idempotency_key))
+        Ok((self.project, which, (self.worker, self.agent), self.idempotency_key))
     }
 }
 
@@ -417,15 +360,6 @@ fn checked_key(given: Option<String>) -> Result<Option<IdempotencyKey>, ToolErro
     given.map(IdempotencyKey::new).transpose().map_err(|e| ToolError::invalid(e.to_string()))
 }
 
-/// `cols` and `rows` together, or neither.
-fn size(cols: Option<u16>, rows: Option<u16>) -> Result<Option<Size>, ToolError> {
-    match (cols, rows) {
-        (Some(cols), Some(rows)) => Ok(Some(Size { cols, rows })),
-        (None, None) => Ok(None),
-        _ => Err(ToolError::invalid("give cols and rows together")),
-    }
-}
-
 /// How a tool behaves, for the client's hints.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -458,8 +392,8 @@ pub fn list() -> Vec<Tool> {
              `depends_on`, `kind`, the worker it is pinned to, its terminal's `term`, \
              `branch`, `pr`, `verified`), `natives` (Claude Code's own subagents and to-dos in \
              each node's session), `bounds` and `limits` with what runs now (`live`), and its \
-             `timeline` from `since`, with `next` to read on from. With `timeout_ms` it waits \
-             for the next change: how to follow the tree without polling.",
+             `timeline` from `since`, with `next` to read on from. It answers at once; \
+             task_wait waits for tasks' news.",
             Kind::Read,
         ),
         tool::<TaskGetArgs>(
@@ -472,11 +406,11 @@ pub fn list() -> Vec<Tool> {
         tool::<TaskStartArgs>(
             "task_start",
             "Start a task, the one way work starts: a new one made from a `title`, a `brief` \
-             its agent works from (its first prompt), a `kind`, `depends_on` or `read_only`; or \
-             a `task` the project has. It runs Claude Code, another `agent` or a `command` on \
-             the `worker` you name (`slopty --json workers` shows each one's facts; work \
-             that needs no Apple platform belongs on Linux) or one with room, beside a clone of \
-             the project's repository in a worktree of its own unless you name a `cwd`. Start \
+             its agent works from (its first prompt), `depends_on` or `read_only`; or a `task` \
+             the project has. It runs Claude Code or another `agent` on the `worker` you name \
+             (`slopty --json workers` shows each one's facts; work that needs no Apple \
+             platform belongs on Linux) or one with room, beside a clone of the project's \
+             repository in a worktree of its own. Start \
              only work that runs in parallel with yours and needs no context you hold: do \
              sequential or small work yourself. A start is refused while as many tasks wait on \
              the person as the project's review limit, saying how many and where. A new task \
@@ -593,8 +527,7 @@ async fn run<D: Dispatch>(
     match name {
         "project_status" => {
             let a: ProjectStatusArgs = args(arguments)?;
-            let timeout = a.timeout_ms.unwrap_or(0);
-            let status = ops::project_status(dispatch, a.project.as_deref(), a.since, timeout);
+            let status = ops::project_status(dispatch, a.project.as_deref(), a.since);
             json(&view::projects::status(&with_progress(status, progress).await?))
         }
         "task_get" => {
@@ -605,9 +538,10 @@ async fn run<D: Dispatch>(
         }
         "task_start" => {
             let a: TaskStartArgs = args(arguments)?;
-            let (project, which, launch, key) = a.start()?;
+            let (project, which, (worker, agent), key) = a.start()?;
             let key = checked_key(key)?;
-            let started = ops::task_start(&mut res, project.as_deref(), which, launch, key);
+            let on = (worker.as_deref(), agent.as_deref());
+            let started = ops::task_start(&mut res, project.as_deref(), which, on, key);
             json(&view::projects::task(&started.await?))
         }
         "task_update" => {
@@ -691,7 +625,7 @@ mod tests {
     use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadRead, Verb};
     use slopty_proto::project::{
         Assignment, Bounds, Limits, Live, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
-        Runner, Task, TaskId, TaskState, TimelineEntry,
+        Task, TaskId, TaskLaunch, TaskState, TimelineEntry,
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -770,7 +704,9 @@ mod tests {
                 limits: Limits::default(),
                 metadata: None,
                 created_ms: WallMs::ZERO,
-                members: Vec::new(),
+                goal: None,
+                autonomy: slopty_proto::project::Autonomy::default(),
+                progress: None,
             },
             tasks: [made_task(3, "Plan", false), made_task(5, "Review", true)]
                 .iter()
@@ -900,9 +836,10 @@ mod tests {
     }
 
     /// The orchestrator's own project is what the project tools default to: `task_start` makes a
-    /// task with the kind, dependencies and metadata it gave and starts it in one call on the
-    /// worker named, its brief the agent's first prompt; and it starts a task made before with
-    /// any agent or a command. A caller that runs for no project is told to name one.
+    /// task with the dependencies it gave and starts it in one call on the worker named, Claude
+    /// Code when it names no agent; and it starts a task made before with any agent. What the
+    /// server decides (the folder, the prompt, the agent's arguments) is no argument. A caller
+    /// that runs for no project is told to name one.
     #[tokio::test]
     async fn task_start_makes_and_starts_a_task_in_the_caller_s_own_project() {
         let scope =
@@ -911,11 +848,9 @@ mod tests {
         let made = json!({
             "title": "Hub",
             "brief": "Fix the hub\nThen test it",
-            "kind": "build",
             "depends_on": [2],
-            "metadata": { "ticket": 12 },
+            "read_only": true,
             "worker": studio().to_string(),
-            "cwd": "~/w",
         });
         let (failed, text) = call_json(&fake, "task_start", made).await;
         assert!(!failed, "{text}");
@@ -926,51 +861,28 @@ mod tests {
             panic!("{verbs:?}")
         };
         assert_eq!(project.as_str(), "slopty");
-        assert_eq!((spec.kind.as_str(), spec.depends_on.as_slice()), ("build", &[TaskId(2)][..]));
-        assert_eq!(spec.metadata.as_deref(), Some(r#"{"ticket":12}"#));
-        assert_eq!((*task, launch.pin, launch.cwd.as_str()), (TaskId(7), Some(studio()), "~/w"));
-        let brief = Some("Fix the hub\nThen test it".to_owned());
-        assert_eq!(launch.run, Runner::Claude { prompt: brief, args: Vec::new() }, "its brief");
+        assert_eq!(spec.depends_on.as_slice(), &[TaskId(2)][..]);
+        assert_eq!((spec.brief.as_str(), spec.read_only), ("Fix the hub\nThen test it", true));
+        let claude =
+            TaskLaunch { pin: Some(studio()), agent: AgentId::named(AgentId::CLAUDE_CODE) };
+        assert_eq!((*task, launch), (TaskId(7), &claude));
 
-        let command = json!({"task": 7, "command": ["cargo", "test"]});
-        let (failed, text) = call_json(&fake, "task_start", command).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
-        let argv = vec!["cargo".to_owned(), "test".to_owned()];
-        assert_eq!(launch.run, Runner::Command { argv });
-
-        let codex = json!({"task": 7, "agent": "codex", "prompt": "Go", "args": ["-m", "o3"]});
-        let (failed, text) = call_json(&fake, "task_start", codex).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
-        let args = vec!["-m".to_owned(), "o3".to_owned()];
-        assert_eq!(launch.run, Runner::Codex { prompt: Some("Go".to_owned()), args });
-        let mixed = json!({"task": 7, "agent": "codex", "command": ["codex"]});
-        let (failed, text) = call_json(&fake, "task_start", mixed).await;
-        assert!(failed && text.contains("an agent's"), "{text}");
         for (named, agent) in [
+            ("codex", AgentId::named(AgentId::CODEX)),
             ("pi", AgentId::named(AgentId::PI)),
             ("acp:gemini", AgentId::acp("gemini")),
             ("gemini", AgentId::acp("gemini")),
         ] {
-            let thread = json!({"task": 7, "agent": named, "prompt": "Go", "model": "flash"});
+            let thread = json!({"task": 7, "agent": named});
             let (failed, text) = call_json(&fake, "task_start", thread).await;
             assert!(!failed, "{text}");
             let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
-            let run = Runner::Agent {
-                agent,
-                prompt: Some("Go".to_owned()),
-                model: Some("flash".to_owned()),
-                args: Vec::new(),
-            };
-            assert_eq!(launch.run, run, "{named}");
+            assert_eq!(launch, TaskLaunch { pin: None, agent }, "{named}");
         }
-        let claude = json!({"task": 7, "prompt": "Go", "model": "opus"});
-        let (failed, text) = call_json(&fake, "task_start", claude).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
-        let args = vec!["--model".to_owned(), "opus".to_owned()];
-        assert_eq!(launch.run, Runner::Claude { prompt: Some("Go".to_owned()), args });
+        for gone in ["cwd", "command", "prompt", "model", "args", "env", "kind", "metadata"] {
+            let (failed, text) = call_json(&fake, "task_start", json!({"task": 7, gone: 1})).await;
+            assert!(failed && text.contains("unknown field"), "{gone}: {text}");
+        }
 
         let both = json!({"task": 7, "title": "Again"});
         let (failed, text) = call_json(&fake, "task_start", both).await;
@@ -978,8 +890,6 @@ mod tests {
         let (failed, text) = call_json(&fake, "task_start", json!({})).await;
         assert!(failed, "a task or a new one: {text}");
 
-        let bad = call_json(&fake, "task_start", json!({"title": "x", "os": "linux"})).await;
-        assert!(bad.0 && bad.1.contains("unknown field `os`"), "{bad:?}");
         let (failed, text) = call_json(&Fake::default(), "task_start", json!({"title": "x"})).await;
         assert!(failed && text.contains("name the project"), "{text}");
     }
@@ -1119,15 +1029,18 @@ mod tests {
         let fake = Fake::default();
         let reported = Mutex::new(Vec::new());
         let report = |waited: Duration| reported.lock().push(waited);
-        let Value::Object(args) = json!({ "project": "slopty", "timeout_ms": 30_000 }) else {
-            panic!()
-        };
-        let result = call(&fake, "project_status", args, Some(&report)).await.unwrap();
+        let wait = json!({ "project": "slopty", "tasks": [5], "timeout_ms": 25_000 });
+        let Value::Object(args) = wait else { panic!() };
+        let result = call(&fake, "task_wait", args, Some(&report)).await.unwrap();
         assert_ne!(result.is_error, Some(true), "{result:?}");
         let every = PROGRESS_EVERY;
         assert_eq!(*reported.lock(), [every, every.saturating_mul(2)], "at 10 s and 20 s of 25");
         let Some(Verb::ProjectStatus { timeout_ms, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(timeout_ms, 30_000, "passed through; the server caps it");
+        assert_eq!(timeout_ms, 25_000, "passed through; the server caps it");
+
+        let read = json!({ "project": "slopty", "timeout_ms": 30_000 });
+        let (failed, text) = call_json(&fake, "project_status", read).await;
+        assert!(failed && text.contains("unknown field `timeout_ms`"), "{text}");
     }
 
     /// A thread is read by a task, a thread's id or a terminal, in the view asked and from

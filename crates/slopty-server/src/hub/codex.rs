@@ -12,11 +12,9 @@ use std::fmt::Write as _;
 /// Codex's program, and its name among a worker's `agents` facts.
 pub(super) const PROGRAM: &str = "codex";
 
-/// Codex's flag that runs a session in a new git worktree of its own.
-pub(super) const WORKTREE_FLAG: &str = "--worktree";
-
-/// Flags that take no value and give nothing the person would be asked for.
-const SAFE_SWITCHES: [&str; 3] = [WORKTREE_FLAG, "--no-alt-screen", "--no-daemon"];
+/// Flags that take no value and give nothing the person would be asked for: a session in a new
+/// git worktree of its own among them.
+const SAFE_SWITCHES: [&str; 3] = ["--worktree", "--no-alt-screen", "--no-daemon"];
 
 /// Flags whose value gives nothing the person would be asked for.
 const SAFE_VALUED: [&str; 4] = ["--model", "-m", "--image", "-i"];

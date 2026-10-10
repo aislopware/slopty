@@ -155,7 +155,7 @@ impl ThreadState {
             Action::ScreensSet(screens) => self.screens.clone_from(screens),
             Action::PullSeen(pull) => self.pull.clone_from(pull),
             Action::Seen(turn) => self.seen = self.seen.max(*turn),
-            Action::DraftSet(draft) => self.draft.clone_from(draft),
+            Action::DraftSet(draft) => self.draft = Some(draft.clone()),
         }
     }
 

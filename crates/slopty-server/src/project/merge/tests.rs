@@ -34,7 +34,8 @@ fn logged(verifier: Option<&str>, log: &mut Vec<Change>) -> Projects {
         orchestrator: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
         limits: LimitsChange::default(),
         metadata: None,
-        members: Vec::new(),
+        goal: None,
+        autonomy: slopty_proto::project::Autonomy::Ask,
     };
     log.extend(p.create(new, &running, at(0)).unwrap().1);
     p

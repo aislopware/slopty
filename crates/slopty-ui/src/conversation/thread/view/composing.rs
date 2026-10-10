@@ -44,7 +44,7 @@ use gpui::{
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::git::{Branch, Branches};
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
+use slopty_proto::thread::{Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -55,15 +55,6 @@ use crate::kit::ButtonKind;
 
 /// Rows the menu shows before it scrolls.
 const MENU_ROWS: f32 = 8.0;
-
-/// The command that compacts the context, as the menu lists it.
-const COMPACT: &str = "compact";
-
-/// Whether `state`'s agent compacts through Slopty ([`Cap::COMPACT`]) rather than by a command
-/// it lists itself.
-pub(super) fn compacts(state: &slopty_proto::thread::ThreadState) -> bool {
-    state.meta.can(Cap::COMPACT) && !state.commands.iter().any(|c| c.name == COMPACT)
-}
 
 /// What the composer's menu lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,30 +260,10 @@ impl ThreadView {
         }
     }
 
-    /// The commands the `/` menu lists: the agent's own, and `/compact` where Slopty compacts
-    /// the context through the agent's own door ([`Cap::COMPACT`]) and the agent lists no
-    /// command of that name.
+    /// The commands the `/` menu lists: the agent's own.
     #[must_use]
     pub fn commands(&self, cx: &App) -> Vec<Command> {
-        let Some(state) = self.state(cx) else { return Vec::new() };
-        let mut all = state.commands.clone();
-        if compacts(state) {
-            all.push(Command {
-                name: COMPACT.to_owned(),
-                description: "Summarize the conversation to free up context".to_owned(),
-                argument_hint: None,
-                source: "built-in".to_owned(),
-            });
-        }
-        all
-    }
-
-    /// Whether the draft asks Slopty to compact the context: `/compact` alone, where the agent
-    /// compacts through its door rather than by a command of its own.
-    pub(super) fn compact_asked(&self, cx: &App) -> bool {
-        self.state(cx).is_some_and(compacts)
-            && self.draft(cx).trim() == format!("/{COMPACT}")
-            && self.composing.attachments.chips().is_empty()
+        self.state(cx).map(|state| state.commands.clone()).unwrap_or_default()
     }
 
     /// The draft or its caret moved: the menu's row goes back to the top, a word the person

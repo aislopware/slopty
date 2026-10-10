@@ -96,8 +96,9 @@ pub enum SessionState {
     Running,
     /// The child exited; the last screen is retained until closed.
     Exited {
-        /// Exit status, or the signal number negated.
-        status: i32,
+        /// Exit status, or the signal number negated; none when it is not known (a shell
+        /// rescued from a lost ptyd, whose end only shows as its process gone), shown neutral.
+        status: Option<i32>,
     },
 }
 
@@ -744,8 +745,8 @@ pub enum TermEvent {
     },
     /// Child exited.
     Exited {
-        /// Status.
-        status: i32,
+        /// Its status; none when it is not known ([`SessionState::Exited`]).
+        status: Option<i32>,
     },
     /// The PTY size changed (another client drives it).
     Resized {

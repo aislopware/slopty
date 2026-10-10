@@ -47,4 +47,7 @@ pub struct PushBody {
     /// opened after the thread came to need the person, or the one it showed went): it
     /// replaces that note under the same collapse id without a sound or a banner.
     pub quiet: bool,
+    /// The task a ready-to-merge note's Merge button merges, the oldest ready, in the notice's
+    /// project ([`crate::thread::attention::NoticeKind::ReadyToMerge`]).
+    pub merges: Option<crate::project::TaskId>,
 }

@@ -3761,3 +3761,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `worker_term_program_status`, and the four that carry a summary
     (`worker_session_opened`, `worker_session_changed`, `server_session_changed`,
     `ctl_reply_status`).
+
+- ✅ **A program whose end its worker did not see has no exit status** (2026-10-10, the
+  orchestrator-first study, item 25's wire half).
+  - `SessionState::Exited`, `TermEvent::Exited` and `Happening::SessionExited` carry
+    `status: Option<i32>`. A worker that saw its program end says the status, as before.
+    `None` is for a program a restarted worker found gone without seeing how it went, which
+    used to read as a status it never had. That mapping is item 25's; until then every end
+    still carries its status.
+  - Where it shows: `slopty attach` ends with code 1 for an unknown end, never 0
+    (`attach::tests`), the tools' views print a bare "exited", and a verifier with no status
+    has not passed. The client keeps the end as `term::Exit(Option<i32>)`.
+  - Goldens: `server_client_restart_worker` and every summary or event golden that carries an
+    exit.
+
