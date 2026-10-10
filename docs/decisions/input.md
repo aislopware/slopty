@@ -574,8 +574,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     took has its release taken too, and taken keys are drained before anything else the view
     sends, so a chord or a click never overtakes one. ⌘⌥⎋ and ⌃⌘Q stay on this Mac.
   - *The client, iPad.* An iPad names neither positions nor a source a Mac can select, so it
-    always composes: UIKit's text system types, its commits go as `Text`, and chords go by
-    their character's place on a US keyboard. `UIKey.keyCode` needs the fork change the design
+    always composes: UIKit's text system types, its commits go as `Text`, and chords name
+    their character ("A shortcut goes by its character", below). `UIKey.keyCode` needs the fork change the design
     names, which this change does not make.
   - *The worker.* A key is `CGEventCreateKeyboardEvent` with the position and the flags, the
     side's device bit included, and no Unicode string. Events come from a private-state
@@ -1190,8 +1190,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *Linux.* Not applicable yet: a Linux worker has no screen input injector (the platform
     gives `NoInput` there), so there is nothing to place a chord for. The xkb keymap's
     keysym-to-keycode table is where it goes when one lands.
-  - *The client* fills `chord` (lane A's half); until it does every chord goes by position as
-    before.
+  - *The client* fills `chord` with the key's own character from the keystroke (GPUI's `key`,
+    which on a Mac and an iPad alike is what the person's layout puts on the key, modifiers
+    but Shift aside), lowercased, single characters only, so a named key such as an arrow
+    names none. It names one on a press and a repeat, never on a release, which the worker
+    sends where the press went; the key bar's ⌘ and ⌃ do the same. The position it sends
+    stays the character's US place, the worker's fallback for a character its layout lacks.
+    The paste chord carries none: it goes by the person's own V. Test:
+    `screen::keyboard::tests::a_chord_the_worker_reads_under_its_own_source_goes_by_character`
+    (slopty-ui).
   - Tests: `chords::tests` (AZERTY `a` on Q's place and `q` on A's, QWERTZ `z` on Y's, bare
     before shifted, the main row before the keypad, uppercase and several characters) and
     `a_chord_goes_by_its_character_and_lets_go_where_it_went` (`slopty-input`);

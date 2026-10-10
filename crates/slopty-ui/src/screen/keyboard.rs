@@ -14,8 +14,9 @@
 //!   the event.
 //! - *Composed* (not yet, or never: an input method the worker lacks, an iPad): the text system
 //!   here composes, dead keys and input methods included, and what it commits goes as
-//!   [`ScreenInput::Text`]; named keys still go by position, and a ⌘ or ⌃ chord by its character's
-//!   place on a US keyboard, since the worker matches it by character under a source of its own.
+//!   [`ScreenInput::Text`]; named keys still go by position, and a ⌘ or ⌃ chord names its
+//!   character, which the worker presses where its own layout types it, else at the character's
+//!   place on a US keyboard (`docs/decisions/input.md`, "A shortcut goes by its character").
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -216,6 +217,17 @@ fn code_of(native: Option<NativeKey>, keystroke: &Keystroke) -> (KeyCode, Mods) 
     native
         .and_then(|n| KeyCode::from_mac_vk(n.vk).map(|code| (code, n.mods)))
         .unwrap_or_else(|| (keys::key_code(&keystroke.key), keys::screen_mods(keystroke.modifiers)))
+}
+
+/// The character a chord's key names, as the wire carries it (`ScreenInput::Key::chord`): the
+/// key's own character, lowercased, when it is one character; a named key (`left`, `f1`)
+/// names none.
+fn chord_char(key: &str) -> Option<String> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c.to_lowercase().collect()),
+        _ => None,
+    }
 }
 
 /// A key of the numeric keypad.
@@ -420,7 +432,7 @@ impl ScreenView {
         if code == KeyCode::Unidentified {
             return false;
         }
-        let code = self.chord_code(code, keystroke);
+        let (code, chord) = self.chord_code(code, keystroke);
         // Paste is the character this device's layout typed, wherever its key sits.
         if !repeat && is_paste_chord(keystroke) {
             self.push_clipboard(cx);
@@ -428,28 +440,33 @@ impl ScreenView {
             self.send_input(ScreenInput::PasteChord { code, mods });
             return true;
         }
-        self.press_key(code, repeat, mods);
+        self.hold_key(code);
+        let action = if repeat { KeyAction::Repeat } else { KeyAction::Press };
+        self.send_input(ScreenInput::Key { code, action, mods, chord });
         true
     }
 
-    /// The key a ⌘ or ⌃ chord at `at` goes as. While the worker types under its own source,
-    /// not this device's, it matches the chord by character under that source: the character's
-    /// place on a US keyboard is what the worker's layouts agree on (every Latin QWERTY one,
-    /// and the ASCII layout macOS matches ⌘ against under a non-Latin one), so ⌘A typed on
-    /// AZERTY stays ⌘A there rather than ⌘Q. Under this device's source, and for the keypad,
-    /// the key's own place is right.
-    fn chord_code(&mut self, at: KeyCode, keystroke: &Keystroke) -> KeyCode {
+    /// The key a ⌘ or ⌃ chord at `at` goes as, and the character it names. While the worker
+    /// types under its own source, not this device's, the chord names the character this
+    /// device's layout put on the key, and the worker presses the key that types it under its
+    /// own layout, so ⌘Z on a German keyboard is undo on a US worker and ⌘A on AZERTY stays ⌘A
+    /// on an AZERTY one. The key sent is the character's place on a US keyboard, where the
+    /// worker presses a character its layout lacks: every Latin QWERTY layout agrees on it, and
+    /// so does the ASCII layout macOS matches ⌘ against under a non-Latin one. Under this
+    /// device's source, and for the keypad, the key's own place is right and names nothing.
+    fn chord_code(&mut self, at: KeyCode, keystroke: &Keystroke) -> (KeyCode, Option<String>) {
         self.keyboard.chorded.retain(|&(place, _)| place != at);
         let m = keystroke.modifiers;
         if self.keyboard.applied || !(m.platform || m.control) || is_keypad(at) {
-            return at;
+            return (at, None);
         }
+        let chord = chord_char(&keystroke.key);
         let by_character = keys::key_code(&keystroke.key);
         if by_character == KeyCode::Unidentified || by_character == at {
-            return at;
+            return (at, chord);
         }
         self.keyboard.chorded.push((at, by_character));
-        by_character
+        (by_character, chord)
     }
 
     /// A key went down (or repeats) on the worker: remember it as held and send it.
@@ -575,7 +592,11 @@ impl ScreenView {
                 self.send_input(ScreenInput::Text { text });
             }
         } else {
-            self.send_input(ScreenInput::Key { code, action: KeyAction::Press, mods, chord: None });
+            // The key bar's chord names its character as a keyboard's does, while the worker
+            // types under its own source.
+            let chorded = keystroke.modifiers.platform || keystroke.modifiers.control;
+            let chord = chord_char(&keystroke.key).filter(|_| chorded && !self.keyboard.applied);
+            self.send_input(ScreenInput::Key { code, action: KeyAction::Press, mods, chord });
             self.send_input(ScreenInput::Key {
                 code,
                 action: KeyAction::Release,

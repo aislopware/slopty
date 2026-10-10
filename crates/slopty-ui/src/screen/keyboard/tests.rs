@@ -508,9 +508,11 @@ fn a_source_the_worker_lost_is_composed_here_again(cx: &mut gpui::TestAppContext
     assert!(!view.read_with(cx, |v, _| v.worker_composes()), "composed here, nothing taken");
 }
 
-/// While the worker types under its own source, a ⌘ chord goes by its character's place on a
-/// US keyboard: ⌘A typed on AZERTY (the Q key's place) goes as ⌘A, and its release lets the
-/// same key go. By place it went as ⌘Q, and the worker's app quit.
+/// While the worker types under its own source, a ⌘ chord names the character this device's
+/// layout put on the key, so the worker presses it where its own layout types it: ⌘A typed on
+/// AZERTY (the Q key's place) names `a`, at the US A's place should the worker's layout lack
+/// it, and its release lets the same key go. By place it went as ⌘Q, and the worker's app
+/// quit. The key bar's ⌘ names its character too; a named key names none.
 #[gpui::test]
 fn a_chord_the_worker_reads_under_its_own_source_goes_by_character(cx: &mut gpui::TestAppContext) {
     let fake = Fake::on(FRENCH);
@@ -525,13 +527,25 @@ fn a_chord_the_worker_reads_under_its_own_source_goes_by_character(cx: &mut gpui
     // An arrow is its place under any source.
     fake.native.set(Some(NativeKey { vk: 0x7b, kind: KeyKind::Down, mods: Mods::SUPER }));
     assert!(view.update(cx, |v, cx| v.key_pressed(&stroke("left", cmd, None), false, cx)));
+    let chord = |code, c: &str| ScreenInput::Key {
+        code,
+        action: KeyAction::Press,
+        mods: Mods::SUPER,
+        chord: Some(c.to_owned()),
+    };
     assert_eq!(
         inputs(&mut rx),
         [
-            key(KeyCode::A, KeyAction::Press, Mods::SUPER),
+            chord(KeyCode::A, "a"),
             key(KeyCode::A, KeyAction::Release, Mods::SUPER),
             key(KeyCode::ArrowLeft, KeyAction::Press, Mods::SUPER),
         ]
+    );
+    view.update(cx, |v, cx| v.press(stroke("Z", cmd, None), cx));
+    assert_eq!(
+        inputs(&mut rx),
+        [chord(KeyCode::Z, "z"), key(KeyCode::Z, KeyAction::Release, Mods::SUPER)],
+        "the key bar's chord, lowercased"
     );
 }
 
