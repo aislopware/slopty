@@ -28,7 +28,6 @@ Tab │ Network
 Heading │ Help
 Tab │ Keyboard
 Tab │ About
-Button │ Edit as TOML
 Button │ Back
 Heading │ Input
 TabPanel │ Input
@@ -43,10 +42,10 @@ Heading │ Clipboard
 Switch │ Share the clipboard
 TextInput │ By machine
 List │ By machine
-ListItem │ laptop
-Switch │ laptop
+ListItem │ Machine not on the server (0199c0de)
+Switch │ Machine not on the server (0199c0de)
 Button │ Remove
-ListItem │ studio
-Switch │ studio
+ListItem │ e2e-worker
+Switch │ e2e-worker
 Button │ Remove
 Switch │ Copy on select

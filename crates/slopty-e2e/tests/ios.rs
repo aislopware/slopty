@@ -12,7 +12,7 @@
 mod tests {
     use std::time::Duration;
 
-    use slopty_e2e::harness::{APPEARANCE, Simulator, Stack, artifacts_dir, pinned_settings};
+    use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
     use slopty_e2e::snapshot::{assert_matches, foreground_fraction};
     use slopty_e2e::{Command, Driver, Dump};
 
@@ -201,11 +201,9 @@ mod tests {
         .await
         .unwrap();
 
-        // The phone has no editor for a file in its sandbox: "Open settings" from the palette
-        // opens the settings on their form, "Edit as TOML" puts `settings.toml` in the in-app
-        // editor, ⌘A and the soft keyboard replace it, ⌘↩ writes the file. The new text keeps
-        // the harness's pins: without them the cursor goes back to blinking as the shell asks,
-        // and a golden holds it or not by the phase.
+        // "Open settings" from the palette opens the settings on their form, with Done in its
+        // head. The phone has no worker of its own to open `settings.toml` in, so the form is
+        // all there is.
         open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
         // The best match leads; a looser one (a machine's clipboard line) may follow it.
@@ -218,36 +216,20 @@ mod tests {
         // The page takes the panes' place, under the notices: the closed shell's take-back
         // offer hangs over its head until it lapses, and a tap there would take the shell back.
         let dump = drv
-            .wait_for("the settings editor, the offer gone", STEP, |d| {
+            .wait_for("the settings form, the offer gone", STEP, |d| {
                 d.a11y_node("Group", Some("Settings")).is_some() && d.notice.is_none()
             })
             .await
             .unwrap();
+        assert!(dump.a11y_node("Button", Some("Open the file")).is_none(), "{:#?}", dump.a11y);
         let [left, top, width, height] =
-            dump.a11y_node("Button", Some("Edit as TOML")).expect("the file's link").bounds;
+            dump.a11y_node("Button", Some("Done")).expect("the page's Done").bounds;
         drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
-        drv.wait_for("the file's text", STEP, |d| {
-            d.a11y_node("Button", Some("Edit with controls")).is_some()
-        })
-        .await
-        .unwrap();
-        drv.keys("cmd-a").await.unwrap();
-        // The server the app follows stays in the file.
-        let settings = format!(
-            "{}alert = \"never\"\n\n[network]\nserver = \"{}\"\n",
-            pinned_settings(APPEARANCE),
-            stack.server.address()
-        );
-        drv.ui_insert_text(&settings).await.unwrap();
-        drv.keys("cmd-enter").await.unwrap();
-        drv.wait_for("the settings editor to close", STEP, |d| {
+        drv.wait_for("the settings to close", STEP, |d| {
             d.a11y_node("Group", Some("Settings")).is_none()
         })
         .await
         .unwrap();
-        let saved =
-            std::fs::read_to_string(stack.dir.path().join("app").join("settings.toml")).unwrap();
-        assert_eq!(saved, settings);
 
         // The phone names a tile the same way: "Name this tile" from the palette puts the
         // field in the focused tile's header, the soft keyboard types into it, ↩ keeps it.

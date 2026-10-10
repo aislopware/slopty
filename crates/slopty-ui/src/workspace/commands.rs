@@ -769,6 +769,13 @@ impl WorkspaceView {
         let _shown = self.show_file_as(key, path, line, true, cx);
     }
 
+    /// A file opened on purpose from outside the workspace (this Mac's `settings.toml`, from
+    /// the settings page): a kept file tile for `path` on `key`, not a preview, an open one
+    /// focused.
+    pub fn edit_file_on(&mut self, key: WorkerKey, path: &str, cx: &mut Context<Self>) {
+        let _shown = self.show_file(Some(key), path, None, cx);
+    }
+
     /// A file picked on purpose: [`Self::open_file_on`] kept rather than a preview, saying
     /// which item shows the file.
     pub(super) fn show_file(

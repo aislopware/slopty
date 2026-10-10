@@ -869,9 +869,9 @@ impl Workspace {
         }
     }
 
-    /// ⌘, / "Settings…" / the palette: the file's text (the commented defaults when there is
-    /// none) in the in-app editor, a page in the panes' place. A second ask while it is open
-    /// just refocuses it.
+    /// ⌘, / "Settings…" / the palette: the file (the commented defaults when there is none) as
+    /// the settings form, a page in the panes' place. A second ask while it is open just
+    /// refocuses it.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_focus_editor = true;
         if self.settings_editor.is_some() {
@@ -879,20 +879,17 @@ impl Workspace {
             return;
         }
         let text = settings::editable_text(&self.settings_path);
-        let path = self.settings_path.display().to_string();
         let theme = self.theme.clone();
-        let editor = cx.new(|cx| SettingsEditor::new(&text, &path, theme, window, cx));
-        editor.update(cx, |e, cx| e.set_palette_words(app_palette_items(), cx));
+        let editor = cx.new(|cx| SettingsEditor::new(&text, theme, window, cx));
+        let opens = self.this_mac_worker.is_some();
+        editor.update(cx, |e, cx| {
+            e.set_palette_words(app_palette_items(), cx);
+            e.set_file_opens(opens, cx);
+        });
         self.settings_editor_events =
             Some(cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
-                SettingsEditorEvent::Apply(text) => {
-                    this.write_settings(text, editor, cx);
-                }
-                SettingsEditorEvent::Save(text) => {
-                    if this.write_settings(text, editor, cx) {
-                        this.close_settings(window, cx);
-                    }
-                }
+                SettingsEditorEvent::Apply(text) => this.write_settings(text, editor, cx),
+                SettingsEditorEvent::OpenFile => this.open_settings_file(window, cx),
                 SettingsEditorEvent::Dismiss => this.close_settings(window, cx),
             }));
         self.view.update(cx, |view, cx| view.show_settings(Some(editor.clone()), cx));
@@ -927,26 +924,31 @@ impl Workspace {
         }
     }
 
-    /// A change from the settings form, or the file's face saved: a text that parses is written
-    /// and applied at once, and the watcher takes it as seen; one that does not stays in the
-    /// editor with the reason under it. Returns whether it was written.
+    /// A change from the settings form: a text that parses is written and applied at once,
+    /// and the watcher takes it as seen; one that does not stays unwritten, with the reason at
+    /// the page's foot.
     fn write_settings(
         &mut self,
         text: &str,
         editor: &Entity<SettingsEditor>,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) {
         match settings::save(&self.settings_path, text, &mut self.settings_seen) {
             Ok(loaded) => {
                 tracing::info!(path = %self.settings_path.display(), "settings saved");
                 self.apply_loaded(loaded, cx);
-                true
             }
-            Err(error) => {
-                editor.update(cx, |e, cx| e.set_error(error, cx));
-                false
-            }
+            Err(error) => editor.update(cx, |e, cx| e.set_error(error, cx)),
         }
+    }
+
+    /// "Open the file": the page gives way to the file in a file tile on this Mac's worker,
+    /// as another machine's settings open; the watcher applies it as it is saved there.
+    fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.this_mac_worker else { return };
+        self.close_settings(window, cx);
+        let path = self.settings_path.display().to_string();
+        self.view.update(cx, |view, cx| view.edit_file_on(workers::worker_key(id), &path, cx));
     }
 
     /// Drop the editor, show the panes again, and hand the keyboard back to the focused tile.
@@ -1704,6 +1706,9 @@ impl Workspace {
             let _gone = this.update(cx, |ws, cx| {
                 if ws.this_mac_worker != worker {
                     ws.this_mac_worker = worker;
+                    if let Some(editor) = &ws.settings_editor {
+                        editor.update(cx, |e, cx| e.set_file_opens(worker.is_some(), cx));
+                    }
                     ws.tell_editor_machines(cx);
                     cx.notify();
                 }
@@ -6102,8 +6107,9 @@ mod tests {
     }
 
     /// A change from the settings form writes the file and applies it with the page still
-    /// up; a text that does not parse is not written and the page says why; the file's face
-    /// saved is written, applied and closed.
+    /// up; a text that does not parse is not written and the page says why. "Open
+    /// settings.toml" is offered only once this Mac's worker is known, and then leaves the
+    /// page for the file in a file tile on that worker.
     #[gpui::test]
     fn a_settings_change_applies_with_the_page_still_up(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -6130,8 +6136,38 @@ mod tests {
         assert!(editor.read_with(cx, |e, _| e.error().is_some()), "the page says why");
         assert!(open(cx), "and stays open");
 
-        send(cx, SettingsEditorEvent::Save("[font]\nligatures = true\n".to_owned()));
-        assert!(ws.read_with(cx, |ws, _| ws.settings.font.ligatures), "saved and applied");
-        assert!(!open(cx), "and closed");
+        let offered = |cx: &mut VisualTestContext| editor.read_with(cx, SettingsEditor::file_opens);
+        assert!(!offered(cx), "no worker here to open the file");
+        send(cx, SettingsEditorEvent::OpenFile);
+        assert!(open(cx), "nothing to open it in: the page stays");
+
+        let here = WorkerId::new();
+        ws.update(cx, |ws, cx| {
+            ws.add_worker(here, "studio".to_owned(), cx);
+            ws.this_mac_worker = Some(here);
+        });
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.close_settings(window, cx);
+                ws.open_settings(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let editor = ws.read_with(cx, |ws, _| ws.settings_editor.clone()).expect("the page");
+        assert!(editor.read_with(cx, SettingsEditor::file_opens), "offered");
+        editor.update(cx, |_, cx| cx.emit(SettingsEditorEvent::OpenFile));
+        cx.run_until_parked();
+        assert!(!open(cx), "the page gave way");
+        let files: Vec<(WorkerKey, String)> = ws.read_with(cx, |ws, cx| {
+            ws.view
+                .read(cx)
+                .items()
+                .filter_map(|(key, item)| match &item.kind {
+                    slopty_proto::items::ItemKind::File { path } => Some((key, path.clone())),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(files, [(workers::worker_key(here), path.display().to_string())]);
     }
 }

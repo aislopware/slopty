@@ -28,7 +28,6 @@ Tab │ Network
 Heading │ Help
 Tab │ Keyboard
 Tab │ About
-Button │ Edit as TOML
 Button │ Back
 Heading │ About
 TabPanel │ About

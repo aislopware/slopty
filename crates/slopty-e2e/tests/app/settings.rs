@@ -12,6 +12,10 @@ use super::gallery::{STEP, first_shell, golden};
 const WINDOW: (f32, f32) = (900.0, 600.0);
 /// Where the pointer rests before a golden, over nothing that answers a hover.
 const PARK: (f32, f32) = (1.0, 1.0);
+/// A worker id no machine has.
+const GONE: &str = "0199c0de-0000-7000-8000-000000000001";
+/// What its entry says.
+const GONE_SAID: &str = "Machine not on the server (0199c0de)";
 
 /// Click the centre of the node with `role` and `label` in the settings: in their page or in
 /// their section list, which the navigator holds. A pane's own tab elsewhere may share a
@@ -43,13 +47,15 @@ async fn the_settings_form_edits_the_file() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let settings = dir.join("app").join("settings.toml");
-    // Two machines by name, so the Input page shows a map's entries.
-    let mut before = std::fs::read_to_string(&settings).unwrap();
-    before.push_str("\n[clipboard.workers]\nlaptop = false\nstudio = true\n");
-    std::fs::write(&settings, &before).unwrap();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
+    // Two machines by id, so the Input page shows a map's entries: the run's worker, by its
+    // name, and one no machine has, which says so.
+    let worker = slopty_e2e::harness::worker_id(&dir).expect("the worker's id");
+    let mut before = std::fs::read_to_string(&settings).unwrap();
+    before.push_str(&format!("\n[clipboard.workers]\n\"{GONE}\" = false\n\"{worker}\" = true\n"));
+    std::fs::write(&settings, &before).unwrap();
 
     drv.keys("cmd-,").await.unwrap();
     let dump = drv
@@ -63,7 +69,6 @@ async fn the_settings_form_edits_the_file() {
     for section in sections {
         assert!(dump.a11y_node("Tab", Some(section)).is_some(), "{section}: {:#?}", dump.a11y);
     }
-    assert!(dump.a11y_node("Button", Some("Edit as TOML")).is_some(), "{:#?}", dump.a11y);
 
     press(drv, &dump, "Tab", "Terminal").await;
     let dump = drv
@@ -104,15 +109,16 @@ async fn the_settings_form_edits_the_file() {
     // A map's entries are lines under its row: a machine's name and its switch.
     press(drv, &keys, "Tab", "Input").await;
     let input = drv
-        .wait_for("the input page", STEP, |d| d.a11y_node("ListItem", Some("laptop")).is_some())
+        .wait_for("the input page", STEP, |d| d.a11y_node("ListItem", Some(GONE_SAID)).is_some())
         .await
         .unwrap();
-    assert!(input.a11y_node("Switch", Some("studio")).is_some(), "{:#?}", input.a11y);
+    assert!(input.a11y_node("Switch", Some("e2e-worker")).is_some(), "{:#?}", input.a11y);
     // Scrolled until the map's lines are in the page, under its title and over the window's foot.
     let mut lines = input;
     for _ in 0..20 {
-        let [_, y, _, h] = lines.a11y_node("ListItem", Some("studio")).expect("studio").bounds;
-        let [_, top, _, _] = lines.a11y_node("ListItem", Some("laptop")).expect("laptop").bounds;
+        let [_, y, _, h] =
+            lines.a11y_node("ListItem", Some("e2e-worker")).expect("the worker").bounds;
+        let [_, top, _, _] = lines.a11y_node("ListItem", Some(GONE_SAID)).expect("gone").bounds;
         if top > 200.0 && y + h < 500.0 {
             break;
         }

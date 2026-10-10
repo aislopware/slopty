@@ -316,36 +316,6 @@ mod tests {
         assert!(((after / before) - 20.0 / 13.0).abs() < 0.02, "{before} → {after}");
         assert_eq!(dump.status, "connected", "{dump:#?}");
 
-        // ⌘, opens the settings on their form, and "Edit as TOML" on the file's text; a line
-        // typed into it and ⌘↩ write the file, and the page goes.
-        drv.keys("cmd-,").await.unwrap();
-        let dump = drv
-            .wait_for("the settings editor", STEP, |d| {
-                d.a11y_node("Group", Some("Settings")).is_some()
-            })
-            .await
-            .unwrap();
-        let [x, y, w, h] =
-            dump.a11y_node("Button", Some("Edit as TOML")).expect("the file's link").bounds;
-        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-        drv.wait_for("the file's text", STEP, |d| {
-            d.a11y_node("Button", Some("Edit with controls")).is_some()
-        })
-        .await
-        .unwrap();
-        drv.keys("enter").await.unwrap();
-        drv.type_text("[terminal]").await.unwrap();
-        drv.keys("enter").await.unwrap();
-        drv.type_text("alert = \"never\"").await.unwrap();
-        drv.keys("cmd-enter").await.unwrap();
-        drv.wait_for("the settings editor to close", STEP, |d| {
-            d.a11y_node("Group", Some("Settings")).is_none()
-        })
-        .await
-        .unwrap();
-        let saved = std::fs::read_to_string(&settings).unwrap();
-        assert!(saved.contains("mono_size = 20") && saved.contains("alert = \"never\""), "{saved}");
-
         // ⌘W closes the active one; the worker tears its session down and one shell remains.
         drv.keys("cmd-w").await.unwrap();
         let dump =

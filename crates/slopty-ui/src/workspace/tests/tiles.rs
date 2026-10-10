@@ -70,7 +70,7 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
 /// A header is its title, then its context, muted with no separator: a file's directory, a
 /// shell's (none when the title already names it: the breadcrumb has the path). (That the
 /// context is in the UI
-/// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
+/// face is `kit`'s `the_mono_face_is_for_addresses`: the test platform
 /// shapes every family alike.)
 #[gpui::test]
 fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext) {

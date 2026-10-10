@@ -114,8 +114,9 @@ const NAV_WIDTH: f32 = 168.0;
 /// by side. A window with less room stacks the form in one column.
 const CONTENT_MIN: f32 = 480.0;
 
-/// The way to the file's own text, an advanced path kept apart from the sections.
-pub const EDIT_FILE: &str = "Edit as TOML";
+/// The way to `settings.toml` itself, in a file tile: an advanced path kept apart from the
+/// sections. Short enough for the sidebar's width beside its glyph.
+pub const OPEN_FILE: &str = "Open the file";
 
 /// The way out of the settings, back to the work, at the section list's foot.
 pub const BACK: &str = "Back";
@@ -192,11 +193,8 @@ pub enum SettingsFormEvent {
     Apply(String),
     /// ⌘↩ on a control that is not a text field (a field's Return is the dialog's own): done.
     Done,
-    /// The sidebar's way to the file itself: show its text.
-    EditFile,
-    /// A section was picked from the list: the page shows it, and the file's face gives way
-    /// to it.
-    Shown,
+    /// The way to the file itself: open it in a file tile.
+    OpenFile,
 }
 
 /// The form over one `settings.toml` text.
@@ -242,6 +240,9 @@ pub struct SettingsForm {
     /// The section list is drawn beside the page by its host, the workspace's navigator
     /// ([`Self::set_aside`]), so the form draws only the page.
     aside: bool,
+    /// The file itself can be opened in a file tile, so the form offers it
+    /// ([`Self::set_file_opens`]).
+    file_opens: bool,
     /// The Keyboard page's lines for the text, read again when the text changes.
     keys: Option<KeyPage>,
     /// The app's palette lines beside the workspace's, whose words name its commands here.
@@ -362,6 +363,7 @@ impl SettingsForm {
             reveal: None,
             narrow: false,
             aside: false,
+            file_opens: false,
             keys: None,
             words: Vec::new(),
             key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
@@ -414,9 +416,8 @@ impl SettingsForm {
         self.errors.get(ix).and_then(Option::as_deref)
     }
 
-    /// Take `text` (the dialog's TOML field, edited by hand) and show what it holds. It is
-    /// applied with the next change a row makes.
-    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Take `text` and show what it holds.
+    fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         text.clone_into(&mut self.text);
         self.pending = None;
         self.typed.clear();
@@ -453,7 +454,7 @@ impl SettingsForm {
     }
 
     /// Write what is still waiting for a pause now, and hand back the text to apply if it
-    /// changed since the last one: the dialog is closing or turning to the file's face.
+    /// changed since the last one: the page is closing or giving way to the file's tile.
     pub fn flush(&mut self, cx: &mut Context<Self>) -> Option<String> {
         self.pending = None;
         self.check_typed(cx);
@@ -485,6 +486,21 @@ impl SettingsForm {
     #[must_use]
     pub fn tab_handle(&self, section: Section) -> Option<FocusHandle> {
         self.tabs.get(section.index()).cloned()
+    }
+
+    /// Whether the file itself can be opened in a file tile, which only this Mac's own worker
+    /// does: then the list's foot (the head, in one column) offers it.
+    pub fn set_file_opens(&mut self, opens: bool, cx: &mut Context<Self>) {
+        if self.file_opens != opens {
+            self.file_opens = opens;
+            cx.notify();
+        }
+    }
+
+    /// Whether the form offers the file itself ([`Self::set_file_opens`]).
+    #[must_use]
+    pub const fn file_opens(&self) -> bool {
+        self.file_opens
     }
 
     /// Whether the host draws the section list beside the page (`SettingsForm::sections`): then the
@@ -1045,7 +1061,6 @@ impl SettingsForm {
                 })
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     this.select(section, window, cx);
-                    cx.emit(SettingsFormEvent::Shown);
                 }))
                 .on_key_down(cx.listener(move |this, ev, window, cx| {
                     this.tab_key(section, ev, window, cx);
@@ -1119,8 +1134,10 @@ impl SettingsForm {
                     .pt(px(spacing.sm))
                     .children(groups),
             )
-            .child(self.foot_row("settings-edit-toml", Symbol::Curlybraces, EDIT_FILE, cx, |cx| {
-                cx.emit(SettingsFormEvent::EditFile);
+            .children(self.file_opens.then(|| {
+                self.foot_row("settings-open-file", Symbol::Curlybraces, OPEN_FILE, cx, |cx| {
+                    cx.emit(SettingsFormEvent::OpenFile);
+                })
             }))
             .child(self.foot_row("settings-back", Symbol::ArrowLeft, BACK, cx, |cx| {
                 cx.emit(SettingsFormEvent::Done);
@@ -1243,22 +1260,31 @@ impl SettingsForm {
             row
         };
         let row = if self.narrow {
-            let file = crate::kit::button(theme, "settings-edit-toml", EDIT_FILE, ButtonKind::Link)
-                .on_click(
-                    cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)),
-                );
-            let glyph = crate::kit::icon_button(
-                theme,
-                "settings-edit-toml-glyph",
-                Symbol::Curlybraces,
-                EDIT_FILE,
-            )
-            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::EditFile)));
             let done = crate::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
                 .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
-            row.item("file", crate::kit::Priority::HIGH, file)
-                .item("done", crate::kit::Priority::ESSENTIAL, done)
-                .menu(glyph)
+            if self.file_opens {
+                let open = |_this: &mut Self,
+                            _ev: &ClickEvent,
+                            _w: &mut Window,
+                            cx: &mut Context<Self>| {
+                    cx.emit(SettingsFormEvent::OpenFile);
+                };
+                let file =
+                    crate::kit::button(theme, "settings-open-file", OPEN_FILE, ButtonKind::Link)
+                        .on_click(cx.listener(open));
+                let glyph = crate::kit::icon_button(
+                    theme,
+                    "settings-open-file-glyph",
+                    Symbol::Curlybraces,
+                    OPEN_FILE,
+                )
+                .on_click(cx.listener(open));
+                row.item("file", crate::kit::Priority::HIGH, file)
+                    .item("done", crate::kit::Priority::ESSENTIAL, done)
+                    .menu(glyph)
+            } else {
+                row.item("done", crate::kit::Priority::ESSENTIAL, done)
+            }
         } else {
             row
         };

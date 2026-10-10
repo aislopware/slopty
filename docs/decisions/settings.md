@@ -603,3 +603,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `worker_install_with_no_server_installs_one_beside_it` and
     `a_purge_takes_the_worker_off_and_leaves_the_persons_own` (slopty-cli); the serverd
     follow tests.
+
+- ✅ **The settings page is the form alone; the file opens in a file tile** (2026-10-11,
+  orchestrator-first audit C.5). The page had two faces of one text: the form, and "Edit as
+  TOML", a monospace field with its own head, Cancel and Save, and "Edit with controls" to go
+  back. That was a second editor beside the file tile's, with its own save rules, for a path
+  few take. This supersedes the file's face in the 2026-10-06 entries here and in `ui.md`.
+  - **Gone.** The TOML face, its head, its Save and Cancel, `Mode`,
+    `SettingsEditorEvent::Save`, `SettingsFormEvent::Shown`, the page's TOML highlighter and
+    the file name it showed.
+  - **The file.** "Open the file" at the section list's foot (beside Done in the head, in one
+    column) applies the change still waiting for a pause, closes the page and opens the app's
+    `settings.toml` in a kept file tile on this Mac's own worker (`WorkspaceView::edit_file_on`).
+    That is how another machine's settings already open. The 1 s poll applies the file as it
+    is saved there.
+  - **Only where there is a tile to open it in.** The way is offered once the app knows this
+    Mac's worker (`SettingsEditor::set_file_opens`). A phone, or a Mac with no worker of its
+    own, has the form alone.
+  - The label is short so it fits the 168 pt sidebar beside its glyph; "Open settings.toml"
+    did not.
+  - The mono face lint now allows the held-back page's address only
+    (`kit::tests::the_mono_face_is_for_addresses`).
+  - Tests: settings_editor `the_file_is_the_sidebars_advanced_path`,
+    `a_narrow_sheet_keeps_its_head_whole`, `a_refusal_shows_until_the_next_change`,
+    `a_change_on_its_way_outlives_the_file_changing`; workspace
+    `a_phone_s_page_is_the_form_alone`; app `a_settings_change_applies_with_the_page_still_up`.
