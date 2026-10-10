@@ -6,6 +6,7 @@
 //! * [`protocol`] — messages between the worker and ptyd, framed with [`slopty_proto::codec`].
 //! * [`fdpass`] — frames plus `SCM_RIGHTS` fds over the Unix socket.
 //! * [`client`] — the worker side of the ptyd socket.
+//! * [`succession`] — ptyd running its next build in place, its descriptors kept across `exec`.
 //! * [`shell_integration`] — bundled zsh scripts that emit OSC 133 prompt marks.
 //! * [`terminfo`] — ghostty's terminfo entry, compiled on start-up so `TERM=xterm-ghostty`.
 //! * [`ssh`] — `ssh` out of a Slopty shell, with the entry installed on the far side.
@@ -26,9 +27,10 @@ pub mod ring;
 pub mod shell_integration;
 pub mod spawn;
 pub mod ssh;
+pub mod succession;
 pub mod terminfo;
 
-pub use client::PtydClient;
+pub use client::{Adoptee, PtydClient};
 pub use pty::{Pty, PtyMaster, SpawnSpec, Spawned};
 pub use ring::Ring;
 pub use spawn::Child;

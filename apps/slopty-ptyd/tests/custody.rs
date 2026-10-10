@@ -20,7 +20,9 @@ mod golden {
     use slopty_proto::ptyd::PtydError;
     use slopty_proto::terminal::TermSize;
     use slopty_pty::SpawnSpec;
-    use slopty_pty::protocol::{OutputFrame, PtydEvent, PtydRequest, SessionInfo};
+    use slopty_pty::protocol::{
+        Bequest, Heir, OutputFrame, PtydEvent, PtydRequest, SessionInfo, inherit_args,
+    };
     use uuid::Uuid;
 
     fn id() -> SessionId {
@@ -51,6 +53,10 @@ mod golden {
             PtydRequest::Close { .. } => "request_close",
             PtydRequest::List => "request_list",
             PtydRequest::Shutdown => "request_shutdown",
+            PtydRequest::Reclaim { .. } => "request_reclaim",
+            PtydRequest::Adopt { .. } => "request_adopt",
+            // An older ptyd reads it from a newer build: it is the handover's.
+            PtydRequest::Succeed { .. } => "succession_request",
         }
     }
 
@@ -92,6 +98,15 @@ mod golden {
             PtydRequest::Close { id: id() },
             PtydRequest::List,
             PtydRequest::Shutdown,
+            PtydRequest::Reclaim { id: id() },
+            PtydRequest::Adopt {
+                id: id(),
+                pid: 4242,
+                size: size(),
+                started_ms: WallMs::from_millis(1_759_000_000_000),
+                term: "xterm-ghostty".to_owned(),
+            },
+            PtydRequest::Succeed { program: PathBuf::from("/Users/me/.slopty/bin/slopty-ptyd") },
         ]
     }
 
@@ -154,6 +169,39 @@ mod golden {
         }
     }
 
+    /// Everything one ptyd hands the build it runs next: the command line it runs that build
+    /// with, the state file's first frame, and a session's record after it.
+    #[test]
+    fn every_handover_frame() {
+        insta::assert_snapshot!("succession_argv", inherit_args(7).join(" "));
+        let bequest = Bequest {
+            socket: PathBuf::from("/Users/me/.slopty/run/ptyd.sock"),
+            backlog_bytes: 1 << 20,
+            shell_dir: PathBuf::from("/Users/me/.slopty/shell"),
+            sessions: 1,
+            fds: vec![9],
+        };
+        let bytes = codec::encode(&bequest).expect("encodes");
+        insta::assert_snapshot!("succession_bequest", hex(&bytes));
+        let heir = Heir {
+            id: id(),
+            master: 9,
+            pid: 4242,
+            tty: PathBuf::from("/dev/ttys003"),
+            started_ms: WallMs::from_millis(1_759_000_000_000),
+            term: "xterm-ghostty".to_owned(),
+            size: size(),
+            checkpoint: b"\x1b[H".to_vec(),
+            backlog: b"ok\r\n".to_vec(),
+            dropped: 7,
+            exited: Some(-9),
+            attached: true,
+            orphan: true,
+            orphan_mark: Some(1_759_000_000_123_456),
+        };
+        insta::assert_snapshot!("succession_heir", hex(&codec::encode(&heir).expect("encodes")));
+    }
+
     /// The tap's frame, built by hand to copy its bytes once, is the request's own encoding.
     #[test]
     fn the_taps_frame_is_the_output_request() {
@@ -184,14 +232,38 @@ mod golden {
             .output()
             .unwrap();
         assert!(said.status.success(), "{said:?}");
-        assert_eq!(String::from_utf8(said.stdout).unwrap().trim(), derived);
+        let said = String::from_utf8(said.stdout).unwrap();
+        let succession = super::custody::succession(&goldens);
+        assert_eq!(said.trim(), format!("{derived} {succession}"), "custody, then succession");
         assert_eq!(derived.len(), 16, "{derived}");
+        assert!(
+            goldens.iter().any(|(name, _)| name.contains("golden__succession_heir")),
+            "the handover's goldens are read"
+        );
+        assert_ne!(succession, super::custody::of(Vec::new(), Vec::new()), "of something");
 
         let mut moved = goldens.clone();
         if let Some((_, text)) = moved.iter_mut().find(|(name, _)| name.contains("request_spawn")) {
             text.push('0');
         }
-        assert_ne!(super::custody::of(moved, scripts.clone()), derived, "a golden moves it");
+        assert_ne!(
+            super::custody::of(moved.clone(), scripts.clone()),
+            derived,
+            "a golden moves it"
+        );
+        assert_eq!(
+            super::custody::succession(&moved),
+            succession,
+            "but not the succession, unless it is the handover's"
+        );
+        let mut handover = goldens.clone();
+        if let Some((_, text)) =
+            handover.iter_mut().find(|(name, _)| name.contains("succession_heir"))
+        {
+            text.push('0');
+        }
+        assert_ne!(super::custody::succession(&handover), succession, "the handover's moves it");
+        assert_ne!(super::custody::of(handover, scripts.clone()), derived, "and the custody");
         let mut edited = scripts.clone();
         if let Some((_, bytes)) = edited.first_mut() {
             bytes.push(b'\n');

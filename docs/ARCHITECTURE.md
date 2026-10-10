@@ -292,6 +292,17 @@ worker restart or crash; what the replay reports is kept for the first attach, n
 answered. A bare
 program name the daemon cannot find on its own `PATH` runs through the user's login shell,
 interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
+An install whose ptyd keeps custody another way (its fingerprint from the custody goldens
+moved) stops the worker, then hands ptyd over to the new build (`slopty-ptyd --succeed`,
+`PtydRequest::Succeed`): the old image parks every reader, writes a `Bequest` and each session's
+`Heir` to an unlinked file, clears close-on-exec on it and every master, and `execv`s the new
+binary with `--inherit <fd>` in one synchronous step (`slopty_pty::succession`). The new image
+takes the descriptors back and binds the socket afresh. The children never notice. The
+handover's own wire, command line included, is fingerprinted from its goldens too, and a build
+whose fingerprint differs is restarted instead, ending the sessions. The worker redials a ptyd
+it lost (20 ms doubling to 2 s), checks the custody file names the peer's pid, and takes back
+every session it held: `Reclaim` where ptyd still lists it, else `Adopt` with a dup of the
+master it kept, whose child ptyd then watches by pid and the kernel's start mark.
 
 **After a reboot.** ptyd's end takes the shells with it, so the worker keeps each session on
 disk itself (`slopty_worker::restore::Keeper`: a recipe and the newest checkpoint under

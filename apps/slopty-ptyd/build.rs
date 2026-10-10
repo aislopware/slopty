@@ -18,11 +18,16 @@ fn main() -> std::io::Result<()> {
         })
     };
     let (goldens, shell) = custody::sources(&var("CARGO_MANIFEST_DIR")?);
-    let custody = custody::of(custody::goldens(&goldens)?, custody::scripts(&shell)?);
+    let read = custody::goldens(&goldens)?;
+    let succession = custody::succession(&read);
+    let custody = custody::of(read, custody::scripts(&shell)?);
     let generated = format!(
         "/// What a running ptyd hands the worker: a hash of the protocol's goldens and the shell\n\
          /// integration scripts. Two builds that say the same share one running ptyd.\n\
-         pub const CUSTODY: &str = \"{custody}\";\n"
+         pub const CUSTODY: &str = \"{custody}\";\n\
+         /// How a running ptyd hands its sessions to the build it runs next: a hash of the\n\
+         /// handover's goldens. Two builds that say the same hand over to each other.\n\
+         pub const SUCCESSION: &str = \"{succession}\";\n"
     );
     std::fs::write(var("OUT_DIR")?.join("custody.rs"), generated)?;
     for path in [goldens, shell, PathBuf::from("src/custody.rs")] {

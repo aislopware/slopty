@@ -103,7 +103,7 @@ mod ptyd_link {
         let held = older.attach(id).await.unwrap();
 
         let (worker, mut reports) =
-            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"))
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
                 .await
                 .unwrap();
         assert!(worker.get(id).is_err(), "not the worker's while the older one holds it");
@@ -148,7 +148,7 @@ mod ptyd_link {
         drop(spawner);
 
         let (worker, _reports) =
-            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"))
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
                 .await
                 .unwrap();
         let session = worker.get(id).expect("adopted at connect");
@@ -167,15 +167,167 @@ mod ptyd_link {
         worker.close(id).await.unwrap();
     }
 
+    /// ptyd dies under a worker: the worker stays up, dials the ptyd that starts again and hands
+    /// it the session, whose shell lived on through the worker's copy of its master. The new
+    /// ptyd holds it for the worker, reports its end (no child of its own, so with no status),
+    /// and the shell still hears what is typed into it.
+    #[tokio::test]
+    async fn a_worker_hands_its_sessions_to_a_ptyd_that_starts_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut first, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) = Worker::connect(
+            Some(socket.clone()),
+            Arc::new(NoAgents),
+            &dir.path().join("kept"),
+            None,
+        )
+        .await
+        .unwrap();
+        let heard = dir.path().join("heard");
+        let open = OpenSession {
+            size: TermSize::default(),
+            cwd: None,
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("read x; printf %s \"$x\" > '{}'; exit 3", heard.display()),
+            ],
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        let id = worker.open(&open).await.unwrap().id();
+
+        first.kill().await.unwrap();
+        let (_second, socket) = ptyd(dir.path()).await;
+        let held = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Ok((mut ptyd, _exits)) = PtydClient::connect(&socket).await
+                    && let Ok(list) = ptyd.list().await
+                    && let Some(info) = list.into_iter().find(|i| i.id == id)
+                {
+                    break info;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the worker hands the session to the new ptyd");
+        assert!(held.attached, "held for the worker, which reads the master itself");
+        assert!(held.pid > 0 && held.exited.is_none(), "{held:?}");
+
+        let session = worker.get(id).expect("the worker kept the session");
+        session.request(ClientId::new(), TermRequest::Raw(b"still here\r".to_vec())).unwrap();
+        let exit = tokio::time::timeout(WAIT, reports.exits.recv())
+            .await
+            .expect("the new ptyd reports the end")
+            .expect("the exits outlive a lost ptyd");
+        assert_eq!(exit, (id, -1), "an adopted child's status is not known");
+        assert_eq!(std::fs::read_to_string(&heard).unwrap(), "still here", "the shell lived on");
+        worker.close(id).await.unwrap();
+    }
+
+    /// The custody this build of ptyd keeps, as `--custody` prints it first.
+    fn custody() -> String {
+        let said = std::process::Command::new(ptyd_bin()).arg("--custody").output().unwrap();
+        let said = String::from_utf8(said.stdout).unwrap();
+        said.split_whitespace().next().expect("a custody").to_owned()
+    }
+
+    /// A worker dials only a ptyd that says, under the pid the connection reached, the custody
+    /// it speaks: one that keeps another is refused, and so is one whose file another process
+    /// wrote, each with its sessions left alone.
+    #[tokio::test]
+    async fn a_worker_dials_only_a_ptyd_that_keeps_its_custody() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let kept = dir.path().join("kept");
+        let connect = |custody: &str| {
+            Worker::connect(Some(socket.clone()), Arc::new(NoAgents), &kept, Some(custody.into()))
+        };
+        let (worker, _reports) = connect(&custody()).await.expect("its own custody");
+        drop(worker);
+        let refused = connect("0000000000000000").await.expect_err("another custody");
+        assert!(refused.to_string().contains("keeps custody"), "{refused}");
+        let file = socket.with_extension("custody");
+        let said = std::fs::read_to_string(&file).unwrap();
+        let (_pid, rest) = said.split_once(' ').unwrap();
+        std::fs::write(&file, format!("1 {rest}")).unwrap();
+        let refused = connect(&custody()).await.expect_err("another process's file");
+        assert!(refused.to_string().contains("does not say its custody"), "{refused}");
+    }
+
+    /// ptyd runs a new build in place under a worker that holds a session: the worker, which
+    /// dials only a ptyd of its own custody, dials the new image, finds its custody under the
+    /// same pid, and takes the session back (`Reclaim`), whose shell still hears what is typed.
+    #[tokio::test]
+    async fn a_worker_takes_its_sessions_back_after_a_handover() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) = Worker::connect(
+            Some(socket.clone()),
+            Arc::new(NoAgents),
+            &dir.path().join("kept"),
+            Some(custody()),
+        )
+        .await
+        .unwrap();
+        let heard = dir.path().join("heard");
+        let open = OpenSession {
+            size: TermSize::default(),
+            cwd: None,
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("read x; printf %s \"$x\" > '{}'; exit 3", heard.display()),
+            ],
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        let id = worker.open(&open).await.unwrap().id();
+        let (mut asker, _exits) = PtydClient::connect(&socket).await.unwrap();
+        asker.succeed(ptyd_bin()).await.expect("no answer: the new build runs");
+        let reclaimed = tokio::time::timeout(WAIT, async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                if let Ok((mut ptyd, _exits)) = PtydClient::connect(&socket).await
+                    && let Ok(list) = ptyd.list().await
+                    && let Some(info) = list.into_iter().find(|i| i.id == id)
+                    && info.attached
+                    && let Err(e) = ptyd.attach(id).await
+                {
+                    break e;
+                }
+            }
+        })
+        .await
+        .expect("the worker takes the session back");
+        assert!(reclaimed.to_string().contains("attached"), "held by the worker: {reclaimed}");
+        let session = worker.get(id).expect("the worker kept the session");
+        session.request(ClientId::new(), TermRequest::Raw(b"still here\r".to_vec())).unwrap();
+        let exit = tokio::time::timeout(WAIT, reports.exits.recv())
+            .await
+            .expect("the new image reports the end")
+            .expect("the exits outlive a handover");
+        assert_eq!(exit, (id, 3), "reaped by the same process, with its status");
+        assert_eq!(std::fs::read_to_string(&heard).unwrap(), "still here", "the shell lived on");
+        worker.close(id).await.unwrap();
+    }
+
     /// Closing a session ptyd has already forgotten is done, not a failure.
     #[tokio::test]
     async fn closing_a_session_ptyd_already_forgot_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let (_ptyd, socket) = ptyd(dir.path()).await;
-        let (worker, _reports) =
-            Worker::connect(Some(socket.clone()), Arc::new(NoAgents), &dir.path().join("kept"))
-                .await
-                .unwrap();
+        let (worker, _reports) = Worker::connect(
+            Some(socket.clone()),
+            Arc::new(NoAgents),
+            &dir.path().join("kept"),
+            None,
+        )
+        .await
+        .unwrap();
         let open = OpenSession {
             size: TermSize::default(),
             cwd: None,

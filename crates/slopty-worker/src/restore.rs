@@ -1,15 +1,17 @@
 //! Sessions kept on disk, so they come back after their shell is lost to a reboot or to ptyd
 //! ending (`docs/decisions/terminal.md`, "Sessions come back after a reboot").
 //!
-//! ptyd keeps shells alive across a worker restart, but not across its own end. For that the
-//! worker keeps, per session, a recipe (`<id>.json`: the command, the request's environment,
-//! the directory, the title, the size) and the newest checkpoint of its screen and scrollback
-//! (`<id>.vt`, the VT bytes ptyd is handed). A worker that finds a recipe ptyd no longer holds
-//! reopens the session under the same id, so every workspace item keeps its tile: a new shell
-//! in the old directory, below the old screen and a divider. What the old shell was running is
-//! never started again, with one exception: a Claude Code conversation the person left running
-//! comes back with `claude --resume` (`docs/decisions/claude-code.md`, "An agent comes back
-//! after a reboot"). The daemon's agent tick tells the keeper which conversation each session
+//! ptyd keeps shells alive across a worker restart, and across its own update (it runs the new
+//! build in place) or its own crash (the worker hands the masters it holds back to the ptyd
+//! that starts again). Not across a reboot, or a ptyd that ends while no worker holds its
+//! sessions. For that the worker keeps, per session, a recipe (`<id>.json`: the command, the
+//! request's environment, the directory, the title, the size) and the newest checkpoint of its
+//! screen and scrollback (`<id>.vt`, the VT bytes ptyd is handed). A worker that finds a recipe
+//! ptyd no longer holds reopens the session under the same id, so every workspace item keeps its
+//! tile: a new shell in the old directory, below the old screen and a divider. What the old shell
+//! was running is never started again, with one exception: a Claude Code conversation the person
+//! left running comes back with `claude --resume` (`docs/decisions/claude-code.md`, "An agent comes
+//! back after a reboot"). The daemon's agent tick tells the keeper which conversation each session
 //! holds ([`Keeper::agent`]); a tile opened on `claude` runs it again resumed, and a shell the
 //! person typed `claude` into gets the resuming line typed at its first prompt.
 //! A conversation Claude Code still runs in the background (`claude --bg`, in its session

@@ -1,7 +1,7 @@
 //! The worker's connection to ptyd.
 
-use std::os::fd::OwnedFd;
-use std::path::Path;
+use std::os::fd::{BorrowedFd, OwnedFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use slopty_core::SessionId;
@@ -32,6 +32,19 @@ pub struct Attached {
     /// When ptyd spawned the child.
     pub started_ms: slopty_core::WallMs,
     /// The terminfo name ptyd gave the child as `TERM`.
+    pub term: String,
+}
+
+/// What ptyd keeps of a session handed back to it ([`PtydClient::adopt`]) besides its master.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Adoptee {
+    /// Its child.
+    pub pid: u32,
+    /// Size of record.
+    pub size: TermSize,
+    /// When the child was spawned.
+    pub started_ms: slopty_core::WallMs,
+    /// The terminfo name the child was given as `TERM`.
     pub term: String,
 }
 
@@ -76,6 +89,13 @@ impl PtydClient {
         let (replies, replies_rx) = mpsc::unbounded_channel();
         let reader = tokio::spawn(read_loop(Arc::clone(&stream), replies_rx, exits));
         Ok((Self { stream, replies, reader }, exits_rx))
+    }
+
+    /// The process at the other end: the ptyd this connection reached.
+    #[must_use]
+    pub fn peer_pid(&self) -> Option<u32> {
+        let pid = self.stream.peer_cred().ok()?.pid()?;
+        u32::try_from(pid).ok()
     }
 
     /// Spawn a session; returns the child pid.
@@ -141,6 +161,39 @@ impl PtydClient {
         self.expect_ok(&PtydRequest::Shutdown).await
     }
 
+    /// Take back a session whose master this worker holds already
+    /// ([`PtydRequest::Reclaim`]).
+    pub async fn reclaim(&mut self, id: SessionId) -> Result<(), PtyError> {
+        self.expect_ok(&PtydRequest::Reclaim { id }).await
+    }
+
+    /// Hand ptyd a session it does not hold, with its master ([`PtydRequest::Adopt`]).
+    pub async fn adopt(
+        &mut self,
+        id: SessionId,
+        master: BorrowedFd<'_>,
+        child: Adoptee,
+    ) -> Result<(), PtyError> {
+        let Adoptee { pid, size, started_ms, term } = child;
+        let req = PtydRequest::Adopt { id, pid, size, started_ms, term };
+        match self.call_with(&req, Some(master)).await?.0 {
+            PtydEvent::Ok => Ok(()),
+            other => Self::unexpected(other),
+        }
+    }
+
+    /// Ask the daemon to run the build at `program` in place, keeping every session
+    /// ([`PtydRequest::Succeed`]). `Ok` once the connection closed without an answer, which is
+    /// what a daemon that went ahead does: whether the new build came up is for the caller to
+    /// read beside the socket.
+    pub async fn succeed(&mut self, program: PathBuf) -> Result<(), PtyError> {
+        match self.call(&PtydRequest::Succeed { program }).await {
+            Err(PtyError::Closed) => Ok(()),
+            Ok((other, _)) => Self::unexpected(other),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn expect_ok(&mut self, req: &PtydRequest) -> Result<(), PtyError> {
         match self.call(req).await?.0 {
             PtydEvent::Ok => Ok(()),
@@ -161,12 +214,21 @@ impl PtydClient {
 
     /// Send a request and wait for its reply. `&mut self` keeps one request in flight per
     /// sender, so the reader's queue of reply slots is in request order.
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
     async fn call(&mut self, req: &PtydRequest) -> Result<Reply, PtyError> {
+        self.call_with(req, None).await
+    }
+
+    /// [`Self::call`], with `fd` riding on the request's frame.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
+    async fn call_with(
+        &mut self,
+        req: &PtydRequest,
+        fd: Option<BorrowedFd<'_>>,
+    ) -> Result<Reply, PtyError> {
         let frame = codec::encode(req)?;
         let (slot, reply) = oneshot::channel();
         self.replies.send(slot).map_err(|_closed| PtyError::Closed)?;
-        self.send(&frame).await?;
+        fdpass::send(&self.stream, &frame, fd).await?;
         reply.await.map_err(|_closed| PtyError::Closed)
     }
 }

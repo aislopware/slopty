@@ -8298,10 +8298,12 @@ name = "slopty-ptyd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "insta",
  "parking_lot",
  "rustix",
+ "serde",
  "slopty-core",
  "slopty-crash",
  "slopty-proto",

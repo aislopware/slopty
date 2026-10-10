@@ -1216,10 +1216,9 @@ mod tests {
         .await
         .expect("the screen is kept");
 
-        // ptyd ends, and the worker with it; the shell and its program go with them.
-        guard.0[0].start_kill().unwrap();
-        guard.0[0].wait().await.unwrap();
-        tokio::time::timeout(STEP, guard.0[1].wait()).await.expect("the worker exits").unwrap();
+        // The machine goes down: the worker and ptyd end, and the shell and its program with
+        // them, since nothing holds the master any more.
+        end_both(&mut guard).await;
         drop(events);
         drop(worker);
 
@@ -1366,9 +1365,7 @@ mod tests {
         .expect("the conversation is kept");
         assert!(!std::fs::read_to_string(&recipe).unwrap().contains("hush-hush"));
 
-        guard.0[0].start_kill().unwrap();
-        guard.0[0].wait().await.unwrap();
-        tokio::time::timeout(STEP, guard.0[1].wait()).await.expect("the worker exits").unwrap();
+        end_both(&mut guard).await;
         drop(events);
         drop(worker);
         let ptyd = spawn_ptyd(dir.path()).await;
@@ -4571,18 +4568,50 @@ mod tests {
         tokio::time::timeout(STEP, server).await.unwrap().unwrap();
     }
 
-    /// A worker that loses ptyd goes down with a failure, so launchd starts one that connects
-    /// again, rather than serving on with nothing to spawn into and nobody keeping its shells.
+    /// The worker, then ptyd, as a reboot ends them: the worker first, so it hands nothing to
+    /// a ptyd on its way out.
+    async fn end_both(guard: &mut Guard) {
+        for at in [1, 0] {
+            guard.0[at].start_kill().unwrap();
+            guard.0[at].wait().await.unwrap();
+        }
+    }
+
+    /// A worker that loses ptyd keeps running and keeps its shells, whose masters it holds:
+    /// once a ptyd starts again (launchd starts it), the worker, which dials only a ptyd of
+    /// the custody it ships with, hands it the session, and the shell still takes input.
     #[tokio::test]
-    async fn a_worker_that_loses_ptyd_exits_to_be_restarted() {
+    async fn a_worker_that_loses_ptyd_keeps_its_shells_for_the_next() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut guard, _addr) = daemons(dir.path()).await;
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        let (session, mut events) = open_shell_and_see(&mut worker, "before-the-loss").await;
         guard.0[0].start_kill().unwrap();
-        let status = tokio::time::timeout(STEP, guard.0[1].wait())
+        guard.0[0].wait().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(guard.0[1].try_wait().unwrap().is_none(), "the worker stays up");
+        guard.0[0] = spawn_ptyd(dir.path()).await;
+        let kept = dir.path().join("data").join("sessions").join(format!("{session}.vt"));
+        // Handed back, the session checkpoints at once (its taps meanwhile went nowhere).
+        let before = std::fs::metadata(&kept).and_then(|m| m.modified()).ok();
+        tokio::time::timeout(STEP, async {
+            while std::fs::metadata(&kept).and_then(|m| m.modified()).ok() == before {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the worker hands the session to the new ptyd");
+        worker
+            .tx
+            .send(&ClientMsg::Term {
+                session,
+                req: TermRequest::Raw(b"echo after-the-lo'ss'\n".to_vec()),
+            })
             .await
-            .expect("the worker exits once ptyd is gone")
             .unwrap();
-        assert!(!status.success(), "{status}");
+        wait_for_text(&mut events, "after-the-loss").await;
+        worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 
     /// `nc -l` typed into a real shell is announced as its session's port, and the set is

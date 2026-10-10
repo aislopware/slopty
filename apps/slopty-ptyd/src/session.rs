@@ -1,14 +1,15 @@
 //! One PTY-backed child, its output ring and the last worker's checkpoint.
 
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use rustix::process::{Pid, Signal};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::TermSize;
-use slopty_pty::protocol::SessionInfo;
+use slopty_pty::protocol::{Heir, SessionInfo};
 use slopty_pty::shell_integration::ShellIntegration;
 use slopty_pty::{Pty, PtyMaster, Ring, SpawnSpec};
 use tokio::sync::{broadcast, watch};
@@ -48,6 +49,44 @@ pub struct Session {
     reader: watch::Sender<Reader>,
     /// Reader acknowledges it is out of the fd (or finished) by setting this to `true`.
     parked: watch::Sender<bool>,
+    /// The child is no child of this process: a worker handed the session back to a ptyd that
+    /// started afresh ([`Self::adopt`]).
+    orphan: bool,
+    /// Such a child's start as the kernel recorded it when this ptyd took it
+    /// ([`slopty_pty::process::start_mark`]): its pid is that child's only while it carries it.
+    mark: Option<u64>,
+}
+
+/// How long a session a worker held when the ptyd before this build handed it over is kept out
+/// of the reader, for that worker to take back (`PtydRequest::Reclaim`) before ptyd drains it
+/// again.
+const RECLAIM_GRACE: Duration = Duration::from_secs(30);
+
+/// How often the pid of an adopted child is looked at: it is no child of ptyd, so no `SIGCHLD`
+/// says it ended.
+const ORPHAN_POLL: Duration = Duration::from_secs(1);
+
+/// How a session's end is seen.
+enum Watch {
+    /// A child of this process, reaped.
+    Child(slopty_pty::Child),
+    /// A process that is no child of this one: gone once its pid is.
+    Orphan,
+}
+
+/// What a session starts with, however it came to this ptyd.
+struct Start {
+    id: SessionId,
+    pid: u32,
+    started_ms: WallMs,
+    term: String,
+    tty: PathBuf,
+    master: OwnedFd,
+    state: State,
+    reader: Reader,
+    exited: Option<i32>,
+    orphan: bool,
+    mark: Option<u64>,
 }
 
 /// What a session's reader is to do with the master.
@@ -112,18 +151,141 @@ impl Session {
     ) -> Result<Arc<Self>, slopty_pty::PtyError> {
         let pty = Pty::open(spec.size)?;
         let tty = pty.slave_path().to_path_buf();
-        let slopty_pty::Spawned { mut child, term } = pty.spawn_with(spec, integration)?;
-        let pid = child.id().unwrap_or(0);
-        let started_ms = WallMs::now();
-        let master = Arc::new(PtyMaster::new(pty.into_master())?);
-        let (reader, _) = watch::channel(Reader::Drain);
-        let (parked, _) = watch::channel(false);
-        let state = State {
-            size: spec.size,
-            ring: Ring::new(backlog_bytes),
-            checkpoint: Vec::new(),
-            attached_by: None,
+        let slopty_pty::Spawned { child, term } = pty.spawn_with(spec, integration)?;
+        let session = Self::start(Start {
+            id,
+            pid: child.id().unwrap_or(0),
+            started_ms: WallMs::now(),
+            term,
+            tty,
+            master: pty.into_master(),
+            state: State {
+                size: spec.size,
+                ring: Ring::new(backlog_bytes),
+                checkpoint: Vec::new(),
+                attached_by: None,
+            },
+            reader: Reader::Drain,
+            exited: None,
+            orphan: false,
+            mark: None,
+        })?;
+        session.watch(Watch::Child(child), events);
+        Ok(session)
+    }
+
+    /// Keep a session a worker hands back with its master: this ptyd started afresh after the
+    /// one that spawned it ended. Connection `conn` holds the master from now on, as after an
+    /// attach, so the reader starts out of it. Its child is no child of this process.
+    pub fn adopt(
+        id: SessionId,
+        master: OwnedFd,
+        child: slopty_pty::Adoptee,
+        backlog_bytes: usize,
+        conn: u64,
+        events: broadcast::Sender<Broadcast>,
+    ) -> Result<Arc<Self>, slopty_pty::PtyError> {
+        let slopty_pty::Adoptee { pid, size, started_ms, term } = child;
+        let session = Self::start(Start {
+            id,
+            pid,
+            started_ms,
+            term,
+            tty: slopty_pty::pty::slave_of(&master)?,
+            master,
+            state: State {
+                size,
+                ring: Ring::new(backlog_bytes),
+                checkpoint: Vec::new(),
+                attached_by: Some(conn),
+            },
+            reader: Reader::Pause,
+            exited: None,
+            orphan: true,
+            mark: mark_of(pid),
+        })?;
+        session.watch(Watch::Orphan, events);
+        Ok(session)
+    }
+
+    /// Take a session the ptyd before this build handed over ([`Heir`]), with its master. Its
+    /// child is still this process's (the pid did not change), unless it was an orphan there.
+    /// One a worker held is kept out of the reader for [`RECLAIM_GRACE`], for that worker.
+    pub fn inherit(
+        heir: Heir,
+        master: OwnedFd,
+        backlog_bytes: usize,
+        events: broadcast::Sender<Broadcast>,
+    ) -> Result<Arc<Self>, slopty_pty::PtyError> {
+        let Heir {
+            id,
+            pid,
+            tty,
+            started_ms,
+            term,
+            size,
+            checkpoint,
+            backlog,
+            dropped,
+            exited,
+            attached,
+            orphan,
+            orphan_mark,
+            // Taken already: it is `master`.
+            ..
+        } = heir;
+        // A child of this process still, unless it was adopted there or cannot be waited for
+        // here: such a one is watched, and signalled, by its pid's mark.
+        let child =
+            if exited.is_none() && !orphan { slopty_pty::Child::inherited(pid) } else { None };
+        let watched = exited.is_none() && child.is_none();
+        let mark = if orphan {
+            orphan_mark
+        } else if watched {
+            mark_of(pid)
+        } else {
+            None
         };
+        let session = Self::start(Start {
+            id,
+            pid,
+            started_ms,
+            term,
+            tty,
+            master,
+            state: State {
+                size,
+                ring: Ring::holding(backlog_bytes, &backlog, dropped),
+                checkpoint,
+                attached_by: None,
+            },
+            reader: if attached { Reader::Pause } else { Reader::Drain },
+            exited,
+            orphan: orphan || watched,
+            mark,
+        })?;
+        match child {
+            Some(child) => session.watch(Watch::Child(child), events),
+            None if watched => session.watch(Watch::Orphan, events),
+            None => {}
+        }
+        if attached {
+            let kept = Arc::clone(&session);
+            tokio::spawn(async move {
+                tokio::time::sleep(RECLAIM_GRACE).await;
+                // Taken back meanwhile, the reader stays out for that connection.
+                kept.resume_unless_held();
+            });
+        }
+        Ok(session)
+    }
+
+    fn start(start: Start) -> Result<Arc<Self>, slopty_pty::PtyError> {
+        let Start { id, pid, started_ms, term, tty, master, state, reader, exited, orphan, mark } =
+            start;
+        let master = Arc::new(PtyMaster::new(master)?);
+        let (reader, _) = watch::channel(reader);
+        let (parked, _) = watch::channel(false);
         let session = Arc::new(Self {
             id,
             pid,
@@ -132,20 +294,33 @@ impl Session {
             tty,
             master,
             state: Mutex::new(state),
-            exited: watch::Sender::new(None),
+            exited: watch::Sender::new(exited),
             reader,
             parked,
+            orphan,
+            mark,
         });
+        let reading = Arc::clone(&session);
+        tokio::spawn(async move { reading.read_loop().await });
+        Ok(session)
+    }
 
-        let reader = Arc::clone(&session);
-        tokio::spawn(async move { reader.read_loop().await });
-
-        let waiter = Arc::clone(&session);
+    /// Wait for the session's end as `how` says, then record it and tell every connection.
+    fn watch(self: &Arc<Self>, how: Watch, events: broadcast::Sender<Broadcast>) {
+        let waiter = Arc::clone(self);
         tokio::spawn(async move {
-            let status = match child.wait().await {
-                Ok(status) => exit_code(status),
-                Err(e) => {
-                    tracing::warn!(session = %waiter.id, error = %e, "wait failed");
+            let status = match how {
+                Watch::Child(mut child) => match child.wait().await {
+                    Ok(status) => exit_code(status),
+                    Err(e) => {
+                        tracing::warn!(session = %waiter.id, error = %e, "wait failed");
+                        -1
+                    }
+                },
+                Watch::Orphan => {
+                    while waiter.child_lives() {
+                        tokio::time::sleep(ORPHAN_POLL).await;
+                    }
                     -1
                 }
             };
@@ -153,7 +328,6 @@ impl Session {
             tracing::info!(session = %waiter.id, pid = waiter.pid, status, "child exited");
             let _ignored = events.send(Broadcast::Exited { id: waiter.id, status });
         });
-        Ok(session)
     }
 
     /// Drain the master into the ring whenever not paused, until stopped or the child's side
@@ -221,10 +395,10 @@ impl Session {
         }
     }
 
-    /// Stop the reader and wait until it is out of the fd, then take the backlog with the
-    /// checkpoint it follows and the size.
-    pub async fn hand_over(&self) -> Handover {
-        self.reader.send_if_modified(|mode| {
+    /// Stop the reader and wait until it is out of the fd; `true` when this stopped it, `false`
+    /// when it was out already (a worker holds the master, or the session is closed).
+    pub async fn park(&self) -> bool {
+        let paused = self.reader.send_if_modified(|mode| {
             let pause = *mode == Reader::Drain;
             if pause {
                 *mode = Reader::Pause;
@@ -237,6 +411,12 @@ impl Session {
                 break;
             }
         }
+        paused
+    }
+
+    /// The backlog with the checkpoint it follows and the size, taken once the reader is out of
+    /// the fd ([`Self::park`]).
+    pub fn hand_over(&self) -> Handover {
         let mut state = self.state.lock();
         let dropped = state.ring.dropped();
         Handover {
@@ -276,9 +456,21 @@ impl Session {
     }
 
     /// Wait up to `grace` for the child to exit; `true` when it has.
-    pub async fn exits_within(&self, grace: std::time::Duration) -> bool {
+    pub async fn exits_within(&self, grace: Duration) -> bool {
         let mut exited = self.exited.subscribe();
         tokio::time::timeout(grace, exited.wait_for(Option::is_some)).await.is_ok_and(|w| w.is_ok())
+    }
+
+    /// Let the reader drain again unless a connection holds the master (or the session is
+    /// closed): a handover that did not happen gives back what it paused.
+    pub fn resume_unless_held(&self) {
+        // Under the lock a claim takes, so a claim comes either before (and is seen) or after
+        // (and parks the reader again).
+        let state = self.state.lock();
+        if state.attached_by.is_none() {
+            self.resume_reader();
+        }
+        drop(state);
     }
 
     /// Let the reader drain again, unless the session is closed.
@@ -295,7 +487,7 @@ impl Session {
     /// The session is closed: the reader lets go of it now, whoever holds the master, and the
     /// child is hung up, then killed if it has not exited within `grace`. Once the child is
     /// reaped nothing holds the session, so its master, ring and checkpoint go.
-    pub fn close(self: Arc<Self>, grace: std::time::Duration) {
+    pub fn close(self: Arc<Self>, grace: Duration) {
         self.reader.send_replace(Reader::Stop);
         if self.exited.borrow().is_some() {
             return;
@@ -314,6 +506,29 @@ impl Session {
         self.master.as_fd()
     }
 
+    /// The session as this ptyd hands it to the build it runs next. Taken once the reader is
+    /// out of the master ([`Self::park`]), so the ring is whole.
+    #[must_use]
+    pub fn heir(&self) -> Heir {
+        let state = self.state.lock();
+        Heir {
+            id: self.id,
+            master: self.master.as_fd().as_raw_fd(),
+            pid: self.pid,
+            tty: self.tty.clone(),
+            started_ms: self.started_ms,
+            term: self.term.clone(),
+            size: state.size,
+            checkpoint: state.checkpoint.clone(),
+            backlog: state.ring.contents(),
+            dropped: state.ring.dropped(),
+            exited: *self.exited.borrow(),
+            attached: state.attached_by.is_some(),
+            orphan: self.orphan,
+            orphan_mark: self.mark.filter(|_| self.orphan),
+        }
+    }
+
     /// Snapshot for `List`.
     #[must_use]
     pub fn info(&self) -> SessionInfo {
@@ -330,13 +545,24 @@ impl Session {
         }
     }
 
-    /// Send a signal to the child's process group (the child is its own session leader).
+    /// Send a signal to the child's process group (the child is its own session leader). An
+    /// adopted child no longer there is not signalled: its pid may be another process's now.
     pub fn signal(&self, signal: Signal) -> Result<(), std::io::Error> {
         let pid = i32::try_from(self.pid)
             .ok()
             .and_then(Pid::from_raw)
             .ok_or_else(|| std::io::Error::other("not a process id"))?;
+        if self.orphan && !self.child_lives() {
+            return Err(std::io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error()));
+        }
         rustix::process::kill_process_group(pid, signal).map_err(std::io::Error::from)
+    }
+
+    /// Whether the child still runs under its pid. Only asked of one that is no child of this
+    /// process: no zombie holds its pid once it ends, so the pid is that child's only while it
+    /// carries the start mark it had when this ptyd took it.
+    fn child_lives(&self) -> bool {
+        self.mark.is_some_and(|mark| mark_of(self.pid) == Some(mark))
     }
 }
 
@@ -344,4 +570,9 @@ impl Session {
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt as _;
     status.code().or_else(|| status.signal().map(i32::saturating_neg)).unwrap_or(-1)
+}
+
+/// Process `pid`'s start mark ([`slopty_pty::process::start_mark`]).
+fn mark_of(pid: u32) -> Option<u64> {
+    i32::try_from(pid).ok().and_then(slopty_pty::process::start_mark)
 }

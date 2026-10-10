@@ -7,6 +7,10 @@
 //! name and body; the insta header is not the protocol) and every file of `slopty-pty`'s
 //! `assets/shell`. Two builds whose fingerprints are equal can share one running ptyd, so a
 //! worker update leaves it, and every session it holds, alone.
+//!
+//! Its succession fingerprint hashes the goldens of the handover alone: how a ptyd hands its
+//! sessions to the new build it runs in place. Two builds whose custody differs and whose
+//! succession is equal hand over, so an update ends no session either.
 
 use std::path::Path;
 
@@ -58,6 +62,15 @@ pub(crate) fn of(goldens: Vec<(String, String)>, scripts: Vec<(String, Vec<u8>)>
         hash.write(&[0]);
     }
     format!("{:016x}", hash.0)
+}
+
+/// The succession fingerprint of `goldens`: of the goldens of how one ptyd hands its sessions
+/// to the build it runs next (`succession_*`) alone, as 16 hex digits. Two builds that say the
+/// same can hand over to each other, whatever else they changed.
+pub(crate) fn succession(goldens: &[(String, String)]) -> String {
+    let handover =
+        goldens.iter().filter(|(name, _)| name.contains("golden__succession_")).cloned().collect();
+    of(handover, Vec::new())
 }
 
 /// Every file directly in `dir`, by name, with its text; nothing when `dir` is not there yet

@@ -12,7 +12,7 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 
 use bytes::BytesMut;
 use rustix::net::{
-    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, recvmsg, sendmsg,
 };
 use serde::de::DeserializeOwned;
@@ -111,6 +111,10 @@ pub struct Inbox {
     scratch: Box<[u8]>,
 }
 
+/// Descriptors one `recvmsg` of a worker↔ptyd connection has room for: a frame carries one,
+/// and a request waits for its answer.
+const ROOM: usize = 4;
+
 impl Default for Inbox {
     fn default() -> Self {
         Self {
@@ -133,6 +137,13 @@ impl Inbox {
         self.fds.pop_front()
     }
 
+    /// Nothing received waits to be decoded: no frame is part way in, so no fd received waits
+    /// for the rest of its frame.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        self.buf.is_empty()
+    }
+
     /// Close every fd received and not taken.
     pub fn close_fds(&mut self) {
         self.fds.clear();
@@ -140,11 +151,16 @@ impl Inbox {
 
     /// Receive once, appending to the buffered bytes and descriptors. Returns bytes read; 0 means
     /// EOF.
+    ///
+    /// # Errors
+    ///
+    /// A failed read, and one that brought more descriptors than the inbox has room for: those
+    /// are closed, and the frames they rode on would be taken without them.
     pub async fn recv(&mut self, stream: &UnixStream) -> Result<usize, PtyError> {
         let scratch = &mut self.scratch;
-        let (n, received) = stream
+        let (n, received, cut) = stream
             .async_io(Interest::READABLE, || {
-                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(ROOM))];
                 let mut cmsg = RecvAncillaryBuffer::new(&mut space);
                 let mut iov = [IoSliceMut::new(scratch)];
                 let msg = recvmsg(stream, &mut iov, &mut cmsg, RECV_FLAGS)
@@ -155,10 +171,16 @@ impl Inbox {
                         got.extend(fds);
                     }
                 }
-                Ok((msg.bytes, got))
+                Ok((msg.bytes, got, msg.flags.contains(ReturnFlags::CTRUNC)))
             })
             .await
             .map_err(|e| PtyError::os("recvmsg", e))?;
+        if cut {
+            return Err(PtyError::os(
+                "recvmsg",
+                std::io::Error::other("more descriptors came than there was room for"),
+            ));
+        }
         self.buf.extend_from_slice(self.scratch.get(..n).unwrap_or_default());
         for fd in received {
             if RECV_FLAGS.is_empty() {

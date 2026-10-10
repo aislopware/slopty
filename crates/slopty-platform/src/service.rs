@@ -13,7 +13,9 @@
 //! the new build keeps custody the same way ([`Session::ptyd_plan`], [`Ptyd::Kept`]): the same
 //! protocol and the same shell scripts, which ptyd says beside its socket
 //! ([`Layout::ptyd_custody`]). Only the worker restarts then, and takes every session back from
-//! ptyd. A ptyd that must restart ends the sessions it holds; the plan counts them, so the
+//! ptyd. When the custody changed and the handover did not ([`Ptyd::HandsOver`]), the running
+//! ptyd runs the new build in place and hands it every session. A ptyd that must restart ends
+//! the sessions it holds; the plan counts them, so the
 //! caller asks the person first. Every file an install writes goes under its
 //! [`Session`]'s home, data directory and definitions directory, and every command goes through
 //! its [`Runner`], so a test installs into a temporary directory with a runner that records what
@@ -51,6 +53,10 @@ pub struct Service {
     pub env: Vec<(String, String)>,
     /// The services it needs started first (`slopty-ptyd` for the worker), by name.
     pub after: Vec<String>,
+    /// Its children outlive it: the manager ends the main process alone when it stops or
+    /// dies (`KillMode=process`), as ptyd's sessions must, and a ptyd that starts again takes
+    /// them back from the worker that holds their masters.
+    pub leaves_children: bool,
 }
 
 impl Service {
@@ -77,6 +83,9 @@ impl Service {
         for (name, value) in &self.env {
             let _infallible =
                 writeln!(unit, "Environment={}", quote(&format!("{name}={value}"), false));
+        }
+        if self.leaves_children {
+            unit.push_str("KillMode=process\n");
         }
         unit.push_str("Restart=always\nRestartSec=1\n\n[Install]\nWantedBy=default.target\n");
         unit
@@ -711,6 +720,7 @@ fn service(
         args,
         env: vars,
         after: Vec::new(),
+        leaves_children: false,
     }
 }
 
@@ -734,7 +744,8 @@ pub fn worker_services(opts: &WorkerOpts, bin_dir: &Path, data_dir: &Path) -> Ve
         worker_args.push("--bind".to_owned());
         worker_args.push(ip.to_string());
     }
-    let ptyd = service(PTYD, bin_dir, Vec::new(), &opts.log, data_dir, sockets());
+    let mut ptyd = service(PTYD, bin_dir, Vec::new(), &opts.log, data_dir, sockets());
+    ptyd.leaves_children = true;
     let mut worker = service(WORKER, bin_dir, worker_args, &opts.log, data_dir, sockets());
     worker.after.push(PTYD.program.to_owned());
     vec![(PTYD, ptyd), (WORKER, worker)]
@@ -832,6 +843,10 @@ pub enum Ptyd {
     /// The one running stays, and every session with it: the new build keeps custody the same
     /// way. Its binary is replaced, to run from its next start.
     Kept,
+    /// The one running runs the new build in place and hands it every session
+    /// (`slopty-ptyd --succeed`): the new build keeps custody another way, and hands sessions on
+    /// as the running one does (their succession is the same).
+    HandsOver,
     /// The one running is replaced, ending every session it holds.
     Restarts {
         /// How many it holds (its child processes), when they could be counted.
@@ -899,7 +914,7 @@ impl InstallPlan {
 #[must_use]
 pub fn ended_said(ptyd: Ptyd, turns: usize) -> String {
     let sessions = match ptyd {
-        Ptyd::Restarts { sessions: Some(0) } | Ptyd::Starts | Ptyd::Kept => None,
+        Ptyd::Restarts { sessions: Some(0) } | Ptyd::Starts | Ptyd::Kept | Ptyd::HandsOver => None,
         Ptyd::Restarts { sessions: Some(1) } => Some("1 session".to_owned()),
         Ptyd::Restarts { sessions: Some(n) } => Some(format!("{n} sessions")),
         Ptyd::Restarts { sessions: None } => Some("every session".to_owned()),
@@ -922,6 +937,7 @@ impl std::fmt::Display for Ptyd {
         match self {
             Self::Starts => f.write_str("slopty-ptyd starts"),
             Self::Kept => f.write_str("slopty-ptyd keeps running, and every session with it"),
+            Self::HandsOver => f.write_str("slopty-ptyd hands every session to the new build"),
             Self::Restarts { sessions: Some(0) } => {
                 f.write_str("slopty-ptyd restarts; it holds no sessions")
             }
@@ -942,11 +958,13 @@ impl Session {
     /// What installing the binaries in `source` over the worker whose data is in `data_dir`
     /// does to its ptyd.
     ///
-    /// None running: [`Ptyd::Starts`]. Kept when the new `slopty-ptyd --custody` says what the
-    /// running one wrote ([`Layout::ptyd_custody`]), trusted only while its pid is the one the
-    /// manager runs, and while it holds sessions: one that holds none is restarted all the same,
-    /// so the new build's own ptyd runs from now. Anything else restarts it, counting its child
-    /// processes, which are its sessions: an older ptyd says no custody, so it restarts once.
+    /// None running: [`Ptyd::Starts`]. Kept when the new `slopty-ptyd --custody` says the
+    /// custody the running one wrote ([`Layout::ptyd_custody`]), trusted only while its pid is
+    /// the one the manager runs, and while it holds sessions: one that holds none is restarted
+    /// all the same, so the new build's own runs from now. Handed over when the custody differs
+    /// and the succession is the same ([`Ptyd::HandsOver`]). Anything else restarts it, counting
+    /// its child processes, which are its sessions: an older ptyd says no succession, so it
+    /// restarts once.
     #[must_use]
     pub fn ptyd_plan(&self, source: &Path, data_dir: &Path) -> Ptyd {
         let Some(pid) = self.pid(PTYD) else { return Ptyd::Starts };
@@ -957,16 +975,85 @@ impl Session {
         let new = self
             .runner
             .run(&program.to_string_lossy(), &["--custody"])
-            .map(|said| said.trim().to_owned())
             .inspect_err(|e| tracing::debug!(error = %e, "the new ptyd's custody"))
             .ok()
-            .filter(|said| !said.is_empty());
+            .and_then(|said| Custody::parse(&said));
         let sessions = self.children(pid);
-        if running.is_some() && running == new && sessions != Some(0) {
-            return Ptyd::Kept;
+        if let (Some(running), Some(new)) = (&running, &new)
+            && sessions != Some(0)
+        {
+            if running.custody == new.custody {
+                return Ptyd::Kept;
+            }
+            if running.succession == new.succession {
+                return Ptyd::HandsOver;
+            }
         }
         tracing::info!(?running, ?new, ?sessions, "slopty-ptyd restarts");
         Ptyd::Restarts { sessions }
+    }
+
+    /// Have the ptyd running for `layout` run the build in `source` in place, handing it every
+    /// session ([`Ptyd::HandsOver`]): `slopty-ptyd --succeed` of that build, which returns once
+    /// the running one says it runs it.
+    ///
+    /// The build runs from where it is installed, `bin_dir`: copied there beside the binary it
+    /// replaces (`slopty-ptyd.next`) and renamed over it once ptyd runs it, never from `source`,
+    /// which may go once the install is done. A `--succeed` that says it failed is weighed
+    /// against the custody file: when the running ptyd says, under its own pid, the new build's
+    /// custody or that it is handing over, the handover went through all the same. When it did
+    /// not, the copy goes and nothing else has changed.
+    ///
+    /// Once it went through, nothing that fails after is a reason to call it off: the `exec`
+    /// happened. `Ok(true)` when the new build is in place where it runs; `Ok(false)` when the
+    /// rename failed, so the install copies it there as it copies the rest.
+    fn hand_over(&self, source: &Path, bin_dir: &Path, layout: &Layout) -> io::Result<bool> {
+        let staged = source.join(PTYD.program);
+        let installed = bin_dir.join(PTYD.program);
+        let pid = self.pid(PTYD);
+        let new = self
+            .runner
+            .run(&staged.to_string_lossy(), &["--custody"])
+            .ok()
+            .and_then(|said| Custody::parse(&said));
+        let program = if bin_dir == source {
+            installed.clone()
+        } else {
+            let next = bin_dir.join(format!("{}.next", PTYD.program));
+            std::fs::copy(&staged, &next).map_err(|e| {
+                context(&e, format_args!("copy {} to {}", staged.display(), next.display()))
+            })?;
+            next
+        };
+        let socket = layout.ptyd_socket();
+        let ran = self
+            .runner
+            .run(&program.to_string_lossy(), &["--succeed", "--socket", &socket.to_string_lossy()]);
+        let went = ran.is_ok() || {
+            let now = std::fs::read_to_string(layout.ptyd_custody()).ok();
+            let now = now.zip(pid).and_then(|(said, pid)| custody_of(&said, pid));
+            now.is_some_and(|now| now.custody == HANDING || Some(&now) == new.as_ref())
+        };
+        if !went {
+            if program != installed {
+                let _gone = std::fs::remove_file(&program);
+            }
+            let e = ran.err().unwrap_or_else(|| io::Error::other("the handover did not happen"));
+            return Err(context(
+                &e,
+                "slopty-ptyd did not hand its sessions to the new build; nothing changed",
+            ));
+        }
+        if let Err(e) = &ran {
+            tracing::warn!(error = %e, "slopty-ptyd --succeed failed, but ptyd runs the new build");
+        }
+        if program != installed
+            && let Err(e) = std::fs::rename(&program, &installed)
+        {
+            tracing::warn!(from = %program.display(), to = %installed.display(), error = %e, "the new ptyd runs but is not in place; copied there instead");
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// How many processes `pid` is the parent of, as `ps` lists them; `None` when it cannot.
@@ -995,10 +1082,33 @@ impl Session {
     }
 }
 
-/// The fingerprint in a custody file's `<pid> <fingerprint>`, when `pid` wrote it.
-fn custody_of(said: &str, pid: u32) -> Option<String> {
-    let (by, custody) = said.trim().split_once(' ')?;
-    (by.parse() == Ok(pid) && !custody.is_empty()).then(|| custody.to_owned())
+/// What a ptyd's custody file says in place of a custody while it runs the next build in place
+/// (`slopty-ptyd`'s `daemon::HANDING`).
+const HANDING: &str = "handing";
+
+/// How a ptyd keeps sessions, as `slopty-ptyd --custody` prints it: `<custody> <succession>`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Custody {
+    /// What it hands the worker: its protocol and its shell scripts.
+    custody: String,
+    /// How it hands its sessions to the build it runs next.
+    succession: String,
+}
+
+impl Custody {
+    /// The two words of `said`, when it has both.
+    fn parse(said: &str) -> Option<Self> {
+        let mut words = said.split_whitespace();
+        let custody = words.next()?.to_owned();
+        let succession = words.next()?.to_owned();
+        Some(Self { custody, succession })
+    }
+}
+
+/// What a custody file's `<pid> <custody> <succession>` says, when `pid` wrote it.
+fn custody_of(said: &str, pid: u32) -> Option<Custody> {
+    let (by, rest) = said.trim().split_once(' ')?;
+    by.parse().ok().filter(|by: &u32| *by == pid).and_then(|_| Custody::parse(rest))
 }
 
 /// What an install put where.
@@ -1015,11 +1125,13 @@ pub struct Installed {
 /// Install the worker's two services in `session` from the binaries in `source`, and start them,
 /// carrying out `ptyd` ([`Session::ptyd_plan`], which the caller asked first).
 ///
-/// It stops the worker (and ptyd, unless [`Ptyd::Kept`]), puts the binaries where they run
-/// from ([`run_dir`]), writes the definitions and starts ptyd, then the worker. A kept ptyd is
-/// not stopped or started: its binary and definition are replaced for its next start, and the
-/// new worker takes its sessions back. Idempotent. The worker reads its settings and keeps its
-/// sockets under `data_dir`; whether it came up is asked of its control socket
+/// It stops the worker (and ptyd, unless [`Ptyd::Kept`] or [`Ptyd::HandsOver`]), puts the
+/// binaries where they run from ([`run_dir`]), writes the definitions and starts ptyd, then the
+/// worker. A kept ptyd is not stopped or started: its binary and definition are replaced for
+/// its next start, and the new worker takes its sessions back. One handed over runs the new
+/// build once the worker is stopped, before anything else changes; when it does not, the old
+/// worker starts again and the install fails. Idempotent. The worker reads its settings and keeps
+/// its sockets under `data_dir`; whether it came up is asked of its control socket
 /// ([`Layout::worker_socket`]).
 ///
 /// # Errors
@@ -1038,15 +1150,31 @@ pub async fn install_worker(
     let layout = Layout::new(data_dir);
     let bin_dir = run_dir(source, data_dir, &session.home);
     session.make_dirs(&[&layout.run(), &bin_dir])?;
-    let kept = |job: Job| job == PTYD && ptyd == Ptyd::Kept;
+    let kept = |job: Job| job == PTYD && matches!(ptyd, Ptyd::Kept | Ptyd::HandsOver);
     // Stop first: a stale socket file makes the daemon's bind fail (the manager would then
     // loop on it).
-    for job in [WORKER, PTYD] {
-        if !kept(job) {
-            session.stop(job, false).await;
+    session.stop(WORKER, false).await;
+    // With the worker gone, before anything else is touched: no worker holds a session across
+    // the handover, which would leave it reading a master the new build drains too, and one
+    // that does not happen leaves everything as it was, the old worker started again.
+    let mut in_place = false;
+    if ptyd == Ptyd::HandsOver {
+        match session.hand_over(source, &bin_dir, &layout) {
+            Ok(renamed) => in_place = renamed,
+            Err(e) => {
+                if let Err(again) = session.start(WORKER) {
+                    tracing::warn!(error = %again, "the old worker did not start again");
+                }
+                return Err(e);
+            }
         }
     }
-    copy_binaries(&WORKER_BINARIES, source, &bin_dir)?;
+    if !kept(PTYD) {
+        session.stop(PTYD, false).await;
+    }
+    let copied: Vec<&str> =
+        WORKER_BINARIES.iter().copied().filter(|name| !in_place || *name != PTYD.program).collect();
+    copy_binaries(&copied, source, &bin_dir)?;
     let mut definitions = Vec::new();
     for (job, service) in worker_services(opts, &bin_dir, data_dir) {
         let path = session.write_definition(job, &service, true)?;
@@ -1262,6 +1390,7 @@ mod tests {
             args: vec!["--installed".into(), "--name=50% \"mine\" $HOME".into()],
             env: vec![("SLOPTY_DATA_DIR".into(), "/home/me/a b/%h $x".into())],
             after: vec!["slopty-ptyd".into()],
+            leaves_children: false,
         };
         assert_eq!(service.unit_name(), "slopty-worker.service", "the unit's file name");
         assert_eq!(
@@ -1760,16 +1889,21 @@ mod tests {
         assert!(!d.contains_key("LimitLoadToSessionType"), "the server needs no GUI session");
     }
 
-    /// On Linux the same services are systemd user units: the worker's after ptyd, and the
-    /// server's command line read back from the unit written.
+    /// On Linux the same services are systemd user units: the worker's after ptyd, ptyd's
+    /// sessions outliving it (systemd ends its main process alone), and the server's command
+    /// line read back from the unit written.
     #[test]
     fn a_linux_install_writes_systemd_user_units() {
         let (bin, data) = (Path::new("/opt/slopty/bin"), Path::new("/data/slopty"));
         let list =
             worker_services(&WorkerOpts { port: Some(45551), ..WorkerOpts::default() }, bin, data);
         let (session, _calls) = stand_in(Manager::Systemd, Path::new("/home/me"));
+        let (job, ptyd) = &list[0];
+        let unit = String::from_utf8(session.render(*job, ptyd, true).unwrap()).unwrap();
+        assert!(unit.contains("\nKillMode=process\n"), "a ptyd's end ends no shell: {unit}");
         let (job, worker) = &list[1];
         let unit = String::from_utf8(session.render(*job, worker, true).unwrap()).unwrap();
+        assert!(!unit.contains("KillMode"), "the worker's children go with it: {unit}");
         assert!(unit.contains("After=slopty-ptyd.service\n"), "{unit}");
         assert!(
             unit.contains(
@@ -1832,6 +1966,19 @@ mod tests {
         asked: mpsc::Sender<String>,
         custody: &'static str,
         children: Option<usize>,
+        /// What `--succeed` does.
+        succeeds: Succeeds,
+    }
+
+    /// What a stand-in `slopty-ptyd --succeed` does.
+    #[derive(Debug)]
+    enum Succeeds {
+        /// It says the handover went through.
+        Yes,
+        /// It fails.
+        No,
+        /// It fails, though ptyd runs the new build: it wrote this custody file first.
+        NoButRan(PathBuf, String),
     }
 
     impl Runner for Running {
@@ -1841,6 +1988,14 @@ mod tests {
             let ptyd = args.iter().any(|a| a.contains(PTYD.label) || a.contains(PTYD.program));
             match (program, args.first().copied()) {
                 (_, Some("--custody")) => Ok(format!("{}\n", self.custody)),
+                (_, Some("--succeed")) => match &self.succeeds {
+                    Succeeds::Yes => Ok(String::new()),
+                    Succeeds::No => Err(io::Error::other("did not come back within 30 s")),
+                    Succeeds::NoButRan(file, said) => {
+                        std::fs::write(file, said)?;
+                        Err(io::Error::other("did not come back within 30 s"))
+                    }
+                },
                 ("ps", _) => {
                     let n = self.children.ok_or_else(|| io::Error::other("ps: not found"))?;
                     Ok(std::iter::repeat_n("  700\n", n).chain(["    1\n", "  701\n"]).collect())
@@ -1869,7 +2024,8 @@ mod tests {
         let (mut session, _calls) = stand_in(manager, &root.join("home"));
         std::fs::create_dir_all(&session.home).unwrap();
         let (tx, asked) = mpsc::channel();
-        session.runner = Arc::new(Running { asked: tx, custody, children });
+        session.runner =
+            Arc::new(Running { asked: tx, custody, children, succeeds: Succeeds::Yes });
         let run = Layout::new(&root.join("data")).run();
         std::fs::create_dir_all(&run).unwrap();
         if let Some(said) = said {
@@ -1887,8 +2043,13 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
-        let (session, asked) =
-            running(Manager::Launchd, root.path(), Some("700 0123abcd\n"), "0123abcd", Some(3));
+        let (session, asked) = running(
+            Manager::Launchd,
+            root.path(),
+            Some("700 0123abcd 5555\n"),
+            "0123abcd 5555",
+            Some(3),
+        );
         let source = root.path().join("new");
         binaries(&source, &WORKER_BINARIES);
         let bin = Layout::new(&data).bin();
@@ -1922,10 +2083,12 @@ mod tests {
         );
     }
 
-    /// A new build that keeps custody another way restarts ptyd, counting the sessions that
-    /// ends; so does a custody file left by another process (a ptyd that died and came back),
-    /// an older ptyd that wrote none, and a new ptyd that says nothing. A ptyd holding nothing
-    /// restarts even when it could be kept, so the new build's own runs from now.
+    /// A new build that keeps custody another way and hands sessions on another way restarts
+    /// ptyd, counting the sessions that ends; so does a custody file left by another process (a
+    /// ptyd that died and came back), an older ptyd that wrote no succession, and a new ptyd
+    /// that says nothing. One that hands sessions on the same way is handed over. A ptyd
+    /// holding nothing restarts even when it could be kept, so the new build's own runs from
+    /// now.
     #[test]
     fn a_changed_or_unknown_custody_restarts_ptyd_and_counts_its_sessions() {
         let root = tempfile::tempdir().unwrap();
@@ -1938,15 +2101,21 @@ mod tests {
             session.ptyd_plan(&source, &data)
         };
         let two = Ptyd::Restarts { sessions: Some(2) };
-        assert_eq!(plan(Some("700 aaaa"), "bbbb", Some(2)), two, "another custody");
-        assert_eq!(plan(Some("699 aaaa"), "aaaa", Some(2)), two, "written by another pid");
-        assert_eq!(plan(None, "aaaa", Some(2)), two, "an older ptyd says none");
-        assert_eq!(plan(Some("700 aaaa"), "", Some(2)), two, "the new one says none");
+        assert_eq!(plan(Some("700 aaaa 11"), "bbbb 22", Some(2)), two, "another custody");
+        assert_eq!(plan(Some("699 aaaa 11"), "aaaa 11", Some(2)), two, "written by another pid");
+        assert_eq!(plan(None, "aaaa 11", Some(2)), two, "an older ptyd says none");
+        assert_eq!(plan(Some("700 aaaa"), "aaaa 11", Some(2)), two, "nor any succession");
+        assert_eq!(plan(Some("700 aaaa 11"), "", Some(2)), two, "the new one says none");
         assert!(two.ends_sessions());
-        let idle = plan(Some("700 aaaa"), "aaaa", Some(0));
+        let handed = plan(Some("700 aaaa 11"), "bbbb 11", Some(2));
+        assert_eq!(handed, Ptyd::HandsOver, "another custody, handed over the same way");
+        assert!(!handed.ends_sessions(), "and nothing ends");
+        assert_eq!(handed.to_string(), "slopty-ptyd hands every session to the new build");
+        let idle = plan(Some("700 aaaa 11"), "aaaa 11", Some(0));
         assert_eq!(idle, Ptyd::Restarts { sessions: Some(0) }, "nothing to keep");
         assert!(!idle.ends_sessions(), "and nothing ends");
-        let uncounted = plan(Some("700 aaaa"), "bbbb", None);
+        assert_eq!(plan(Some("700 aaaa 11"), "bbbb 11", Some(0)), idle, "nor to hand over");
+        let uncounted = plan(Some("700 aaaa 11"), "bbbb 22", None);
         assert_eq!(uncounted, Ptyd::Restarts { sessions: None }, "ps failed");
         assert!(uncounted.ends_sessions(), "sessions that could not be counted may end");
 
@@ -1960,7 +2129,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         let (session, asked) =
-            running(Manager::Launchd, root.path(), Some("700 aaaa"), "bbbb", Some(1));
+            running(Manager::Launchd, root.path(), Some("700 aaaa 11"), "bbbb 22", Some(1));
         let source = root.path().join("new");
         binaries(&source, &WORKER_BINARIES);
         let plan = session.ptyd_plan(&source, &data);
@@ -1973,6 +2142,117 @@ mod tests {
         assert!(asked.iter().any(|c| c.starts_with("launchctl bootstrap") && c.contains("ptyd")));
     }
 
+    /// A ptyd handed over is asked to run the new build once the worker is stopped, before
+    /// anything else changes (`slopty-ptyd --succeed` of that build, copied beside the installed
+    /// one, on the installation's socket), and is never taken out or loaded again; the worker
+    /// restarts.
+    #[tokio::test]
+    async fn an_install_hands_ptyd_over_before_anything_else() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let (session, asked) =
+            running(Manager::Launchd, root.path(), Some("700 aaaa 11"), "bbbb 11", Some(2));
+        let source = root.path().join("new");
+        binaries(&source, &WORKER_BINARIES);
+        let plan = session.ptyd_plan(&source, &data);
+        assert_eq!(plan, Ptyd::HandsOver);
+        let _planning: Vec<String> = asked.try_iter().collect();
+        install_worker(&session, &WorkerOpts::default(), &source, &data, plan).await.unwrap();
+        let asked: Vec<String> = asked.try_iter().collect();
+        let socket = Layout::new(&data).ptyd_socket();
+        let bin = Layout::new(&data).bin();
+        let succeed = format!(
+            "{} --succeed --socket {}",
+            bin.join("slopty-ptyd.next").display(),
+            socket.display()
+        );
+        let at = asked.iter().position(|c| *c == succeed).unwrap_or_else(|| panic!("{asked:?}"));
+        let before: Vec<&String> = asked[..at]
+            .iter()
+            .filter(|c| !c.starts_with("launchctl print") && !c.ends_with(" --custody"))
+            .collect();
+        assert_eq!(
+            before,
+            [&format!("launchctl bootout gui/501/{}", WORKER.label)],
+            "only the worker stops before: {asked:?}"
+        );
+        assert_eq!(
+            std::fs::read(bin.join(PTYD.program)).unwrap(),
+            PTYD.program.as_bytes(),
+            "the new build is installed where it runs"
+        );
+        assert!(!bin.join("slopty-ptyd.next").exists(), "renamed over the installed one");
+        let touched_ptyd = asked
+            .iter()
+            .filter(|c| c.starts_with("launchctl") && !c.starts_with("launchctl print"))
+            .filter(|c| c.contains("ptyd"))
+            .collect::<Vec<_>>();
+        assert_eq!(touched_ptyd, Vec::<&String>::new(), "ptyd left running: {asked:?}");
+        assert!(
+            asked.iter().any(|c| c.starts_with("launchctl bootstrap") && c.contains("worker")),
+            "the worker restarts: {asked:?}"
+        );
+    }
+
+    /// A handover that does not happen changes nothing: the install fails, the copy beside the
+    /// installed binary goes, ptyd is left alone, no definition is written, and the old worker
+    /// starts again. One whose `--succeed` failed although ptyd runs the new build, or is
+    /// running it (its custody file says the new custody, or that it is handing over, under its
+    /// pid), goes on as one that went through.
+    #[tokio::test]
+    async fn a_handover_that_does_not_happen_changes_nothing() {
+        for wrote in [None, Some("700 bbbb 11\n"), Some("700 handing 11\n")] {
+            let went = wrote.is_some();
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("data");
+            let (mut session, asked) =
+                running(Manager::Launchd, root.path(), Some("700 aaaa 11"), "bbbb 11", Some(2));
+            let said = Layout::new(&data).ptyd_custody();
+            let (tx, asked_too) = mpsc::channel();
+            let succeeds = wrote
+                .map_or(Succeeds::No, |wrote| Succeeds::NoButRan(said.clone(), wrote.to_owned()));
+            session.runner =
+                Arc::new(Running { asked: tx, custody: "bbbb 11", children: Some(2), succeeds });
+            drop(asked);
+            let source = root.path().join("new");
+            binaries(&source, &WORKER_BINARIES);
+            let bin = Layout::new(&data).bin();
+            binaries(&bin, &[PTYD.program]);
+            std::fs::write(bin.join(PTYD.program), b"old").unwrap();
+            let done =
+                install_worker(&session, &WorkerOpts::default(), &source, &data, Ptyd::HandsOver)
+                    .await;
+            let asked: Vec<String> = asked_too.try_iter().collect();
+            let changed: Vec<&String> = asked
+                .iter()
+                .filter(|c| c.starts_with("launchctl") && !c.starts_with("launchctl print"))
+                .collect();
+            assert!(!bin.join("slopty-ptyd.next").exists(), "no copy left: {went}");
+            if went {
+                done.unwrap();
+                assert_eq!(
+                    std::fs::read(bin.join(PTYD.program)).unwrap(),
+                    PTYD.program.as_bytes(),
+                    "installed"
+                );
+                continue;
+            }
+            let failed = done.unwrap_err();
+            assert!(failed.to_string().contains("nothing changed"), "{failed}");
+            assert_eq!(std::fs::read(bin.join(PTYD.program)).unwrap(), b"old", "left as it was");
+            assert_eq!(
+                changed
+                    .iter()
+                    .map(|c| c.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>(),
+                ["launchctl bootout", "launchctl bootstrap"],
+                "the worker stopped and started again, nothing else: {asked:?}"
+            );
+            assert!(changed.iter().all(|c| c.contains("worker")), "{asked:?}");
+            assert!(!session.file(WORKER).exists(), "no definition written");
+        }
+    }
+
     /// Under systemd a kept ptyd's unit is reloaded and stays enabled, and is never restarted;
     /// the worker's is.
     #[tokio::test]
@@ -1980,7 +2260,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         let (session, asked) =
-            running(Manager::Systemd, root.path(), Some("700 cafe"), "cafe", Some(4));
+            running(Manager::Systemd, root.path(), Some("700 cafe 11"), "cafe 11", Some(4));
         let source = root.path().join("new");
         binaries(&source, &WORKER_BINARIES);
         let plan = session.ptyd_plan(&source, &data);

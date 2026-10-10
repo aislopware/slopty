@@ -368,6 +368,194 @@ mod roundtrip {
         next.shutdown().await.unwrap();
     }
 
+    /// ptyd hands every session to a new build run in place: the same process, which still
+    /// reaps its children. A protocol test: it hands over to this same build and reclaims with
+    /// a client that reads no custody, where an update hands over only across custodies, with
+    /// the worker stopped (`slopty-platform`'s install, and `slopty-worker`'s
+    /// `a_worker_takes_its_sessions_back_after_a_handover` for the custody check). A session nobody
+    /// held keeps what it printed and gives its exit status; one a worker held keeps its
+    /// checkpoint and the tap after it, and is kept for that worker to take back (`Reclaim`),
+    /// which then holds it against anyone else.
+    #[tokio::test]
+    async fn every_session_survives_a_handover_to_a_new_build() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let spec = |script: &str| SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        let (alone, held) = (SessionId::new(), SessionId::new());
+        let pid = client
+            .spawn(alone, spec("printf before; read x; printf after:$x; exit 7"))
+            .await
+            .unwrap();
+        client.spawn(held, spec("read x; echo bye:$x")).await.unwrap();
+        let attached = client.attach(held).await.unwrap();
+        client.checkpoint(held, b"STATE").await.unwrap();
+        client.output(&tap(held, b"after-the-checkpoint")).await.unwrap();
+        let printed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let list = client.list().await.unwrap();
+                if list.iter().any(|s| s.id == alone && s.backlog >= b"before".len()) {
+                    break list;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the shell printed into the ring");
+        assert!(printed.iter().any(|s| s.id == held && s.attached));
+
+        let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let program = PathBuf::from(env!("CARGO_BIN_EXE_slopty-ptyd"));
+        asker.succeed(program).await.expect("no answer: the new build runs");
+        let mut ran = String::new();
+        for _ in 0..200 {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "command=", "-p", &daemon.child.id().to_string()])
+                .output()
+                .unwrap();
+            ran = String::from_utf8_lossy(&ps.stdout).into_owned();
+            if ran.contains("--inherit") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ran.contains("--inherit"), "the same process runs the new build: {ran:?}");
+
+        // The worker that held `held` lost its connection with the old image, not the master;
+        // it dials until the new build listens.
+        let (mut back, mut exits) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(connected) = PtydClient::connect(&daemon.socket).await {
+                    break connected;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the new build listens");
+        back.reclaim(held).await.expect("kept for the worker that held it");
+        let (mut stranger, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let refused = stranger.attach(held).await;
+        assert!(
+            matches!(refused, Err(PtyError::Daemon(PtydError::AttachedElsewhere))),
+            "{refused:?}"
+        );
+        drop(back);
+        drop(attached);
+        let reattached = attach_when_free(&daemon, held).await;
+        assert_eq!(reattached.checkpoint, b"STATE", "the checkpoint came across");
+        assert_eq!(reattached.backlog, b"after-the-checkpoint", "and the tap after it");
+
+        let (mut worker, mut exits_after) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let list = worker.list().await.unwrap();
+        let info = list.iter().find(|s| s.id == alone).expect("still held");
+        assert_eq!((info.pid, info.exited), (pid, None), "the same child, still running");
+        let attached = worker.attach(alone).await.unwrap();
+        assert_eq!(attached.backlog, b"before", "what it printed came across");
+        let master = PtyMaster::new(attached.master).unwrap();
+        master.write_all(b"x\r").await.unwrap();
+        read_until(&master, b"after:x", Vec::new()).await;
+        let exit = tokio::time::timeout(Duration::from_secs(10), exits_after.recv())
+            .await
+            .expect("the new build reaps the child the old one started")
+            .expect("exit channel open");
+        assert_eq!(exit, (alone, 7), "with its status");
+        assert!(exits.try_recv().is_err(), "nothing exited on the way");
+        worker.shutdown().await.unwrap();
+    }
+
+    /// A handover that cannot happen is refused with why, and leaves every session as it was,
+    /// still read into its ring, and the daemon taking requests again: a build that hands
+    /// sessions on another way, one that is not there, and one whose `exec` fails after it said
+    /// its custody (it takes itself away as it says it).
+    #[tokio::test]
+    async fn a_handover_that_cannot_happen_keeps_every_session() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let daemon = start().await;
+        let (mut client, mut exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let spec = |script: &str| SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        let alone = SessionId::new();
+        let pid = client.spawn(alone, spec("printf a; read x; printf b:$x; exit 3")).await.unwrap();
+        let custody = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"))
+            .arg("--custody")
+            .output()
+            .unwrap();
+        let custody = String::from_utf8(custody.stdout).unwrap().trim().to_owned();
+        let scripts = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = scripts.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let fds = scripts.path().join("open-fds");
+        // This build's own `--custody`, a child of ptyd's, lists what it has open, before any
+        // handover and after a failed `exec`: every master is close-on-exec again by then.
+        let listing = script(
+            "fds",
+            &format!(
+                "ls /dev/fd | tr '\\n' ' ' >> '{}'; echo >> '{}'; echo 0000 1111",
+                fds.display(),
+                fds.display()
+            ),
+        );
+        let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        assert!(asker.succeed(listing.clone()).await.is_err(), "another way");
+        let builds = [
+            (script("another-way", "echo 0000 1111"), "hands sessions on another way"),
+            (scripts.path().join("missing"), "--custody"),
+            (script("gone", &format!("echo '{custody}'; rm -f \"$0\"")), "run "),
+            (listing, "hands sessions on another way"),
+        ];
+        let said = daemon.socket.with_extension("custody");
+        let said_before = std::fs::read_to_string(&said).unwrap();
+        for (program, what) in builds {
+            let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+            let refused = asker.succeed(program.clone()).await;
+            assert!(
+                matches!(&refused, Err(PtyError::Daemon(PtydError::Os(why))) if why.contains(what)),
+                "{what}: {refused:?}"
+            );
+            assert!(!program.exists() || what != "run ", "it said its custody, then went");
+            let list = client.list().await.unwrap();
+            let info = list.iter().find(|s| s.id == alone).expect("still held");
+            assert_eq!((info.pid, info.exited, info.attached), (pid, None, false), "{what}");
+            let other = SessionId::new();
+            client.spawn(other, spec("sleep 60")).await.expect(what);
+            client.close(other).await.expect(what);
+            assert_eq!(std::fs::read_to_string(&said).unwrap(), said_before, "{what}");
+        }
+        let listed = std::fs::read_to_string(&fds).unwrap();
+        let listed: Vec<&str> = listed.lines().collect();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert_eq!(listed[0], listed[1], "nothing of ptyd's left open after the failed exec");
+        let attached = client.attach(alone).await.unwrap();
+        assert_eq!(attached.backlog, b"a", "read into its ring all along");
+        let master = PtyMaster::new(attached.master).unwrap();
+        master.write_all(b"x\r").await.unwrap();
+        read_until(&master, b"b:x", Vec::new()).await;
+        let exit = loop {
+            let exit = tokio::time::timeout(Duration::from_secs(10), exits.recv())
+                .await
+                .expect("an exit")
+                .expect("exit channel open");
+            if exit.0 == alone {
+                break exit;
+            }
+        };
+        assert_eq!(exit, (alone, 3), "reaped with its status");
+        client.shutdown().await.unwrap();
+    }
+
     /// A worker that dies while ptyd is still writing its `Attached` reply (a 12 MB checkpoint
     /// is many socket buffers) leaves the session to the next worker: ptyd's write fails, and the
     /// claim and the paused reader go with the connection.

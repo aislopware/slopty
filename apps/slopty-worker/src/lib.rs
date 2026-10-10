@@ -25,6 +25,8 @@ mod threads;
 mod tunnel;
 mod xfer;
 
+include!(concat!(env!("OUT_DIR"), "/custody.rs"));
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -736,6 +738,7 @@ async fn run(
         args.ptyd_socket,
         Arc::new(server::DaemonAgents(Arc::clone(&agents))),
         &data_dir.join("sessions"),
+        Some(CUSTODY.to_owned()),
     )
     .await
     .context("connect to slopty-ptyd")?;
@@ -859,10 +862,8 @@ async fn run(
     // exit reaches the viewers on the session stream and everyone else as the session's changed
     // summary. Nobody watching it for `EXITED_UNWATCHED` closes it here.
     //
-    // The exits end when ptyd's connection does. A worker without ptyd can spawn nothing and
-    // hands its sessions to nobody, so it goes down (`ptyd_gone`) and launchd starts one that
-    // connects again.
-    let (ptyd_gone_tx, mut ptyd_gone) = tokio::sync::oneshot::channel::<()>();
+    // A lost ptyd is dialled again and handed every session back, so the exits run as long as
+    // the worker does.
     tokio::spawn({
         let daemon = daemon.clone();
         async move {
@@ -874,7 +875,6 @@ async fn run(
                         daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
                 }
             }
-            let _sent = ptyd_gone_tx.send(());
         }
     });
     tokio::spawn(close_stale_exits(daemon.clone()));
@@ -965,10 +965,6 @@ async fn run(
             () = restarted(daemon.restart.as_deref()) => {
                 tracing::info!("restarting at a client's word: shutting down to be started again");
                 break Ok(());
-            }
-            _gone = &mut ptyd_gone => {
-                tracing::error!("lost slopty-ptyd: shutting down for a worker that connects again");
-                break Err(anyhow::anyhow!("slopty-ptyd hung up"));
             }
         }
     };

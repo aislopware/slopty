@@ -39,17 +39,38 @@ const HANDOVER_WAIT: Duration = Duration::from_secs(30);
 /// How often a session an older worker holds is asked for again.
 const HANDOVER_POLL: Duration = Duration::from_millis(50);
 
+/// The first wait before ptyd is dialled again once its link is lost, doubled on each refusal
+/// up to [`REDIAL_MAX`]: a ptyd handing itself to a new build is back within milliseconds, one
+/// its manager restarts within a second.
+const REDIAL_FIRST: Duration = Duration::from_millis(20);
+
+/// The longest wait between two dials of a lost ptyd.
+const REDIAL_MAX: Duration = Duration::from_secs(2);
+
+/// How long a ptyd that answers has to say its custody under its own pid: it writes the file
+/// just after it binds, so a dial can come between the two.
+const CUSTODY_WAIT: Duration = Duration::from_secs(2);
+
+/// How often its custody file is read meanwhile.
+const CUSTODY_LOOK: Duration = Duration::from_millis(20);
+
 struct Entry {
     handle: SessionHandle,
     command: Vec<String>,
     exited: Option<i32>,
     /// When ptyd spawned the child.
     started_ms: WallMs,
+    /// The child ptyd spawned, which a ptyd that started afresh is told of.
+    pid: u32,
+    /// The terminfo name the child was given as `TERM`.
+    term: String,
 }
 
 /// What a session is adopted with besides what ptyd hands over.
 #[derive(Clone, Debug, Default)]
 struct Adoption {
+    /// The child ptyd spawned.
+    pid: u32,
     /// What it was opened to run.
     command: Vec<String>,
     /// Its child's exit status, when ptyd reaped it before this worker adopted it.
@@ -89,7 +110,14 @@ pub struct Worker {
 }
 
 struct Inner {
+    /// The link to ptyd, replaced when a lost one is dialled again ([`keep_ptyd`]).
     ptyd: tokio::sync::Mutex<PtydClient>,
+    /// Where ptyd listens.
+    socket: PathBuf,
+    /// The custody this build speaks, which a ptyd must keep to be dialled; `None` takes any.
+    custody: Option<String>,
+    /// Each child exit, from whichever link to ptyd reported it ([`Reports::exits`]).
+    exits: mpsc::UnboundedSender<(SessionId, i32)>,
     /// Output copies and checkpoints for ptyd, drained onto `ptyd` by [`tap_loop`].
     tap: mpsc::Sender<Tap>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
@@ -158,9 +186,8 @@ impl std::fmt::Debug for Worker {
 /// What the sessions report that the daemon acts on, each read by one task of its own.
 #[derive(Debug)]
 pub struct Reports {
-    /// Each child exit, as ptyd reports it; the caller pumps it into [`Worker::on_exit`]. It
-    /// ends when the connection to ptyd does: the worker can then neither spawn nor hand its
-    /// sessions on, and should exit so a fresh one connects again.
+    /// Each child exit, as ptyd reports it; the caller pumps it into [`Worker::on_exit`]. A
+    /// lost link to ptyd is dialled again ([`keep_ptyd`]), so it ends only with the worker.
     pub exits: mpsc::UnboundedReceiver<(SessionId, i32)>,
     /// The sessions whose output named a local server.
     pub port_hints: mpsc::UnboundedReceiver<SessionId>,
@@ -173,14 +200,19 @@ impl Worker {
     /// Connect to ptyd (default socket or `$SLOPTY_PTYD_SOCKET`) and adopt every session it
     /// already holds. `agents` is the daemon's agent table. `kept` is
     /// where sessions are kept on disk ([`crate::restore`]); the ones ptyd no longer holds wait
-    /// for [`Self::restore`].
+    /// for [`Self::restore`]. `custody` is the one this build speaks: a ptyd that says another
+    /// beside its socket is refused, its sessions left alone ([`dial`]).
+    ///
+    /// A link to ptyd that is lost later is dialled again, and every session the worker runs
+    /// is handed back to the ptyd it reaches ([`keep_ptyd`]).
     pub async fn connect(
         socket: Option<PathBuf>,
         agents: Arc<dyn Agents>,
         kept: &Path,
+        custody: Option<String>,
     ) -> Result<(Self, Reports), WorkerError> {
         let path = socket.unwrap_or_else(socket_path);
-        let (mut client, exits) = PtydClient::connect(&path).await?;
+        let (mut client, link_exits) = dial(&path, custody.as_deref()).await?;
         let existing = client.list().await?;
         let (keeper, mut recipes) = Keeper::open(kept)
             .map_err(|source| PtyError::Os { context: "open the kept sessions", source })?;
@@ -192,6 +224,7 @@ impl Worker {
             })
             .collect();
         let (tap, tap_rx) = mpsc::channel(TAP_QUEUE);
+        let (exits_tx, exits) = mpsc::unbounded_channel();
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
         let (moves, moves_rx) = mpsc::unbounded_channel();
         let changes = crate::changes::Changes::start(crate::changes::git_counter(), moves.clone());
@@ -199,6 +232,9 @@ impl Worker {
         let worker = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
+                socket: path,
+                custody,
+                exits: exits_tx,
                 tap,
                 sessions: Mutex::new(HashMap::new()),
                 opening: Mutex::new(HashSet::new()),
@@ -219,6 +255,7 @@ impl Worker {
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
+        tokio::spawn(keep_ptyd(Arc::downgrade(&worker.inner), link_exits));
         for (info, recipe) in held {
             tracing::info!(session = %info.id, pid = info.pid, "adopting session from ptyd");
             worker.adopt_listed(info, recipe).await;
@@ -232,6 +269,7 @@ impl Worker {
     async fn adopt_listed(&self, info: SessionInfo, recipe: Option<Recipe>) {
         let (id, size) = (info.id, info.size);
         let adoption = Adoption {
+            pid: info.pid,
             exited: info.exited,
             command: recipe.as_ref().map(|r| r.command.clone()).unwrap_or_default(),
             restored: recipe.and_then(|r| r.restored),
@@ -397,9 +435,9 @@ impl Worker {
             restored: None,
             agent: None,
         };
-        self.inner.ptyd.lock().await.spawn(id, spec).await?;
+        let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(id, recipe);
-        let adoption = Adoption { command: req.command.clone(), ..Adoption::default() };
+        let adoption = Adoption { pid, command: req.command.clone(), ..Adoption::default() };
         self.adopt(id, req.size, adoption).await
     }
 
@@ -529,7 +567,7 @@ impl Worker {
             env,
             size: recipe.size,
         };
-        self.inner.ptyd.lock().await.spawn(id, spec).await?;
+        let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(
             id,
             Recipe {
@@ -541,6 +579,7 @@ impl Worker {
             },
         );
         let adoption = Adoption {
+            pid,
             command: plan.command,
             exited: None,
             restored: Some(plan.restored),
@@ -566,12 +605,13 @@ impl Worker {
         size: TermSize,
         adoption: Adoption,
     ) -> Result<SessionHandle, WorkerError> {
-        let Adoption { command, exited, restored, screen } = adoption;
+        let Adoption { pid, command, exited, restored, screen } = adoption;
         let attached = self.inner.ptyd.lock().await.attach(id).await?;
         if attached.dropped > 0 {
             tracing::warn!(session = %id, dropped = attached.dropped, "output lost before the backlog; the replay starts mid-stream");
         }
         let divide = screen.is_some();
+        let term = attached.term.clone();
         let handle = session::spawn(SessionStart {
             id,
             master: attached.master,
@@ -592,7 +632,7 @@ impl Worker {
         self.inner
             .sessions
             .lock()
-            .insert(id, Entry { handle: handle.clone(), command, exited, started_ms });
+            .insert(id, Entry { handle: handle.clone(), command, exited, started_ms, pid, term });
         // Read after the insert: a reader shared meanwhile reaches the session one way or the
         // other.
         let clip = self.inner.clipboard.lock().clone();
@@ -797,9 +837,9 @@ const TAP_QUEUE: usize = 1024;
 /// Forward output copies, checkpoints and sizes to ptyd on the worker's connection until the
 /// worker goes away. The taps ride the same connection as the requests, and only that connection
 /// may tap (ptyd checks it holds the master), so a dying worker's last taps and its EOF reach ptyd
-/// in order. A failed send is logged once and the loop goes on: a dead ptyd ends the worker
-/// through the exits channel ([`Reports::exits`]), and a rejected frame (too large) must not
-/// stop the other sessions' taps.
+/// in order. A failed send is logged once and the loop goes on: a lost ptyd is dialled again
+/// ([`keep_ptyd`]), which has every session checkpoint, and a rejected frame (too large) must
+/// not stop the other sessions' taps.
 async fn tap_loop(inner: Weak<Inner>, mut rx: mpsc::Receiver<Tap>) {
     let mut failing = false;
     while let Some(tap) = rx.recv().await {
@@ -824,6 +864,140 @@ async fn send_tap(ptyd: &mut PtydClient, tap: &Tap) -> Result<(), PtyError> {
         Tap::Output(frame) => ptyd.output(frame).await,
         Tap::Checkpoint { id, state, .. } => ptyd.checkpoint(*id, state).await,
         Tap::Resize { id, size } => ptyd.resize(*id, *size).await,
+    }
+}
+
+/// Dial ptyd on `socket`, refusing one that keeps another custody than `custody`
+/// ([`Worker::connect`]): it would speak another protocol, or have handed its shells other
+/// scripts. A refused ptyd and its sessions are left alone. Its custody is what it says beside
+/// its socket (`ptyd.custody`, `<pid> <custody> <succession>`), trusted only from the process
+/// this connection reached, which has [`CUSTODY_WAIT`] to write it.
+async fn dial(
+    socket: &Path,
+    custody: Option<&str>,
+) -> Result<(PtydClient, mpsc::UnboundedReceiver<(SessionId, i32)>), PtyError> {
+    let (client, exits) = PtydClient::connect(socket).await?;
+    let Some(custody) = custody else { return Ok((client, exits)) };
+    let file = socket.with_extension("custody");
+    let peer = client.peer_pid();
+    let read = || {
+        let said = std::fs::read_to_string(&file).unwrap_or_default();
+        let mut words = said.split_whitespace();
+        let by = words.next().and_then(|pid| pid.parse::<u32>().ok());
+        let kept = words.next().map(str::to_owned);
+        (by.is_some() && by == peer).then_some(kept).flatten()
+    };
+    let deadline = tokio::time::Instant::now().checked_add(CUSTODY_WAIT);
+    let mut kept = read();
+    while kept.is_none() && deadline.is_some_and(|at| tokio::time::Instant::now() < at) {
+        tokio::time::sleep(CUSTODY_LOOK).await;
+        kept = read();
+    }
+    let why = match kept {
+        Some(kept) if kept == custody => return Ok((client, exits)),
+        Some(kept) => format!("it keeps custody {kept}, and this worker speaks {custody}"),
+        None => format!("{} does not say its custody", file.display()),
+    };
+    Err(PtyError::Os {
+        context: "slopty-ptyd refused",
+        source: std::io::Error::other(format!("{why}; its sessions are left alone")),
+    })
+}
+
+/// Pump each link's child exits into the worker's, and when the link to ptyd is lost, dial it
+/// again until it answers and hand it back every session ([`Worker::take_back`]). A worker
+/// that lost ptyd keeps running: its sessions' masters are its own, and their shells live on.
+async fn keep_ptyd(inner: Weak<Inner>, mut exits: mpsc::UnboundedReceiver<(SessionId, i32)>) {
+    loop {
+        while let Some(exit) = exits.recv().await {
+            let Some(inner) = inner.upgrade() else { return };
+            if inner.exits.send(exit).is_err() {
+                return;
+            }
+        }
+        tracing::warn!("lost slopty-ptyd; dialling it again, every session kept meanwhile");
+        let mut wait = REDIAL_FIRST;
+        let mut refused = false;
+        exits = loop {
+            tokio::time::sleep(wait).await;
+            let Some(strong) = inner.upgrade() else { return };
+            match dial(&strong.socket, strong.custody.as_deref()).await {
+                Ok((client, link)) => {
+                    *strong.ptyd.lock().await = client;
+                    Worker { inner: strong }.take_back().await;
+                    break link;
+                }
+                Err(e) => {
+                    if !std::mem::replace(&mut refused, true) {
+                        tracing::warn!(error = %e, "slopty-ptyd not reached yet");
+                    }
+                    wait = wait.saturating_mul(2).min(REDIAL_MAX);
+                }
+            }
+        };
+        tracing::info!("slopty-ptyd reached again");
+    }
+}
+
+impl Worker {
+    /// Hand every session whose program runs back to the ptyd just dialled: one it holds (it
+    /// ran a new build in place) is reclaimed, and its exit recorded when it ended meanwhile;
+    /// one it does not (it started afresh) is adopted with a copy of the master. Either way the
+    /// taps since the last checkpoint are lost, so the session checkpoints next.
+    async fn take_back(&self) {
+        let listed = match self.inner.ptyd.lock().await.list().await {
+            Ok(listed) => listed,
+            Err(e) => {
+                tracing::warn!(error = %e, "slopty-ptyd lists nothing; its link is lost again");
+                return;
+            }
+        };
+        let running: Vec<(SessionId, SessionHandle, u32, String, WallMs)> = self
+            .inner
+            .sessions
+            .lock()
+            .iter()
+            .filter(|(_, e)| e.exited.is_none())
+            .map(|(id, e)| (*id, e.handle.clone(), e.pid, e.term.clone(), e.started_ms))
+            .collect();
+        for (id, handle, pid, term, started_ms) in running {
+            let held = listed.iter().find(|info| info.id == id);
+            if let Some(status) = held.and_then(|info| info.exited) {
+                // It ended while the link was down, and its exit went with the old link.
+                let _gone = self.inner.exits.send((id, status));
+            }
+            let taken = if held.is_some() {
+                self.inner.ptyd.lock().await.reclaim(id).await.map_err(WorkerError::from)
+            } else {
+                self.hand_back(
+                    id,
+                    &handle,
+                    slopty_pty::Adoptee { pid, size: TermSize::default(), started_ms, term },
+                )
+                .await
+            };
+            match taken {
+                Ok(()) => handle.tap_lost(),
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "not handed back to slopty-ptyd");
+                }
+            }
+        }
+    }
+
+    /// Hand session `id` to a ptyd that does not hold it, with a copy of its master and its
+    /// size of record.
+    async fn hand_back(
+        &self,
+        id: SessionId,
+        handle: &SessionHandle,
+        child: slopty_pty::Adoptee,
+    ) -> Result<(), WorkerError> {
+        let master = handle.master().await?;
+        let size = handle.snapshot().await.map_or(child.size, |snap| snap.size);
+        let child = slopty_pty::Adoptee { size, ..child };
+        self.inner.ptyd.lock().await.adopt(id, std::os::fd::AsFd::as_fd(&master), child).await?;
+        Ok(())
     }
 }
 

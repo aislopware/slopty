@@ -18,6 +18,22 @@ impl Ring {
         Self { buf: VecDeque::with_capacity(capacity.min(1 << 16)), capacity, dropped: 0 }
     }
 
+    /// Ring holding at most `capacity` bytes, holding `bytes` (their newest `capacity`) with
+    /// `dropped` bytes already lost before them: a ring handed from one ptyd to its next build.
+    #[must_use]
+    pub fn holding(capacity: usize, bytes: &[u8], dropped: u64) -> Self {
+        let mut ring = Self::new(capacity);
+        ring.push(bytes);
+        ring.dropped = ring.dropped.saturating_add(dropped);
+        ring
+    }
+
+    /// A copy of everything held, which stays held.
+    #[must_use]
+    pub fn contents(&self) -> Vec<u8> {
+        self.buf.iter().copied().collect()
+    }
+
     /// Append, evicting from the front as needed.
     pub fn push(&mut self, bytes: &[u8]) {
         if bytes.len() >= self.capacity {
@@ -93,6 +109,16 @@ mod tests {
         assert_eq!(r.dropped(), 0);
         r.push(b"z");
         assert_eq!(r.drain(), b"z");
+    }
+
+    /// A ring handed on holds what it was given and counts what was lost before it, and a
+    /// copy of it leaves it as it was.
+    #[test]
+    fn a_handed_ring_keeps_its_bytes_and_its_losses() {
+        let r = Ring::holding(3, b"abcd", 5);
+        assert_eq!(r.contents(), b"bcd");
+        assert_eq!(r.dropped(), 6, "the 5 lost before, and the 1 that did not fit");
+        assert_eq!(r.len(), 3, "a copy takes nothing out");
     }
 
     #[test]

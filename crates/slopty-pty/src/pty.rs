@@ -234,6 +234,16 @@ fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
     Ok(PathBuf::from(OsString::from(name.to_string_lossy().into_owned())))
 }
 
+/// The path of the slave of `master`, a master this process did not open itself: one a worker
+/// hands back to a ptyd that started afresh.
+///
+/// # Errors
+///
+/// When `master` is no PTY master.
+pub fn slave_of(master: &OwnedFd) -> Result<PathBuf, PtyError> {
+    slave_path(master)
+}
+
 /// How many times [`open_granted`] replaces a master whose slave XNU never made.
 #[cfg(target_os = "macos")]
 const REMAKES: usize = 64;

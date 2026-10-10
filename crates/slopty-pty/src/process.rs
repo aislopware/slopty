@@ -46,6 +46,17 @@ pub fn foreground(fd: impl AsFd) -> Option<Foreground> {
     (pid > 0).then_some(pid).and_then(imp::describe)
 }
 
+/// The kernel's own record of when process `pid` started, as a number that stays the same for
+/// as long as that process lives, whatever the wall clock does.
+///
+/// It is microseconds since the epoch on macOS (`pbi_start`), and clock ticks after boot on Linux
+/// (`/proc/<pid>/stat` field 22). `None` when the process is gone or the platform would not say.
+/// Together with the pid it names one process: a pid used again carries another mark.
+#[must_use]
+pub fn start_mark(pid: i32) -> Option<u64> {
+    imp::start_mark(pid)
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::CStr;
@@ -61,10 +72,22 @@ mod imp {
     pub(super) fn describe(pid: i32) -> Option<Foreground> {
         let info = bsd_info(pid)?;
         let name = c_string(&info.pbi_name).or_else(|| c_string(&info.pbi_comm))?;
-        let started = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_secs(info.pbi_start_tvsec))
-            .and_then(|at| at.checked_add(Duration::from_micros(info.pbi_start_tvusec)));
+        let started = started(pid);
         Some(Foreground { pid, name, argv: argv(pid).unwrap_or_default(), cwd: cwd(pid), started })
+    }
+
+    /// When `pid` started.
+    fn started(pid: i32) -> Option<SystemTime> {
+        let info = bsd_info(pid)?;
+        SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(info.pbi_start_tvsec))
+            .and_then(|at| at.checked_add(Duration::from_micros(info.pbi_start_tvusec)))
+    }
+
+    /// `pid`'s start, in microseconds since the epoch, as the kernel recorded it.
+    pub(super) fn start_mark(pid: i32) -> Option<u64> {
+        let info = bsd_info(pid)?;
+        info.pbi_start_tvsec.checked_mul(1_000_000)?.checked_add(info.pbi_start_tvusec)
     }
 
     /// `proc_pidinfo(PROC_PIDTBSDINFO)`: name, start time.
@@ -259,10 +282,21 @@ mod imp {
         let argv = std::fs::read(dir.join("cmdline"))
             .map(|line| procfs::split_cmdline(&line))
             .unwrap_or_default();
-        let started = boot_time()
-            .zip(clock_ticks())
-            .and_then(|(boot, hz)| boot.checked_add(procfs::since_boot(stat.start_ticks, hz)));
+        let started = since_boot(stat.start_ticks);
         Some(Foreground { pid, name, argv, cwd: std::fs::read_link(dir.join("cwd")).ok(), started })
+    }
+
+    /// `pid`'s start, in clock ticks after boot, as the kernel recorded it.
+    pub(super) fn start_mark(pid: i32) -> Option<u64> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        Some(procfs::Stat::parse(&stat)?.start_ticks)
+    }
+
+    /// The moment `ticks` clock ticks after boot.
+    fn since_boot(ticks: u64) -> Option<SystemTime> {
+        boot_time()
+            .zip(clock_ticks())
+            .and_then(|(boot, hz)| boot.checked_add(procfs::since_boot(ticks, hz)))
     }
 
     /// When the machine booted, to the second: `btime` in `/proc/stat`. Whole seconds, so a
@@ -286,6 +320,11 @@ mod imp {
 
     /// No process table to read here; the caller treats `None` as "the platform would not say".
     pub(super) const fn describe(_pid: i32) -> Option<Foreground> {
+        None
+    }
+
+    /// Nor a start.
+    pub(super) const fn start_mark(_pid: i32) -> Option<u64> {
         None
     }
 }
@@ -406,6 +445,18 @@ mod tests {
 
     use super::*;
     use crate::Pty;
+
+    /// A process's start mark is the same each time it is read, and a pid nobody runs has none.
+    #[test]
+    fn a_start_mark_stays_and_a_gone_pid_has_none() {
+        let me = i32::try_from(std::process::id()).expect("a pid");
+        let mark = start_mark(me).expect("this process has one");
+        assert_eq!(start_mark(me), Some(mark), "the same each time");
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().expect("spawn");
+        let pid = i32::try_from(child.id()).expect("a pid");
+        child.wait().expect("reaped");
+        assert_eq!(start_mark(pid), None, "gone once reaped");
+    }
 
     #[tokio::test]
     async fn a_ptys_foreground_process_is_the_program_it_runs() {

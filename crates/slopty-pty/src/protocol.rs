@@ -119,6 +119,120 @@ pub enum PtydRequest {
     List,
     /// Exit the daemon after closing every session.
     Shutdown,
+    /// Take back a session whose master this worker holds already, from a connection that is
+    /// gone: ptyd ran a new build in place ([`Self::Succeed`]), which closed it. Answer: `Ok`,
+    /// or `Error` (`NoSuchSession`: ptyd started afresh, so hand it over with [`Self::Adopt`];
+    /// `AttachedElsewhere`). ptyd stays out of the master until the connection drops, as after
+    /// an `Attach`. The taps sent while the connection was gone are lost, so the worker
+    /// checkpoints next.
+    Reclaim {
+        /// The session it is about.
+        id: SessionId,
+    },
+    /// Keep a session ptyd does not hold, whose master rides on this frame: a ptyd that started
+    /// afresh after the one before it ended is handed back what the worker held. Answer: `Ok`
+    /// or `Error`. The connection holds the master from then on, as after an `Attach`. The child
+    /// is no child of this ptyd, so its end is seen when its pid is gone, and its exit status is
+    /// not known: it is reported as -1, as when a wait fails.
+    Adopt {
+        /// The session it is about.
+        id: SessionId,
+        /// Its child, which ptyd signals on `Close`.
+        pid: u32,
+        /// Size of record.
+        size: TermSize,
+        /// When the child was spawned.
+        started_ms: WallMs,
+        /// The terminfo name the child was given as `TERM`.
+        term: String,
+    },
+    /// Become the build at `program`, keeping every session: ptyd runs it in place, so its pid,
+    /// its children and their masters stay, and hands it every session's state
+    /// ([`Bequest`], [`Heir`]). No answer when it does: the connection closes as the new build
+    /// starts, and that build says its custody beside the socket. Answer: `Error` when it
+    /// cannot, `program` above all handing sessions on another way (its succession, which
+    /// `slopty-ptyd --custody` prints, differs).
+    ///
+    /// The last request, so a request added later moves nothing an older ptyd reads of it.
+    Succeed {
+        /// The new build's `slopty-ptyd`.
+        program: PathBuf,
+    },
+}
+
+/// The flag a ptyd running a new build in place ([`PtydRequest::Succeed`]) runs it with,
+/// followed by the descriptor of the handover's state file ([`inherit_args`]).
+pub const INHERIT_FLAG: &str = "--inherit";
+
+/// The command line, after the program, a ptyd runs the build it hands over to with.
+///
+/// It is [`INHERIT_FLAG`] and the descriptor `exec` keeps open for the state file. Everything else
+/// the new build needs is in that file ([`Bequest`]), so nothing of it depends on the flags a
+/// build takes.
+#[must_use]
+pub fn inherit_args(state: i32) -> Vec<String> {
+    vec![INHERIT_FLAG.to_owned(), state.to_string()]
+}
+
+/// What a ptyd running a new build in place hands it, first in the state file.
+///
+/// The state file is already unlinked, kept open across `exec` and named by
+/// [`inherit_args`]; it holds this frame and then one [`Heir`] per
+/// session. Each session's master is kept open across `exec` too, its descriptor in its heir:
+/// the process stays the same, so nothing has to cross a socket. Kept apart from the worker's
+/// protocol: a change here changes the succession fingerprint, and an install then restarts
+/// ptyd rather than hand it over.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Bequest {
+    /// Where the daemon listens.
+    pub socket: PathBuf,
+    /// Bytes of output kept per session.
+    pub backlog_bytes: u64,
+    /// Where the shell integration scripts go.
+    pub shell_dir: PathBuf,
+    /// How many [`Heir`] frames follow.
+    pub sessions: u32,
+    /// Every descriptor kept open across `exec` for the new build besides the state file, its
+    /// masters: written first, so each is taken (and one whose heir does not read closed) even
+    /// when a heir after this frame does not read.
+    pub fds: Vec<i32>,
+}
+
+/// One session as a ptyd hands it to the build it runs next, a frame of the state file.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Heir {
+    /// The id the worker chose when it spawned the session.
+    pub id: SessionId,
+    /// The descriptor its master is open on, kept across `exec`.
+    pub master: i32,
+    /// Its child.
+    pub pid: u32,
+    /// Slave device path.
+    pub tty: PathBuf,
+    /// When the child was spawned.
+    pub started_ms: WallMs,
+    /// The terminfo name the child was given as `TERM`.
+    pub term: String,
+    /// Size of record.
+    pub size: TermSize,
+    /// The last worker's terminal state.
+    #[serde(with = "byte_string")]
+    pub checkpoint: Vec<u8>,
+    /// Output since it.
+    #[serde(with = "byte_string")]
+    pub backlog: Vec<u8>,
+    /// Bytes lost before `backlog`.
+    pub dropped: u64,
+    /// The child's exit status, once reaped.
+    pub exited: Option<i32>,
+    /// A worker held the master: the new build keeps out of it a while for that worker to
+    /// take it back ([`PtydRequest::Reclaim`]) rather than read it beside the worker.
+    pub attached: bool,
+    /// The child is no child of this process (it was adopted, [`PtydRequest::Adopt`]).
+    pub orphan: bool,
+    /// An adopted child's start as the kernel recorded it when it was adopted
+    /// ([`crate::process::start_mark`]): it is that child only while its pid carries this mark.
+    pub orphan_mark: Option<u64>,
 }
 
 /// ptyd → the worker.

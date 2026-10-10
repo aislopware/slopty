@@ -1,0 +1,5 @@
+---
+source: apps/slopty-ptyd/tests/custody.rs
+expression: "inherit_args(7).join(\" \")"
+---
+--inherit 7

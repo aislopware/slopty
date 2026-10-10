@@ -177,6 +177,8 @@ enum Cmd {
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
+    Master { reply: oneshot::Sender<std::io::Result<OwnedFd>> },
+    TapLost,
     Close,
 }
 
@@ -381,6 +383,8 @@ impl std::fmt::Debug for Cmd {
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
+            Self::Master { .. } => "Master",
+            Self::TapLost => "TapLost",
             Self::Close => "Close",
         };
         f.write_str(name)
@@ -576,6 +580,24 @@ impl SessionHandle {
     /// [`FIRST_PROMPT_WAIT`]. Restore uses this to resume the agent a lost shell was running.
     pub fn type_at_first_prompt(&self, line: String) -> Result<(), WorkerError> {
         self.send(Cmd::Launch { line })
+    }
+
+    /// A copy of the session's PTY master, to hand a ptyd that started afresh
+    /// ([`slopty_pty::PtydClient::adopt`]).
+    pub async fn master(&self) -> Result<OwnedFd, WorkerError> {
+        let (reply, master) = oneshot::channel();
+        self.send(Cmd::Master { reply })?;
+        let master = master.await.map_err(|_gone| WorkerError::SessionClosed)?;
+        master.map_err(|source| {
+            WorkerError::Pty(slopty_pty::PtyError::Os { context: "dup the master", source })
+        })
+    }
+
+    /// What was tapped for ptyd since its last checkpoint did not all reach it (the link to it
+    /// was lost and is back): checkpoint as soon as the output allows, which replaces the
+    /// ring, and tap nothing until then.
+    pub fn tap_lost(&self) {
+        let _ignored = self.tx.send(Cmd::TapLost);
     }
 
     /// Stop the actor (the PTY master closes; ptyd decides the child's fate).
@@ -2332,6 +2354,14 @@ impl Actor {
                 let until = tokio::time::Instant::now().checked_add(FIRST_PROMPT_WAIT);
                 self.launch = until.map(|until| (line, until));
                 self.launch_when_prompted();
+            }
+            Cmd::Master { reply } => {
+                let _ignored = reply.send(self.master.as_fd().try_clone_to_owned());
+            }
+            Cmd::TapLost => {
+                self.dirty_since_checkpoint = true;
+                self.tap_lost = true;
+                self.checkpoint(false);
             }
             Cmd::Close => return false,
         }

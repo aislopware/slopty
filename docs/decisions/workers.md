@@ -1354,3 +1354,120 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_update_that_ends_a_driven_turn_stops_until_the_person_says_so` (slopty-deploy);
     `a_worker_back_within_the_grace_tells_nobody` and the reworded
     `a_task_s_machine_going_away_is_said_and_frees_its_place` (slopty-server).
+
+- ✅ **No end of ptyd ends a shell: an update hands its sessions over, and a crash gets them
+  back from the worker** (2026-10-12, readiness 10-12 item 10). The worker shut down when ptyd
+  went, ptyd kept nothing across its own end, and an install whose custody moved restarted it.
+  The custody hashes the goldens and the shell scripts, which move about weekly, so a routine
+  update ended dev servers, builds, editors and every agent TUI but Claude Code's.
+  - **An update hands every session to the new build, in place.** `PtydRequest::Succeed {
+    program }` (an absolute path, so the file checked is the file run) has the running ptyd
+    write a `Bequest` (its socket, backlog size, shell directory and every master's descriptor)
+    and each session's state (`Heir`: the master's descriptor, pid, tty, size, term,
+    checkpoint, ring, exit status, whether a worker held it) into an unlinked file. It clears
+    close-on-exec on that file and on every master and `exec`s `program --inherit <fd>`
+    (`slopty_pty::succession`). The pid stays, so the service manager keeps the same process and
+    every shell stays its child: the new build still reaps them and reports their status. Ruled
+    over a second process adopting over a socket, which the plan first named: that one would be
+    no shell's parent (no exit status), and launchd runs one process per job, so two ptyds
+    could not overlap under one label. A session a worker held is kept out of the reader for
+    30 s, for that worker to take back (`PtydRequest::Reclaim`).
+  - **Nothing crosses a socket** (reviewed 2026-10-10). The first cut sent the state file and
+    every master over `SCM_RIGHTS` on a socketpair that nobody read until after the `exec`, and
+    ran it through std's `Command::exec`. A review found that a Linux socket buffer fills at a
+    few hundred sessions, which would hang the handover with every session paused. It also found
+    that std moves the socket onto standard input and puts `SIGPIPE` back to its default before
+    the `exec`, and undoes neither when it fails. Descriptors kept across the `exec` have no
+    such limit. `exec_in_place` is a bare `execv` that changes nothing first, so a failed one
+    leaves the process as it was; close-on-exec is set back on each descriptor. The new image
+    takes each descriptor through `take_inherited`, an `unsafe fn` whose contract is that the
+    image before kept the number for this one and nothing else owns it; it checks what it can
+    (open, above 2, not close-on-exec). That is ptyd's one `unsafe` call. Every descriptor the
+    `Bequest` names is taken first, so a master whose heir does not read is closed rather than
+    left open for every program ptyd starts. std opens `/dev/null` onto a closed standard
+    descriptor at start-up, so no master can sit on 0 to 2.
+  - **The handover is one synchronous step.** ptyd runs on one thread. Once every reader is
+    parked (5 s at most, else it is given up), the state file is written and the `exec` made
+    with no `await` between. So no child is reaped, no byte read and no request served between
+    the record of a session and the new image. While a handover is under way ptyd refuses
+    `Spawn`, `Adopt`, `Close`, `Attach` and `Reclaim`. Without that, a tab closed during an
+    install would come back after it. An attach or a reclaim that was waiting for its reader
+    when the handover began gives the session up and says so. A handover that fails lets every
+    session no connection holds drain again.
+  - **A new build that cannot take over never ends a session.** Everything the new build needs
+    is in the state file, so its command line is only `--inherit <fd>`, and that line is a
+    golden of the succession (`succession_argv`). Under `--inherit` the new image keeps what
+    came whole when part of the state does not read. It binds until it can (50 ms doubling to
+    1 s), its sessions draining meanwhile. It writes its custody file before it binds (the
+    pid is the same, and the old image marked the file `handing` before the `exec`, so no
+    worker of either custody takes the new image for one that speaks its own), and again each
+    second until it can.
+  - **The listener is bound afresh.** The old listener closes at the `exec`, and a worker that
+    dials in those milliseconds dials again. A worker waits up to 2 s for the custody file to
+    name the pid it reached, since ptyd writes it just after it binds.
+  - **Succession.** A second fingerprint hashes only the handover's goldens (`succession_*`:
+    `Succeed`, the command line, `Bequest` and `Heir`). `Succeed` is the last request, so later
+    requests move nothing an older ptyd reads of it. `slopty-ptyd --custody` prints both
+    fingerprints, and a running ptyd writes `<pid> <custody> <succession>` beside its socket.
+    The install plan keeps ptyd when the custody is the same, hands it over (`Ptyd::HandsOver`)
+    when only the succession is, and restarts it otherwise. The running ptyd checks `program
+    --custody` itself before it runs it. `--succeed` returns once the custody file says the new
+    custody under the same pid.
+  - **The install stops the worker before it hands ptyd over.** A handover happens only when
+    the custody moved, so the running worker would be refused by the new image. Were it still
+    holding sessions, the new image would drain them after the 30 s grace beside the worker's
+    own read of the same master, and both screens would garble. With the worker stopped first,
+    no session is held across the handover. One that does not happen starts the old worker
+    again and changes nothing else.
+    - The new build runs from where it is installed: it is copied beside the installed binary
+      as `slopty-ptyd.next` and renamed over it once ptyd runs it, never run from the staging
+      directory.
+    - `--succeed` fails only on a refusal. A link that closed with no answer is the `exec`, and
+      one that failed otherwise counts as it once the file says `handing`. From then on it waits
+      up to 10 minutes for the new custody and succeeds either way, since there is no going
+      back. The install still weighs a failed `--succeed` against the custody file (the new
+      custody or `handing` under the same pid count as done). After a handover went through,
+      nothing is a reason to restart the old worker: a failed rename of `slopty-ptyd.next` is a
+      warning, and the binary is copied into place with the rest.
+  - **A worker that loses ptyd keeps running and dials it again** (20 ms doubling to 2 s). It
+    hands back every session whose program runs: `Reclaim` when the ptyd holds it (a handover),
+    recording the exit of one that ended meanwhile, and `Adopt` with a copy of the master
+    (`SCM_RIGHTS`) when it does not (a ptyd that started afresh). Then each session
+    checkpoints, since the taps sent while the link was down are lost. An adopted child is no
+    child of the new ptyd. It counts as alive only while its pid carries the start mark the
+    kernel gave it, read when ptyd took it (`slopty_pty::process::start_mark`: `pbi_start` on
+    macOS, the start in clock ticks on Linux, neither moved by the wall clock) and carried
+    across a handover in its `Heir`. That check is polled each second for its end (status -1)
+    and made before any signal, so a pid used again is never hung up or killed.
+  - **A worker dials only a ptyd of its own custody.** The worker bakes the custody of the
+    ptyd it ships with (`apps/slopty-worker/build.rs`, from ptyd's own sources) and refuses a
+    ptyd whose custody file says another, or says nothing under the pid at the socket's other
+    end. Such a ptyd and its sessions are left alone.
+  - **Neither dies of the moment.** ptyd raises its descriptor limit as the worker does, and an
+    accept that fails waits (50 ms doubling to 1 s) instead of ending the daemon. A program it
+    starts gets a soft limit of at most 1024 back, since `select` fails past `FD_SETSIZE`.
+  - **`KillMode=process` stays.** ptyd's systemd unit says it, so a crash of ptyd ends no shell
+    and the worker hands the sessions to the next one. launchd ends only the job's process group,
+    which every shell left at `setsid`. A deliberate stop (a restart plan, an uninstall) hangs
+    every session up as closing a terminal window does. A process that ignores `SIGHUP` lives
+    on, as it would after any terminal closed: that is what `nohup` asks for.
+  - Tests:
+    - `slopty-ptyd`: `roundtrip::every_session_survives_a_handover_to_a_new_build`,
+      `roundtrip::a_handover_that_cannot_happen_keeps_every_session` (another succession, a
+      missing build, an `exec` that fails after the custody was said, and nothing left open
+      after it), `every_session_survives_a_handover_to_a_new_build` being a protocol test (same
+      build, no custody check),
+      `custody::every_handover_frame`, and the reworked
+      `the_custody_is_the_goldens_and_the_scripts`.
+    - `slopty-worker`: `ptyd_link::a_worker_hands_its_sessions_to_a_ptyd_that_starts_again`,
+      `ptyd_link::a_worker_takes_its_sessions_back_after_a_handover` (the custody check across
+      the `exec`) and `ptyd_link::a_worker_dials_only_a_ptyd_that_keeps_its_custody`.
+    - `slopty-platform` `service`: `an_install_hands_ptyd_over_before_anything_else`,
+      `a_handover_that_does_not_happen_changes_nothing` (with the late `handing` and new-custody
+      cases), the handover cases of
+      `a_changed_or_unknown_custody_restarts_ptyd_and_counts_its_sessions`, and `KillMode` in
+      `a_linux_install_writes_systemd_user_units`.
+    - `slopty-pty`: `succession::only_a_descriptor_kept_across_exec_is_taken`,
+      `succession::a_failed_exec_returns`, `process::a_start_mark_stays_and_a_gone_pid_has_none`
+      and
+      `ring::a_handed_ring_keeps_its_bytes_and_its_losses`.

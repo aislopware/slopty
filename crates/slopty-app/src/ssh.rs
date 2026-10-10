@@ -421,7 +421,9 @@ impl Progress {
             (Stage::Copy, Mark::Done) => self.sent.map(|(_, total)| kit::size_label(total)),
             (Stage::Install, Mark::Running | Mark::Failed) => self.line.clone(),
             (Stage::Install, Mark::Done) => self.ptyd.and_then(|ptyd| match ptyd {
-                slopty_deploy::Ptyd::Kept => Some("Every shell kept".to_owned()),
+                slopty_deploy::Ptyd::Kept | slopty_deploy::Ptyd::HandsOver => {
+                    Some("Every shell kept".to_owned())
+                }
                 slopty_deploy::Ptyd::Restarts { .. } => Some("Shells started afresh".to_owned()),
                 slopty_deploy::Ptyd::Starts => None,
             }),

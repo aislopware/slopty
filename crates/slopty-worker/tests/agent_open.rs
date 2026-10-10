@@ -126,7 +126,9 @@ mod agent_open {
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let (_ptyd, socket) = ptyd(&dir).await;
         let (worker, _reports) =
-            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept")).await.unwrap();
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept"), None)
+                .await
+                .unwrap();
         let mod_dir = dir.join("claude-mod/abc");
         std::fs::create_dir_all(&mod_dir).unwrap();
         worker.set_session_env(vec![
@@ -175,7 +177,9 @@ mod agent_open {
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let (_ptyd, socket) = ptyd(&dir).await;
         let (worker, _reports) =
-            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept")).await.unwrap();
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept"), None)
+                .await
+                .unwrap();
         let relay = dir.join("relay/slopty");
         std::fs::create_dir_all(relay.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink("/usr/bin/true", &relay).unwrap();

@@ -47,6 +47,22 @@ pub(crate) struct Launch {
     argv: Vec<CString>,
     env: Vec<CString>,
     cwd: CString,
+    /// The open-descriptor limit the program starts with ([`program_descriptors`]).
+    descriptors: libc::rlimit,
+}
+
+/// The soft limit on open descriptors a program started here gets at most: what a login gives,
+/// whatever this process raised its own to. A program that `select`s fails on a descriptor past
+/// `FD_SETSIZE` (1024), so a limit above it only hides that until the day it bites.
+const PROGRAM_DESCRIPTORS: u64 = 1024;
+
+/// This process's limit on open descriptors with the soft one at most
+/// [`PROGRAM_DESCRIPTORS`], for the program to start with.
+fn program_descriptors() -> libc::rlimit {
+    let now = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    let max = now.maximum.unwrap_or(libc::RLIM_INFINITY);
+    let current = now.current.unwrap_or(libc::RLIM_INFINITY).min(PROGRAM_DESCRIPTORS).min(max);
+    libc::rlimit { rlim_cur: current, rlim_max: max }
 }
 
 impl Launch {
@@ -75,6 +91,7 @@ impl Launch {
                 .collect::<io::Result<_>>()?,
             env,
             cwd: c_string(cwd.as_os_str().as_bytes())?,
+            descriptors: program_descriptors(),
         })
     }
 
@@ -147,10 +164,10 @@ impl Launch {
     }
 
     /// The child's side of the fork: the working directory, a new session, the tty on fds 0
-    /// to 2 as its controlling terminal, nothing else open, the signal state a new program
-    /// expects, and `execve`, with `execvp`'s fallback to the shell for a file the kernel
-    /// cannot run. System calls on memory built before the fork and nothing else. A step that
-    /// fails is reported on `report` and ends the child with [`CANNOT_START`].
+    /// to 2 as its controlling terminal, nothing else open, the descriptor limit and the signal
+    /// state a new program expects, and `execve`, with `execvp`'s fallback to the shell for a file
+    /// the kernel cannot run. System calls on memory built before the fork and nothing else. A
+    /// step that fails is reported on `report` and ends the child with [`CANNOT_START`].
     ///
     /// # Safety
     ///
@@ -179,6 +196,9 @@ impl Launch {
             fail(report, Step::Terminal, e.raw_os_error());
         }
         close_inherited(report.descriptor());
+        // SAFETY: `setrlimit` reads the limit, built before the fork, and changes this process's
+        // alone; a refusal leaves the limit as it was, which the program can live with.
+        let _limited = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const self.descriptors) };
         default_signals();
         // SAFETY: `execve` reads the NUL-terminated path and the null-terminated `argv` and
         // `envp` arrays, all in memory the fork copied; it returns only on failure.
@@ -696,6 +716,15 @@ pub struct Child {
 }
 
 impl Child {
+    /// A child this process image did not start: the image before it did, and handed it on by
+    /// running a new build in place (an exec keeps the pid, and with it every child). `None`
+    /// for a number no process can have.
+    #[must_use]
+    pub fn inherited(pid: u32) -> Option<Self> {
+        let pid = i32::try_from(pid).ok().and_then(Pid::from_raw)?;
+        Some(Self { pid, status: None })
+    }
+
     /// Its pid; `None` once it has been reaped and the number may belong to someone else.
     #[must_use]
     pub fn id(&self) -> Option<u32> {
