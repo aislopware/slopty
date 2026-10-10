@@ -1269,10 +1269,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     that answers the request with it alone, as the question's own dialog would send it. Any
     other request has none, and is opened or replied to.
   - The server pushes a needing thread's first request with its note when it is a yes or no
-    Allow and Deny answer, or when it has buttons. `PushBody.choices` carries them, and the
-    phone offers them as the note's actions, each answering `ask` with its choice.
+    Allow and Deny answer, or when it has buttons. `PushBody.picks` carries their labels, and
+    the phone offers them as the note's actions, each answering `ask` with the option at its
+    place (see "A pushed note keeps up with its thread").
   - Tests: `slopty-proto` `units::a_small_question_is_answered_by_its_options`, the
-    `push_body_choices` golden; `slopty-server`
+    `push_body_picks` golden; `slopty-server`
     `hub::ladder::tests::needs_you_pushes_once_per_ask` (the pocketed phone's push carries a
     question's buttons).
 
@@ -1286,8 +1287,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     not go is said on a note that keeps the field.
   - **Options as buttons.** A question that asks one thing, takes one answer and offers at
     most four puts its options on the note in place of Allow and Deny (`Note::picking`,
-    `pick.0` on). Each answers the request with the choice the note keeps for it under the
-    button's id (`notify::Pressed`). Notification categories are fixed sets of buttons, so a
+    `pick.0` on). Each answers the request with the option at its place, looked up among the
+    request's own buttons where it is answered (`notify::Pressed::Pick`). Notification categories are fixed sets of buttons, so a
     category is made for each set of labels (`picking_id`, an FNV-1a hash, so the same
     options share one). It is registered as the note goes out: by the app for its own notes,
     and by the notification extension before it hands back a pushed one (`register_then`).
@@ -1328,9 +1329,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `push.json`). It is taken back once the row's `seen` reaches that turn, or once the thread
     is gone from a linked worker's table. A later note about the thread replaces it, and with
     it the record. The file's shape changed again: an old one is set aside.
+  - **A long question was dropped.** Each of a question's four buttons carried its choice, and
+    a choice repeats the whole question, so a long one went past APNs' 4 KB and was refused.
+    `note()` cut only the title and the text. Now a note's buttons carry their labels
+    (`PushBody.picks`, each cut to `PICK_BYTES`), and a press carries its place
+    (`Pressed::Pick(n)`). Whoever answers looks up the choice at that place among the
+    request's own buttons: a linked workspace in its table's `RequestCard::buttons`, and an
+    answer through the server in the thread it reads first (`RequestRead::picks`, which the
+    worker fills from `NoteChoice::of`). A place the request no longer offers sends nothing.
+    The app's own notes work the same way, so a press is one thing whichever process showed
+    the note.
   - Tests: `slopty-server` `hub::ladder::tests::a_shown_need_follows_its_request_quietly`,
     `…::a_need_first_seen_is_pushed_to_a_phone_not_showing_it`,
-    `…::a_finished_note_is_taken_back_once_its_turn_is_seen`.
+    `…::a_finished_note_is_taken_back_once_its_turn_is_seen`,
+    `push::tests::a_long_question_s_four_options_still_fit_apns`; `slopty-platform`
+    `notify::pushed::tests::a_questions_options_are_its_notes_buttons`; `slopty-worker`
+    `orchestrate::thread_read::tests::a_read_says_what_it_skipped_and_offers_the_open_requests`;
+    `slopty-app` `verdict::tests::a_pick_answers_with_its_own_choice_with_no_window`;
+    `slopty-ui` `workspace::tests::attention::a_small_question_is_answered_from_its_notes_options`;
+    goldens `push_body_picks`, `thread_read`.
 
 - ✅ **Save to Files comes down into the folder chosen** (2026-10-10, readiness audit "below
   the line"). On iPhone and iPad, "Save to Files…" and "Save a copy…" brought the whole file

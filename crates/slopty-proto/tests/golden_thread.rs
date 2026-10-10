@@ -1176,22 +1176,17 @@ mod golden_thread {
             via: None,
         };
         let ask = Some(AskId("toolu_01".to_owned()));
-        let body = |ask, choices, quiet| PushBody {
+        let body = |ask, picks, quiet| PushBody {
             notice: notice.clone(),
             ask,
-            choices,
+            picks,
             quiet,
             merges: None,
         };
         snap("push_body", &body(ask.clone(), Vec::new(), false));
         snap("push_body_quiet", &body(ask.clone(), Vec::new(), true));
-        let choices = ["Postgres", "SQLite"]
-            .map(|label| slopty_proto::thread::wire::NoteChoice {
-                label: label.to_owned(),
-                choice: format!("[{{\"question\":\"Which database?\",\"answer\":\"{label}\"}}]"),
-            })
-            .to_vec();
-        snap("push_body_choices", &body(ask, choices, false));
+        let picks = ["Postgres", "SQLite"].map(str::to_owned).to_vec();
+        snap("push_body_picks", &body(ask, picks, false));
         let program = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Terminal(TermRef { worker, session }),
@@ -1203,13 +1198,7 @@ mod golden_thread {
         };
         snap(
             "push_body_program",
-            &PushBody {
-                notice: program,
-                ask: None,
-                choices: Vec::new(),
-                quiet: false,
-                merges: None,
-            },
+            &PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false, merges: None },
         );
         let ready = Notice {
             kind: NoticeKind::ReadyToMerge,
@@ -1225,7 +1214,7 @@ mod golden_thread {
             &PushBody {
                 notice: ready,
                 ask: None,
-                choices: Vec::new(),
+                picks: Vec::new(),
                 quiet: false,
                 merges: Some(slopty_proto::project::TaskId(4)),
             },

@@ -305,6 +305,7 @@ mod golden_project {
                     stops: false,
                 }],
                 questions: Vec::new(),
+                picks: Vec::new(),
             }],
             next: TurnId(4),
             truncated: true,

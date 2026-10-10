@@ -675,7 +675,7 @@ async fn needs_you_pushes_once_per_ask() {
     assert_eq!(pushed_body.notice.kind, NoticeKind::NeedsYou);
     assert_eq!(pushed_body.notice.text, "Run cargo test?");
     assert_eq!(pushed_body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
-    assert_eq!(pushed_body.choices, [], "Allow and Deny answer it");
+    assert!(pushed_body.picks.is_empty(), "Allow and Deny answer it");
     assert!(urgent(push));
     hub.rank_ladder();
     rank(vec![needs.clone()]);
@@ -698,7 +698,7 @@ async fn needs_you_pushes_once_per_ask() {
     let asked = pushes();
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(body(&asked[0]).ask, Some(AskId("1".to_owned())), "a question its options answer");
-    assert_eq!(body(&asked[0]).choices, buttons, "each a button of its own");
+    assert_eq!(body(&asked[0]).picks, ["Postgres", "SQLite"], "each a button of its own");
     rank(vec![moved(&thread, Phase::Working, 4_700)]);
     assert_eq!(pushes().len(), 1, "taken back");
     mac.at(&hub, Seat::Desk, true, Vec::new());

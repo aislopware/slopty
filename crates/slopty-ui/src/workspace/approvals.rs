@@ -133,10 +133,10 @@ impl WorkspaceView {
     ) -> bool {
         let open = self.thread_request(thread).filter(|a| a.id == *ask);
         let choice = open.and_then(|a| match pressed {
-            Pressed::Allow | Pressed::Deny => answerable(a).then(|| pressed.choice(&a.options))?,
-            Pressed::Pick(choice) => {
-                a.buttons.iter().any(|b| b.choice == *choice).then(|| choice.clone())
+            Pressed::Allow | Pressed::Deny => {
+                answerable(a).then(|| pressed.choice(&a.options, &a.buttons))?
             }
+            Pressed::Pick(_) => pressed.choice(&a.options, &a.buttons),
         });
         let Some(choice) = choice else {
             tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
@@ -391,7 +391,7 @@ impl WorkspaceView {
                     .requests
                     .iter()
                     .find(|r| r.ask == ask)
-                    .and_then(|r| pressed.choice(&r.choices)),
+                    .and_then(|r| pressed.choice(&r.choices, &r.picks)),
                 _ => None,
             };
             let answered = match choice {

@@ -339,6 +339,7 @@ mod tests {
                     stops: false,
                 }],
                 questions: Vec::new(),
+                picks: Vec::new(),
             }],
             next: TurnId(3),
             truncated: true,

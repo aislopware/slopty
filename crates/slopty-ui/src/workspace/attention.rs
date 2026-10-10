@@ -212,7 +212,11 @@ impl Asking {
             urgent: true,
             thread: None,
         }
-        .picking(if self.approval.is_some() { &self.picks } else { &[] })
+        .picking(&if self.approval.is_some() {
+            self.picks.iter().map(|p| p.label.clone()).collect()
+        } else {
+            Vec::new()
+        })
     }
 }
 

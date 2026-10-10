@@ -79,6 +79,7 @@ pub fn read(
             title: r.title.clone(),
             choices: r.options.clone(),
             questions: r.questions.iter().map(|q| q.text.clone()).collect(),
+            picks: slopty_proto::thread::wire::NoteChoice::of(r),
         })
         .collect();
     ThreadRead {

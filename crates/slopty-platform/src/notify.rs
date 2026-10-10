@@ -24,7 +24,8 @@
 //! question's options are its note's buttons
 //! instead ([`Note::picking`]): their category is made for their labels and registered as the
 //! note goes out, beside the ones already registered ([`register_then`] for a pushed note), and
-//! a press answers with the choice the note kept ([`Pressed`]). A press that finds nothing
+//! a press answers with the option at its place among the request's ([`Pressed::Pick`]). A
+//! press that finds nothing
 //! listening for taps (an iOS
 //! app the press launched in the background, with no window) goes to the answer the app installed
 //! for it ([`answer_unheard`]). The categories are registered with the centre when [`System`] is
@@ -88,11 +89,11 @@ pub struct Note {
     pub thread: Option<String>,
     /// Its buttons, when it has any.
     pub category: Option<Category>,
-    /// A question's options as buttons of their own, in its order ([`Note::picking`]): a
-    /// category of their own, registered as the note goes out, takes [`Self::category`]'s
-    /// place. Each answers the note's request with its choice, kept in [`Self::info`] under
-    /// its button's identifier.
-    pub picks: Vec<NoteChoice>,
+    /// The labels of a question's options as buttons of their own, in its order
+    /// ([`Note::picking`]): a category of their own, registered as the note goes out, takes
+    /// [`Self::category`]'s place. Each answers the note's request with the option at its
+    /// place ([`Pressed::Pick`]).
+    pub picks: Vec<String>,
     /// No sound: it only says more about a note already up under its identifier, which
     /// sounded when it came.
     pub silent: bool,
@@ -104,21 +105,18 @@ pub struct Note {
 }
 
 impl Note {
-    /// `self` with `picks` as its buttons: each a button of its own, `pick.0` on, whose choice
-    /// its `userInfo` keeps under the button's identifier for the press to answer with
-    /// ([`Pressed::of`]). At most [`NoteChoice::MAX`] are offered; none leaves it as it was.
+    /// `self` with the labels `picks` as its buttons: each a button of its own, `pick.0` on,
+    /// whose press answers with the option at its place ([`Pressed::of`]). At most
+    /// [`NoteChoice::MAX`] are offered; none leaves it as it was.
     #[must_use]
-    pub fn picking(mut self, picks: &[NoteChoice]) -> Self {
+    pub fn picking(mut self, picks: &[String]) -> Self {
         let picks = picks.get(..picks.len().min(NoteChoice::MAX)).unwrap_or_default();
-        for (n, pick) in picks.iter().enumerate() {
-            self.info.insert(pick_id(n), pick.choice.clone());
-        }
         self.picks = picks.to_vec();
         self
     }
 }
 
-/// The identifier of a note's `n`th pick, its button's and its choice's key in `userInfo`.
+/// The identifier of a note's `n`th pick's button.
 #[must_use]
 pub fn pick_id(n: usize) -> String {
     format!("{PICK}{n}")
@@ -127,9 +125,9 @@ pub fn pick_id(n: usize) -> String {
 /// The category of a note with `picks` as its buttons: one per set of labels, so notes asking
 /// the same choices share it, named by their FNV-1a hash.
 #[must_use]
-pub fn picking_id(picks: &[NoteChoice]) -> String {
+pub fn picking_id(picks: &[String]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in picks.iter().flat_map(|p| p.label.bytes().chain(std::iter::once(0x1f))) {
+    for byte in picks.iter().flat_map(|p| p.bytes().chain(std::iter::once(0x1f))) {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -137,39 +135,48 @@ pub fn picking_id(picks: &[NoteChoice]) -> String {
 }
 
 /// What a note's button answers its request with: Allow or Deny, which find the choice that
-/// allows or denies once among the request's, or a question's option, whose choice the note
-/// carried.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// allows or denies once among the request's, or a question's option by its place.
+///
+/// A pick carries its place, not its choice: a choice repeats the whole question, and four of
+/// them would not fit a push. Whoever answers looks the choice up among the request's own
+/// buttons ([`Self::choice`]), read where it is answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pressed {
     /// "Allow".
     Allow,
     /// "Deny".
     Deny,
-    /// One of a question's options ([`Note::picking`]): the choice it answers with.
-    Pick(String),
+    /// One of a question's options ([`Note::picking`]), by its place among them.
+    Pick(usize),
 }
 
 impl Pressed {
-    /// What `tap` answers, when it is a press of "Allow", "Deny" or a pick whose choice the note
-    /// carries.
+    /// What `tap` answers, when it is a press of "Allow", "Deny" or a pick.
     #[must_use]
     pub fn of(tap: &Tap) -> Option<Self> {
         match tap.action.as_deref()? {
             ALLOW => Some(Self::Allow),
             DENY => Some(Self::Deny),
-            action if action.starts_with(PICK) => tap.info.get(action).cloned().map(Self::Pick),
-            _ => None,
+            action => {
+                let n: usize = action.strip_prefix(PICK)?.parse().ok()?;
+                (n < NoteChoice::MAX).then_some(Self::Pick(n))
+            }
         }
     }
 
-    /// The choice it answers a request offering `options` with: Allow's and Deny's once, as
-    /// the request words it, and a pick's own.
+    /// The choice it answers a request offering `options`, with `picks` as its note's buttons,
+    /// with: Allow's and Deny's once, as the request words it, and the pick's at its place.
+    /// None when the request offers no such answer.
     #[must_use]
-    pub fn choice(&self, options: &[slopty_proto::thread::Choice]) -> Option<String> {
+    pub fn choice(
+        self,
+        options: &[slopty_proto::thread::Choice],
+        picks: &[NoteChoice],
+    ) -> Option<String> {
         match self {
             Self::Allow => slopty_proto::thread::once(options, true).map(|c| c.id.clone()),
             Self::Deny => slopty_proto::thread::once(options, false).map(|c| c.id.clone()),
-            Self::Pick(choice) => Some(choice.clone()),
+            Self::Pick(n) => picks.get(n).map(|p| p.choice.clone()),
         }
     }
 }
@@ -509,7 +516,7 @@ mod apple {
     use tokio::sync::mpsc::error::SendError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, NoteChoice, Notifier, Tap};
+    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, Notifier, Tap};
 
     /// Where the person's answer stands. Completion handlers write it from the framework's
     /// queues, so it sits behind a lock.
@@ -1144,14 +1151,14 @@ mod apple {
 
     /// The category of a note with `picks` as its buttons: each answers where the note is, as
     /// Allow does, then "Show".
-    fn picking(picks: &[NoteChoice]) -> Retained<UNNotificationCategory> {
+    fn picking(picks: &[String]) -> Retained<UNNotificationCategory> {
         let mut actions: Vec<Retained<UNNotificationAction>> = picks
             .iter()
             .enumerate()
             .map(|(n, pick)| {
                 UNNotificationAction::actionWithIdentifier_title_options(
                     &NSString::from_str(&super::pick_id(n)),
-                    &NSString::from_str(&pick.label),
+                    &NSString::from_str(pick),
                     UNNotificationActionOptions::AuthenticationRequired,
                 )
             })
@@ -1179,7 +1186,7 @@ mod apple {
     /// The centre holds one set for the app and its notification extension alike, and setting
     /// it replaces the whole of it, so the picks another process registered are read first
     /// and kept. Its handlers run on a queue of the centre's own, hence `Send`.
-    fn merge_categories(extra: Option<Vec<NoteChoice>>, then: impl FnOnce() + Send + 'static) {
+    fn merge_categories(extra: Option<Vec<String>>, then: impl FnOnce() + Send + 'static) {
         let then = Mutex::new(Some(then));
         let extra = Mutex::new(extra);
         let read = RcBlock::new(move |set: std::ptr::NonNull<NSSet<UNNotificationCategory>>| {

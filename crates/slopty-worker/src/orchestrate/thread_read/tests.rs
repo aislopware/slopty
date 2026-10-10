@@ -204,7 +204,8 @@ fn a_read_is_bounded_and_says_what_it_left_out() {
 }
 
 /// A read from a turn the worker no longer holds starts at the first it holds, and says so.
-/// Only open requests come with it, each with the choices it offers.
+/// Only open requests come with it, each with the choices it offers, and a small question with
+/// the picks its note's buttons answer by their place.
 #[test]
 fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
     let mut s = worked();
@@ -241,4 +242,24 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
     assert_eq!(asking.requests.len(), 1);
     assert_eq!(asking.requests[0].ask, AskId("2".to_owned()));
     assert_eq!(asking.requests[0].choices[0].id, "allow");
+    assert!(asking.requests[0].picks.is_empty(), "a yes or no takes Allow and Deny");
+
+    let mut question = ask("3", RequestState::Open);
+    question.kind = Request::QUESTION.to_owned();
+    question.questions = vec![slopty_proto::thread::detail::Question {
+        text: "Layout?".to_owned(),
+        header: None,
+        options: ["Split", "Unified"]
+            .map(|label| slopty_proto::thread::detail::Offered {
+                label: label.to_owned(),
+                description: None,
+            })
+            .to_vec(),
+        multi_select: false,
+    }];
+    s.requests = vec![question.clone()];
+    let asked = read(&s, WorkerId::new(), ThreadView::Messages, None);
+    let picks = &asked.requests[0].picks;
+    assert_eq!(picks.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(), ["Split", "Unified"]);
+    assert_eq!(picks, &slopty_proto::thread::wire::NoteChoice::of(&question));
 }

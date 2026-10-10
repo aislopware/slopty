@@ -554,7 +554,10 @@ pub enum Verb {
         autonomy: crate::project::Autonomy,
         /// The repository its tasks work in.
         repo: String,
-        /// The branch finished work lands on.
+        /// The branch finished work lands on. Empty asks for a branch of the project's own
+        /// ([`crate::project::Task::goal_branch`]), made in `repo` on the orchestrator's
+        /// worker at the tip of the branch checked out there ([`Verb::BranchOff`]), so a goal
+        /// never lands on the person's branch unasked; that needs an `orchestrator`.
         target: String,
         /// The command that says a task's work is right.
         verifier: Option<String>,
@@ -993,6 +996,18 @@ pub enum Verb {
         /// Which.
         worker: WorkerId,
     },
+    /// Server → worker: make the branch `branch` in the clone at `repo` at the tip of the
+    /// branch checked out there (its commit when detached), for a project made with no target
+    /// ([`Verb::ProjectCreate`]). Only names under `slopty/` are made; one there already is
+    /// left as it is. Answered with [`Outcome::Done`].
+    BranchOff {
+        /// Where.
+        worker: WorkerId,
+        /// The clone, or a worktree of it.
+        repo: String,
+        /// The branch, by name.
+        branch: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1062,6 +1077,7 @@ impl Verb {
             | Self::AnswerRequest { .. }
             | Self::SendMessage { .. }
             | Self::RestartWorker { .. }
+            | Self::BranchOff { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
             | Self::ProjectProgress { .. }
@@ -1708,4 +1724,8 @@ pub struct RequestRead {
     pub choices: Vec<Choice>,
     /// Its questions, for a question.
     pub questions: Vec<String>,
+    /// The answers a note offers as buttons of their own
+    /// ([`NoteChoice::of`](crate::thread::wire::NoteChoice::of)): a note's pick, pressed,
+    /// answers with the choice at its place here.
+    pub picks: Vec<crate::thread::wire::NoteChoice>,
 }

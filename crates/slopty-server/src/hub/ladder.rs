@@ -294,7 +294,7 @@ impl Phones {
             let body = PushBody {
                 notice: notice.clone(),
                 ask: how.ask.map(|a| a.id.clone()),
-                choices: how.ask.map(|a| a.choices.clone()).unwrap_or_default(),
+                picks: how.ask.map(|a| a.picks.clone()).unwrap_or_default(),
                 quiet: false,
                 merges: how.merges,
             };
@@ -352,7 +352,7 @@ impl Phones {
         let body = PushBody {
             notice: notice.clone(),
             ask: now.clone(),
-            choices: ask.map(|a| a.choices.clone()).unwrap_or_default(),
+            picks: ask.map(|a| a.picks.clone()).unwrap_or_default(),
             quiet: true,
             merges: None,
         };
@@ -1223,14 +1223,15 @@ pub(super) fn tell_goal_met(
     tell(&mut state.board, &notice, None);
 }
 
-/// The request a pushed note's buttons answer, and the answers it offers as buttons of their
-/// own: a small question's options; none for a yes or no, which Allow and Deny answer.
+/// The request a pushed note's buttons answer, and the labels of the answers it offers as
+/// buttons of their own: a small question's options; none for a yes or no, which Allow and Deny
+/// answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) struct Ask {
     /// The request.
     id: AskId,
-    /// Its buttons ([`slopty_proto::thread::wire::RequestCard::buttons`]).
-    choices: Vec<slopty_proto::thread::wire::NoteChoice>,
+    /// Its buttons' labels ([`slopty_proto::thread::wire::RequestCard::buttons`]).
+    picks: Vec<String>,
 }
 
 /// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
@@ -1615,7 +1616,10 @@ fn notice_of(
         .first()
         .filter(|_| kind == NoticeKind::NeedsYou && via.is_none())
         .filter(|r| r.answerable() || !r.buttons.is_empty())
-        .map(|r| Ask { id: r.id.clone(), choices: r.buttons.clone() });
+        .map(|r| Ask {
+            id: r.id.clone(),
+            picks: r.buttons.iter().map(|b| b.label.clone()).collect(),
+        });
     let notice = Notice {
         kind,
         about: Subject::Thread(at),

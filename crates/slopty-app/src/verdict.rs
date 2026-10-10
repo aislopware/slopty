@@ -8,11 +8,11 @@
 //! which a press in the background never brings. So a press that finds nobody listening
 //! ([`slopty_platform::notify::answer_unheard`]) is answered here instead, through the server:
 //! a link of its own to the server the settings name, the thread's open requests read for the
-//! choice that allows or denies once, and that choice sent, as the workspace answers a note
-//! whose worker it is not linked to. "Merge" puts the task the note names in its project's merge
-//! queue (`Verb::TaskMerge`), the person's word. The system is told the press is done once the
-//! answer is out or given up ([`slopty_platform::notify::taps_finished`]), within the time it
-//! grants.
+//! choice that allows or denies once, or the pick's at its place, and that choice sent, as the
+//! workspace answers a note whose worker it is not linked to. "Merge" puts the task the note names
+//! in its project's merge queue (`Verb::TaskMerge`), the person's word. The system is told the
+//! press is done once the answer is out or given up ([`slopty_platform::notify::taps_finished`]),
+//! within the time it grants.
 //!
 //! An answer that did not land is said in a note in place of the one pressed ([`missed_note`]),
 //! so the person does not walk away believing it went: the machine was not reached, or the
@@ -156,7 +156,7 @@ pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
             .requests
             .iter()
             .find(|r| r.ask == verdict.ask)
-            .and_then(|r| verdict.pressed.choice(&r.choices)),
+            .and_then(|r| verdict.pressed.choice(&r.choices, &r.picks)),
         Outcome::Error { message, .. } => return Answered::Failed(message),
         _ => None,
     };
@@ -188,7 +188,6 @@ pub const ANSWERED_ELSEWHERE: &str = "It was answered elsewhere, or it ended.";
 pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Option<Note> {
     let mut info = tap.info.clone();
     info.remove(info::ASK);
-    info.retain(|key, _| !key.starts_with(notify::PICK));
     let note = Note { id: tap.id.clone(), info, ..Note::default() };
     let merge = tap.action.as_deref() == Some(notify::MERGE);
     match answered {
@@ -473,6 +472,7 @@ mod tests {
             title: "Run cargo test".to_owned(),
             choices: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
             questions: Vec::new(),
+            picks: Vec::new(),
         };
         let held = ThreadRead {
             worker: WorkerId::new(),
@@ -509,8 +509,9 @@ mod tests {
     }
 
     /// A question's option pressed on its note with no window answers the request with the
-    /// choice the note kept for it, through the server, once the request is still open there.
-    /// One that did not land is said with no pick left on it to answer twice.
+    /// choice at the pick's place among the request's, read through the server while the
+    /// request is still open there. One that did not land is said with no pick left on it to
+    /// answer twice.
     #[tokio::test]
     async fn a_pick_answers_with_its_own_choice_with_no_window() {
         let thread = ThreadId::new();
@@ -523,16 +524,7 @@ mod tests {
             ]),
             ..Note::default()
         }
-        .picking(&[
-            slopty_proto::thread::wire::NoteChoice {
-                label: "Split".to_owned(),
-                choice: r#"[{"question":"Layout?","answer":"Split"}]"#.to_owned(),
-            },
-            slopty_proto::thread::wire::NoteChoice {
-                label: "Unified".to_owned(),
-                choice: picked.to_owned(),
-            },
-        ]);
+        .picking(&["Split".to_owned(), "Unified".to_owned()]);
         let pressed = Tap {
             id: note.id.clone(),
             info: note.info.clone(),
@@ -542,7 +534,7 @@ mod tests {
         let Some(Press::Verdict(verdict)) = press_of(&pressed) else {
             panic!("a pick is a verdict: {pressed:?}")
         };
-        assert_eq!(verdict.pressed, Pressed::Pick(picked.to_owned()));
+        assert_eq!(verdict.pressed, Pressed::Pick(1));
         let (caller, mut queue) = ServerCaller::queued();
         let answering = tokio::spawn(async move { answer(&caller, verdict).await });
         let read = loop {
@@ -557,6 +549,16 @@ mod tests {
             title: "Layout?".to_owned(),
             choices: Vec::new(),
             questions: Vec::new(),
+            picks: vec![
+                slopty_proto::thread::wire::NoteChoice {
+                    label: "Split".to_owned(),
+                    choice: r#"[{"question":"Layout?","answer":"Split"}]"#.to_owned(),
+                },
+                slopty_proto::thread::wire::NoteChoice {
+                    label: "Unified".to_owned(),
+                    choice: picked.to_owned(),
+                },
+            ],
         };
         let held = ThreadRead {
             worker: WorkerId::new(),
@@ -595,6 +597,5 @@ mod tests {
         let missed = missed_note(&pressed, &failed, Some("studio")).expect("said");
         assert_eq!(missed.body, "Your answer was not sent. The agent is still waiting.");
         assert!(missed.picks.is_empty(), "no pick to press again");
-        assert!(!missed.info.keys().any(|k| k.starts_with(notify::PICK)), "{:?}", missed.info);
     }
 }

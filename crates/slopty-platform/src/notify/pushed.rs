@@ -102,7 +102,7 @@ pub fn note_of(body: &PushBody) -> Note {
         Subject::Project { project, .. } => Some(project.as_str().to_owned()),
         Subject::Thread(_) | Subject::Terminal(_) => None,
     };
-    let picks = if body.ask.is_some() { body.choices.as_slice() } else { &[] };
+    let picks = if body.ask.is_some() { body.picks.as_slice() } else { &[] };
     Note {
         id: note_id(notice),
         title,
@@ -123,7 +123,7 @@ pub fn note_of(body: &PushBody) -> Note {
 /// project's work ready to merge that names the task to merge ([`PushBody::merges`]). A
 /// program's record and a project's other notices have none.
 fn category_of(body: &PushBody) -> Option<super::Category> {
-    if body.ask.is_some() && !body.choices.is_empty() {
+    if body.ask.is_some() && !body.picks.is_empty() {
         return None;
     }
     if body.merges.is_some() && matches!(body.notice.about, Subject::Project { .. }) {
@@ -448,7 +448,7 @@ mod tests {
         let body = PushBody {
             notice: notice(NoticeKind::ReadyToMerge, about, None),
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: Some(slopty_proto::project::TaskId(4)),
         };
@@ -488,7 +488,7 @@ mod tests {
         let body = PushBody {
             notice: notice(NoticeKind::NeedsYou, at.clone(), Some(tile)),
             ask: Some(ask),
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         };
@@ -512,7 +512,7 @@ mod tests {
         );
         assert_eq!((note.category, note.urgent, note.thread), (Some(APPROVAL), true, None));
         assert!(!note.silent, "the first push sounds");
-        let moved = note_of(&PushBody { ask: None, choices: Vec::new(), quiet: true, ..body });
+        let moved = note_of(&PushBody { ask: None, picks: Vec::new(), quiet: true, ..body });
         assert_eq!(moved.id, note.id, "in place of the note up");
         assert!(moved.silent, "a quiet push only moves its buttons");
         assert_eq!(moved.category, Some(super::super::REPLYING), "the yes or no went: a reply");
@@ -523,7 +523,7 @@ mod tests {
         let note = note_of(&PushBody {
             notice: done,
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         });
@@ -543,7 +543,7 @@ mod tests {
         let note = note_of(&PushBody {
             notice: notice(NoticeKind::Project, about, Some(tile)),
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         });
@@ -557,7 +557,7 @@ mod tests {
         let note = note_of(&PushBody {
             notice: program,
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         });
@@ -573,42 +573,47 @@ mod tests {
     }
 
     /// A small question's options pushed with its request are the note's own buttons: each a
-    /// pick carrying its choice, under a category named by the labels, no Allow or Deny; a
-    /// press of one answers with that choice where the note is. A body with no request offers
-    /// none.
+    /// pick by its label, under a category named by the labels, no Allow or Deny; a press of
+    /// one answers with the request's option at its place, looked up where it is answered. A
+    /// body with no request offers none.
     #[test]
     fn a_questions_options_are_its_notes_buttons() {
         use slopty_proto::thread::wire::NoteChoice;
 
         use crate::notify::{PICKING, Pressed, Tap, pick_id, picking_id};
         let at = Subject::Thread(ThreadAt { worker: WorkerId::new(), thread: ThreadId::new() });
-        let pick = |label: &str| NoteChoice {
-            label: label.to_owned(),
-            choice: format!("[{{\"question\":\"Layout?\",\"answer\":\"{label}\"}}]"),
-        };
-        let choices = vec![pick("Split"), pick("Unified")];
+        let labels = |l: &[&str]| l.iter().map(|l| (*l).to_owned()).collect::<Vec<String>>();
+        let picks = labels(&["Split", "Unified"]);
         let body = PushBody {
             notice: notice(NoticeKind::NeedsYou, at, None),
             ask: Some(AskId("toolu_02".to_owned())),
-            choices: choices.clone(),
+            picks: picks.clone(),
             quiet: false,
             merges: None,
         };
         let note = note_of(&body);
-        assert_eq!(note.picks, choices);
+        assert_eq!(note.picks, picks);
         assert_eq!(note.category, None, "the picks' own category, no Allow or Deny");
-        assert_eq!(note.info.get(&pick_id(1)), Some(&choices[1].choice));
         assert_eq!(note.info.get(info::ASK).map(String::as_str), Some("toolu_02"));
         let id = picking_id(&note.picks);
         assert!(id.starts_with(PICKING), "{id}");
-        assert_eq!(id, picking_id(&choices), "the same labels share a category");
-        assert_ne!(id, picking_id(&[pick("Split"), pick("Stacked")]));
+        assert_eq!(id, picking_id(&picks), "the same labels share a category");
+        assert_ne!(id, picking_id(&labels(&["Split", "Stacked"])));
 
         let pressed =
             Tap { id: note.id.clone(), info: note.info, action: Some(pick_id(1)), text: None };
         assert!(pressed.finished_later(), "answered where the note is");
-        assert_eq!(Pressed::of(&pressed), Some(Pressed::Pick(choices[1].choice.clone())));
-        assert_eq!(Pressed::of(&Tap { action: Some(pick_id(3)), ..pressed }), None, "none kept");
+        assert_eq!(Pressed::of(&pressed), Some(Pressed::Pick(1)));
+        let offered: Vec<NoteChoice> = picks
+            .iter()
+            .map(|label| NoteChoice { label: label.clone(), choice: format!("[{label}]") })
+            .collect();
+        let answer = Pressed::Pick(1).choice(&[], &offered);
+        assert_eq!(answer.as_deref(), Some("[Unified]"), "the request's own choice at its place");
+        assert_eq!(Pressed::Pick(2).choice(&[], &offered), None, "a place it does not offer");
+        let past = Tap { action: Some(pick_id(NoteChoice::MAX)), ..pressed.clone() };
+        assert_eq!(Pressed::of(&past), None, "past the most a note offers");
+        assert_eq!(Pressed::of(&Tap { action: Some("pick.x".to_owned()), ..pressed }), None);
 
         let unasked = note_of(&PushBody { ask: None, ..body });
         assert!(unasked.picks.is_empty(), "no request, nothing to answer");
@@ -624,7 +629,7 @@ mod tests {
         let body = PushBody {
             notice: notice(NoticeKind::NeedsYou, at, Some(TermRef { worker, session })),
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         };

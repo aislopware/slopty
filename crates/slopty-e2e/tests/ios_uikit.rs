@@ -445,7 +445,7 @@ mod tests {
         let body = slopty_proto::codec::encode_body(&PushBody {
             notice,
             ask: None,
-            choices: Vec::new(),
+            picks: Vec::new(),
             quiet: false,
             merges: None,
         })

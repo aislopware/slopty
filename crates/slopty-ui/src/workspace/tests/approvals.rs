@@ -55,6 +55,7 @@ fn read(worker: WorkerId, thread: ThreadId, ask: &str) -> Outcome {
                 choice("no", Effect::Deny, None),
             ],
             questions: Vec::new(),
+            picks: Vec::new(),
         }],
         next: TurnId(0),
         truncated: false,

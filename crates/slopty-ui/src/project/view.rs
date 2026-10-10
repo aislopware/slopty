@@ -1683,7 +1683,8 @@ impl ProjectView {
             asked
                 .picks
                 .iter()
-                .map(|(choice, words)| (Pressed::Pick(choice.clone()), words.clone()))
+                .enumerate()
+                .map(|(at, (_, words))| (Pressed::Pick(at), words.clone()))
                 .collect()
         };
         if choices.is_empty() {
@@ -1721,7 +1722,6 @@ impl ProjectView {
             let ask = asked.ask.clone();
             tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
-                let pressed = pressed.clone();
                 cx.emit(ProjectEvent::Answer { session, ask: ask.clone(), pressed });
             }))
         });
