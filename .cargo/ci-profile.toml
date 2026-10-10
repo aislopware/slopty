@@ -178,9 +178,6 @@ opt-level = 0
 [profile.dev.package.windows-interface]
 opt-level = 0
 
-[profile.dev.package.worker-macros]
-opt-level = 0
-
 [profile.dev.package.xshell-macros]
 opt-level = 0
 
