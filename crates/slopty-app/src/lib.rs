@@ -3989,9 +3989,11 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("connect_device", ConnectDevice, &[]),
         app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
         app_command("copy_worker_grant", CopyWorkerGrant, &[]),
-        app_command("update_all_workers", UpdateAllWorkers, &[]),
-        app_command("update_server", UpdateServer, &[]),
     ];
+    if ssh::OFFERED {
+        commands.push(app_command("update_all_workers", UpdateAllWorkers, &[]));
+        commands.push(app_command("update_server", UpdateServer, &[]));
+    }
     if finder::OFFERED {
         commands.push(app_command("show_workers_in_finder", ShowWorkersInFinder, &[]));
     }
@@ -4038,9 +4040,13 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item(server::COPY_GRANT, Box::new(CopyTailnetGrant)),
         item(server::COPY_WORKER_GRANT, Box::new(CopyWorkerGrant)),
         item("Add a machine\u{2026}", Box::new(AddWorker)),
-        item(ssh::UPDATE_ALL, Box::new(UpdateAllWorkers)),
-        item(server::UPDATE_SERVER, Box::new(UpdateServer)),
     ];
+    // Machines are updated over `ssh`, which only the Mac runs: a phone lists no line that
+    // could only say so.
+    if ssh::OFFERED {
+        items.push(item(ssh::UPDATE_ALL, Box::new(UpdateAllWorkers)));
+        items.push(item(server::UPDATE_SERVER, Box::new(UpdateServer)));
+    }
     if finder::OFFERED {
         items.push(item(finder::TITLE, Box::new(ShowWorkersInFinder)));
     }
@@ -5029,7 +5035,7 @@ mod tests {
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
         let listed = |label: &str| tree.iter().any(|n| n.is("ListItem", Some(label)));
-        assert!(listed(ssh::UPDATE_ALL), "{tree:#?}");
+        assert!(listed(ssh::UPDATE_ALL) == ssh::OFFERED, "{tree:#?}");
         assert!(listed(finder::TITLE) == finder::OFFERED, "{tree:#?}");
         assert!(!listed("Update all workers"), "not its name in the file");
     }
@@ -5830,6 +5836,20 @@ mod tests {
         assert!(labels.iter().any(|l| l == "Add a machine\u{2026}"), "{labels:?}");
         let rows = [this_mac::TITLE, ssh::TITLE];
         assert!(!labels.iter().any(|l| rows.contains(&l.as_str())), "rows only: {labels:?}");
+    }
+
+    /// Updating the machines and the server runs `ssh`, so the palette offers it, under
+    /// commands the keymap can bind, only where the app can run it: on a Mac, never on a phone.
+    #[test]
+    fn the_palette_offers_updates_only_where_ssh_runs() {
+        let labels: Vec<_> = app_palette_items().into_iter().map(|item| item.label).collect();
+        for line in [ssh::UPDATE_ALL, server::UPDATE_SERVER] {
+            assert_eq!(labels.iter().any(|l| l == line), ssh::OFFERED, "{line}: {labels:?}");
+        }
+        for name in ["update_all_workers", "update_server"] {
+            let bindable = app_commands().iter().any(|c| c.name() == name);
+            assert_eq!(bindable, ssh::OFFERED, "{name}");
+        }
     }
 
     /// The palette offers the workers in Finder on a Mac, under a command the keymap can bind.

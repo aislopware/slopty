@@ -1089,7 +1089,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `--server`, on every machine added here by address that the server's directory does not
     list and whose SSH target was kept. The directory's first listing after a link says how
     many there are, once a server. Each keeps its sessions (custody, above).
-  - Tests: `slopty-app` `ssh::tests`
+  - **Only where `ssh` runs** (2026-10-10, orchestrator-first study item 7). "Update all
+    machines" and "Update the server" are palette lines and keymap commands on a Mac only
+    (`ssh::OFFERED`). On a phone each could only say machines are updated from a Mac. The
+    tailnet grants stay there: copying one needs no `ssh`.
+  - Tests: `slopty-app` `tests::the_palette_offers_updates_only_where_ssh_runs`; `ssh::tests`
     `every_worker_on_another_build_is_updated_and_this_mac_s_unasked`,
     `machines_added_before_the_server_are_registered_with_it`.
   - Superseded in part 2026-10-04 by **The first Mac runs the server** (topology.md): with no
