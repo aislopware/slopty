@@ -64,6 +64,12 @@ define_class!(
             // window to answer it; it is answered without one, through the server.
             slopty_platform::notify::answer_unheard(slopty_app::verdict::answer_unheard);
             slopty_platform::notify::install();
+            // A self-test's press of a note's button on a killed app, handed on here as the
+            // system hands on a launching response (`slopty_e2e::LAUNCH_TAP_ENV`).
+            #[cfg(feature = "e2e")]
+            if let Some(tap) = slopty_app::e2e_launch_tap() {
+                slopty_platform::notify::deliver_launching(tap);
+            }
             // A self-test plays the app delegate and hands the app its device token: a real
             // one from APNs (which a simulator on Apple silicon gets) would replace it in the
             // Keychain while the test seals to its own, and the push would not open.

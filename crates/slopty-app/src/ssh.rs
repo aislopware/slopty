@@ -1585,8 +1585,14 @@ fn not_listed(host: &str, deployed: &Deployed) -> Failure {
     use slopty_proto::ctl::LinkState;
     let why = match deployed.health.server.as_ref().map(|s| &s.link) {
         Some(LinkState::Redialling { why } | LinkState::Refused { why }) => why.clone(),
+        // A tagged node needs a grant only the tailnet's policy gives; no allow list here
+        // lets it in, so the hint names the grant and where it is copied from.
         Some(LinkState::NotGranted) => {
-            "the tailnet policy does not grant it the worker role".to_owned()
+            return Failure::new(
+                format!("The tailnet policy does not let {host} in as a machine"),
+                Some(crate::server::WORKER_GRANT_WHERE.to_owned()),
+                Vec::new(),
+            );
         }
         Some(LinkState::Dialling | LinkState::Linked) | None => String::new(),
     };

@@ -91,6 +91,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    `ui_delete_backward` (`Driver::ui_key`, `ui_tap`, `ui_pan`, `ui_pinch`, `ui_insert_text`),
    delivered at the UIKit boundary by the fork (`tests/ios_uikit.rs`): use them for anything
    about how the phone's own keyboard, fingers or key bar reach the app.
+   A note's button pressed on a killed app is the one press simctl cannot make (it delivers
+   pushes, not presses), so the e2e build alone reads `SLOPTY_E2E_LAUNCH_TAP` at launch and
+   hands that press to notify's own delivery before any window, as the system's launching
+   response would (`Stack::relaunch_on_simulator`); no release build carries the seam.
    `cargo xtask e2e pair` (serial) runs two app processes on one worker,
    each on its own socket and data dir, to prove many-clients-one-server: a terminal opened on
    one shows on the other, typing on both is serialised, attention badges both, a client dying

@@ -43,6 +43,13 @@ pub(crate) const GRANT_WHERE: &str =
 pub(crate) const COPY_GRANT: &str = "Copy the tailnet grant for Slopty's clients";
 /// Said once the grant is on the clipboard.
 const GRANT_COPIED: &str = "Copied: paste it into the grants of Tailscale's Access controls";
+/// The palette's line that copies [`worker_grant`].
+pub(crate) const COPY_WORKER_GRANT: &str = "Copy the tailnet grant for Slopty's machines";
+/// What a machine the tailnet's policy turns away as a worker says to do: where the grant is
+/// copied from, and where it goes.
+pub(crate) const WORKER_GRANT_WHERE: &str = "Its tailnet tag grants it no worker role on the \
+     server: run \u{201c}Copy the tailnet grant for Slopty's machines\u{201d} from the palette \
+     and paste it into the grants of Tailscale's Access controls.";
 /// The tag a tailnet gives the nodes that run a Slopty worker, which [`client_grant`] names
 /// beside the server's.
 pub(crate) const WORKER_TAG: &str = "tag:slopty-worker";
@@ -62,6 +69,17 @@ pub(crate) fn grant_to(dst: &[&str]) -> String {
     let dst = dst.join(", ");
     format!(
         r#"{{"src": ["autogroup:member"], "dst": [{dst}], "ip": ["*"], "app": {{"{cap}": [{{"roles": ["client"]}}]}}}}"#
+    )
+}
+
+/// The grant that lets the tailnet's nodes tagged [`WORKER_TAG`] register with a server as its
+/// workers: a server tagged as discovery prefers, or one a member owns. A tagged node is owned
+/// by nobody, so its owner's own access never covers it (`slopty_tailnet::policy`).
+pub(crate) fn worker_grant() -> String {
+    let cap = slopty_tailnet::policy::CAP;
+    let server = slopty_net::discover::SERVER_TAG;
+    format!(
+        r#"{{"src": ["{WORKER_TAG}"], "dst": ["{server}", "autogroup:member"], "ip": ["*"], "app": {{"{cap}": [{{"roles": ["worker"]}}]}}}}"#
     )
 }
 
@@ -322,6 +340,11 @@ impl Workspace {
     /// Puts [`client_grant`] on the clipboard, for the tailnet's policy file.
     pub(crate) fn copy_grant(&self, cx: &mut Context<Self>) {
         self.copy_grant_text(client_grant(), cx);
+    }
+
+    /// Puts [`worker_grant`] on the clipboard, for the tailnet's policy file.
+    pub(crate) fn copy_worker_grant(&self, cx: &mut Context<Self>) {
+        self.copy_grant_text(worker_grant(), cx);
     }
 
     /// Puts `grant` on the clipboard and says where it goes.
@@ -786,6 +809,27 @@ mod tests {
         assert_eq!(copied, Some(client_grant()));
         let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
         assert_eq!(said.as_deref(), Some(GRANT_COPIED));
+    }
+
+    /// A machine the tailnet's policy turns away as a worker is let in by a grant of the worker
+    /// role from nodes tagged as Slopty's machines, to a tagged server or one a member owns;
+    /// the palette's line copies it.
+    #[gpui::test]
+    fn the_worker_grant_lets_a_tagged_machine_in(cx: &mut gpui::TestAppContext) {
+        let grant: serde_json::Value = serde_json::from_str(&worker_grant()).unwrap();
+        assert_eq!(grant["src"], serde_json::json!([WORKER_TAG]));
+        assert_eq!(
+            grant["dst"],
+            serde_json::json!([slopty_net::discover::SERVER_TAG, "autogroup:member"])
+        );
+        assert_eq!(grant["app"][slopty_tailnet::policy::CAP][0]["roles"][0], "worker");
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (_ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
+        cx.dispatch_action(crate::CopyWorkerGrant);
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied, Some(worker_grant()));
     }
 
     /// A server on another build is said so with both builds and the way on: the palette's

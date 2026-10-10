@@ -587,4 +587,107 @@ mod tests {
         .unwrap();
         stack.shutdown().await;
     }
+
+    /// A note's "Deny" pressed while the app is not running: the system launches it in the
+    /// background and hands it the press before any window, so the press is answered with no
+    /// window, through a link of its own to the server its settings name. The held relay gets
+    /// its answer and the thread's request is gone. Pressed again on the prompt now gone, the
+    /// press says so in a note in place of the one pressed.
+    ///
+    /// simctl delivers pushes but cannot press a note's button, so the press is handed in at
+    /// launch through the e2e build's seam ([`slopty_e2e::LAUNCH_TAP_ENV`]), along the path the
+    /// system's launching response takes.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
+    async fn a_killed_app_answers_a_note_s_deny_with_no_window() {
+        use serde_json::json;
+        use slopty_e2e::harness::slopty_json;
+
+        let mut stack = Stack::launch_on_simulator("e2e-ios-cold", simulator()).await.unwrap();
+        let dump = stack
+            .driver
+            .wait_for("the first shell with a prompt", STEP, |d| {
+                d.status == "connected"
+                    && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
+            })
+            .await
+            .unwrap();
+        let session = dump.terminals[0].session.clone();
+        // Notes allowed with no prompt, so the press's own note can be shown.
+        stack.driver.push_register(&[0; 32]).await.unwrap();
+
+        let transcript = stack.path("projects").join("s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, long_session(1)).unwrap();
+        let transcript = transcript.to_string_lossy().into_owned();
+        let start = json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": stack.path("home"),
+        });
+        let started = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
+        assert!(started.success(), "the relay ran");
+        let ask = json!({
+            "hook_event_name": "PermissionRequest", "session_id": "s1",
+            "transcript_path": transcript, "cwd": stack.path("home"),
+            "tool_name": "Bash", "tool_input": { "command": "rm -rf build" },
+        });
+        let mut held = stack.relay_hook(&session, &[], &ask).unwrap();
+
+        let term = format!("e2e-ios-cold/{session}");
+        let cli = stack.path("cli");
+        let address = stack.server.address().to_owned();
+        let read_thread = async || {
+            let args = ["agent", "read", "--term", term.as_str()];
+            slopty_json(&address, &cli, &args, b"").await.unwrap()
+        };
+        let mut read = read_thread().await;
+        let waited = std::time::Instant::now();
+        while read["requests"][0]["ask"].as_str().is_none() {
+            assert!(waited.elapsed() < STEP, "the thread holds no request: {read}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            read = read_thread().await;
+        }
+        let ask = read["requests"][0]["ask"].as_str().unwrap().to_owned();
+        let held_on: slopty_core::WorkerId = read["worker"].as_str().unwrap().parse().unwrap();
+        // Spelled as `slopty_platform::notify::info` keys a note, which builds on Apple only.
+        let pressed = json!({
+            "id": "e2e-cold",
+            "action": "deny",
+            "info": {
+                "worker": held_on.as_uuid().as_u128().to_string(),
+                "session": session,
+                "ask": ask,
+            },
+        })
+        .to_string();
+
+        // Killed, then launched by the press.
+        let launched = std::time::Instant::now();
+        stack.relaunch_on_simulator(&[(slopty_e2e::LAUNCH_TAP_ENV, &pressed)]).await.unwrap();
+        let status = tokio::time::timeout(STEP, held.wait()).await;
+        let status = status.expect("the held relay got its answer").unwrap();
+        println!(
+            "MEASURE ios-cold: a Deny pressed on a killed app reached the held relay within {:.0} ms",
+            launched.elapsed().as_secs_f64() * 1e3
+        );
+        assert!(status.success(), "the relay ends well on an answer: {status}");
+        let read = read_thread().await;
+        assert_eq!(read["requests"].as_array().map(Vec::len), Some(0), "{read}");
+
+        // The same press on the prompt now gone: said in a note in its place.
+        stack.relaunch_on_simulator(&[(slopty_e2e::LAUNCH_TAP_ENV, &pressed)]).await.unwrap();
+        let waited = std::time::Instant::now();
+        loop {
+            let notes = stack.driver.delivered().await.unwrap();
+            if notes
+                .iter()
+                .any(|n| n.id == "e2e-cold" && n.title == "That prompt is no longer waiting")
+            {
+                break;
+            }
+            assert!(waited.elapsed() < STEP, "no note says the prompt is gone: {notes:?}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        stack.shutdown().await;
+    }
 }

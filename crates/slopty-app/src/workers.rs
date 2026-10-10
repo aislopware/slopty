@@ -28,6 +28,9 @@ pub mod actions {
             /// Copy the tailnet policy grant that lets the tailnet's devices in as the server's
             /// clients.
             CopyTailnetGrant,
+            /// Copy the tailnet policy grant that lets nodes tagged as Slopty's machines
+            /// register with the server as its workers.
+            CopyWorkerGrant,
         ]
     );
 }

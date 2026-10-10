@@ -486,6 +486,8 @@ pub enum Fix {
     OpenTailscale,
     /// Open Tailscale's download page: none is installed here.
     GetTailscale,
+    /// Copy the grant that lets a tagged node in as a worker, for the tailnet's policy file.
+    CopyGrant,
 }
 
 impl Fix {
@@ -501,6 +503,7 @@ impl Fix {
             Self::SetUpPush => "Set up",
             Self::OpenTailscale => "Open Tailscale",
             Self::GetTailscale => "Get Tailscale",
+            Self::CopyGrant => "Copy the grant",
         }
     }
 }
@@ -790,8 +793,10 @@ fn server_line(server: &Server, doctor: Option<&Doctor>, server_logs: &str) -> L
         Some(LinkState::Refused { why }) => line(Mark::Missing, why.clone(), Some(Fix::Retry)),
         Some(LinkState::NotGranted) => line(
             Mark::Missing,
-            "The tailnet policy does not grant this machine the worker role.".to_owned(),
-            Some(Fix::Retry),
+            "The tailnet policy does not let this Mac in as a machine: its tag needs the \
+             grant, pasted into Tailscale's Access controls."
+                .to_owned(),
+            Some(Fix::CopyGrant),
         ),
         None => {
             line(Mark::Missing, "Its worker registers with no server.".to_owned(), Some(Fix::Retry))
@@ -1367,6 +1372,11 @@ mod tests {
         };
         let lines = checklist_of(Worker::Up(refused), "");
         assert_eq!((lines[1].mark, lines[1].fix), (Missing, Some(Fix::Retry)));
+        // A tagged node the tailnet's policy grants no worker role: the grant is the way in.
+        let ungranted =
+            Doctor { server: Some(LinkState::NotGranted), ..doctor(true, true, Tailnet::Absent) };
+        let lines = checklist_of(Worker::Up(ungranted), "");
+        assert_eq!((lines[1].mark, lines[1].fix), (Missing, Some(Fix::CopyGrant)));
         let unset = Doctor { server: None, ..doctor(true, true, Tailnet::Absent) };
         assert_eq!(checklist_of(Worker::Up(unset), "")[1].mark, Missing, "registered nowhere");
 

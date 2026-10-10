@@ -426,7 +426,7 @@ mod uikit {
     ///
     /// Off iOS, with a bad modifier, or when the fork has no window.
     #[cfg(all(target_os = "ios", feature = "e2e"))]
-    pub fn inject(command: Command) -> Result<(), String> {
+    pub(crate) fn inject(command: Command) -> Result<(), String> {
         use gpui_ios::described::{
             DescribedInput, DescribedPinch, DescribedPress, DescribedTouch, GestureState,
             PressPhase, UiTouchPhase,

@@ -1192,3 +1192,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     left (`until_deaf`, `STOP_BEFORE`, `LOOK_AGAIN`, `BackgroundGrace::remaining`) is deleted.
   - Not covered by a host test: the code is iOS-only. `Attention::set_listening` keeps its
     own tests, and the simulator lane exercises a pocketed phone.
+
+- ✅ **A machine the tailnet's policy turns away is offered its grant** (2026-10-12,
+  readiness 10-12 rank 14, the app's half). A tagged node is owned by nobody, so it needs a
+  grant of the worker role. The app only ever built client grants, and a failed deploy sent
+  the person to `[server] allow`, which cannot let such a node in.
+  - The worker now says `LinkState::NotGranted` (lane W). A deploy whose machine runs but is
+    never listed, and whose health says so, fails as "The tailnet policy does not let <host>
+    in as a machine". The hint names the palette's "Copy the tailnet grant for Slopty's
+    machines" and where to paste it, and no longer mentions the allow list.
+  - That line copies `worker_grant()`: from `tag:slopty-worker` to a server tagged as
+    discovery prefers it, or to one a member owns (`autogroup:member`), with the worker role.
+    This Mac's checklist says the same on its server line, with "Copy the grant" as its button.
+  - Tests: `server::tests::the_worker_grant_lets_a_tagged_machine_in`,
+    `this_mac::tests::the_server_line_follows_the_server_then_the_workers_link` (slopty-app).
+
+- ✅ **A press on a killed app is proved on the simulator** (2026-10-12, readiness 10-12
+  rank 7). The windowless answer (`verdict::answer_unheard`) had host tests for its parts and
+  a Mac scenario through `press_note`, but nothing launched the phone app cold from a press.
+  - simctl delivers pushes but cannot press a note's button. The e2e build reads
+    `SLOPTY_E2E_LAUNCH_TAP` (a JSON press) and, right after `notify::install` in
+    `didFinishLaunching`, hands it to `notify::deliver_launching`, the same `deliver` the
+    system's launching response reaches. Nothing listens yet, so the press takes the
+    `answer_unheard` path exactly as a real one would. The hook sits behind the `e2e` feature,
+    so no release build carries it.
+  - `Stack::relaunch_on_simulator(env)` ends the app as the system ends a suspended one and
+    launches it again on the same data with the press.
+  - Test: `a_killed_app_answers_a_note_s_deny_with_no_window` (`tests/ios.rs`, live by
+    `cargo xtask e2e ios`). A held Bash prompt is denied by a cold launch, the relay ends
+    well and the thread's request is gone; the same press again shows "That prompt is no
+    longer waiting" in the pressed note's place. It prints a `MEASURE ios-cold` line.

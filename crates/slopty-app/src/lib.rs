@@ -77,7 +77,7 @@ use slopty_ui::workspace::{
 pub use ssh::actions::{UpdateAllWorkers, UpdateServer};
 pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
 pub use window::{HELP_URL, show as show_main_window};
-pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant};
+pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant, CopyWorkerGrant};
 use workers::{Hearing, Tick, WorkerSlot};
 
 /// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
@@ -2248,6 +2248,7 @@ impl Workspace {
                 }
             }
             this_mac::Fix::GetTailscale => cx.open_url(TAILSCALE_DOWNLOAD),
+            this_mac::Fix::CopyGrant => self.copy_worker_grant(cx),
         }
     }
 
@@ -3620,6 +3621,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &CopyTailnetGrant, _window, cx| this.copy_grant(cx)))
             .on_action(
+                cx.listener(|this, _: &CopyWorkerGrant, _window, cx| this.copy_worker_grant(cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &UpdateAllWorkers, _window, cx| this.update_all_workers(cx)),
             )
             .on_action(cx.listener(|this, _: &UpdateServer, _window, cx| this.update_server(cx)))
@@ -3984,6 +3988,7 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("connect_server", ConnectServer, &[]),
         app_command("connect_device", ConnectDevice, &[]),
         app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
+        app_command("copy_worker_grant", CopyWorkerGrant, &[]),
         app_command("update_all_workers", UpdateAllWorkers, &[]),
         app_command("update_server", UpdateServer, &[]),
     ];
@@ -4031,6 +4036,7 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item("Connect to a server", Box::new(ConnectServer)),
         item(invite::TITLE, Box::new(ConnectDevice)),
         item(server::COPY_GRANT, Box::new(CopyTailnetGrant)),
+        item(server::COPY_WORKER_GRANT, Box::new(CopyWorkerGrant)),
         item("Add a machine\u{2026}", Box::new(AddWorker)),
         item(ssh::UPDATE_ALL, Box::new(UpdateAllWorkers)),
         item(server::UPDATE_SERVER, Box::new(UpdateServer)),
@@ -4109,6 +4115,30 @@ fn hold_uploads(link: &slopty_client::WorkerLink) {
 /// Uploads are never held outside the e2e build.
 #[cfg(not(feature = "e2e"))]
 const fn hold_uploads(_link: &slopty_client::WorkerLink) {}
+
+/// The press a self-test launches the iOS app as woken by ([`slopty_e2e::LAUNCH_TAP_ENV`]).
+///
+/// It stands in for a finger on a killed app's note. `None` when none is named, or what is
+/// named does not read, said in the log.
+#[cfg(feature = "e2e")]
+#[must_use]
+pub fn e2e_launch_tap() -> Option<Tap> {
+    use serde_json::Value;
+    let json = std::env::var(slopty_e2e::LAUNCH_TAP_ENV).ok()?;
+    let pressed: Value = serde_json::from_str(&json)
+        .inspect_err(|e| tracing::warn!(error = %e, "the launching press does not read"))
+        .ok()?;
+    let text = |key: &str| pressed.get(key).and_then(Value::as_str).map(str::to_owned);
+    let info = pressed.get("info").and_then(Value::as_object).map(|info| {
+        info.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()
+    });
+    Some(Tap {
+        id: text("id")?,
+        info: info.unwrap_or_default(),
+        action: text("action"),
+        text: text("text"),
+    })
+}
 
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
 #[cfg(feature = "e2e")]

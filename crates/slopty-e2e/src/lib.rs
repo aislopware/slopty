@@ -60,6 +60,14 @@ pub const THIS_MAC_ENV: &str = "SLOPTY_THIS_MAC";
 /// sees the grants the test chose and a render is the same on every machine.
 pub const WORKER_GRANTS_ENV: &str = "SLOPTY_WORKER_GRANTS";
 
+/// The press of a note's button the iOS app is launched as having been woken by.
+///
+/// It is JSON (`{"id", "action", "info", "text"}`): a killed app's cold launch for a press,
+/// which only a finger on a delivered note makes. The app hands it on as its delegate hands on a
+/// launching response, before any scene connects (`slopty_platform::notify::deliver_launching`).
+/// Only the e2e build reads it.
+pub const LAUNCH_TAP_ENV: &str = "SLOPTY_E2E_LAUNCH_TAP";
+
 /// Screen Recording, in [`WORKER_GRANTS_ENV`].
 pub const SCREEN_RECORDING: &str = "screen-recording";
 

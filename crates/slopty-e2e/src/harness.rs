@@ -1221,6 +1221,36 @@ impl Stack {
         Ok(())
     }
 
+    /// End the app in the simulator, as the system ends one it suspended, then launch it again
+    /// on the same data directory with `env` beside what it was launched with: a cold launch,
+    /// as a press of a note's button makes one ([`crate::LAUNCH_TAP_ENV`]). Waits for its test
+    /// socket, not for a link.
+    ///
+    /// # Errors
+    ///
+    /// When the app runs in no simulator, or does not come back in time.
+    pub async fn relaunch_on_simulator(&mut self, env: &[(&str, &str)]) -> Result<()> {
+        let simulator = self.simulator.clone().context("the app runs in no simulator")?;
+        let ended = Command::new("xcrun")
+            .args(["simctl", "terminate", &simulator.udid, &simulator.bundle_id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .context("xcrun simctl terminate")?;
+        anyhow::ensure!(ended.success(), "simctl terminate failed: {ended}");
+        // The ended app left its socket file; the new one binds afresh.
+        let _removed = std::fs::remove_file(self.dir.path().join("app.sock"));
+        let mut all: Vec<(&str, &str)> =
+            self.app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        all.extend_from_slice(env);
+        let driver =
+            spawn_simulator_app(self.dir.path(), "app", &self.log, &simulator, &all).await?;
+        self.driver = driver;
+        Ok(())
+    }
+
     /// Kill the worker (SIGKILL, as a crash or a pulled cable would leave it) and reap it;
     /// ptyd and its shells live on. It stays down: the app's dials are refused.
     ///

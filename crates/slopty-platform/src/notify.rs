@@ -354,8 +354,8 @@ impl Notifier for Memory {
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{
-    System, answer_unheard, ask, ask_quietly, content_of, delivered, install, open_settings,
-    post_alone, settings, take_back, taps, taps_finished,
+    System, answer_unheard, ask, ask_quietly, content_of, deliver_launching, delivered, install,
+    open_settings, post_alone, settings, take_back, taps, taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -447,6 +447,15 @@ mod apple {
     /// installed while the app finishes launching, before the press can arrive.
     pub fn answer_unheard(answer: fn(Tap)) {
         *UNHEARD.lock() = Some(answer);
+    }
+
+    /// Hand on `tap` as the delegate hands on the response that launched the app.
+    ///
+    /// It is taken before any scene connects: a self-test's stand-in for a press of a note's
+    /// button on a killed app, which only a finger makes (`slopty_app::e2e_launch_tap`). Taken from
+    /// `application:didFinishLaunchingWithOptions:`, after [`answer_unheard`] and [`install`].
+    pub fn deliver_launching(tap: Tap) {
+        deliver(tap);
     }
 
     /// Hand `tap` to the app, or hold it until the app listens. A press that answers where the
