@@ -567,7 +567,8 @@ fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
         attention.notice(&heard);
         let posted = memory.posted();
         let [posted] = posted.as_slice() else { panic!("one note: {posted:?}") };
-        let pushed = notify::pushed::note_of(&PushBody { notice: notice.clone(), ask: None });
+        let pushed =
+            notify::pushed::note_of(&PushBody { notice: notice.clone(), ask: None, quiet: false });
         let mut info = posted.info.clone();
         info.remove(ITEM);
         let what = |n: &Note| (n.id.clone(), n.title.clone(), n.body.clone(), n.urgent, n.category);
@@ -601,6 +602,48 @@ fn a_tapped_note_focuses_its_tile(cx: &mut TestAppContext) {
         assert_eq!(v.focused(), Some(tiles[0]), "the tap went to its tile");
         assert_eq!(v.pending_focus, Some(first), "and gives its shell the keyboard");
     });
+}
+
+/// A note tapped on a cold phone, while its machine is still being dialled, says so and waits:
+/// once that machine has sent what it holds, the agent with no tile here gets one. A
+/// tap that waited past [`PARKED_FOR`] goes nowhere.
+#[gpui::test]
+fn a_note_tapped_before_its_machine_links_goes_there_once_it_does(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let opened = |rx: &mut mpsc::Receiver<ClientMsg>, session: SessionId| {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|msg| {
+            matches!(msg, ClientMsg::Items(ItemOp::Add(Item {
+                kind: ItemKind::Terminal { session: s }, ..
+            })) if s == session)
+        })
+    };
+    let tap_on = |key: WorkerKey, session: SessionId| {
+        let route = Route { worker: key, item: None, about: About::Session(session) };
+        Tap { id: session.to_string(), info: route.info(), action: None }
+    };
+
+    let (studio, session) = (WorkerKey::new(9), SessionId::new());
+    view.update_in(cx, |v, _w, cx| {
+        v.hold_clock(Some(Duration::ZERO));
+        v.add_worker(studio, "studio".to_owned(), cx);
+        v.open_notification(&tap_on(studio, session), cx);
+    });
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("Connecting to studio…"), "the tap waits for the link");
+    view.update(cx, |v, _| v.hold_clock(Some(Duration::from_secs(5))));
+    let (_tiles, mut link) = worker(&view, cx, studio, "studio", &[]);
+    assert!(opened(&mut link, session), "linked, the agent gets its tile");
+
+    let (late, other) = (WorkerKey::new(10), SessionId::new());
+    view.update_in(cx, |v, _w, cx| {
+        v.hold_clock(Some(Duration::from_secs(10)));
+        v.add_worker(late, "mini".to_owned(), cx);
+        v.open_notification(&tap_on(late, other), cx);
+        let past = PARKED_FOR.saturating_add(Duration::from_secs(11));
+        v.hold_clock(Some(past));
+    });
+    let (_tiles, mut link) = worker(&view, cx, late, "mini", &[]);
+    assert!(!opened(&mut link, other), "a link past the wait leaves the person where they are");
 }
 
 /// An agent's note gets the approval buttons once a prompt is held for it, silently, as the

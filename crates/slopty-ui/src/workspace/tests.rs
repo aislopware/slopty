@@ -124,7 +124,7 @@ fn healthy() -> WorkerCaps {
         os_version: "26.5".into(),
         can_capture: true,
         can_inject: true,
-        version: env!("CARGO_PKG_VERSION").into(),
+        build: slopty_proto::wire::this_build(),
         agents: vec![slopty_proto::server::InstalledAgent {
             agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
             version: "2.1.0".into(),

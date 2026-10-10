@@ -21,6 +21,8 @@
 )]
 
 pub mod asked_size;
+#[cfg(target_os = "macos")]
+pub mod away;
 pub mod continued;
 #[cfg(target_os = "macos")]
 pub mod curtain;

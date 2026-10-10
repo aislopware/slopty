@@ -8,12 +8,16 @@
 //! choice that allows or denies once, and that choice sent, as the workspace answers a note
 //! whose worker it is not linked to. The system is told the press is done once the answer is
 //! out or given up ([`slopty_platform::notify::taps_finished`]), within the time it grants.
+//!
+//! An answer that did not land is said in a note in place of the one pressed ([`missed_note`]),
+//! so the person does not walk away believing it went: the machine was not reached, or the
+//! prompt no longer waits. A tap on it goes to the agent, as the pressed note's did.
 
 use std::time::Duration;
 
 use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WorkerId};
-use slopty_platform::notify::{self, Tap, info};
+use slopty_platform::notify::{self, Note, Tap, info};
 use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::{AskId, ThreadId};
 
@@ -93,7 +97,61 @@ pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
     }
 }
 
-/// Answer `tap` with no window, then tell the system the press is done.
+/// What a note says when a background answer prompt is no longer waiting.
+pub const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
+/// Under it.
+pub const ANSWERED_ELSEWHERE: &str = "It was answered elsewhere, or it ended.";
+
+/// The note that says `answered` did not land, in place of the note `tap` pressed.
+///
+/// `None` once it was sent. `machine` is the name of the machine the agent runs on, where this
+/// device knows it. The note carries the pressed one's way to the agent, without its request,
+/// so a tap on it shows the agent and no button answers twice.
+#[must_use]
+pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Option<Note> {
+    let mut info = tap.info.clone();
+    info.remove(info::ASK);
+    let note = Note { id: tap.id.clone(), info, ..Note::default() };
+    match answered {
+        Answered::Sent => None,
+        Answered::Gone => Some(Note {
+            title: NO_LONGER_WAITING.to_owned(),
+            body: ANSWERED_ELSEWHERE.to_owned(),
+            silent: true,
+            ..note
+        }),
+        Answered::Failed(why) => {
+            let pressed =
+                if tap.action.as_deref() == Some(notify::DENY) { "Deny" } else { "Allow" };
+            let title = machine.map_or_else(
+                || "Couldn't reach your server".to_owned(),
+                |name| format!("Couldn't reach {name}"),
+            );
+            tracing::info!(why, "a background answer failed");
+            Some(Note {
+                title,
+                body: format!("{pressed} was not sent. The agent is still waiting."),
+                urgent: true,
+                ..note
+            })
+        }
+    }
+}
+
+/// The name this device last knew for the machine `tap` is about, from the server's directory
+/// as it was kept.
+fn machine_of(tap: &Tap) -> Option<String> {
+    let worker: u128 = tap.info.get(info::WORKER)?.parse().ok()?;
+    let worker: WorkerId = format!("{worker:032x}").parse().ok()?;
+    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server?;
+    slopty_client::directory::Directory::load(&crate::server::cache_path(), &server)
+        .into_iter()
+        .find(|w| w.worker == worker)
+        .map(|w| w.name)
+}
+
+/// Answer `tap` with no window, say so in a note when the answer did not land, then tell the
+/// system the press is done.
 ///
 /// It is what [`slopty_platform::notify::answer_unheard`] calls for a press nobody listens to,
 /// and it answers on a thread of its own ([`answer_alone`]).
@@ -101,7 +159,10 @@ pub fn answer_unheard(tap: Tap) {
     let spawned = std::thread::Builder::new().name("slopty-verdict".to_owned()).spawn(move || {
         let answered = answer_alone(&tap);
         tracing::info!(id = tap.id, ?answered, "a verdict answered in the background");
-        notify::taps_finished();
+        match missed_note(&tap, &answered, machine_of(&tap).as_deref()) {
+            Some(note) => notify::post_alone(&note, notify::taps_finished),
+            None => notify::taps_finished(),
+        }
     });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "the background answer's thread");
@@ -186,6 +247,35 @@ mod tests {
             None
         );
         assert_eq!(verdict_of(&tap(notify::ALLOW, &[(info::THREAD, thread.to_string())])), None);
+    }
+
+    /// A background answer that did not land is said in place of the pressed note, by the
+    /// machine where this device knows it, and leads to the agent with no button to answer
+    /// again; a sent one says nothing.
+    #[test]
+    fn a_background_answer_that_did_not_land_is_said() {
+        let thread = ThreadId::new();
+        let pressed =
+            tap(notify::DENY, &[(info::THREAD, thread.to_string()), (info::ASK, "a1".to_owned())]);
+        assert_eq!(missed_note(&pressed, &Answered::Sent, Some("studio")), None);
+
+        let failed = Answered::Failed("no answer in time".to_owned());
+        let note = missed_note(&pressed, &failed, Some("studio")).expect("said");
+        assert_eq!(note.id, pressed.id, "in place of the pressed note");
+        assert_eq!(note.title, "Couldn't reach studio");
+        assert_eq!(note.body, "Deny was not sent. The agent is still waiting.");
+        assert!(note.urgent && !note.silent, "the agent still needs the person");
+        assert_eq!(note.category, None, "no button answers twice");
+        assert_eq!(
+            note.info,
+            BTreeMap::from([(info::THREAD.to_owned(), thread.to_string())]),
+            "a tap shows the agent"
+        );
+        let unknown = missed_note(&pressed, &failed, None).expect("said");
+        assert_eq!(unknown.title, "Couldn't reach your server");
+
+        let gone = missed_note(&pressed, &Answered::Gone, Some("studio")).expect("said");
+        assert_eq!((gone.title.as_str(), gone.silent), (NO_LONGER_WAITING, true));
     }
 
     fn choice(id: &str, effect: Effect) -> Choice {

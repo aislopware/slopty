@@ -251,6 +251,16 @@ enum Why {
     Unanswered,
 }
 
+/// How long a tapped note waits for its machine's link: a cold launch dials every worker at
+/// once, and a link that takes longer than this is not what the person is still waiting on.
+pub const PARKED_FOR: Duration = Duration::from_secs(30);
+
+/// What a tapped note says while its machine is still being dialled.
+#[must_use]
+pub fn connecting(machine: Option<&str>) -> String {
+    machine.map_or_else(|| "Connecting…".to_owned(), |name| format!("Connecting to {name}…"))
+}
+
 /// What the app says, once a run, on coming back after a note went unsaid because
 /// notifications are off.
 pub const NOTES_OFF: &str = if cfg!(target_os = "ios") {
@@ -856,6 +866,12 @@ impl WorkspaceView {
             return;
         };
         let tile = route.item.map(|item| TileRef { worker: route.worker, item });
+        if !self.leads_here(route) && !self.worker_ready(route.worker) {
+            let name = self.workers.get(&route.worker).map(|w| w.name.clone());
+            self.parked_tap = Some((tap.clone(), self.clock_instant()));
+            self.show_notice(connecting(name.as_deref()), cx);
+            return;
+        }
         match (tile.and_then(|t| self.item(t)).map(|i| i.kind.clone()), route.about) {
             (Some(kind), _) => {
                 if let Some(item) = route.item {
@@ -871,6 +887,38 @@ impl WorkspaceView {
             }
             (None, About::Session(session)) => self.show_untiled(route.worker, session, cx),
         }
+    }
+
+    /// Whether `route` leads to a tile this device already has: one it names, or one of its
+    /// session or thread. Such a tap needs no link to come forward.
+    fn leads_here(&self, route: Route) -> bool {
+        let tile = route.item.map(|item| TileRef { worker: route.worker, item });
+        tile.and_then(|t| self.item(t)).is_some()
+            || match route.about {
+                About::Session(session) => self.tile_of_session(session).is_some(),
+                About::Thread(thread) => self.tile_of_thread(thread).is_some(),
+            }
+    }
+
+    /// Whether `key` is linked and has sent what it holds: what a tap that makes a tile there
+    /// needs.
+    fn worker_ready(&self, key: WorkerKey) -> bool {
+        self.workers.get(&key).is_some_and(|w| w.link.is_some() && !w.awaiting_snapshot)
+    }
+
+    /// `key` has sent what it holds: a tap parked for it, while it was still being dialled,
+    /// goes where it leads now, unless it waited past [`PARKED_FOR`].
+    pub(super) fn run_parked_tap(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let Some((tap, at)) = self.parked_tap.take() else { return };
+        if Route::of_tap(&tap).is_none_or(|r| r.worker != key) {
+            self.parked_tap = Some((tap, at));
+            return;
+        }
+        if self.clock_instant().saturating_duration_since(at) > PARKED_FOR {
+            tracing::debug!(id = tap.id, "a parked tap waited too long");
+            return;
+        }
+        self.open_notification(&tap, cx);
     }
 
     /// What a note's title says: the tile's name, else the worker's.

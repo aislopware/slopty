@@ -242,7 +242,12 @@ impl Doctor {
         Self {
             worker: health.worker,
             server: health.server.map(|s| s.link),
-            version: health.version,
+            version: health
+                .caps
+                .build
+                .split_once('+')
+                .map_or(health.caps.build.as_str(), |(v, _)| v)
+                .to_owned(),
             screen_recording: health.caps.can_capture,
             accessibility: health.caps.can_inject,
             tailnet,
@@ -1452,11 +1457,11 @@ mod tests {
         let health = slopty_proto::ctl::Health {
             worker: WorkerId::nil(),
             server: None,
-            version: "0.3.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
             caps: slopty_proto::server::WorkerCaps {
                 can_capture: true,
                 can_inject: false,
+                build: "0.3.0+wire.0badf00d.20261009T2307Z".to_owned(),
                 ..slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs)
             },
             listen: "[::]:45550".to_owned(),

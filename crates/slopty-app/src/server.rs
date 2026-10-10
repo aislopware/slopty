@@ -281,7 +281,10 @@ impl Workspace {
                     slot.task = Some(task);
                     ws.view.update(cx, |v, _cx| v.set_server_caller(Some(caller)));
                     #[cfg(target_os = "ios")]
-                    ws.tell_phone(cx);
+                    {
+                        ws.tell_phone(cx);
+                        Self::look_at_notes(cx);
+                    }
                     true
                 }
                 _ => false,

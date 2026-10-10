@@ -326,7 +326,7 @@ impl Notifier for Memory {
 #[cfg(target_vendor = "apple")]
 pub use apple::{
     System, answer_unheard, ask, ask_quietly, content_of, delivered, install, open_settings,
-    settings, take_back, taps, taps_finished,
+    post_alone, settings, take_back, taps, taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -977,6 +977,16 @@ mod apple {
     /// Hand `note` to the centre now: a nil trigger delivers at once, and the identifier
     /// replaces whatever is up under it.
     fn add(center: &UNUserNotificationCenter, note: &Note) {
+        add_then(center, note, || ());
+    }
+
+    /// [`add`], then `then` once the centre has taken the note or refused it.
+    /// The centre calls its completion handler on a queue of its own, so `then` is `Send`.
+    fn add_then(
+        center: &UNUserNotificationCenter,
+        note: &Note,
+        then: impl FnOnce() + Send + 'static,
+    ) {
         let content = content_of(note);
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&note.id),
@@ -984,14 +994,32 @@ mod apple {
             None,
         );
         let id = note.id.clone();
+        let then = Mutex::new(Some(then));
         let added = RcBlock::new(move |error: *mut NSError| {
             // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
             // duration of the completion handler.
             if let Some(error) = unsafe { error.as_ref() } {
                 tracing::warn!(id, error = %error.localizedDescription(), "note not delivered");
             }
+            let then = then.lock().take();
+            if let Some(then) = then {
+                then();
+            }
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&added));
+    }
+
+    /// Show `note` with no [`System`], then call `done` once the centre has it.
+    ///
+    /// It is what an app answering a press with no window ([`answer_unheard`]) says when its
+    /// answer did not land, before the system may suspend it again. Notes are allowed, the
+    /// person having just pressed a button on one. Outside an app bundle `done` runs at once.
+    pub fn post_alone(note: &Note, done: impl FnOnce() + Send + 'static) {
+        if !in_bundle() {
+            done();
+            return;
+        }
+        add_then(&UNUserNotificationCenter::currentNotificationCenter(), note, done);
     }
 
     /// `note` as the system shows it: what the app posts, and what the notification extension

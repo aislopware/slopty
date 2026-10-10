@@ -102,3 +102,57 @@ fn a_remote_window_on_a_mac_that_takes_no_input_says_so(cx: &mut TestAppContext)
     let said = tile::no_input("studio");
     assert!(nodes.iter().any(|n| n.is("Status", Some(&said))), "{nodes:#?}");
 }
+
+/// A device whose notes were never asked for says so under its navigator's header, and its
+/// line asks, once a press; notes turned off say that instead, and its door goes to the
+/// system's settings. Notes that reach the person say nothing.
+#[gpui::test]
+fn a_phone_s_navigator_asks_for_notes_until_they_reach_the_person(cx: &mut TestAppContext) {
+    use slopty_platform::notify::Alerts;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.simulate_resize(size(px(390.0), px(760.0)));
+    let asked = Rc::new(Cell::new(0_u32));
+    let door = |count: &Rc<Cell<u32>>| -> MenuRun {
+        let count = Rc::clone(count);
+        Rc::new(move |_w, _cx| count.set(count.get().saturating_add(1)))
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.nav.open = true;
+        v.set_notes(Alerts::Unasked, door(&asked), cx);
+    });
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref() == Some(readouts::NOTES_ASK)),
+        "it asks: {nodes:#?}"
+    );
+    let line = cx.debug_bounds("nav-notes").expect("the line");
+    let header = cx.debug_bounds("navigator").expect("the navigator");
+    assert!(header.contains(&line.center()), "in the navigator: {line:?}");
+    let allow = cx.debug_bounds("nav-notes-door").expect("its door");
+    cx.simulate_click(allow.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(asked.get(), 1, "one press asks once");
+
+    let opened = Rc::new(Cell::new(0_u32));
+    view.update_in(cx, |v, _w, cx| v.set_notes(Alerts::Denied, door(&opened), cx));
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref() == Some(readouts::NOTES_OFF_LINE)),
+        "it says they are off: {nodes:#?}"
+    );
+    let turn_on = cx.debug_bounds("nav-notes-door").expect("its door");
+    cx.simulate_click(turn_on.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!((asked.get(), opened.get()), (1, 1), "the settings' door, not the question");
+
+    for quiet in [Alerts::Allowed, Alerts::Unavailable] {
+        view.update_in(cx, |v, _w, cx| v.set_notes(quiet, door(&asked), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("nav-notes").is_none(), "{quiet:?} says nothing");
+    }
+}

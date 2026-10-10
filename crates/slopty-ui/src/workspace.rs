@@ -967,6 +967,12 @@ pub struct WorkspaceView {
     more_entries: Vec<MenuEntry>,
     /// The app's rows in the server readout's menu.
     server_entries: Vec<MenuEntry>,
+    /// How this device's notes stand, with the app's way to fix them, while they do not reach
+    /// the person: a phone's navigator says so ([`readouts`]).
+    notes_door: Option<(slopty_platform::notify::Alerts, MenuRun)>,
+    /// A tapped note whose machine was still being dialled, and when it was tapped: it goes
+    /// where it leads once that machine has sent what it holds ([`attention`]).
+    parked_tap: Option<(slopty_platform::notify::Tap, Instant)>,
     show_stats: bool,
     /// The remote desktops' own state: this device's display key, the wait of a display
     /// following its tile, the system shortcuts.
@@ -1240,6 +1246,8 @@ impl WorkspaceView {
             turns: turns::Turns::default(),
             more_entries: Vec::new(),
             server_entries: Vec::new(),
+            notes_door: None,
+            parked_tap: None,
             show_stats: false,
             desktop: desktop::Desktop::of(saved.as_ref()),
             toast: None,
@@ -1502,6 +1510,19 @@ impl WorkspaceView {
     /// now, connect to another.
     pub fn set_server_menu(&mut self, entries: Vec<MenuEntry>) {
         self.server_entries = entries;
+    }
+
+    /// How this device's notes stand (`alerts`), and what its navigator's line does about it:
+    /// asks while they were never asked for, opens the system's settings while they are off.
+    /// Notes that reach the person, or a build that posts none, say nothing.
+    pub fn set_notes(
+        &mut self,
+        alerts: slopty_platform::notify::Alerts,
+        door: MenuRun,
+        cx: &mut Context<Self>,
+    ) {
+        self.notes_door = Some((alerts, door));
+        cx.notify();
     }
 
     /// Save the layout to `path` whenever it changes (debounced).

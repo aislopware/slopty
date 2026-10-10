@@ -7,11 +7,20 @@
 //! once this Mac has gone unused a while. The server's list of every client's presence decides
 //! whether a handheld stays quiet, and its notices are the only agent moments that post.
 //!
+//! A Mac the person walked away from says so at once rather than two minutes later: its
+//! screen locked, its screens or the Mac itself asleep, its session given to another
+//! ([`slopty_platform::away`]) lower `active` until the matching way back (unlocked, woke, the
+//! session back), so a request that comes meanwhile goes to the phone.
+//!
 //! [`WorkspaceView::presence`]: slopty_ui::workspace::WorkspaceView::presence
 
 use std::time::Duration;
 
 use gpui::{Context, Window};
+#[cfg(target_os = "macos")]
+use slopty_platform::away::Left;
+#[cfg(target_os = "macos")]
+use slopty_platform::resume::Resume;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Presence, Present, Seat};
 
 use crate::{Workspace, alert, settings};
@@ -36,11 +45,50 @@ pub(crate) struct Presenting {
     /// Whether the app still hears notices on its link: a phone stops just before the system
     /// suspends it.
     listening: bool,
+    /// Why the person has left this Mac, whatever its input clock says.
+    #[cfg(target_os = "macos")]
+    gone: Gone,
 }
 
 impl Default for Presenting {
     fn default() -> Self {
-        Self { settling: false, listening: true }
+        Self {
+            settling: false,
+            listening: true,
+            #[cfg(target_os = "macos")]
+            gone: Gone::default(),
+        }
+    }
+}
+
+/// The ways the person left this Mac that have not ended yet: each lasts until its own way
+/// back ([`Left::ended_by`]), so screens woken on a locked Mac leave it left.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Gone(Vec<Left>);
+
+#[cfg(target_os = "macos")]
+impl Gone {
+    /// The person left by `left`. Whether that changed anything.
+    fn left(&mut self, left: Left) -> bool {
+        if self.0.contains(&left) {
+            return false;
+        }
+        self.0.push(left);
+        true
+    }
+
+    /// `resume` happened: it ends the leaving it is the way back from. Whether that changed
+    /// anything.
+    fn back(&mut self, resume: Resume) -> bool {
+        let before = self.0.len();
+        self.0.retain(|left| left.ended_by() != resume);
+        self.0.len() != before
+    }
+
+    /// Whether the person is gone from this Mac.
+    const fn is_gone(&self) -> bool {
+        !self.0.is_empty()
     }
 }
 
@@ -104,14 +152,66 @@ impl Workspace {
         else {
             return;
         };
-        caller.presence(present_now(presence, self.presenting.listening()));
+        caller.presence(self.present_now(presence));
     }
 
     /// Tell the server where the person is, from inside `window`'s own callbacks.
     pub(crate) fn tell_presence_in(&self, window: &Window, cx: &Context<Self>) {
         if let Some(caller) = self.server_caller() {
             let presence = self.view.read(cx).presence(window);
-            caller.presence(present_now(presence, self.presenting.listening()));
+            caller.presence(self.present_now(presence));
+        }
+    }
+
+    /// `presence` as the app says it: whether it hears notices on its link, and with `active`
+    /// lowered while the person has left this Mac or not used it past `AWAY_AFTER`. On an
+    /// iPhone or iPad the system locks the screen itself, which resigns the app.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::missing_const_for_fn, reason = "a Mac reads its input clock here")
+    )]
+    fn present_now(&self, mut presence: Presence) -> Presence {
+        presence.listening = self.presenting.listening();
+        #[cfg(target_os = "macos")]
+        if self.presenting.gone.is_gone() || slopty_platform::idle::since_input() >= AWAY_AFTER {
+            presence.active = false;
+        }
+        presence
+    }
+
+    /// Hear the person leave this Mac, for as long as the app runs: the server is told at once.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn watch_leaving(&mut self, cx: &Context<Self>) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink: slopty_platform::away::Sink = std::sync::Arc::new(move |left| {
+            let _closed = tx.send(left);
+        });
+        self.leaving_watch = Some(slopty_platform::away::watch(&sink));
+        cx.spawn(async move |this, cx| {
+            while let Some(left) = rx.recv().await {
+                if this.update(cx, |ws, cx| ws.person_left(left, cx)).is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The person left this Mac by `left`.
+    #[cfg(target_os = "macos")]
+    fn person_left(&mut self, left: Left, cx: &mut Context<Self>) {
+        if self.presenting.gone.left(left) {
+            tracing::info!(?left, "the person left this Mac");
+            self.tell_presence(cx);
+        }
+    }
+
+    /// `resume` happened: back from the way the person left by, they are told of again.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn person_back(&mut self, resume: Resume, cx: &mut Context<Self>) {
+        if self.presenting.gone.back(resume) {
+            tracing::info!(resume = resume.name(), "the person is back at this Mac");
+            self.tell_presence(cx);
         }
     }
 
@@ -152,41 +252,39 @@ impl Workspace {
     }
 }
 
-/// `presence` as the app says it: `listening` or not, and with `active` lowered once this Mac
-/// has gone unused past [`AWAY_AFTER`]. On an iPhone or iPad the system locks the screen
-/// itself, which resigns the app.
-#[cfg(target_os = "macos")]
-fn present_now(mut presence: Presence, listening: bool) -> Presence {
-    presence.listening = listening;
-    if slopty_platform::idle::since_input() >= AWAY_AFTER {
-        presence.active = false;
-    }
-    presence
-}
-
-#[cfg(not(target_os = "macos"))]
-const fn present_now(mut presence: Presence, listening: bool) -> Presence {
-    presence.listening = listening;
-    presence
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn presence(seat: Seat, active: bool) -> Presence {
-        Presence {
-            seat,
-            active,
-            workspace: None,
-            showing: Vec::new(),
-            focus: None,
-            listening: true,
-        }
+        Presence { seat, active, showing: Vec::new(), focus: None, listening: true }
     }
 
     fn client(link: u64, seat: Seat, active: bool) -> Present {
         Present { link, name: format!("client {link}"), presence: presence(seat, active) }
+    }
+
+    /// Each way the person leaves holds until its own way back: screens woken on a locked Mac
+    /// leave it left, and the unlock brings the person back.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leaving_lasts_until_its_own_way_back() {
+        let mut gone = Gone::default();
+        assert!(!gone.is_gone());
+        assert!(gone.left(Left::Locked), "the lock is a leaving at once");
+        assert!(gone.left(Left::ScreensSlept));
+        assert!(!gone.left(Left::Locked), "said twice, nothing more");
+        assert!(gone.is_gone());
+        assert!(gone.back(Resume::ScreensWoke), "the screens woke");
+        assert!(gone.is_gone(), "still locked");
+        assert!(!gone.back(Resume::Foreground), "the app in front is no way back");
+        assert!(gone.back(Resume::Unlocked));
+        assert!(!gone.is_gone(), "back");
+        for left in Left::ALL {
+            assert!(gone.left(left));
+            assert!(gone.back(left.ended_by()), "{left:?}");
+        }
+        assert_eq!(gone, Gone::default());
     }
 
     #[test]

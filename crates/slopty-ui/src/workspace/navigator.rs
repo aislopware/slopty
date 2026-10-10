@@ -2754,6 +2754,7 @@ impl WorkspaceView {
             .on_key_down(cx.listener(Self::navigator_key))
             .child(self.navigator_header(window, cx))
             .children(self.phone.then(|| self.phone_server_line()).flatten())
+            .children(self.notes_line())
             .child(rows)
             .into_any_element()
     }

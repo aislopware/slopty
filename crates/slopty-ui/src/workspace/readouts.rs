@@ -32,6 +32,7 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::update::Release;
+use slopty_platform::notify::Alerts;
 use slopty_theme::Theme;
 
 use super::WorkspaceView;
@@ -729,6 +730,69 @@ impl WorkspaceView {
         )
     }
 }
+
+impl WorkspaceView {
+    /// This device's notes in its navigator, under the server's line, while they do not reach
+    /// the person: never asked for, the line asks ([`NOTES_ASK`]); turned off, it says so and
+    /// opens the system's settings. The app sets it only where pushes are the way an agent
+    /// reaches the person (a phone, an iPad).
+    pub(super) fn notes_line(&self) -> Option<gpui::AnyElement> {
+        let (alerts, door) = self.notes_door.as_ref()?;
+        let (glyph, text, action) = match alerts {
+            Alerts::Unasked => (Symbol::Bell, NOTES_ASK, NOTES_ALLOW),
+            Alerts::Denied => (Symbol::BellSlash, NOTES_OFF_LINE, NOTES_TURN_ON),
+            Alerts::Allowed | Alerts::Unavailable => return None,
+        };
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let run = Rc::clone(door);
+        let action = SharedString::from(action);
+        let el = button("nav-notes-door", action.clone(), theme)
+            .flex_none()
+            .text_color(hsla(s.accent))
+            .child(action);
+        let door = tab_stop(el, s.focus).on_click(move |_ev, window, cx| run(window, cx));
+        Some(
+            div()
+                .id("nav-notes")
+                .debug_selector(|| "nav-notes".to_owned())
+                .role(Role::Group)
+                .aria_label(text)
+                .aria_description(NOTES_MEANS)
+                .flex_none()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.inset()))
+                .py(px(theme.spacing.xxs))
+                .text_size(px(theme.typography.small()))
+                .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_color(hsla(s.text_secondary)).child(text))
+                        .child(div().text_color(hsla(s.text_muted)).child(NOTES_MEANS)),
+                )
+                .child(door)
+                .into_any_element(),
+        )
+    }
+}
+
+/// What a device's navigator says while its notes were never asked for.
+pub(super) const NOTES_ASK: &str = "Notify me when an agent needs me";
+/// Its door: the system's question.
+pub(super) const NOTES_ALLOW: &str = "Allow";
+/// What it says while the person turned them off.
+pub(super) const NOTES_OFF_LINE: &str = "Notifications are off";
+/// Its door: the system's settings, where they are turned on.
+pub(super) const NOTES_TURN_ON: &str = "Turn on";
+/// What either costs, under it.
+pub(super) const NOTES_MEANS: &str = "Nothing reaches you here while Slopty is away.";
 
 /// Where a popover rises from the foot bar, as offsets from the window's edges.
 struct Rise {

@@ -2,9 +2,9 @@
 //! is wanted (`docs/decisions/ui.md`, "Notifications by presence").
 //!
 //! [`WorkspaceView::presence`] reads it off the workspace: what kind of seat this is, whether its
-//! window is in front, the workspace there, the terminals on screen and the one with the
-//! keyboard. The app sends it on every change, and lowers `active` once the person has been
-//! away from the machine a while, which only the app can measure.
+//! window is in front, the terminals on screen and the one with the keyboard. The app sends it on
+//! every change, and lowers `active` once the person has been away from the machine a while, which
+//! only the app can measure.
 
 use gpui::Window;
 use slopty_client::layout::TileRef;
@@ -28,11 +28,9 @@ impl WorkspaceView {
             .filter_map(|tile| self.term_ref(tile))
             .collect();
         showing.sort_by_key(|t| (t.worker, t.session));
-        let workspace = self.layout.shown_index().map(|ix| self.project_name_at(ix));
         Presence {
             seat: self.seat(),
             active: self.app_active && window.is_window_active(),
-            workspace,
             showing,
             focus: self.focused().and_then(|tile| self.term_ref(tile)),
             listening: true,

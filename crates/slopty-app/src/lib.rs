@@ -531,6 +531,10 @@ pub struct Workspace {
     motion_watch: Option<slopty_platform::motion::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
+    /// The person leaving this Mac: its lock, its sleep, another session
+    /// (`Workspace::watch_leaving`).
+    #[cfg(target_os = "macos")]
+    leaving_watch: Option<slopty_platform::away::Watch>,
     adding: Option<Adding>,
     /// The code a phone or iPad scans for the server, while it is up.
     inviting: Option<invite::Invite>,
@@ -678,7 +682,11 @@ impl Workspace {
         let this_mac = this_mac::native(&runtime);
         let dial = network_dialer(runtime.clone());
         let deployer = ssh::native(&runtime);
-        let this = Self {
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_mut, reason = "only a Mac watches the person leave")
+        )]
+        let mut this = Self {
             workers: Vec::new(),
             key_target: None,
             foot_drawn: false,
@@ -698,6 +706,8 @@ impl Workspace {
             window_subscriptions: Vec::new(),
             motion_watch: None,
             resume_watch: None,
+            #[cfg(target_os = "macos")]
+            leaving_watch: None,
             adding: None,
             inviting: None,
             runtime,
@@ -737,6 +747,8 @@ impl Workspace {
         this.repoint_this_mac(cx);
         this.ask_this_mac_worker(cx);
         Self::watch_presence(cx);
+        #[cfg(target_os = "macos")]
+        this.watch_leaving(cx);
         #[cfg(target_os = "ios")]
         Self::watch_push_tokens(cx);
         this
@@ -845,6 +857,9 @@ impl Workspace {
             };
             self.listen_while(active, cx);
             self.tell_phone(cx);
+            if active && self.server_caller().is_some() {
+                Self::look_at_notes(cx);
+            }
         }
     }
 
@@ -4367,7 +4382,14 @@ fn watch_resumes(
     let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         while let Some(resume) = rx.recv().await {
-            if workspace.update(cx, |ws, _cx| ws.resume(resume)).is_err() {
+            #[cfg(target_os = "macos")]
+            let heard = workspace.update(cx, |ws, cx| {
+                ws.resume(resume);
+                ws.person_back(resume, cx);
+            });
+            #[cfg(not(target_os = "macos"))]
+            let heard = workspace.update(cx, |ws, _cx| ws.resume(resume));
+            if heard.is_err() {
                 return;
             }
         }

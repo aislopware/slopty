@@ -657,6 +657,7 @@ impl WorkspaceView {
         if snapshot {
             self.first_snapshot(key, cx);
             self.reopen_kept(key, cx);
+            self.run_parked_tap(key, cx);
         }
     }
 

@@ -8,7 +8,15 @@
 //! takes that back instead: a pushed note would not show either. Just before the background
 //! grace runs out, it says it no longer listens ([`until_deaf`]), so the server pushes what it
 //! would have sent on the link, and the app posts none of it.
+//!
+//! Nothing on iOS asks for notes by itself until the first note is posted, and that happens
+//! only away from the front, so a new phone would never be pushed to. Once its server link is
+//! up, and on each return to the front, the phone reads whether notes reach the person and its
+//! navigator says so while they do not (`Workspace::look_at_notes`): never asked, its line
+//! asks, and the answer goes to the server at once; turned off, it opens the system's settings.
 
+#[cfg(target_os = "ios")]
+use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(target_os = "ios")]
@@ -70,6 +78,8 @@ pub(crate) struct Pushing {
     me: Option<(slopty_core::ClientId, [u8; 32])>,
     /// The clock that stops the phone listening near the grace's end, while the app is away.
     ending: Option<gpui::Task<()>>,
+    /// The system's question about notes is up: a second press waits for its answer.
+    asking: bool,
 }
 
 #[cfg(target_os = "ios")]
@@ -116,6 +126,47 @@ impl Workspace {
             let alerts = slopty_platform::notify::settings().await;
             let token = slopty_platform::notify::pushed::tokens().borrow().clone();
             caller.push_device(client, device(token.as_deref(), alerts, key, quiet));
+        })
+        .detach();
+    }
+
+    /// Read whether notes reach the person, and have the navigator say so while they do not:
+    /// once the server link is up, and on each return to the front, since the person may have
+    /// turned them on or off in Settings meanwhile.
+    pub(crate) fn look_at_notes(cx: &Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let alerts = slopty_platform::notify::settings().await;
+            let _gone = this.update(cx, |ws, cx| ws.show_notes(alerts, cx));
+        })
+        .detach();
+    }
+
+    /// The navigator's line for notes that stand at `alerts`, and its door.
+    fn show_notes(&self, alerts: Alerts, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let door: crate::MenuRun = Rc::new(move |_window, cx| {
+            let _gone = this.update(cx, |ws, cx| match alerts {
+                Alerts::Unasked => ws.ask_phone_notes(cx),
+                Alerts::Denied => slopty_platform::notify::open_settings(),
+                Alerts::Allowed | Alerts::Unavailable => {}
+            });
+        });
+        self.view.update(cx, |v, cx| v.set_notes(alerts, door, cx));
+    }
+
+    /// The navigator's "Allow": the system's question, once while it is up, then the answer
+    /// to the navigator and the server, which may push to this phone from now on.
+    fn ask_phone_notes(&mut self, cx: &Context<Self>) {
+        if std::mem::replace(&mut self.pushing.asking, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let alerts = slopty_platform::notify::ask().await;
+            let _gone = this.update(cx, |ws, cx| {
+                ws.pushing.asking = false;
+                ws.show_notes(alerts, cx);
+                ws.tell_phone(cx);
+            });
         })
         .detach();
     }
