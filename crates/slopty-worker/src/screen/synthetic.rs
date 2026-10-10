@@ -451,7 +451,7 @@ impl<const HZ: u16, const W: u16, const H: u16> CaptureSource for StudioAt<HZ, W
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -1119,9 +1119,11 @@ mod tests {
     /// [`STALLED`] without a picture fails with what both ends saw (`what` says where the test
     /// was), unless the machine is what held the picture up. That is a frame inside
     /// VideoToolbox, being coded on the worker or decoded on the client (on a starved machine
-    /// one keyframe at 756 × 492 has taken 12 s there), or a side that did not run at all over
-    /// the wait: a worker that captured nothing, or a client task that read nothing or has not
-    /// reported lately (`ScreenStats::reported_at`), which
+    /// one keyframe at 756 × 492 has taken 12 s there), an encoder the system took away, whose
+    /// replacements wait longer each time one codes nothing (a hosted virtual Mac's
+    /// VideoToolbox stops this way, `docs/decisions/video.md`), or a side that did not run at all
+    /// over the wait: a worker that captured nothing, or a client task that read nothing or has
+    /// not reported lately (`ScreenStats::reported_at`), which
     /// it does every 50 ms while it runs: a task that stopped just after a report still counts
     /// the datagrams it read before it. Waiting on the machine is
     /// the runner's to time out; a stream whose two sides ran and still sent no picture has
@@ -1171,15 +1173,21 @@ mod tests {
                         "a frame being coded in VideoToolbox"
                     } else if client.decoding > 0 {
                         "frames being decoded in VideoToolbox"
+                    } else if stream.shared.encoder_down() {
+                        "a worker whose encoder session the system took away, rebuilt as its retry allows"
                     } else if !captured {
                         "a worker that captured nothing"
                     } else if !reported {
                         "a client task that reported nothing"
                     } else {
+                        let worker = stream.stats();
                         panic!(
-                            "no picture for {STALLED:?} {}, both sides running and none inside VideoToolbox: client {client:?}, worker {:?}",
+                            "no picture for {STALLED:?} {}, both sides running and none inside VideoToolbox: the client asked {} refresh(es) after {} decode error(s), the worker heard {} and deferred {} keyframe(s): client {client:?}, worker {worker:?}",
                             what(),
-                            stream.stats()
+                            client.refreshes,
+                            client.decode_errors,
+                            worker.refreshes,
+                            worker.keyframes_deferred,
                         );
                     };
                     eprintln!(
@@ -1459,7 +1467,7 @@ mod tests {
     const TAKEN_REBUILD: Duration = Duration::from_millis(200);
 
     /// Sessions built for [`Malfunctioning`].
-    static TAKEN_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static TAKEN_BUILT: AtomicU32 = AtomicU32::new(0);
 
     /// VideoToolbox, the first session of which answers every frame from its
     /// [`TAKEN_AFTER`]th on as the codec answers for a session the system took away.
@@ -1467,7 +1475,7 @@ mod tests {
         session: slopty_codec::VideoToolbox,
         /// Frames it codes before it is taken away; `None` for one that keeps coding.
         lasts: Option<u32>,
-        frames: std::sync::atomic::AtomicU32,
+        frames: AtomicU32,
     }
 
     impl slopty_codec::VideoEncoder for TakenAway {
@@ -1606,7 +1614,7 @@ mod tests {
     }
 
     /// Sessions built for [`NoEncoder`].
-    static UNAVAILABLE_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static UNAVAILABLE_BUILT: AtomicU32 = AtomicU32::new(0);
 
     /// A VideoToolbox session that takes its settings but answers every frame with
     /// `kVTVideoEncoderNotAvailableNowErr`, as every session did on a virtual Mac whose encoder
@@ -1696,7 +1704,7 @@ mod tests {
     const WEDGED_AT: u32 = 20;
 
     /// Sessions built for [`Wedging`].
-    static WEDGED_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static WEDGED_BUILT: AtomicU32 = AtomicU32::new(0);
 
     /// When the submit that does not come back went in.
     static WEDGED_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
@@ -1726,7 +1734,7 @@ mod tests {
     struct Wedged {
         session: slopty_codec::VideoToolbox,
         wedges: bool,
-        frames: std::sync::atomic::AtomicU32,
+        frames: AtomicU32,
         /// The turn under way: its place in [`TURNS`].
         turn: Mutex<Option<usize>>,
     }
@@ -1907,23 +1915,61 @@ mod tests {
 
     /// The worker's end of the link with one frame's bitstream garbled on the way: every data
     /// fragment of frame `frame` has its back half flipped, so it arrives whole and fails to
-    /// decode.
+    /// decode. With `drop_answer`, the first frame after it that restarts decoding (the refresh's
+    /// answer, a keyframe or an LTR refresh) is lost whole, its data, parity and retransmissions
+    /// alike, as a congested link loses it.
     struct Garble {
         wire: Wire,
         frame: u32,
-        garbled: std::sync::atomic::AtomicU32,
+        garbled: AtomicU32,
+        drop_answer: bool,
+        /// The answer dropped, once one went by; 0 before.
+        answer: AtomicU32,
+        /// Its datagrams dropped.
+        dropped: AtomicU32,
+    }
+
+    impl Garble {
+        fn new(wire: Wire, frame: u32, drop_answer: bool) -> Self {
+            let (garbled, answer, dropped) = (0.into(), 0.into(), 0.into());
+            Self { wire, frame, garbled, drop_answer, answer, dropped }
+        }
+
+        /// Whether `header`'s datagram belongs to the refresh's answer, which goes nowhere.
+        fn drops(&self, header: &slopty_proto::media::MediaHeader) -> bool {
+            use slopty_proto::media::{Kind, flags};
+            let video = matches!(header.kind(), Some(Kind::VideoData | Kind::VideoParity));
+            let restarts = header.flags & (flags::KEYFRAME | flags::LTR_REFRESH) != 0;
+            let frame = header.frame.get();
+            if !self.drop_answer || !video || frame <= self.frame {
+                return false;
+            }
+            let first = restarts
+                && self
+                    .answer
+                    .compare_exchange(0, frame, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok();
+            let dropped = first || self.answer.load(Ordering::Relaxed) == frame;
+            if dropped {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            dropped
+        }
     }
 
     impl DatagramSink for Garble {
         fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
             let garble = |datagram: &Bytes| {
                 let header = slopty_proto::media::MediaHeader::parse(datagram).map(|(h, _)| *h);
+                if header.is_some_and(|h| self.drops(&h)) {
+                    return None;
+                }
                 let ours = header.is_some_and(|h| {
                     h.kind() == Some(slopty_proto::media::Kind::VideoData)
                         && h.frame.get() == self.frame
                 });
                 if !ours {
-                    return datagram.clone();
+                    return Some(datagram.clone());
                 }
                 self.garbled.fetch_add(1, Ordering::Relaxed);
                 let mut bytes = datagram.to_vec();
@@ -1931,9 +1977,9 @@ mod tests {
                 for byte in bytes.iter_mut().skip(half) {
                     *byte ^= 0x5a;
                 }
-                Bytes::from(bytes)
+                Some(Bytes::from(bytes))
             };
-            let datagrams: Vec<Bytes> = datagrams.iter().map(garble).collect();
+            let datagrams: Vec<Bytes> = datagrams.iter().filter_map(garble).collect();
             self.wire.send(&datagrams)
         }
 
@@ -1960,12 +2006,33 @@ mod tests {
     /// fails on it, the client asks, and a hundred pictures come after it.
     #[test]
     fn a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on() {
+        let (garble, client) = refreshed(false);
+        assert!(garble.garbled.load(Ordering::Relaxed) > 0, "frame 20 went by: {client:?}");
+        assert!(client.refreshes > 0, "the failure asked for a refresh: {client:?}");
+        assert!(client.decode_failure.is_some(), "VideoToolbox named it: {client:?}");
+    }
+
+    /// A refresh whose answer is lost on the way is asked for again: the frame that would have
+    /// restarted decoding after the garbled one never arrives ([`Garble::drop_answer`]), and the
+    /// client asks once more, so the pictures go on rather than freezing on the last good one.
+    #[test]
+    fn a_refresh_whose_answer_is_lost_is_asked_for_again() {
+        let (garble, client) = refreshed(true);
+        let answer = garble.answer.load(Ordering::Relaxed);
+        assert!(answer > 20, "an answer to the refresh went by and was dropped: {client:?}");
+        assert!(garble.dropped.load(Ordering::Relaxed) > 0, "{client:?}");
+        assert!(client.refreshes >= 2, "asked again after the answer was lost: {client:?}");
+    }
+
+    /// The drawn screen streamed through [`Garble`] (`drop_answer` as given) until a hundred
+    /// pictures came after the decode failure; the link's end and what the client counted.
+    fn refreshed(drop_answer: bool) -> (Arc<Garble>, slopty_client::screen::ScreenStats) {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
             let router = ScreenRouter::new();
             let wire = Wire::new(router.clone(), None, None);
-            let garble = Arc::new(Garble { wire, frame: 20, garbled: 0.into() });
+            let garble = Arc::new(Garble::new(wire, 20, drop_answer));
             let quality = Quality { scale: 0.25, ..Quality::default() };
             let (mut stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
@@ -1993,7 +2060,13 @@ mod tests {
             let mut frames = handle.frames();
             let (mut pictures, mut after) = (0_u32, 0_u32);
             while after < 100 {
-                let what = || format!("after {pictures} pictures, {after} since the failure");
+                let what = || {
+                    let dropped = garble.dropped.load(Ordering::Relaxed);
+                    format!(
+                        "after {pictures} pictures, {after} since the failure, {dropped} datagrams \
+                         of the refresh's answer dropped"
+                    )
+                };
                 let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
                 assert!(next, "the client's stream ended");
                 pictures += 1;
@@ -2003,19 +2076,19 @@ mod tests {
             }
             let client = handle.stats();
             eprintln!(
-                "garbled {} datagrams of frame 20: {} decode error(s), status {:?}, {} refresh(es), {pictures} pictures",
+                "garbled {} datagrams of frame 20, dropped {} of its answer: {} decode error(s), \
+                 status {:?}, {} refresh(es), {pictures} pictures",
                 garble.garbled.load(Ordering::Relaxed),
+                garble.dropped.load(Ordering::Relaxed),
                 client.decode_errors,
                 client.decode_failure,
                 client.refreshes
             );
-            assert!(garble.garbled.load(Ordering::Relaxed) > 0, "frame 20 went by: {client:?}");
-            assert!(client.refreshes > 0, "the failure asked for a refresh: {client:?}");
-            assert!(client.decode_failure.is_some(), "VideoToolbox named it: {client:?}");
             drop(handle);
             drain.abort();
             stream.close().await;
-        });
+            (garble, client)
+        })
     }
 
     /// `SLOPTY_SYNTHETIC_SCREEN=1` and nothing else turns the drawn screen on.

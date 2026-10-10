@@ -2823,6 +2823,17 @@ impl<P: Platform> Shared<P> {
             .then(|| (if stuck.seen == inside { stuck.charged_us } else { 0 }, stuck.patience_us))
     }
 
+    /// Whether the encoder holds the stream up: the session in force is one the system took
+    /// away ([`CodecError::EncoderLost`]), whose replacement waits as [`LostRetry`] allows, or
+    /// none is in force since one was given up on inside the encoder ([`Self::unstick`]). The
+    /// synthetic platform's tests read it, which only macOS builds.
+    #[cfg(all(test, target_os = "macos"))]
+    fn encoder_down(&self) -> bool {
+        let lost = self.encoder_lost.load(Ordering::Relaxed);
+        let top = self.top.session.load(Ordering::Relaxed);
+        top == 0 || (lost != 0 && top == lost)
+    }
+
     /// The beat's look at a lost session still in force at `now`: once its replacement may be
     /// built ([`LostRetry`]), the geometry tick is woken for it, once for each moment.
     fn retry_lost(&self, now: u64) {
