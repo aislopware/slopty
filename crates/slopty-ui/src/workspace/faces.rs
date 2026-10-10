@@ -728,12 +728,20 @@ impl WorkspaceView {
                 this.worktree_heard(key, repo, cx);
                 this.scripts_heard(key, repo, cx);
             }
+            HubEvent::Drafted => this.drafts_changed(cx),
             _ => {}
         });
+        let kept = self.drafts.commits_on(key);
+        hub.update(cx, |hub, _cx| hub.restore_commit_drafts(kept));
         self.faces.threads.hearing.insert(key, hearing);
         self.faces.threads.hubs.insert(key, hub.clone());
         self.hub_agents(key, cx);
         hub
+    }
+
+    /// Every worker's hub made so far.
+    pub(super) fn thread_hubs(&self) -> Vec<(WorkerKey, Entity<ThreadHub>)> {
+        self.faces.threads.hubs.iter().map(|(k, h)| (*k, h.clone())).collect()
     }
 
     /// What `key` found in its threads for the words its hub last asked, or the palette did.

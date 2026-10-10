@@ -30,6 +30,7 @@ use slopty_proto::thread::wire::{
 use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId};
 use slopty_proto::{ClientMsg, RequestId};
 
+use super::commit::CommitDraft;
 use super::git::GitBook;
 
 /// How long a thread rests before what it is now is kept on disk: a busy one is written once
@@ -65,6 +66,8 @@ pub enum HubEvent {
     Thread(ThreadId),
     /// The table changed.
     Table,
+    /// A commit sheet's unsent words changed ([`ThreadHub::set_commit_draft`]).
+    Drafted,
     /// The whole of some clipped content came.
     Expanded(ContentRef),
     /// `thread`'s review came.
@@ -135,6 +138,10 @@ pub struct ThreadHub {
     seeds: HashMap<IntentId, String>,
     /// The same, by the thread it started, until a view takes them.
     seeded: HashMap<ThreadId, String>,
+    /// What the commit sheets of this worker's repositories hold unsent, by the folder each
+    /// works: a sheet closed and opened again takes its words back, and the workspace keeps
+    /// them across a launch.
+    commit_drafts: HashMap<String, CommitDraft>,
 }
 
 impl std::fmt::Debug for ThreadHub {
@@ -170,6 +177,7 @@ impl ThreadHub {
             searched: None,
             seeds: HashMap::new(),
             seeded: HashMap::new(),
+            commit_drafts: HashMap::new(),
         }
     }
 
@@ -536,6 +544,37 @@ impl ThreadHub {
         if let Some(msg) = self.threads.page(thread, PAGE_TURNS) {
             cx.emit(HubEvent::Send(vec![msg]));
         }
+    }
+
+    /// What the commit sheet of the repository holding `repo` holds unsent.
+    #[must_use]
+    pub fn commit_draft(&self, repo: &str) -> Option<&CommitDraft> {
+        self.commit_drafts.get(repo)
+    }
+
+    /// Every commit sheet's unsent words, by folder.
+    pub fn commit_drafts(&self) -> impl Iterator<Item = (&String, &CommitDraft)> {
+        self.commit_drafts.iter()
+    }
+
+    /// Keep `draft` as what the commit sheet of `repo` holds unsent; an empty one lets it go.
+    pub fn set_commit_draft(&mut self, repo: &str, draft: CommitDraft, cx: &mut Context<Self>) {
+        let changed = if draft.is_empty() {
+            self.commit_drafts.remove(repo).is_some()
+        } else {
+            self.commit_drafts.insert(repo.to_owned(), draft.clone()) != Some(draft)
+        };
+        if changed {
+            cx.emit(HubEvent::Drafted);
+        }
+    }
+
+    /// Take back what a previous launch kept unsent in this worker's commit sheets.
+    pub fn restore_commit_drafts(
+        &mut self,
+        drafts: impl IntoIterator<Item = (String, CommitDraft)>,
+    ) {
+        self.commit_drafts.extend(drafts.into_iter().filter(|(_, d)| !d.is_empty()));
     }
 
     /// Ask what `thread` changed over `scope`.

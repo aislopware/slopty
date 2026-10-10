@@ -48,7 +48,9 @@ pub(super) type Openings = VecDeque<(RequestId, Opening)>;
 impl WorkspaceView {
     /// ⌘T: an agent's composer in a tab of its own, on the focused tile's machine (or the one
     /// "+" chose) and in its folder, else where that machine last worked. The agent is the
-    /// one last started there, else the first it offers.
+    /// one last started there, else the first it offers. It starts in a new worktree when the
+    /// last start on that machine, in the same repository, chose one ([`Self::worktree_again`]).
+    /// The draft's place chip shows it and takes it back.
     pub(super) fn start_agent(
         &mut self,
         _: &StartAgent,
@@ -68,7 +70,18 @@ impl WorkspaceView {
                 self.recent_places(Some(&agent), cx).into_iter().find(|p| p.worker == worker);
             latest.map_or_else(|| "~".to_owned(), |p| p.cwd)
         });
-        self.begin_start(StartThread { worker, agent, cwd, worktree: false }, window, cx);
+        let worktree = self.worktree_again(worker, &cwd, cx);
+        self.begin_start(StartThread { worker, agent, cwd, worktree }, window, cx);
+    }
+
+    /// Whether a start at `cwd` on `worker` goes in a new worktree as the person's last one
+    /// there did: that start made one, from the same repository `cwd` is in.
+    fn worktree_again(&self, worker: WorkerKey, cwd: &str, cx: &App) -> bool {
+        let Some(last) = self.starts.last().filter(|l| l.worktree && l.worker == worker) else {
+            return false;
+        };
+        let repo = self.repo_at(worker, cwd, cx);
+        repo.is_some() && repo == self.repo_at(worker, &last.cwd, cx)
     }
 
     /// ⌘D: a shell in a pane of its own right of the focused one, in its folder.

@@ -1,6 +1,7 @@
 //! What the person wrote and has not sent, kept on this device so a quit, a crash or iOS ending
 //! a suspended app loses none of it: a thread's composer, a start's first message, a review's
-//! comments and the files marked viewed in it.
+//! comments and the files marked viewed in it, and a commit sheet's message and pull request
+//! words (held by each worker's hub while the app runs, by machine and folder).
 //!
 //! One store, one file (`drafts.json` beside the layout), replaced whole by
 //! `slopty_platform::fs::replace`, so a crash mid-write leaves the one before. It holds every
@@ -26,6 +27,7 @@ use slopty_core::WallMs;
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
+use crate::conversation::thread::commit::CommitDraft;
 use crate::review::model::Comment;
 
 /// How long after the last change a pass writes the drafts.
@@ -77,12 +79,22 @@ struct KeptReview {
     kept_ms: WallMs,
 }
 
+/// A commit sheet's words, by the machine and folder it works.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+struct KeptCommit {
+    worker: String,
+    repo: String,
+    draft: CommitDraft,
+    kept_ms: WallMs,
+}
+
 /// The file's contents.
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 struct Held {
     threads: Vec<ThreadDraft>,
     starts: Vec<StartDraft>,
     reviews: Vec<KeptReview>,
+    commits: Vec<KeptCommit>,
 }
 
 /// What a review tile reviews, as the store keys it: a thread, or a folder on a machine.
@@ -168,6 +180,35 @@ impl Drafts {
         }
     }
 
+    /// The commit sheets' words kept for `worker`, by folder.
+    pub(super) fn commits_on(&self, worker: WorkerKey) -> Vec<(String, CommitDraft)> {
+        let worker = worker.to_string();
+        let kept = self.held.commits.iter().filter(|c| c.worker == worker);
+        kept.map(|c| (c.repo.clone(), c.draft.clone())).collect()
+    }
+
+    /// Keep `drafts` as every commit sheet's words on `worker`, in place of what was kept;
+    /// an unchanged one keeps its time.
+    pub(super) fn set_commits<'a>(
+        &mut self,
+        worker: WorkerKey,
+        drafts: impl IntoIterator<Item = (&'a String, &'a CommitDraft)>,
+        now: WallMs,
+    ) {
+        let worker = worker.to_string();
+        let (mine, others): (Vec<KeptCommit>, Vec<KeptCommit>) =
+            std::mem::take(&mut self.held.commits).into_iter().partition(|c| c.worker == worker);
+        self.held.commits = others;
+        for (repo, draft) in drafts.into_iter().filter(|(_, d)| !d.is_empty()) {
+            let kept_ms = mine
+                .iter()
+                .find(|c| c.repo == *repo && c.draft == *draft)
+                .map_or(now, |c| c.kept_ms);
+            let (repo, draft) = (repo.clone(), draft.clone());
+            self.held.commits.push(KeptCommit { worker: worker.clone(), repo, draft, kept_ms });
+        }
+    }
+
     /// Read what `path` holds, all but what is older than [`KEPT_FOR`]; nothing when it is
     /// absent or unreadable, which only loses what it held.
     fn read(path: &Path, now: WallMs) -> Held {
@@ -184,6 +225,7 @@ impl Drafts {
         held.threads.retain(|d| fresh(d.kept_ms));
         held.starts.retain(|d| fresh(d.kept_ms));
         held.reviews.retain(|d| fresh(d.kept_ms));
+        held.commits.retain(|d| fresh(d.kept_ms));
         held
     }
 }
@@ -272,6 +314,9 @@ impl WorkspaceView {
         for (of, draft) in self.review_drafts(cx) {
             self.drafts.set_review(&of, draft, now);
         }
+        for (key, hub) in self.thread_hubs() {
+            self.drafts.set_commits(key, hub.read(cx).commit_drafts(), now);
+        }
     }
 }
 
@@ -280,9 +325,10 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{AgentId, ThreadId};
 
-    use super::{Drafts, Held, KEPT_FOR, ReviewDraft, write};
+    use super::{CommitDraft, Drafts, Held, KEPT_FOR, ReviewDraft, write};
 
-    /// A thread's, a start's and a review's drafts go to the file and come back; an empty one
+    /// A thread's, a start's, a review's and a commit sheet's drafts go to the file and come
+    /// back; an empty one
     /// leaves nothing, and one kept too long ago is let go as the file is read.
     #[test]
     fn drafts_come_back_and_old_ones_go() {
@@ -298,6 +344,10 @@ mod tests {
         let review = ReviewDraft { comments: Vec::new(), viewed: vec![("a.rs".to_owned(), None)] };
         drafts.set_review("thread:x", review.clone(), now);
         drafts.set_thread(ThreadId::new(), "  ", now);
+        let words = CommitDraft { message: "Fix the hook".to_owned(), ..CommitDraft::default() };
+        let held = [("/w".to_owned(), words.clone()), ("/v".to_owned(), CommitDraft::default())];
+        drafts.set_commits(worker, held.iter().map(|(r, d)| (r, d)), now);
+        assert_eq!(drafts.held.commits.len(), 1, "an empty sheet leaves nothing");
         assert_eq!(drafts.held.threads.len(), 1, "an empty composer leaves nothing");
         write(&path, &serde_json::to_vec(&drafts.held).unwrap()).unwrap();
 
@@ -305,6 +355,7 @@ mod tests {
         assert_eq!(back.thread(thread), Some("Half a thought"));
         assert_eq!(back.start(worker, &agent, "~/code"), Some("Fix the build"));
         assert_eq!(back.review("thread:x"), Some(&review));
+        assert_eq!(back.commits_on(worker), [("/w".to_owned(), words)], "a commit sheet's words");
         let later = WallMs::from_millis(now.as_millis().saturating_mul(2).saturating_add(1));
         assert_eq!(Drafts::read(&path, later), Held::default(), "kept too long ago");
         let mode = std::fs::metadata(&path).map(|m| {

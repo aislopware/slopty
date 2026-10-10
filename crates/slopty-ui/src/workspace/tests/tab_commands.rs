@@ -71,6 +71,63 @@ fn cmd_t_starts_an_agent_in_a_tab_of_its_own_where_the_focus_works(cx: &mut Test
     assert!(said.starts_with("The agent did not open: studio is"), "{said}");
 }
 
+/// ⌘T starts in a new worktree when the last start on that machine, in the same repository,
+/// chose one; in a folder of another repository, or after a start in place, it starts where
+/// the focus works.
+#[gpui::test]
+fn cmd_t_keeps_the_last_starts_worktree_choice(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let key = fake.key;
+    let shell_in_repo = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, cwd: &str, n| {
+        let session = SessionId::new();
+        let mut opened = summary(session, Some(cwd));
+        opened.repo = Some(cwd.to_owned());
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            name: None,
+            facts: BTreeMap::new(),
+        };
+        let tile = TileRef { worker: key, item: item.id };
+        view.update_in(cx, |v, _w, cx| {
+            v.session_opened(key, opened, cx);
+            v.apply_sync(
+                key,
+                ItemSync::Delta { version: n, by: fake.me, op: ItemOp::Add(item) },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        tile
+    };
+    let app = shell_in_repo(&view, cx, "/src/app", 1);
+    let other = shell_in_repo(&view, cx, "/src/other", 2);
+    let went = |cwd: &str, worktree| slopty_client::starts::LastStart {
+        agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
+        worker: key,
+        cwd: cwd.to_owned(),
+        worktree,
+        at: WallMs::ZERO,
+    };
+    let start_from = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile| {
+        view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-t");
+        cx.run_until_parked();
+        let start = focused(view, cx).expect("the start has the focus");
+        view.read_with(cx, |v, _| v.starting.get(start.item).map(|s| s.worktree)).expect("a start")
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_worker_caps(key, healthy(), cx);
+        v.start_went(went("/src/app", true), None, cx);
+    });
+    assert!(start_from(&view, cx, app), "a new worktree, as the last start chose");
+    assert!(!start_from(&view, cx, other), "another repository starts where it works");
+    view.update_in(cx, |v, _w, cx| v.start_went(went("/src/app", false), None, cx));
+    assert!(!start_from(&view, cx, app), "after a start in place, in place");
+}
+
 /// "Other tabs…" and "Close other tabs" are offered only while the project on show has two
 /// tabs or more. The first lists them by their focused work, the one on show ticked, and a
 /// line picked shows its tab; the second closes every tab but the one on show and leaves the

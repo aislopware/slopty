@@ -1,8 +1,11 @@
 //! The commit sheet: the repository a thread works in, as the person commits, pushes and opens
 //! or merges its branch's pull request, from the thread's tile or its review's.
 //!
-//! It opens on the changed files, every one ticked, and an empty message: a commit takes the
-//! person's words, so nothing is suggested. On a thread's sheet the agent can be asked to commit
+//! It opens on the changed files and an empty message: a commit takes the person's words, so
+//! nothing is suggested. A thread's sheet ticks only the files its agent changed, as the thread's
+//! review over all its turns names them, so another thread's work in the same checkout is not
+//! swept into it; the rest are listed unticked. A folder's sheet, or a thread whose review cannot
+//! tell, ticks every one. On a thread's sheet the agent can be asked to commit
 //! instead ("Ask `<agent>` to commit"): it knows why it changed what it did. The ask is one
 //! message through its own door, after its turn, and the sheet reads the repository again once
 //! the turn it went into ends. Slopty writes no message itself and calls no model. Over the files
@@ -11,10 +14,13 @@
 //! gh said when it refused is shown in its own words, in the code face, under the buttons.
 //!
 //! It is drawn over its tile on a scrim of the tile alone, so the rest of the workspace stays
-//! in reach. Its state is the hub's ([`super::git::GitBook`]): two tiles on one repository show
-//! one answer.
+//! in reach. What the person writes in it (the message, a pull request's title and description)
+//! is kept as they type, on the worker's hub and in the drafts file ([`CommitDraft`]), so a sheet
+//! closed and opened again, or the app relaunched, takes it back. A press on the scrim or Esc
+//! closes it only while it holds no words; Close always does, the words kept. Its state is the
+//! hub's ([`super::git::GitBook`]): two tiles on one repository show one answer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::rc::Rc;
 
@@ -33,7 +39,7 @@ use slopty_proto::RequestId;
 use slopty_proto::git::{
     CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStanding, PullStatus,
 };
-use slopty_proto::thread::wire::{Intent, PullSeen};
+use slopty_proto::thread::wire::{Intent, PullSeen, Review, ReviewScope};
 use slopty_proto::thread::{Cap, Delivery, IntentId, Liveness, ThreadId, TurnState};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -80,6 +86,55 @@ pub enum CommitEvent {
     EndAndRemove(String),
 }
 
+/// What a commit sheet holds unsent.
+#[derive(Clone, Default, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct CommitDraft {
+    /// The commit's message.
+    pub message: String,
+    /// A pull request's title.
+    pub title: String,
+    /// Its description.
+    pub body: String,
+}
+
+impl CommitDraft {
+    /// Whether it holds no words.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        [&self.message, &self.title, &self.body].iter().all(|t| t.trim().is_empty())
+    }
+}
+
+/// Which of the changed files are the thread's own: ticked as the sheet opens.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Own {
+    /// Every one: a folder's sheet, or a thread whose review could not tell.
+    All,
+    /// The thread's review over this span is asked; none until it comes.
+    Waiting(ReviewScope),
+    /// These paths, from the repository's root.
+    Files(HashSet<String>),
+}
+
+impl Own {
+    /// What `review` names: each file by its path, and a renamed one by its old path too.
+    fn of(review: &Review) -> Self {
+        if review.absent.is_some() {
+            return Self::All;
+        }
+        let paths = review.files.iter().flat_map(|f| f.old_path.iter().chain([&f.path]));
+        Self::Files(paths.cloned().collect())
+    }
+
+    fn has(&self, path: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Waiting(_) => false,
+            Self::Files(own) => own.contains(path),
+        }
+    }
+}
+
 /// Which face the sheet shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Page {
@@ -101,13 +156,17 @@ pub struct CommitSheet {
     body: Entity<TextareaState>,
     base: Entity<InputState>,
     draft: bool,
-    /// Files the person unticked, by path: every other one goes in the commit.
-    unticked: HashSet<String>,
+    /// Which files are the thread's own, ticked unless the person says otherwise.
+    own: Own,
+    /// The person's own ticks, by path, over what [`Self::own`] says.
+    picked: HashMap<String, bool>,
     method: Method,
     methods_open: bool,
     delete_branch: bool,
     /// The commit this sheet asked for: its message goes once it is made.
     committing: Option<RequestId>,
+    /// Why that commit did not go, in git's words, until the next one is asked.
+    commit_failed: Option<String>,
     /// The thread whose agent "Ask `<agent>` to commit" asks; none for a folder's.
     ask: Option<ThreadId>,
     /// The agent's ask, until the turn it went into ends.
@@ -155,14 +214,21 @@ impl CommitSheet {
             cx.subscribe_in(&hub, window, move |this, _hub, event, window, cx| match event {
                 HubEvent::Git(r) if *r == watched => this.heard(window, cx),
                 HubEvent::Thread(t) if this.ask == Some(*t) => this.ask_moved(cx),
+                HubEvent::Review(t) if this.ask == Some(*t) => this.own_reviewed(cx),
                 HubEvent::Table => this.row_moved(cx),
                 _ => {}
             });
         let typing = [
-            cx.observe(&message, |_, _, cx| cx.notify()),
-            cx.observe(&title, |_, _, cx| cx.notify()),
-            cx.observe(&body, |_, _, cx| cx.notify()),
+            cx.observe(&message, |this, _, cx| this.typed(cx)),
+            cx.observe(&title, |this, _, cx| this.typed(cx)),
+            cx.observe(&body, |this, _, cx| this.typed(cx)),
         ];
+        let kept = hub.read(cx).commit_draft(&repo).cloned();
+        if let Some(kept) = kept {
+            message.update(cx, |m, cx| m.set_value(&kept.message, window, cx));
+            title.update(cx, |t, cx| t.set_value(&kept.title, window, cx));
+            body.update(cx, |b, cx| b.set_value(&kept.body, window, cx));
+        }
         let sheet = Self {
             hub,
             repo,
@@ -173,11 +239,13 @@ impl CommitSheet {
             body,
             base,
             draft: false,
-            unticked: HashSet::new(),
+            own: Own::All,
+            picked: HashMap::new(),
             method: Method::default(),
             methods_open: false,
             delete_branch: true,
             committing: None,
+            commit_failed: None,
             ask: None,
             asked: None,
             ask_refused: None,
@@ -191,12 +259,25 @@ impl CommitSheet {
     }
 
     /// The sheet of `thread`'s repository, its agent offered the commit, its row's pull
-    /// request followed.
+    /// request followed, and only the files its review over all its turns names ticked: that
+    /// review is asked now, and nothing is ticked until it comes.
     #[must_use]
-    pub fn asking(mut self, thread: ThreadId, cx: &App) -> Self {
+    pub fn asking(mut self, thread: ThreadId, cx: &mut Context<Self>) -> Self {
         self.ask = Some(thread);
-        self.pull_seen =
-            self.hub.read(cx).threads().rows().rows.get(&thread).and_then(|r| r.pull.clone());
+        let hub = self.hub.read(cx);
+        self.pull_seen = hub.threads().rows().rows.get(&thread).and_then(|r| r.pull.clone());
+        let first = hub.threads().mirror(thread).and_then(Mirror::state).map(|state| {
+            state.turns.iter().map(|t| t.id).find(|t| *t != slopty_proto::thread::TurnId::BEFORE)
+        });
+        self.own = match first {
+            // A thread not read yet, or one that has run no turn: nothing of its own.
+            None | Some(None) => Own::Files(HashSet::new()),
+            Some(Some(first)) => {
+                let scope = ReviewScope::Since(first);
+                self.hub.update(cx, |hub, cx| hub.ask_review(thread, scope.clone(), cx));
+                Own::Waiting(scope)
+            }
+        };
         self
     }
 
@@ -236,6 +317,11 @@ impl CommitSheet {
         if let Some((request, said)) = said {
             if Some(request) == self.committing {
                 self.committing = None;
+                self.commit_failed = match &said {
+                    Said::Refused { why } => Some(why.clone()),
+                    Said::Failed { said } => Some(said.clone()),
+                    _ => None,
+                };
                 if matches!(said, Said::Committed { .. }) {
                     self.message.update(cx, |m, cx| m.set_value("", window, cx));
                 }
@@ -253,8 +339,7 @@ impl CommitSheet {
             .and_then(|r| r.status.as_deref())
             .map(|s| s.files.iter().map(|f| f.path.as_str()).collect())
             .unwrap_or_default();
-        let unticked = std::mem::take(&mut self.unticked);
-        self.unticked = unticked.into_iter().filter(|p| present.contains(p.as_str())).collect();
+        self.picked.retain(|p, _| present.contains(p.as_str()));
         cx.notify();
     }
 
@@ -265,25 +350,35 @@ impl CommitSheet {
         status
             .files
             .iter()
-            .filter(|f| !self.unticked.contains(&f.path))
+            .filter(|f| self.ticked(&f.path))
             .flat_map(|f| f.from.iter().cloned().chain([f.path.clone()]))
             .collect()
     }
 
+    /// Whether `path` goes in the commit: the person's tick, else whether it is the thread's.
+    fn ticked(&self, path: &str) -> bool {
+        self.picked.get(path).copied().unwrap_or_else(|| self.own.has(path))
+    }
+
     fn toggle_file(&mut self, path: String, cx: &mut Context<Self>) {
-        if !self.unticked.remove(&path) {
-            self.unticked.insert(path);
-        }
+        let on = self.ticked(&path);
+        self.picked.insert(path, !on);
         cx.notify();
     }
 
+    /// Every file ticked, or, when every one already is, none.
     fn toggle_all(&mut self, cx: &mut Context<Self>) {
         let Some(status) = self.state(cx).and_then(|r| r.status.clone()) else { return };
-        if self.unticked.is_empty() {
-            self.unticked = status.files.iter().map(|f| f.path.clone()).collect();
-        } else {
-            self.unticked.clear();
-        }
+        let on = !status.files.iter().all(|f| self.ticked(&f.path));
+        self.picked = status.files.iter().map(|f| (f.path.clone(), on)).collect();
+        cx.notify();
+    }
+
+    /// The thread's review over all its turns came: the files it names are its own.
+    fn own_reviewed(&mut self, cx: &mut Context<Self>) {
+        let (Some(thread), Own::Waiting(scope)) = (self.ask, &self.own) else { return };
+        let Some(review) = self.hub.read(cx).review(thread, scope) else { return };
+        self.own = Own::of(review);
         cx.notify();
     }
 
@@ -297,6 +392,7 @@ impl CommitSheet {
             return;
         }
         let repo = self.repo.clone();
+        self.commit_failed = None;
         self.committing = self.hub.update(cx, |hub, cx| {
             if push {
                 hub.commit_and_push(&repo, paths, message, cx)
@@ -440,6 +536,30 @@ impl CommitSheet {
 
     fn close(cx: &mut Context<Self>) {
         cx.emit(CommitEvent::Close);
+    }
+
+    /// A press on the scrim, or Esc: the sheet closes only while it holds no words, which a
+    /// stray press would otherwise put out of sight.
+    fn dismiss(&self, cx: &mut Context<Self>) {
+        if self.draft(cx).is_empty() {
+            Self::close(cx);
+        }
+    }
+
+    /// What the sheet holds unsent.
+    fn draft(&self, cx: &App) -> CommitDraft {
+        CommitDraft {
+            message: self.message.read(cx).value().to_string(),
+            title: self.title.read(cx).value().to_string(),
+            body: self.body.read(cx).value().to_string(),
+        }
+    }
+
+    /// The person typed: the words go to the hub, which keeps them for the next sheet here.
+    fn typed(&self, cx: &mut Context<Self>) {
+        let (draft, repo) = (self.draft(cx), self.repo.clone());
+        self.hub.update(cx, |hub, cx| hub.set_commit_draft(&repo, draft, cx));
+        cx.notify();
     }
 
     // ----- drawing: pieces -------------------------------------------------------------
@@ -960,7 +1080,7 @@ impl CommitSheet {
             return part.child(self.quiet("commit-clean", "Nothing to commit")).into_any_element();
         }
         let total = status.files.len();
-        let chosen = status.files.iter().filter(|f| !self.unticked.contains(&f.path)).count();
+        let chosen = status.files.iter().filter(|f| self.ticked(&f.path)).count();
         let count = if chosen == total {
             files_words(total)
         } else {
@@ -994,7 +1114,7 @@ impl CommitSheet {
         let theme = &self.theme;
         let s = theme.surfaces;
         let file = self.state(cx)?.status.as_ref()?.files.get(ix)?;
-        let on = !self.unticked.contains(&file.path);
+        let on = self.ticked(&file.path);
         let letters = git::letters(&file.xy);
         let tone = match letters.as_str() {
             "D" => s.error,
@@ -1215,6 +1335,31 @@ impl CommitSheet {
             .children(self.outcome(cx))
     }
 
+    /// A refusal in git's or gh's words, and, under the commit this sheet asked for, "Ask
+    /// `<agent>` to fix" where the thread's agent takes a message: it is told git's words
+    /// whole, to fix what stopped the commit and leave the commit to the person.
+    fn missed_block(&self, id: &'static str, said: &str, cx: &Context<Self>) -> AnyElement {
+        let block = self.said_block(id, said, self.theme.surfaces.error);
+        let fix = self.commit_failed.as_ref().zip(self.asker(cx)).map(|(why, agent)| {
+            let text = fix_commit_words(why);
+            self.button(
+                "commit-ask-fix",
+                format!("Ask {agent} to fix"),
+                ButtonKind::Secondary,
+                self.asked.is_some(),
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.tell(text.clone(), cx)))
+        });
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(self.theme.spacing.xs))
+            .child(block)
+            .children(fix.map(|el| div().flex().child(el)))
+            .into_any_element()
+    }
+
     /// What the last op came to, or what is on its way: under the buttons, a refusal in git's
     /// or gh's words.
     fn outcome(&self, cx: &Context<Self>) -> Option<AnyElement> {
@@ -1313,12 +1458,8 @@ impl CommitSheet {
             Said::Merged { said } | Said::Freed { said } => {
                 self.said_block("commit-merged", said, s.text_secondary).into_any_element()
             }
-            Said::Refused { why } => {
-                self.said_block("commit-refused", why, s.error).into_any_element()
-            }
-            Said::Failed { said } => {
-                self.said_block("commit-failed", said, s.error).into_any_element()
-            }
+            Said::Refused { why } => self.missed_block("commit-refused", why, cx),
+            Said::Failed { said } => self.missed_block("commit-failed", said, cx),
         })
     }
 }
@@ -1338,7 +1479,7 @@ impl Render for CommitSheet {
                 .child(self.commit_foot(cx)),
             Page::Open => self.open_page(cx),
         };
-        // The tile under the sheet dims, and a press on it closes the sheet.
+        // The tile under the sheet dims, and a press on it closes a sheet that holds no words.
         div()
             .id("commit-scrim")
             .absolute()
@@ -1351,7 +1492,7 @@ impl Render for CommitSheet {
             .bg(kit::scrim(&theme))
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|_this, _ev, _w, cx| Self::close(cx)),
+                cx.listener(|this, _ev, _w, cx| this.dismiss(cx)),
             )
             .child(
                 kit::dialog(&theme, kit::Overlay::List)
@@ -1360,8 +1501,8 @@ impl Render for CommitSheet {
                     .track_focus(&self.focus)
                     .role(Role::Dialog)
                     .aria_label("Commit")
-                    .capture_action(cx.listener(|_this, _: &input::Escape, _w, cx| {
-                        Self::close(cx);
+                    .capture_action(cx.listener(|this, _: &input::Escape, _w, cx| {
+                        this.dismiss(cx);
                         cx.stop_propagation();
                     }))
                     .overflow_y_scroll()
@@ -1394,6 +1535,18 @@ pub(crate) const fn standing_tone(theme: &Theme, standing: PullStanding) -> Rgb 
 /// The longest message a next step sends its agent, in bytes: the review's threads past it are
 /// left to the pull request's page.
 const STEP_TEXT_MAX: usize = 32 * 1024;
+
+/// What "Ask `<agent>` to fix" tells the agent when a commit failed: git's words whole, to fix
+/// what stopped it and leave the commit to the person, who asked for it with their own words.
+#[must_use]
+pub fn fix_commit_words(said: &str) -> String {
+    let said: String = said.chars().take(STEP_TEXT_MAX).collect();
+    format!(
+        "My commit failed. Git said:\n\n```\n{}\n```\n\nFix what stopped it, and leave the \
+         commit to me.",
+        said.trim_end()
+    )
+}
 
 /// Whether `pull` is open, so a step on it means anything.
 fn open(pull: &PullStatus) -> bool {

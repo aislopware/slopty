@@ -388,7 +388,7 @@ impl WorkspaceView {
     /// The repository `cwd` is in on `worker`: as a shell or a thread standing there reported
     /// it; else the one of those `cwd` is inside; else `cwd` itself when a folder tile there
     /// lists a `.git`.
-    fn repo_at(&self, worker: WorkerKey, cwd: &str, cx: &gpui::App) -> Option<String> {
+    pub(super) fn repo_at(&self, worker: WorkerKey, cwd: &str, cx: &gpui::App) -> Option<String> {
         let w = self.workers.get(&worker)?;
         let shells = w.sessions.values().map(|s| (s.cwd.clone(), s.repo.clone()));
         let threads = self.places_on(worker, cx).into_iter().map(|p| (p.cwd, p.repo));

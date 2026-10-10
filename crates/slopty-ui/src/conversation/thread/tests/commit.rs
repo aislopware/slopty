@@ -80,8 +80,33 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 
 /// A thread at `/w`, its view open with the commit sheet opened from the "+" menu.
 fn opened(cx: &mut TestAppContext) -> (gpui::Entity<ThreadHub>, Sent, &mut VisualTestContext) {
+    opened_owning(cx, Some(&["src/lib.rs", "notes.md"]))
+}
+
+/// The sheet over a thread that ran one turn, whose review over all its turns names `own`, or
+/// cannot tell (`None`).
+fn opened_owning<'a>(
+    cx: &'a mut TestAppContext,
+    own: Option<&[&str]>,
+) -> (gpui::Entity<ThreadHub>, Sent, &'a mut VisualTestContext) {
+    opened_as(cx, own, false)
+}
+
+/// [`opened_owning`], its agent taking a message where `queues`.
+fn opened_as<'a>(
+    cx: &'a mut TestAppContext,
+    own: Option<&[&str]>,
+    queues: bool,
+) -> (gpui::Entity<ThreadHub>, Sent, &'a mut VisualTestContext) {
+    use slopty_proto::thread::wire::{FileDiff, FileKind, Review, ReviewScope, ThreadFrame};
+    use slopty_proto::thread::{TurnId, TurnState};
+
     let (hub, sent) = hub(cx, None);
-    let state = fixtures::empty();
+    let mut state = fixtures::empty();
+    state.turns.push(turn(1, TurnState::Complete));
+    if queues {
+        state.meta.caps = vec![slopty_proto::thread::Cap::named(slopty_proto::thread::Cap::QUEUE)];
+    }
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
@@ -89,7 +114,59 @@ fn opened(cx: &mut TestAppContext) -> (gpui::Entity<ThreadHub>, Sent, &mut Visua
     cx.run_until_parked();
     click(cx, "thread-attach");
     click(cx, "thread-add-menu-commit");
+    let asked = sent.borrow().iter().any(|m| {
+        matches!(
+            m,
+            ClientMsg::Thread(slopty_proto::thread::wire::ThreadRequest::Review {
+                scope: ReviewScope::Since(TurnId(1)),
+                ..
+            })
+        )
+    });
+    assert!(asked, "the thread's review over all its turns is asked as the sheet opens");
+    let file = |path: &str| FileDiff {
+        path: path.to_owned(),
+        old_path: None,
+        from: None,
+        to: Some("b0".to_owned()),
+        kind: FileKind::Text,
+        modes: None,
+        patch: slopty_proto::thread::Patch::default(),
+    };
+    let review = Review {
+        scope: ReviewScope::Since(TurnId(1)),
+        from: None,
+        to: None,
+        files: own.unwrap_or_default().iter().map(|p| file(p)).collect(),
+        absent: own.is_none().then(|| "no snapshot".to_owned()),
+    };
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(review)), cx));
+    cx.run_until_parked();
     (hub, sent, cx)
+}
+
+/// A thread's sheet ticks only the files the thread's review names, so another thread's work
+/// in the checkout is listed but left out; the person can still tick it. A review that cannot
+/// tell ticks every file.
+#[gpui::test]
+fn a_threads_sheet_ticks_only_its_own_files(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened_owning(cx, Some(&["src/lib.rs"]));
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
+    cx.simulate_input("Mine");
+    click(cx, "commit-commit");
+    let mine = GitOp::Commit { paths: vec!["src/lib.rs".to_owned()], message: "Mine".to_owned() };
+    assert!(asks(&sent).iter().any(|(_, op)| *op == mine), "only its own: {:?}", asks(&sent));
+}
+
+#[gpui::test]
+fn a_sheet_that_cannot_tell_ticks_every_file(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened_owning(cx, None);
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
+    cx.simulate_input("All");
+    click(cx, "commit-commit");
+    let paths = vec!["src/lib.rs".to_owned(), "notes.md".to_owned()];
+    let all = GitOp::Commit { paths, message: "All".to_owned() };
+    assert!(asks(&sent).iter().any(|(_, op)| *op == all), "{:?}", asks(&sent));
 }
 
 fn answer(
@@ -591,4 +668,56 @@ fn the_sheet_asks_again_when_the_rows_pull_request_moves(cx: &mut TestAppContext
     hub.update(cx, |hub, cx| hub.table(&table(&state, 4, Some(seen(PullStands::Merged))), cx));
     cx.run_until_parked();
     assert_eq!(reads(&sent), opened.saturating_add(2), "merged elsewhere, asked again");
+}
+
+/// A commit refused by a hook says git's words, and "Ask `<agent>` to fix" tells the agent
+/// them whole, to fix what stopped it and leave the commit to the person.
+#[gpui::test]
+fn a_failed_commit_offers_to_ask_the_agent_to_fix_it(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened_as(cx, Some(&["src/lib.rs", "notes.md"]), true);
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
+    cx.simulate_input("Fix");
+    click(cx, "commit-commit");
+    let commit = asks(&sent).into_iter().rev().find(|(_, op)| matches!(op, GitOp::Commit { .. }));
+    let (request, _) = commit.expect("asked");
+    let said = "pre-commit: cargo fmt would change src/lib.rs".to_owned();
+    hub.update(cx, |hub, cx| hub.git_done(request, GitOutcome::Failed { said: said.clone() }, cx));
+    cx.run_until_parked();
+    click(cx, "commit-ask-fix");
+    assert_eq!(told(&sent), [crate::conversation::thread::commit::fix_commit_words(&said)]);
+    assert!(told(&sent)[0].contains(&said), "git's words whole");
+}
+
+/// A sheet holding words stays up through a stray press round it and Esc; Close takes it away,
+/// and the next sheet on the folder opens on the same words. An empty one goes on either.
+#[gpui::test]
+fn a_sheet_with_words_stays_and_its_words_come_back(cx: &mut TestAppContext) {
+    let (_hub, _sent, cx) = opened(cx);
+    cx.simulate_input("Half a message");
+    let sheet = cx.debug_bounds("commit-sheet").expect("the sheet");
+    let outside = gpui::point(sheet.left() + gpui::px(2.0), sheet.bottom() + gpui::px(8.0));
+    cx.simulate_click(outside, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("commit-sheet").is_some(), "a stray press keeps the words up");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("commit-sheet").is_some(), "so does Esc");
+    click(cx, "commit-close");
+    assert!(cx.debug_bounds("commit-sheet").is_none(), "Close closes");
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    cx.update(|window, _cx| {
+        window.set_a11y_active(true);
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let nodes = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        nodes.iter().any(|n| n.value.as_deref() == Some("Half a message")),
+        "the words came back: {nodes:#?}"
+    );
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("commit-sheet").is_none(), "an empty sheet goes on Esc");
 }
