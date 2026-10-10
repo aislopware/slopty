@@ -2,19 +2,19 @@
 //!
 //! Live (`#[ignore]`), run by `cargo xtask e2e ios [--sim iphone|ipad]`, like `ios.rs`.
 //! Where that file drives GPUI's dispatch (`Keys`, `Click`), this one delivers *described* UIKit
-//! events (`UiKeyPress`, `UiTouch`, `UiPinch`, `UiInsertText`, `UiDeleteBackward`): the fork's
-//! metal view runs the same code its `pressesBegan:` / `touchesBegan:` / pinch target /
-//! `insertText:` / `deleteBackward` run once they have read their UIKit objects, so a lost
-//! modifier, a wrongly mapped touch phase or a key the text system should have typed shows up
-//! here and nowhere else. Every assertion reads the dump (rows, focus, bounds, a11y);
-//! no golden is involved.
+//! events (`UiKeyPress`, `UiTouch`, `UiPointerClick`, `UiPinch`, `UiInsertText`,
+//! `UiDeleteBackward`): the fork's metal view runs the same code its `pressesBegan:` /
+//! `touchesBegan:` / pinch target / `insertText:` / `deleteBackward` run once they have read
+//! their UIKit objects, so a lost modifier, a wrongly mapped touch phase or a key the text
+//! system should have typed shows up here and nowhere else. Every assertion reads the dump (rows,
+//! focus, bounds, a11y); no golden is involved.
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use slopty_e2e::harness::{Simulator, Stack};
-    use slopty_e2e::{Driver, Dump, UiTouchPhase, UiTouchPoint};
+    use slopty_e2e::{Command, Driver, Dump, UiTouchPhase, UiTouchPoint};
 
     /// Per-step wait.
     const STEP: Duration = Duration::from_secs(30);
@@ -138,7 +138,7 @@ mod tests {
         let left_arrows = |d: &Dump| -> usize {
             d.terminals.iter().flat_map(|t| t.rows.iter()).map(|r| r.matches("^[[D").count()).sum()
         };
-        drv.ok(&slopty_e2e::Command::UiKeyPress {
+        drv.ok(&Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("left").unwrap(),
             modifiers: String::new(),
             phase: slopty_e2e::UiPressPhase::Began,
@@ -146,7 +146,7 @@ mod tests {
         .await
         .unwrap();
         drv.wait_for("the left arrow once", STEP, |d| left_arrows(d) == 1).await.unwrap();
-        drv.ok(&slopty_e2e::Command::UiKeyPress {
+        drv.ok(&Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("left").unwrap(),
             modifiers: String::new(),
             phase: slopty_e2e::UiPressPhase::Cancelled,
@@ -172,14 +172,14 @@ mod tests {
         .await
         .unwrap();
         // A cancelled chord leaves no stuck modifier: the next plain key types plainly.
-        drv.ok(&slopty_e2e::Command::UiKeyPress {
+        drv.ok(&Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("a").unwrap(),
             modifiers: "cmd".into(),
             phase: slopty_e2e::UiPressPhase::Began,
         })
         .await
         .unwrap();
-        drv.ok(&slopty_e2e::Command::UiKeyPress {
+        drv.ok(&Command::UiKeyPress {
             usage: slopty_e2e::hid::usage("a").unwrap(),
             modifiers: "cmd".into(),
             phase: slopty_e2e::UiPressPhase::Cancelled,
@@ -261,6 +261,73 @@ mod tests {
         drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
             .await
             .unwrap();
+        stack.shutdown().await;
+    }
+
+    /// A trackpad's pointer touches go as mouse buttons: a primary click on the first of two
+    /// panes gives it the keyboard, and a secondary click (a two-finger click) on the pane's
+    /// tab opens the tile's menu where it landed, or on a phone, whose pane has no tab, on the
+    /// shell's text its own menu; Esc closes it.
+    /// The pointer takes the cursor of what it is over: a beam over text.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
+    async fn a_trackpad_clicks_and_right_clicks_on_the_simulator() {
+        let mut stack = Stack::launch_on_simulator("e2e-ios-worker", simulator()).await.unwrap();
+        let dump = shell(&mut stack).await;
+        let first = dump.item("terminal").unwrap().clone();
+        let drv = &mut stack.driver;
+        drv.keys("cmd-d").await.unwrap();
+        let item_by = |d: &Dump, id: &str| d.items.iter().find(|i| i.id == id).unwrap().clone();
+        let two = drv
+            .wait_for("a second shell, focused", STEP, |d| {
+                d.items.len() == 2 && d.items.iter().any(|i| i.id != first.id && i.active)
+            })
+            .await
+            .unwrap();
+        let tablet = two.window.width >= PHONE_BELOW;
+        let middle =
+            |[left, top, width, height]: [f32; 4]| (left + width / 2.0, top + height / 2.0);
+        let (x, y) = if tablet {
+            let (x, y) = item_by(&two, &first.id).center();
+            drv.ui_pointer_click(x, y, false).await.unwrap();
+            let focused = drv
+                .wait_for("the click to focus the first shell", STEP, |d| {
+                    item_by(d, &first.id).active
+                })
+                .await
+                .unwrap();
+            let tab = focused.a11y_node("Tab", Some("Terminal"));
+            middle(tab.unwrap_or_else(|| panic!("its tab: {:#?}", focused.a11y)).bounds)
+        } else {
+            // A phone's pane has no tab: the shell's own menu opens on its rows, clear of a
+            // notice at the pane's top.
+            two.items.iter().find(|i| i.active).unwrap().center()
+        };
+        drv.ui_pointer_click(x, y, true).await.unwrap();
+        drv.wait_for("the menu", STEP, |d| d.a11y_node("Menu", None).is_some()).await.unwrap();
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the menu closed", STEP, |d| d.a11y_node("Menu", None).is_none())
+            .await
+            .unwrap();
+
+        // The pointer follows what it is over: a text beam over the shell's text, iPadOS's
+        // own pointer over a button.
+        let now = drv.dump().await.unwrap();
+        let (x, y) = now.items.iter().find(|i| i.active).unwrap().center();
+        drv.ok(&Command::Move { x, y }).await.unwrap();
+        drv.wait_for("a beam over the shell", STEP, |d| d.pointer.as_deref() == Some("beam"))
+            .await
+            .unwrap();
+        let more = drv.dump().await.unwrap();
+        let more = more.a11y_node("Button", Some("More")).unwrap().bounds;
+        drv.ok(&Command::Move { x: more[0] + more[2] / 2.0, y: more[1] + more[3] / 2.0 })
+            .await
+            .unwrap();
+        drv.wait_for("the system pointer over a button", STEP, |d| {
+            d.pointer.as_deref() == Some("system")
+        })
+        .await
+        .unwrap();
         stack.shutdown().await;
     }
 

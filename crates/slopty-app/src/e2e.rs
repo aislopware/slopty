@@ -155,6 +155,7 @@ pub(crate) fn serve(
                 // settle on a frame like any input.
                 Command::UiKeyPress { .. }
                 | Command::UiTouch { .. }
+                | Command::UiPointerClick { .. }
                 | Command::UiPinch { .. }
                 | Command::UiInsertText { .. }
                 | Command::UiDeleteBackward => match uikit::inject(command) {
@@ -433,6 +434,14 @@ mod uikit {
         };
         use slopty_e2e::{UiGesturePhase, UiPressPhase, UiTouchPhase as Phase};
 
+        let touch_phase = |phase: Phase| match phase {
+            Phase::Began => UiTouchPhase::Began,
+            Phase::Moved => UiTouchPhase::Moved,
+            Phase::Stationary => UiTouchPhase::Stationary,
+            Phase::Ended => UiTouchPhase::Ended,
+            Phase::Cancelled => UiTouchPhase::Cancelled,
+        };
+
         let input = match command {
             Command::UiKeyPress { usage, modifiers, phase } => {
                 DescribedInput::Press(DescribedPress {
@@ -446,13 +455,7 @@ mod uikit {
                 })
             }
             Command::UiTouch { touches, phase } => {
-                let phase = match phase {
-                    Phase::Began => UiTouchPhase::Began,
-                    Phase::Moved => UiTouchPhase::Moved,
-                    Phase::Stationary => UiTouchPhase::Stationary,
-                    Phase::Ended => UiTouchPhase::Ended,
-                    Phase::Cancelled => UiTouchPhase::Cancelled,
-                };
+                let phase = touch_phase(phase);
                 DescribedInput::Touches(
                     touches
                         .into_iter()
@@ -460,6 +463,10 @@ mod uikit {
                         .collect(),
                 )
             }
+            Command::UiPointerClick { at, secondary, phase } => DescribedInput::PointerClick {
+                touch: DescribedTouch { id: at.id, phase: touch_phase(phase), x: at.x, y: at.y },
+                secondary,
+            },
             Command::UiPinch { scale, x, y, phase } => DescribedInput::Pinch(DescribedPinch {
                 state: match phase {
                     UiGesturePhase::Began => GestureState::Began,
@@ -932,10 +939,36 @@ fn apply(
         | Command::Quit
         | Command::UiKeyPress { .. }
         | Command::UiTouch { .. }
+        | Command::UiPointerClick { .. }
         | Command::UiPinch { .. }
         | Command::UiInsertText { .. }
         | Command::UiDeleteBackward => Reply::Error { message: "handled elsewhere".into() },
     }
+}
+
+/// How the iPad's pointer looks now, in [`Dump::pointer`]'s words.
+#[cfg(all(target_os = "ios", feature = "e2e"))]
+fn pointer_look() -> String {
+    use gpui_ios::pointer::{Outline, PointerLook};
+    match gpui_ios::pointer_look() {
+        PointerLook::System => "system",
+        PointerLook::Beam { upright: true } => "beam",
+        PointerLook::Beam { upright: false } => "beam-lying",
+        PointerLook::Hidden => "hidden",
+        PointerLook::Outline(Outline::LeftRight) => "outline-left-right",
+        PointerLook::Outline(Outline::UpDown) => "outline-up-down",
+        PointerLook::Outline(Outline::UpLeftDownRight) => "outline-up-left-down-right",
+        PointerLook::Outline(Outline::UpRightDownLeft) => "outline-up-right-down-left",
+        PointerLook::Outline(Outline::Cross) => "outline-cross",
+    }
+    .to_owned()
+}
+
+/// Off iOS, or without the fork's test support, there is no pointer to read; never called
+/// ([`Dump::pointer`] is `None`).
+#[cfg(not(all(target_os = "ios", feature = "e2e")))]
+const fn pointer_look() -> String {
+    String::new()
 }
 
 const fn mouse_button(button: Button) -> MouseButton {
@@ -1229,6 +1262,7 @@ impl Workspace {
             project: view.project_name(),
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
             frames: frame_info(slopty_ui::frames::stats(cx)),
+            pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
             ..Dump::default()
         };
         let mut focused = if view.focus_handle(cx).is_focused(window) {

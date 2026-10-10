@@ -249,6 +249,20 @@ impl Driver {
         self.ui_touch(&finger, UiTouchPhase::Ended).await
     }
 
+    /// A trackpad's click at a window point (iOS): pressed and let go, the secondary button (a
+    /// two-finger click) or the primary, delivered as UIKit's pointer touch.
+    ///
+    /// # Errors
+    ///
+    /// When the app is not on iOS or the socket breaks.
+    pub async fn ui_pointer_click(&mut self, x: f32, y: f32, secondary: bool) -> Result<()> {
+        let at = UiTouchPoint { id: 2, x, y };
+        for phase in [UiTouchPhase::Began, UiTouchPhase::Ended] {
+            self.ok(&Command::UiPointerClick { at, secondary, phase }).await?;
+        }
+        Ok(())
+    }
+
     /// A pinch about a window point growing (or shrinking) by `factor` in `steps` reports of
     /// the recognizer (iOS): each report carries the step's own scale, as the view reads it.
     ///

@@ -412,6 +412,18 @@ pub enum Command {
         /// `UITouch.phase` of every touch in the set.
         phase: UiTouchPhase,
     },
+    /// One phase of a trackpad's or mouse's click delivered at the UIKit boundary (iOS only):
+    /// a `UITouchTypeIndirectPointer` touch, its event's `buttonMask` holding the secondary
+    /// button (a two-finger click) or the primary. GPUI gets it as mouse events of that
+    /// button, not as a touch.
+    UiPointerClick {
+        /// Where, in window points.
+        at: UiTouchPoint,
+        /// The secondary button, else the primary.
+        secondary: bool,
+        /// `UITouch.phase`.
+        phase: UiTouchPhase,
+    },
     /// One report of the metal view's `UIPinchGestureRecognizer` (iOS only): `scale` is the
     /// change since the previous report (the view resets the recognizer to 1 after each), so
     /// a whole pinch is the product of its steps.
@@ -694,6 +706,10 @@ pub struct Dump {
     /// The server's projects as the app mirrors them, by name.
     #[serde(default)]
     pub projects: Vec<ProjectInfo>,
+    /// How an iPad's trackpad pointer looks over the window, as the last cursor style set it:
+    /// `system`, `beam`, `beam-lying`, `hidden`, or `outline-<shape>`. `None` off iOS.
+    #[serde(default)]
+    pub pointer: Option<String>,
 }
 
 /// The UI frame-time probe (`slopty_ui::frames`), in microseconds.

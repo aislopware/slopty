@@ -1132,3 +1132,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_ipads_menus_are_the_macs_without_the_macs_own`,
     `the_palette_offers_the_keyboard_shortcuts`, and the key bar's width and layout tests
     (`slopty-app`); the fork's host menu tests and its simulator `menu-test`.
+
+- ✅ **An iPad's trackpad clicks as a mouse, and its pointer takes the cursor's shape**
+  (2026-10-10, readiness audit "carried": no right-click and no pointer shapes on an iPad).
+  The work is in the gpui-fast fork's `gpui_ios` (`93fa22a7`).
+  - **Clicks.** A `UITouchTypeIndirectPointer` touch, which a trackpad or mouse makes with
+    `UIApplicationSupportsIndirectInputEvents` set, goes to GPUI as mouse events of its
+    button, as an `NSEvent` click does. It is the right button when the event's `buttonMask`
+    holds the secondary (a two-finger click or tap, a mouse's right button), and the left
+    otherwise. The button is read when the touch begins and kept until it ends, since the
+    mask is empty by the release. Double and triple clicks are counted there (500 ms, 4 pt),
+    because UIKit leaves that to the app. Before, a pointer click was a touch, so gpui core's
+    recognizer made a click-drag a pan that scrolled rather than selecting, and a two-finger
+    click was a plain tap. Fingers and the pencil stay touches.
+  - **What reaches Slopty.** Nothing in Slopty changed for the menus: `kit::menu_press` opens
+    a thing's menu on a right mouse down as well as a long press, so the tile, tab, project,
+    machine and row menus open on a secondary click. The terminal's and the remote desktop's
+    right button paths are the Mac's.
+  - **Pointer shapes.** A `UIPointerInteraction` on the window's view answers with the look
+    GPUI's cursor style last set, and is invalidated when the look changes. Text gets a beam
+    (lying down for vertical text). `CursorStyle::None` hides the pointer, which is what the
+    remote desktop sets while it draws the far side's cursor. The resize cursors get outline
+    double arrows along their axis, and the crosshair a cross. The hands, the drag badges and
+    a picture keep iPadOS's own pointer, because iPadOS draws shapes, not cursor images, and
+    iPad apps keep its pointer over buttons.
+  - Tests: in the fork, `gpui_ios::pointer` on the host (each cursor's look, the outlines
+    centred on the hot spot, a pointer touch's button, the click count). In Slopty, the live
+    simulator e2e `ios_uikit::a_trackpad_clicks_and_right_clicks_on_the_simulator` drives
+    `UiPointerClick` through the fork's own delivery: a primary click focuses a pane, a
+    secondary click on its tab opens the tile's menu (on a phone, whose pane has no tab, the shell's own menu on its rows), and the pointer
+    reads `beam` over the shell and `system` over a button (`Dump::pointer`).
