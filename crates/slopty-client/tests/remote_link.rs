@@ -394,16 +394,21 @@ mod tests {
         let header = download_header(first, "out/big.bin", big.len(), 0);
         let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
         send.write_all(&big[..1_000_000]).await.unwrap();
-        // Cut only once some of it is on the client's disk: a reset before any byte arrived
-        // leaves nothing partial to resume, which a loaded runner hit after a fixed wait.
+        // Cut only once the small file has landed and some of the big one is on the client's
+        // disk. The two go on streams of their own, so a loaded runner can cut before either:
+        // a reset before any byte arrived leaves nothing partial to resume, and a small file
+        // still in flight is not yet held.
         let partial = into.path().join("out/big.bin.partial");
+        let landed = into.path().join("out/small.txt");
         tokio::time::timeout(Duration::from_secs(20), async {
-            while std::fs::metadata(&partial).map_or(0, |m| m.len()) == 0 {
+            while std::fs::metadata(&partial).map_or(0, |m| m.len()) == 0
+                || std::fs::metadata(&landed).map_or(0, |m| m.len()) != small.len() as u64
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("some of the big file reaches the client");
+        .expect("the small file lands and some of the big one reaches the client");
         send.reset(0_u32.into()).unwrap();
 
         let cancelled = expect(&mut client, |m| match m {
