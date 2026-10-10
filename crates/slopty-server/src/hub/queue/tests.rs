@@ -961,3 +961,42 @@ async fn a_held_merge_keeps_the_task_s_own_commit_and_frees_a_closed_agent_s_wor
         "freed at the merge, as its terminal had closed"
     );
 }
+
+/// A merge the project did not push, as pushing is off unless the person turns it on, is
+/// pushed on the person's word all the same: the board's Push for what waits on the target.
+#[tokio::test]
+async fn a_merge_left_unpushed_is_pushed_on_the_person_s_word() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    done(&hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, _close) = studio.past_screens(&["ok"]).await;
+    answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
+    let (id, _rebase) = studio.request().await;
+    let rebased = Outcome::Rebased {
+        head: commit('a'),
+        from: commit('a'),
+        onto: commit('b'),
+        verified: true,
+    };
+    answer(&studio.lease, id, rebased);
+    let (id, _forward) = studio.request().await;
+    let kept = Outcome::FastForwarded { head: commit('a'), pushed: false, push_failed: None };
+    answer(&studio.lease, id, kept);
+    until_state(&hub, task, TaskState::Merged).await;
+
+    let pushing = hub.clone();
+    let pushed =
+        tokio::spawn(
+            async move { pushing.dispatch(Verb::TaskPush { project: project(), task }).await },
+        );
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::FastForward { push: true, .. }), "{verb:?}");
+    let went = Outcome::FastForwarded { head: commit('a'), pushed: true, push_failed: None };
+    answer(&studio.lease, id, went);
+    let Outcome::Task(card) = pushed.await.unwrap() else { panic!("a card") };
+    assert!(matches!(card.merge, Some(Merge::Merged { pushed: true, push_failed: None, .. })));
+}

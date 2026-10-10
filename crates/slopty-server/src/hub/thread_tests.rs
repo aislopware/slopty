@@ -263,7 +263,8 @@ async fn a_codex_task_s_card_shows_its_thread_s_failing_pull_request() {
         Verb::TaskSpawn { project: project(), task, launch: as_thread(codex.clone(), &[]) },
     );
     let (id, verb) = request(&mut rx).await;
-    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    let Verb::StartThread { seat, start, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(start.mode.as_deref(), Some("on-request"), "held to asking");
     let thread = ThreadId::new();
     answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));

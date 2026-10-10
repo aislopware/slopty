@@ -1990,6 +1990,28 @@ impl Projects {
             .collect()
     }
 
+    /// Project `id`'s target `target` reached `origin` as it stood at `at`: every task merged
+    /// into it by then whose card still says it was not pushed went with it, as a push takes
+    /// the whole branch. Their cards say so, so what waits to be pushed is read off them: the
+    /// merged tasks still not pushed.
+    pub(crate) fn pushed_with(&mut self, id: &ProjectId, target: &str, at: WallMs) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let mut went = Vec::new();
+        for t in &mut record.tasks {
+            if let Some(Merge::Merged { target: into, at_ms, pushed, push_failed, .. }) =
+                &mut t.merge
+                && into == target
+                && !*pushed
+                && *at_ms <= at
+            {
+                *pushed = true;
+                *push_failed = None;
+                went.push(t.clone());
+            }
+        }
+        went.iter().map(|t| record.task_update(t, None)).collect()
+    }
+
     /// The server closes the agent of `task`, which is finished and rested `rested_mins`, with
     /// what it `left` running, which stops with it: the timeline says why, before the
     /// terminal's end says it is gone.

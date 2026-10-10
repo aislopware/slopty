@@ -1623,6 +1623,9 @@ impl Lease {
                 let now = WallMs::now();
                 let mut moved = Vec::new();
                 state.board.take(worker, frame);
+                for (seat, settings) in state.board.codex_moves(worker) {
+                    hub.codex_settings(&mut state, TermRef { worker, session: seat }, &settings);
+                }
                 for (term, status) in state.board.seat_moves(worker) {
                     hub.adopt(&mut state, term);
                     moved.extend(state.projects.agent_status(term, &status, now));

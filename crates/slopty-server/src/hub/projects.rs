@@ -1788,7 +1788,14 @@ impl Hub {
                     Place { path, worktree }
                 });
                 let role = agent_role(record, card, at.as_ref());
-                if !permission_flags && matches!(launch.run, Runner::Claude { .. }) {
+                // Held to asking: Claude Code by its permission mode, Codex by its approval
+                // policy and sandbox, each as its own reports say them.
+                let held_by_server = match &launch.run {
+                    Runner::Claude { .. } | Runner::Codex { .. } => true,
+                    Runner::Agent { agent, .. } => agent.is(AgentId::CODEX),
+                    Runner::Command { .. } => false,
+                };
+                if !permission_flags && held_by_server {
                     watch(&mut state, placed.1, |w| w.locked = true);
                 }
                 Ok((placed, permission_flags, role, at))
@@ -1862,7 +1869,7 @@ impl Hub {
                 let open = Verb::OpenTerminal {
                     worker,
                     cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: codex::command(&role, args, prompt),
+                    command: codex::command(&role, args, prompt, !permission_flags),
                     env,
                     name: Some(format!("{project} #{task}")),
                     size,
@@ -1884,13 +1891,17 @@ impl Hub {
                     pull: None,
                     setup: true,
                 });
+                // Codex as a thread takes its approval policy from the start; its sandbox is its
+                // own configuration's, judged once its row says it (`Hub::codex_settings`).
+                let mode = (!permission_flags && agent.is(AgentId::CODEX))
+                    .then(|| codex::HELD_APPROVAL.to_owned());
                 let start = Start {
                     agent,
                     cwd,
                     drive: None,
                     prompt,
                     model,
-                    mode: None,
+                    mode,
                     effort: None,
                     attachments: Vec::new(),
                     args,
@@ -2049,6 +2060,29 @@ impl Hub {
         let why = format!(
             "its agent went into {mode} mode{how}, looser than the person allows \
              (`[server.projects] permission_flags`), so its terminal was closed"
+        );
+        self.close_looser(state, term, &why);
+    }
+
+    /// What a Codex thread at `term` says its approval policy and sandbox are, at its start
+    /// and at each change: held to asking as [`Self::permission_mode`] holds Claude Code, a
+    /// Codex past `on-request`, or with a sandbox past its workspace, is closed and the
+    /// timeline says why. Its own configuration, or a switch in its TUI, set that.
+    pub(super) fn codex_settings(
+        &self,
+        state: &mut State,
+        term: TermRef,
+        (mode, sandbox): &super::ladder::CodexSettings,
+    ) {
+        let Some(looser) = codex::looser_settings(mode.as_deref(), sandbox.as_deref()) else {
+            return;
+        };
+        if !Self::held_to_asking(state, term) {
+            return;
+        }
+        let why = format!(
+            "its Codex runs with {looser}, looser than the person allows (`[server.projects] \
+             permission_flags`), so it was closed"
         );
         self.close_looser(state, term, &why);
     }

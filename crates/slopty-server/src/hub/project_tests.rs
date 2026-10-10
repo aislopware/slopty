@@ -2492,10 +2492,36 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
         command[2].starts_with("developer_instructions=\"You are the agent of task"),
         "{command:?}"
     );
-    assert_eq!(command[3..], ["-m", "o3", "Read your brief."], "a named cwd: no worktree");
+    let held = ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"];
+    assert_eq!(command[3..7], held, "held to asking, whatever its config.toml says");
+    assert_eq!(command[7..], ["-m", "o3", "Read your brief."], "a named cwd: no worktree");
     assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == docs.to_string()), "{env:?}");
-    opened(&linux_lease, &start);
+    let term = opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    // Its row says what Codex runs with: asking, it stays; switched past it, it is closed.
+    let mut tui = ladder::tests::row(slopty_proto::thread::Phase::Idle, 1, Some(term.session));
+    tui.agent = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX);
+    tui.meters.mode = Some("on-request".to_owned());
+    tui.facts.insert("sandbox".to_owned(), "workspaceWrite".to_owned());
+    linux_lease.handle(ladder::tests::snapshot(vec![tui.clone()]));
+    let quiet = tokio::time::timeout(Duration::from_millis(100), request(&mut linux_rx)).await;
+    assert!(quiet.is_err(), "asking: nothing closes {quiet:?}");
+    tui.facts.insert("sandbox".to_owned(), "dangerFullAccess".to_owned());
+    linux_lease.handle(ladder::tests::snapshot(vec![tui]));
+    let (_, close) = request(&mut linux_rx).await;
+    assert_eq!(close, Verb::Close { term });
+    let said = status(&hub).await.timeline.into_iter().rev().find_map(|e| match e.what {
+        Moment::Note { text } if e.task == Some(docs) => Some(text),
+        _ => None,
+    });
+    assert_eq!(
+        said.as_deref(),
+        Some(
+            "its Codex runs with sandbox dangerFullAccess, looser than the person allows \
+             (`[server.projects] permission_flags`), so it was closed"
+        )
+    );
 }
 
 /// A member: what a tile must have to be in the project.

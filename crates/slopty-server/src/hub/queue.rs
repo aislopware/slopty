@@ -905,7 +905,12 @@ impl Hub {
             ..Advance::default()
         };
         match state.projects.advance(project, task, advance, now) {
-            Ok((_, updates)) => self.projects_moved(&mut state, updates),
+            Ok((_, mut updates)) => {
+                if pushed {
+                    updates.extend(state.projects.pushed_with(project, &place.target, now));
+                }
+                self.projects_moved(&mut state, updates);
+            }
             Err(refused) => tracing::debug!(%project, %task, ?refused, "a merge not recorded"),
         }
         // The task's work brought home is on the target now: its branch there goes.
@@ -1020,9 +1025,13 @@ impl Hub {
         Went::Next
     }
 
-    /// The person pushes `task`'s target to `origin` again after the push that went with its
-    /// merge failed ([`Verb::TaskPush`]). The target goes as it is in the orchestrator's clone:
-    /// the merge put the task's work there, and what the queue merged since went on top of it.
+    /// The person pushes `task`'s target to `origin` ([`Verb::TaskPush`]): its merge was not
+    /// pushed, as the project pushes nothing unless the person turned that on, or the push that
+    /// went with it failed. The target goes as it is in the orchestrator's clone: the merge put
+    /// the task's work there, and what the queue merged since went on top of it, so every
+    /// merged task's card not pushed yet says it was ([`Projects::pushed_with`]).
+    ///
+    /// [`Projects::pushed_with`]: crate::project::Projects::pushed_with
     pub(super) async fn task_push(
         &self,
         caller: Caller,
@@ -1043,12 +1052,11 @@ impl Hub {
             Ok(card) => card,
             Err(refused) => return error(ErrorCode::Invalid, &said(&refused)),
         };
-        let Some(Merge::Merged { target, head, from, at_ms, pushed, push_failed }) =
-            card.merge.clone()
+        let Some(Merge::Merged { target, head, from, at_ms, pushed, .. }) = card.merge.clone()
         else {
             return error(ErrorCode::Invalid, &format!("task {task} is not merged"));
         };
-        if push_failed.is_none() {
+        if pushed {
             return Outcome::Task(Box::new(card));
         }
         let place = match self.lane_place(project, task) {
@@ -1093,8 +1101,9 @@ impl Hub {
             None => step(StepState::Done { detail }),
             Some(_) => step(StepState::Failed { why: detail }),
         };
+        let went = now_failed.is_none();
         let merge = Merge::Merged {
-            target,
+            target: target.clone(),
             head,
             from,
             at_ms,
@@ -1107,10 +1116,16 @@ impl Hub {
             merge: Queue::Set(merge),
             ..Advance::default()
         };
-        match self.advance(at, advance) {
-            Some(card) => Outcome::Task(Box::new(card)),
-            None => error(ErrorCode::Invalid, &format!("task {task} is not there any more")),
+        let Some(card) = self.advance(at, advance) else {
+            return error(ErrorCode::Invalid, &format!("task {task} is not there any more"));
+        };
+        if went {
+            let mut state = self.inner.state.lock();
+            let others = state.projects.pushed_with(project, &target, WallMs::now());
+            self.projects_moved(&mut state, others);
+            drop(state);
         }
+        Outcome::Task(Box::new(card))
     }
 }
 

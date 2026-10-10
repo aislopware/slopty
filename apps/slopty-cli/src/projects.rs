@@ -167,7 +167,8 @@ pub enum TaskCmd {
         #[arg(long)]
         agent: Option<String>,
     },
-    /// Push a merged task's work to the forge again, as the person: after a push that failed.
+    /// Push a merged task's target to the forge, as the person: a merge the project did not
+    /// push, or one whose push failed. What the queue merged since goes with it.
     Push {
         #[command(flatten)]
         which: TaskRef,

@@ -2640,3 +2640,48 @@ reordering and edited allows are gone" in `agents.md`.*
     (`hub/outcome_tests.rs`); the cleanup lines in the store's replay tests;
     `a_let_go_project_s_checkout_goes_by_force` and `Rebased::from` in slopty-worker's
     `repo/verify/tests.rs`.
+
+- ✅ **A task's Codex is held to asking, as Claude Code is** (2026-10-12, readiness 10-12
+  rank 24).
+  - **The gap.** Only Claude Code tasks were pinned to a mode that asks (`--permission-mode
+    default`, a locked watch). A Codex task's arguments were judged (`hub/codex.rs`), but the
+    person's own `config.toml` still decided its approval policy and sandbox, so
+    `approval_policy = "never"` there ran a task with no approvals at all.
+  - **At the start.** Without the person's leave (`permission_flags` off), a task's Codex in
+    its terminal starts with `--ask-for-approval on-request --sandbox workspace-write`. Flags
+    win over `config.toml`. Arguments that name their own policy or sandbox keep them, and the
+    argument check lets those through only when they ask no less. Codex run as a thread starts
+    with the `on-request` mode. Its sandbox is its configuration's, because `Start` carries
+    none.
+  - **As it runs.** A task's Codex is watched as locked, as Claude Code's terminal is. Its row
+    says the effective policy (the thread's mode) and sandbox (its `sandbox` fact), read from
+    the app-server whether the TUI or a thread runs it (`Board::codex_moves`). A policy past
+    `on-request` (`never`, `granular`), or a sandbox past the workspace (`dangerFullAccess`,
+    `externalSandbox`), closes it, and the timeline says why (`Hub::codex_settings`). That is
+    how a thread whose configuration names no sandbox is held, and how a switch made in the
+    TUI is caught. A terminal an agent opened or typed into is held the same way.
+  - Rejected: reading the person's `config.toml` on the worker to predict the policy. Codex
+    resolves profiles, project trust and managed configuration itself. Its row says the
+    outcome, so the outcome is what is judged.
+  - Tests: `a_task_s_codex_is_held_to_asking` and
+    `a_codex_thread_s_settings_are_judged_as_its_arguments_are` (`hub/codex.rs`); the pinned
+    command and the close in `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role`
+    (`hub/project_tests.rs`); the thread's mode in
+    `a_codex_task_s_card_shows_its_thread_s_failing_pull_request` (`hub/thread_tests.rs`).
+
+- ✅ **What the merge queue merged can be pushed from the board, and the cards say what waits**
+  (2026-10-12, readiness 10-12 rank 16, the server's half).
+  - Pushing is off unless the person turns it on, so merged work stays in the orchestrator's
+    clone. `TaskPush` acted only after a push had failed. Now it pushes the target for any
+    merged task not pushed yet.
+  - A push takes the whole branch, but only the task it was asked for had its card updated, so
+    "not pushed" stayed on every earlier merge. Now a push that goes through, the merge's own
+    or the person's, marks every task merged into that target by then as pushed
+    (`Projects::pushed_with`).
+  - So the board reads what waits off the cards: the merged tasks whose merge is not pushed.
+    No count goes on the wire. A count of commits would need a git read of the orchestrator's
+    clone on every status, and tasks are the unit the board already shows. A push made outside
+    Slopty is not seen. Pushing from the board again answers at once, and the forge says
+    nothing new.
+  - Tests: `a_push_takes_every_merge_before_it` (`project/merge/tests.rs`);
+    `a_merge_left_unpushed_is_pushed_on_the_person_s_word` (`hub/queue/tests.rs`).

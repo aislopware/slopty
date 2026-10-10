@@ -200,3 +200,39 @@ fn work_judged_afresh_keeps_where_its_branch_came_home() {
     let (judged, _) = p.advance(&id(), a, done, at(6)).unwrap();
     assert_eq!(judged.step, Some(home), "where the new work is stays on its card");
 }
+
+/// A push takes the whole target: every task merged into it by then, not pushed, goes with
+/// it, so what waits to be pushed is read off the cards. One merged later, or into another
+/// branch, still waits.
+#[test]
+fn a_push_takes_every_merge_before_it() {
+    let mut p = projects(None);
+    let merged = |into: &str, ms: u64| Advance {
+        state: Some(TaskState::Merged),
+        merge: Queue::Set(Merge::Merged {
+            target: into.to_owned(),
+            head: "d".repeat(40),
+            from: "a".repeat(40),
+            at_ms: at(ms),
+            pushed: false,
+            push_failed: (ms == 2).then(|| "rejected".to_owned()),
+        }),
+        ..Advance::default()
+    };
+    let mut tasks = Vec::new();
+    for (title, into, ms) in [("A", "main", 1), ("B", "main", 2), ("C", "main", 9), ("D", "dev", 3)]
+    {
+        let t = task(&mut p, title);
+        p.advance(&id(), t, queued(ms), at(ms)).unwrap();
+        p.advance(&id(), t, merged(into, ms), at(ms)).unwrap();
+        tasks.push(t);
+    }
+    let changes = p.pushed_with(&id(), "main", at(5));
+    assert_eq!(changes.len(), 2, "A and B went");
+    let pushed = |t: TaskId| match p.task(&id(), t).unwrap().merge.clone() {
+        Some(Merge::Merged { pushed, push_failed, .. }) => (pushed, push_failed),
+        other => panic!("{other:?}"),
+    };
+    let states: Vec<_> = tasks.iter().map(|t| pushed(*t)).collect();
+    assert_eq!(states, [(true, None), (true, None), (false, None), (false, None)]);
+}
