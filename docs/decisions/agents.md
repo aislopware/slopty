@@ -1347,6 +1347,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_rested_thread_nobody_follows_is_let_go_and_taken_up_again` (stand-in daemon)
     and `what_rested_codex_threads_keep_followed_and_let_go` (the real `codex app-server`,
     run by hand).
+  - **Across a worker restart** (2026-10-12, readiness 10-12 rank 8). Which threads were let
+    go lived only in memory, and on joining Codex the worker took up only those Codex listed
+    as loaded. A thread let go before a restart stayed in the table, but a follow did nothing
+    and a message to it was dropped after its intent was answered Done. Now the worker reads
+    Codex's loaded list before it acts on any ask of a thread: every Codex thread the table
+    keeps that is not loaded counts as let go, so a follow or a message takes it up again
+    (`thread/resume`) first, as pi's and ACP's start-up pass already did. A message that
+    still cannot go (Codex holds no such thread, or it could not be taken up again) is held
+    in the thread's pending list with why, for the person to send again, instead of
+    vanishing. Test: `a_thread_let_go_before_a_restart_is_taken_up_again_by_a_message`.
 
 - ✅ **A Codex thread's commands claim no Slopty terminal** (2026-10-04). Codex's shared
   daemon runs every thread's commands with its own environment, which is that of whatever

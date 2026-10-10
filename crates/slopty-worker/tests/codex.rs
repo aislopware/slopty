@@ -945,6 +945,70 @@ mod codex {
         until_sent(&mut heard, "thread/resume").await;
     }
 
+    /// A stand-in for the person's Codex after the worker restarted: it holds no thread loaded
+    /// (the worker had let the recording's go, and Codex unloaded it), takes it up again on
+    /// `thread/resume` and answers a turn as the recording did.
+    async fn restarted(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let mut answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [], "nextCursor": null } })
+                }
+                Some("thread/resume") => resumed(),
+                Some("turn/start") => lines[recorded(&lines, "turn/start").1].msg.clone(),
+                _ => continue,
+            };
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// A thread the worker let go before it restarted is not among those Codex holds when the
+    /// worker joins it again, yet stays in the table. A message to it takes it up again first
+    /// and goes as its turn, rather than vanishing.
+    #[tokio::test]
+    async fn a_thread_let_go_before_a_restart_is_taken_up_again_by_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        {
+            let socket: PathBuf = short.path().join("before.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let (tx, _heard) = mpsc::unbounded_channel();
+            let _server = tokio::spawn(unloader(listener, tx));
+            let host = host(dir.path());
+            let (_handle, asks) = Codex::channel();
+            let served = codex::spawn(host.clone(), socket, None, asks);
+            until(&host, thread, |s| !s.turns.is_empty()).await;
+            served.abort();
+            let _ended = served.await;
+        }
+
+        let socket: PathBuf = short.path().join("after.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(restarted(listener, tx));
+        let host = host(dir.path());
+        assert!(host.holds(thread), "kept in the table across the restart");
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        handle.send(thread, "Say hello.".to_owned(), Vec::new(), Delivery::Steer, IntentId::new());
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let methods: Vec<&str> = sent
+            .iter()
+            .filter_map(|m| m["method"].as_str())
+            .filter(|m| !matches!(*m, "initialize" | "initialized" | "model/list"))
+            .collect();
+        assert_eq!(methods, ["thread/loaded/list", "thread/resume", "turn/start"]);
+        assert_eq!(sent.last().unwrap()["params"]["threadId"], native.as_str());
+    }
+
     /// A stand-in daemon that has the recording's thread loaded and takes it up again, then
     /// takes each `thread/settings/update` and tells every client the settings it now holds
     /// (`thread/settings/updated`), but refuses a switch to `mini-model`, as Codex refuses one

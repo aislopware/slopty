@@ -63,7 +63,7 @@ use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
-    Phase, Status, ThreadId, ThreadState, TurnId,
+    Pending, PendingState, Phase, Status, ThreadId, ThreadState, TurnId,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -74,6 +74,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::terminals::Terminals;
 use super::{Host, Seated};
+
+/// Why a message to a Codex thread did not go: the person's Codex holds no such thread.
+const NOT_HELD: &str = "Codex no longer holds this thread, so the message did not go";
 
 /// How long the worker waits before it tries the daemon again.
 pub const RETRY: Duration = Duration::from_secs(2);
@@ -815,9 +818,10 @@ struct Session {
     resuming: HashMap<String, bool>,
     /// Threads put back from Codex's archive to be taken up again: each is tried once.
     unarchived: HashSet<String>,
-    /// Whether the handshake is done, so a thread can be started.
+    /// Whether the handshake is done and the threads Codex holds are known, so a thread can be
+    /// started or asked anything.
     ready: bool,
-    /// Starts asked before it was.
+    /// Asks of a thread, and starts, asked before it was.
     held: Vec<Ask>,
     /// Who waits on each start Codex has not answered yet.
     starting: HashMap<IntentId, Vec<oneshot::Sender<Outcome>>>,
@@ -1015,6 +1019,11 @@ impl Session {
             Ask::Release { thread, id, reply } => {
                 let _gone = reply.send(self.tuis.refuse(&self.host, thread, id, reason));
             }
+            Ask::Send { thread, text, attachments, delivery, intent } => {
+                let pending =
+                    Pending { intent, text, attachments, delivery, state: PendingState::Sending };
+                self.not_sent(thread, pending, reason);
+            }
             other => tracing::debug!(?other, "an ask of a Codex thread that did not come back"),
         }
     }
@@ -1080,18 +1089,20 @@ impl Session {
                 self.request(&list, Waiting::Loaded).await?;
                 let models = p::ModelListParams::default();
                 self.request(&models, Waiting::Models { gathered: Vec::new() }).await?;
-                self.ready = true;
-                for ask in std::mem::take(&mut self.held) {
-                    self.ask(ask).await?;
-                }
             }
             (Waiting::Initialize, Err(e)) => return Err(format!("initialize: {e}")),
             (Waiting::Loaded, Ok(result)) => {
                 let loaded = rpc::response::<p::ThreadLoadedListParams>(result)
                     .map_err(|e| e.to_string())?;
+                self.let_go_before(&loaded.data);
                 for native in loaded.data {
                     self.resume(native).await?;
                 }
+                self.joined().await?;
+            }
+            (Waiting::Loaded, Err(e)) => {
+                tracing::debug!("Codex listed no loaded threads: {e}");
+                self.joined().await?;
             }
             (Waiting::Resume { native }, Ok(result)) => {
                 self.resuming.remove(&native);
@@ -1299,7 +1310,7 @@ impl Session {
                     self.host.apply(thread, actions);
                 }
             }
-            (Waiting::Loaded | Waiting::Turn { .. }, _) => {}
+            (Waiting::Turn { .. }, _) => {}
         }
         Ok(())
     }
@@ -1337,6 +1348,48 @@ impl Session {
             self.unloaded.insert(native.clone());
         }
         self.resuming.insert(native, false);
+    }
+
+    /// The handshake is done and Codex's threads are known: what was asked meanwhile goes.
+    async fn joined(&mut self) -> Result<(), String> {
+        self.ready = true;
+        for ask in std::mem::take(&mut self.held) {
+            self.ask(ask).await?;
+        }
+        Ok(())
+    }
+
+    /// Every Codex thread the host keeps that is not among `loaded`, the threads Codex holds
+    /// now, was let go before this link (by the worker before it restarted, or by Codex): it
+    /// counts as let go, so a follow or a message takes it up again (`thread/resume`) rather
+    /// than finding nothing to go to.
+    fn let_go_before(&mut self, loaded: &[String]) {
+        let kept = self.host.visit(|state| {
+            let native = &state.meta.native;
+            (is_shared(state) && !native.is_empty() && !loaded.contains(native))
+                .then(|| (state.meta.id, native.clone()))
+        });
+        for (thread, native) in kept {
+            if self.threads.contains_key(&native) {
+                continue;
+            }
+            self.native.insert(thread, native.clone());
+            self.unloaded.insert(native);
+        }
+    }
+
+    /// A message for `thread` that could not go, for `reason`: it is held in the thread's
+    /// list of messages on their way, saying why, for the person to send again, rather than
+    /// lost.
+    fn not_sent(&self, thread: ThreadId, pending: Pending, reason: &str) {
+        let Some((state, _)) = self.host.state(thread) else {
+            tracing::debug!(%thread, "a message for a thread the worker does not hold");
+            return;
+        };
+        let mut list = state.pending;
+        list.retain(|p| p.intent != pending.intent);
+        list.push(Pending { state: PendingState::Held { reason: reason.to_owned() }, ..pending });
+        self.host.apply(thread, vec![Action::PendingSet(list)]);
     }
 
     /// Host Codex thread `thread`, as it now stands.
@@ -1505,6 +1558,11 @@ impl Session {
     }
 
     async fn ask(&mut self, ask: Ask) -> Result<(), String> {
+        // Which threads Codex let go is known only once it listed what it holds.
+        if !self.ready && ask.thread().is_some() {
+            self.held.push(ask);
+            return Ok(());
+        }
         if let Some(thread) = ask.thread()
             && let Some(native) = self.native.get(&thread).cloned()
         {
@@ -1632,6 +1690,14 @@ impl Session {
             }
             Ask::Send { thread, text, attachments, delivery, intent } => {
                 if !self.native.contains_key(&thread) {
+                    let pending = Pending {
+                        intent,
+                        text,
+                        attachments,
+                        delivery,
+                        state: PendingState::Sending,
+                    };
+                    self.not_sent(thread, pending, NOT_HELD);
                     return Ok(());
                 }
                 let attached = crate::thread::attach::read(&attachments).await;
