@@ -4,8 +4,8 @@
 //! agents get the worker directory and send verbs on the same port, an agent's tools through
 //! `slopty mcp` among them. It admits loopback, the tailnet and the `[server] allow` ranges of
 //! `settings.toml` (a VPN Tailscale does not vouch for). The worker list survives restarts in
-//! `workers.json` in the data directory. Notes reach a pocketed phone once `[server.push]` names a
-//! relay or an APNs key.
+//! `workers.json` in the data directory. Notes reach a pocketed phone once `[server.push]` names an
+//! APNs key.
 
 #![forbid(unsafe_code)]
 
@@ -93,30 +93,23 @@ fn changed(before: &Read, now: &Read) -> Changed {
 }
 
 /// How `[server.push]` has notes reach a phone: straight to APNs when it names a key, its ID
-/// and the team's, else through the relay it names, else not at all. A key that does not read
-/// is said and passed over for the relay.
+/// and the team's, else not at all. A key that does not read, or comes without its IDs, is
+/// said and not used.
 fn push(settings: &slopty_settings::PushSettings) -> PushConfig {
-    let slopty_settings::PushSettings { relay, apns_key, key_id, team_id } = settings;
-    let (relay, apns_key, key_id, team_id) =
-        (relay.trim(), apns_key.trim(), key_id.trim(), team_id.trim());
-    if !apns_key.is_empty() {
-        let direct = std::fs::read_to_string(apns_key)
-            .map_err(|e| e.to_string())
-            .and_then(|pem| PushConfig::direct(&pem, key_id, team_id).map_err(|e| e.to_string()));
-        match direct {
-            Ok(direct) if !key_id.is_empty() && !team_id.is_empty() => return direct,
-            Ok(_) => tracing::warn!("[server.push] apns_key needs key_id and team_id; not used"),
-            Err(e) => tracing::warn!(error = %e, "[server.push] apns_key does not read; not used"),
-        }
-    }
-    if relay.is_empty() {
+    let slopty_settings::PushSettings { apns_key, key_id, team_id } = settings;
+    let (apns_key, key_id, team_id) = (apns_key.trim(), key_id.trim(), team_id.trim());
+    if apns_key.is_empty() {
         return PushConfig::Off;
     }
-    if !relay.starts_with("https://") {
-        tracing::warn!(relay, "[server.push] relay is no https:// address; notes stay off");
-        return PushConfig::Off;
+    let direct = std::fs::read_to_string(apns_key)
+        .map_err(|e| e.to_string())
+        .and_then(|pem| PushConfig::direct(&pem, key_id, team_id).map_err(|e| e.to_string()));
+    match direct {
+        Ok(direct) if !key_id.is_empty() && !team_id.is_empty() => return direct,
+        Ok(_) => tracing::warn!("[server.push] apns_key needs key_id and team_id; not used"),
+        Err(e) => tracing::warn!(error = %e, "[server.push] apns_key does not read; not used"),
     }
-    PushConfig::Relay { url: relay.to_owned() }
+    PushConfig::Off
 }
 
 /// What `[worker] keep_awake` lets keep the server's machine awake.
@@ -244,12 +237,9 @@ async fn main() -> Result<()> {
         }
         if changed.push {
             tracing::info!("[server.push] changed: applied");
-            let (hub, data_dir, config) = (hub.clone(), data_dir.clone(), push(&now.server.push));
-            tokio::spawn(async move {
-                if let Err(e) = slopty_server::push_as(&hub, config, &data_dir).await {
-                    tracing::warn!(error = %e, "[server.push] not applied; what was applied stays");
-                }
-            });
+            if let Err(e) = slopty_server::push_as(&hub, push(&now.server.push)) {
+                tracing::warn!(error = %e, "[server.push] not applied; what was applied stays");
+            }
         }
         if changed.keep_awake {
             tracing::info!(keep_awake = ?now.keep_awake, "[worker] keep_awake changed: applied");
@@ -319,17 +309,17 @@ mod tests {
         after_a_poll().await;
         let keep = Changed { keep_awake: true, ..Changed::default() };
         assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(keep), "the machine's own");
-        let relay = "[server.push]\nrelay = \"https://relay.example\"\n";
-        std::fs::write(&path, format!("{text}[worker]\nkeep_awake = \"never\"\n{relay}")).unwrap();
+        let pushing = "[server.push]\nkey_id = \"ABC123DEFG\"\n";
+        std::fs::write(&path, format!("{text}[worker]\nkeep_awake = \"never\"\n{pushing}"))
+            .unwrap();
         after_a_poll().await;
         let pushed = Changed { push: true, ..Changed::default() };
         assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(pushed));
         follow.abort();
     }
 
-    /// Notes reach a phone only once `[server.push]` says how: through an `https://` relay, or
-    /// straight to APNs with a key, its ID and the team's. A key that does not read, or comes
-    /// without its IDs, is passed over for the relay.
+    /// Notes reach a phone only once `[server.push]` names an APNs key with its ID and the
+    /// team's. A key that does not read, or comes without its IDs, leaves them off.
     #[test]
     fn notes_reach_a_phone_as_server_push_says() {
         let root = tempfile::tempdir().unwrap();
@@ -339,17 +329,14 @@ mod tests {
             push(&settings(&data_dir).server.push)
         };
         assert!(matches!(read(""), PushConfig::Off), "off until set up");
-        let relay = "[server.push]\nrelay = \"https://relay.example\"\n";
-        assert!(matches!(read(relay), PushConfig::Relay { url } if url == "https://relay.example"));
-        let plain = "[server.push]\nrelay = \"http://relay.example\"\n";
-        assert!(matches!(read(plain), PushConfig::Off), "never in the clear");
         let missing = root.path().join("AuthKey.p8");
-        let no_key = format!(
-            "{relay}apns_key = {missing:?}\nkey_id = \"ABC123DEFG\"\nteam_id = \"DEF456GHIJ\"\n"
-        );
-        assert!(matches!(read(&no_key), PushConfig::Relay { .. }), "a key that is not there");
+        let ids = "key_id = \"ABC123DEFG\"\nteam_id = \"DEF456GHIJ\"\n";
+        let named = format!("[server.push]\napns_key = {missing:?}\n{ids}");
+        assert!(matches!(read(&named), PushConfig::Off), "a key that is not there");
         std::fs::write(&missing, "not a key").unwrap();
-        assert!(matches!(read(&no_key), PushConfig::Relay { .. }), "a key that is not one");
+        assert!(matches!(read(&named), PushConfig::Off), "a key that is not one");
+        let bare = format!("[server.push]\napns_key = {missing:?}\n");
+        assert!(matches!(read(&bare), PushConfig::Off), "a key without its IDs");
     }
 
     /// The ranges come from the settings beside the server's own directory, and a range that

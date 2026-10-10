@@ -2237,7 +2237,7 @@ impl Workspace {
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
             this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
             this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
-            this_mac::Fix::SetUpPush => self.open_setting("server.push", "relay", window, cx),
+            this_mac::Fix::SetUpPush => self.open_setting("server.push", "apns_key", window, cx),
             this_mac::Fix::OpenTailscale => {
                 // The app where it is installed, else where to get it.
                 let app = std::path::Path::new(TAILSCALE_APP);

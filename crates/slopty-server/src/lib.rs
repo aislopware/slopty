@@ -9,7 +9,7 @@
 //! * [`hub`] — the registry, the leases and the one verb dispatch.
 //! * [`project`] — projects: their records, path claims, placement, and how agents move tasks.
 //! * [`store`] — the state files: known workers, every project and the phones, across restarts.
-//! * [`push`] — notices pushed to pocketed phones, through the relay or straight to APNs.
+//! * [`push`] — notices pushed to pocketed phones, straight to APNs.
 //! * [`link`] — the QUIC front end, the only one.
 
 #![forbid(unsafe_code)]
@@ -51,51 +51,27 @@ async fn say_relay(api: slopty_tailnet::LocalApi) {
     }
 }
 
-/// Push notices to phones as `config` says from now on.
-///
-/// It goes through the relay, with this install's key from the store in `data_dir`, or
-/// straight to APNs, or nowhere when it is off. What was pushing before stops once its last
-/// push is sent.
+/// Push notices to phones as `config` says from now on: straight to APNs, or nowhere when it is
+/// off. What was pushing before stops once its last push is sent.
 ///
 /// # Errors
-/// [`ServerError::Push`] when the system's certificates cannot be used, [`ServerError::State`]
-/// when the install's key cannot be read or made.
-pub async fn push_as(
-    hub: &Hub,
-    config: PushConfig,
-    data_dir: &std::path::Path,
-) -> Result<(), ServerError> {
-    let Some(pusher) = pusher(config, &PushStore::in_dir(data_dir)).await? else {
-        hub.push_to(None);
-        return Ok(());
+/// [`ServerError::Push`] when the system's certificates cannot be used.
+pub fn push_as(hub: &Hub, config: PushConfig) -> Result<(), ServerError> {
+    let pusher: std::sync::Arc<dyn push::Pusher> = match config {
+        PushConfig::Off => {
+            hub.push_to(None);
+            return Ok(());
+        }
+        PushConfig::Direct(key) => {
+            std::sync::Arc::new(push::DirectPusher::new(key, push::Https::new()?))
+        }
+        PushConfig::Through(pusher) => pusher,
     };
     let (out, queue) = tokio::sync::mpsc::channel(push::QUEUE);
     hub.push_to(Some(out));
     // It ends when the hub drops its end: pushing set up again, or the server gone.
     tokio::spawn(push::deliver(hub.downgrade(), queue, pusher));
     Ok(())
-}
-
-/// What sends pushes as `config` says, with this install's key from `phones` for a relay; none
-/// when pushing is off.
-async fn pusher(
-    config: PushConfig,
-    phones: &PushStore,
-) -> Result<Option<std::sync::Arc<dyn push::Pusher>>, ServerError> {
-    Ok(Some(match config {
-        PushConfig::Off => return Ok(None),
-        PushConfig::Relay { url } => {
-            let key = phones.install_key().await.map_err(|source| ServerError::State {
-                path: phones.path().with_file_name(store::PUSH_KEY),
-                source,
-            })?;
-            std::sync::Arc::new(push::RelayPusher::new(&url, key, push::Https::new()?))
-        }
-        PushConfig::Direct(key) => {
-            std::sync::Arc::new(push::DirectPusher::new(key, push::Https::new()?))
-        }
-        PushConfig::Through(pusher) => pusher,
-    }))
 }
 
 /// Server errors.
@@ -164,7 +140,7 @@ impl Server {
         let phones = PushStore::in_dir(&config.data_dir);
         let devices = phones.load().await.map_err(unreadable(phones.path()))?;
         let devices = hub.keep_phones(devices);
-        push_as(&hub, config.push, &config.data_dir).await?;
+        push_as(&hub, config.push)?;
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
         if let Some(api) = config.admission.local_api() {

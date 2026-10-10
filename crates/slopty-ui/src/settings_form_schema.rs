@@ -186,7 +186,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (
         Section::Agents,
         "Notes on your phone",
-        &["server.push.relay", "server.push.apns_key", "server.push.key_id", "server.push.team_id"],
+        &["server.push.apns_key", "server.push.key_id", "server.push.team_id"],
     ),
     (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps"]),
     (Section::Network, THIS_APP, &["client.server", "client.editor"]),
@@ -845,7 +845,6 @@ mod tests {
             ("ACP agents", "worker.acp"),
             ("Projects", "server.projects.live_agents"),
             ("Projects", "server.projects.permission_flags"),
-            ("Notes on your phone", "server.push.relay"),
             ("Notes on your phone", "server.push.apns_key"),
             ("Notes on your phone", "server.push.key_id"),
             ("Notes on your phone", "server.push.team_id"),

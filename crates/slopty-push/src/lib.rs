@@ -1,23 +1,20 @@
 //! The push path to a pocketed phone, where nothing of Slopty runs: what the server seals to the
-//! phone, what the relay checks and hands to APNs, and the token APNs takes from a provider
+//! phone, the request it hands APNs, and the token APNs takes from a provider
 //! (`.research/push-2026-10-06.md`, `docs/decisions/platform.md`).
 //!
-//! Pure: no sockets and no clock. The server, the relay's Worker and the phone's notification
-//! extension each bring their own I/O and their own `now`.
+//! Pure: no sockets and no clock. The server and the phone's notification extension each bring
+//! their own I/O and their own `now`.
 //!
 //! - [`seal`]: the note's words, sealed to a key only the phone holds (HPKE, RFC 9180), the device
-//!   token bound in, so the relay and APNs carry ciphertext and nothing else.
-//! - [`apns`]: the request APNs takes, its generic alert the relay's own words, and what its answer
-//!   means.
+//!   token bound in, so APNs carries ciphertext and nothing else.
+//! - [`apns`]: the request APNs takes, its generic alert the server's fixed words, and what its
+//!   answer means.
 //! - [`provider`]: the provider token, one per half hour, the same from every caller.
-//! - [`relay`]: a server's signed request to the relay, and the relay's checks of it: who sent it,
-//!   when, how large, and whether that server may push to that phone.
 
 mod b64;
 
 pub mod apns;
 pub mod provider;
-pub mod relay;
 pub mod seal;
 
 /// Why a push could not be made, sealed or opened.

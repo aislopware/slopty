@@ -480,7 +480,7 @@ pub enum Fix {
     EndSessions,
     /// Move Slopty to Applications and open it from there.
     MoveToApplications,
-    /// Open Slopty's settings where a push relay is named.
+    /// Open Slopty's settings where the APNs key is named.
     SetUpPush,
     /// Open the Tailscale app here, to turn it on or sign in.
     OpenTailscale,
@@ -703,24 +703,16 @@ pub fn app_lines(flow: &Flow) -> [Line; 3] {
 /// How a server started here reaches a pocketed phone, as `[server.push]` sets it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Push {
-    /// It does not: no relay and no APNs key is named.
+    /// It does not: no APNs key is named.
     Off,
-    /// Through the relay the person deployed.
-    Relay,
     /// Straight to Apple with the person's own APNs key.
     OwnKey,
 }
 
 impl Push {
-    /// How `settings` send, the key winning when both are set as the server has it.
+    /// How `settings` send.
     pub const fn of(settings: &slopty_settings::PushSettings) -> Self {
-        if !settings.apns_key.is_empty() {
-            Self::OwnKey
-        } else if !settings.relay.is_empty() {
-            Self::Relay
-        } else {
-            Self::Off
-        }
+        if settings.apns_key.is_empty() { Self::Off } else { Self::OwnKey }
     }
 }
 
@@ -737,10 +729,9 @@ pub fn push_line(flow: &Flow, push: Push) -> Option<Line> {
     Some(match push {
         Push::Off => line(
             Mark::Advisory,
-            "Off until you name a push relay. A pocketed phone hears nothing till then.",
+            "Off until you name your APNs key. A pocketed phone hears nothing till then.",
             Some(Fix::SetUpPush),
         ),
-        Push::Relay => line(Mark::Ok, "Through your relay.", None),
         Push::OwnKey => line(Mark::Ok, "Straight to Apple with your APNs key.", None),
     })
 }
@@ -1237,7 +1228,7 @@ mod tests {
     /// Before the worker answers only its own line and the server's move; a failed install or a
     /// silent worker is red with a way to try again, and says why.
     /// The phone line shows only for a server started here, whose settings it reads: off, it is
-    /// quiet with the way to set it up; the key wins over a relay as the server has it.
+    /// quiet with the way to set it up; with an APNs key named, it is on.
     #[test]
     fn a_server_here_says_how_notes_reach_a_phone() {
         use slopty_settings::PushSettings;
@@ -1252,12 +1243,9 @@ mod tests {
             slopty_ui::icons::Status::Idle,
             "quiet, not waiting on the person"
         );
-        let relay =
-            PushSettings { relay: "https://relay.example".to_owned(), ..PushSettings::default() };
-        assert_eq!(Push::of(&relay), Push::Relay);
-        let both = PushSettings { apns_key: "/k.p8".to_owned(), ..relay };
-        assert_eq!(Push::of(&both), Push::OwnKey);
-        let on = push_line(&here, Push::Relay).expect("a line here");
+        let key = PushSettings { apns_key: "/k.p8".to_owned(), ..PushSettings::default() };
+        assert_eq!(Push::of(&key), Push::OwnKey);
+        let on = push_line(&here, Push::OwnKey).expect("a line here");
         assert_eq!((on.mark, on.fix), (Mark::Ok, None));
         let joined = Flow::installing(1, Serve::Join(HostAddr::new("mini", 45551)));
         assert_eq!(push_line(&joined, Push::Off), None, "a server elsewhere is set up there");

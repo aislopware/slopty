@@ -720,22 +720,16 @@ pub struct ServerSettings {
 
 /// `[server.push]`: how the server's notes reach a phone the person is not using.
 ///
-/// It is off until they deploy the relay and name it here, or name an APNs key of their own;
-/// the key wins when both are set (`docs/decisions/platform.md`).
+/// It is off until they name an APNs key of their own, its ID and their team's
+/// (`docs/decisions/platform.md`).
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Notes on your phone")]
 pub struct PushSettings {
-    /// The relay you deployed, which carries notes to your phone.
-    ///
-    /// The `https://` address of the relay you deployed (`apps/slopty-relay`). It sees only
-    /// sealed notes. Empty, with no APNs key, sends none.
-    #[schemars(title = "Relay", example = &"https://slopty-relay.example.workers.dev")]
-    pub relay: String,
-    /// Your own APNs key, to send notes without a relay.
+    /// Your own APNs key, which sends notes to your phone.
     ///
     /// The full path to the `.p8` key Apple gave you. With its key ID and your team ID, the
-    /// server sends notes straight to Apple, and the relay is not used.
+    /// server sends notes straight to Apple. Empty sends none.
     #[schemars(title = "APNs key", example = &"/Users/me/keys/AuthKey_ABC123DEFG.p8")]
     pub apns_key: String,
     /// The APNs key's ID.

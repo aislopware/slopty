@@ -914,8 +914,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     one line in each entitlements writer (`xtask/src/bundle.rs`, `xtask/src/ios.rs`).
   - Test: `slopty-ui` `workspace::attention::tests::only_needs_you_breaks_through_a_focus`.
 
-- ✅ **Notes reach a pocketed phone: the server pushes, sealed, through a relay the person
-  deploys** (readiness N6, 2026-10-06; `.research/push-2026-10-06.md`). It replaces the
+- ✅ **Notes reach a pocketed phone: the server pushes, sealed, straight to APNs with the
+  person's key** (readiness N6, 2026-10-06; `.research/push-2026-10-06.md`). It replaces the
   deferral from 2026-09-28. A phone's links end a few tens of seconds after it leaves the
   screen, so local notes stop there. Now the server pushes what a linked client would have
   heard, and APNs carries it as ciphertext.
@@ -937,21 +937,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `mutable-content`, Time Sensitive for *Needs you* only, and thread and collapse ids that
     are hashes keyed by the phone's key. The phone's notification extension opens the body and
     shows what the app would have posted (P5).
-  - **The relay** (`apps/slopty-relay`, a Cloudflare Worker in Rust). It holds the team's APNs
-    key, and APNs is reached only through it, unless a self-builder names their own key
-    (below). A server signs each request with an Ed25519 install key made once (`push.key`,
-    readable by its owner only), over the route, the time and the body's hash, within five
-    minutes. The relay binds each token to the first four installs that push to it, in KV, and
-    holds each phone to 30 pushes a minute and each install to 120. It builds the APNs request
-    itself with its own words, so it can't be used to show anyone's text, and it never logs a
-    body. Its checks are plain Rust in `slopty_push::relay`, tested on the host. The Worker is a
-    thin adapter, linted for `wasm32-unknown-unknown` in the clippy-linux lane.
-  - **Off until set up.** No relay address is built in. `[server.push] relay` names the one the
-    person deployed, or `apns_key`, `key_id` and `team_id` send straight to APNs with their own
-    `.p8`. The same payload and the same token code are used either way, and the key wins when
-    both are set. Deploying, the `.p8`, the App IDs and the capabilities stay with the person.
+  - **No relay.** A Cloudflare Worker that held the team's APNs key and forwarded signed
+    requests was deleted on 2026-10-10 ("The push relay is deleted", below). The server sends
+    straight to APNs with the person's own key.
+  - **Off until set up.** `[server.push] apns_key`, `key_id` and `team_id` send straight to APNs
+    with the person's own `.p8`. The `.p8`, the App IDs and the capabilities stay with the
+    person.
   - **The provider token.** ES256, with `iat` fixed to a half-hour bucket and RFC 6979
-    deterministic signatures. Every Worker isolate then makes the same token, byte for byte,
+    deterministic signatures. A server started again then makes the same token, byte for byte,
     and it changes once in 30 minutes, inside Apple's 20 to 60.
   - **The server's HTTPS client** is hyper 1 over HTTP/2 with rustls on ring and the platform
     verifier. ring needs no CMake, so the static musl server builds with zig as its only C
@@ -985,23 +978,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Apple silicon receives those, so that check needs the key and nothing else.
   - **This Mac's checklist** has a "Notes on your phone" line while the server runs on this
     Mac, whose settings decide it. While `[server.push]` is off the line is quiet and not in the
-    way, and Set up opens Settings with the keyboard in the relay's field. A server on another
+    way, and Set up opens Settings with the keyboard in the APNs key's field. A server on another
     machine is set up there, so no line shows for one. The line holds no panel open. The
     flow's Done moved to the panel's foot, where Cancel stood, so a checklist one line longer
     still ends with its last word in view at 700 pt.
   - Taking a pushed note back once it is answered elsewhere: see "A note answered elsewhere
     leaves a pocketed phone" (2026-10-10).
   - Tests:
-    - `slopty-push`: the seal opens only with the phone's key and token; the relay's checks
-      and the APNs request it builds;
+    - `slopty-push`: the seal opens only with the phone's key and token, and the APNs request;
     - `slopty-server`: `hub::ladder::tests::needs_you_pushes_once_per_ask`,
-      `store::tests::the_phones_and_the_relay_key_outlive_the_server` and
+      `store::tests::the_phones_outlive_the_server` and
       `push::tests::a_long_notice_still_fits_apns`;
-    - `tests/push.rs` `a_notice_reaches_the_phone_through_the_relay`: a server, a phone that
-      stops listening and a worker's thread needing the person, through a stand-in relay
-      running the relay's own checks to a stand-in APNs, both HTTP/2 over TLS on loopback; and
-      straight to that APNs with a test `.p8`;
-    - `slopty-relay` `binding::tests::a_token_binds_to_its_first_installs`;
+    - `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back`: a server, a phone that
+      stops listening and a worker's thread needing the person, straight to a stand-in APNs
+      over HTTP/2 and TLS on loopback with a test `.p8`;
     - `slopty-ui` `a_pushed_note_is_the_note_the_app_would_post`: the opened note is the
       app's own, and a phone that stopped listening posts none of the server's notices;
     - `slopty-client` `the_phone_goes_on_each_change_and_to_each_new_link`;
@@ -1063,8 +1053,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `apns-push-type: background`, priority 5 (APNs takes no other for it), no collapse id,
     and the payload `{"aps":{"content-available":1},"w":[ids]}` with at most
     `MAX_TAKE_BACK` (16) ids. Nothing of the note is in it, and the ids are the ones Apple
-    already saw. The relay takes it through the same signature, binding and limits
-    (`RelayWhat::TakeBack`) and checks that every id is opaque.
+    already saw.
   - **The phone.** `UIBackgroundModes` gains `remote-notification`. The app delegate's
     `application:didReceiveRemoteNotification:fetchCompletionHandler:` reads the ids
     (`pushed::take_back_of`) and calls `notify::take_back`. That removes them, then asks for a
@@ -1080,8 +1069,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `hub::ladder::tests::a_pushed_ask_answered_elsewhere_is_taken_back` (answered and done at
     once, ended, swept by a phone back in front, kept for a worker away), the take-back step
     of `needs_you_pushes_once_per_ask`, and `tests/push.rs`
-    `a_notice_reaches_the_phone_through_the_relay_and_is_taken_back` (through the stand-in
-    relay and straight to the stand-in APNs, the take-back naming the `apns-collapse-id` the
+    `a_notice_reaches_the_phone_and_is_taken_back` (straight to the stand-in APNs, the
+    take-back naming the `apns-collapse-id` the
     note was shown under); `slopty-platform` `a_take_back_names_only_opaque_ids`. The app
     delegate's half is proved only on a device, or by a simulator test sending `simctl push`,
     which is still to be written.
@@ -1348,3 +1337,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     words a finished one, from the row's last line.
   - Goldens: `push_body*` (each body gains `merges`) and `push_body_ready_to_merge`.
 
+
+- ✅ **The push relay is deleted** (2026-10-10, orchestrator-first audit §C.5). There were two
+  ways to APNs: a Cloudflare Worker the person deployed (`apps/slopty-relay`), which held the
+  team's APNs key, and the person's own `.p8` named in `[server.push]`. One way is enough. The
+  phone app reaches people through TestFlight, which already needs the Apple developer account
+  the key comes from, and the key path adds no service to deploy or keep running.
+  - **Gone.** `apps/slopty-relay`; `slopty_push::relay` and its Ed25519 signing; the
+    server's `RelayPusher`, `PushConfig::Relay` and the install key in `push.key`;
+    `[server.push] relay` and its row in the form; the wasm32 clippy step, target and CI
+    target. `slopty-push` always has a random source now, so it has no `getrandom` feature.
+  - **Kept.** `[server.push] apns_key`, `key_id` and `team_id`, the sealed body, the provider
+    token and the take-back, all unchanged. A file that still names `relay` loads with an
+    unknown-key warning, and notes stay off until a key is named.
+  - **This Mac's line** says "Off until you name your APNs key", and Set up opens the form on
+    that field.
+  - Tests: `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back` (slopty-server),
+    `notes_reach_a_phone_as_server_push_says` (slopty-serverd),
+    `this_mac::tests::a_server_here_says_how_notes_reach_a_phone` (slopty-app).

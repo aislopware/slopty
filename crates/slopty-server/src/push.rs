@@ -2,10 +2,10 @@
 //!
 //! The hub decides what to push (`hub::ladder`): a notice that finds the person at none of
 //! their clients goes to every phone not listening on a live link. Here each one is sealed to
-//! its phone ([`slopty_push::seal`]) and sent, through the relay the person deployed
-//! ([`RelayPusher`]) or straight to APNs with their own key ([`DirectPusher`]), over one HTTPS
-//! client ([`Https`]): rustls on ring, which builds for the Linux server too, checking
-//! certificates as the system does. A phone APNs says is gone is forgotten.
+//! its phone ([`slopty_push::seal`]) and sent straight to APNs with the person's own key
+//! ([`DirectPusher`]), over one HTTPS client ([`Https`]): rustls on ring, which builds for the
+//! Linux server too, checking certificates as the system does. A phone APNs says is gone is
+//! forgotten.
 //!
 //! A pushed ask answered on another client is taken back ([`Sending::TakeBack`]): a background
 //! push naming the note's opaque collapse id, which iOS made the shown note's identifier.
@@ -27,7 +27,6 @@ use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::thread::attention::{NoticeKind, Subject};
 use slopty_push::apns::{self, Outcome};
 use slopty_push::provider::ProviderKey;
-use slopty_push::relay::{InstallKey, RelayPush};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -35,9 +34,9 @@ use crate::hub::WeakHub;
 
 /// How many pushes wait to be sealed and sent before more are dropped.
 pub const QUEUE: usize = 64;
-/// How long one request to the relay or APNs may take.
+/// How long one request to APNs may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long to wait before each try again of a push APNs or the relay said to try later.
+/// How long to wait before each try again of a push APNs said to try later.
 pub const RETRY_AFTER: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(10)];
 /// How much of a notice's title, and of the subagent's it names, a push carries, in bytes.
 pub const TITLE_BYTES: usize = 256;
@@ -51,11 +50,6 @@ pub enum PushConfig {
     /// It does not: nothing is set up.
     #[default]
     Off,
-    /// Through the relay the person deployed, at `url` (`https://…`, its `/push` route added).
-    Relay {
-        /// The relay's origin.
-        url: String,
-    },
     /// Straight to APNs, with the person's own key.
     Direct(Arc<ProviderKey>),
     /// Through `pusher`, whatever it is.
@@ -223,39 +217,6 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// Seconds since the Unix epoch.
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-/// Pushes through the relay the person deployed, signed with this install's key, which the
-/// relay binds each phone to on its first push.
-#[derive(Debug)]
-pub struct RelayPusher {
-    url: String,
-    key: InstallKey,
-    https: Https,
-}
-
-impl RelayPusher {
-    /// The relay at `url` (its origin), signing with `key`, over `https`.
-    #[must_use]
-    pub fn new(url: &str, key: InstallKey, https: Https) -> Self {
-        let url = format!("{}{}", url.trim_end_matches('/'), slopty_push::relay::PATH);
-        Self { url, key, https }
-    }
-}
-
-impl Pusher for RelayPusher {
-    fn push<'a>(&'a self, push: &'a apns::Push, _topic: &'a str) -> PushFuture<'a> {
-        Box::pin(async move {
-            let signed = self.key.sign(&RelayPush::of(push), now());
-            match self.https.post(&self.url, signed.headers, signed.body).await {
-                Ok((status, body)) => apns::outcome(status, &body),
-                Err(e) => {
-                    tracing::debug!(error = %e, "the relay was not reached");
-                    Outcome::Later
-                }
-            }
-        })
-    }
 }
 
 /// Pushes straight to APNs with the person's own key.

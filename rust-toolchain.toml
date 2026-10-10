@@ -9,7 +9,5 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
-    # The push relay, a Cloudflare Worker (`apps/slopty-relay`).
-    "wasm32-unknown-unknown",
 ]
 profile = "minimal"

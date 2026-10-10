@@ -1,8 +1,7 @@
 //! A notice reaches a pocketed phone: a worker's thread comes to need the person while their
-//! phone has stopped listening, the server seals the notice to the phone's key and sends it
-//! through a stand-in relay running the relay's own checks, which forwards it to a stand-in
-//! APNs; and, for a self-builder, straight to that APNs with their own key. Both stand-ins
-//! speak HTTP/2 over TLS on loopback, as the real ones do. What APNs got opens with the phone's
+//! phone has stopped listening, and the server seals the notice to the phone's key and sends it
+//! straight to a stand-in APNs with the person's own key. The stand-in speaks HTTP/2 over TLS
+//! on loopback, as the real one does. What APNs got opens with the phone's
 //! key to the notice's words, and carries none of them in the clear. Once the ask is answered
 //! elsewhere, a background push takes the note back by the id APNs showed it under.
 
@@ -11,14 +10,13 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::convert::Infallible;
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use http_body_util::{BodyExt as _, Full};
     use hyper::body::Incoming;
     use hyper::service::service_fn;
     use hyper_util::rt::{TokioExecutor, TokioIo};
-    use parking_lot::Mutex;
     use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
     use slopty_net::HostAddr;
     use slopty_net::admission::Admission;
@@ -34,15 +32,12 @@ mod tests {
         Status, ThreadId,
     };
     use slopty_push::provider::ProviderKey;
-    use slopty_push::relay::{self, InstallKey, PublicKey};
     use slopty_push::seal::{DeviceKey, Sealed};
-    use slopty_server::push::{DirectPusher, Https, Pusher, RelayPusher};
+    use slopty_server::push::{DirectPusher, Https, Pusher};
     use slopty_server::{Config, PushConfig, Server};
     use tokio::sync::mpsc;
 
     const PATIENCE: Duration = Duration::from_secs(10);
-    /// The app the relay pushes for, as its own setting names it.
-    const RELAY_TOPIC: &str = "dev.aislopware.slopty";
     /// The app the phone says it is.
     const PHONE_TOPIC: &str = "dev.aislopware.slopty.dev";
 
@@ -120,48 +115,6 @@ mod tests {
         })
         .await;
         (origin, der, got)
-    }
-
-    fn now() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
-    }
-
-    /// A stand-in relay: the relay's own checks and binding (`slopty_push::relay`), then the
-    /// push to APNs at `apns` under `provider`'s token, whose answer it gives back.
-    async fn relay(provider: ProviderKey, apns: String, https: Https) -> (String, Vec<u8>) {
-        let bound: Arc<Mutex<BTreeMap<String, Vec<PublicKey>>>> = Arc::default();
-        let provider = Arc::new(provider);
-        stand_in(move |request| {
-            let (bound, provider, apns, https) =
-                (Arc::clone(&bound), Arc::clone(&provider), apns.clone(), https.clone());
-            Box::pin(async move {
-                assert_eq!(request.path, relay::PATH);
-                let header = |name: &str| request.headers.get(name).map(String::as_str);
-                let incoming = relay::Incoming {
-                    key: header(relay::KEY_HEADER),
-                    at: header(relay::AT_HEADER),
-                    signature: header(relay::SIGNATURE_HEADER),
-                    body: &request.body,
-                };
-                let admitted = match relay::admit(&incoming, now()) {
-                    Ok(admitted) => admitted,
-                    Err(refusal) => return (refusal.status(), Bytes::new()),
-                };
-                let token = admitted.push.token.clone();
-                let keys = bound.lock().get(&token).cloned().unwrap_or_default();
-                match relay::bind(admitted.key, &keys) {
-                    Ok(keys) => bound.lock().insert(token, keys),
-                    Err(refusal) => return (refusal.status(), Bytes::new()),
-                };
-                let to_apns = match relay::forward(&admitted, &provider, RELAY_TOPIC, now()) {
-                    Ok(to_apns) => to_apns,
-                    Err(refusal) => return (refusal.status(), Bytes::new()),
-                };
-                let url = format!("{apns}{}", to_apns.path);
-                https.post(&url, to_apns.headers, to_apns.body).await.unwrap()
-            })
-        })
-        .await
     }
 
     fn summary(id: SessionId) -> SessionSummary {
@@ -370,24 +323,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_notice_reaches_the_phone_through_the_relay_and_is_taken_back() {
+    async fn a_notice_reaches_the_phone_and_is_taken_back() {
         let (apns_origin, apns_der, mut got) = apns().await;
         let pem =
             rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap().serialize_pem();
-        let provider = || ProviderKey::from_p8(&pem, "ABC123DEFG", "DEF456GHIJ").unwrap();
-
-        let to_apns = Https::trusting(apns_der.clone()).unwrap();
-        let (relay_origin, relay_der) = relay(provider(), apns_origin.clone(), to_apns).await;
-        let install = InstallKey::generate().unwrap();
-        let https = Https::trusting(relay_der).unwrap();
-        let through = Arc::new(RelayPusher::new(&relay_origin, install, https));
-        let (pushed, back, key, token) = a_phone_is_pushed(through, &mut got).await;
-        opens_to_the_notice(&pushed, &key, &token, RELAY_TOPIC);
-        takes_the_note_back(&back, &pushed, RELAY_TOPIC);
-
-        // A self-builder's server goes straight to APNs, for the app the phone names.
+        let provider = ProviderKey::from_p8(&pem, "ABC123DEFG", "DEF456GHIJ").unwrap();
+        // The server goes straight to APNs, for the app the phone names.
         let https = Https::trusting(apns_der).unwrap();
-        let direct = Arc::new(DirectPusher::new(Arc::new(provider()), https).at(&apns_origin));
+        let direct = Arc::new(DirectPusher::new(Arc::new(provider), https).at(&apns_origin));
         let (pushed, back, key, token) = a_phone_is_pushed(direct, &mut got).await;
         opens_to_the_notice(&pushed, &key, &token, PHONE_TOPIC);
         takes_the_note_back(&back, &pushed, PHONE_TOPIC);

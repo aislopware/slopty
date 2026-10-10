@@ -193,7 +193,6 @@ impl Shard {
                 "slopty-server",
                 "slopty-serverd",
                 "slopty-push",
-                "slopty-relay",
                 "slopty-cli",
                 "slopty-proto",
                 "slopty-agent",
@@ -1490,26 +1489,12 @@ pub fn lint(sh: &Shell) -> Result<()> {
     lint_linux(sh)
 }
 
-/// Clippy for Linux on every one of [`LINUX_CRATES`] (`tools::lint_linux`), on xtask, which
-/// the deep checks run on Linux runners, and on the push relay for the Worker it is
-/// ([`lint_wasm`]).
+/// Clippy for Linux on every one of [`LINUX_CRATES`] (`tools::lint_linux`), and on xtask, which
+/// the deep checks run on Linux runners.
 pub fn lint_linux(sh: &Shell) -> Result<()> {
     let crates = crate::tools::lint_linux(sh, &LINUX_CRATES);
-    both(crates, both(lint_linux_xtask(sh), lint_wasm(sh)))
+    both(crates, lint_linux_xtask(sh))
 }
-
-/// The push relay, a Cloudflare Worker, as it is built: for [`WASM_TRIPLE`], where its Worker
-/// code is (`apps/slopty-relay`). Every other lane builds only its host part. In the Linux
-/// lane, which has a runner of its own and no Mac to spare.
-fn lint_wasm(sh: &Shell) -> Result<()> {
-    quiet_step(
-        &format!("clippy {WASM_TRIPLE}, slopty-relay"),
-        cmd!(sh, "cargo clippy -p slopty-relay --target {WASM_TRIPLE} -- -D warnings"),
-    )
-}
-
-/// The triple the push relay builds for.
-pub const WASM_TRIPLE: &str = "wasm32-unknown-unknown";
 
 /// Clippy for Linux on xtask, which the deep checks run on Linux runners: through
 /// `cargo-zigbuild`, as the crates are (`tools::lint_linux`).

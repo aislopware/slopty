@@ -2,9 +2,9 @@
 //! the header and the team id and the time in its claims.
 //!
 //! Apple asks that the token be made again no more often than every 20 minutes and no less
-//! often than every 60, and refuses one made too often (`TooManyProviderTokenUpdates`). A relay
-//! runs in many short-lived isolates, each of which would make its own. So the time a token
-//! says is the start of its half hour ([`EPOCH_SECONDS`]), and ECDSA signs deterministically
+//! often than every 60, and refuses one made too often (`TooManyProviderTokenUpdates`). So that
+//! a server started again, or more than one caller, never makes one too often, the time a
+//! token says is the start of its half hour ([`EPOCH_SECONDS`]), and ECDSA signs deterministically
 //! (RFC 6979, `p256`'s way): every caller in a half hour makes the same token, byte for byte, and
 //! the token changes every 30 minutes, inside Apple's window.
 

@@ -1,6 +1,6 @@
 //! The request APNs takes, and what its answer means.
 //!
-//! What it shows before the phone's extension runs is the relay's own words ([`TITLE`],
+//! What it shows before the phone's extension runs is the server's fixed words ([`TITLE`],
 //! [`URGENT`], [`NEWS`]), never the note's: those travel sealed under `e` and `s`, and the
 //! extension (`mutable-content`) puts them in. If the extension fails or runs out of time, the
 //! person still sees that an agent wants them. Only an agent that needs the person is Time
@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// Only an agent that needs the person is Time Sensitive at the highest priority; anything
-    /// else is said in the relay's other words, at the low priority. A push over APNs' size, or
+    /// else is said in the other fixed words, at the low priority. A push over APNs' size, or
     /// with a token or an id that is not one, is no request.
     #[test]
     fn only_needs_you_is_time_sensitive() {

@@ -3,7 +3,7 @@
 //! The phone makes an X25519 key once and hands its public half to the person's own server over
 //! the tailnet, with its device token. The server seals each note's body to it: HPKE (RFC 9180)
 //! in base mode, `DHKEM(X25519, HKDF-SHA256)`, HKDF-SHA256 and ChaCha20-Poly1305, under
-//! [`INFO`], with the device token as the associated data. So what the relay and APNs carry is
+//! [`INFO`], with the device token as the associated data. So what APNs carries is
 //! ciphertext, and a body sealed for one device opens on no other, even with its key.
 
 use hpke::aead::ChaCha20Poly1305;
@@ -68,7 +68,6 @@ impl DeviceKey {
     ///
     /// # Errors
     /// [`PushError::Random`] when the random source fails.
-    #[cfg(feature = "getrandom")]
     pub fn generate() -> Result<Self, PushError> {
         let mut ikm = [0_u8; KEY_LEN];
         getrandom::fill(&mut ikm).map_err(|_os| PushError::Random)?;
@@ -126,7 +125,6 @@ impl DeviceKey {
 /// # Errors
 /// [`PushError::Key`] when `public` is not an X25519 key, [`PushError::Seal`] when sealing
 /// fails.
-#[cfg(feature = "getrandom")]
 pub fn seal(public: &[u8], token: &str, body: &[u8]) -> Result<Sealed, PushError> {
     let public =
         <Kem as hpke::Kem>::PublicKey::from_bytes(public).map_err(|_hpke| PushError::Key)?;
@@ -142,7 +140,6 @@ pub fn seal(public: &[u8], token: &str, body: &[u8]) -> Result<Sealed, PushError
 }
 
 #[cfg(test)]
-#[cfg(feature = "getrandom")]
 mod tests {
     use super::*;
 

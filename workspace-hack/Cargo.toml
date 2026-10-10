@@ -35,7 +35,6 @@ collections = { git = "https://github.com/aislopware/gpui-fast.git", default-fea
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.2", default-features = false, features = ["rand_core"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-curve25519-dalek = { version = "5", default-features = false, features = ["digest", "precomputed-tables", "zeroize"] }
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
@@ -48,7 +47,6 @@ futures-util = { version = "0.3", default-features = false, features = ["async-a
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
-hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "x25519"] }
 http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }

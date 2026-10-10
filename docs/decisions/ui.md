@@ -9071,7 +9071,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **What.** First under Machines, before Streams and Network, with the agent glyph: the ACP
     agents beside the ones Slopty knows (`worker.acp`), the bounds every project stays under
     (`server.projects`: live agents, looser permissions) and how notes reach a pocketed phone
-    (`server.push`: the relay, or an APNs key with its IDs), each its own group.
+    (`server.push`: an APNs key with its IDs), each its own group.
   - **Why.** These keys stood at the foot of Network, under their tables' titles, among the
     addresses and the server, where nobody looking for an agent's setting would look. The
     agents are what the app is for, so their page comes first among the machines'.

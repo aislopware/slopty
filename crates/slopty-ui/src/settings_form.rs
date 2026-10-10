@@ -2584,21 +2584,21 @@ mod tests {
         cx.run_until_parked();
         let ix = rows()
             .iter()
-            .position(|r| r.table() == "server.push" && r.key() == "relay")
-            .expect("the relay's row");
+            .position(|r| r.table() == "server.push" && r.key() == "apns_key")
+            .expect("the APNs key's row");
         form.update_in(cx, |form, window, cx| {
             form.show_setting("no.such", "key", window, cx);
         });
         assert_eq!(form.read_with(cx, |form, _| form.section), Section::Appearance, "unmoved");
         form.update_in(cx, |form, window, cx| {
-            form.show_setting("server.push", "relay", window, cx);
+            form.show_setting("server.push", "apns_key", window, cx);
         });
         cx.run_until_parked();
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
         assert_eq!(form.read_with(cx, |form, _| form.section), Section::Agents);
         let field = form.read_with(cx, |form, _| form.fields.get(ix).cloned().flatten());
-        let field = field.expect("the relay is typed into");
+        let field = field.expect("the APNs key is typed into");
         assert!(
             cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window)),
             "the keyboard is in it"
@@ -2869,7 +2869,8 @@ mod map_tests {
     }
 
     /// The Agents page writes its keys to their own tables: a step of the live agents to
-    /// `[server.projects]`, a relay typed to `[server.push]`, in a field wide enough to read it.
+    /// `[server.projects]`, an APNs key's path typed to `[server.push]`, in a field wide enough to
+    /// read it.
     #[gpui::test]
     fn the_agents_page_writes_the_projects_and_the_notes_tables(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -2885,8 +2886,8 @@ mod map_tests {
         };
         click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
         let live = ix("server.projects", "live_agents");
-        let relay = ix("server.push", "relay");
-        for row in [ix("worker", "acp"), live, ix("server.projects", "permission_flags"), relay] {
+        let key = ix("server.push", "apns_key");
+        for row in [ix("worker", "acp"), live, ix("server.projects", "permission_flags"), key] {
             assert!(cx.debug_bounds(leak(format!("settings-row-{row}"))).is_some(), "row {row}");
         }
         click(cx, leak(format!("settings-increase-{live}")));
@@ -2895,16 +2896,16 @@ mod map_tests {
         let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
         assert_eq!(text(cx), "[server.projects]\nlive_agents = 25\n");
 
-        // A URL's field is wide enough to read one whole, wider than a colour's.
-        let wide = cx.debug_bounds(leak(format!("settings-field-{relay}"))).expect("its field");
+        // A path's field is wide enough to read one whole, wider than a colour's.
+        let wide = cx.debug_bounds(leak(format!("settings-field-{key}"))).expect("its field");
         assert!(f32::from(wide.size.width) > FIELD_WIDTH, "{wide:?}");
-        click(cx, leak(format!("settings-field-{relay}")));
-        cx.simulate_input("https://relay.example.dev");
+        click(cx, leak(format!("settings-field-{key}")));
+        cx.simulate_input("/Users/me/keys/AuthKey.p8");
         cx.executor().advance_clock(SETTLE);
         cx.run_until_parked();
         assert_eq!(
             text(cx),
-            "[server.projects]\nlive_agents = 25\n\n[server.push]\nrelay = \"https://relay.example.dev\"\n"
+            "[server.projects]\nlive_agents = 25\n\n[server.push]\napns_key = \"/Users/me/keys/AuthKey.p8\"\n"
         );
     }
 
