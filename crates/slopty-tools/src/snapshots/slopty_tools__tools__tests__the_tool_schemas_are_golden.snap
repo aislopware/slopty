@@ -1,0 +1,587 @@
+---
+source: crates/slopty-tools/src/tools.rs
+expression: tools
+---
+[
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`project_status`.",
+      "properties": {
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "description": "Timeline cursor: the `next` of the previous call. The latest entries when omitted; 0\nfor all the server keeps.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "ProjectStatusArgs",
+      "type": "object"
+    },
+    "name": "project_status"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_get`.",
+      "properties": {
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The task; yours when omitted. `orchestrator` for the orchestrator's own node."
+        }
+      },
+      "title": "TaskGetArgs",
+      "type": "object"
+    },
+    "name": "task_get"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_start`.",
+      "properties": {
+        "agent": {
+          "description": "Which agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's\nname (`gemini`, `acp:gemini`). Each gets Slopty's tools and its role, and goes only to\na worker with it installed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "brief": {
+          "default": "",
+          "description": "A new task: what its agent is told to do (the goal, the constraints, how to know it is\ndone). Its first prompt.",
+          "type": "string"
+        },
+        "depends_on": {
+          "description": "A new task: tasks whose work it needs first; it starts once they are merged. A\ndependency never leads back to it.",
+          "items": {
+            "$ref": "#/$defs/TaskArg"
+          },
+          "type": "array"
+        },
+        "read_only": {
+          "default": false,
+          "description": "A new task: it only reads.",
+          "type": "boolean"
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A task the project has, to start: one made before and refused its start, one stopped or\ngiven back. A new task is made from `title` and the fields after it when omitted."
+        },
+        "title": {
+          "description": "A new task: what it is, in a line.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worker": {
+          "description": "This worker (name or id); one with room when omitted. `slopty --json workers`\nshows each worker's facts, and work that needs no Apple platform belongs on Linux.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "TaskStartArgs",
+      "type": "object"
+    },
+    "name": "task_start"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_update`.",
+      "properties": {
+        "note": {
+          "description": "Words for the project's timeline.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "What you are doing, in your own words, for the tree; empty clears it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The task; yours when omitted."
+        }
+      },
+      "title": "TaskUpdateArgs",
+      "type": "object"
+    },
+    "name": "task_update"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_report`.",
+      "properties": {
+        "artifacts": {
+          "default": [],
+          "description": "What you made: paths, commits, links.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "branch": {
+          "description": "The branch your work is on.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_key": {
+          "description": "A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "default": "",
+          "description": "What you have to say, in a few lines.",
+          "type": "string"
+        },
+        "pr": {
+          "description": "The pull request you opened, by number.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The task; yours when omitted."
+        }
+      },
+      "title": "TaskReportArgs",
+      "type": "object"
+    },
+    "name": "task_report"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_tell`.",
+      "properties": {
+        "idempotency_key": {
+          "description": "A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "$ref": "#/$defs/TaskArg",
+          "description": "The task to tell: any of the project you orchestrate."
+        },
+        "text": {
+          "description": "What to say, in a few lines.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "text"
+      ],
+      "title": "TaskTellArgs",
+      "type": "object"
+    },
+    "name": "task_tell"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_restart`.",
+      "properties": {
+        "agent": {
+          "description": "The agent to hand it to: `claude`, `codex`, `pi`, or an ACP agent by the registry's\nname. The one it ran last when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_key": {
+          "description": "A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "$ref": "#/$defs/TaskArg",
+          "description": "The task to start again: any of the project you orchestrate but your own."
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "title": "TaskRestartArgs",
+      "type": "object"
+    },
+    "name": "task_restart"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        },
+        "UntilArg": {
+          "description": "What `task_wait` waits for.",
+          "oneOf": [
+            {
+              "const": "any",
+              "description": "The first news of any task named.",
+              "type": "string"
+            },
+            {
+              "const": "all",
+              "description": "News of every task named.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`task_wait`.",
+      "properties": {
+        "project": {
+          "description": "The project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "description": "Timeline cursor: the `next` of the previous `task_wait` or `project_status`, so nothing in\nbetween is missed. From now when omitted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tasks": {
+          "description": "The tasks to wait for, at most 64.",
+          "items": {
+            "$ref": "#/$defs/TaskArg"
+          },
+          "type": "array"
+        },
+        "timeout_ms": {
+          "description": "How long to wait, at most 1800000; 50000 when omitted. Running out cancels nothing.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "until": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntilArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`any` (the default): answer at the first news of any of them; `all`: once each has\nnews."
+        }
+      },
+      "required": [
+        "tasks"
+      ],
+      "title": "TaskWaitArgs",
+      "type": "object"
+    },
+    "name": "task_wait"
+  },
+  {
+    "input_schema": {
+      "$defs": {
+        "TaskArg": {
+          "anyOf": [
+            {
+              "description": "Its number.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "description": "Its number as text.",
+              "type": "string"
+            }
+          ],
+          "description": "A task by its number, `3` or `\"#3\"`."
+        },
+        "ViewArg": {
+          "description": "How much of a thread a read gives.",
+          "oneOf": [
+            {
+              "const": "messages",
+              "description": "What was said.",
+              "type": "string"
+            },
+            {
+              "const": "activity",
+              "description": "What was said and done.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`read_thread`.",
+      "properties": {
+        "after": {
+          "description": "The last turn already read: the `next` of the previous read. From the first turn held\nwhen omitted.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project": {
+          "description": "The task's project; yours when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The task whose agent's thread to read; with `project`, yours when omitted."
+        },
+        "term": {
+          "description": "The terminal an agent runs in instead, as the lists print it (`worker/session`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread": {
+          "description": "A thread's id instead: a subagent's `child` from an earlier read, say.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "view": {
+          "$ref": "#/$defs/ViewArg",
+          "description": "`messages` (the default) for what was said, `activity` for that and every tool call\nwith the end of its output."
+        }
+      },
+      "title": "ReadThreadArgs",
+      "type": "object"
+    },
+    "name": "read_thread"
+  }
+]

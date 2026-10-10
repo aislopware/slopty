@@ -1280,6 +1280,12 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     let (session, batch, context) = next_batch(&mut rx).await;
     assert_eq!(session, orchestrator.session);
     assert!(context.contains("You orchestrate the Slopty project slopty"), "{context}");
+    // It dispatches: the split goes to the person first, the goal ends with its summary, and
+    // the agent choice is said once, in task_start's own description.
+    for said in ["you do not code", "plan mode", "with task_tell", "end with its summary"] {
+        assert!(context.contains(said), "{said}: {context}");
+    }
+    assert!(!context.contains("runs Claude Code"), "{context}");
     lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
 
     let task = new_task(&hub, None).await;

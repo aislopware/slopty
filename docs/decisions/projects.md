@@ -2754,3 +2754,28 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task` (slopty-server); the CLI's
     `apps/slopty-cli/tests/projects.rs`, its stand-in agent scripted through the worker's
     environment; the goldens `task_spawn` and `task_spawn_agent`.
+
+- ✅ **The orchestrator dispatches, and its tools say only that** (2026-10-10, the
+  orchestrator-first study, item 4's tool and role half).
+  - **Role.** The orchestrator's role now says it dispatches and does not code. It puts the
+    split to the person in plan mode before starting any task, answers its tasks' scope
+    questions with `task_tell` (asking the person only what is theirs to decide), and ends the
+    goal with its summary.
+    - "Do sequential and small work yourself" is gone: a coding orchestrator is a single agent
+      with extra steps.
+    - The second "task_start runs Claude Code" line is gone; `task_start`'s own description
+      says which agents it runs.
+  - **`task_start`** takes `title`, `brief`, `depends_on`, `read_only`, `worker` and `agent`,
+    plus `task` for one the project has. `task` stays because a stopped, given-back or refused
+    task is started again by its number, and the server's own refusals tell the orchestrator
+    so. Its `project` (always the caller's own) and its `idempotency_key` are gone.
+  - **`task_update`** keeps `task`, `status` and `note`. A task's state moves by itself: its
+    agent's status, `task_report` and the person's merge move it. `state`, `branch`, `base`,
+    `depends_on`, `verifier`, `metadata`, `project` and `idempotency_key` are the CLI's
+    (`slopty task update`) and no model's.
+  - **`project_status`** reads at once, with no progress wrapper; `task_wait` is the one wait.
+  - Tests: `the_tool_schemas_are_golden` (slopty-tools, the schema of every tool a model is
+    handed); `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` and
+    `the_server_s_record_of_the_caller_s_terminal_names_its_task` (the trimmed arguments are
+    unknown fields); `a_report_reaches_the_orchestrator_through_its_worker` (slopty-server, the
+    role's words).

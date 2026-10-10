@@ -705,17 +705,19 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
             plain(&project.repo),
             plain(&project.target)
         ),
-        "- Do sequential and small work yourself. Start a task only for a part that runs in \
-         parallel with the rest: task_start makes it and starts its agent in one call, and \
-         project_status follows them all. Tasks are one level: their agents start nothing \
-         themselves."
+        "- You dispatch; you do not code. Split the goal into tasks that run side by side, and \
+         put the split to the person in plan mode before you start any. task_start makes a \
+         task and starts its agent in one call, and project_status follows them all. Tasks \
+         are one level: their agents start nothing themselves."
             .to_owned(),
         "- Reports come to you in <slopty-reports> blocks like this one, and so does what a \
          task's agent came to when it ended a turn, exited or waits on the person without \
          reporting; task_wait waits for that news where none comes unasked."
             .to_owned(),
-        "- task_tell says more to a task's agent, marked as yours: the person's words go \
-         first, and nothing you say answers what the person was asked."
+        "- A task's agent brings its scope and design questions to you in its reports: answer \
+         them with task_tell, which reaches it marked as yours, after the person's words and \
+         never in their place. Ask the person, with your own question tool, only what is \
+         theirs to decide."
             .to_owned(),
         "- Work that passes its checks waits for the person's Merge; merge nothing yourself, \
          and answer no permission: approvals are the person's. While as many tasks wait on the \
@@ -725,12 +727,10 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         "- `slopty --json workers` in your shell shows each worker's facts; name the worker \
          in task_start. Work that needs no Apple platform belongs on Linux."
             .to_owned(),
-    ];
-    lines.push(
-        "- task_start runs Claude Code; `agent: \"codex\"` runs the person's Codex instead, \
-         with the same tools, on a worker that has it."
+        "- When the goal is met, end with its summary for the person: what was done, what was \
+         merged and what is left."
             .to_owned(),
-    );
+    ];
     if let Some(key) = &clones.key {
         let on: Vec<String> = clones
             .on

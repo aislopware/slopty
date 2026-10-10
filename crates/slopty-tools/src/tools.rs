@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, ThreadView};
-use slopty_proto::project::{Report, TaskChange, TaskId};
+use slopty_proto::project::{Report, TaskChange};
 
 use crate::ops::{self, NewTask, Which};
 use crate::resolve::Resolver;
@@ -30,8 +30,8 @@ task_get shows one task in full. The orchestrator starts work with task_start: e
 one agent (Claude Code, Codex, pi or an ACP agent), working from its brief in a worktree of \
 its own on the worker named or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
 more to a task's agent, task_restart starts its work again with a fresh or another agent, \
-task_wait waits for tasks' news, and task_update changes a task. A \
-task's agent moves its own task with task_update and reports it with task_report; its project \
+task_wait waits for tasks' news, and task_update says what you are doing. A \
+task's agent says what it is doing with task_update and reports with task_report; its project \
 and task are the defaults. read_thread reads another agent's thread; the requests on it are \
 the person's to answer, never an agent's. Everything else, the workers and their facts, \
 terminals, files and the workspace, is the `slopty` command in your shell: `slopty --help` \
@@ -66,16 +66,6 @@ fn task_text(task: Option<&TaskArg>) -> Option<String> {
     task.map(TaskArg::text)
 }
 
-/// A JSON object as the text the server keeps.
-fn metadata_text(doc: Option<Map<String, Value>>) -> Result<Option<String>, ToolError> {
-    doc.map(|d| serde_json::to_string(&d).map_err(|e| ToolError::invalid(e.to_string())))
-        .transpose()
-}
-
-fn task_numbers(tasks: &[TaskArg]) -> Result<Vec<TaskId>, ToolError> {
-    tasks.iter().map(|t| ops::task_number(&t.text())).collect()
-}
-
 /// `project_status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -101,8 +91,6 @@ struct TaskGetArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskStartArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
     /// A task the project has, to start: one made before and refused its start, one stopped or
     /// given back. A new task is made from `title` and the fields after it when omitted.
     task: Option<TaskArg>,
@@ -126,12 +114,10 @@ struct TaskStartArgs {
     /// name (`gemini`, `acp:gemini`). Each gets Slopty's tools and its role, and goes only to
     /// a worker with it installed.
     agent: Option<String>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
 }
 
-/// What [`TaskStartArgs::start`] asks: the project, the task, the worker and agent, the key.
-type Start = (Option<String>, Which, (Option<String>, Option<String>), Option<String>);
+/// What [`TaskStartArgs::start`] asks: the task, and the worker and agent.
+type Start = (Which, (Option<String>, Option<String>));
 
 impl TaskStartArgs {
     /// Which task it starts, and on what.
@@ -163,7 +149,7 @@ impl TaskStartArgs {
                 ));
             }
         };
-        Ok((self.project, which, (self.worker, self.agent), self.idempotency_key))
+        Ok((which, (self.worker, self.agent)))
     }
 }
 
@@ -171,29 +157,12 @@ impl TaskStartArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskUpdateArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
     /// The task; yours when omitted.
     task: Option<TaskArg>,
-    /// A new state: planned, running, waiting, blocked, verifying, done, merged, failed. A
-    /// merged task is final; only a done or verifying task merges.
-    state: Option<String>,
     /// What you are doing, in your own words, for the tree; empty clears it.
     status: Option<String>,
-    /// The branch its work is on.
-    branch: Option<String>,
-    /// The commit its work starts from, in hex.
-    base: Option<String>,
     /// Words for the project's timeline.
     note: Option<String>,
-    /// New dependencies, in place of the old.
-    depends_on: Option<Vec<TaskArg>>,
-    /// Its own verifier command; empty for the project's.
-    verifier: Option<String>,
-    /// New metadata, a JSON object in place of the old.
-    metadata: Option<Map<String, Value>>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
 }
 
 /// `task_report`.
@@ -288,29 +257,8 @@ impl TaskReportArgs {
 }
 
 impl TaskUpdateArgs {
-    fn change(&self) -> Result<TaskChange, ToolError> {
-        let state = match self.state.as_deref() {
-            Some(word) => Some(view::projects::state_named(word).ok_or_else(|| {
-                ToolError::invalid(format!(
-                    "state is planned, running, waiting, blocked, verifying, done, merged or \
-                     failed, not {word:?}"
-                ))
-            })?),
-            None => None,
-        };
-        let depends_on = self.depends_on.as_deref().map(task_numbers).transpose()?;
-        Ok(TaskChange {
-            state,
-            status: self.status.clone(),
-            branch: self.branch.clone(),
-            verified: None,
-            base: self.base.clone(),
-            note: self.note.clone(),
-            depends_on,
-            run_on: None,
-            verifier: self.verifier.clone(),
-            metadata: metadata_text(self.metadata.clone())?,
-        })
+    fn change(&self) -> TaskChange {
+        TaskChange { status: self.status.clone(), note: self.note.clone(), ..TaskChange::default() }
     }
 }
 
@@ -411,8 +359,7 @@ pub fn list() -> Vec<Tool> {
              (`slopty --json workers` shows each one's facts; work that needs no Apple \
              platform belongs on Linux) or one with room, beside a clone of the project's \
              repository in a worktree of its own. Start \
-             only work that runs in parallel with yours and needs no context you hold: do \
-             sequential or small work yourself. A start is refused while as many tasks wait on \
+             work that runs side by side with the rest and needs no context only you hold. A start is refused while as many tasks wait on \
              the person as the project's review limit, saying how many and where. A new task \
              refused its start is kept: start it later by its number. Returns the task with its \
              terminal's `term`.",
@@ -420,10 +367,10 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<TaskUpdateArgs>(
             "task_update",
-            "Change a task: its `state` (verifying, done, failed, planned again; merging is the \
-             person's), your own `status` text, `depends_on`, `metadata`; record its \
-             `branch` or the `base` commit its work starts from, or put a `note` on the \
-             timeline. Its agent's own status moves it among running, waiting and blocked.",
+            "Say what you are doing on a task, in your own `status` words for the tree, or put a \
+             `note` on the project's timeline. Its state moves by itself: its agent's own \
+             status moves it among running, waiting and blocked, task_report moves it to done, \
+             and merging is the person's.",
             Kind::Write,
         ),
         tool::<TaskReportArgs>(
@@ -527,8 +474,8 @@ async fn run<D: Dispatch>(
     match name {
         "project_status" => {
             let a: ProjectStatusArgs = args(arguments)?;
-            let status = ops::project_status(dispatch, a.project.as_deref(), a.since);
-            json(&view::projects::status(&with_progress(status, progress).await?))
+            let status = ops::project_status(dispatch, a.project.as_deref(), a.since).await?;
+            json(&view::projects::status(&status))
         }
         "task_get" => {
             let a: TaskGetArgs = args(arguments)?;
@@ -538,19 +485,15 @@ async fn run<D: Dispatch>(
         }
         "task_start" => {
             let a: TaskStartArgs = args(arguments)?;
-            let (project, which, (worker, agent), key) = a.start()?;
-            let key = checked_key(key)?;
+            let (which, (worker, agent)) = a.start()?;
             let on = (worker.as_deref(), agent.as_deref());
-            let started = ops::task_start(&mut res, project.as_deref(), which, on, key);
+            let started = ops::task_start(&mut res, None, which, on, None);
             json(&view::projects::task(&started.await?))
         }
         "task_update" => {
             let a: TaskUpdateArgs = args(arguments)?;
-            let change = a.change()?;
-            let key = checked_key(a.idempotency_key)?;
             let task = task_text(a.task.as_ref());
-            let (project, task) = (a.project.as_deref(), task.as_deref());
-            let updated = ops::task_update(&res, project, task, change, key);
+            let updated = ops::task_update(&res, None, task.as_deref(), a.change(), None);
             json(&view::projects::task(&updated.await?))
         }
         "task_report" => {
@@ -879,7 +822,8 @@ mod tests {
             let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
             assert_eq!(launch, TaskLaunch { pin: None, agent }, "{named}");
         }
-        for gone in ["cwd", "command", "prompt", "model", "args", "env", "kind", "metadata"] {
+        let gone = ["cwd", "command", "prompt", "model", "args", "env", "kind", "metadata"];
+        for gone in gone.into_iter().chain(["project", "idempotency_key"]) {
             let (failed, text) = call_json(&fake, "task_start", json!({"task": 7, gone: 1})).await;
             assert!(failed && text.contains("unknown field"), "{gone}: {text}");
         }
@@ -943,9 +887,14 @@ mod tests {
         };
         assert_eq!((task, change.status.as_deref()), (TaskId(5), Some("reading")));
 
-        let (failed, text) =
-            call_json(&fake, "task_update", json!({"project": "other", "status": "x"})).await;
-        assert!(failed && text.contains("task"), "another project has no own task: {text}");
+        let trimmed = ["state", "branch", "base", "depends_on", "verifier", "metadata"];
+        for gone in trimmed.into_iter().chain(["project", "idempotency_key"]) {
+            let (failed, text) = call_json(&fake, "task_update", json!({ gone: "x" })).await;
+            assert!(
+                failed && text.contains("unknown field"),
+                "only status and note: {gone}: {text}"
+            );
+        }
     }
 
     async fn call_json(fake: &Fake, name: &str, arguments: Value) -> (bool, String) {
@@ -986,6 +935,17 @@ mod tests {
         }
     }
 
+    /// What a model is handed is a golden: each tool's name and argument schema. A changed
+    /// snapshot is a changed tool surface, read as one.
+    #[test]
+    fn the_tool_schemas_are_golden() {
+        let tools: Vec<Value> = list()
+            .iter()
+            .map(|t| json!({ "name": t.name, "input_schema": *t.input_schema }))
+            .collect();
+        insta::assert_json_snapshot!(tools);
+    }
+
     #[tokio::test]
     async fn an_unknown_tool_is_invalid_params_and_a_failure_is_the_models_to_read() {
         let scope =
@@ -1014,8 +974,8 @@ mod tests {
             ..crate::Scope::default()
         };
         let fake = Fake { scope, ..Fake::default() };
-        let args = json!({ "state": "done", "idempotency_key": "step-3" });
-        let (failed, text) = call_json(&fake, "task_update", args).await;
+        let args = json!({ "task": 3, "text": "Go on.", "idempotency_key": "step-3" });
+        let (failed, text) = call_json(&fake, "task_tell", args).await;
         assert!(!failed, "{text}");
         let sent = fake.keys.lock().last().cloned().flatten();
         assert_eq!(sent, Some(IdempotencyKey::new("step-3").unwrap()));
