@@ -4,6 +4,8 @@ Navigation │ Navigator
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Heading │ To review
+Button │ Retry the refresh, The refresh now retries three times with one key, and saves the token., Done
 Heading │ Projects
 Button │ src
 Button │ Fold
@@ -29,6 +31,7 @@ Image │ Done
 Button │ Close tab
 Button │ New
 Button │ Needs you
+Status │ 1 new
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal

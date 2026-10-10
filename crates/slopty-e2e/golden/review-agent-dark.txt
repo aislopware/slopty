@@ -4,12 +4,16 @@ Navigation │ Navigator
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Heading │ To review
+Button │ Retry the refresh, Say that it retries three times with one key., Done
+Heading │ Machines
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
-Button │ Retry the refresh
+Button │ Retry the refresh, unseen
 Image │ Claude Code
 Button │ Close tile
+Image │ Done
 Button │ Terminal
 Button │ Close tile
 Button │ Review
@@ -24,6 +28,7 @@ Image │ Done
 Button │ Close tab
 Button │ New
 Button │ Needs you
+Status │ 1 new
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
@@ -45,6 +50,8 @@ TabList
 Tab │ Last turn
 Tab │ Since reviewed
 Tab │ All turns
+Tab │ Uncommitted
+Tab │ Whole branch
 Button │ Collapse all files
 Button │ Review with Claude Code
 Button │ Commit…
@@ -56,6 +63,7 @@ Button │ Let the finding go
 List │ Files
 ListItem │ src/refresh.rs
 Button │ src/refresh.rs
+CheckBox │ Viewed
 Button │ Revert
 Button │ Keep
 Button │ Add to message
