@@ -115,8 +115,9 @@ pub async fn apply(
             .await
             .map(|bytes| GitDone::Blob { blob, bytes })
             .map_err(|failed| GitOutcome::Refused { why: failed.0 }),
-        GitOp::PullReview { .. } => {
-            Err(GitOutcome::Refused { why: "this worker cannot post a review yet".to_owned() })
+        GitOp::PullReview { number, verdict, body, notes, head } => {
+            let review = super::pull::Review { number, verdict, body, notes, head };
+            super::pull::review(programs, &root, &review).await
         }
         GitOp::Branches => {
             super::branches::branches(git, &root).await.map(|b| GitDone::Branches(Box::new(b)))

@@ -2757,3 +2757,37 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `tests/review.rs`);
     - `a_review_asked_again_stops_the_one_before` (slopty-workerd `threads.rs`);
     - the `review_keep`/`review_revert` goldens.
+
+- ✅ **The person's review of a pull request posts through their own gh or glab, as one review**
+  (2026-10-11, readiness 10-11 rank 23, worker half; the drawing half is in `ui.md`).
+  - **What was wrong.** `GitOp::PullReview` was on the wire, but the worker refused it.
+  - **GitHub.** One `gh api --method POST repos/{owner}/{repo}/pulls/N/reviews --input -`. It
+    carries the verdict (`COMMENT`, `APPROVE`, `REQUEST_CHANGES`), the person's words when they
+    wrote any, and each note on its `line` and `side` (`LEFT`/`RIGHT`). `commit_id` is the
+    head the person reviewed. The answer's `html_url` is the review's page.
+  - **GitLab.** It goes the way GitLab's own "Submit review" does:
+    - Each note is first made a draft note (`…/draft_notes`).
+    - Then all are published together with the words (`…/draft_notes/bulk_publish`), so the
+      merge request gets one review and one email.
+    - A comment sets the reviewer state `reviewed`, and a request for changes sets
+      `requested_changes`. An approval approves afterwards at the head reviewed (`…/approve`
+      with `sha`).
+    - GitLab needs both lines for a note on a line the diff keeps, and both paths of a renamed
+      file. Both are read from the merge request's own diffs (`glab api --paginate --output
+      ndjson …/diffs`). A line between hunks is shifted by what the hunks before it added and
+      removed.
+  - **Nothing else on the forge moves.**
+    - The head is read first. A review of an older head is refused before anything is posted,
+      so neither an approval nor a note lands on code the person did not see.
+    - On GitLab, a review is refused while the person has draft notes of their own pending
+      there, because publishing would send those too.
+    - If a draft or the publish fails, the drafts already made are deleted.
+  - **Checked before the forge is asked.** A review that says nothing is refused, unless it is
+    an approval. So is one with more than `REVIEW_NOTES_MAX` notes, a note that is empty or over
+    `NOTE_MAX`, or a note on line 0.
+  - Tests (stand-in `gh` and `glab` scripts that record arguments and bodies; no real forge is
+    reached):
+    - `a_review_is_posted_as_one_with_gh_and_never_past_the_head_reviewed`;
+    - `a_review_is_published_as_one_with_glab_and_a_failure_leaves_no_drafts`;
+    - `review::tests::{a_note_is_placed_on_both_lines_where_the_diff_keeps_its_line,
+      a_review_out_of_bounds_or_saying_nothing_is_refused, a_review_at_an_older_head_is_refused}`.

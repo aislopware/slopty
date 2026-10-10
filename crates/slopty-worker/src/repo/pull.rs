@@ -16,6 +16,9 @@ use super::commit::{Programs, REMOTE, run};
 
 mod comments;
 mod gitlab;
+mod review;
+
+pub use review::Review;
 
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,\
@@ -89,6 +92,21 @@ pub async fn comments(
         Forge::GitLab => gitlab::comments(program, root, number).await,
     };
     read.map(|c| GitDone::PullComments(Box::new(c)))
+}
+
+/// Post the person's `review` of a pull request of the repository at `root`, as one review.
+///
+/// # Errors
+/// The review is out of bounds or says nothing, the forge's command line is missing, the pull
+/// request moved past the head reviewed, or the forge refused, in its words.
+pub async fn review(
+    programs: &Programs,
+    root: &Path,
+    review: &Review,
+) -> Result<GitDone, GitOutcome> {
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    review::post(forge, program, root, review).await
 }
 
 /// [`status`], as a done op.

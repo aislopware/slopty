@@ -773,3 +773,194 @@ async fn a_merge_from_a_worktree_reads_as_merged_and_leaves_the_worktree_on_its_
         );
     }
 }
+
+/// A stand-in forge command line `name` in `dir`: each call's arguments go to `asked`, each
+/// body piped in to `bodies`, one per line, and `script`'s `case` arms answer on `$*`.
+fn stand_in_poster(dir: &Path, name: &str, arms: &str) -> PathBuf {
+    let program = dir.join(name);
+    let script = format!(
+        "#!/bin/sh\nd=\"{dir}\"\nprintf '%s\\n' \"$*\" >> \"$d/asked\"\n\
+         case \"$*\" in *'--input -'*) tr -d '\\n' >> \"$d/bodies\"; echo >> \"$d/bodies\" ;; esac\n\
+         case \"$*\" in\n{arms}\n*) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
+        dir = dir.display()
+    );
+    std::fs::write(&program, script).expect("written");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("executable");
+    program
+}
+
+fn bodies(dir: &Path) -> Vec<Value> {
+    let text = std::fs::read_to_string(dir.join("bodies")).unwrap_or_default();
+    text.lines().map(|l| serde_json::from_str(l).expect("a JSON body")).collect()
+}
+
+fn review_op(verdict: slopty_proto::git::ReviewVerdict, head: &str) -> GitOp {
+    use slopty_proto::git::{LineSide, ReviewNote};
+    GitOp::PullReview {
+        number: 7,
+        verdict,
+        body: "Close; two things.".to_owned(),
+        notes: vec![
+            ReviewNote {
+                path: "src/lib.rs".to_owned(),
+                line: 6,
+                side: LineSide::New,
+                body: "This unwrap panics on an empty file.".to_owned(),
+            },
+            ReviewNote {
+                path: "src/old.rs".to_owned(),
+                line: 4,
+                side: LineSide::Old,
+                body: "Keep this check.".to_owned(),
+            },
+        ],
+        head: Some(head.to_owned()),
+    }
+}
+
+/// The person's review goes to GitHub with their own gh as one review: their words, the
+/// verdict and every note on its line and side, anchored at the head they reviewed. A review
+/// of an older head is refused before anything is posted.
+#[tokio::test]
+async fn a_review_is_posted_as_one_with_gh_and_never_past_the_head_reviewed() {
+    use slopty_proto::git::ReviewVerdict;
+    let dir = tempfile::tempdir().expect("temp");
+    let arms = "'pr view 7 --json headRefOid,url') \
+                echo '{\"headRefOid\":\"0123abcdef\",\"url\":\"https://github.com/o/demo/pull/7\"}' ;;\n\
+                'api --method POST repos/{owner}/{repo}/pulls/7/reviews --input -') \
+                echo '{\"id\":1,\"html_url\":\"https://github.com/o/demo/pull/7#pullrequestreview-1\"}' ;;";
+    let programs = Programs {
+        git: crate::changes::git().map(Path::to_path_buf),
+        gh: Some(stand_in_poster(dir.path(), "gh", arms)),
+        glab: None,
+    };
+    let work = repo(dir.path());
+    let at = work.to_string_lossy();
+    let op = review_op(ReviewVerdict::RequestChanges, "0123abcd");
+    let GitOutcome::Done(GitDone::PullReviewed { url, posted }) =
+        apply(&programs, &at, op, &[]).await
+    else {
+        panic!("no review posted")
+    };
+    assert_eq!(
+        (url.as_deref(), posted),
+        (Some("https://github.com/o/demo/pull/7#pullrequestreview-1"), 2)
+    );
+    let [sent] = bodies(dir.path()).try_into().expect("one review posted");
+    assert_eq!(
+        sent,
+        serde_json::json!({
+            "commit_id": "0123abcdef",
+            "event": "REQUEST_CHANGES",
+            "body": "Close; two things.",
+            "comments": [
+                {"path": "src/lib.rs", "line": 6, "side": "RIGHT",
+                 "body": "This unwrap panics on an empty file."},
+                {"path": "src/old.rs", "line": 4, "side": "LEFT", "body": "Keep this check."},
+            ],
+        })
+    );
+
+    let stale = review_op(ReviewVerdict::Approve, "fedcba98");
+    let refused = apply(&programs, &at, stale, &[]).await;
+    assert!(
+        matches!(&refused, GitOutcome::Refused { why } if why.contains("moved on")),
+        "{refused:?}"
+    );
+    let asked = asked(dir.path());
+    assert_eq!(asked.iter().filter(|a| a.starts_with("api")).count(), 1, "{asked:?}");
+}
+
+/// What the stand-in glab answers for merge request !7: its head and diff commits, the diffs
+/// of a changed file and a renamed one, and a draft note made.
+const MR_REVIEW_ARMS: &str = "'api projects/:id/merge_requests/7') \
+    echo '{\"iid\":7,\"sha\":\"0123abcdef\",\"web_url\":\"https://gitlab.example.com/o/demo/-/merge_requests/7\",\
+\"diff_refs\":{\"base_sha\":\"b0\",\"start_sha\":\"s0\",\"head_sha\":\"0123abcdef\"}}' ;;\n\
+    'api projects/:id/merge_requests/7/draft_notes') \
+    if [ -f \"$d/pending\" ]; then echo '[{\"id\":3}]'; else echo '[]'; fi ;;\n\
+    'api --paginate --output ndjson projects/:id/merge_requests/7/diffs?per_page=100') \
+    echo '{\"old_path\":\"src/lib.rs\",\"new_path\":\"src/lib.rs\",\"diff\":\"@@ -3,3 +3,4 @@\\\\n a\\\\n+b\\\\n c\\\\n d\\\\n\"}'; \
+    echo '{\"old_path\":\"src/old.rs\",\"new_path\":\"src/new.rs\",\"diff\":\"@@ -4,2 +4,2 @@\\\\n-x\\\\n+y\\\\n z\\\\n\"}' ;;\n\
+    'api --method POST projects/:id/merge_requests/7/draft_notes --input -') \
+    if [ -f \"$d/refuse\" ]; then echo 'POST 400: line_code is invalid' >&2; exit 1; fi; \
+    touch \"$d/refuse\"; echo '{\"id\":41}' ;;\n\
+    'api --method DELETE projects/:id/merge_requests/7/draft_notes/41') echo ;;\n\
+    'api --method POST projects/:id/merge_requests/7/draft_notes/bulk_publish --input -') echo ;;\n\
+    'api --method POST projects/:id/merge_requests/7/approve -f sha=0123abcdef') echo '{}' ;;";
+
+/// On GitLab the review is draft notes published together, as GitLab's own review is: a kept
+/// line's note names both its lines and a renamed file both its paths; the words go with the
+/// publish and the verdict sets the reviewer state. When a note fails, the drafts made are
+/// discarded and nothing is published; while the person has drafts of their own pending,
+/// nothing is posted at all.
+#[tokio::test]
+async fn a_review_is_published_as_one_with_glab_and_a_failure_leaves_no_drafts() {
+    use slopty_proto::git::ReviewVerdict;
+    let dir = tempfile::tempdir().expect("temp");
+    let work = gitlab_repo(dir.path());
+    let at = work.to_string_lossy();
+    let programs = with_glab(stand_in_poster(dir.path(), "glab", MR_REVIEW_ARMS));
+
+    let mut op = review_op(ReviewVerdict::Comment, "0123abcd");
+    if let GitOp::PullReview { notes, .. } = &mut op {
+        notes.truncate(1);
+    }
+    let done = apply(&programs, &at, op, &[]).await;
+    let GitOutcome::Done(GitDone::PullReviewed { url, posted }) = done else {
+        panic!("no review posted: {done:?}")
+    };
+    assert_eq!(
+        (url.as_deref(), posted),
+        (Some("https://gitlab.example.com/o/demo/-/merge_requests/7"), 1)
+    );
+    let sent = bodies(dir.path());
+    assert_eq!(
+        sent,
+        [
+            serde_json::json!({"note": "This unwrap panics on an empty file.", "position": {
+                "position_type": "text", "base_sha": "b0", "start_sha": "s0",
+                "head_sha": "0123abcdef", "old_path": "src/lib.rs", "new_path": "src/lib.rs",
+                "old_line": 5, "new_line": 6}}),
+            serde_json::json!({"note": "Close; two things.", "reviewer_state": "reviewed"}),
+        ]
+    );
+
+    // The second note is refused by GitLab: the first draft is discarded, nothing published.
+    std::fs::remove_file(dir.path().join("refuse")).expect("reset");
+    std::fs::remove_file(dir.path().join("asked")).expect("reset");
+    std::fs::remove_file(dir.path().join("bodies")).expect("reset");
+    let failed = apply(&programs, &at, review_op(ReviewVerdict::Approve, "0123abcd"), &[]).await;
+    assert!(
+        matches!(&failed, GitOutcome::Failed { said } if said.contains("line_code")),
+        "{failed:?}"
+    );
+    let sent = bodies(dir.path());
+    assert_eq!(sent.len(), 2, "two notes tried, no publish: {sent:?}");
+    assert_eq!(
+        sent.get(1).map(|b| &b["position"]),
+        Some(&serde_json::json!({"position_type": "text", "base_sha": "b0", "start_sha": "s0",
+            "head_sha": "0123abcdef", "old_path": "src/old.rs", "new_path": "src/new.rs",
+            "old_line": 4}))
+    );
+    let tried = asked(dir.path());
+    assert!(
+        tried.contains(
+            &"api --method DELETE projects/:id/merge_requests/7/draft_notes/41".to_owned()
+        ),
+        "{tried:?}"
+    );
+    assert!(
+        !tried.iter().any(|a| a.contains("bulk_publish") || a.contains("approve")),
+        "{tried:?}"
+    );
+
+    // The person's own drafts wait there: nothing is posted.
+    std::fs::write(dir.path().join("pending"), "").expect("written");
+    std::fs::remove_file(dir.path().join("asked")).expect("reset");
+    let refused = apply(&programs, &at, review_op(ReviewVerdict::Approve, "0123abcd"), &[]).await;
+    assert!(
+        matches!(&refused, GitOutcome::Refused { why } if why.contains("draft notes")),
+        "{refused:?}"
+    );
+    assert!(!asked(dir.path()).iter().any(|a| a.contains("POST")));
+}
