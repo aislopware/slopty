@@ -115,7 +115,15 @@ pub enum Command {
     Focus,
     Focused(bool),
     SetQuality(Quality),
-    Resize { width: u32, height: u32, scale: Option<f32> },
+    Resize {
+        width: u32,
+        height: u32,
+        scale: Option<f32>,
+    },
+    /// The client's link went quiet, or a newer link of the same client replaced it: let go of
+    /// every key and button it holds down on the worker, and of the keys waiting on its input
+    /// source, and serve on.
+    LetGo,
     Close,
 }
 
@@ -437,6 +445,12 @@ pub async fn serve<P: Platform>(
                     for command in std::mem::take(&mut held) {
                         feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                     }
+                }
+                Some(Command::LetGo) => {
+                    held.clear();
+                    hold_until = None;
+                    stream.release_input();
+                    tracing::info!(%client, stream = %stream.id(), "input let go: the link went quiet");
                 }
                 // Applied on top of a resize's build under way, not under it.
                 Some(Command::SetQuality(quality)) => {
@@ -802,6 +816,7 @@ fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Comma
                 }
             }));
         }
+        Command::LetGo => stream.release_input(),
         Command::SetQuality(_) | Command::Close => {}
     }
 }
@@ -1370,6 +1385,16 @@ pub mod fake {
         rx
     }
 
+    static RELEASED: LazyLock<Mutex<HashMap<u32, mpsc::UnboundedSender<()>>>> =
+        LazyLock::new(Mutex::default);
+
+    /// Each time the sink of display `display` lets go of everything held, from now on.
+    pub fn note_releases(display: u32) -> mpsc::UnboundedReceiver<()> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        RELEASED.lock().insert(display, tx);
+        rx
+    }
+
     /// An input sink that notes each event instead of posting it: the point where the real one
     /// hands it to its thread. A drag's entry is answered with its point as it came.
     pub struct Noted {
@@ -1405,7 +1430,11 @@ pub mod fake {
             Ok(())
         }
 
-        fn release_all(&mut self) {}
+        fn release_all(&mut self) {
+            if let Some(tx) = RELEASED.lock().get(&self.display) {
+                let _gone = tx.send(());
+            }
+        }
 
         fn drag(&mut self, step: slopty_input::DragStep) {
             use slopty_input::DragStep;
@@ -1598,7 +1627,9 @@ mod serving {
     use slopty_worker::screen::Pipeline;
     use tokio::sync::mpsc;
 
-    use super::fake::{BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note, unsourced};
+    use super::fake::{
+        BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note, note_releases, unsourced,
+    };
     use super::{Command, serve};
 
     /// A display switch keeps the tile's word on its trackpad gestures: the input sink made
@@ -1792,6 +1823,36 @@ mod serving {
             ),
             "the news, once there was room: {told:?}"
         );
+        drop(commands);
+        task.await.unwrap();
+    }
+
+    /// A link gone quiet lets go of what its client holds down on the worker, and the stream
+    /// serves on: the next press goes in as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_link_lets_go_of_the_held_input_and_serves_on() {
+        const DISPLAY: u32 = 18;
+        let mut released = note_releases(DISPLAY);
+        let (commands, mut events, mut queued, task) =
+            served::<Fake<Plain>>(DISPLAY, 64, false).await;
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let press = ScreenInput::Button {
+            button: slopty_proto::input::MouseButton::Left,
+            down: true,
+            x: 1.0,
+            y: 1.0,
+            clicks: 1,
+            mods: slopty_proto::input::Mods::empty(),
+        };
+        commands.send(Command::Input(press.clone())).unwrap();
+        assert_eq!(next(&mut queued).await.input, press, "pressed");
+        commands.send(Command::LetGo).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), released.recv())
+            .await
+            .expect("let go in time")
+            .expect("the sink noted it");
+        commands.send(Command::Input(at(4.0))).unwrap();
+        assert_eq!(next(&mut queued).await.input, at(4.0), "still served");
         drop(commands);
         task.await.unwrap();
     }

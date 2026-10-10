@@ -963,8 +963,8 @@ impl Session {
     /// the one the manager runs, and while it holds sessions: one that holds none is restarted
     /// all the same, so the new build's own runs from now. Handed over when the custody differs
     /// and the succession is the same ([`Ptyd::HandsOver`]). Anything else restarts it, counting
-    /// its child processes, which are its sessions: an older ptyd says no succession, so it
-    /// restarts once.
+    /// the sessions it says it holds, the ones handed to it after a crash too: an older ptyd says
+    /// no succession, so it restarts once.
     #[must_use]
     pub fn ptyd_plan(&self, source: &Path, data_dir: &Path) -> Ptyd {
         let Some(pid) = self.pid(PTYD) else { return Ptyd::Starts };
@@ -978,7 +978,7 @@ impl Session {
             .inspect_err(|e| tracing::debug!(error = %e, "the new ptyd's custody"))
             .ok()
             .and_then(|said| Custody::parse(&said));
-        let sessions = self.children(pid);
+        let sessions = self.held(&program, data_dir);
         if let (Some(running), Some(new)) = (&running, &new)
             && sessions != Some(0)
         {
@@ -1056,15 +1056,18 @@ impl Session {
         Ok(true)
     }
 
-    /// How many processes `pid` is the parent of, as `ps` lists them; `None` when it cannot.
-    fn children(&self, pid: u32) -> Option<u32> {
-        let listed = self
+    /// How many sessions the ptyd running for `data_dir` holds, as it says itself when asked by
+    /// `program` (`slopty-ptyd --sessions` on its socket). That counts the sessions handed to it
+    /// after a crash, whose shells are no children of it. `None` when it cannot say, as when it
+    /// speaks another protocol than `program`'s build.
+    fn held(&self, program: &Path, data_dir: &Path) -> Option<u32> {
+        let socket = Layout::new(data_dir).ptyd_socket();
+        let said = self
             .runner
-            .run("ps", &["-A", "-o", "ppid="])
+            .run(&program.to_string_lossy(), &["--sessions", "--socket", &socket.to_string_lossy()])
             .inspect_err(|e| tracing::warn!(error = %e, "count ptyd's sessions"))
             .ok()?;
-        let count = listed.lines().filter(|line| line.trim().parse() == Ok(pid)).count();
-        u32::try_from(count).ok()
+        said.trim().parse().ok()
     }
 
     /// A service left running through an install: its new definition is known to the manager
@@ -1958,14 +1961,14 @@ mod tests {
         ask_on(asker, b"{}\n").await.unwrap_err();
     }
 
-    /// A machine where ptyd runs as pid 700 with `children` sessions: `launchctl print` and
+    /// A machine where ptyd runs as pid 700 holding `held` sessions: `launchctl print` and
     /// `systemctl show` say so for ptyd only, the new `slopty-ptyd --custody` says `custody`,
-    /// and `ps` lists ptyd's children, or fails.
+    /// and `slopty-ptyd --sessions` says `held`, or fails.
     #[derive(Debug)]
     struct Running {
         asked: mpsc::Sender<String>,
         custody: &'static str,
-        children: Option<usize>,
+        held: Option<usize>,
         /// What `--succeed` does.
         succeeds: Succeeds,
     }
@@ -1996,9 +1999,9 @@ mod tests {
                         Err(io::Error::other("did not come back within 30 s"))
                     }
                 },
-                ("ps", _) => {
-                    let n = self.children.ok_or_else(|| io::Error::other("ps: not found"))?;
-                    Ok(std::iter::repeat_n("  700\n", n).chain(["    1\n", "  701\n"]).collect())
+                (_, Some("--sessions")) => {
+                    let n = self.held.ok_or_else(|| io::Error::other("no ptyd answers"))?;
+                    Ok(format!("{n}\n"))
                 }
                 ("launchctl", Some("print")) if ptyd => Ok("\tpid = 700\n".to_owned()),
                 ("launchctl", Some("print")) if prints_a_service(args) => {
@@ -2019,13 +2022,12 @@ mod tests {
         root: &Path,
         said: Option<&str>,
         custody: &'static str,
-        children: Option<usize>,
+        held: Option<usize>,
     ) -> (Session, mpsc::Receiver<String>) {
         let (mut session, _calls) = stand_in(manager, &root.join("home"));
         std::fs::create_dir_all(&session.home).unwrap();
         let (tx, asked) = mpsc::channel();
-        session.runner =
-            Arc::new(Running { asked: tx, custody, children, succeeds: Succeeds::Yes });
+        session.runner = Arc::new(Running { asked: tx, custody, held, succeeds: Succeeds::Yes });
         let run = Layout::new(&root.join("data")).run();
         std::fs::create_dir_all(&run).unwrap();
         if let Some(said) = said {
@@ -2093,8 +2095,8 @@ mod tests {
     fn a_changed_or_unknown_custody_restarts_ptyd_and_counts_its_sessions() {
         let root = tempfile::tempdir().unwrap();
         let (data, source) = (root.path().join("data"), root.path().join("new"));
-        let plan = |said: Option<&str>, custody, children| {
-            let (session, _asked) = running(Manager::Launchd, root.path(), said, custody, children);
+        let plan = |said: Option<&str>, custody, held| {
+            let (session, _asked) = running(Manager::Launchd, root.path(), said, custody, held);
             if said.is_none() {
                 let _gone = std::fs::remove_file(Layout::new(&data).ptyd_custody());
             }
@@ -2116,11 +2118,31 @@ mod tests {
         assert!(!idle.ends_sessions(), "and nothing ends");
         assert_eq!(plan(Some("700 aaaa 11"), "bbbb 11", Some(0)), idle, "nor to hand over");
         let uncounted = plan(Some("700 aaaa 11"), "bbbb 22", None);
-        assert_eq!(uncounted, Ptyd::Restarts { sessions: None }, "ps failed");
+        assert_eq!(uncounted, Ptyd::Restarts { sessions: None }, "ptyd did not say");
         assert!(uncounted.ends_sessions(), "sessions that could not be counted may end");
 
         let (session, _asked) = stand_in(Manager::Launchd, root.path());
         assert_eq!(session.ptyd_plan(&source, &data), Ptyd::Starts, "no ptyd runs");
+    }
+
+    /// The sessions a restart ends are the ones ptyd says it holds, asked on its socket by the
+    /// new build, never its child processes: a shell handed to it after a crash is no child of
+    /// it, and counts all the same.
+    #[test]
+    fn the_sessions_a_restart_ends_are_the_ones_ptyd_says_it_holds() {
+        let root = tempfile::tempdir().unwrap();
+        let (data, source) = (root.path().join("data"), root.path().join("new"));
+        let (session, asked) =
+            running(Manager::Launchd, root.path(), Some("700 aaaa 11"), "bbbb 22", Some(3));
+        assert_eq!(session.ptyd_plan(&source, &data), Ptyd::Restarts { sessions: Some(3) });
+        let asked: Vec<String> = asked.try_iter().collect();
+        let sessions = format!(
+            "{} --sessions --socket {}",
+            source.join(PTYD.program).display(),
+            Layout::new(&data).ptyd_socket().display()
+        );
+        assert!(asked.contains(&sessions), "{asked:?}");
+        assert!(!asked.iter().any(|c| c.starts_with("ps ")), "no process list: {asked:?}");
     }
 
     /// Restarting ptyd stops and starts it as before.
@@ -2212,7 +2234,7 @@ mod tests {
             let succeeds = wrote
                 .map_or(Succeeds::No, |wrote| Succeeds::NoButRan(said.clone(), wrote.to_owned()));
             session.runner =
-                Arc::new(Running { asked: tx, custody: "bbbb 11", children: Some(2), succeeds });
+                Arc::new(Running { asked: tx, custody: "bbbb 11", held: Some(2), succeeds });
             drop(asked);
             let source = root.path().join("new");
             binaries(&source, &WORKER_BINARIES);

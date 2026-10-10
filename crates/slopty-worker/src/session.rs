@@ -20,7 +20,7 @@ use slopty_proto::terminal::{
     TermEvent, TermRequest, TermSize,
 };
 use slopty_pty::PtyMaster;
-use slopty_pty::protocol::OutputFrame;
+use slopty_pty::protocol::{Exit, OutputFrame};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
@@ -175,7 +175,7 @@ enum Cmd {
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     ShareClipboard { clip: Arc<dyn ForSessions> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
-    Exited { status: i32 },
+    Exited { exit: Exit },
     Launch { line: String },
     Master { reply: oneshot::Sender<std::io::Result<OwnedFd>> },
     TapLost,
@@ -197,8 +197,8 @@ pub struct Snapshot {
     pub size: TermSize,
     /// Clients attached to it.
     pub viewers: u16,
-    /// Exit status if the child is gone.
-    pub exited: Option<i32>,
+    /// How the child ended, if it is gone.
+    pub exited: Option<Exit>,
     /// The program's progress report (`OSC 9;4`), while one stands.
     pub progress: Option<Progress>,
     /// Whether the session was reopened after its shell was lost.
@@ -568,9 +568,9 @@ impl SessionHandle {
         }
     }
 
-    /// The child exited with `status` (ptyd reaped it): the viewers are told.
-    pub fn exited(&self, status: i32) {
-        let _ignored = self.tx.send(Cmd::Exited { status });
+    /// The child ended as `exit` says (ptyd saw it go): the viewers are told.
+    pub fn exited(&self, exit: Exit) {
+        let _ignored = self.tx.send(Cmd::Exited { exit });
     }
 
     /// Type `line` and Enter into the shell once it is at its first prompt: it has reported
@@ -654,8 +654,8 @@ pub struct SessionStart {
     pub size: TermSize,
     /// Scrollback lines to retain.
     pub scrollback_lines: u32,
-    /// The child's exit status, when ptyd reaped it before this worker adopted the session.
-    pub exited: Option<i32>,
+    /// How the child ended, when it did before this worker adopted the session.
+    pub exited: Option<Exit>,
     /// Where the session says its output named a local server, so its ports get scanned.
     pub port_hints: Option<mpsc::UnboundedSender<SessionId>>,
     /// Where the session says its directory, repository or branch changed, so its summary is
@@ -937,7 +937,7 @@ struct Actor {
     told_cwd: Option<String>,
     /// The shell reported a directory or a command ended since the place was last resolved.
     place_due: bool,
-    exited: Option<i32>,
+    exited: Option<Exit>,
     /// The master read EOF or failed: the child is gone, whatever its status turns out to be.
     pty_closed: bool,
     /// Highest key seq written to the PTY.
@@ -2107,8 +2107,8 @@ impl Actor {
                 self.remove(vec![i]);
             }
         }
-        if let Some(status) = self.exited {
-            self.send_to(client, &TermEvent::Exited { status: Some(status) });
+        if let Some(exit) = self.exited {
+            self.send_to(client, &TermEvent::Exited { status: exit.status });
         }
     }
 
@@ -2331,8 +2331,8 @@ impl Actor {
                     cwd: self.cwd.clone(),
                 });
             }
-            Cmd::Exited { status } => {
-                self.exited = Some(status);
+            Cmd::Exited { exit } => {
+                self.exited = Some(exit);
                 self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                 self.flush_frame();
                 // Its report ends with the program; the viewers drop it on the exit.
@@ -2345,7 +2345,7 @@ impl Actor {
                     self.moved();
                     self.broadcast(&TermEvent::ProgramStatus(self.program.clone()));
                 }
-                self.broadcast(&TermEvent::Exited { status: Some(status) });
+                self.broadcast(&TermEvent::Exited { status: exit.status });
             }
             Cmd::Read { read, reply } => {
                 let _ignored = reply.send(self.read(read));

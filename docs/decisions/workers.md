@@ -1478,3 +1478,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `succession::a_failed_exec_returns`, `process::a_start_mark_stays_and_a_gone_pid_has_none`
       and
       `ring::a_handed_ring_keeps_its_bytes_and_its_losses`.
+
+- ✅ **An install counts what ptyd holds by asking it, and a rescued shell ends with no
+  status** (2026-10-11, orchestrator-first audit item 25).
+  - **The count is ptyd's own word.** An install that restarts ptyd says how many sessions it
+    ends. It counted ptyd's child processes with `ps`, but a shell handed back to ptyd after a
+    crash (`PtydRequest::Adopt`) is no child of it, so it went uncounted and the plan could say
+    "it holds no sessions" and restart over it. `ptyd_plan` now runs the new build's
+    `slopty-ptyd --sessions` on the installation's socket, which asks the running ptyd for its
+    list (`PtydRequest::List`). A ptyd that speaks another protocol cannot answer, and the plan
+    then says "every session it holds", as an uncounted `ps` did.
+  - **An adopted child's end has no status.** ptyd sees such a child end only as its pid gone,
+    and it reported -1, which a client showed as a failure. `slopty_pty::protocol::Exit` now
+    carries `status: Option<i32>`. An adopted child, and a wait that fails, end with
+    `Exit::UNKNOWN`, which the worker passes on as `SessionState::Exited { status: None }`, the
+    status the tile already shows neutral. The goldens `event_exited`, `event_sessions` and
+    `succession_heir` moved, and the custody and succession fingerprints with them.
+  - Tests: `the_sessions_a_restart_ends_are_the_ones_ptyd_says_it_holds` (`slopty-platform`).
+    `ptyd_link::a_worker_hands_its_sessions_to_a_ptyd_that_starts_again` (`slopty-worker`)
+    covers both halves: the rescued shell counts once by `--sessions`, no process is a child of
+    the new ptyd, and the shell ends with `Exit::UNKNOWN`. Also
+    `session_actor::an_end_with_no_status_is_told_as_unknown`.

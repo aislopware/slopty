@@ -613,8 +613,8 @@ impl Connection {
                     }
                 }
                 ev = events.recv() => match ev {
-                    Ok(Broadcast::Exited { id, status }) => {
-                        self.reply(&PtydEvent::Exited { id, status }, None).await?;
+                    Ok(Broadcast::Exited { id, exit }) => {
+                        self.reply(&PtydEvent::Exited { id, exit }, None).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(conn = self.id, lagged = n, "event stream lagged");

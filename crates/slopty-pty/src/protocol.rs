@@ -198,6 +198,26 @@ pub struct Bequest {
     pub fds: Vec<i32>,
 }
 
+/// How a session's child ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Exit {
+    /// Its exit status, or the signal number negated; `None` when it is not known: an adopted
+    /// child ([`PtydRequest::Adopt`]) is no child of ptyd, and its end shows only as its process
+    /// gone.
+    pub status: Option<i32>,
+}
+
+impl Exit {
+    /// An end whose status is not known.
+    pub const UNKNOWN: Self = Self { status: None };
+
+    /// An end with `status`.
+    #[must_use]
+    pub const fn with(status: i32) -> Self {
+        Self { status: Some(status) }
+    }
+}
+
 /// One session as a ptyd hands it to the build it runs next, a frame of the state file.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Heir {
@@ -223,8 +243,8 @@ pub struct Heir {
     pub backlog: Vec<u8>,
     /// Bytes lost before `backlog`.
     pub dropped: u64,
-    /// The child's exit status, once reaped.
-    pub exited: Option<i32>,
+    /// How the child ended, once it did.
+    pub exited: Option<Exit>,
     /// A worker held the master: the new build keeps out of it a while for that worker to
     /// take it back ([`PtydRequest::Reclaim`]) rather than read it beside the worker.
     pub attached: bool,
@@ -276,8 +296,8 @@ pub enum PtydEvent {
     Exited {
         /// The session it is about.
         id: SessionId,
-        /// Exit status, or the signal number negated.
-        status: i32,
+        /// How it ended.
+        exit: Exit,
     },
     /// Request failed.
     Error {
@@ -335,8 +355,8 @@ pub struct SessionInfo {
     pub size: TermSize,
     /// A worker holds the master.
     pub attached: bool,
-    /// Exit status if the child is gone.
-    pub exited: Option<i32>,
+    /// How the child ended, if it is gone.
+    pub exited: Option<Exit>,
     /// Backlog bytes held.
     pub backlog: usize,
     /// Checkpoint bytes held.

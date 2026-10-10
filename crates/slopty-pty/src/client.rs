@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{CheckpointFrame, OutputFrame, PtydEvent, PtydRequest, SessionInfo};
+use crate::protocol::{CheckpointFrame, Exit, OutputFrame, PtydEvent, PtydRequest, SessionInfo};
 use crate::pty::SpawnSpec;
 use crate::{PtyError, fdpass};
 
@@ -80,7 +80,7 @@ impl PtydClient {
     /// spawn nothing more.
     pub async fn connect(
         path: &Path,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<(SessionId, i32)>), PtyError> {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<(SessionId, Exit)>), PtyError> {
         let stream =
             UnixStream::connect(path).await.map_err(|e| PtyError::os("connect ptyd", e))?;
         fdpass::widen_buffers(&stream);
@@ -238,7 +238,7 @@ impl PtydClient {
 async fn read_loop(
     stream: Arc<UnixStream>,
     mut replies: mpsc::UnboundedReceiver<oneshot::Sender<Reply>>,
-    exits: mpsc::UnboundedSender<(SessionId, i32)>,
+    exits: mpsc::UnboundedSender<(SessionId, Exit)>,
 ) {
     let mut inbox = fdpass::Inbox::default();
     loop {
@@ -251,8 +251,8 @@ async fn read_loop(
                     return;
                 }
             };
-            if let PtydEvent::Exited { id, status } = ev {
-                let _ignored = exits.send((id, status));
+            if let PtydEvent::Exited { id, exit } = ev {
+                let _ignored = exits.send((id, exit));
                 continue;
             }
             // The fd rides on the first byte of its frame, so it is queued by now.

@@ -9,7 +9,7 @@ mod roundtrip {
     use slopty_proto::input::CellMetrics;
     use slopty_proto::ptyd::PtydError;
     use slopty_proto::terminal::TermSize;
-    use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, OutputFrame, PtydRequest};
+    use slopty_pty::protocol::{Exit, MAX_CHECKPOINT_BYTES, OutputFrame, PtydRequest};
     use slopty_pty::{PtyError, PtyMaster, PtydClient, SpawnSpec};
     use tokio::io::AsyncWriteExt as _;
 
@@ -220,7 +220,7 @@ mod roundtrip {
         })
         .await
         .unwrap();
-        assert_eq!(exited, 0);
+        assert_eq!(exited, Exit::with(0));
         client2.close(id).await.unwrap();
         assert_eq!(client2.list().await.unwrap(), []);
         let gone = client2.attach(id).await.map(drop);
@@ -300,7 +300,7 @@ mod roundtrip {
             .await
             .expect("the exit, unprompted")
             .expect("exit channel open");
-        assert_eq!(exit, (id, 7));
+        assert_eq!(exit, (id, Exit::with(7)));
         client.shutdown().await.unwrap();
     }
 
@@ -463,7 +463,7 @@ mod roundtrip {
             .await
             .expect("the new build reaps the child the old one started")
             .expect("exit channel open");
-        assert_eq!(exit, (alone, 7), "with its status");
+        assert_eq!(exit, (alone, Exit::with(7)), "with its status");
         assert!(exits.try_recv().is_err(), "nothing exited on the way");
         worker.shutdown().await.unwrap();
     }
@@ -552,7 +552,7 @@ mod roundtrip {
                 break exit;
             }
         };
-        assert_eq!(exit, (alone, 3), "reaped with its status");
+        assert_eq!(exit, (alone, Exit::with(3)), "reaped with its status");
         client.shutdown().await.unwrap();
     }
 
@@ -632,7 +632,7 @@ mod roundtrip {
     /// close it and wait for its child's exit. The session's id.
     async fn open_and_close(
         client: &mut PtydClient,
-        exits: &mut tokio::sync::mpsc::UnboundedReceiver<(SessionId, i32)>,
+        exits: &mut tokio::sync::mpsc::UnboundedReceiver<(SessionId, Exit)>,
         attach: bool,
     ) -> SessionId {
         let id = SessionId::new();

@@ -1222,3 +1222,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     in the bar.
   - Tests: `worker_choices` (slopty-settings), `terminal_settings_ride_on_the_theme`
     (slopty-app), `workspace::tests::secure_entry_holds_while_the_focused_shell_reads_a_password`.
+
+- ✅ **A link gone quiet lets go of what its client holds down** (2026-10-11, orchestrator-first
+  audit item 25). A worker let go of a client's held keys and buttons only when the stream
+  ended, and a lost link ends only at the connection's 45 s idle timeout. So a link dropped
+  mid-drag, or with ⌘ held, left the button or the key down on the worker for that long.
+  - **A lease of 3 s.** Everything heard from the client renews it: a control message, a
+    feedback datagram, an input copy. A client streaming a screen reports twenty times a second
+    on the control stream and probes the clock four times a second in datagrams, so 3 s of
+    neither is a link gone. Past it, each of the link's streams gets `Command::LetGo`, which
+    releases what the sink holds and drops the keys still waiting on the client's input source,
+    and the stream serves on. It lapses once per silence: the next thing heard renews it.
+  - **It costs nothing on the input path.** Hearing the client is a store of a flag. The link
+    reads the clock only on its one 1 s tick, which stamps the lease when the flag is set and
+    checks it when not. So the lapse lands 3 to 4 s after the client went quiet. The first cut
+    armed a fresh timer on every turn of the link's loop, an insert and a removal in the timer
+    wheel for every input copy, datagram and control message.
+  - **A new link replaces the old one at once.** Each link says its client's hello on the
+    daemon's `hellos` channel, and an older link of the same client and name lets go the same
+    way, without waiting out the 3 s. The name counts because the CLI says the installation's
+    id too, and a command run on the Mac must not let go of the person's drag.
+  - Tests: `a_quiet_link_lets_go_of_the_held_input_and_serves_on` (the fake platform's sink
+    notes the release) and `held_input_is_let_go_once_per_silence_while_streaming`
+    (`slopty-workerd`).

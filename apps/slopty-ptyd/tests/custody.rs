@@ -21,7 +21,7 @@ mod golden {
     use slopty_proto::terminal::TermSize;
     use slopty_pty::SpawnSpec;
     use slopty_pty::protocol::{
-        Bequest, Heir, OutputFrame, PtydEvent, PtydRequest, SessionInfo, inherit_args,
+        Bequest, Exit, Heir, OutputFrame, PtydEvent, PtydRequest, SessionInfo, inherit_args,
     };
     use uuid::Uuid;
 
@@ -126,7 +126,7 @@ mod golden {
             tty: PathBuf::from("/dev/ttys003"),
             size: size(),
             attached: true,
-            exited: Some(-9),
+            exited: Some(Exit::with(-9)),
             backlog: 1024,
             checkpoint: 2048,
         };
@@ -143,7 +143,7 @@ mod golden {
             },
             PtydEvent::Ok,
             PtydEvent::Sessions(vec![info]),
-            PtydEvent::Exited { id: id(), status: 1 },
+            PtydEvent::Exited { id: id(), exit: Exit::with(1) },
             PtydEvent::Error { id: Some(id()), error: PtydError::NoSuchSession },
         ]
     }
@@ -194,7 +194,7 @@ mod golden {
             checkpoint: b"\x1b[H".to_vec(),
             backlog: b"ok\r\n".to_vec(),
             dropped: 7,
-            exited: Some(-9),
+            exited: Some(Exit::with(-9)),
             attached: true,
             orphan: true,
             orphan_mark: Some(1_759_000_000_123_456),

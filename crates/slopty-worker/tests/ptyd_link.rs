@@ -10,6 +10,7 @@ mod ptyd_link {
     use slopty_agent::status::SessionAgent;
     use slopty_core::{ClientId, SessionId};
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
+    use slopty_pty::protocol::Exit;
     use slopty_pty::{PtydClient, SpawnSpec};
     use slopty_worker::Worker;
     use slopty_worker::orchestrate::Agents;
@@ -199,7 +200,7 @@ mod ptyd_link {
         let id = worker.open(&open).await.unwrap().id();
 
         first.kill().await.unwrap();
-        let (_second, socket) = ptyd(dir.path()).await;
+        let (second, socket) = ptyd(dir.path()).await;
         let held = tokio::time::timeout(WAIT, async {
             loop {
                 if let Ok((mut ptyd, _exits)) = PtydClient::connect(&socket).await
@@ -215,6 +216,23 @@ mod ptyd_link {
         .expect("the worker hands the session to the new ptyd");
         assert!(held.attached, "held for the worker, which reads the master itself");
         assert!(held.pid > 0 && held.exited.is_none(), "{held:?}");
+        // Counted by asking the new ptyd, as an install does: the rescued shell is no child of
+        // it, so its children would say it holds nothing.
+        let counted = std::process::Command::new(ptyd_bin())
+            .arg("--sessions")
+            .arg("--socket")
+            .arg(&socket)
+            .output()
+            .unwrap();
+        assert!(counted.status.success(), "{counted:?}");
+        assert_eq!(String::from_utf8_lossy(&counted.stdout).trim(), "1", "the rescued shell");
+        let parent = second.id().unwrap().to_string();
+        let ps = std::process::Command::new("ps").args(["-A", "-o", "ppid="]).output().unwrap();
+        let children = String::from_utf8_lossy(&ps.stdout)
+            .lines()
+            .filter(|line| line.trim() == parent)
+            .count();
+        assert_eq!(children, 0, "no child of the new ptyd");
 
         let session = worker.get(id).expect("the worker kept the session");
         session.request(ClientId::new(), TermRequest::Raw(b"still here\r".to_vec())).unwrap();
@@ -222,7 +240,7 @@ mod ptyd_link {
             .await
             .expect("the new ptyd reports the end")
             .expect("the exits outlive a lost ptyd");
-        assert_eq!(exit, (id, -1), "an adopted child's status is not known");
+        assert_eq!(exit, (id, Exit::UNKNOWN), "an adopted child's status is not known");
         assert_eq!(std::fs::read_to_string(&heard).unwrap(), "still here", "the shell lived on");
         worker.close(id).await.unwrap();
     }
@@ -310,7 +328,7 @@ mod ptyd_link {
             .await
             .expect("the new image reports the end")
             .expect("the exits outlive a handover");
-        assert_eq!(exit, (id, 3), "reaped by the same process, with its status");
+        assert_eq!(exit, (id, Exit::with(3)), "reaped by the same process, with its status");
         assert_eq!(std::fs::read_to_string(&heard).unwrap(), "still here", "the shell lived on");
         worker.close(id).await.unwrap();
     }

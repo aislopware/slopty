@@ -9,6 +9,7 @@ mod actor {
     use slopty_grid::LineIndex;
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::terminal::{TermColors, TermEvent, TermRequest, TermSize};
+    use slopty_pty::protocol::Exit;
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::session::{self, Outbound, SessionStart, Tap};
     use tokio::sync::mpsc;
@@ -204,7 +205,7 @@ mod actor {
         session.request(me, TermRequest::Raw(b"\x04".to_vec())).unwrap();
         // ptyd reaps the child and the worker passes the status on; here the test is both.
         let status = child.wait().await.unwrap();
-        session.exited(status.code().unwrap());
+        session.exited(Exit::with(status.code().unwrap()));
         let (events, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
                 .await;
@@ -696,7 +697,7 @@ mod actor {
         let both = vec![blocked[0].clone(), ("b".to_owned(), ProgramState::Done)];
         wait_for(&mut rx_a, |ev, _| states(ev).as_ref() == Some(&both)).await;
         let status = child.wait().await.unwrap();
-        session.exited(status.code().unwrap());
+        session.exited(Exit::with(status.code().unwrap()));
         let done = vec![("b".to_owned(), ProgramState::Done)];
         wait_for(&mut rx_a, |ev, _| states(ev).as_ref() == Some(&done)).await;
         session.close();
@@ -1565,7 +1566,7 @@ done"#
         session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
         let status = child.wait().await.unwrap().code().unwrap();
         assert_eq!(status, 3);
-        session.exited(status);
+        session.exited(Exit::with(status));
         let (events, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
                 .await;
@@ -1577,7 +1578,30 @@ done"#
             })
             .collect();
         assert_eq!(exits, [Some(3)]);
-        assert_eq!(session.snapshot().await.unwrap().exited, Some(3));
+        assert_eq!(session.snapshot().await.unwrap().exited, Some(Exit::with(3)));
+        session.close();
+    }
+
+    /// A child whose end only showed as its process gone (one ptyd adopted) is told ended with
+    /// no status, never as a failure it did not report.
+    #[tokio::test]
+    async fn an_end_with_no_status_is_told_as_unknown() {
+        let (session, mut child) = start(&["/bin/sh", "-c", "read x"]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.exited(Exit::UNKNOWN);
+        let (events, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
+                .await;
+        let told = events.iter().find_map(|e| match e {
+            TermEvent::Exited { status } => Some(*status),
+            _ => None,
+        });
+        assert_eq!(told, Some(None), "ended, its status unknown");
+        assert_eq!(session.snapshot().await.unwrap().exited, Some(Exit::UNKNOWN));
         session.close();
     }
 

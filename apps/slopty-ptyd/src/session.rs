@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use rustix::process::{Pid, Signal};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::TermSize;
-use slopty_pty::protocol::{Heir, SessionInfo};
+use slopty_pty::protocol::{Exit, Heir, SessionInfo};
 use slopty_pty::shell_integration::ShellIntegration;
 use slopty_pty::{Pty, PtyMaster, Ring, SpawnSpec};
 use tokio::sync::{broadcast, watch};
@@ -21,8 +21,8 @@ pub enum Broadcast {
     Exited {
         /// The session whose child it was.
         id: SessionId,
-        /// Exit code, or the terminating signal negated.
-        status: i32,
+        /// How it ended.
+        exit: Exit,
     },
 }
 
@@ -43,7 +43,7 @@ pub struct Session {
     /// What the connections and the reader change, under one lock.
     state: Mutex<State>,
     /// Exit status once known.
-    exited: watch::Sender<Option<i32>>,
+    exited: watch::Sender<Option<Exit>>,
     /// What the reader is to do. It lives in the session it reads for, so it never closes: a
     /// stop is the only way out of a pause.
     reader: watch::Sender<Reader>,
@@ -84,7 +84,7 @@ struct Start {
     master: OwnedFd,
     state: State,
     reader: Reader,
-    exited: Option<i32>,
+    exited: Option<Exit>,
     orphan: bool,
     mark: Option<u64>,
 }
@@ -309,24 +309,25 @@ impl Session {
     fn watch(self: &Arc<Self>, how: Watch, events: broadcast::Sender<Broadcast>) {
         let waiter = Arc::clone(self);
         tokio::spawn(async move {
-            let status = match how {
+            let exit = match how {
                 Watch::Child(mut child) => match child.wait().await {
-                    Ok(status) => exit_code(status),
+                    Ok(status) => exit_of(status),
                     Err(e) => {
                         tracing::warn!(session = %waiter.id, error = %e, "wait failed");
-                        -1
+                        Exit::UNKNOWN
                     }
                 },
+                // No child of this process: its end shows only as its pid gone.
                 Watch::Orphan => {
                     while waiter.child_lives() {
                         tokio::time::sleep(ORPHAN_POLL).await;
                     }
-                    -1
+                    Exit::UNKNOWN
                 }
             };
-            waiter.exited.send_replace(Some(status));
-            tracing::info!(session = %waiter.id, pid = waiter.pid, status, "child exited");
-            let _ignored = events.send(Broadcast::Exited { id: waiter.id, status });
+            waiter.exited.send_replace(Some(exit));
+            tracing::info!(session = %waiter.id, pid = waiter.pid, status = ?exit.status, "child exited");
+            let _ignored = events.send(Broadcast::Exited { id: waiter.id, exit });
         });
     }
 
@@ -566,10 +567,10 @@ impl Session {
     }
 }
 
-/// Exit code, or the terminating signal negated.
-fn exit_code(status: std::process::ExitStatus) -> i32 {
+/// The exit code, or the terminating signal negated; unknown when the status says neither.
+fn exit_of(status: std::process::ExitStatus) -> Exit {
     use std::os::unix::process::ExitStatusExt as _;
-    status.code().or_else(|| status.signal().map(i32::saturating_neg)).unwrap_or(-1)
+    Exit { status: status.code().or_else(|| status.signal().map(i32::saturating_neg)) }
 }
 
 /// Process `pid`'s start mark ([`slopty_pty::process::start_mark`]).

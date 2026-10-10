@@ -152,6 +152,9 @@ pub(crate) struct Daemon {
     pub name: String,
     /// Events every connected client should hear (session opened/closed, item deltas).
     pub events: broadcast::Sender<slopty_proto::WorkerMsg>,
+    /// Each link as its client says hello, with the name it says: an older link of the same
+    /// client and name lets go of the input it holds down ([`conn`]).
+    pub hellos: broadcast::Sender<(ClientId, String, slopty_worker::clip::Link)>,
     /// What the agents' hooks and [`agents::watch`] report, once [`Self::agents`] took it: the
     /// daemon's own, which feeds the observed threads and orchestration's waits. Clients and
     /// the server read an agent from its thread's row instead.
@@ -789,6 +792,7 @@ async fn run(
         id,
         name: paths::worker_name(),
         events,
+        hellos: broadcast::Sender::new(EVENT_BUFFER),
         heard: broadcast::Sender::new(EVENT_BUFFER),
         items,
         agents,
@@ -854,9 +858,9 @@ async fn run(
     tokio::spawn({
         let daemon = daemon.clone();
         async move {
-            while let Some((session, status)) = exits.recv().await {
-                tracing::info!(%session, status, "child exited");
-                daemon.worker.on_exit(session, status);
+            while let Some((session, exit)) = exits.recv().await {
+                tracing::info!(%session, status = ?exit.status, "child exited");
+                daemon.worker.on_exit(session, exit);
                 if let Some(summary) = daemon.worker.summary(session).await {
                     let _sent =
                         daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));

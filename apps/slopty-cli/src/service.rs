@@ -749,7 +749,7 @@ mod tests {
             let _sent = self.0.send(format!("{program} {}", args.join(" ")));
             match (program, args) {
                 (_, ["--custody"]) => Ok("new\n".to_owned()),
-                ("ps", _) => Ok("700\n700\n1\n".to_owned()),
+                (_, ["--sessions", ..]) => Ok("2\n".to_owned()),
                 ("launchctl", ["print", target]) if target.ends_with(PTYD.label) => {
                     Ok("\tpid = 700\n".to_owned())
                 }

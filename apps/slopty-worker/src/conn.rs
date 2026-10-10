@@ -57,6 +57,59 @@ const CLIP_DEPTH: usize = 8;
 /// Receiver reports waiting for the task that applies them. Reports come a few times a second
 /// per stream and each one stands alone, so one that finds the queue full is dropped.
 const REPORT_DEPTH: usize = 64;
+/// How long a client holds keys and buttons down on the worker with nothing heard from it:
+/// past it, its streams let go of them. A stream's client reports twenty times a second on
+/// the control stream and probes the clock four times a second in datagrams, so three seconds
+/// of neither is a link gone, not a slow one; the connection itself takes far longer to time
+/// out (`slopty_net::endpoint`'s idle timeout).
+const INPUT_LEASE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often a link looks at its lease ([`InputLease`]): a lapse lands between
+/// [`INPUT_LEASE`] and a tick past it after the client went quiet.
+const LEASE_TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The lease on the input a client holds down ([`INPUT_LEASE`]): renewed by everything heard
+/// from it, on any path, and lapsed once per silence. Hearing costs a store; the clock is read
+/// only at the link's tick ([`LEASE_TICK`]).
+#[derive(Debug)]
+struct InputLease {
+    /// The tick that last found the client heard.
+    heard: tokio::time::Instant,
+    /// Something was heard since the last tick.
+    fresh: bool,
+    /// The input was let go since the client was last heard.
+    lapsed: bool,
+}
+
+impl InputLease {
+    const fn new(now: tokio::time::Instant) -> Self {
+        Self { heard: now, fresh: false, lapsed: false }
+    }
+
+    /// The client said something.
+    const fn heard(&mut self) {
+        self.fresh = true;
+        self.lapsed = false;
+    }
+
+    /// The link's tick at `now`: whether to let go of the input, which only a stream injects
+    /// (`streaming`), and only once [`INPUT_LEASE`] passed since a tick last found the client
+    /// heard.
+    fn tick(&mut self, now: tokio::time::Instant, streaming: bool) -> bool {
+        if std::mem::take(&mut self.fresh) {
+            self.heard = now;
+            return false;
+        }
+        let due = self.heard.checked_add(INPUT_LEASE).unwrap_or(self.heard);
+        streaming && now >= due && self.lapse()
+    }
+
+    /// Let go now unless it was since the client was last heard; whether to.
+    const fn lapse(&mut self) -> bool {
+        !std::mem::replace(&mut self.lapsed, true)
+    }
+}
+
 /// How long an upload into a terminal's directory waits to learn the directory before it
 /// lands in the drop directory instead.
 const CWD_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -350,8 +403,16 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         searches: slopty_worker::search::Searches::default(),
         saves,
         curtain: daemon.curtain.as_ref().map(|c| c.link(hello.client)),
+        lease: InputLease::new(tokio::time::Instant::now()),
     };
     daemon.wake.lock().client_joined();
+    // A client back on a new link leaves its old one behind, which may still hold keys down
+    // until it times out: subscribed first, so this link hears only the others' hellos. The
+    // name tells the app from the CLI, which says the same installation's id.
+    let mut hellos = daemon.hellos.subscribe();
+    let _no_other_link = daemon.hellos.send((hello.client, hello.name.clone(), link));
+    let mut lease_tick = tokio::time::interval(LEASE_TICK);
+    lease_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let result = loop {
         tokio::select! {
@@ -361,10 +422,29 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                     Err(NetError::Closed) => break Ok("control stream closed"),
                     Err(e) => break Err(e),
                 };
+                peer.lease.heard();
                 peer.handle(msg);
             }
-            Some(Arrived { feedback, at }) = feedback_rx.recv() => peer.feedback(feedback, at),
-            Some(copy) = copies_rx.recv() => peer.input_copy(copy),
+            Some(Arrived { feedback, at }) = feedback_rx.recv() => {
+                peer.lease.heard();
+                peer.feedback(feedback, at);
+            }
+            Some(copy) = copies_rx.recv() => {
+                peer.lease.heard();
+                peer.input_copy(copy);
+            }
+            now = lease_tick.tick() => {
+                if peer.lease.tick(now, !peer.screens.is_empty()) {
+                    peer.let_go("nothing heard from the client");
+                }
+            }
+            Ok((client, name, link)) = hellos.recv() => {
+                if client == peer.client && name == hello.name && link != peer.link
+                    && peer.lease.lapse()
+                {
+                    peer.let_go("the client is back on a new link");
+                }
+            }
             Some(clip) = clips_rx.recv() => peer.clip_data(&clip.rep, clip.bytes),
             Some(done) = done_rx.recv() => {
                 if let Some(why) = peer.done(done) {
@@ -907,6 +987,8 @@ struct Peer<'d> {
     saves: mpsc::UnboundedSender<crate::files::Save>,
     /// This connection's hold on the curtain, on a Mac.
     curtain: Option<crate::CurtainLink>,
+    /// The lease on the input the client holds down through its streams.
+    lease: InputLease,
 }
 
 impl Drop for Peer<'_> {
@@ -1544,6 +1626,15 @@ impl Peer<'_> {
         }
     }
 
+    /// Have every stream let go of what the client holds down on the worker: its link went
+    /// quiet, or it is back on another ([`InputLease`] says when).
+    fn let_go(&self, why: &'static str) {
+        tracing::info!(client = %self.client, streams = self.screens.len(), why, "letting go of the client's input");
+        for screen in self.screens.values() {
+            let _gone = screen.commands.send(Command::LetGo);
+        }
+    }
+
     /// Let go of every stream and wait for each to stop capturing. The command channels
     /// closing, rather than a `Close`, tells a stream its client is gone: there is no one to
     /// say "closed" to.
@@ -1672,7 +1763,32 @@ mod tests {
     use slopty_proto::screen::ScreenInput;
     use slopty_proto::terminal::{CloseReason, RepoChanges, SessionState, SessionSummary};
 
-    use super::{Heard, Input, InputOrder, Route, ScreenOrder, StreamId, route};
+    use super::{
+        Heard, INPUT_LEASE, Input, InputLease, InputOrder, Route, ScreenOrder, StreamId, route,
+    };
+
+    /// The input a client holds down is let go once a tick finds it [`INPUT_LEASE`] unheard,
+    /// while it streams: once per silence, and again only after it is heard and goes quiet
+    /// anew. Hearing it only marks the lease; the tick after stamps it.
+    #[test]
+    fn held_input_is_let_go_once_per_silence_while_streaming() {
+        let at = |s: u64| tokio::time::Instant::now() + std::time::Duration::from_secs(s);
+        let start = at(0);
+        let mut lease = InputLease::new(start);
+        assert!(!lease.tick(at(5), false), "nothing streamed holds nothing");
+        let mut lease_after = InputLease::new(start);
+        assert!(!lease_after.tick(start + INPUT_LEASE - std::time::Duration::from_millis(1), true));
+        lease.heard();
+        assert!(!lease.tick(at(6), true), "heard since the last tick: renewed at it");
+        assert!(!lease.tick(at(8), true), "not yet past the lease");
+        assert!(lease.tick(at(9), true), "let go once past it");
+        assert!(!lease.tick(at(10), true), "and only once");
+        assert!(!lease.lapse(), "a hello finds it let go already");
+        lease.heard();
+        assert!(!lease.tick(at(20), true));
+        assert!(lease.lapse(), "heard again, a hello lets go");
+        assert!(!lease.tick(at(30), true), "and the tick does not again");
+    }
 
     /// A handoff's word reaches a client whose control queue is full at that moment, once there
     /// is room, and the words keep their order: an ask, then its withdrawal.

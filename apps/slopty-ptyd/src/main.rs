@@ -49,6 +49,11 @@ struct Args {
     /// differs and its succession (`--custody`, the second word) is this build's.
     #[arg(long, conflicts_with = "custody")]
     succeed: bool,
+    /// Print how many sessions the slopty-ptyd running on the socket holds, and exit: what an
+    /// install says ending them costs when it restarts that ptyd. Its child processes would
+    /// miss the sessions handed to it after a crash, whose shells are no children of it.
+    #[arg(long, conflicts_with_all = ["custody", "succeed"])]
+    sessions: bool,
     /// Take every session the ptyd before this build handed over in the state file open on
     /// this descriptor, which says how that ptyd ran too. Only a ptyd running this build in
     /// place passes it ([`slopty_pty::protocol::inherit_args`]).
@@ -92,6 +97,13 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let socket = args.socket.unwrap_or_else(slopty_pty::protocol::socket_path);
+    if args.sessions {
+        use std::io::Write as _;
+        let (mut ptyd, _exits) = slopty_pty::PtydClient::connect(&socket).await?;
+        let held = ptyd.list().await?.len();
+        writeln!(std::io::stdout().lock(), "{held}")?;
+        return Ok(());
+    }
     if args.succeed {
         return succeed::run(&socket).await;
     }

@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary, TermSize};
-use slopty_pty::protocol::{SessionInfo, socket_path};
+use slopty_pty::protocol::{Exit, SessionInfo, socket_path};
 use slopty_pty::{PtyError, PtydClient, SpawnSpec};
 use tokio::sync::{Notify, mpsc};
 
@@ -57,7 +57,7 @@ const CUSTODY_LOOK: Duration = Duration::from_millis(20);
 struct Entry {
     handle: SessionHandle,
     command: Vec<String>,
-    exited: Option<i32>,
+    exited: Option<Exit>,
     /// When ptyd spawned the child.
     started_ms: WallMs,
     /// The child ptyd spawned, which a ptyd that started afresh is told of.
@@ -73,8 +73,8 @@ struct Adoption {
     pid: u32,
     /// What it was opened to run.
     command: Vec<String>,
-    /// Its child's exit status, when ptyd reaped it before this worker adopted it.
-    exited: Option<i32>,
+    /// How its child ended, when it did before this worker adopted it.
+    exited: Option<Exit>,
     /// It was reopened after its shell was lost.
     restored: Option<Restored>,
     /// The lost shell's screen, to replay with the divider under it: ptyd holds nothing of
@@ -87,7 +87,7 @@ struct Listed {
     id: SessionId,
     handle: SessionHandle,
     command: Vec<String>,
-    exited: Option<i32>,
+    exited: Option<Exit>,
     started_ms: WallMs,
 }
 
@@ -117,7 +117,7 @@ struct Inner {
     /// The custody this build speaks, which a ptyd must keep to be dialled; `None` takes any.
     custody: Option<String>,
     /// Each child exit, from whichever link to ptyd reported it ([`Reports::exits`]).
-    exits: mpsc::UnboundedSender<(SessionId, i32)>,
+    exits: mpsc::UnboundedSender<(SessionId, Exit)>,
     /// Output copies and checkpoints for ptyd, drained onto `ptyd` by [`tap_loop`].
     tap: mpsc::Sender<Tap>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
@@ -188,7 +188,7 @@ impl std::fmt::Debug for Worker {
 pub struct Reports {
     /// Each child exit, as ptyd reports it; the caller pumps it into [`Worker::on_exit`]. A
     /// lost link to ptyd is dialled again (`keep_ptyd`), so it ends only with the worker.
-    pub exits: mpsc::UnboundedReceiver<(SessionId, i32)>,
+    pub exits: mpsc::UnboundedReceiver<(SessionId, Exit)>,
     /// The sessions whose output named a local server.
     pub port_hints: mpsc::UnboundedReceiver<SessionId>,
     /// The sessions whose directory, repository or branch changed, whose summaries are then
@@ -328,12 +328,12 @@ impl Worker {
     /// Record a child exit reported by ptyd, and tell the session's viewers. A clean exit
     /// takes any conversation kept with the session with it: the person ended the program the
     /// agent ran in, or the agent itself. A signal (what a reboot sends) does not.
-    pub fn on_exit(&self, id: SessionId, status: i32) {
+    pub fn on_exit(&self, id: SessionId, exit: Exit) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {
-            e.exited = Some(status);
-            e.handle.exited(status);
+            e.exited = Some(exit);
+            e.handle.exited(exit);
         }
-        if status == 0 {
+        if exit.status == Some(0) {
             self.inner.keeper.agent(id, None);
         }
     }
@@ -709,7 +709,7 @@ impl Worker {
         let Listed { id, handle, command, exited, started_ms } = listed;
         let snap = handle.snapshot().await.ok()?;
         let state = match exited.or(snap.exited) {
-            Some(status) => SessionState::Exited { status: Some(status) },
+            Some(exit) => SessionState::Exited { status: exit.status },
             None => SessionState::Running,
         };
         Some(SessionSummary {
@@ -875,7 +875,7 @@ async fn send_tap(ptyd: &mut PtydClient, tap: &Tap) -> Result<(), PtyError> {
 async fn dial(
     socket: &Path,
     custody: Option<&str>,
-) -> Result<(PtydClient, mpsc::UnboundedReceiver<(SessionId, i32)>), PtyError> {
+) -> Result<(PtydClient, mpsc::UnboundedReceiver<(SessionId, Exit)>), PtyError> {
     let (client, exits) = PtydClient::connect(socket).await?;
     let Some(custody) = custody else { return Ok((client, exits)) };
     let file = socket.with_extension("custody");
@@ -907,7 +907,7 @@ async fn dial(
 /// Pump each link's child exits into the worker's, and when the link to ptyd is lost, dial it
 /// again until it answers and hand it back every session ([`Worker::take_back`]). A worker
 /// that lost ptyd keeps running: its sessions' masters are its own, and their shells live on.
-async fn keep_ptyd(inner: Weak<Inner>, mut exits: mpsc::UnboundedReceiver<(SessionId, i32)>) {
+async fn keep_ptyd(inner: Weak<Inner>, mut exits: mpsc::UnboundedReceiver<(SessionId, Exit)>) {
     loop {
         while let Some(exit) = exits.recv().await {
             let Some(inner) = inner.upgrade() else { return };
@@ -962,9 +962,9 @@ impl Worker {
             .collect();
         for (id, handle, pid, term, started_ms) in running {
             let held = listed.iter().find(|info| info.id == id);
-            if let Some(status) = held.and_then(|info| info.exited) {
+            if let Some(exit) = held.and_then(|info| info.exited) {
                 // It ended while the link was down, and its exit went with the old link.
-                let _gone = self.inner.exits.send((id, status));
+                let _gone = self.inner.exits.send((id, exit));
             }
             let taken = if held.is_some() {
                 self.inner.ptyd.lock().await.reclaim(id).await.map_err(WorkerError::from)
