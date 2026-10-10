@@ -788,6 +788,11 @@ fn server_line(server: &Server, doctor: Option<&Doctor>, server_logs: &str) -> L
             line(Mark::Busy, format!("Not reached yet: {why}"), None)
         }
         Some(LinkState::Refused { why }) => line(Mark::Missing, why.clone(), Some(Fix::Retry)),
+        Some(LinkState::NotGranted) => line(
+            Mark::Missing,
+            "The tailnet policy does not grant this machine the worker role.".to_owned(),
+            Some(Fix::Retry),
+        ),
         None => {
             line(Mark::Missing, "Its worker registers with no server.".to_owned(), Some(Fix::Retry))
         }

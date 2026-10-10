@@ -119,9 +119,11 @@ pub async fn run(
             }
             // The tailnet policy may grant it later; the redials find out.
             Err(Ended::NotGranted) => {
-                let why = "the tailnet policy does not grant this machine the worker role";
-                tracing::warn!(server = %addr, "{why}");
-                stands(&daemon, &addr, LinkState::Refused { why: why.to_owned() });
+                tracing::warn!(
+                    server = %addr,
+                    "the tailnet policy does not grant this machine the worker role"
+                );
+                stands(&daemon, &addr, LinkState::NotGranted);
             }
             // It changes only when someone updates it or this worker: asked again after a while.
             Err(Ended::WrongBuild(wrong)) => {

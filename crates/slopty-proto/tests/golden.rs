@@ -2512,6 +2512,9 @@ mod ctl {
         snap("ctl_reply_doctor", &CtlReply::Doctor(Box::new(health())));
         snap("ctl_health_without_tailscale", &Health { tailscale: Tailscale::Absent, ..health() });
         snap("ctl_health_unregistered", &Health { server: None, ..health() });
+        let not_granted =
+            ServerHealth { address: "100.64.0.1:45560".to_owned(), link: LinkState::NotGranted };
+        snap("ctl_health_not_granted", &Health { server: Some(not_granted), ..health() });
         let links = [
             LinkState::Dialling,
             LinkState::Linked,

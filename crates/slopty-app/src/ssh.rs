@@ -1585,6 +1585,9 @@ fn not_listed(host: &str, deployed: &Deployed) -> Failure {
     use slopty_proto::ctl::LinkState;
     let why = match deployed.health.server.as_ref().map(|s| &s.link) {
         Some(LinkState::Redialling { why } | LinkState::Refused { why }) => why.clone(),
+        Some(LinkState::NotGranted) => {
+            "the tailnet policy does not grant it the worker role".to_owned()
+        }
         Some(LinkState::Dialling | LinkState::Linked) | None => String::new(),
     };
     let hint = format!(

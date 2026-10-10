@@ -290,6 +290,10 @@ pub enum LinkState {
         /// Why, and what would let it in.
         why: String,
     },
+    /// The tailnet's policy does not grant this machine the worker role, so the server turns it
+    /// away: a grant with `roles: ["worker"]` for it lets it in, and the worker asks again now
+    /// and then.
+    NotGranted,
 }
 
 /// This machine's Tailscale, as the daemon reads it.

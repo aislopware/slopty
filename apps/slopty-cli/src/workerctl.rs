@@ -209,6 +209,12 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
                     s.address
                 )
             }
+            LinkState::NotGranted => format!(
+                "{} the server at {} does not take this worker: the tailnet policy grants this \
+                 machine no worker role; add a grant with roles [\"worker\"] for it",
+                mark(false),
+                s.address
+            ),
         },
     };
     let ranges = if h.allow.is_empty() {
@@ -432,6 +438,8 @@ mod tests {
             refused.contains("✘ the server at studio:45560 does not take this worker: not granted"),
             "{refused}"
         );
+        let ungranted = link(LinkState::NotGranted);
+        assert!(ungranted.contains("add a grant with roles [\"worker\"] for it"), "{ungranted}");
         let own = doctor_report(&slopty_proto::ctl::Health { server: None, ..h.clone() }, true);
         assert!(own.contains("✘ no server set: this worker runs on its own"), "{own}");
         let linux = doctor_report(&h, false);
