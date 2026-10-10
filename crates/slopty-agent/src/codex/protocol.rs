@@ -103,6 +103,18 @@ impl Method for ThreadGoalGetParams {
     const METHOD: &'static str = "thread/goal/get";
 }
 
+impl Method for ThreadBackgroundTerminalsListParams {
+    type Response = ThreadBackgroundTerminalsListResponse;
+
+    const METHOD: &'static str = "thread/backgroundTerminals/list";
+}
+
+impl Method for SkillsListParams {
+    type Response = SkillsListResponse;
+
+    const METHOD: &'static str = "skills/list";
+}
+
 impl Method for TurnStartParams {
     type Response = TurnStartResponse;
 
@@ -256,6 +268,8 @@ pub enum ServerNotification {
     ThreadCompacted(ContextCompactedNotification),
     /// `thread/queue/changed`.
     ThreadQueueChanged(ThreadQueueChangedNotification),
+    /// `skills/changed`.
+    SkillsChanged(SkillsChangedNotification),
     /// `turn/started`.
     TurnStarted(TurnStartedNotification),
     /// `turn/completed`.
@@ -330,6 +344,7 @@ impl ServerNotification {
             }
             "thread/compacted" => serde_json::from_value(params).map(Self::ThreadCompacted),
             "thread/queue/changed" => serde_json::from_value(params).map(Self::ThreadQueueChanged),
+            "skills/changed" => serde_json::from_value(params).map(Self::SkillsChanged),
             "turn/started" => serde_json::from_value(params).map(Self::TurnStarted),
             "turn/completed" => serde_json::from_value(params).map(Self::TurnCompleted),
             "hook/started" => serde_json::from_value(params).map(Self::HookStarted),
@@ -394,6 +409,7 @@ impl ServerNotification {
             Self::ThreadTokenUsageUpdated(_) => "thread/tokenUsage/updated",
             Self::ThreadCompacted(_) => "thread/compacted",
             Self::ThreadQueueChanged(_) => "thread/queue/changed",
+            Self::SkillsChanged(_) => "skills/changed",
             Self::TurnStarted(_) => "turn/started",
             Self::TurnCompleted(_) => "turn/completed",
             Self::HookStarted(_) => "hook/started",
@@ -3860,6 +3876,152 @@ pub struct Settings {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
+/// `SkillDependencies`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillDependencies {
+    /// `tools`.
+    pub tools: Vec<SkillToolDependency>,
+}
+
+/// `SkillErrorInfo`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillErrorInfo {
+    /// `message`.
+    pub message: String,
+    /// `path`.
+    pub path: String,
+}
+
+/// `SkillInterface`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillInterface {
+    /// `brandColor`.
+    #[serde(rename = "brandColor", default, skip_serializing_if = "Option::is_none")]
+    pub brand_color: Option<String>,
+    /// `defaultPrompt`.
+    #[serde(rename = "defaultPrompt", default, skip_serializing_if = "Option::is_none")]
+    pub default_prompt: Option<String>,
+    /// `displayName`.
+    #[serde(rename = "displayName", default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// `iconLarge`.
+    #[serde(rename = "iconLarge", default, skip_serializing_if = "Option::is_none")]
+    pub icon_large: Option<AbsolutePathBuf>,
+    /// Remote large icon URL from the plugin catalog.
+    #[serde(rename = "iconLargeUrl", default, skip_serializing_if = "Option::is_none")]
+    pub icon_large_url: Option<String>,
+    /// `iconSmall`.
+    #[serde(rename = "iconSmall", default, skip_serializing_if = "Option::is_none")]
+    pub icon_small: Option<AbsolutePathBuf>,
+    /// Remote small icon URL from the plugin catalog.
+    #[serde(rename = "iconSmallUrl", default, skip_serializing_if = "Option::is_none")]
+    pub icon_small_url: Option<String>,
+    /// `shortDescription`.
+    #[serde(rename = "shortDescription", default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+}
+
+/// `SkillMetadata`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct SkillMetadata {
+    /// `dependencies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<SkillDependencies>,
+    /// `description`.
+    pub description: String,
+    /// `enabled`.
+    pub enabled: bool,
+    /// `interface`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<SkillInterface>,
+    /// `name`.
+    pub name: String,
+    /// `path`.
+    pub path: LegacyAppPathString,
+    /// Owning plugin ID, matching `PluginSummary.id`, when known.
+    #[serde(rename = "pluginId", default, skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<String>,
+    /// `scope`.
+    pub scope: SkillScope,
+    /// Legacy `short_description` from `SKILL.md`. Prefer `SKILL.json`
+    /// `interface.short_description`.
+    #[serde(rename = "shortDescription", default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+}
+
+/// `SkillScope`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum SkillScope {
+    /// `user`.
+    #[serde(rename = "user")]
+    User,
+    /// `repo`.
+    #[serde(rename = "repo")]
+    Repo,
+    /// `system`.
+    #[serde(rename = "system")]
+    System,
+    /// `admin`.
+    #[serde(rename = "admin")]
+    Admin,
+}
+
+/// `SkillToolDependency`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillToolDependency {
+    /// `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `transport`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// `type`.
+    pub r#type: String,
+    /// `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `value`.
+    pub value: String,
+}
+
+/// Notification emitted when watched local skill files change.
+///
+/// Treat this as an invalidation signal and re-run `skills/list` with the client's current
+/// parameters when refreshed skill metadata is needed.
+pub type SkillsChangedNotification = BTreeMap<String, serde_json::Value>;
+
+/// `SkillsListEntry`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillsListEntry {
+    /// `cwd`.
+    pub cwd: String,
+    /// `errors`.
+    pub errors: Vec<SkillErrorInfo>,
+    /// `skills`.
+    pub skills: Vec<SkillMetadata>,
+}
+
+/// `SkillsListParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillsListParams {
+    /// When empty, defaults to the current session working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwds: Option<Vec<String>>,
+    /// When true, bypass the skills cache and re-scan skills from disk.
+    #[serde(rename = "forceReload", default, skip_serializing_if = "Option::is_none")]
+    pub force_reload: Option<bool>,
+}
+
+/// `SkillsListResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct SkillsListResponse {
+    /// `data`.
+    pub data: Vec<SkillsListEntry>,
+}
+
 /// `SortDirection`, as Codex's schema names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum SortDirection {
@@ -4063,6 +4225,55 @@ pub enum ThreadActiveFlag {
     /// `waitingOnUserInput`.
     #[serde(rename = "waitingOnUserInput")]
     WaitingOnUserInput,
+}
+
+/// `ThreadBackgroundTerminal`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ThreadBackgroundTerminal {
+    /// `command`.
+    pub command: String,
+    /// `cpuPercent`.
+    #[serde(rename = "cpuPercent", default, skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    /// `cwd`.
+    pub cwd: LegacyAppPathString,
+    /// `itemId`.
+    #[serde(rename = "itemId")]
+    pub item_id: String,
+    /// `osPid`.
+    #[serde(rename = "osPid", default, skip_serializing_if = "Option::is_none")]
+    pub os_pid: Option<u32>,
+    /// `processId`.
+    #[serde(rename = "processId")]
+    pub process_id: String,
+    /// `rssKb`.
+    #[serde(rename = "rssKb", default, skip_serializing_if = "Option::is_none")]
+    pub rss_kb: Option<u64>,
+}
+
+/// `ThreadBackgroundTerminalsListParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadBackgroundTerminalsListParams {
+    /// Opaque pagination cursor returned by a previous call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Optional page size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadBackgroundTerminalsListResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadBackgroundTerminalsListResponse {
+    /// `data`.
+    pub data: Vec<ThreadBackgroundTerminal>,
+    /// Opaque cursor to pass to the next call to continue after the last item. If None, there are
+    /// no more items to return.
+    #[serde(rename = "nextCursor", default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// `ThreadClosedNotification`, as Codex's schema names it.

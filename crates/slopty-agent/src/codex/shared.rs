@@ -35,6 +35,14 @@
 //!   app-server has no queue of its own. The person's stop holds it ([`Shared::stop`],
 //!   [`Pending::STOPPED`](slopty_proto::thread::Pending::STOPPED)) until they send again, which
 //!   lets it go after what they sent.
+//! - **Commands.** The composer's commands are the thread's skills (`skills/list`, asked again on
+//!   `skills/changed`), the only commands the app-server publishes; Codex's own slash commands live
+//!   in its TUI. A message that leads with one as `/name` goes as Codex's own `$name` with the
+//!   skill named beside the words, the way its TUI sends it.
+//! - **Background work.** The commands Codex left running past their calls are its background
+//!   terminals (`thread/backgroundTerminals/list`), asked whenever a call or a turn ends
+//!   ([`terminals_due`]); the app-server says nothing when one exits. A thread at rest with some
+//!   still running waits on them ([`Wait::COMMAND`]).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -45,11 +53,11 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
-    Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
-    Mode, Notice, Offers, PartKey, Phase, Plan, Request, RequestState, Retry, Status, Step,
-    ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
-    UserMessage, Wait, kind,
+    Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
+    Compaction, Delivery, Drive, Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId,
+    Limit, Link, Liveness, Meters, Mode, Notice, Offers, PartKey, Phase, Plan, Request,
+    RequestState, Retry, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn,
+    TurnId, TurnState, Usage, UserMessage, Wait, kind,
 };
 
 use super::form::Form;
@@ -348,6 +356,11 @@ pub struct Shared {
     queued: Queue<Vec<Attached>>,
     /// The models Codex offers (`model/list`), hidden ones left out.
     catalog: Vec<p::Model>,
+    /// The skills the thread's composer offers as commands, by name: the path Codex reads each
+    /// from.
+    skills: BTreeMap<String, String>,
+    /// The commands Codex left running in the background, as last listed.
+    tasks: Vec<BackgroundTask>,
 }
 
 impl Shared {
@@ -425,6 +438,8 @@ impl Shared {
             began: HashMap::new(),
             queued: Queue::default(),
             catalog: Vec::new(),
+            skills: BTreeMap::new(),
+            tasks: Vec::new(),
         };
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
         for turn in &thread.turns {
@@ -1041,7 +1056,7 @@ impl Shared {
             let paths = attached.iter().map(|a| a.path().to_owned()).collect();
             return Send::Held(vec![self.queued.hold(intent, text, paths, attached, false)]);
         }
-        let input = input(text, &attached);
+        let input = self.input(text, &attached);
         let client = Some(intent.to_string());
         match (&self.current, delivery) {
             (Some(turn), Delivery::Steer) => Send::Steer(Box::new(p::TurnSteerParams {
@@ -1170,6 +1185,75 @@ impl Shared {
         })
     }
 
+    /// What lists the skills of the thread's folder (`skills/list`).
+    #[must_use]
+    pub fn skills_list(&self) -> p::SkillsListParams {
+        p::SkillsListParams { cwds: Some(vec![self.meta.cwd.clone()]), force_reload: None }
+    }
+
+    /// The skills Codex listed for the thread's folder, enabled ones only, as the composer's
+    /// commands.
+    pub fn skills(&mut self, said: &p::SkillsListResponse) -> Vec<Action> {
+        let listed = said
+            .data
+            .iter()
+            .filter(|entry| entry.cwd == self.meta.cwd || said.data.len() == 1)
+            .flat_map(|entry| &entry.skills)
+            .filter(|skill| skill.enabled);
+        let mut skills = BTreeMap::new();
+        let mut commands = Vec::new();
+        for skill in listed {
+            if skills.insert(skill.name.clone(), skill.path.clone()).is_some() {
+                continue;
+            }
+            commands.push(command_of(skill));
+        }
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        self.skills = skills;
+        vec![Action::CommandsSet(commands)]
+    }
+
+    /// What lists the commands Codex left running in the background on this thread
+    /// (`thread/backgroundTerminals/list`).
+    #[must_use]
+    pub fn terminals_list(&self) -> p::ThreadBackgroundTerminalsListParams {
+        p::ThreadBackgroundTerminalsListParams {
+            thread_id: self.meta.native.clone(),
+            ..p::ThreadBackgroundTerminalsListParams::default()
+        }
+    }
+
+    /// The commands Codex says still run in the background, listed at `now`: the thread's
+    /// background tasks, each begun when first listed, and its status again when it rests, so
+    /// it waits on them while any runs. One that ended leaves the list.
+    pub fn terminals(&mut self, live: &[p::ThreadBackgroundTerminal], now: WallMs) -> Vec<Action> {
+        let tasks: Vec<BackgroundTask> = live
+            .iter()
+            .map(|terminal| {
+                let began = self.tasks.iter().find(|t| t.id == terminal.process_id);
+                BackgroundTask {
+                    id: terminal.process_id.clone(),
+                    kind: BackgroundTask::SHELL.to_owned(),
+                    title: terminal.command.clone(),
+                    state: BackgroundTask::RUNNING.to_owned(),
+                    item: Some(ItemId(terminal.item_id.clone())),
+                    output: None,
+                    started_ms: began.map_or(now, |t| t.started_ms),
+                    ended_ms: None,
+                }
+            })
+            .collect();
+        if tasks == self.tasks {
+            return Vec::new();
+        }
+        self.tasks = tasks;
+        let mut actions = vec![Action::TasksSet(self.tasks.clone())];
+        if let Some((said @ ThreadStatus::Idle, since)) = self.said.clone() {
+            actions.push(Action::Status(self.status_of(&said, since)));
+        }
+        actions
+    }
+
     /// What stops the turn under way, when one is.
     #[must_use]
     pub fn interrupt(&self) -> Option<p::TurnInterruptParams> {
@@ -1183,6 +1267,26 @@ impl Shared {
     pub fn stop(&mut self) -> Option<(p::TurnInterruptParams, Vec<Action>)> {
         let params = self.interrupt()?;
         Some((params, self.queued.stop().into_iter().collect()))
+    }
+
+    /// What a message of `text` and the files `attached` is to Codex: the words, with the paths
+    /// of the files that are no pictures after them, then each picture as a `localImage`. Words
+    /// that lead with one of the thread's skills as `/name` lead with Codex's own `$name`
+    /// instead, the skill named beside them.
+    fn input(&self, text: &str, attached: &[Attached]) -> Vec<UserInput> {
+        let skill = text.strip_prefix('/').and_then(|rest| {
+            let name = rest.split(char::is_whitespace).next()?;
+            self.skills.get_key_value(name)
+        });
+        let text = skill.map_or_else(|| text.to_owned(), |_| text.replacen('/', "$", 1));
+        let words = crate::attach::with_files(&text, attached);
+        let words = (!words.trim().is_empty())
+            .then(|| UserInput::Text { text: words, text_elements: Some(Vec::new()) });
+        let skill = skill
+            .map(|(name, path)| UserInput::Skill { name: name.to_owned(), path: path.clone() });
+        let pictures = crate::attach::pictures(attached)
+            .map(|picture| UserInput::LocalImage { detail: None, path: picture.path().to_owned() });
+        words.into_iter().chain(skill).chain(pictures).collect()
     }
 
     /// The thread's latest turn, or [`TurnId::BEFORE`] before its first: where what Codex says
@@ -1293,6 +1397,12 @@ impl Shared {
         let (phase, wait, liveness) = match status {
             ThreadStatus::NotLoaded => (Phase::Idle, None, Liveness::Exited { resumable: true }),
             ThreadStatus::SystemError => (Phase::Failed, None, Liveness::Live),
+            ThreadStatus::Idle if !self.tasks.is_empty() => {
+                let names: Vec<&str> = self.tasks.iter().map(|t| t.title.as_str()).collect();
+                let text = format!("Running {}", names.join(", "));
+                let wait = Wait { kind: Wait::COMMAND.to_owned(), text };
+                (Phase::Waiting, Some(wait), Liveness::Live)
+            }
             ThreadStatus::Idle => {
                 let phase = match &self.last_end {
                     Some(TurnState::Complete) => Phase::Done,
@@ -1661,15 +1771,47 @@ pub fn ask_of(id: &RequestId) -> AskId {
 }
 
 /// A thread's name for people: its own, else what it was first asked.
-/// What a message of `text` and the files `attached` is to Codex: the words, with the paths of
-/// the files that are no pictures after them, then each picture as a `localImage`.
-fn input(text: &str, attached: &[Attached]) -> Vec<UserInput> {
-    let words = crate::attach::with_files(text, attached);
-    let words = (!words.trim().is_empty())
-        .then(|| UserInput::Text { text: words, text_elements: Some(Vec::new()) });
-    let pictures = crate::attach::pictures(attached)
-        .map(|picture| UserInput::LocalImage { detail: None, path: picture.path().to_owned() });
-    words.into_iter().chain(pictures).collect()
+/// The command a skill is in the composer: its name, its short description where it has one,
+/// and where it comes from in the composer's words.
+fn command_of(skill: &p::SkillMetadata) -> Command {
+    let short = skill
+        .interface
+        .as_ref()
+        .and_then(|i| i.short_description.clone())
+        .or_else(|| skill.short_description.clone())
+        .filter(|d| !d.trim().is_empty());
+    let source = if skill.plugin_id.is_some() {
+        "plugin"
+    } else {
+        match skill.scope {
+            p::SkillScope::User => "personal",
+            p::SkillScope::Repo => "project",
+            p::SkillScope::System => "built-in",
+            p::SkillScope::Admin => "admin",
+        }
+    };
+    Command {
+        name: skill.name.clone(),
+        description: short.unwrap_or_else(|| skill.description.clone()),
+        argument_hint: None,
+        source: source.to_owned(),
+    }
+}
+
+/// Whether `note` may have changed the commands Codex runs in the background, so the worker
+/// lists them again ([`Shared::terminals_list`]): a command's call or a turn ended, or the
+/// thread was taken up.
+#[must_use]
+pub const fn terminals_due(note: &ServerNotification) -> bool {
+    matches!(
+        note,
+        ServerNotification::TurnCompleted(_)
+            | ServerNotification::ThreadStarted(_)
+            | ServerNotification::ItemCompleted(p::ItemCompletedNotification {
+                item: ThreadItem::CommandExecution { .. },
+                ..
+            })
+    )
 }
 
 /// What lists Codex's threads in folder `cwd`, most recently changed first, at most `limit`

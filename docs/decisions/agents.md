@@ -2817,3 +2817,26 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - `a_review_is_published_as_one_with_glab_and_a_failure_leaves_no_drafts`;
     - `review::tests::{a_note_is_placed_on_both_lines_where_the_diff_keeps_its_line,
       a_review_out_of_bounds_or_saying_nothing_is_refused, a_review_at_an_older_head_is_refused}`.
+
+- ✅ **Codex gets the commands and background work its app-server publishes** (2026-10-12,
+  readiness 10-12 "below the line", kept by the orchestrator-first study). A Codex thread had no
+  slash menu and an empty tray. The app-server (0.162.1, checked in its JSON Schema and its TUI's
+  source) has a door for each, so the adapter uses them and nothing else:
+  - **Commands are skills.** Codex's own slash commands live in its TUI and the app-server does
+    not list them. It lists skills (`skills/list`, again on `skills/changed`), so those are the
+    composer's commands: enabled ones only, each with its short description, and its scope as
+    the source (`personal`, `project`, `built-in`, `admin`, or `plugin`). A message that leads
+    with one as `/name` goes as Codex's own `$name` with a `skill` input naming its path beside
+    the words, which is how Codex's TUI sends a skill. Any other `/` word goes as typed.
+  - **Background work** is Codex's background terminals (`thread/backgroundTerminals/list`):
+    each is a `shell` task named by its command and tied to the call that started it. The
+    app-server sends nothing when one exits, so the worker lists them again whenever a command's
+    call or a turn ends, or the thread is taken up (`codex::shared::terminals_due`). A thread at
+    rest with some still running waits on them (`Wait::COMMAND`), as a Claude Code thread does.
+  - **No compacting through Slopty.** The orchestrator-first study deleted compacting from every
+    agent's face, since agents compact themselves, so no `Cap::COMPACT` is declared and
+    `thread/compact/start` is not spoken.
+  - The generated protocol gains `skills/list`, `thread/backgroundTerminals/list` and
+    `skills/changed`.
+  - Tests (slopty-agent `tests/codex.rs`): `codexs_skills_are_its_commands`,
+    `commands_left_running_are_its_background_tasks`.

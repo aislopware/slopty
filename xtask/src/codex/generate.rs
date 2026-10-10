@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Map, Value};
 
 /// The requests Slopty sends.
-const CLIENT_REQUESTS: [&str; 18] = [
+const CLIENT_REQUESTS: [&str; 20] = [
     "initialize",
     "thread/start",
     "thread/resume",
@@ -26,6 +26,8 @@ const CLIENT_REQUESTS: [&str; 18] = [
     "thread/name/set",
     "thread/settings/update",
     "thread/goal/get",
+    "thread/backgroundTerminals/list",
+    "skills/list",
     "turn/start",
     "turn/steer",
     "turn/interrupt",
@@ -44,7 +46,7 @@ const SERVER_REQUESTS: [&str; 5] = [
 ];
 
 /// The notifications Slopty reads.
-const SERVER_NOTIFICATIONS: [&str; 34] = [
+const SERVER_NOTIFICATIONS: [&str; 35] = [
     "error",
     "warning",
     "thread/started",
@@ -58,6 +60,7 @@ const SERVER_NOTIFICATIONS: [&str; 34] = [
     "thread/tokenUsage/updated",
     "thread/compacted",
     "thread/queue/changed",
+    "skills/changed",
     "turn/started",
     "turn/completed",
     "hook/started",

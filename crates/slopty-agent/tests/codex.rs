@@ -694,6 +694,113 @@ mod tests {
         assert_eq!(texts(&state).last(), Some(&format!("text: {found}")));
     }
 
+    /// The composer's commands are the thread's enabled skills, as Codex lists them for its
+    /// folder; one led with as `/name` goes as Codex's own `$name` with the skill beside the
+    /// words, and any other `/` word goes as typed.
+    #[test]
+    fn codexs_skills_are_its_commands() {
+        use slopty_proto::thread::{Delivery, IntentId};
+        let (mut shared, mut state) = begun();
+        let cwd = shared.meta().cwd.clone();
+        assert_eq!(serde_json::to_value(shared.skills_list()).unwrap(), json!({"cwds": [cwd]}));
+        let skill = |name: &str, enabled: bool, scope: &str| {
+            json!({"name": name, "description": format!("All about {name}"), "enabled": enabled,
+                "path": format!("/skills/{name}/SKILL.md"), "scope": scope,
+                "interface": {"shortDescription": format!("{name}, short")}})
+        };
+        let said: p::SkillsListResponse = serde_json::from_value(json!({"data": [{"cwd": cwd,
+            "errors": [], "skills": [skill("ship", true, "repo"), skill("lint", true, "user"),
+            skill("off", false, "user")]}]}))
+        .unwrap();
+        for action in &shared.skills(&said) {
+            state.apply(action);
+        }
+        let listed: Vec<(&str, &str, &str)> = state
+            .commands
+            .iter()
+            .map(|c| (c.name.as_str(), c.description.as_str(), c.source.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("lint", "lint, short", "personal"), ("ship", "ship, short", "project")]
+        );
+
+        let input = |shared: &mut Shared, text: &str| {
+            let shared::Send::Start(start) =
+                shared.send(text, vec![], Delivery::Steer, IntentId::new())
+            else {
+                panic!("a turn of its own")
+            };
+            serde_json::to_value(&start.input).unwrap()
+        };
+        assert_eq!(
+            input(&mut shared, "/ship the fix"),
+            json!([{"type": "text", "text": "$ship the fix", "text_elements": []},
+                {"type": "skill", "name": "ship", "path": "/skills/ship/SKILL.md"}])
+        );
+        assert_eq!(
+            input(&mut shared, "/shipping now"),
+            json!([{"type": "text", "text": "/shipping now", "text_elements": []}]),
+            "a word that only starts like a skill"
+        );
+    }
+
+    /// The commands Codex left running past their calls are the thread's background tasks,
+    /// listed again whenever a call or a turn ends; at rest with any still running, the thread
+    /// waits on them by name, and done once they are gone.
+    #[test]
+    fn commands_left_running_are_its_background_tasks() {
+        use slopty_proto::thread::{BackgroundTask, ItemId, Wait};
+        let (mut shared, mut state) = begun();
+        let thread = shared.meta().native.clone();
+        assert_eq!(
+            serde_json::to_value(shared.terminals_list()).unwrap(),
+            json!({"threadId": thread})
+        );
+        let turn = turn_begun(&mut shared, &mut state);
+        let ended = json!({"threadId": thread, "turn": {"completedAt": 2, "durationMs": 1,
+            "error": null, "id": turn, "items": [], "itemsView": "notLoaded", "startedAt": 0,
+            "status": "completed"}});
+        let msg = json!({"jsonrpc": "2.0", "method": "turn/completed", "params": ended});
+        let Incoming::Notification { note, .. } = rpc::read(&msg.to_string()).unwrap() else {
+            panic!("a notification")
+        };
+        assert!(shared::terminals_due(&note), "a turn's end lists them again");
+        hear(&mut shared, &mut state, "turn/completed", &ended);
+        hear(
+            &mut shared,
+            &mut state,
+            "thread/status/changed",
+            &json!({"threadId": thread, "status": {"type": "idle"}}),
+        );
+        assert_eq!(state.status.phase, Phase::Done);
+
+        let live: Vec<p::ThreadBackgroundTerminal> = serde_json::from_value(json!([
+            {"command": "npm run dev", "cwd": "/repo", "itemId": "call_1", "processId": "41"}
+        ]))
+        .unwrap();
+        for action in &shared.terminals(&live, WallMs::from_millis(5)) {
+            state.apply(action);
+        }
+        let task = state.tasks.first().expect("listed");
+        assert_eq!(
+            (task.kind.as_str(), task.title.as_str(), task.item.clone(), task.is_running()),
+            (BackgroundTask::SHELL, "npm run dev", Some(ItemId("call_1".to_owned())), true)
+        );
+        assert_eq!(state.status.phase, Phase::Waiting);
+        assert_eq!(state.status.wait.as_ref().map(|w| w.kind.as_str()), Some(Wait::COMMAND));
+        assert!(
+            shared.terminals(&live, WallMs::from_millis(9)).is_empty(),
+            "no news, nothing told"
+        );
+
+        for action in &shared.terminals(&[], WallMs::from_millis(10)) {
+            state.apply(action);
+        }
+        assert!(state.tasks.is_empty(), "an ended command leaves the list");
+        assert_eq!(state.status.phase, Phase::Done);
+    }
+
     /// An edit's hunks keep the heading Codex's diff names after their ranges.
     #[test]
     fn an_edits_hunks_keep_their_heading() {
