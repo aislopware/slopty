@@ -9970,3 +9970,78 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::pins::adding_a_tile_to_a_project_pins_it_there`,
     `workspace::tests::projects::a_task_never_started_is_started_from_its_card`,
     `workspace::tests::tiles` (the exited pills).
+
+- ✅ **The thread keeps only what directs it: single-agent chrome cut** (2026-10-10,
+  orchestrator-first study item 2, the UI half). Each piece served babysitting one agent or
+  said again what another surface already says, so the thread's foot carries the model, the
+  mode and the meter beside the "+" and the send.
+  - **Effort is the model's.** The effort chip, its "+" menu row and "Next effort level"
+    (`CycleEffort`, `cycle_effort`) are gone. The model chip names a level that is not the
+    default after the model, "Opus 5.5 · High", and its menu lists the models, then the levels
+    under a quiet "Effort", one walk for the keyboard (`MenuRows::Models`). The chip is a
+    switch where the agent can switch either. Supersedes "The effort chip switches how hard
+    the model thinks".
+  - **Context is said once.** The header's ring is gone; the composer's meter stays, its ring
+    and share with the plan's windows in its hint. It is words to read now: the panel it
+    opened in the tray, whose last control was compaction, is deleted, and so is its "+" menu
+    row, which had nothing left to do. Supersedes "The context ring opens a popover".
+  - **Background work is the tray's own list.** The tasks chip is gone, and the tray lists the
+    agent's background work as it lists commands: what runs, and what ended in the last turn
+    (started by one of its calls or, started by none, ended since it began), with no head to
+    fold. Work over before the turn under way leaves the list (`activity::tasks`).
+  - **The edits have one way to the review.** The composer's changes chip is gone; the card
+    under the answer and the palette's "Review changes" open the review. Supersedes "The
+    edits are said once" as far as the chip goes.
+  - **No screen chip.** The agent's screen arrives as a tile and keeps its palette line
+    ("Watch the agent's screen").
+  - **No goal line.** Codex's read-only goal line over the field and the Stop hint it added
+    are gone. `ThreadState::goal` has no reader in the client now.
+  - **No prompt outline.** The bars at a wide transcript's right edge are gone; ⌘F and the
+    subagent trail take the person through a long thread. Supersedes "The prompt outline
+    stands at the transcript's right edge".
+  - **No "Interrupt and send".** The send already becomes Stop while a turn runs, and ⌘↵
+    queues. Supersedes its half of "Carrying a thread on".
+  - Tests: `conversation::thread::tests::face::{the_model_chip_switches_how_hard_the_model_thinks,
+    the_tray_lists_background_work, a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus}`,
+    `conversation::thread::tests::composing::the_meter_is_read_not_pressed`,
+    `conversation::thread::tests::doors::the_screen_the_agent_drives_is_offered_beside_it`.
+
+- ✅ **"Branch from here" becomes Fork from here and Ask aside** (2026-10-10,
+  orchestrator-first study item 8, the UI half). The panel's machine and agent rows served
+  moving one thread around by hand, which a project's task does by its restart, and its five
+  settings made a two-way choice read like a form. Supersedes "One way to branch" and the
+  panel parts of later entries.
+  - **Two rows in a message's own menu** (a right click or a long press), after Copy and
+    Quote in reply. **Fork from here**, on a message of the person's, asks the agent for a fork
+    through the turn before it (`Intent::Fork`, where it forks), and the new thread opens with
+    the message in its composer to change and send. It is offered only where a turn comes
+    before the message and none runs now. **Ask aside** asks the draft of a fork of the whole
+    thread in its sheet, as the palette's "Ask aside" does.
+  - **Deleted:** the panel and the branch mark under each message, the "Branch from here…"
+    palette line and its action (`BranchFromHere`, `branch_from_here`), the other machines'
+    clones the workspace listed for it (`Elsewhere`, `going_on_elsewhere`, `clones_elsewhere`)
+    and the start it handed over (`ThreadViewEvent::{AskElsewhere, ContinueOn}`,
+    `continue_on`). Nothing in the client asks `Intent::Continue` any more.
+  - Tests: `conversation::thread::tests::carry::a_message_forks_from_its_menu`,
+    `conversation::thread::view::fork::tests::a_fork_goes_through_the_turn_before_the_message`,
+    `conversation::thread::tests::aside`.
+
+- ✅ **A card asks only what moves its task on, and push is set in one place** (2026-10-10,
+  orchestrator-first study item 3, the UI half). Moving, restarting and stopping a task's agent
+  are the orchestrator's (`task_start`, `task_restart`), so the person's buttons on a card are
+  the decisions that are theirs.
+  - **Card actions cut:** Run on… (its worker picker, `RunOnPicker`, and the place chip's click,
+    now words only), Start fresh, Give to another agent… (its agent picker) and Stop its agent,
+    with their palette lines and actions (`RunTaskOn`, `StartTaskFresh`, `GiveTaskToAgent`,
+    `StopTaskAgent`). A card keeps Review, Merge, Retry, Start, Fix CI, Address comments,
+    Resolve conflicts and, on the task stood on, Cancel task.
+  - **Push in one place.** The board's head holds the project's one setting ("Push after each
+    merge") and, while merged work is not on the forge, "Push" for all of it at once. A merged
+    card offers nothing, the "New project" sheet has no push switch (a project starts with
+    pushing off), and "Push the task's merge again" (`PushTask`) is gone.
+  - **One door to a project.** "Start a project here" (`StartProject`) and "Make this agent X's
+    orchestrator" (`MakeOrchestrator`) are deleted: a project is made with its orchestrator by
+    "New project…", which becomes "New goal" with item 9.
+  - Tests: `project::tests::a_merge_whose_push_failed_says_so` (a merged card offers nothing),
+    `workspace::tests::projects::{a_task_stood_on_can_be_cancelled,
+    every_card_says_where_it_runs, the_boards_actions_reach_the_server}`.

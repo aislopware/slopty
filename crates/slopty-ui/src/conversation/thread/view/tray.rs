@@ -47,8 +47,6 @@ pub(super) struct Marks {
     pub asked: Option<(usize, Placement)>,
     /// The list is scrolled up from its newest row.
     pub down: bool,
-    /// The prompt outline's bars and the prompt it lights.
-    pub outline: Option<super::outline::OutlineMark>,
 }
 
 /// Where the request on show is answered.
@@ -106,7 +104,7 @@ impl ThreadView {
             .and_then(|request| request.item.as_ref())
             .and_then(|item| self.call_row(item))
             .map(|row| (row, self.placement_of(row)));
-        Marks { asked, down: self.away_from_newest(), outline: self.outline_mark() }
+        Marks { asked, down: self.away_from_newest() }
     }
 
     /// Whether the way down shows: the list does not follow its newest row, and is not known
@@ -118,14 +116,13 @@ impl ThreadView {
     }
 
     /// Draw again once the list's layout moved what the frame drew from it: the request's
-    /// place, the way down, the outline. Reads only the list, so a frame that changes neither costs
-    /// no second one.
+    /// place and the way down. Reads only the list, so a frame that changes neither
+    /// costs no second one.
     pub(super) fn recheck_marks(&self, cx: &mut Context<Self>) {
         let was = self.marks.get();
         let now = Marks {
             asked: was.asked.map(|(row, _)| (row, self.placement_of(row))),
             down: self.away_from_newest(),
-            outline: self.outline_mark(),
         };
         if now != was {
             #[cfg(test)]
@@ -298,13 +295,8 @@ impl ThreadView {
         if !bar.background.is_empty() {
             groups.push(vec![self.background_section(&bar.background)]);
         }
-        if self.tasks_open && !bar.tasks.is_empty() {
-            let mut tasks = vec![self.tasks_head(cx)];
-            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task, state, cx)));
-            groups.push(tasks);
-        }
-        if self.meter_open {
-            groups.push(vec![self.meter_panel(state, cx)]);
+        if !bar.tasks.is_empty() {
+            groups.push(vec![self.tasks_section(&bar.tasks, state, cx)]);
         }
         let mut sections: Vec<AnyElement> = Vec::new();
         for group in groups.into_iter().filter(|g| !g.is_empty()) {
@@ -450,31 +442,6 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(line))
             }))
-    }
-
-    /// The head of the work in the background, opened from its chip: what it is, how much of
-    /// it runs or how it ended, and the way to fold it.
-    fn tasks_head(&self, cx: &Context<Self>) -> AnyElement {
-        let s = self.theme.surfaces;
-        // The count is the composer's chip's, which opened this and stays beside it as the
-        // way back: said twice, a step apart, it read as two things.
-        self.section()
-            .id("thread-tasks-head")
-            .debug_selector(|| "thread-tasks-head".to_owned())
-            .role(Role::Button)
-            .aria_label("In the background")
-            .aria_expanded(true)
-            .cursor_pointer()
-            .text_color(hsla(s.text_secondary))
-            .child(Self::slot())
-            .child(div().flex_none().child("In the background"))
-            .child(div().flex_1())
-            .child(self.icon(Symbol::ChevronDown, s.text_muted))
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                this.tasks_open = false;
-                cx.notify();
-            }))
-            .into_any_element()
     }
 
     /// Something the worker turned down that the thread would not show: what and why, until
@@ -1082,38 +1049,30 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The meter's panel: a line for the context and each of the plan's windows with when it
-    /// resets.
-    fn meter_panel(
+    /// The work the agent lists as run in the background, a line each, what still runs
+    /// first ([`Activity::tasks`]): the tray's own list, as the commands' is.
+    fn tasks_section(
         &self,
+        tasks: &[&BackgroundTask],
         state: &slopty_proto::thread::ThreadState,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let s = self.theme.surfaces;
-        let meters = &state.meters;
-        let lines = super::composer::meter_words(meters, crate::clock::now(cx));
-        let label = SharedString::from(lines.join(", "));
-        self.section()
-            .id("thread-meter-panel")
-            .debug_selector(|| "thread-meter-panel".to_owned())
-            .role(Role::Group)
-            .aria_label(label)
-            .items_start()
-            .py(px(self.theme.spacing.xs))
-            .text_color(hsla(s.text_secondary))
-            .child(Self::slot().child(self.icon(Symbol::InfoCircle, s.text_muted)))
-            .child(
-                kit::tabular(div())
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .children(lines.into_iter().map(|l| div().child(SharedString::from(l)))),
-            )
+        div()
+            .id("thread-tasks")
+            .debug_selector(|| "thread-tasks".to_owned())
+            .role(Role::List)
+            .aria_label(SharedString::from(format!(
+                "In the background, {}",
+                tasks_words(tasks.iter().copied())
+            )))
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(tasks.iter().map(|task| self.task_line(task, state, cx)))
             .into_any_element()
     }
 
-    /// One piece of background work in the panel: its kind, what it is, the end of what it
+    /// One piece of background work in the tray: its kind, what it is, the end of what it
     /// printed, and how it stands and for how long.
     ///
     /// The line opens what the work is: a subagent's thread, as its call's card opens it, once

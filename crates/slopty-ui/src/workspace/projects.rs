@@ -16,23 +16,23 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Autonomy, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, TaskChange, TaskId,
-    TaskLaunch, TaskState,
+    Autonomy, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, TaskChange, TaskId, TaskLaunch,
+    TaskState,
 };
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
-use super::actions::{MakeOrchestrator, StartOrchestrator};
+use super::actions::StartOrchestrator;
 use super::agents::{agent_ask_text, agent_mark_of};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
-use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction};
+use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
-use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
+use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 /// What a board's action says when no server is linked to take it.
 pub(crate) const NOT_SENT: &str = "Not sent: the server is away";
-/// What "Start a project here" says away from an agent's terminal, and the way that works.
+/// What the "New project" sheet says away from an agent's terminal, and the way that works.
 pub(crate) const NO_TERMINAL: &str = "A project is run by an agent in a terminal: start one with \u{201c}New project\u{2026}\u{201d}";
 /// How many pages of the timeline a recap reads back from the server, past what the board
 /// holds: far enough for a night away from a busy project.
@@ -41,7 +41,7 @@ const RECAP_PAGES: usize = 8;
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// What the timeline says of a task the person cancelled from the board.
 pub(crate) const CANCELLED: &str = "Cancelled by the person";
-/// What "Start a project here" and "Make this agent … orchestrator" say in a plain shell.
+/// What the "New project" sheet says in a plain shell.
 pub(crate) const NOT_AN_AGENT: &str = "Start an agent in this terminal first: an orchestrator is an agent, and a shell never \
      hears what the board tells it";
 
@@ -83,8 +83,6 @@ pub(super) struct ProjectsState {
     /// The tile of an agent "New project…" started, whose sheet opens once it is its
     /// terminal's tile ([`WorkspaceView::orchestrator_started`]).
     pub orchestrating: Option<ItemId>,
-    /// The "Run on" picker open on a task, per project.
-    pub run_on: HashMap<ProjectId, RunOnPicker>,
     /// How far this client read each project's timeline, as its board last hid.
     pub looked: HashMap<ProjectId, Looked>,
     /// The boards on show at the last hand-over: one not among them opened since.
@@ -354,62 +352,6 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// "Make this agent `project`'s orchestrator" for each project the focused terminal's
-    /// agent does not orchestrate, while an agent runs there.
-    pub(super) fn orchestrator_lines(&self) -> Vec<crate::palette::PaletteItem> {
-        let Some(session) = self.focused_session() else { return Vec::new() };
-        if self.session_agent(session).is_none() {
-            return Vec::new();
-        }
-        self.projects
-            .mirror
-            .boards()
-            .filter(|b| b.project.orchestrator.is_none_or(|t| t.session != session))
-            .map(|board| {
-                let label = format!("Make this agent {}'s orchestrator", board.project.title);
-                let action = MakeOrchestrator { project: board.project.id.clone() };
-                crate::palette::PaletteItem::new(&label, Box::new(action), &[])
-            })
-            .collect()
-    }
-
-    /// The focused terminal's agent becomes `project`'s orchestrator, and the tile shows its
-    /// board. A plain shell is refused, as it never hears what the board tells it.
-    pub(super) fn make_orchestrator(
-        &mut self,
-        make: &MakeOrchestrator,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.focused_session() else {
-            self.show_notice(NO_TERMINAL.to_owned(), cx);
-            return;
-        };
-        if self.session_agent(session).is_none() {
-            self.show_notice(NOT_AN_AGENT.to_owned(), cx);
-            return;
-        }
-        let Some(worker) = self.worker_of_session(session).and_then(worker_id) else {
-            self.show_notice(NO_TERMINAL.to_owned(), cx);
-            return;
-        };
-        let verb = Verb::ProjectSet {
-            project: make.project.clone(),
-            autonomy: None,
-            orchestrator: Some(TermRef { worker, session }),
-            verifier: None,
-            push: None,
-            limits: LimitsChange::default(),
-            metadata: None,
-        };
-        let (project, term) = (make.project.clone(), TermRef { worker, session });
-        self.send_to_server(
-            verb,
-            move |this, cx| this.open_when_orchestrated(project, term, cx),
-            cx,
-        );
-    }
-
     /// Show `project`'s board in `term`'s tile, now if the mirror has `term` as its orchestrator
     /// and else once it does: the server's word of the change may come before or after its
     /// answer.
@@ -510,9 +452,8 @@ impl WorkspaceView {
         for (project, view) in views {
             let board = self.projects.mirror.get(&project).cloned();
             let agents = board.as_ref().map(|b| self.board_agents(b)).unwrap_or_default();
-            let run_on = self.projects.run_on.get(&project).cloned();
             let recap = self.projects.recaps.get(&project).cloned();
-            let seen = Seen { board, workers: names.clone(), agents, now, run_on, recap };
+            let seen = Seen { board, workers: names.clone(), agents, now, recap };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         for project in std::mem::take(&mut self.projects.focus) {
@@ -677,17 +618,8 @@ impl WorkspaceView {
                 }
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
                 ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
-                ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
-                ProjectEvent::GiveTo(task, agent) => {
-                    this.restart_task(&asked, *task, Some(agent.clone()), cx);
-                }
                 ProjectEvent::CloseRecap => {
                     if this.projects.recaps.remove(&asked).is_some() {
-                        this.projects_moved(cx);
-                    }
-                }
-                ProjectEvent::CloseRunOn => {
-                    if this.projects.run_on.remove(&asked).is_some() {
                         this.projects_moved(cx);
                     }
                 }
@@ -699,8 +631,7 @@ impl WorkspaceView {
     /// A board's action on a task, as the person's word to the server: a merge and a retry
     /// both put the task in the merge queue, which checks it afresh; a next step is said to the
     /// task's agent, as the person. A cancel gives
-    /// the task up with the person's word on the timeline, and a stop ends its agent's
-    /// terminal, whose session its agent can take up again.
+    /// the task up with the person's word on the timeline.
     fn act_on_task(
         &mut self,
         project: &ProjectId,
@@ -714,10 +645,6 @@ impl WorkspaceView {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::Push => Verb::TaskPush { project, task },
             TaskAction::Start => return self.start_task(&project, task, cx),
-            TaskAction::RunOn => return self.open_run_on(&project, task, cx),
-            TaskAction::StartFresh => return self.restart_task(&project, task, None, cx),
-            // The board picks the agent itself, and says so as `ProjectEvent::GiveTo`.
-            TaskAction::GiveTo => return,
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),
@@ -725,13 +652,6 @@ impl WorkspaceView {
                     ..TaskChange::default()
                 };
                 Verb::TaskUpdate { project, task, change: Box::new(change) }
-            }
-            TaskAction::Stop => {
-                let board = self.projects.mirror.get(&project);
-                let Some((worker, session)) = board.and_then(|b| b.terminal(Some(task))) else {
-                    return self.show_notice(format!("#{task} has no agent running"), cx);
-                };
-                Verb::Close { term: TermRef { worker, session } }
             }
             TaskAction::FixCi | TaskAction::AddressComments | TaskAction::ResolveConflicts => {
                 let board = self.projects.mirror.get(&project);
@@ -797,75 +717,12 @@ impl WorkspaceView {
         }
     }
 
-    /// Open the "Run on" picker on `task`, and ask the server for the workers' facts.
-    fn open_run_on(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
-        let picker = RunOnPicker { task, workers: None };
-        self.projects.run_on.insert(project.clone(), picker);
-        self.projects_moved(cx);
-        let verb = Verb::WorkerFacts { worker: None };
-        let asked = project.clone();
-        self.ask_server(verb, cx, move |this, outcome, cx| {
-            let workers = match outcome {
-                Outcome::Facts(workers) => workers,
-                Outcome::Error { message, .. } => {
-                    this.projects.run_on.remove(&asked);
-                    this.show_notice(message, cx);
-                    this.projects_moved(cx);
-                    return;
-                }
-                _ => return,
-            };
-            if let Some(picker) = this.projects.run_on.get_mut(&asked).filter(|p| p.task == task) {
-                picker.workers = Some(workers);
-                this.projects_moved(cx);
-            }
-        });
-    }
-
-    /// The "Run on" picker's choice: the task runs there, or wherever its placement chooses.
-    fn pin_task(
-        &mut self,
-        project: &ProjectId,
-        task: TaskId,
-        run_on: RunOn,
-        cx: &mut Context<Self>,
-    ) {
-        self.projects.run_on.remove(project);
-        self.projects_moved(cx);
-        let change = TaskChange { run_on: Some(run_on), ..TaskChange::default() };
-        let verb = Verb::TaskUpdate { project: project.clone(), task, change: Box::new(change) };
-        self.send_to_server(verb, |_, _| (), cx);
-    }
-
-    /// Start `task` again with `agent`, else the one it ran last ([`Verb::TaskRestart`]). Its
-    /// board says so at once; a refusal is said in the server's words, and the card goes back
-    /// to what it said before.
-    fn restart_task(
-        &mut self,
-        project: &ProjectId,
-        task: TaskId,
-        agent: Option<AgentId>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.projects.caller.is_none() {
-            let said = format!("#{task} was not started again: no server is linked");
-            return self.restart_refused(project, task, said, cx);
-        }
-        let asked = project.clone();
-        let verb = Verb::TaskRestart { project: project.clone(), task, agent };
-        self.ask_server(verb, cx, move |this, outcome, cx| {
-            if let Outcome::Error { message, .. } = outcome {
-                this.restart_refused(&asked, task, message, cx);
-            }
-        });
-    }
-
     /// "Start" on a task not started yet: the task spawned on its pin when it has one, by the
     /// agent its orchestrator is (Claude Code when this client cannot tell), its brief its first
     /// prompt. The server places it, as it would for the orchestrator.
     fn start_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
         if self.projects.caller.is_none() {
-            return self.restart_refused(project, task, NOT_SENT.to_owned(), cx);
+            return self.start_refused(project, task, NOT_SENT.to_owned(), cx);
         }
         let board = self.projects.mirror.get(project);
         let pin = board.and_then(|b| b.tasks.get(&task)).and_then(|c| c.pin);
@@ -878,13 +735,13 @@ impl WorkspaceView {
         let verb = Verb::TaskSpawn { project: project.clone(), task, launch };
         self.ask_server(verb, cx, move |this, outcome, cx| {
             if let Outcome::Error { message, .. } = outcome {
-                this.restart_refused(&asked, task, message, cx);
+                this.start_refused(&asked, task, message, cx);
             }
         });
     }
 
-    /// The server would not start `task` again: say why, and let its card say what it did.
-    fn restart_refused(
+    /// The server would not start `task`: say why, and let its card say what it did.
+    fn start_refused(
         &mut self,
         project: &ProjectId,
         task: TaskId,
@@ -944,24 +801,6 @@ impl WorkspaceView {
             })
         })
         .detach();
-    }
-
-    /// "Start a project here": the "New project" sheet for the focused terminal's agent as
-    /// its orchestrator, named for the terminal's directory, its repository and the branch
-    /// checked out filled in. A terminal that orchestrates one already shows that one, and a
-    /// plain shell is refused: nothing in it would hear what the board tells it. Away from a
-    /// terminal (a thread tile's agent has none) it points to "New project…".
-    pub(super) fn start_project(
-        &mut self,
-        _: &StartProject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self.focused_session() else {
-            self.show_notice(NO_TERMINAL.to_owned(), cx);
-            return;
-        };
-        self.open_project_sheet(session, window, cx);
     }
 
     /// The last step of "New project…": `agent` starts at once in its own tile, with no first
@@ -1044,7 +883,7 @@ impl WorkspaceView {
             .map_or_else(String::new, |a| agent_label(&AgentId(a.to_owned())));
         let machine = self.worker_name(worker_key(worker));
         let orchestrator = format!("Orchestrated by {agent} on {machine}, in this terminal");
-        let filled = NewProject { title, repo, target, verifier: None, push: false };
+        let filled = NewProject { title, repo, target, verifier: None };
         let theme = self.theme.clone();
         let view = cx.new(|cx| ProjectSheet::new(theme, filled, orchestrator, window, cx));
         let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
@@ -1079,7 +918,8 @@ impl WorkspaceView {
             repo: new.repo,
             target,
             verifier: new.verifier,
-            push: new.push,
+            // Pushing is the board head's one setting, off until the person turns it on.
+            push: false,
             orchestrator: Some(term),
             limits: LimitsChange::default(),
             metadata: None,

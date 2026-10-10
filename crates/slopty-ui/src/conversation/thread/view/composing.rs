@@ -7,10 +7,10 @@
 //!   on its way, the last answer filtered here stands in for it, so the list never blanks between
 //!   keys. ↑/↓ move, ↵ or ⇥ pick, Esc closes the menu until the caret leaves the word. Picking only
 //!   writes into the draft.
-//! - **Models.** The model chip opens a menu of the models the agent can switch to; picking one
-//!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says. The
-//!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`), and the effort
-//!   chip with how hard its model can think (`Intent::SetEffort`).
+//! - **Models.** The model chip opens a menu of the models the agent can switch to, then how hard
+//!   its model can think; picking one asks the agent to switch (`Intent::SetModel`,
+//!   `Intent::SetEffort`), and the chip reads as the agent then says. The mode chip does the same
+//!   with the modes the agent publishes (`Intent::SetMode`).
 //! - **Place.** A draft in a folder that is a repository switches where it starts from its place
 //!   chip: in the folder itself or in a new worktree of it. In a new worktree, its base chip lists
 //!   the branches the clone knows (`GitOp::Branches`, asked once as the draft opens), the default
@@ -44,7 +44,7 @@ use gpui::{
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::git::{Branch, Branches};
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
+use slopty_proto::thread::{Cap, Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -65,12 +65,11 @@ pub(super) enum MenuRows {
     Paths(Option<Vec<String>>),
     /// An `@` with nothing after it yet.
     Hint,
-    /// The models the agent can switch to, opened from the model chip.
-    Models(Vec<Model>),
+    /// The models the agent can switch to, then how hard the model can be set to think, opened
+    /// from the model chip: one walk for the keyboard, the models' rows first.
+    Models { models: Vec<Model>, efforts: Vec<Effort> },
     /// The modes the agent can switch to, opened from the mode chip.
     Modes(Vec<Mode>),
-    /// How hard the model can be set to think, opened from the effort chip.
-    Efforts(Vec<Effort>),
     /// Where a draft starts, opened from its place chip: [`PLACES`] rows, the folder itself
     /// then a new worktree of it.
     Places,
@@ -81,6 +80,9 @@ pub(super) enum MenuRows {
 
 /// The rows of a draft's place menu: in the folder itself, in a new worktree of it.
 const PLACES: usize = 2;
+
+/// The quiet head over the model menu's levels of effort, after its models.
+const EFFORT_HEAD: &str = "Effort";
 
 /// The branches of `branches` in the order a base menu lists them: `origin`'s default first,
 /// then the one checked out, then the rest as the worker gave them, the newest first.
@@ -105,9 +107,8 @@ impl MenuRows {
             Self::Commands(commands) => commands.len(),
             Self::Paths(paths) => paths.as_ref().map_or(0, Vec::len),
             Self::Hint => 0,
-            Self::Models(models) => models.len(),
+            Self::Models { models, efforts } => models.len().saturating_add(efforts.len()),
             Self::Modes(modes) => modes.len(),
-            Self::Efforts(efforts) => efforts.len(),
             Self::Places => PLACES,
             Self::Bases(branches) => branches.list.len(),
         }
@@ -149,8 +150,6 @@ pub(super) struct Composing {
     models: bool,
     /// The mode chip's menu is open.
     modes: bool,
-    /// The effort chip's menu is open.
-    efforts: bool,
     /// A draft's place chip's menu is open.
     places: bool,
     /// A draft's base chip's menu is open.
@@ -226,16 +225,13 @@ impl ThreadView {
     /// What the menu lists now, if it is open.
     pub(super) fn menu_rows(&self, cx: &App) -> Option<MenuRows> {
         if self.composing.models {
-            let models = self.state(cx).map(|s| s.meta.models.clone()).unwrap_or_default();
-            return (!models.is_empty()).then_some(MenuRows::Models(models));
+            let (models, efforts) = self.switches(cx);
+            let open = !models.is_empty() || !efforts.is_empty();
+            return open.then_some(MenuRows::Models { models, efforts });
         }
         if self.composing.modes {
             let modes = self.state(cx).map(|s| s.meta.modes.clone()).unwrap_or_default();
             return (!modes.is_empty()).then_some(MenuRows::Modes(modes));
-        }
-        if self.composing.efforts {
-            let efforts = self.state(cx).map(|s| s.meta.efforts.clone()).unwrap_or_default();
-            return (!efforts.is_empty()).then_some(MenuRows::Efforts(efforts));
         }
         if self.composing.places {
             return self.place_switch(cx).map(|_| MenuRows::Places);
@@ -358,7 +354,7 @@ impl ThreadView {
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
         let c = &self.composing;
-        if c.models || c.modes || c.efforts || c.places || c.bases {
+        if c.models || c.modes || c.places || c.bases {
             self.close_chip_menus();
             cx.notify();
             return true;
@@ -377,10 +373,14 @@ impl ThreadView {
             (composer.value().to_string(), composer.cursor())
         };
         let written = match (rows, self.menu_token(cx)) {
-            (MenuRows::Models(models), _) => {
-                let Some(model) = models.get(ix) else { return };
+            (MenuRows::Models { models, efforts }, _) => {
+                let intent = match ix.checked_sub(models.len()) {
+                    None => models.get(ix).map(|m| Intent::SetModel { model: m.id.clone() }),
+                    Some(at) => efforts.get(at).map(|e| Intent::SetEffort { effort: e.id.clone() }),
+                };
+                let Some(intent) = intent else { return };
                 self.composing.models = false;
-                let _id = self.intent(Intent::SetModel { model: model.id.clone() }, cx);
+                let _id = self.intent(intent, cx);
                 // The keyboard goes back to the field, to write on or send.
                 self.focus(window, cx);
                 cx.notify();
@@ -390,15 +390,6 @@ impl ThreadView {
                 let Some(mode) = modes.get(ix) else { return };
                 self.composing.modes = false;
                 let _id = self.intent(Intent::SetMode { mode: mode.id.clone() }, cx);
-                // The keyboard goes back to the field, to write on or send.
-                self.focus(window, cx);
-                cx.notify();
-                return;
-            }
-            (MenuRows::Efforts(efforts), _) => {
-                let Some(effort) = efforts.get(ix) else { return };
-                self.composing.efforts = false;
-                let _id = self.intent(Intent::SetEffort { effort: effort.id.clone() }, cx);
                 // The keyboard goes back to the field, to write on or send.
                 self.focus(window, cx);
                 cx.notify();
@@ -540,9 +531,10 @@ impl ThreadView {
         let theme = &self.theme;
         let label = match &rows {
             MenuRows::Commands(_) => "Commands",
-            MenuRows::Models(_) => "Models",
+            MenuRows::Models { efforts, .. } if efforts.is_empty() => "Models",
+            MenuRows::Models { models, .. } if models.is_empty() => "Effort",
+            MenuRows::Models { .. } => "Model and effort",
             MenuRows::Modes(_) => "Modes",
-            MenuRows::Efforts(_) => "Effort",
             MenuRows::Places => "Place",
             MenuRows::Bases(_) => "Base branch",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
@@ -572,25 +564,7 @@ impl ThreadView {
                     })
                     .collect()
             }
-            MenuRows::Efforts(efforts) => {
-                let now = self.state(cx).and_then(|s| s.meters.effort.clone());
-                efforts
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, effort)| {
-                        let Effort { id, label, description } = effort;
-                        self.named_row(ix, (id, label, description.as_deref()), now.as_deref(), cx)
-                    })
-                    .collect()
-            }
-            MenuRows::Models(models) => {
-                let now = self.state(cx).and_then(|s| s.meters.model_id.clone());
-                models
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, model)| self.model_row(ix, model, now.as_deref(), cx))
-                    .collect()
-            }
+            MenuRows::Models { models, efforts } => self.model_rows(models, efforts, cx),
             MenuRows::Places => self.place_rows(cx),
             MenuRows::Bases(branches) => {
                 let now = self.draft_base(cx);
@@ -719,12 +693,11 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Shut the menus the composer's foot opens: the models, the modes, the efforts. The
-    /// keyboard starts the next one from its first row.
+    /// Shut the menus the composer's foot opens: the models and efforts, the modes, a draft's
+    /// place and base. The keyboard starts the next one from its first row.
     pub(super) const fn close_chip_menus(&mut self) {
         self.composing.models = false;
         self.composing.modes = false;
-        self.composing.efforts = false;
         self.composing.places = false;
         self.composing.bases = false;
         self.composing.selected = 0;
@@ -735,15 +708,6 @@ impl ThreadView {
         let open = !self.composing.modes;
         self.close_chip_menus();
         self.composing.modes = open;
-        self.composing.selected = 0;
-        cx.notify();
-    }
-
-    /// The effort chip's menu open or shut; open, the keyboard walks it from its first row.
-    pub(super) fn toggle_efforts(&mut self, cx: &mut Context<Self>) {
-        let open = !self.composing.efforts;
-        self.close_chip_menus();
-        self.composing.efforts = open;
         self.composing.selected = 0;
         cx.notify();
     }
@@ -859,6 +823,56 @@ impl ThreadView {
         self.composing.models = open;
         self.composing.selected = 0;
         cx.notify();
+    }
+
+    /// What the model chip's menu offers: the models the agent can switch to, and the levels
+    /// its model can think at where it can switch those ([`Cap::SET_EFFORT`]).
+    pub(super) fn switches(&self, cx: &App) -> (Vec<Model>, Vec<Effort>) {
+        let Some(meta) = self.state(cx).map(|s| &s.meta) else { return (Vec::new(), Vec::new()) };
+        let models = if meta.can(Cap::SET_MODEL) { meta.models.clone() } else { Vec::new() };
+        let efforts = if meta.can(Cap::SET_EFFORT) { meta.efforts.clone() } else { Vec::new() };
+        (models, efforts)
+    }
+
+    /// The model chip's menu: the models, a check on the one it runs, then under a quiet
+    /// "Effort" the levels, a check on the one it thinks at. One walk for the keyboard.
+    fn model_rows(
+        &self,
+        models: &[Model],
+        efforts: &[Effort],
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let theme = &self.theme;
+        let meters = self.state(cx).map(|s| &s.meters);
+        let model = meters.and_then(|m| m.model_id.clone());
+        let effort = meters.and_then(|m| m.effort.clone());
+        let mut rows: Vec<AnyElement> = models
+            .iter()
+            .enumerate()
+            .map(|(ix, m)| self.model_row(ix, m, model.as_deref(), cx))
+            .collect();
+        if !models.is_empty() && !efforts.is_empty() {
+            rows.push(
+                div()
+                    .debug_selector(|| "thread-menu-effort".to_owned())
+                    .flex_none()
+                    .h(px(theme.density.row))
+                    .flex()
+                    .items_end()
+                    .px(px(theme.spacing.sm))
+                    .pb(px(theme.spacing.xxs))
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .child(EFFORT_HEAD)
+                    .into_any_element(),
+            );
+        }
+        rows.extend(efforts.iter().enumerate().map(|(at, e)| {
+            let Effort { id, label, description } = e;
+            let ix = models.len().saturating_add(at);
+            self.named_row(ix, (id, label, description.as_deref()), effort.as_deref(), cx)
+        }));
+        rows
     }
 
     /// A model the agent can switch to, with a check on the one it runs.

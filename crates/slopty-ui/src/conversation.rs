@@ -19,9 +19,9 @@ pub mod menu;
 pub mod thread;
 
 pub use actions::{
-    AllowRequest, AskAside, BranchFromHere, CycleDensity, CycleEffort, DenyRequest, EditLastQueued,
-    Interrupt, OpenCommit, QueueMessage, RefreshPullRequest, ResumeAgent, ReviewChanges,
-    ReviewWithAgent, WatchAgentScreen,
+    AllowRequest, AskAside, CycleDensity, DenyRequest, EditLastQueued, Interrupt, OpenCommit,
+    QueueMessage, RefreshPullRequest, ResumeAgent, ReviewChanges, ReviewWithAgent,
+    WatchAgentScreen,
 };
 pub use attach::Attach;
 
@@ -37,14 +37,12 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
     };
     vec![
         line("Review changes", Box::new(ReviewChanges)),
-        line("Branch from here\u{2026}", Box::new(BranchFromHere)),
         line("Resume the agent", Box::new(ResumeAgent)),
         line("Commit\u{2026}", Box::new(OpenCommit)),
         line("Review with the agent", Box::new(ReviewWithAgent)),
         line("Watch the agent's screen", Box::new(WatchAgentScreen)),
         line("Refresh pull request", Box::new(RefreshPullRequest)),
         line("Ask aside", Box::new(AskAside)),
-        line("Next effort level", Box::new(CycleEffort)),
         line("Allow the request", Box::new(AllowRequest)),
         line("Deny the request", Box::new(DenyRequest)),
     ]

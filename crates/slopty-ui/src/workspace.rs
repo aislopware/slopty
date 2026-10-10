@@ -376,7 +376,7 @@ pub enum WorkerStatus {
     NoAnswer,
     /// Its address names nothing here: the name does not resolve. Still dialled.
     NoSuchHost,
-    /// It answered and turned this device away by its address, which its `[worker] allow`
+    /// It answered and turned this device away by its address, which its `[network] allow`
     /// ranges do not hold: this device's address as that path shows it, when it can be told.
     /// Still dialled, as the file is read again when it changes.
     Refused(Option<String>),
@@ -2228,11 +2228,7 @@ impl gpui::Render for WorkspaceView {
                 el.on_action(cx.listener(Self::close_item))
                     .on_action(cx.listener(Self::rename_item))
             })
-            .when(applies.terminal, |el| el.on_action(cx.listener(Self::start_project)))
-            .when(applies.agent, |el| {
-                el.on_action(cx.listener(Self::switch_face))
-                    .on_action(cx.listener(Self::make_orchestrator))
-            })
+            .when(applies.agent, |el| el.on_action(cx.listener(Self::switch_face)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.tabs, |el| {
                 el.on_action(cx.listener(Self::other_tabs))

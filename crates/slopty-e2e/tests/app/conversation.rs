@@ -307,7 +307,7 @@ async fn a_subagent_has_a_thread_of_its_own() {
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
     drv.wait_for("the settled turn", STEP, |d| {
-        thread_shows(d) && button_starts(d, "Worked") && has(d, "Button", "Review the changes")
+        thread_shows(d) && button_starts(d, "Worked") && has(d, "Button", "Review")
     })
     .await
     .unwrap();
@@ -725,9 +725,7 @@ async fn the_thread_shows_the_work_beyond_words() {
     let drv = &mut stack.driver;
     let building = "Build the release binary: Running";
     let picture = "Picture, 600 \u{d7} 200";
-    // The agent lists its background work: a chip says one runs, and opens the panel of it.
-    drv.wait_for("the background chip", STEP, |d| has(d, "Button", "1 running")).await.unwrap();
-    click(drv, "Button", "1 running").await;
+    // The agent lists its background work: the tray lists it, with no chip to open first.
     drv.wait_for("the build in the background", STEP, |d| {
         // The foot bar and the two panels leave the prompt above the fold: it is looked for
         // last, scrolled to.
@@ -1363,10 +1361,10 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     played.refresh_turn(&stack).await;
 
     let drv = &mut stack.driver;
-    drv.wait_for("the thread", STEP, |d| thread_shows(d) && has(d, "Button", "Review the changes"))
+    drv.wait_for("the thread", STEP, |d| thread_shows(d) && has(d, "Button", "Review"))
         .await
         .unwrap();
-    click(drv, "Button", "Review the changes").await;
+    click(drv, "Button", "Review").await;
     drv.wait_for("the review tile with its door", STEP, |d| {
         d.items.iter().any(|i| i.kind == "review") && has(d, "Button", "Review with Claude Code")
     })
@@ -1490,13 +1488,54 @@ async fn a_line_names_the_turn_that_wrote_it_and_opens_it() {
 /// The drawn screen's first window, as the worker's `synthetic::WINDOWS` lists it.
 const SYNTHETIC_EDITOR: u32 = 7001;
 
+/// The palette is open.
+fn palette_up(d: &Dump) -> bool {
+    d.a11y_node("Dialog", Some("Commands")).is_some()
+}
+
+/// The palette's line that watches the agent's screen, first.
+const WATCH: &str = "Watch the agent's screen";
+
+/// Open the palette on [`WATCH`] until it offers it first: the line shows only once the agent
+/// has a screen to watch.
+async fn watch_line(drv: &mut Driver) {
+    let started = tokio::time::Instant::now();
+    loop {
+        drv.keys("cmd-shift-p").await.unwrap();
+        drv.wait_for("the palette", STEP, palette_up).await.unwrap();
+        drv.type_text(WATCH).await.unwrap();
+        let first = |d: &Dump| {
+            d.a11y.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.as_deref())
+                == Some(WATCH)
+        };
+        let offered = drv.wait_for(WATCH, Duration::from_secs(2), first).await;
+        if offered.is_ok() {
+            return;
+        }
+        assert!(started.elapsed() < STEP, "the palette never offered {WATCH}: {offered:?}");
+        close_palette(drv).await;
+    }
+}
+
+/// Close the palette: the first Esc may only clear what was typed, the next closes it.
+async fn close_palette(drv: &mut Driver) {
+    for _ in 0..3 {
+        drv.keys("escape").await.unwrap();
+        let closed = drv.wait_for("the palette closed", Duration::from_secs(1), |d| !palette_up(d));
+        if closed.await.is_ok() {
+            return;
+        }
+    }
+    panic!("the palette stayed open");
+}
+
 /// The screen an agent drives beside its thread: the agent's computer-use call names a window
 /// of the worker's (the drawn screen's editor), the worker names it in the thread, and the
-/// composer offers it. Opened, it streams beside the thread, watched: its pill says Claude Code
+/// palette offers it. Opened, it streams beside the thread, watched: its pill says Claude Code
 /// drives it. "Take control" stops the turn under way through the agent's own door (Esc into
 /// its terminal, a stand-in that keeps what it is given) and gives the person the screen;
-/// "Hand back" watches again. Goldens of the thread with its offer, light and dark; the stream,
-/// whose picture moves, is rendered to the artifacts for review only.
+/// "Hand back" watches again. Goldens of the thread with its screen named, light and dark; the
+/// stream, whose picture moves, is rendered to the artifacts for review only.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 #[expect(clippy::too_many_lines, reason = "one screen, from the call to the take-over")]
@@ -1580,11 +1619,10 @@ async fn the_screen_an_agent_drives_opens_beside_its_thread() {
 
     let drv = &mut stack.driver;
     drv.ok(&Command::PinClock { at_ms: Some(A_MINUTE_IN) }).await.unwrap();
-    drv.wait_for("the screen offered", STEP, |d| {
-        thread_shows(d) && has(d, "Button", "Watch Synthetic editor")
-    })
-    .await
-    .unwrap();
+    // The screen comes with the call; the palette offers it, the thread's one door to it.
+    watch_line(drv).await;
+    close_palette(drv).await;
+    drv.wait_for("the thread", STEP, thread_shows).await.unwrap();
     drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
     golden(drv, &dir, "agent-screen").await;
     stack.set_appearance("dark").unwrap();
@@ -1595,7 +1633,8 @@ async fn the_screen_an_agent_drives_opens_beside_its_thread() {
     let drv = &mut stack.driver;
     drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
 
-    click(drv, "Button", "Watch Synthetic editor").await;
+    watch_line(drv).await;
+    drv.keys("enter").await.unwrap();
     let dump = drv
         .wait_for("the editor streaming, watched", Duration::from_secs(90), |d| {
             d.items.iter().any(|i| i.kind == "window")

@@ -16,9 +16,9 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::git::Forge;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Fact, Merge, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
+    Merge, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
     ProjectUpdate, ProjectsPart, StepKind, StepState, Task, TaskCard, TaskId, TaskState, TaskStep,
-    TimelineEntry, VerifierRun, WorkerFacts,
+    TimelineEntry, VerifierRun,
 };
 use slopty_proto::thread::wire::{PullSeen, PullStands};
 
@@ -240,8 +240,6 @@ pub enum TaskAction {
     /// Start a task not started yet with an agent of the person's, on its pin when it has one
     /// ([`slopty_proto::orchestration::Verb::TaskSpawn`]): the orchestrator need not be there.
     Start,
-    /// Choose the worker it runs on.
-    RunOn,
     /// Tell its agent, as the person, to make its failed verifier pass.
     FixCi,
     /// Tell its agent, as the person, to address what its pull request's review asked for.
@@ -250,18 +248,11 @@ pub enum TaskAction {
     ResolveConflicts,
     /// Push its target to the forge: a merge the project did not push (pushing is off unless the
     /// person turns it on), or one whose push failed. The target goes as it is, so every merged
-    /// task not pushed yet is pushed with it.
+    /// task not pushed yet is pushed with it. The board's head offers it, never a card.
     Push,
     /// Give it up: it holds its paths no more and leaves the merge queue, and it may be
     /// planned again. Its agent, if one runs, is left to the person.
     Cancel,
-    /// End its agent's terminal; the task waits for its next start.
-    Stop,
-    /// Start its work again with a new run of the agent it ran last, its work so far kept
-    /// ([`slopty_proto::orchestration::Verb::TaskRestart`]).
-    StartFresh,
-    /// Hand its work, as it stands, to another agent, picked on the board.
-    GiveTo,
 }
 
 impl TaskAction {
@@ -273,15 +264,11 @@ impl TaskAction {
             Self::Merge => "Merge",
             Self::Retry => "Retry",
             Self::Start => "Start",
-            Self::RunOn => "Run on\u{2026}",
             Self::FixCi => "Fix CI",
             Self::AddressComments => "Address comments",
             Self::ResolveConflicts => "Resolve conflicts",
             Self::Push => "Push",
             Self::Cancel => "Cancel task",
-            Self::Stop => "Stop its agent",
-            Self::StartFresh => "Start fresh",
-            Self::GiveTo => "Give to another agent\u{2026}",
         }
     }
 
@@ -299,15 +286,11 @@ impl TaskAction {
             Self::Merge => "merge",
             Self::Retry => "retry",
             Self::Start => "start",
-            Self::RunOn => "run-on",
             Self::FixCi => "fix-ci",
             Self::AddressComments => "address-comments",
             Self::ResolveConflicts => "resolve-conflicts",
             Self::Push => "push",
             Self::Cancel => "cancel",
-            Self::Stop => "stop",
-            Self::StartFresh => "start-fresh",
-            Self::GiveTo => "give-to",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -402,42 +385,6 @@ impl StageKind {
 
 /// A node of the tree: a task, or the orchestrator for `None`.
 pub type Node = Option<TaskId>;
-
-/// The "Run on" picker open on a task: every worker with its facts, once the server answers.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunOnPicker {
-    /// The task.
-    pub task: TaskId,
-    /// Every worker by name; `None` while the server reads them.
-    pub workers: Option<Vec<WorkerFacts>>,
-}
-
-/// A worker as the "Run on" picker offers it: its name, its system and the agents it runs,
-/// and whether it is online to take a start.
-#[must_use]
-pub fn run_on_words(worker: &WorkerFacts) -> (String, String, bool) {
-    let text = |name: &str| match worker.facts.get(name) {
-        Some(Fact::Text(t)) => Some(t.clone()),
-        _ => None,
-    };
-    let name = text("name").unwrap_or_else(|| worker.worker.to_string());
-    let online = matches!(worker.facts.get("online"), Some(Fact::Bool(true)));
-    let agents = match worker.facts.get("live_agents") {
-        Some(Fact::Int(1)) => "1 agent".to_owned(),
-        Some(Fact::Int(n)) => format!("{n} agents"),
-        _ => String::new(),
-    };
-    let line = [
-        text("os").unwrap_or_default(),
-        agents,
-        if online { String::new() } else { "offline".to_owned() },
-    ]
-    .into_iter()
-    .filter(|p| !p.is_empty())
-    .collect::<Vec<_>>()
-    .join(" \u{b7} ");
-    (name, line, online)
-}
 
 /// One project in full, as the board draws it.
 #[derive(Clone, PartialEq, Debug)]
@@ -629,13 +576,6 @@ impl Board {
         Some(Place { worker: card.pin?, how: PlaceHow::Pinned, worktree, branch, why })
     }
 
-    /// Whether the person may move `task` to another worker now: a start not made yet, which
-    /// "Run on…" points elsewhere. A running agent stays where it is.
-    #[must_use]
-    pub fn movable(&self, task: TaskId) -> bool {
-        self.tasks.get(&task).is_some_and(|card| self.not_started(card))
-    }
-
     /// The worker a node runs on, or ran on last.
     #[must_use]
     pub fn worker(&self, node: Option<TaskId>) -> Option<WorkerId> {
@@ -727,15 +667,12 @@ impl Board {
     ///
     /// Checking a failure again unchanged would fail the same way, so a failed verifier or
     /// rebase offers Retry only when no agent runs to fix it. A task that only reads has
-    /// nothing to merge, and a merged one only a push, while its merge is not on the forge.
+    /// nothing to merge, and a merged one nothing at all: a merge not on the forge is pushed
+    /// from the board's head, for every such task at once.
     #[must_use]
     pub fn actions(&self, task: TaskId) -> Vec<TaskAction> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
-        if card.state == TaskState::Merged {
-            let unpushed = matches!(card.merge, Some(Merge::Merged { pushed: false, .. }));
-            return if unpushed { vec![TaskAction::Push] } else { Vec::new() };
-        }
-        if card.read_only {
+        if card.state == TaskState::Merged || card.read_only {
             return Vec::new();
         }
         let failed = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
@@ -771,29 +708,20 @@ impl Board {
             out.push(TaskAction::Retry);
         }
         if self.not_started(card) {
-            out.extend([TaskAction::Start, TaskAction::RunOn]);
+            out.push(TaskAction::Start);
         }
         out
     }
 
-    /// What the person can do to `task` beyond what moves it on ([`Self::actions`]): stop its
-    /// agent while one runs, and cancel it until it is merged or given up. Rare, and never
-    /// what the task waits for, so the board offers them only on the task it stands on.
+    /// What the person can do to `task` beyond what moves it on ([`Self::actions`]): cancel it
+    /// until it is merged or given up. Rare, and never what the task waits for, so the board
+    /// offers it only on the task it stands on. Stopping, restarting and moving a task's agent
+    /// are the orchestrator's (`task_start`, `task_restart`).
     #[must_use]
     pub fn controls(&self, task: TaskId) -> Vec<TaskAction> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
-        let mut out = Vec::new();
-        if self.terminal(Some(task)).is_some() {
-            out.push(TaskAction::Stop);
-        }
-        // A task an agent has worked on can begin again, on that agent or another.
-        if card.assignment.is_some() && card.state != TaskState::Merged {
-            out.extend([TaskAction::StartFresh, TaskAction::GiveTo]);
-        }
-        if !matches!(card.state, TaskState::Merged | TaskState::Failed) {
-            out.push(TaskAction::Cancel);
-        }
-        out
+        let open = !matches!(card.state, TaskState::Merged | TaskState::Failed);
+        if open { vec![TaskAction::Cancel] } else { Vec::new() }
     }
 
     /// What the person says to `task`'s agent for a next step, in their words: what failed or
@@ -868,13 +796,9 @@ impl Board {
             TaskAction::Review
             | TaskAction::Merge
             | TaskAction::Start
-            | TaskAction::RunOn
             | TaskAction::Retry
             | TaskAction::Push
-            | TaskAction::Cancel
-            | TaskAction::Stop
-            | TaskAction::StartFresh
-            | TaskAction::GiveTo => None,
+            | TaskAction::Cancel => None,
         }
     }
 

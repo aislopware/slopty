@@ -25,7 +25,6 @@ Button │ More
 Group │ scenario:bash run echo hi
 Group │ Thread
 Article │ You: scenario:bash run echo hi
-Button │ Branch from here
 Button │ Copy message
 Article │ Let me run it.
 Button │ Copy message

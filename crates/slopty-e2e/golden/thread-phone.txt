@@ -10,7 +10,6 @@ Button │ More
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Group │ Thread
 Article │ You: Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
-Button │ Branch from here
 Button │ Copy message
 Button │ Worked 9.8 s: Edited notes.txt · Read 2 files
 Article │ done
@@ -27,6 +26,5 @@ Button │ Allow
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
-Button │ Review the changes
-Button │ Context 34% of 200k
+Label │ Context 34% of 200k
 Button │ Send

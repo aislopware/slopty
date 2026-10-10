@@ -1,19 +1,16 @@
-//! Carrying a thread on: a branch from a message on any agent, the new thread's composer opening
-//! on the message or on a pointer back, and a message that stops the turn to go.
+//! Carrying a thread on: a fork from a message of the person's, the new thread's composer
+//! opening on the message.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, MouseButton, TestAppContext};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, IntentDone, Outcome};
 use slopty_proto::thread::{
-    AgentId, Cap, Changed, Clipped, Delivery, Item, ItemBody, ItemId, Phase, ThreadId, Turn,
-    TurnId, TurnState, Usage, UserMessage,
+    Cap, Changed, Clipped, Item, ItemBody, ItemId, Phase, ThreadId, Turn, TurnId, TurnState, Usage,
+    UserMessage,
 };
 
 use super::{hub, intents, snapshot, view};
-use crate::conversation::thread::hub::{HubEvent, ThreadHub};
+use crate::conversation::thread::hub::ThreadHub;
 use crate::conversation::thread::{ThreadView, fixtures};
 
 fn turn(id: u32, state: TurnState) -> Turn {
@@ -45,61 +42,59 @@ fn user(id: &str, turn: u32) -> Item {
         }),
     }
 }
-
 fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} drawn")).center();
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
 }
 
-/// Open "Branch from here" under the message `u`: the pointer on it shows its mark.
-fn open_branch(cx: &mut gpui::VisualTestContext) {
-    let message = cx.debug_bounds("item-u").expect("the message").center();
-    cx.simulate_mouse_move(message, None, Modifiers::none());
+/// Open the message `u`'s own menu with a right click.
+fn open_menu(cx: &mut gpui::VisualTestContext) {
+    let at = cx.debug_bounds("item-u").expect("the message").center();
+    cx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
-    click(cx, "branch-u");
 }
 
-/// "Branch from here" offers the thread's own agent first, then the others the worker can
-/// start; another agent starts afresh, the thread it started is handed to the workspace to
-/// open, and its composer opens on a pointer back: the old thread's id, folder and branch,
-/// and the command that reads it.
+/// The labels of the open menu's rows.
+fn menu_rows(cx: &mut gpui::VisualTestContext) -> Vec<String> {
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect()
+}
+
+/// A message of the person's goes on in two ways from its own menu, Fork from here and Ask
+/// aside, beside Copy and Quote, and no other. Fork asks the agent for a fork through the turn
+/// before the message, offered only while no turn runs, and the new thread's composer holds the
+/// message to change and send.
 #[gpui::test]
-fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
+fn a_message_forks_from_its_menu(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::FORK)];
-    state.meta.facts.insert("branch".to_owned(), "main".to_owned());
-    // A message after the first turn, so its own agent forks from just before it.
-    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
+    state.meta.caps = vec![Cap::named(Cap::FORK)];
+    state.status.phase = Phase::Working;
+    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
     state.items = vec![user("t", 1), user("u", 2)];
-    let codex = AgentId::named(AgentId::CODEX);
-    hub.update(cx, |hub, cx| {
-        hub.connected(cx);
-        hub.set_agents(vec![AgentId::named(AgentId::CLAUDE_CODE), codex.clone()], cx);
-    });
-    let started: Rc<RefCell<Vec<(ThreadId, ThreadId)>>> = Rc::default();
-    let into = Rc::clone(&started);
-    cx.update(|cx| {
-        cx.subscribe(&hub, move |_hub, event: &HubEvent, _cx| {
-            if let HubEvent::Started { from, thread, .. } = event {
-                into.borrow_mut().push((*from, *thread));
-            }
-        })
-        .detach();
-    });
+    hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    open_branch(cx);
-    assert!(cx.debug_bounds("branch-agent-2").is_none(), "its own agent once");
-    assert!(cx.debug_bounds("branch-from-message").is_some(), "its own agent edits from here");
-    click(cx, "branch-agent-1");
-    assert!(cx.debug_bounds("branch-from-message").is_none(), "another agent takes it all");
-    click(cx, "branch-go");
-    assert_eq!(intents(&sent), [Intent::Continue { agent: codex }]);
-    assert!(cx.debug_bounds("branch-panel").is_none(), "the panel shuts");
+    open_menu(cx);
+    assert_eq!(menu_rows(cx), ["Copy", "Quote in reply", "Ask aside"], "no fork while it runs");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    state.status.phase = Phase::Idle;
+    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    open_menu(cx);
+    assert_eq!(menu_rows(cx), ["Copy", "Quote in reply", "Fork from here", "Ask aside"]);
+    click(cx, "message-menu-fork");
+    assert_eq!(intents(&sent), [Intent::Fork { after: Some(TurnId(1)) }]);
+    assert!(cx.debug_bounds("message-menu").is_none(), "the choice is made");
+
+    // The new thread's composer holds the message it started before, to change and send.
     let id = sent
         .borrow()
         .iter()
@@ -114,172 +109,6 @@ fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
     let done = IntentDone { id, outcome: Outcome::Started { thread: new } };
     hub.update(cx, |hub, cx| hub.done(&done, cx));
     cx.run_until_parked();
-    assert_eq!(*started.borrow(), [(thread, new)], "the workspace is asked to open it");
-    let (fresh, cx) = view(cx, &hub, new);
-    let pointer = fresh.read_with(cx, ThreadView::draft);
-    for part in [thread.to_string(), "in /w".to_owned(), "on branch main".to_owned()] {
-        assert!(pointer.contains(&part), "{part:?} in {pointer:?}");
-    }
-    assert!(pointer.contains(&format!("slopty agent read --thread {thread}")), "{pointer}");
-    let (again, cx) = view(cx, &hub, new);
-    assert_eq!(again.read_with(cx, ThreadView::draft), "", "the pointer is given once");
-}
-
-/// On an agent that takes no message mid-turn but can be stopped, "Interrupt and send" stands
-/// beside the queue's send while a turn runs; the message waits in the tray, never as a
-/// bubble, until it goes.
-#[gpui::test]
-fn interrupt_and_send_waits_in_the_tray(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::QUEUE), Cap::named(Cap::INTERRUPT)];
-    state.status.phase = Phase::Working;
-    state.turns = vec![turn(1, TurnState::Active)];
-    state.items = vec![user("u", 1)];
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-interrupt-send").is_none(), "nothing typed, nothing offered");
-    cx.simulate_input("Stop and use the other parser");
-    let at = cx.debug_bounds("thread-interrupt-send").expect("offered").center();
-    cx.simulate_click(at, Modifiers::none());
-    cx.run_until_parked();
-    let sent_now = intents(&sent);
-    assert!(
-        matches!(sent_now.as_slice(), [Intent::Send { delivery: Delivery::Interrupt, .. }]),
-        "{sent_now:?}"
-    );
-    let id = sent
-        .borrow()
-        .iter()
-        .find_map(|m| match m {
-            slopty_proto::ClientMsg::Thread(
-                slopty_proto::thread::wire::ThreadRequest::Intent { id, .. },
-            ) => Some(*id),
-            _ => None,
-        })
-        .expect("sent");
-    let queued = format!("queued-{id}");
-    assert!(cx.debug_bounds(Box::leak(queued.into_boxed_str())).is_some(), "in the tray");
-    let bubble = format!("sending-{id}");
-    assert!(cx.debug_bounds(Box::leak(bubble.into_boxed_str())).is_none(), "not a bubble");
-}
-
-/// Branching from a message of the person's on its own agent forks through the turn before
-/// it. While a turn runs, Branch asks nothing.
-#[gpui::test]
-fn branching_from_a_message_forks_before_it(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::FORK)];
-    state.status.phase = Phase::Working;
-    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
-    state.items = vec![user("t", 1), user("u", 2)];
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
-    cx.run_until_parked();
-    open_branch(cx);
-    click(cx, "branch-go");
-    assert!(intents(&sent).is_empty(), "nothing while a turn runs");
-
-    state.status.phase = Phase::Idle;
-    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Complete)];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
-    cx.run_until_parked();
-    click(cx, "branch-go");
-    assert_eq!(intents(&sent), [Intent::Fork { after: Some(TurnId(1)) }]);
-    assert!(cx.debug_bounds("branch-panel").is_none(), "the choice is made");
-
-    // The new thread's composer holds the message it started before, to change and send.
-    let again = sent
-        .borrow()
-        .iter()
-        .rev()
-        .find_map(|m| match m {
-            slopty_proto::ClientMsg::Thread(
-                slopty_proto::thread::wire::ThreadRequest::Intent { id, .. },
-            ) => Some(*id),
-            _ => None,
-        })
-        .expect("sent again");
-    let new = ThreadId::new();
-    let done = IntentDone { id: again, outcome: Outcome::Started { thread: new } };
-    hub.update(cx, |hub, cx| hub.done(&done, cx));
-    cx.run_until_parked();
     let (fresh, cx) = view(cx, &hub, new);
     assert_eq!(fresh.read_with(cx, ThreadView::draft), "Count the lines");
-}
-
-/// "Branch from here" asks the workspace which other machines have the thread's repository,
-/// and offers them under Machine. On one of them, the agent is chosen among that machine's,
-/// the thread's own first, and Branch hands the workspace a start there in its clone, opening
-/// on a pointer back that names this machine. Nothing is asked of this thread's worker.
-#[gpui::test]
-fn branching_onto_another_machine_hands_the_workspace_a_start_there(cx: &mut TestAppContext) {
-    use crate::conversation::thread::ThreadViewEvent;
-    use crate::conversation::thread::view::Elsewhere;
-
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::FORK)];
-    state.meta.facts.insert("branch".to_owned(), "main".to_owned());
-    state.status.phase = Phase::Working;
-    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
-    state.items = vec![user("u", 1)];
-    let own = state.meta.agent.clone();
-    let codex = AgentId::named(AgentId::CODEX);
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    let heard: Rc<RefCell<Vec<ThreadViewEvent>>> = Rc::default();
-    let into = Rc::clone(&heard);
-    cx.update(|_w, cx| {
-        cx.subscribe(&view, move |_v, event: &ThreadViewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
-        })
-        .detach();
-    });
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    open_branch(cx);
-    assert!(
-        matches!(heard.borrow().as_slice(), [ThreadViewEvent::AskElsewhere { thread: t }] if *t == thread),
-        "the workspace is asked where else it can go on"
-    );
-    assert!(cx.debug_bounds("branch-on-here").is_none(), "no other machine, no Machine row");
-
-    let forge = slopty_client::layout::WorkerKey::new(2);
-    let there = Elsewhere {
-        worker: forge,
-        machine: "forge".to_owned(),
-        cwd: "/home/f/atlas/crates/x".to_owned(),
-        agents: vec![own, codex.clone()],
-    };
-    view.update(cx, |v, cx| v.set_elsewhere(vec![there], cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("branch-on-here").is_some(), "this machine first");
-    click(cx, "branch-on-0");
-    assert!(cx.debug_bounds("branch-from-message").is_none(), "another machine takes it all");
-    click(cx, "branch-agent-1");
-    heard.borrow_mut().clear();
-    click(cx, "branch-go");
-    assert!(intents(&sent).is_empty(), "nothing asked of this worker, even mid-turn");
-    assert!(cx.debug_bounds("branch-panel").is_none(), "the panel shuts");
-    let heard = heard.borrow();
-    let [ThreadViewEvent::ContinueOn { worker, cwd, agent, seed }] = heard.as_slice() else {
-        panic!("one start elsewhere: {heard:?}");
-    };
-    assert_eq!((*worker, cwd.as_str(), agent), (forge, "/home/f/atlas/crates/x", &codex));
-    for part in [
-        thread.to_string(),
-        "on studio, in /w".to_owned(),
-        "on branch main".to_owned(),
-        format!("slopty agent read --thread {thread}"),
-    ] {
-        assert!(seed.contains(&part), "{part:?} in {seed:?}");
-    }
 }

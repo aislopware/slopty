@@ -53,18 +53,15 @@ fn forking() -> slopty_proto::thread::ThreadState {
     state
 }
 
-/// "Branch from here" under the message, as an aside.
-fn branch_aside(cx: &mut gpui::VisualTestContext) {
+/// "Ask aside" from the message's own menu.
+fn ask_aside_from_menu(cx: &mut gpui::VisualTestContext) {
     let message = cx.debug_bounds("item-u").expect("the message").center();
-    cx.simulate_mouse_move(message, None, Modifiers::none());
+    cx.simulate_mouse_down(message, gpui::MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
-    click(cx, "branch-u");
-    click(cx, "branch-as-aside");
-    assert!(cx.debug_bounds("branch-from-message").is_none(), "an aside forks it all");
-    click(cx, "branch-go");
+    click(cx, "message-menu-aside");
 }
 
-/// The draft is asked aside from "Branch from here": the thread forks, the sheet opens over
+/// The draft is asked aside from a message's menu: the thread forks, the sheet opens over
 /// it, and the question goes to the fork once it is there. Closing the sheet ends the fork for
 /// good.
 #[gpui::test]
@@ -78,7 +75,7 @@ fn an_aside_asks_beside_the_thread_and_closes_for_good(cx: &mut TestAppContext) 
     cx.run_until_parked();
 
     cx.simulate_input("Why is the parser slow?");
-    branch_aside(cx);
+    ask_aside_from_menu(cx);
     let asked = sent_intents(&sent);
     let [(id, on, Intent::Aside)] = asked.as_slice() else { panic!("{asked:?}") };
     assert_eq!(*on, thread);
@@ -102,7 +99,7 @@ fn an_aside_asks_beside_the_thread_and_closes_for_good(cx: &mut TestAppContext) 
         Some((fork, Intent::Discard))
     );
     assert!(cx.debug_bounds("thread-aside").is_none(), "the sheet goes");
-    branch_aside(cx);
+    ask_aside_from_menu(cx);
     assert_eq!(sent_intents(&sent).last().map(|(_, _, i)| i.clone()), Some(Intent::Aside));
 }
 

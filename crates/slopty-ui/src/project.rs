@@ -31,8 +31,6 @@ gpui::actions!(
         OpenNode,
         /// Start the task the keyboard stands on, not started yet.
         StartTask,
-        /// Choose the worker the task the keyboard stands on runs on.
-        RunTaskOn,
         /// Review the whole branch of the task the keyboard stands on, before it merges.
         ReviewTask,
         /// Ask for the merge of the task the keyboard stands on.
@@ -45,16 +43,8 @@ gpui::actions!(
         AddressComments,
         /// Tell the agent of the task the keyboard stands on to resolve its conflicts.
         ResolveConflicts,
-        /// Push the target again for the task the keyboard stands on, whose push failed.
-        PushTask,
         /// Give up the task the keyboard stands on.
         CancelTask,
-        /// End the terminal of the agent of the task the keyboard stands on.
-        StopTaskAgent,
-        /// Start the task the keyboard stands on again, with a new run of its agent.
-        StartTaskFresh,
-        /// Choose another agent to hand the task the keyboard stands on to.
-        GiveTaskToAgent,
         /// Push the target after each merge, or stop.
         TogglePush,
         /// Turn the orchestrator's tile back to its terminal.
@@ -65,16 +55,11 @@ gpui::actions!(
         TellOrchestrator,
         /// Set the project's verifier command.
         EditChecks,
-        /// Make a project of the focused terminal's directory, with that terminal as its
-        /// orchestrator.
-        StartProject,
     ]
 );
 
 /// A board's key context, as bindings name it.
 const BOARD: &[Option<&str>] = &[Some(CTX)];
-/// The workspace's, for what a board need not be shown for.
-const WORKSPACE: &[Option<&str>] = &[Some("Workspace && !Screen")];
 
 /// The board's commands and their keys, beside the ones the keymap holds for it: a row's
 /// actions on bare keys, as its other keys are, and what is rare or cannot be taken back on
@@ -89,43 +74,31 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
-        Command::new(Scope::Project, "push_task", PushTask, &[], BOARD),
         Command::new(Scope::Project, "cancel_task", CancelTask, &[], BOARD),
-        Command::new(Scope::Project, "stop_task_agent", StopTaskAgent, &[], BOARD),
-        Command::new(Scope::Project, "start_task_fresh", StartTaskFresh, &[], BOARD),
-        Command::new(Scope::Project, "give_task_to_agent", GiveTaskToAgent, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "start_task", StartTask, &["s"], BOARD),
-        Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
         Command::new(Scope::Project, "edit_checks", EditChecks, &[], BOARD),
-        Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
     ]
 }
 
-/// The palette's lines for a project's board and for starting one, with their keys.
+/// The palette's lines for a project's board, with their keys.
 #[must_use]
 pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
     let line = |label: &str, action: Box<dyn gpui::Action>| {
         crate::palette::PaletteItem::new(label, action, bindings)
     };
     vec![
-        line("Start a project here", Box::new(StartProject)),
         line("Review the task", Box::new(ReviewTask)),
         line("Merge the task", Box::new(MergeTask)),
         line("Retry the task", Box::new(RetryTask)),
         line("Tell the task's agent to fix CI", Box::new(FixCi)),
         line("Tell the task's agent to address the comments", Box::new(AddressComments)),
         line("Tell the task's agent to resolve the conflicts", Box::new(ResolveConflicts)),
-        line("Push the task's merge again", Box::new(PushTask)),
         line("Cancel the task", Box::new(CancelTask)),
-        line("Stop the task's agent", Box::new(StopTaskAgent)),
-        line("Start the task fresh", Box::new(StartTaskFresh)),
-        line("Give the task to another agent\u{2026}", Box::new(GiveTaskToAgent)),
         line("Start the task", Box::new(StartTask)),
-        line("Run the task on\u{2026}", Box::new(RunTaskOn)),
         line("Push after each merge", Box::new(TogglePush)),
         line("Show the orchestrator's terminal", Box::new(ShowTerminal)),
         line("Message the orchestrator\u{2026}", Box::new(TellOrchestrator)),

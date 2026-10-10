@@ -18,6 +18,11 @@ use super::{approval, hub, intents, snapshot, view};
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
 
+fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is on show")).center();
+    cx.simulate_click(at, Modifiers::none());
+}
+
 fn live_turn() -> Turn {
     Turn {
         id: TurnId(1),
@@ -162,6 +167,7 @@ fn the_model_chip_switches_the_agent_s_model(cx: &mut TestAppContext) {
     ];
     state.meters.model = Some("Opus".to_owned());
     state.meters.model_id = Some("opus".to_owned());
+    state.meters.model = Some("Opus 5.5".to_owned());
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
@@ -207,22 +213,31 @@ fn the_mode_chip_switches_the_agent_s_mode(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
 }
 
-/// The effort chip names the level by the agent's label and lists the levels it offers where
-/// it can switch; picking one, or "Next effort level" from the palette, asks the agent to
-/// switch. With the door but no levels for its model there is no chip.
+/// Effort is the model chip's: the chip names a level that is not the default by the agent's
+/// label after the model, and its menu lists the levels under the models, one walk for the
+/// keyboard; picking a level asks the agent to switch. With the door but no levels for its
+/// model the chip offers the models alone.
 #[gpui::test]
-fn the_effort_chip_switches_how_hard_the_model_thinks(cx: &mut TestAppContext) {
-    use slopty_proto::thread::Effort;
+fn the_model_chip_switches_how_hard_the_model_thinks(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Effort, Model};
 
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::SET_EFFORT)];
+    state.meta.caps = vec![Cap::named(Cap::SET_MODEL), Cap::named(Cap::SET_EFFORT)];
+    state.meta.models = vec![Model { id: "opus".to_owned(), label: "Opus 5.5".to_owned() }];
+    state.meters.model_id = Some("opus".to_owned());
+    state.meters.model = Some("Opus 5.5".to_owned());
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-effort").is_none(), "no levels: no chip");
+    click(cx, "thread-model");
+    assert!(cx.debug_bounds("thread-menu-0").is_some(), "the model");
+    assert!(cx.debug_bounds("thread-menu-1").is_none(), "no levels: the models alone");
+    assert!(cx.debug_bounds("thread-menu-effort").is_none());
+    click(cx, "thread-model");
 
     let effort = |id: &str, label: &str| Effort {
         id: id.to_owned(),
@@ -233,16 +248,22 @@ fn the_effort_chip_switches_how_hard_the_model_thinks(cx: &mut TestAppContext) {
     state.meters.effort = Some("high".to_owned());
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
-    let chip = cx.debug_bounds("thread-effort").expect("the effort chip").center();
-    cx.simulate_click(chip, Modifiers::none());
-    assert!(cx.debug_bounds("thread-menu-2").is_some(), "the three levels");
-    let low = cx.debug_bounds("thread-menu-0").expect("the first").center();
-    cx.simulate_click(low, Modifiers::none());
+    let named = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        named.iter().any(|n| n.label.as_deref() == Some("Model, Opus 5.5 \u{b7} High")),
+        "the level after the model"
+    );
+    assert!(cx.debug_bounds("thread-effort").is_none(), "no chip of its own");
+    click(cx, "thread-model");
+    assert!(cx.debug_bounds("thread-menu-effort").is_some(), "the levels under their head");
+    assert!(cx.debug_bounds("thread-menu-3").is_some(), "the model, then the three levels");
+    click(cx, "thread-menu-1");
     assert_eq!(intents(&sent), [Intent::SetEffort { effort: "low".to_owned() }]);
     assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
-    cx.dispatch_action(crate::conversation::CycleEffort);
+    click(cx, "thread-model");
+    click(cx, "thread-menu-0");
     let asked = intents(&sent);
-    assert_eq!(asked.last(), Some(&Intent::SetEffort { effort: "xhigh".to_owned() }), "next");
+    assert_eq!(asked.last(), Some(&Intent::SetModel { model: "opus".to_owned() }), "a model");
 }
 
 /// The reading size grows what is read, an answer and a message, and leaves the chrome's
@@ -530,11 +551,11 @@ fn a_long_open_thread_survives_hard_scrolling(cx: &mut TestAppContext) {
     assert_eq!(cx.debug_bounds("thread-down").is_some(), !at_end, "the way down tells the truth");
 }
 
-/// The agent's background work stays out of the way: a chip says how much runs, and opens
-/// the panel of it under its own head. Once nothing runs the chip says how it ended, never
-/// that it is still in the background.
+/// The tray lists the agent's background work, with no chip to open first: what runs, and
+/// what ended in the last turn, saying how it ended. Work that ended before the turn under way
+/// has been said and leaves the list.
 #[gpui::test]
-fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
+fn the_tray_lists_background_work(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -548,6 +569,7 @@ fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
         started_ms: WallMs::from_millis(1_000),
         ended_ms: None,
     };
+    state.turns = vec![live_turn()];
     state.tasks = vec![task("b1", BackgroundTask::RUNNING)];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
@@ -560,28 +582,31 @@ fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
             .any(|n| n.label.as_deref() == Some(label))
     };
 
-    assert!(cx.debug_bounds("task-b1").is_none(), "the panel waits to be asked");
-    assert!(labelled(cx, "1 running"));
-    let chip = cx.debug_bounds("thread-tasks").expect("the chip says one runs").center();
-    cx.simulate_click(chip, Modifiers::none());
-    assert!(cx.debug_bounds("task-b1").is_some(), "the panel lists it");
-    assert!(labelled(cx, "In the background"), "under its own head");
-    let count = cx.update(|window, _cx| crate::a11y::tree(window));
-    let said = count.iter().filter(|n| n.label.as_deref() == Some("1 running")).count();
-    assert_eq!(said, 1, "the count once, on the chip that opened it");
+    assert!(cx.debug_bounds("task-b1").is_some(), "the tray lists it at once");
+    assert!(labelled(cx, "In the background, 1 running"));
+    assert!(cx.debug_bounds("thread-tasks-head").is_none(), "no head to fold it");
     assert!(labelled(cx, "cargo build: Running"), "what it printed stays off its line");
 
-    state.tasks = vec![task("b1", BackgroundTask::COMPLETED), task("b2", BackgroundTask::FAILED)];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    let ended = |id: &str, how: &str| BackgroundTask {
+        ended_ms: Some(WallMs::from_millis(5_000)),
+        ..task(id, how)
+    };
+    state.tasks = vec![ended("b1", BackgroundTask::COMPLETED), ended("b2", BackgroundTask::FAILED)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
     cx.run_until_parked();
-    assert!(labelled(cx, "1 finished \u{b7} 1 failed"), "how it ended");
-    let head = cx.debug_bounds("thread-tasks-head").expect("the head").center();
-    cx.simulate_click(head, Modifiers::none());
-    assert!(cx.debug_bounds("task-b1").is_none(), "the head folds it");
+    assert!(labelled(cx, "In the background, 1 finished \u{b7} 1 failed"), "how it ended");
+
+    let mut next = live_turn();
+    next.id = TurnId(2);
+    next.started_ms = WallMs::from_millis(9_000);
+    state.turns.push(next);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-tasks").is_none(), "said by its turn, gone from the next");
 }
 
-/// The composer names how hard the model thinks and how far a Codex sandbox reaches, beside
-/// the approval mode.
+/// The composer names how hard the model thinks, on the model's chip, and how far a Codex
+/// sandbox reaches, beside the approval mode.
 #[gpui::test]
 fn the_composer_names_the_effort_and_the_sandbox(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -592,9 +617,14 @@ fn the_composer_names_the_effort_and_the_sandbox(cx: &mut TestAppContext) {
     state.meta.facts.insert("sandbox".to_owned(), "workspaceWrite".to_owned());
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-effort").is_some(), "the effort chip");
+    let named = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        named.iter().any(|n| n.label.as_deref().is_some_and(|l| l.ends_with("\u{b7} High"))),
+        "the effort on the model's chip"
+    );
     assert!(cx.debug_bounds("thread-mode").is_some(), "the mode chip");
 }
 
@@ -942,46 +972,6 @@ fn a_web_search_lists_its_sources(cx: &mut TestAppContext) {
     );
 }
 
-/// A goal the agent works toward is one line over the field: what it is for, where it stands
-/// and the tokens against its budget, with a bar for the budget; without a budget, no bar, and
-/// none once the agent holds no goal.
-#[gpui::test]
-fn a_goal_is_one_quiet_line_with_its_budget(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.goal = Some(slopty_proto::thread::Goal {
-        objective: "Make the parser fast".to_owned(),
-        state: "budget-limited".to_owned(),
-        tokens_used: 190_000,
-        token_budget: Some(200_000),
-        time_used_s: 720,
-        updated_ms: WallMs::ZERO,
-    });
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
-    cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let said = "Goal: Make the parser fast, Budget limited, 190k of 200k tokens";
-    assert!(tree.iter().any(|n| n.is("Status", Some(said))), "{tree:#?}");
-    assert!(cx.debug_bounds("thread-goal-bar").is_some(), "the budget's bar");
-
-    if let Some(goal) = state.goal.as_mut() {
-        goal.token_budget = None;
-    }
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-goal").is_some());
-    assert!(cx.debug_bounds("thread-goal-bar").is_none(), "no budget, no bar");
-
-    state.goal = None;
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-goal").is_none(), "gone with the goal");
-}
-
 /// The agent's default mode goes unsaid on the composer's foot, and a mode it is not in shows
 /// as its chip; the "+" menu switches it either way.
 #[gpui::test]
@@ -1043,9 +1033,8 @@ fn the_meter_says_its_share_from_half_full(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-meter-figure").is_some(), "60 %: in figures too");
 }
 
-/// A request's card asks only its own question: what the turn edited stays the thread's, on
-/// the composer's chip, which opens the review, while the card is on show and after it goes;
-/// the tray does not say it a second time.
+/// A request's card asks only its own question: what the turn edited stays the thread's,
+/// for the changes card under its answer and the review.
 #[gpui::test]
 fn a_requests_card_leaves_the_edits_to_the_thread(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -1053,69 +1042,16 @@ fn a_requests_card_leaves_the_edits_to_the_thread(cx: &mut TestAppContext) {
     let thread = state.meta.id;
     state.requests = vec![approval("a")];
     hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
-    cx.run_until_parked();
-    let card = cx.debug_bounds("request-a").expect("the card");
-    let chip = cx.debug_bounds("thread-changes").expect("the edits on the composer");
-    assert!(!card.contains(&chip.center()), "outside the card");
-    assert!(cx.debug_bounds("request-changes").is_none(), "nothing of them on the card");
-
-    let asked = super::asked(cx, &view);
-    cx.simulate_click(chip.center(), Modifiers::none());
-    assert!(
-        asked.borrow().iter().any(|e| matches!(
-            e,
-            crate::conversation::thread::view::ThreadViewEvent::Review { .. }
-        )),
-        "it opens the review"
-    );
-
-    state.requests.clear();
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-changes").is_some(), "the chip stays with the card gone");
-}
-
-/// A turn whose edits counted no line (an agent that reports none) still has the composer's
-/// way to the review, naming the file it wrote.
-#[gpui::test]
-fn a_created_file_alone_still_opens_the_review(cx: &mut TestAppContext) {
-    use slopty_proto::thread::ItemBody;
-    use slopty_proto::thread::detail::ToolDetail;
-    let (hub, _sent) = hub(cx, None);
-    let mut state = fixtures::thread("tools");
-    let mut uncounted = 0_u32;
-    for item in &mut state.items {
-        if let ItemBody::Tool(call) = &mut item.body
-            && let Some(ToolDetail::Write(write)) = &mut call.detail
-        {
-            (write.patch.added, write.patch.removed) = (0, 0);
-            uncounted = uncounted.saturating_add(1);
-        }
-    }
-    assert_eq!(uncounted, 1, "the recorded session writes one file");
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
+    let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let chip = cx.debug_bounds("thread-changes").expect("the way to the review");
-
-    let asked = super::asked(cx, &view);
-    cx.simulate_click(chip.center(), Modifiers::none());
-    assert!(
-        asked.borrow().iter().any(|e| matches!(
-            e,
-            crate::conversation::thread::view::ThreadViewEvent::Review { .. }
-        )),
-        "it opens the review"
-    );
+    assert!(cx.debug_bounds("request-a").is_some(), "the card");
+    assert!(cx.debug_bounds("request-changes").is_none(), "nothing of them on the card");
 }
 
 /// The composer's foot fits the room it is given: in a column beside a board (312 pt) the send
-/// stays inside the card, the "+" stays, and what left the foot waits in the "+" menu, each
-/// doing what its chip does. With room, nothing leaves and the menu holds only its own rows.
+/// stays inside the card, the "+" stays, and the model, if it left the foot, waits in the "+"
+/// menu. With room, nothing leaves and the menu holds only its own rows.
 #[gpui::test]
 fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -1129,8 +1065,8 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let chips = ["thread-model", "thread-effort", "thread-mode", "thread-tasks", "thread-meter"];
-    for chip in chips.iter().chain(&["thread-changes"]) {
+    let chips = ["thread-model", "thread-mode", "thread-meter"];
+    for chip in chips {
         assert!(cx.debug_bounds(chip).is_some(), "with room, {chip} stands in the foot");
     }
     let open_plus = |cx: &mut VisualTestContext| {
@@ -1139,7 +1075,7 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
         cx.run_until_parked();
     };
     open_plus(cx);
-    assert!(cx.debug_bounds("thread-add-menu-tasks").is_none(), "nothing left the foot");
+    assert!(cx.debug_bounds("thread-add-menu-model").is_none(), "nothing left the foot");
     open_plus(cx);
 
     cx.simulate_resize(gpui::size(px(312.0), px(600.0)));
@@ -1150,19 +1086,15 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
     let add = cx.debug_bounds("thread-attach").expect("the + stays");
     assert!(add.right() <= send.left(), "the + leads, the send ends");
     let gone: Vec<&str> = chips.into_iter().filter(|c| cx.debug_bounds(c).is_none()).collect();
-    assert!(gone.contains(&"thread-tasks"), "312 pt holds the foot only by leaving some out");
+    assert!(!gone.is_empty(), "312 pt holds the foot only by leaving some out: {gone:?}");
     assert!(cx.debug_bounds("thread-ledge").is_none(), "a thread with rows has no ledge");
     open_plus(cx);
-    for chip in gone {
-        let row = match chip {
-            "thread-tasks" => Some("thread-add-menu-tasks"),
-            "thread-meter" => Some("thread-add-menu-meter"),
-            _ => None,
-        };
-        if let Some(row) = row {
-            assert!(cx.debug_bounds(row).is_some(), "{chip} left for the + menu's {row}");
-        }
-    }
+    let model_gone = gone.contains(&"thread-model");
+    assert_eq!(
+        cx.debug_bounds("thread-add-menu-model").is_some(),
+        model_gone,
+        "the model, and only it, waits in the + menu once it left"
+    );
 }
 
 /// Where pictures live in Photos (iOS), the "+" menu offers its picker right after the Files

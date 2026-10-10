@@ -411,15 +411,6 @@ pub struct EditMachineSettings {
     pub worker: slopty_client::layout::WorkerKey,
 }
 
-/// "Make this agent `project`'s orchestrator": the focused terminal's agent becomes the one
-/// the project's board talks to, in place of the one it had.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct MakeOrchestrator {
-    /// The project.
-    pub project: slopty_proto::project::ProjectId,
-}
-
 /// "Add to `project`": pin the focused tile to a project, so every client groups it there
 /// whatever else it is; `None` takes the pin back.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]

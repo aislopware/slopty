@@ -394,8 +394,8 @@ fn an_exited_pi_thread_goes_on_with_the_next_message(cx: &mut TestAppContext) {
     assert_eq!(starts(&sent), Vec::<(slopty_proto::thread::IntentId, Vec<String>)>::new());
 }
 
-/// The screen the agent drove last is offered in the composer's toolbar, by its window's
-/// title, and in the palette; either opens it beside the thread. With none, neither shows.
+/// The screen the agent drove last is offered in the palette, which opens it beside the
+/// thread; the composer holds no chip for it. With none, the palette does not offer it.
 #[gpui::test]
 fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
     use slopty_proto::screen::CaptureTarget;
@@ -410,7 +410,6 @@ fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
     let (view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-screen").is_none(), "no screen, no chip");
     let available = |cx: &mut gpui::VisualTestContext| {
         cx.update(|window, cx| window.is_action_available(&WatchAgentScreen, cx))
     };
@@ -425,27 +424,27 @@ fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
     state.screens = vec![screen.clone()];
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
+    assert!(available(cx), "the palette offers it");
+    assert!(cx.debug_bounds("thread-screen").is_none(), "no chip in the composer");
     let asked = asked(cx, &view);
-    click(cx, "thread-screen");
+    cx.dispatch_action(WatchAgentScreen);
     assert!(
         matches!(asked.borrow().as_slice(), [ThreadViewEvent::Watch { screen: s, .. }] if *s == screen),
         "{:?}",
         asked.borrow()
     );
-    assert!(available(cx), "and in the palette");
 }
 
 /// Each of the thread's buttons is an action too, for the palette and a bound key, answered only
-/// while its button would show: Review over the last turn's edits, Branch from here under the
-/// last message, and Resume once the agent has exited. The agent's terminal is ⌘J's, on the
+/// while its button would show: Review over the last turn's edits and Resume once the agent
+/// has exited. The agent's terminal is ⌘J's, on the
 /// tile, so the thread has no action of its own for it.
 #[gpui::test]
 fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContext) {
-    use crate::conversation::{BranchFromHere, ResumeAgent, ReviewChanges};
+    use crate::conversation::{ResumeAgent, ReviewChanges};
 
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::thread("edit");
-    state.meta.caps = vec![Cap::named(Cap::FORK)];
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
@@ -459,9 +458,6 @@ fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContex
 
     cx.dispatch_action(ReviewChanges);
     assert!(matches!(asked.borrow().as_slice(), [ThreadViewEvent::Review { .. }]));
-    cx.dispatch_action(BranchFromHere);
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("branch-panel").is_some(), "open under the last message");
 
     state.status.liveness = Liveness::Exited { resumable: true };
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));

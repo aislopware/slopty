@@ -100,7 +100,8 @@ pub struct Activity<'a> {
     /// The commands the agent ran in the background: those still running, and those of the
     /// last turn that ended.
     pub background: Vec<Background<'a>>,
-    /// The work the agent lists as run in the background, what still runs first.
+    /// The work the agent lists as run in the background that still runs, or ended in the last
+    /// turn, what still runs first.
     pub tasks: Vec<&'a BackgroundTask>,
     /// Whether a waiting message can be withdrawn from here.
     pub can_withdraw: bool,
@@ -194,7 +195,7 @@ impl<'a> Activity<'a> {
             background: if state.tasks.is_empty() { background(state) } else { Vec::new() },
             queue,
             tasks: {
-                let mut tasks: Vec<&BackgroundTask> = state.tasks.iter().collect();
+                let mut tasks = tasks(state);
                 tasks.sort_by_key(|t| !t.is_running());
                 tasks
             },
@@ -222,6 +223,24 @@ impl<'a> Activity<'a> {
 
 /// A plan step's status once done, as agents name it.
 pub const STEP_DONE: &str = "completed";
+
+/// The background work the agent lists that still runs, or belongs to the last turn: started
+/// by one of its calls, or, started by none, ended since it began. Work of earlier turns that
+/// is over has been said by its turn.
+fn tasks(state: &ThreadState) -> Vec<&BackgroundTask> {
+    let last = state.last_turn();
+    state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.is_running()
+                || last.is_some_and(|turn| match task.item.as_ref().and_then(|i| state.item(i)) {
+                    Some(item) => item.turn == turn.id,
+                    None => task.ended_ms.is_some_and(|end| end >= turn.started_ms),
+                })
+        })
+        .collect()
+}
 
 /// The commands run in the background that still run, or ended in the last turn.
 fn background(state: &ThreadState) -> Vec<Background<'_>> {

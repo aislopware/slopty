@@ -489,7 +489,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     assert_eq!(of(1), [TaskAction::FixCi], "no Retry while an agent can fix it");
     assert_eq!(of(3), [TaskAction::AddressComments]);
     assert_eq!(of(4), [TaskAction::ResolveConflicts]);
-    assert_eq!(of(5), [TaskAction::Retry, TaskAction::Start, TaskAction::RunOn], "nobody to tell");
+    assert_eq!(of(5), [TaskAction::Retry, TaskAction::Start], "nobody to tell");
     assert!(TaskAction::FixCi.tells() && !TaskAction::Retry.tells());
 
     let told = |n, action| b.told(TaskId(n), action).expect("words");
@@ -579,7 +579,7 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
 fn a_merge_whose_push_failed_says_so() {
     use slopty_proto::project::Merge;
 
-    use super::model::{StageKind, TaskAction, merged_words};
+    use super::model::{StageKind, merged_words};
 
     let merged = |n, pushed, push_failed: Option<&str>| {
         let mut c = card(n, "Merged", TaskState::Merged);
@@ -614,17 +614,16 @@ fn a_merge_whose_push_failed_says_so() {
     assert_eq!(words(3).as_deref(), Some("into main at abcdef0"));
     let beside_its_stage = merge(1).and_then(|m| merged_words(m, true));
     assert_eq!(beside_its_stage.as_deref(), Some("into main at abcdef0"), "said once");
-    assert_eq!(b.actions(TaskId(1)), [TaskAction::Push], "pushed again on the person's word");
-    assert_eq!(b.actions(TaskId(2)), Vec::<TaskAction>::new(), "pushed: nothing left to do");
-    assert_eq!(b.actions(TaskId(3)), [TaskAction::Push], "not on the forge: offered all the same");
+    for n in 1..=3 {
+        assert!(b.actions(TaskId(n)).is_empty(), "a merged card offers nothing: the head pushes");
+    }
     assert_eq!(b.unpushed(), [TaskId(1), TaskId(3)], "what the board's head counts");
 }
 
 /// Each node says where it is: the orchestrator and a running task where their agents run, an
-/// ended one where it ran, then a pin, with the worktree and branch; only a task not started
-/// yet can move.
+/// ended one where it ran, then a pin, with the worktree and branch.
 #[test]
-fn a_node_says_where_it_runs_and_whether_it_can_move() {
+fn a_node_says_where_it_runs() {
     use super::model::{Place, PlaceHow, os_name};
 
     let (studio, linux) = (WorkerId::new(), WorkerId::new());
@@ -661,8 +660,6 @@ fn a_node_says_where_it_runs_and_whether_it_can_move() {
     assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran, None)));
     assert_eq!(place(Some(TaskId(3))), Some((linux, PlaceHow::Pinned, Some("pinned".into()))));
     assert_eq!(place(Some(TaskId(4))), None, "nowhere yet: no place to show");
-    let movable: Vec<u32> = (1..=4).filter(|t| board.movable(TaskId(*t))).collect();
-    assert_eq!(movable, [3, 4]);
     assert_eq!(os_name(slopty_proto::server::Os::Linux), "Linux");
     assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");
 }
@@ -697,79 +694,6 @@ fn running_checks_hold_nothing_and_a_merged_pull_request_asks_for_no_fix() {
     for n in [1, 2] {
         assert!(!b.actions(TaskId(n)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(n)));
     }
-}
-
-/// A task an agent has worked on can begin again: "Start fresh" on the agent it ran last, and
-/// "Give to another agent…" among those its machine can start, which goes to the workspace as
-/// that agent. A task that never ran and a merged one offer neither.
-#[gpui::test]
-fn a_task_starts_fresh_or_goes_to_another_agent(cx: &mut gpui::TestAppContext) {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use gpui::Modifiers;
-    use slopty_proto::thread::AgentId;
-
-    use super::model::TaskAction;
-    use super::view::{ProjectEvent, ProjectView, Seen, WorkerSeen};
-
-    let worker = WorkerId::new();
-    let ran = on(card(3, "Ran", TaskState::Waiting), worker, SessionId::new());
-    let never = card(4, "Never ran", TaskState::Planned);
-    let merged = on(card(5, "Merged", TaskState::Merged), worker, SessionId::new());
-    let mirror = one(vec![ran, never, merged]);
-    let b = board(&mirror);
-    let fresh = [TaskAction::StartFresh, TaskAction::GiveTo];
-    assert!(fresh.iter().all(|a| b.controls(TaskId(3)).contains(a)), "{:?}", b.controls(TaskId(3)));
-    assert!(fresh.iter().all(|a| !b.controls(TaskId(4)).contains(a)), "it never ran");
-    assert!(fresh.iter().all(|a| !b.controls(TaskId(5)).contains(a)), "its work is in");
-
-    let codex = AgentId::named(AgentId::CODEX);
-    let agents = vec![AgentId::named(AgentId::CLAUDE_CODE), codex.clone()];
-    let seen = Seen {
-        board: mirror.get(&fixtures::id("board")).cloned(),
-        workers: [(
-            worker,
-            WorkerSeen { name: "box".to_owned(), os: None, form: None, agents, away: false },
-        )]
-        .into(),
-        ..Seen::default()
-    };
-    cx.update(gpui_kit::init);
-    let (view, cx) = cx.add_window_view(|_w, cx| {
-        let mut view = ProjectView::new(fixtures::id("board"), slopty_theme::Theme::default(), cx);
-        view.set_seen(seen, cx);
-        view
-    });
-    let heard: Rc<RefCell<Vec<ProjectEvent>>> = Rc::default();
-    let into = Rc::clone(&heard);
-    cx.update(|_w, cx| {
-        cx.subscribe(&view, move |_v, event: &ProjectEvent, _cx| {
-            into.borrow_mut().push(event.clone());
-        })
-        .detach();
-    });
-    view.update(cx, |v, cx| v.select_by(1, cx));
-    cx.run_until_parked();
-    let click = |cx: &mut gpui::VisualTestContext, s: &'static str| {
-        let at = cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} drawn")).center();
-        cx.simulate_click(at, Modifiers::none());
-        cx.run_until_parked();
-    };
-    click(cx, "project-card-start-fresh-3");
-    assert_eq!(*heard.borrow(), [ProjectEvent::Act(TaskId(3), TaskAction::StartFresh)]);
-    assert!(cx.debug_bounds("project-card-3-handing").is_some(), "said at once");
-    assert!(cx.debug_bounds("project-card-give-to-3").is_none(), "not handed on meanwhile");
-    // The server refused it, as the workspace tells the board.
-    view.update(cx, |v, cx| v.handing_refused(TaskId(3), cx));
-    cx.run_until_parked();
-    heard.borrow_mut().clear();
-    click(cx, "project-card-give-to-3");
-    assert!(heard.borrow().is_empty(), "the board picks the agent itself");
-    assert!(cx.debug_bounds("project-card-give-3-0").is_some(), "Claude Code, on box");
-    click(cx, "project-card-give-3-1");
-    assert_eq!(*heard.borrow(), [ProjectEvent::GiveTo(TaskId(3), codex)]);
-    assert!(cx.debug_bounds("project-card-give-3").is_none(), "the picker shuts");
 }
 
 /// A task whose protected target took its work through a pull request shows that pull

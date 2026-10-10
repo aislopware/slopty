@@ -460,10 +460,10 @@ fn command_return_queues_and_option_up_edits_the_last_waiting(cx: &mut TestAppCo
     assert!(cx.debug_bounds("thread-editing").is_some(), "the composer says so");
 }
 
-/// A press on the meter opens its panel in the tray: the context and each window with its
-/// reset. No dollar figure is shown.
+/// The meter is words to read, not a door: its label says the context and each window, a
+/// press opens nothing, and no dollar figure is shown.
 #[gpui::test]
-fn the_meter_opens_its_panel_on_a_press(cx: &mut TestAppContext) {
+fn the_meter_is_read_not_pressed(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = state();
     state.meters.context_tokens = Some(50_000);
@@ -476,12 +476,10 @@ fn the_meter_opens_its_panel_on_a_press(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-meter-panel").is_none(), "quiet until asked");
-
     let meter = cx.debug_bounds("thread-meter").expect("the meter").center();
     cx.simulate_click(meter, Modifiers::none());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-meter-panel").is_some(), "the panel is open");
+    assert!(cx.debug_bounds("thread-meter-panel").is_none(), "no panel to open");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let words: Vec<_> = tree.iter().filter_map(|n| n.label.clone()).collect();
     assert!(!words.iter().any(|w| w.contains('$')), "{words:?}");
@@ -662,7 +660,8 @@ fn a_stop_pauses_the_queue_until_the_next_message(cx: &mut TestAppContext) {
 }
 
 /// A right click on a message opens its own menu where it landed: the person's quotes into the
-/// draft, the agent's copies, and a thread that cannot branch offers no branch. Esc closes it.
+/// draft, the agent's copies, and a thread that cannot fork offers neither fork nor aside. Esc
+/// closes it.
 #[gpui::test]
 fn a_right_click_on_a_message_quotes_or_copies_it(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -696,7 +695,8 @@ fn a_right_click_on_a_message_quotes_or_copies_it(cx: &mut TestAppContext) {
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Menu", Some("Message"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("MenuItem", Some("Quote in reply"))), "{tree:#?}");
-    assert!(cx.debug_bounds("message-menu-branch").is_none(), "no door to branch by");
+    assert!(cx.debug_bounds("message-menu-fork").is_none(), "no door to fork by");
+    assert!(cx.debug_bounds("message-menu-aside").is_none(), "nor to ask aside");
     pick(cx, "message-menu-quote");
     assert_eq!(view.read_with(cx, ThreadView::draft), "> Read it\n>\n> then fix it");
 

@@ -4,8 +4,10 @@
 //! - **Copy** puts its words on the clipboard and says "Copied" under it, as its copy does.
 //! - **Quote in reply** puts its words in the draft, each line behind "> ", and gives the composer
 //!   the keyboard. Not in a subagent's thread, which takes no messages.
-//! - **Branch from here** opens the branch panel under one of the person's messages, where the
-//!   thread can branch.
+//! - **Fork from here**, under one of the person's messages, starts a new thread from just before
+//!   it, the message waiting in its composer (`super::fork`).
+//! - **Ask aside** asks the draft of a fork of the whole thread in a sheet over it
+//!   (`super::aside`).
 
 use std::rc::Rc;
 
@@ -23,7 +25,7 @@ use crate::kit;
 pub(super) struct MessageMenu {
     item: ItemId,
     words: String,
-    /// The person's message's turn, which it branches from; none for the agent's.
+    /// The person's message's turn, which it forks from; none for the agent's.
     turn: Option<TurnId>,
     at: Point<Pixels>,
     /// What held the keyboard before it opened, which has it back when it closes.
@@ -35,8 +37,15 @@ pub(super) struct MessageMenu {
 enum Pick {
     Copy,
     Quote,
-    Branch,
+    Fork,
+    Aside,
 }
+
+/// The menu's row that forks from a message of the person's.
+pub(super) const FORK: &str = "Fork from here";
+
+/// The menu's row that asks the draft aside.
+pub(super) const ASIDE: &str = "Ask aside";
 
 /// `words` quoted for a reply: each line behind "> ", a lone ">" for a blank one.
 pub(super) fn quoted(words: &str) -> String {
@@ -105,11 +114,12 @@ impl ThreadView {
         match pick {
             Pick::Copy => self.copy(menu.item, menu.words, cx),
             Pick::Quote => self.quote_into_draft(&quoted(&menu.words), window, cx),
-            Pick::Branch => {
+            Pick::Fork => {
                 if let Some(turn) = menu.turn {
-                    self.toggle_branch(&menu.item, turn, cx);
+                    self.fork_from(turn, cx);
                 }
             }
+            Pick::Aside => self.ask_aside(window, cx),
         }
     }
 
@@ -120,8 +130,11 @@ impl ThreadView {
         if !self.in_subagent() {
             picks.push((Pick::Quote, "quote", "Quote in reply"));
         }
-        if menu.turn.is_some() && self.branches(cx) {
-            picks.push((Pick::Branch, "branch", "Branch from here"));
+        if menu.turn.is_some_and(|turn| self.forks_from(turn, cx)) {
+            picks.push((Pick::Fork, "fork", FORK));
+        }
+        if !self.in_subagent() && self.can_aside(cx) {
+            picks.push((Pick::Aside, "aside", ASIDE));
         }
         let this = cx.entity().downgrade();
         let mut rows = kit::Menu::new();

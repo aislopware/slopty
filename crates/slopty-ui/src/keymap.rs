@@ -270,8 +270,8 @@ pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{
-        AllowRequest, AskAside, BranchFromHere, CycleDensity, CycleEffort, DenyRequest,
-        EditLastQueued, Interrupt, QueueMessage, ResumeAgent, ReviewChanges,
+        AllowRequest, AskAside, CycleDensity, DenyRequest, EditLastQueued, Interrupt, QueueMessage,
+        ResumeAgent, ReviewChanges,
     };
     use crate::terminal as t;
 
@@ -400,10 +400,8 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "interrupt", Interrupt, &["escape"], &[FACE]),
         c(Conversation, "queue_message", QueueMessage, &["cmd-enter"], &[THREAD_INPUT]),
         c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
-        c(Conversation, "cycle_effort", CycleEffort, &[], &[FACE]),
         c(Conversation, "ask_aside", AskAside, &[], &[FACE]),
         c(Conversation, "review_changes", ReviewChanges, &[], &[FACE]),
-        c(Conversation, "branch_from_here", BranchFromHere, &[], &[FACE]),
         c(Conversation, "resume_agent", ResumeAgent, &[], &[FACE]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),

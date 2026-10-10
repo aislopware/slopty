@@ -17,8 +17,6 @@ gpui::actions!(
         OpenCommit,
         /// Ask the branch's pull request again, where a thread's or a review's tile shows it.
         RefreshPullRequest,
-        /// Switch the thread's model to think at the next level its agent offers, round.
-        CycleEffort,
         /// Ask the draft of a fork of the thread, in a sheet over it.
         AskAside,
         /// Ask the thread's agent for its own review of the changes the review tile shows.
@@ -27,8 +25,6 @@ gpui::actions!(
         WatchAgentScreen,
         /// Open the review of the files the last turn changed, as the tray's "Review" does.
         ReviewChanges,
-        /// Open "Branch from here" under the person's last message.
-        BranchFromHere,
         /// Take the thread's exited agent up again.
         ResumeAgent,
         /// Answer the request that has the keyboard with its plain allow: bound only where the

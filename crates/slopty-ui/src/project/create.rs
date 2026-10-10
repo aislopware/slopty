@@ -1,8 +1,8 @@
-//! The sheet "Start a project here" opens before the project is made.
+//! The sheet "New project…" opens before the project is made.
 //!
-//! It asks the project's name, the repository and the branch its work lands on, the verifier
-//! that says a task is done, and whether a merge is pushed to the forge, each filled from the
-//! terminal where it can be.
+//! It asks the project's name, the repository and the branch its work lands on, and the
+//! verifier that says a task is done, each filled from the terminal where it can be. Whether a
+//! merge is pushed to the forge is set in one place, the board's head.
 //!
 //! The orchestrator is the agent in the terminal the sheet was opened from, on that
 //! terminal's machine; the sheet names both and asks nothing of them. ↵ in any field or
@@ -18,8 +18,7 @@ use gpui::{
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_theme::Theme;
 
-use super::view::{VERIFIER, VERIFIER_HINT, switch};
-use crate::colors::hsla;
+use super::view::{VERIFIER, VERIFIER_HINT};
 use crate::kit::{self, ButtonKind};
 
 /// What the sheet makes a project of.
@@ -33,8 +32,6 @@ pub struct NewProject {
     pub target: String,
     /// The command that passes when a task's work is right; none when blank.
     pub verifier: Option<String>,
-    /// Push the target to `origin` after each merge.
-    pub push: bool,
 }
 
 /// What the sheet tells the workspace.
@@ -48,8 +45,6 @@ pub enum SheetEvent {
 
 /// The title the sheet wears.
 pub const TITLE: &str = "New project";
-/// The push switch's words.
-pub const PUSH: &str = "Push the target to origin after each merge";
 
 /// The sheet's fields, in the order they stand.
 struct Fields {
@@ -65,7 +60,6 @@ pub struct ProjectSheet {
     /// Who orchestrates it and where: "Claude Code on studio, in ~/src/board".
     orchestrator: String,
     fields: Fields,
-    push: bool,
     focus: FocusHandle,
     _enters: [Subscription; 4],
 }
@@ -74,7 +68,6 @@ impl std::fmt::Debug for ProjectSheet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectSheet")
             .field("orchestrator", &self.orchestrator)
-            .field("push", &self.push)
             .finish_non_exhaustive()
     }
 }
@@ -122,14 +115,7 @@ impl ProjectSheet {
             enter(&fields.verifier),
         ];
         fields.name.update(cx, |input, cx| input.focus(window, cx));
-        Self {
-            theme,
-            orchestrator,
-            fields,
-            push: filled.push,
-            focus: cx.focus_handle(),
-            _enters: enters,
-        }
+        Self { theme, orchestrator, fields, focus: cx.focus_handle(), _enters: enters }
     }
 
     /// What the sheet holds now, trimmed; a blank verifier is none.
@@ -142,24 +128,18 @@ impl ProjectSheet {
             repo: read(&self.fields.repo),
             target: read(&self.fields.target),
             verifier: (!verifier.is_empty()).then_some(verifier),
-            push: self.push,
         }
     }
 
     fn create(&self, cx: &mut Context<Self>) {
         cx.emit(SheetEvent::Create(self.typed(cx)));
     }
-
-    fn flip_push(&mut self, cx: &mut Context<Self>) {
-        self.push = !self.push;
-        cx.notify();
-    }
 }
 
 impl Render for ProjectSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.theme;
-        let (s, sp) = (theme.surfaces, theme.spacing);
+        let sp = theme.spacing;
         // A path, a branch and a command: what is typed is code or close to it.
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let field = |name: &'static str, input: &Entity<InputState>, code: bool| {
@@ -169,8 +149,6 @@ impl Render for ProjectSheet {
                     .child(Input::new(input).aria_label(name)),
             )
         };
-        let push = switch(theme, "project-sheet-push", PUSH, self.push)
-            .on_click(cx.listener(|this, _ev, _w, cx| this.flip_push(cx)));
         let cancel = kit::button(theme, "project-sheet-cancel", "Cancel", ButtonKind::Ghost)
             .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(SheetEvent::Cancel)));
         let create = kit::button(theme, "project-sheet-create", "Create", ButtonKind::Primary)
@@ -195,14 +173,6 @@ impl Render for ProjectSheet {
             .child(field("Repository", &self.fields.repo, true))
             .child(field("Target branch", &self.fields.target, true))
             .child(field(VERIFIER, &self.fields.verifier, true))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(sp.sm))
-                    .child(push)
-                    .child(div().min_w_0().text_color(hsla(s.text_secondary)).child(PUSH)),
-            )
             .child(
                 div().flex().justify_end().gap(px(sp.xs)).pt(px(sp.xs)).child(cancel).child(create),
             )

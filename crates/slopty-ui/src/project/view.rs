@@ -24,22 +24,21 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    NativeCounts, ProjectId, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
 use slopty_proto::thread::AgentId;
 use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, os_name, pull_words,
-    queue_words, run_on_words, short_commit, state_word, verdict_detail, verdict_tail,
+    Board, Lane, Place, PlaceHow, Stage, StageKind, TaskAction, os_name, pull_words, queue_words,
+    short_commit, state_word, verdict_detail, verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
 use super::{
-    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, GiveTaskToAgent, MergeTask,
-    OpenNode, PushTask, ResolveConflicts, RetryTask, ReviewTask, RunTaskOn, SelectNext,
-    SelectPrevious, ShowTerminal, StartTask, StartTaskFresh, StopTaskAgent, TellOrchestrator,
-    TogglePush,
+    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, MergeTask, OpenNode,
+    ResolveConflicts, RetryTask, ReviewTask, SelectNext, SelectPrevious, ShowTerminal, StartTask,
+    TellOrchestrator, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -62,14 +61,6 @@ pub(crate) const PROJECT_GONE: &str = "This project is no longer on the server";
 const WAITING_ON_YOU: &str = "Waiting on you";
 /// What the orchestrator's row is called.
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
-/// The "Run on" picker's first choice.
-pub(crate) const ANYWHERE: &str = "Anywhere";
-/// What "Anywhere" means.
-pub(crate) const ANYWHERE_LINE: &str = "A worker with room when it starts";
-/// The "Run on" picker while the server reads the workers.
-pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
-/// The "Run on" picker's close button.
-pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
 /// How far a card that arrives travels up into its place.
 const ARRIVE: f32 = 4.0;
@@ -102,12 +93,6 @@ pub enum ProjectEvent {
     Delete,
     /// Say this: what was asked of the board cannot be done now.
     Say(String),
-    /// Run the task there, or wherever its placement chooses: the "Run on" picker's choice.
-    Pin(TaskId, RunOn),
-    /// Hand the task's work to this agent: the "Give to another agent" picker's choice.
-    GiveTo(TaskId, AgentId),
-    /// Close the "Run on" picker.
-    CloseRunOn,
     /// Tell the orchestrator this, as the person.
     Tell(String),
     /// The person read the recap: close it.
@@ -202,8 +187,6 @@ pub struct Seen {
     pub agents: HashMap<SessionId, AgentSeen>,
     /// The server's clock now, near enough, for the recap's age and the time at work.
     pub now: WallMs,
-    /// The "Run on" picker, while it is open on one of the project's tasks.
-    pub run_on: Option<RunOnPicker>,
     /// What changed since this client last looked, from the moment the board opened until the
     /// person closes it or the board hides.
     pub recap: Option<Recap>,
@@ -248,8 +231,6 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
-    /// The task whose "Give to another agent" picker is open.
-    giving: Option<TaskId>,
     /// The tasks asked to start again whose new agent the board does not show yet.
     handing: BTreeMap<TaskId, Handing>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
@@ -291,7 +272,6 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
-            giving: None,
             handing: BTreeMap::new(),
             #[cfg(test)]
             renders: 0,
@@ -326,7 +306,6 @@ impl ProjectView {
         let same = same_board
             && self.seen.workers == seen.workers
             && self.seen.agents == seen.agents
-            && self.seen.run_on == seen.run_on
             && self.seen.recap == seen.recap;
         if !same {
             self.seen = seen;
@@ -366,21 +345,11 @@ impl ProjectView {
         });
     }
 
-    /// Do `action` to `task`: the board's own pickers open here, and a start again shows at
-    /// once on its card.
+    /// Do `action` to `task`: a start shows at once on its card.
     fn act(&mut self, task: TaskId, action: TaskAction, cx: &mut Context<Self>) {
-        match action {
-            TaskAction::GiveTo => return self.toggle_giving(task, cx),
-            TaskAction::StartFresh => {
-                self.giving = None;
-                self.hand(task, format!("Starting #{task} fresh\u{2026}"));
-                cx.notify();
-            }
-            TaskAction::Start => {
-                self.hand(task, format!("Starting #{task}\u{2026}"));
-                cx.notify();
-            }
-            _ => {}
+        if action == TaskAction::Start {
+            self.hand(task, format!("Starting #{task}\u{2026}"));
+            cx.notify();
         }
         cx.emit(ProjectEvent::Act(task, action));
     }
@@ -440,11 +409,9 @@ impl ProjectView {
             cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
             return;
         };
-        let handing = self.handing.contains_key(&task)
-            && matches!(action, TaskAction::Start | TaskAction::StartFresh | TaskAction::GiveTo);
+        let handing = self.handing.contains_key(&task) && action == TaskAction::Start;
         if handing {
-            let again = if action == TaskAction::Start { "" } else { " again" };
-            cx.emit(ProjectEvent::Say(format!("#{task} is starting{again}")));
+            cx.emit(ProjectEvent::Say(format!("#{task} is starting")));
         } else if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
             self.act(task, action, cx);
         } else {
@@ -518,9 +485,6 @@ impl ProjectView {
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
         lines.extend(place.why.as_ref().map(|why| format!("Why: {why}")));
-        if node.is_some_and(|t| board.movable(t)) {
-            lines.push(MOVE_HINT.to_owned());
-        }
         Some((place, short, lines.join("\n")))
     }
 
@@ -532,15 +496,9 @@ impl ProjectView {
     /// `node`'s place as a quiet chip: the worker and its system in words, in a stronger ink
     /// while its agent runs there, with no machine glyph: a row carries one mark, its state's,
     /// and a machine's colour is the navigator's alone. A pin keeps its lock, which the words
-    /// do not say. Its hint says the rest; a click moves a task not started yet ("Run on…"),
-    /// and a chip that cannot move is only words.
-    fn where_chip(
-        &self,
-        board: &Board,
-        node: Node,
-        prefix: &str,
-        cx: &Context<Self>,
-    ) -> Option<Stateful<Div>> {
+    /// do not say. Its hint says the rest. Words only: where a task runs is the orchestrator's
+    /// to choose.
+    fn where_chip(&self, board: &Board, node: Node, prefix: &str) -> Option<Stateful<Div>> {
         let (place, short, hint) = self.where_words(board, node)?;
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -550,7 +508,6 @@ impl ProjectView {
             PlaceHow::Ran => (false, s.text_muted),
             PlaceHow::Pinned => (true, s.text_muted),
         };
-        let movable = node.filter(|t| board.movable(*t));
         // Its machine out of reach, the chip wears the away mark: the row's own mark still says
         // the task's state, which nothing has changed yet.
         let id = format!("{prefix}-{}-where", node_key(node));
@@ -570,7 +527,7 @@ impl ProjectView {
         let el = div()
             .id(SharedString::from(id))
             .debug_selector(move || selector)
-            .role(if movable.is_some() { Role::Button } else { Role::Label })
+            .role(Role::Label)
             .aria_label(SharedString::from(label))
             .flex_none()
             .max_w_full()
@@ -595,15 +552,7 @@ impl ProjectView {
                 let theme = Rc::clone(&hint_theme);
                 cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
             });
-        let Some(task) = movable else { return Some(el) };
-        let el =
-            el.cursor_pointer().hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)));
-        Some(tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
-            cx.stop_propagation();
-            this.picked = Some(node);
-            cx.emit(ProjectEvent::Act(task, TaskAction::RunOn));
-            cx.notify();
-        })))
+        Some(el)
     }
 
     /// The agent running `node` as this client sees it, when it sees it.
@@ -646,8 +595,6 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
-/// What a click on a task's place does while it can still move.
-pub(crate) const MOVE_HINT: &str = "Click to choose where it runs";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 /// The header's toggle for the panel that sets how the work is checked, and the panel's name.
@@ -666,49 +613,6 @@ fn place_line(project: &slopty_proto::project::Project) -> String {
     }
 }
 
-/// A switch: a track the solid fills while on, its knob at the far end.
-pub(super) fn switch(
-    theme: &Theme,
-    id: &'static str,
-    label: &'static str,
-    on: bool,
-) -> Stateful<Div> {
-    let (s, sp) = (theme.surfaces, theme.spacing);
-    let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
-    let width = sp.xl + sp.xs;
-    let travel = 2.0_f32.mul_add(-sp.xxs, width - knob);
-    let (track, ink) =
-        if on { (hsla(s.solid), s.solid_ink) } else { (hsla(s.selected), s.text_secondary) };
-    let el = div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .role(Role::Switch)
-        .aria_label(label)
-        .aria_toggled(if on {
-            gpui::accesskit::Toggled::True
-        } else {
-            gpui::accesskit::Toggled::False
-        })
-        .flex_none()
-        .w(px(width))
-        .h(px(sp.lg))
-        .flex()
-        .items_center()
-        .px(px(sp.xxs))
-        .rounded_full()
-        .bg(track)
-        .cursor_pointer()
-        .child(
-            div()
-                .flex_none()
-                .size(px(knob))
-                .ml(px(if on { travel } else { 0.0 }))
-                .rounded_full()
-                .bg(hsla(ink)),
-        );
-    tab_stop(el, s.focus)
-}
-
 /// What an action does, as "nothing to …" and "stand on a task to …" say it.
 const fn verb_of(action: TaskAction) -> &'static str {
     match action {
@@ -716,15 +620,11 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::Merge => "merge",
         TaskAction::Retry => "retry",
         TaskAction::Start => "start",
-        TaskAction::RunOn => "choose where it runs",
         TaskAction::FixCi => "fix",
         TaskAction::AddressComments => "address",
         TaskAction::ResolveConflicts => "resolve",
         TaskAction::Push => "push",
         TaskAction::Cancel => "cancel",
-        TaskAction::Stop => "stop",
-        TaskAction::StartFresh => "start fresh",
-        TaskAction::GiveTo => "give to another agent",
     }
 }
 
@@ -922,10 +822,10 @@ impl ProjectView {
         held: bool,
         cx: &Context<Self>,
     ) -> Option<Div> {
-        // Choosing a worker is a control of the card stood on, so a lane of planned tasks is
-        // not a column of the same button.
+        // Starting is a control of the card stood on, so a lane of planned tasks is not a
+        // column of the same button.
         let offered = board.actions(task);
-        let stood_on = [TaskAction::Start, TaskAction::RunOn];
+        let stood_on = [TaskAction::Start];
         let mut actions: Vec<(TaskAction, bool)> =
             offered.iter().copied().filter(|a| !stood_on.contains(a)).map(|a| (a, false)).collect();
         if self.picked() == Some(Some(task)) {
@@ -935,11 +835,7 @@ impl ProjectView {
             actions.extend(
                 starts.filter(|a| !(handing && *a == TaskAction::Start)).map(|a| (a, true)),
             );
-            let controls = board
-                .controls(task)
-                .into_iter()
-                .filter(|a| !(handing && matches!(a, TaskAction::StartFresh | TaskAction::GiveTo)));
-            actions.extend(controls.map(|a| (a, true)));
+            actions.extend(board.controls(task).into_iter().map(|a| (a, true)));
         }
         if actions.is_empty() {
             return None;
@@ -1795,7 +1691,7 @@ impl ProjectView {
         if let Some(why) = reason {
             line = line.item("why", Priority::LOW, self.fact(format!("{key}-why"), None, why));
         }
-        if let Some(chip) = self.where_chip(board, node, "project-card", cx) {
+        if let Some(chip) = self.where_chip(board, node, "project-card") {
             line = line.item("where", Priority(144), chip);
         }
         if let Some(actions) = self.actions(board, card.id, "project-card", held, cx) {
@@ -1813,10 +1709,6 @@ impl ProjectView {
                     .filter(|_| failed)
                     .map(|c| self.check_block(&key, c, cx).into_any_element()),
             )
-            .chain(
-                self.run_on_block(card.id, "project-card", cx).map(IntoElement::into_any_element),
-            )
-            .chain(self.give_block(card, "project-card", cx).map(IntoElement::into_any_element))
             .collect();
         let arrive = ElementId::Name(format!("{key}-in").into());
         let el = self
@@ -2102,239 +1994,6 @@ impl ProjectView {
         Some(row)
     }
 
-    /// Open the "Give to another agent" picker under `task`, or shut it there.
-    fn toggle_giving(&mut self, task: TaskId, cx: &mut Context<Self>) {
-        self.giving = if self.giving == Some(task) { None } else { Some(task) };
-        cx.notify();
-    }
-
-    /// The "Give to another agent" picker under `card`, while it is open there: the agents the
-    /// machine it ran on can start. Its work stays where it is, so the next agent goes there.
-    fn give_block(
-        &self,
-        card: &TaskCard,
-        prefix: &str,
-        cx: &Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let task = card.id;
-        if self.giving != Some(task) {
-            return None;
-        }
-        let worker = card.assignment.as_ref().map(|a| a.term.worker)?;
-        let seen = self.seen.workers.get(&worker);
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let key = format!("{prefix}-give-{task}");
-        let close = crate::kit::icon_button(theme, format!("{key}-close"), Symbol::Xmark, "Close")
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                cx.stop_propagation();
-                this.giving = None;
-                cx.notify();
-            }));
-        let machine = seen.map_or_else(|| "its machine".to_owned(), |w| w.name.clone());
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(px(sp.xs))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(format!("Give #{task} to an agent on {machine}"))),
-            )
-            .child(close);
-        let agents = seen.map(|w| w.agents.as_slice()).unwrap_or_default();
-        let options = agents.iter().enumerate().map(|(i, agent)| {
-            let id = format!("{key}-{i}");
-            let selector = id.clone();
-            let name = crate::conversation::thread::view::agent_label(agent);
-            let pick = agent.clone();
-            let handing = format!("Handing #{task} to {name}\u{2026}");
-            let el = div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(SharedString::from(format!("Give #{task} to {name}")))
-                .px(px(sp.xs))
-                .py(px(sp.xxs))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .text_color(hsla(s.text))
-                .hover(move |el| el.bg(hsla(s.selected)))
-                .child(SharedString::from(name));
-            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                this.giving = None;
-                this.hand(task, handing.clone());
-                cx.emit(ProjectEvent::GiveTo(task, pick.clone()));
-                cx.notify();
-            }))
-        });
-        let options: Vec<_> = options.collect();
-        let none = agents.is_empty().then(|| {
-            div()
-                .px(px(sp.xs))
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(format!("{machine} is not linked here")))
-        });
-        let selector = key.clone();
-        Some(
-            div()
-                .id(SharedString::from(key))
-                .debug_selector(move || selector)
-                .role(Role::Group)
-                .aria_label(SharedString::from(format!("Give #{task} to another agent")))
-                .flex()
-                .flex_col()
-                .gap(px(sp.xxs))
-                .mt(px(sp.xs))
-                .px(px(sp.sm))
-                .py(px(sp.xs))
-                .rounded(px(theme.radii.sm))
-                .bg(hsla(s.ground))
-                .text_size(px(theme.typography.small()))
-                .child(head)
-                .children(options)
-                .children(none),
-        )
-    }
-
-    /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
-    /// then every worker with its system and its agents, the one the task is pinned to marked.
-    fn run_on_block(
-        &self,
-        task: TaskId,
-        prefix: &str,
-        cx: &Context<Self>,
-    ) -> Option<Stateful<Div>> {
-        let picker = self.seen.run_on.as_ref().filter(|p| p.task == task)?;
-        let board = self.seen.board.as_ref()?;
-        let pin = board.tasks.get(&task).and_then(|c| c.pin);
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let key = format!("{prefix}-picker-{task}");
-        let option =
-            |id: String, name: String, why: String, on: bool, fits: bool, choice: RunOn| {
-                let selector = id.clone();
-                let el = div()
-                    .id(SharedString::from(id))
-                    .debug_selector(move || selector)
-                    .role(Role::RadioButton)
-                    .aria_label(said(&[&name, &why]))
-                    .aria_toggled(if on {
-                        gpui::accesskit::Toggled::True
-                    } else {
-                        gpui::accesskit::Toggled::False
-                    })
-                    .flex()
-                    .items_baseline()
-                    .gap(px(sp.xs))
-                    .min_w_0()
-                    .px(px(sp.xs))
-                    .py(px(sp.xxs))
-                    .rounded(px(theme.radii.sm))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.selected)))
-                    .child(div().flex_none().size(px(theme.typography.icon())).children(on.then(
-                        || {
-                            icon(theme, Symbol::Checkmark, IconSize::Inline, hsla(s.text))
-                                .size(px(theme.typography.icon()))
-                        },
-                    )))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(hsla(if fits { s.text } else { s.text_muted }))
-                            .child(SharedString::from(name)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(why)),
-                    );
-                tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
-                    cx.stop_propagation();
-                    cx.emit(ProjectEvent::Pin(task, choice));
-                }))
-            };
-        let close_id = format!("{key}-close");
-        let close = crate::kit::icon_button(theme, close_id, Symbol::Xmark, CLOSE_RUN_ON).on_click(
-            cx.listener(|_this, _ev, _w, cx| {
-                cx.stop_propagation();
-                cx.emit(ProjectEvent::CloseRunOn);
-            }),
-        );
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(px(sp.xs))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(format!("Run #{task} on"))),
-            )
-            .child(close);
-        let mut options = vec![option(
-            format!("{key}-anywhere"),
-            ANYWHERE.to_owned(),
-            ANYWHERE_LINE.to_owned(),
-            pin.is_none(),
-            true,
-            RunOn::Anywhere,
-        )];
-        let ranking = match &picker.workers {
-            None => Some(
-                div()
-                    .px(px(sp.xs))
-                    .text_color(hsla(s.text_muted))
-                    .child(RANKING)
-                    .into_any_element(),
-            ),
-            Some(workers) => {
-                options.extend(workers.iter().enumerate().map(|(i, w)| {
-                    let (name, line, online) = run_on_words(w);
-                    option(
-                        format!("{key}-{i}"),
-                        name,
-                        line,
-                        pin == Some(w.worker),
-                        online,
-                        RunOn::Worker(w.worker),
-                    )
-                }));
-                None
-            }
-        };
-        let selector = key.clone();
-        Some(
-            div()
-                .id(SharedString::from(key))
-                .debug_selector(move || selector)
-                .role(Role::RadioGroup)
-                .aria_label(SharedString::from(format!("Run #{task} on")))
-                .flex()
-                .flex_col()
-                .gap(px(sp.xxs))
-                .mt(px(sp.xs))
-                .px(px(sp.sm))
-                .py(px(sp.xs))
-                .rounded(px(theme.radii.sm))
-                .bg(hsla(s.ground))
-                .text_size(px(theme.typography.small()))
-                .child(head)
-                .children(options)
-                .children(ranking),
-        )
-    }
-
     fn empty(&self, line: &'static str, hint: &'static str) -> AnyElement {
         let theme = &self.theme;
         div()
@@ -2421,9 +2080,6 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &SelectNext, _w, cx| this.select_by(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrevious, _w, cx| this.select_by(-1, cx)))
             .on_action(cx.listener(|this, _: &OpenNode, _w, cx| this.open_picked(cx)))
-            .on_action(cx.listener(|this, _: &RunTaskOn, _w, cx| {
-                this.act_on_picked(TaskAction::RunOn, cx);
-            }))
             .on_action(cx.listener(|this, _: &ReviewTask, _w, cx| {
                 this.act_on_picked(TaskAction::Review, cx);
             }))
@@ -2442,23 +2098,11 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &ResolveConflicts, _w, cx| {
                 this.act_on_picked(TaskAction::ResolveConflicts, cx);
             }))
-            .on_action(cx.listener(|this, _: &PushTask, _w, cx| {
-                this.act_on_picked(TaskAction::Push, cx);
-            }))
             .on_action(cx.listener(|this, _: &CancelTask, _w, cx| {
                 this.act_on_picked(TaskAction::Cancel, cx);
             }))
-            .on_action(cx.listener(|this, _: &StopTaskAgent, _w, cx| {
-                this.act_on_picked(TaskAction::Stop, cx);
-            }))
             .on_action(cx.listener(|this, _: &StartTask, _w, cx| {
                 this.act_on_picked(TaskAction::Start, cx);
-            }))
-            .on_action(cx.listener(|this, _: &StartTaskFresh, _w, cx| {
-                this.act_on_picked(TaskAction::StartFresh, cx);
-            }))
-            .on_action(cx.listener(|this, _: &GiveTaskToAgent, _w, cx| {
-                this.act_on_picked(TaskAction::GiveTo, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
             .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {

@@ -59,8 +59,7 @@ async fn the_settings_form_edits_the_file() {
         })
         .await
         .unwrap();
-    let sections =
-        ["Appearance", "Terminal", "Input", "Agents", "Streams", "Network", "Keyboard", "About"];
+    let sections = ["Appearance", "Terminal", "Input", "Agents", "Network", "Keyboard", "About"];
     for section in sections {
         assert!(dump.a11y_node("Tab", Some(section)).is_some(), "{section}: {:#?}", dump.a11y);
     }

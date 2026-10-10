@@ -129,7 +129,6 @@ impl WorkspaceView {
         items.extend(self.group_lines());
         items.extend(self.scope_lines());
         items.extend(self.pin_lines());
-        items.extend(self.orchestrator_lines());
         items.extend(self.clipboard_lines());
         items.extend(self.settings_lines());
         items.extend(self.remove_lines());

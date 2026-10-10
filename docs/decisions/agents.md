@@ -1606,11 +1606,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     turn, so the lineage reads as a fork's does. The old thread goes on as it was.
   - **Once.** The start is once per intent, as a client's start is. A repeat starts nothing and
     finishes what the first may not have, the draft and where it came from, both kept once.
-  - **The client's half.** "Continue in…" in the model chip's menu and "Branch from here" on a
-    message are one panel (`conversation/thread/view/branch.rs`). It offers the thread's own
-    agent first, then the others the worker can start (`ThreadHub`'s agents, from the link).
-    Test: `branching_to_another_agent_carries_the_thread_over`
-    (`conversation::thread::tests::carry`). A seated thread's seat does not go with it.
+  - **The client's half** is deleted (2026-10-10): no client door asks `Intent::Continue`
+    since "Branch from here" became Fork from here and Ask aside (`ui.md`). A seated thread's seat does not go with it.
     A project task starts fresh or goes to another agent from its board: see "A task starts
     fresh, or goes to another agent" in `docs/decisions/projects.md`.
   - Tests: `a_thread_is_told_whole_when_it_fits`,
@@ -1636,10 +1633,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **No race to lose.** The stop is the agent's to make. A turn that ends before the stop lands
     leaves the message to go as a queued one does, so it goes once either way. Orchestration's
     intents take the same path.
-  - **The client's half.** "Interrupt and send" stands beside the queue's send while a turn
-    runs on such an agent (`conversation/thread/view/composer.rs`). The message waits in the
-    tray until it goes. Test: `interrupt_and_send_waits_in_the_tray`
-    (`conversation::thread::tests::carry`).
+  - **The client's half** is deleted (2026-10-10): "Interrupt and send" left the composer
+    with the rest of the single-agent chrome (`ui.md`, "The thread keeps only what directs
+    it"). `Delivery::Interrupt` stays on the wire for the worker's side.
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
@@ -1682,9 +1678,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     is Shift-Tab's cycle. Driving either means keys into a menu or a mode cycle, which Slopty
     never types, so an observed thread has no `SET_MODE` and no `SET_EFFORT`. Its mode and
     effort stay read-only meters.
-  - **The client's half.** The effort chip beside the model and mode chips
-    (`conversation/thread/view/composing.rs`), and "Next effort level" in the palette. Test:
-    `the_effort_chip_switches_how_hard_the_model_thinks` (`conversation::thread::tests::face`).
+  - **The client's half.** The levels in the model chip's menu, under its models, and the
+    level after the model's name (`conversation/thread/view/composing.rs`). Test:
+    `the_model_chip_switches_how_hard_the_model_thinks` (`conversation::thread::tests::face`).
   - Tests: `a_thread_switches_among_what_codex_offers` and
     `the_threads_settings_are_its_mode_and_effort` (`slopty-agent/tests/codex.rs`);
     `a_switch_goes_to_codex_as_the_threads_settings` (`slopty-worker/tests/codex.rs`, a
@@ -2341,9 +2337,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `workspace::tests::agent_tile::keeping_a_run_closes_the_message_s_other_runs`.
 
 - ✅ **A thread goes on on another machine that has its repository** (readiness R18,
-  2026-10-09). "Branch from here" offered only the thread's own machine, so work begun on the
-  laptop could not move to the build box without starting over by hand. The panel now has a
-  Machine setting, shown when another linked machine has a clone of the thread's repository.
+  2026-10-09). Deleted 2026-10-10 with the branch panel (`ui.md`, "'Branch from here' becomes
+  Fork from here and Ask aside"): moving work between machines is a task's restart.
+  "Branch from here" offered only the thread's own machine, so work begun on the laptop
+  could not move to the build box without starting over by hand. The panel now has a Machine
+  setting, shown when another linked machine has a clone of the thread's repository.
   - **Which machines.** The workspace matches the thread's `RepoId` (its origin, else its first
     commit) against every checkout it knows on the other machines: their shells' repositories
     and their threads'. On each machine the shortest root wins, so the clone itself is chosen

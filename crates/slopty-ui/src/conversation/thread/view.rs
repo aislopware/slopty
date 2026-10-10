@@ -32,7 +32,7 @@ use slopty_core::WallMs;
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
 use slopty_proto::thread::{
-    AgentId, AskId, Cap, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
+    AgentId, AskId, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
     ThreadState, ToolCall, ToolDetail, TurnId, TurnState, kind,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
@@ -46,8 +46,8 @@ use crate::colors::hsla;
 use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
-    AllowRequest, AskAside, CTX, CycleDensity, CycleEffort, DenyRequest, EditLastQueued, Interrupt,
-    OpenCommit, QueueMessage, RefreshPullRequest, WatchAgentScreen,
+    AllowRequest, AskAside, CTX, CycleDensity, DenyRequest, EditLastQueued, Interrupt, OpenCommit,
+    QueueMessage, RefreshPullRequest, WatchAgentScreen,
 };
 use crate::icons::{IconSize, Status, Symbol};
 use crate::kit::{self, ButtonKind};
@@ -85,9 +85,6 @@ const OVERDRAW: f32 = 2048.0;
 /// The composer grows with its text up to this many rows, then scrolls.
 const COMPOSER_ROWS: usize = 8;
 
-/// The context ring shows only once this share of the window is in use (`design.md` §4.3).
-const RING_FROM: f64 = 20.0;
-
 /// A call's line: its least height and the square its mark sits in.
 const TOOL_ROW: f32 = 24.0;
 
@@ -110,8 +107,6 @@ const BUBBLE_CHARS: usize = 480;
 
 mod aside;
 mod asking;
-mod branch;
-pub use branch::Elsewhere;
 mod changes;
 pub(crate) mod composer;
 mod composing;
@@ -119,23 +114,20 @@ mod decision;
 pub mod denying;
 pub mod exited;
 mod finding;
-mod goal;
+mod fork;
 mod going;
 mod keyed;
 mod later;
 mod message_menu;
 mod notes;
-mod outline;
 mod pictures;
 mod plan;
 mod proposed;
-pub mod screens;
+mod screens;
 pub(super) mod sharing;
 mod tools;
 mod trail;
 mod tray;
-
-use composer::{context_ring, context_tone};
 
 /// Diffs coloured once, by call.
 type Coloured = HashMap<ItemId, Rc<[Block]>>;
@@ -210,24 +202,6 @@ pub enum ThreadViewEvent {
         /// Its path, absolute, or under `~`.
         path: String,
     },
-    /// "Branch from here" opened: the workspace names the other machines that have the
-    /// thread's repository ([`ThreadView::set_elsewhere`]).
-    AskElsewhere {
-        /// The thread.
-        thread: ThreadId,
-    },
-    /// Go on from the thread on another machine that has its repository: a new thread of
-    /// `agent` there in `cwd`, its first message written but not sent, opening on `seed`.
-    ContinueOn {
-        /// The machine.
-        worker: slopty_client::layout::WorkerKey,
-        /// Where the new thread works there.
-        cwd: String,
-        /// Its agent.
-        agent: AgentId,
-        /// What its composer opens with: a pointer back to this thread.
-        seed: String,
-    },
 }
 
 /// One thread, drawn.
@@ -251,9 +225,6 @@ pub struct ThreadView {
     /// How many runs the thread's first message has, itself among them: one, or as many as it
     /// was started on side by side ([`ThreadViewEvent::ReviewRuns`]).
     runs: usize,
-    /// The other machines that have the thread's repository, as the workspace last said: where
-    /// "Branch from here" can go on.
-    elsewhere: Vec<Elsewhere>,
     /// The last frame drew the empty thread's question with the composer under it.
     heroed: bool,
     /// How many times the composer has docked at the foot after the question, for the move's
@@ -283,8 +254,6 @@ pub struct ThreadView {
     changes_asked: Option<TurnId>,
     /// The changes card lists every file, not only its first few.
     changes_open: bool,
-    /// The prompt whose outline bar the pointer is on, by its row.
-    outline_hovered: Option<usize>,
     /// Calls and reasoning the reader opened.
     items_open: HashSet<ItemId>,
     /// The picture open large over the thread.
@@ -296,13 +265,8 @@ pub struct ThreadView {
     /// Which waiting request the bar shows, by its place among them.
     asked_at: usize,
     plan_open: bool,
-    /// The panel of the work the agent runs in the background is open.
-    tasks_open: bool,
     /// The background tasks whose output is open under their line, by the agent's id.
     tasks_shown: HashSet<String>,
-    /// The meter's panel is open in the tray: the context, each window and its reset, what the
-    /// session cost, and Compact where the agent takes it.
-    meter_open: bool,
     /// Diffs coloured once, by call.
     diffs: RefCell<Coloured>,
     /// Ticks once a second while the agent works (the elapsed time).
@@ -346,8 +310,6 @@ pub struct ThreadView {
     copied_clear: Option<Task<()>>,
     /// The commit sheet over the tile, while it is open.
     commit: Option<(Entity<CommitSheet>, Subscription)>,
-    /// The "Branch from here" panel open under a message, and its settings.
-    branching: Option<branch::Branching>,
     /// A message's own menu, open where it was pressed.
     message_menu: Option<message_menu::MessageMenu>,
     /// The find bar, while it is open.
@@ -533,7 +495,6 @@ impl ThreadView {
             orchestrates: false,
             photos: cfg!(target_os = "ios"),
             runs: 1,
-            elsewhere: Vec::new(),
             heroed: false,
             docks: None,
             width: 0.0,
@@ -548,16 +509,13 @@ impl ThreadView {
             kept: HashSet::new(),
             changes_asked: None,
             changes_open: false,
-            outline_hovered: None,
             items_open: HashSet::new(),
             viewing: None,
             groups: HashSet::new(),
             whole: HashSet::new(),
             asked_at: 0,
             plan_open: false,
-            tasks_open: false,
             tasks_shown: HashSet::new(),
-            meter_open: false,
             diffs: RefCell::default(),
             clock: None,
             composing: Composing::default(),
@@ -579,7 +537,6 @@ impl ThreadView {
             copied: None,
             copied_clear: None,
             commit: None,
-            branching: None,
             message_menu: None,
             finder: None,
             going: None,
@@ -691,15 +648,6 @@ impl ThreadView {
         if self.runs != runs {
             self.runs = runs;
             cx.notify();
-        }
-    }
-
-    /// The other machines that have the thread's repository, where it can go on
-    /// ([`ThreadViewEvent::AskElsewhere`]).
-    pub fn set_elsewhere(&mut self, elsewhere: Vec<Elsewhere>, cx: &mut Context<Self>) {
-        if self.elsewhere != elsewhere {
-            self.elsewhere = elsewhere;
-            self.rebuild(cx);
         }
     }
 
@@ -880,9 +828,7 @@ impl ThreadView {
         unshown: &[&Sent],
     ) -> u64 {
         let flags = |item: &ItemId| {
-            u64::from(self.items_open.contains(item))
-                | (u64::from(self.whole.contains(item)) << 1)
-                | (u64::from(self.branching.as_ref().is_some_and(|b| b.item == *item)) << 2)
+            u64::from(self.items_open.contains(item)) | (u64::from(self.whole.contains(item)) << 1)
         };
         match row {
             Row::User { item }
@@ -1171,22 +1117,6 @@ impl ThreadView {
             self.items_open.extend(steps);
         }
         self.rebuild(cx);
-    }
-
-    /// Switch the model to think at the next level the agent offers after the one it is at,
-    /// round; the first where it says none.
-    fn next_effort(&self, cx: &mut Context<Self>) {
-        let Some(state) = self.state(cx) else { return };
-        let efforts = &state.meta.efforts;
-        if !state.meta.can(Cap::SET_EFFORT) || efforts.is_empty() {
-            return;
-        }
-        let now = state.meters.effort.as_deref();
-        let at = efforts.iter().position(|e| now.is_some_and(|n| n == e.id || n == e.label));
-        let next = at.map_or(0, |ix| ix.saturating_add(1).checked_rem(efforts.len()).unwrap_or(0));
-        if let Some(effort) = efforts.get(next).map(|e| e.id.clone()) {
-            let _id = self.intent(Intent::SetEffort { effort }, cx);
-        }
     }
 
     /// Open `turn`'s work, or fold it: a settled turn's is folded until opened, and one under
@@ -1639,23 +1569,14 @@ impl ThreadView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(item.clone(), cx)))
                 .into_any_element()
         });
-        let branch = self.branch_button(id, turn, cx);
         let actions = self.message_actions(id, at_ms, words.clone(), true, cx);
-        let actions = div()
-            .flex()
-            .items_center()
-            .gap(px(self.theme.spacing.xs))
-            .children(branch)
-            .child(actions);
         // Under a pointer the actions wait at the bubble's foot, beside it, so a line kept for
         // them while they are hidden does not push the answer off its question; under a finger
         // they always show and keep their own line.
         let touch = self.theme.density == slopty_theme::Density::TOUCH;
         let (beside, actions) = if touch { (None, Some(actions)) } else { (Some(actions), None) };
-        let choices =
-            self.branching.as_ref().filter(|b| b.item == *id).and_then(|_| self.branch_panel(cx));
         // Nothing under the bubble keeps no line there, not even the column's gap.
-        let under = (more.is_some() || actions.is_some() || choices.is_some()).then(|| {
+        let under = (more.is_some() || actions.is_some()).then(|| {
             div()
                 .flex()
                 .flex_col()
@@ -1663,7 +1584,6 @@ impl ThreadView {
                 .w_full()
                 .children(more)
                 .children(actions)
-                .children(choices)
                 .into_any_element()
         });
         let row = Self::message_menu_press(div(), id, &words, Some(turn), cx);
@@ -2278,7 +2198,6 @@ impl ThreadView {
             .filter(|p| matches!(p.phase, Phase::NeedsYou | Phase::Waiting))
             .and_then(|p| p.wait.as_ref())
             .map(wait_words);
-        let used = state.and_then(|st| context_used(&st.meters)).filter(|u| *u >= RING_FROM);
         Some(
             div()
                 .id("thread-header")
@@ -2335,22 +2254,6 @@ impl ThreadView {
                     kit::pill(theme, s.text_secondary)
                         .child(SharedString::from(hub.worker().to_owned())),
                 )
-                .children(used.map(|u| {
-                    kit::tabular(div())
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(theme.spacing.xxs))
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .child(context_ring(
-                            theme,
-                            "thread-header-ring",
-                            u,
-                            theme.typography.small(),
-                        ))
-                        .child(SharedString::from(composer::share(u)))
-                }))
                 .into_any_element(),
         )
     }
@@ -2504,7 +2407,6 @@ impl ThreadView {
                 )
                 .hidden_by_list(&self.list),
             )
-            .children(self.outline(cx))
             .children(self.marks.get().down.then(|| self.down_button(cx)))
             .children(self.find_bar(cx))
             .into_any_element()
@@ -2594,7 +2496,6 @@ impl Render for ThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
-            .on_action(cx.listener(|this, _: &CycleEffort, _w, cx| this.next_effort(cx)))
             .on_action(cx.listener(|this, _: &AskAside, window, cx| this.ask_aside(window, cx)))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))

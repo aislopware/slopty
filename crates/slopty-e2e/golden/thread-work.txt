@@ -26,7 +26,6 @@ Group │ The header clips its chips on a narrow window, as here.
 Group │ Thread
 Article │ You: The header clips its chips on a narrow window, as here.
 Button │ Picture, 600 × 200
-Button │ Branch from here
 Button │ Copy message
 Button │ Working: Ran a command · Read a file · 1 more
 Button │ Thought for 3 s
@@ -40,13 +39,12 @@ Article │ The chips now give way from the right, the model first. The release 
 Button │ Copy message
 Group │ Activity
 Button │ Plan, 1 of 3 done
-Button │ In the background
+List │ In the background, 1 finished
 Button │ Build the release binary: Completed
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5
-Button │ 1 finished
-Button │ Context 34% of 200k
+Label │ Context 34% of 200k
 Button │ Send
 Group │ Status
 Status │ Claude Code

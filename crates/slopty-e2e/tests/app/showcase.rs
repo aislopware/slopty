@@ -1702,7 +1702,7 @@ async fn settings(stack: &mut Stack) {
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     // Light only: the form writes the file the theme is switched by.
     shot(&mut stack.driver, "settings-appearance-light").await;
-    for page in ["Terminal", "Input", "Streams", "Network", "Keyboard", "About"] {
+    for page in ["Terminal", "Input", "Network", "Keyboard", "About"] {
         let drv = &mut stack.driver;
         if click(drv, "Tab", page).await {
             drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
@@ -2060,7 +2060,7 @@ async fn showcase_a_claude_code_thread_mid_turn() {
 
     // What the thread changed, in a review tile beside it.
     let drv = &mut stack.driver;
-    if click(drv, "Button", "Review the changes").await {
+    if click(drv, "Button", "Review").await {
         wait(drv, "the review tile", |d| d.items.iter().any(|i| i.kind == "review")).await;
         drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
         both(&mut stack, "claude-review").await;
@@ -2200,7 +2200,7 @@ async fn showcase_a_claude_code_thread_mid_turn() {
 /// Write the project stack's settings in `appearance`, still pointed at its server.
 fn project_appearance(stack: &ProjectStack, appearance: &str) {
     let settings = format!(
-        "{}\n[client]\nserver = \"{}\"\n",
+        "{}\n[network]\nserver = \"{}\"\n",
         pinned_settings(appearance),
         stack.server.address()
     );
@@ -2215,207 +2215,6 @@ async fn board_both(stack: &mut ProjectStack, name: &str) {
     shot(&mut stack.driver, &format!("{name}-dark")).await;
     project_appearance(stack, "light");
     wait(&mut stack.driver, "the light theme", |d| !d.dark).await;
-}
-
-/// The showcase project's name.
-const PROJECT: &str = "atlas-043";
-
-/// A project of eleven tasks in every state: running, blocked, planned, reviewed with changes
-/// asked, a verifier that broke, two waiting in the merge queue, merged, failed, in its lanes.
-#[tokio::test]
-#[ignore = "showcase: cargo xtask e2e showcase"]
-#[expect(clippy::too_many_lines, reason = "one project, made task by task")]
-async fn showcase_a_project_board_in_every_state() {
-    let mut stack = ProjectStack::launch("studio").await.unwrap();
-    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let repo = stack.path("repo").to_string_lossy().into_owned();
-    let term = |v: &Value| v["term"].as_str().unwrap_or_default().to_owned();
-    let session_of = |t: &str| t.rsplit_once('/').map_or(t, |(_, s)| s).to_owned();
-
-    let orchestrator = term(&stack.slopty(&["agent", "spawn", "--cwd", &repo]).await.unwrap());
-    stack
-        .slopty(&[
-            "project",
-            "create",
-            PROJECT,
-            "--title",
-            "Atlas 0.4.3: sessions that cannot be replayed",
-            "--repo",
-            "atlas",
-            "--verifier",
-            "cargo nextest run --workspace",
-            "--review",
-            "Every wire change comes with its migration and a test",
-            "--orchestrator",
-            &orchestrator,
-        ])
-        .await
-        .unwrap();
-    for args in [
-        &[
-            "--title",
-            "Lock the refresh row in one transaction",
-            "--owns",
-            "crates/api/src/session.rs",
-        ][..],
-        &[
-            "--title",
-            "Revoke the family on a replayed token",
-            "--owns",
-            "crates/store/src/family.rs",
-            "--parent",
-            "1",
-        ],
-        &[
-            "--title",
-            "Keep the idempotency key on a retry",
-            "--owns",
-            "crates/api/src/middleware.rs",
-        ],
-        &["--title", "Audit log table and migration", "--owns", "migrations/0007_audit_log.sql"],
-        &["--title", "Write the replay runbook", "--owns", "docs/runbooks/replay.md"],
-        &["--title", "Load test the refresh path", "--read-only", "--depends-on", "1"],
-        &["--title", "Bump tokio to 1.48", "--owns", "Cargo.lock"],
-        &[
-            "--title",
-            "Trace every request with its session id",
-            "--owns",
-            "crates/api/src/trace.rs",
-        ],
-        &["--title", "ws-gateway: cap the reconnect backoff", "--owns", "crates/api/src/ws.rs"],
-        &["--title", "Grafana board for refresh replays", "--owns", "ops/grafana/refresh.json"],
-        &["--title", "Drop the v1 token format", "--owns", "crates/proto/src/token.rs"],
-    ] {
-        let mut create = vec!["task", "create", "--project", PROJECT];
-        create.extend_from_slice(args);
-        stack.slopty(&create).await.unwrap();
-    }
-    let started = tokio::time::Instant::now();
-    loop {
-        let workers = stack.slopty(&["workers"]).await.unwrap();
-        let listed = workers.as_array().into_iter().flatten();
-        if listed.into_iter().any(|w| w["facts"]["agents"]["claude"].is_string()) {
-            break;
-        }
-        assert!(started.elapsed() < STEP, "Claude Code on the worker: {workers}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let mut agents = Vec::new();
-    for task in ["1", "3", "9"] {
-        let spawned = stack
-            .slopty(&["task", "spawn", "--project", PROJECT, task, "--cwd", &repo])
-            .await
-            .unwrap();
-        agents.push(session_of(&term(&spawned)));
-    }
-    let update = |task: &'static str, more: &'static [&'static str]| {
-        let mut args = vec!["task", "update", "--project", PROJECT, "--task", task];
-        args.extend_from_slice(more);
-        args
-    };
-    for args in [
-        update("1", &["--branch", "atlas/043/1", "--status", "Locking with SELECT … FOR UPDATE"]),
-        update("3", &["--branch", "atlas/043/3", "--status", "Copying the key across retries"]),
-        update("9", &["--branch", "atlas/043/9", "--status", "Reproducing the 64 s backoff"]),
-        update(
-            "2",
-            &["--state", "blocked", "--status", "Revoke on the first replay, or the second?"],
-        ),
-        update("6", &["--passed", "--head", "71c9e0a", "--base", "c08d4c1"]),
-        update(
-            "7",
-            &[
-                "--state",
-                "done",
-                "--passed",
-                "--summary",
-                "212 tests passed",
-                "--head",
-                "4a7aa6d",
-                "--base",
-                "c08d4c1",
-            ],
-        ),
-        update(
-            "8",
-            &[
-                "--state",
-                "done",
-                "--passed",
-                "--summary",
-                "212 tests passed",
-                "--head",
-                "e5b0d17",
-                "--base",
-                "c08d4c1",
-            ],
-        ),
-        update(
-            "10",
-            &[
-                "--state",
-                "done",
-                "--passed",
-                "--summary",
-                "212 tests passed",
-                "--head",
-                "0b3f6c2",
-                "--base",
-                "c08d4c1",
-            ],
-        ),
-        update(
-            "4",
-            &[
-                "--failed",
-                "--summary",
-                "   Compiling atlas-store v0.4.2\nerror[E0063]: missing field `actor` in initializer of `AuditRow`\n  --> crates/store/src/audit.rs:41:9\nerror: could not compile `atlas-store`",
-                "--head",
-                "9c1e2f3",
-                "--base",
-                "c08d4c1",
-            ],
-        ),
-        update("11", &["--state", "failed", "--note", "the iOS app still sends v1 tokens"]),
-    ] {
-        stack.slopty(&args).await.unwrap();
-    }
-    stack.slopty(&update("7", &["--state", "merged"])).await.unwrap();
-    stack
-        .slopty(&[
-            "task", "review", "--project", PROJECT, "--task", "6", "--changes", "--summary",
-            "Two blockers", "--finding",
-            "crates/api/benches/refresh.rs:58: The load test reuses one token, so it never takes the lock.",
-            "--finding",
-            "docs/runbooks/replay.md: No step says how to tell a replay from a client bug.",
-        ])
-        .await
-        .unwrap();
-
-    let ready = agents.clone();
-    wait(&mut stack.driver, "the project and its agents", |d| {
-        d.projects.iter().any(|p| p.id == PROJECT && p.tasks.len() == 11)
-            && ready
-                .iter()
-                .all(|a| d.items.iter().any(|i| i.session.as_deref() == Some(a.as_str())))
-    })
-    .await;
-    let drv = &mut stack.driver;
-    drv.reveal(&session_of(&orchestrator)).await.unwrap();
-    drv.keys("cmd-shift-enter").await.unwrap();
-    crate::projects::to_board(drv, PROJECT).await;
-    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    board_both(&mut stack, "project-lanes").await;
-    let drv = &mut stack.driver;
-    let d = look(drv).await;
-    let board = d.projects.iter().find(|p| p.id == PROJECT).unwrap();
-    let cards: Vec<u32> = board.lanes.iter().flat_map(|(_, t)| t.clone()).collect();
-    let at = cards.iter().position(|&t| t == 1).unwrap();
-    drv.keys(&format!("{} enter", vec!["down"; at + 1].join(" "))).await.unwrap();
-    wait(drv, "task 1's agent", |d| !d.focused.starts_with("project:")).await;
-    shot(drv, "project-task-agent-light").await;
-
-    stack.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------------------------
