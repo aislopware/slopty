@@ -1222,3 +1222,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `cargo xtask e2e ios`). A held Bash prompt is denied by a cold launch, the relay ends
     well and the thread's request is gone; the same press again shows "That prompt is no
     longer waiting" in the pressed note's place. It prints a `MEASURE ios-cold` line.
+
+- ✅ **A Mac the person left counts as left at once** (2026-10-12, readiness 10-12 rank 1,
+  the app's half; the server's half is "A need told at the desk reaches the phone once the
+  person leaves it" above). The Mac counted as active until two minutes passed with no input.
+  That was the only sign of leaving, so a need in those first minutes went to the desk alone.
+  - The Mac going to sleep, its screens sleeping (display sleep, or the lid closed on a Mac
+    kept running), its login session giving way to another, and its screen locking each count
+    as left at once (`slopty_platform::away::Left`, from AppKit's workspace and distributed
+    notifications). The idle timeout stays for a person who simply walks off.
+  - Each way of leaving lasts until its own way back (`Left::ended_by`): woke, screens woke,
+    the session back, unlocked. Screens that wake on a locked Mac end only the sleep, so the
+    Mac stays left until it is unlocked. An iPhone or iPad needs none of this, because the
+    system resigns the app when its screen locks.
+  - Tests: `slopty-platform` `away::tests::each_leaving_ends_by_its_own_way_back`;
+    `slopty-app` `presence::tests::a_leaving_lasts_until_its_own_way_back`.
+
+- ✅ **A phone asks for notes once it reaches the server** (2026-10-12, readiness 10-12
+  rank 4). The phone registered for pushes only once alerts were allowed, and on iOS nothing
+  asked until the first note posted, which happened only in the background. So the server
+  knew no phone, held no prompt for one and pushed nothing.
+  - Where pushes are how an agent reaches the person (a phone, an iPad), the navigator
+    carries a line under the server's while notes do not reach them. Never asked, it reads
+    "Notify me when an agent needs me" with Allow, the system's question, asked once while it
+    is up. Turned off, it reads "Notifications are off" with "Turn on", which opens the
+    system's settings. Under either: "Nothing reaches you here while Slopty is away."
+  - The answer goes to the navigator and to the server, which may push to this phone from
+    then on. The state is read again once the server links and on each return to the front,
+    since the person may change it in Settings meanwhile.
+  - Test: `workspace::tests::setup_doors::a_phone_s_navigator_asks_for_notes_until_they_reach_the_person`
+    (slopty-ui).
+
+- ✅ **A tapped note waits for its machine, and a press that did not land says so**
+  (2026-10-12, readiness 10-12 rank 7). On a cold launch, a tap was refused as "not
+  reachable from here" while its worker's link was still dialling, and never tried again. An
+  Allow or Deny pressed with no window that failed only logged, so the person believed it
+  went.
+  - A tap whose tile this device does not have yet waits for its machine to link and send
+    what it holds, saying "Connecting to <machine>…" meanwhile, then goes where it leads. It
+    waits at most 30 s (`attention::PARKED_FOR`): a link slower than that is not what the
+    person is still waiting on. A tap on a tile already here needs no link.
+  - A background answer other than sent posts a note in place of the pressed one
+    (`verdict::missed_note`): the machine could not be reached, named as this device last
+    knew it, or "That prompt is no longer waiting" ("It was answered elsewhere, or it ended.").
+    The note keeps the pressed one's way to the agent without its request, so a tap shows the
+    agent and no button answers twice. A reply that did not go keeps its field.
+  - Tests: `workspace::tests::attention::a_note_tapped_before_its_machine_links_goes_there_once_it_does`
+    (slopty-ui); `verdict::tests::a_background_answer_that_did_not_land_is_said` (slopty-app);
+    the simulator's cold press is "A press on a killed app is proved on the simulator" above.

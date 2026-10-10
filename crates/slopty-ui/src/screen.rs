@@ -165,7 +165,16 @@ pub enum ScreenViewEvent {
     DragOut(Arc<slopty_client::dnd::out::Shared>),
     /// A drag out of the worker's app could not be caught there: why, for a person.
     DragOutFailed(String),
+    /// The person stopped the paste of files the input waits for, from the tile's line: the
+    /// workspace stops what goes up for it.
+    CancelPaste,
 }
+
+/// The line over a window whose input waits for a paste of files.
+pub const PASTE_HELD: &str = "Keys and clicks wait for the pasted files";
+
+/// Its stop, as a screen reader says it.
+pub const CANCEL_PASTE: &str = "Cancel the paste";
 
 /// What the worker answered to `Open`, plus what we asked for.
 #[derive(Clone, Copy, Debug)]
@@ -1838,7 +1847,11 @@ impl ScreenView {
             return;
         }
         if self.paste_hold.0 > 0 {
-            self.paste_hold.1.push(input);
+            // Where the pointer went meanwhile is no news once the files are there: a click
+            // carries its own point, and moves let go of all at once would drag.
+            if !matches!(input, ScreenInput::Move { .. }) {
+                self.paste_hold.1.push(input);
+            }
             return;
         }
         self.send(ScreenRequest::Input { stream: self.stream, input });
@@ -1856,10 +1869,84 @@ impl ScreenView {
         }
     }
 
+    /// The person stopped a paste of files: once no other paste waits, of what was held behind
+    /// it only what lets go of a key or a button goes on, so nothing stays down on the worker
+    /// and the chord pastes nothing stale.
+    pub fn cancel_paste(&mut self, cx: &mut Context<Self>) {
+        self.paste_hold.0 = self.paste_hold.0.saturating_sub(1);
+        if self.paste_hold.0 > 0 {
+            return;
+        }
+        for input in std::mem::take(&mut self.paste_hold.1) {
+            let lets_go = matches!(
+                input,
+                ScreenInput::Key { action: KeyAction::Release, .. }
+                    | ScreenInput::Button { down: false, .. }
+            );
+            if lets_go {
+                self.send(ScreenRequest::Input { stream: self.stream, input });
+            }
+        }
+        cx.notify();
+    }
+
     /// Whether input waits behind a paste of files.
     #[must_use]
     pub const fn paste_held(&self) -> bool {
         self.paste_hold.0 > 0
+    }
+
+    /// The line over the picture while input waits behind a paste of files: what it waits for,
+    /// and its stop ([`ScreenViewEvent::CancelPaste`]). Keys and clicks would otherwise seem
+    /// to go nowhere.
+    fn paste_line(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        if !self.paste_held() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let stop = kit::eased(
+            div()
+                .id("screen-paste-cancel")
+                .debug_selector(|| "screen-paste-cancel".to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(CANCEL_PASTE)
+                .px(px(theme.spacing.xs))
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .text_color(hsla(s.text_secondary)),
+        )
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+        .child("Cancel")
+        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+        .on_click(cx.listener(|_this, _ev, _w, cx| {
+            cx.stop_propagation();
+            cx.emit(ScreenViewEvent::CancelPaste);
+        }));
+        // A pill over a picture floats, as the zoom's readout does.
+        let pill = kit::elevate(kit::pill_frame(theme), theme)
+            .id("screen-paste-held")
+            .debug_selector(|| "screen-paste-held".to_owned())
+            .role(gpui::accesskit::Role::Status)
+            .aria_label(PASTE_HELD)
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .text_color(hsla(s.text_secondary))
+            .font_family(theme.typography.ui_family.clone())
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .child(PASTE_HELD)
+            .child(stop);
+        Some(
+            div()
+                .absolute()
+                .bottom(px(theme.spacing.sm))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(pill),
+        )
     }
 
     /// Window position → stream pixels, at the size the worker maps them with, through the
@@ -2331,7 +2418,8 @@ impl ScreenView {
     /// frame, not when the worker's sample of it comes back.
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
         // Watching, the pointer drawn is the agent's.
-        if self.watching() || !self.inside(ev.position) {
+        // A drop being landed holds the worker's button down: a move would drag what it drops.
+        if self.watching() || !self.inside(ev.position) || self.landing() {
             return;
         }
         let now = cx.background_executor().now();
@@ -3401,6 +3489,7 @@ impl Render for ScreenView {
             // The system's drag is the pointer while one is over the tile.
             .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
             .children(self.drop_ring())
+            .children(self.paste_line(cx))
             .children(
                 self.taking_icons(self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))),
             )
@@ -4497,6 +4586,69 @@ mod tests {
         view.update(cx, |v, _| v.release_paste());
         assert_eq!(keys(&mut rx), [KeyCode::V, KeyCode::X], "the chord, then what followed");
         assert!(!view.read_with(cx, |v, _| v.paste_held()));
+    }
+
+    /// While input waits behind a paste of files the tile says so, with its stop: a click on
+    /// it asks the workspace to stop the paste. Meanwhile the pointer's moves are not kept (a
+    /// click carries its own point); stopped, only what lets go of a key or a button goes on,
+    /// so the chord pastes nothing stale and nothing stays down on the worker.
+    #[gpui::test]
+    fn a_held_paste_says_so_and_stops_letting_go_of_keys_only(cx: &mut gpui::TestAppContext) {
+        use crate::clipboard::ClipFiles;
+        let (view, mut rx, cx) = windowed(cx);
+        let files = ClipFiles::Here(vec![std::path::PathBuf::from("/tmp/a.png")]);
+        view.update(cx, |v, _| {
+            v.set_paste_hook(Rc::new(move || PasteAhead {
+                offer: None,
+                files: Some(files.clone()),
+            }));
+        });
+        let stopped = Rc::new(std::cell::Cell::new(0_u32));
+        let heard = Rc::clone(&stopped);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if matches!(event, ScreenViewEvent::CancelPaste) {
+                    heard.set(heard.get().saturating_add(1));
+                }
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-paste-held").is_none(), "nothing waits yet");
+        while rx.try_recv().is_ok() {}
+
+        view.update(cx, |v, cx| v.press(chord("cmd-v"), cx));
+        let middle = view.read_with(cx, |v, _| v.bounds.center());
+        cx.simulate_mouse_move(middle, None, Modifiers::default());
+        view.update(cx, |v, cx| v.press(chord("x"), cx));
+        cx.run_until_parked();
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).next().is_none(), "all of it waits");
+        let line = cx.debug_bounds("screen-paste-held").expect("the line says what waits");
+        assert!(line.size.width > px(0.0));
+        let stop = cx.debug_bounds("screen-paste-cancel").expect("with its stop");
+        cx.simulate_click(stop.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(stopped.get(), 1, "the workspace is asked to stop it");
+
+        view.update(cx, ScreenView::cancel_paste);
+        cx.run_until_parked();
+        let sent: Vec<ScreenInput> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m {
+                ClientMsg::Screen(ScreenRequest::Input { input, .. }) => Some(input),
+                _ => None,
+            })
+            .collect();
+        assert!(!sent.is_empty(), "the keys are let go of");
+        assert!(
+            sent.iter().all(|i| matches!(
+                i,
+                ScreenInput::Key { action: KeyAction::Release, .. }
+                    | ScreenInput::Button { down: false, .. }
+            )),
+            "only what lets go: {sent:?}"
+        );
+        assert!(!view.read_with(cx, |v, _| v.paste_held()));
+        assert!(cx.debug_bounds("screen-paste-held").is_none(), "the line goes with it");
     }
 
     #[test]

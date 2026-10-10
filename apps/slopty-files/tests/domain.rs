@@ -154,7 +154,7 @@ mod tests {
 
         let into = dir.path().join("fetched");
         std::fs::create_dir_all(&into).unwrap();
-        let (landed, item) = domain.fetch("a.txt", &into, XferId::new()).await.unwrap();
+        let (landed, item) = domain.fetch("a.txt", &into, XferId::new(), None).await.unwrap();
         assert_eq!(std::fs::read(&landed).unwrap(), b"hello");
         assert!(landed.starts_with(&into), "{landed:?}");
         let a = listed.iter().find(|i| i.id == "a.txt").unwrap();
@@ -164,7 +164,8 @@ mod tests {
 
     /// A fetch made while the worker restarted (an update) goes on over the next link the
     /// domain dials, and the file comes down whole: the link the domain held is found gone by
-    /// the fetch itself, which nothing else would dial again.
+    /// the fetch itself, which nothing else would dial again. Its progress counts the file's
+    /// bytes, for Finder's bar.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_fetch_goes_on_once_the_worker_is_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -178,10 +179,14 @@ mod tests {
 
         let into = dir.path().join("fetched");
         std::fs::create_dir_all(&into).unwrap();
-        let fetched = tokio::time::timeout(STEP, domain.fetch("big.bin", &into, XferId::new()));
-        let (landed, item) = fetched.await.expect("fetched within the step").unwrap();
+        let (seen, heard) = tokio::sync::watch::channel(slopty_client::xfer::Brought::default());
+        let fetch = domain.fetch("big.bin", &into, XferId::new(), Some(seen));
+        let (landed, item) = tokio::time::timeout(STEP, fetch).await.expect("in the step").unwrap();
         assert!(std::fs::read(&landed).unwrap() == big, "whole, byte for byte");
         assert_eq!(item.size, big.len() as u64);
+        // What Finder's progress is fed: the file's size as its total, all of it done.
+        let brought = heard.borrow().clone();
+        assert_eq!((brought.done, brought.total), (item.size, item.size), "{brought:?}");
         drop(daemons);
     }
 
@@ -206,7 +211,7 @@ mod tests {
 
         let into = dir.path().join("fetched");
         std::fs::create_dir_all(&into).unwrap();
-        let (landed, item) = domain.fetch(&id, &into, XferId::new()).await.unwrap();
+        let (landed, item) = domain.fetch(&id, &into, XferId::new(), None).await.unwrap();
         assert_eq!(std::fs::read(&landed).unwrap(), b"fn main() {}\n");
         assert_eq!((item.id.as_str(), item.parent.as_str()), ("src/main.rs", "src"));
         drop(daemons);

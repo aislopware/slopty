@@ -1284,7 +1284,7 @@ impl WorkspaceView {
                     let theme = std::rc::Rc::clone(&hint_theme);
                     cx.new(|_| kit::Hint::new(STOP_UPLOAD, "", theme)).into()
                 })
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_upload(xfer, cx)))
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_transfer(xfer, cx)))
                 .into_any_element()
         });
         // A tile showing a thread says where its agent works after the title, the checkout and

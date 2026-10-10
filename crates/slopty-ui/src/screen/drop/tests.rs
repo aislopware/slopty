@@ -234,3 +234,39 @@ fn leaving_the_tile_during_a_worker_drag_hands_it_over(cx: &mut TestAppContext) 
     assert!(cx.debug_bounds("screen-drag-out-items").is_none(), "dropped on the worker");
     assert_eq!(handed.borrow().len(), 1, "nothing more handed over");
 }
+
+/// While a drop is being landed the worker holds its button down at the point, so the pointer
+/// moving over the tile sends no move, which would drag what it drops; once the worker says
+/// how the drop ended, moves go again.
+#[gpui::test]
+fn no_move_leaves_the_tile_while_a_drop_lands(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+
+    let (view, mut rx, cx) = windowed(cx);
+    let moves = |rx: &mut mpsc::Receiver<ClientMsg>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|m| {
+                matches!(
+                    m,
+                    ClientMsg::Screen(ScreenRequest::Input { input: ScreenInput::Move { .. }, .. })
+                )
+            })
+            .count()
+    };
+    let p = at(&view, cx, 0.5, 0.5);
+    let drag = view.update(cx, |v, cx| v.drag_enter(p, &Read::default(), DragOps::COPY, cx));
+    assert!(view.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx)));
+    cx.run_until_parked();
+    while rx.try_recv().is_ok() {}
+    for fx in [0.6, 0.7, 0.8] {
+        cx.simulate_mouse_move(at(&view, cx, fx, 0.5), None, Modifiers::none());
+    }
+    cx.run_until_parked();
+    assert_eq!(moves(&mut rx), 0, "the ring shows: the pointer stays put on the worker");
+
+    let ended = DragEvent::Ended { drag, op: DragOp::Copy, error: None };
+    view.update(cx, |v, cx| v.drag_heard(&ended, cx));
+    cx.simulate_mouse_move(at(&view, cx, 0.3, 0.5), None, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(moves(&mut rx), 1, "landed: the pointer is the person's again");
+}

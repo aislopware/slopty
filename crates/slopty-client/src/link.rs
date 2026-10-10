@@ -354,23 +354,20 @@ impl WorkerLink {
         }
     }
 
-    /// Bring the worker's `path` (a file, or a directory as its files) into the directory
-    /// `into` as transfer `xfer`, for a caller that awaits it rather than blocking on it: a
-    /// File Provider's fetch, which Finder may cancel. Should this link go, it goes on over the
-    /// next link to the worker ([`Line`]), which the caller dials. It stops when
-    /// `self.remote().cancel(xfer)` or [`Line::cancel`] is called.
+    /// Bring the worker's file or directory into a directory here as `ask` says, telling its
+    /// `seen` how far it got, for a caller that awaits it rather than blocking on it: a File
+    /// Provider's fetch, which Finder may cancel and shows the progress of. Should this link go, it
+    /// goes on over the next link to the worker ([`Line`]), which the caller dials. It stops
+    /// when `self.remote().cancel(ask.xfer)` or [`Line::cancel`] is called.
     ///
     /// # Errors
     ///
     /// As [`crate::xfer::download`].
     pub async fn download(
         &self,
-        xfer: XferId,
-        path: String,
-        into: std::path::PathBuf,
+        ask: crate::xfer::Download,
     ) -> Result<Vec<std::path::PathBuf>, XferError> {
-        crate::xfer::download(&self.up, &self.line, crate::xfer::Download::new(xfer, path, into))
-            .await
+        crate::xfer::download(&self.up, &self.line, ask).await
     }
 
     /// Send `files` up into `dest` as transfer `xfer`, for a caller that awaits it: a File

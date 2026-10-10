@@ -397,8 +397,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let rows = self.transfer_rows(cx.background_executor().now());
         let focused = self.focused();
-        let own =
-            self.uploads.values().filter(|u| Some(u.tile) == focused && u.drag.is_none()).count();
+        let own = self.uploads.values().filter(|u| Some(u.tile) == focused && u.listed()).count();
         if rows.len() <= own {
             return None;
         }

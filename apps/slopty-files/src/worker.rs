@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use slopty_client::xfer::XferError;
+use slopty_client::xfer::{Download, Seen, XferError};
 use slopty_client::{LinkEvent, WorkerLink};
 use slopty_core::{ClientId, WorkerId, XferId};
 use slopty_net::HostAddr;
@@ -358,16 +358,24 @@ impl Worker {
         self.send(ClientMsg::WatchFolders { paths }).await
     }
 
-    /// Bring the file `id` down into the directory `into` as transfer `xfer`; the path it
-    /// landed at. [`Self::cancel`] with the same `xfer` stops it. Should this link go, it goes
-    /// on over the next link to the worker, once something dials it.
+    /// Bring the file `id` down into the directory `into` as transfer `xfer`, telling `seen`
+    /// how far it got; the path it landed at. [`Self::cancel`] with the same `xfer` stops it.
+    /// Should this link go, it goes on over the next link to the worker, once something dials
+    /// it.
     ///
     /// # Errors
     ///
     /// The transfer failed or was cancelled, or nothing landed.
-    pub async fn fetch(&self, id: &str, into: &Path, xfer: XferId) -> Result<PathBuf, FilesError> {
+    pub async fn fetch(
+        &self,
+        id: &str,
+        into: &Path,
+        xfer: XferId,
+        seen: Option<Seen>,
+    ) -> Result<PathBuf, FilesError> {
         let path = item::on_worker(self.home(), id);
-        let landed = self.link.download(xfer, path.clone(), into.to_path_buf()).await?;
+        let ask = Download { seen, ..Download::new(xfer, path.clone(), into.to_path_buf()) };
+        let landed = self.link.download(ask).await?;
         landed.into_iter().next().ok_or(FilesError::NoSuchItem(path))
     }
 

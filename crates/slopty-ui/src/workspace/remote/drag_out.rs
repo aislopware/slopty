@@ -21,7 +21,7 @@ use slopty_client::dnd::out::{DataAt, FileAt, Offer, Shared};
 use slopty_client::layout::WorkerKey;
 use slopty_platform::drag::{Data, Give, Keep, Promise};
 
-use super::{WorkspaceView, bring_down_to, promise};
+use super::{Bringing, WorkspaceView, keep_told, promise};
 
 /// How long a promised file's keeping waits for the worker's catch to name it: an app writes a
 /// promised file inside the catch's drop, for as long as it takes.
@@ -65,24 +65,28 @@ impl DragsOut {
 
 impl WorkspaceView {
     /// Drag what the worker `worker`'s drag out carries on from the mouse event being handled.
-    /// Whether a drag began.
+    /// Whether a drag began. Each file kept for the drop's app is listed with the transfers
+    /// while it comes down, with its stop.
     pub(in crate::workspace) fn drag_out_of(
         &mut self,
         worker: WorkerKey,
         shared: &Arc<Shared>,
+        cx: &gpui::Context<Self>,
     ) -> bool {
         let Some(remote) = self.remote(worker) else { return false };
         remote.watch_drag_out(shared);
+        let tell = Self::tell_downloads(worker, Arc::clone(&remote), Bringing::Drag, cx);
         let (mut files, mut data) = (Vec::new(), Vec::new());
         for offer in shared.offers() {
             match offer {
                 Offer::File { path: Some(path), .. } => {
-                    files.extend(promise(Arc::clone(&remote), &path, None));
+                    files.extend(promise(Arc::clone(&remote), &path, tell.clone()));
                 }
                 Offer::File { name, path: None, promise: Some(n) } => {
                     let (remote, shared) = (Arc::clone(&remote), Arc::clone(shared));
+                    let tell = tell.clone();
                     let keep: Keep = Arc::new(move |dest| match shared.promised(n, CATCH_WAIT) {
-                        FileAt::At(path) => bring_down_to(remote.as_ref(), &path, dest),
+                        FileAt::At(path) => keep_told(remote.as_ref(), &path, dest, &tell),
                         FileAt::Waiting => {
                             Err("the machine did not catch the drag in time".to_owned())
                         }

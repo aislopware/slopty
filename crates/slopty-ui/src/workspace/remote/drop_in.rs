@@ -335,6 +335,33 @@ impl WorkspaceView {
         }
     }
 
+    /// `drag` was dropped: the files going up into its landing are what the drop waits for,
+    /// listed with the transfers and holding a quit until they are in.
+    #[cfg(target_os = "macos")]
+    fn drop_made(&mut self, drag: DragId, cx: &mut Context<Self>) {
+        for upload in self.uploads.values_mut().filter(|u| u.drag == Some(drag)) {
+            upload.dropped = true;
+        }
+        cx.notify();
+    }
+
+    /// The person stopped the drop of `drag` on `tile` while its files went up: the window
+    /// lets go of it on the worker, and nothing more goes up for it.
+    pub(in crate::workspace) fn cancel_drop(
+        &mut self,
+        tile: TileRef,
+        drag: DragId,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(%drag, item = %tile.item, "drop cancelled");
+        if let Some(screen) = self.screen(tile.item).cloned()
+            && screen.read(cx).dragging() == Some(drag)
+        {
+            screen.update(cx, ScreenView::drag_leave);
+        }
+        self.stop_drag_uploads(drag, cx);
+    }
+
     /// Stop what goes up into `drag`'s landing.
     fn stop_drag_uploads(&mut self, drag: DragId, cx: &mut Context<Self>) {
         let xfers: Vec<_> =
@@ -376,9 +403,14 @@ impl WorkspaceView {
             return if taken { Taken::AsIs } else { Taken::Refused };
         }
         if promised == 0 {
-            return sent(screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx)));
+            let taken = screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx));
+            if taken {
+                self.drop_made(drag, cx);
+            }
+            return sent(taken);
         }
         screen.update(cx, |v, cx| v.drag_hold(p, cx));
+        self.drop_made(drag, cx);
         state.waiting = Some(Waiting { tile: over.tile, drag, at: p, items, term: None });
         Taken::CallIn
     }
@@ -450,7 +482,11 @@ impl WorkspaceView {
             Self::discard_landing(dropped.landing.clone(), cx);
             return;
         }
-        let upload = Upload { scratch: dropped.landing.clone(), ..Upload::to_drag(tile, drag) };
+        let upload = Upload {
+            scratch: dropped.landing.clone(),
+            dropped: true,
+            ..Upload::to_drag(tile, drag)
+        };
         let _started = self.upload(tile, &dropped.paths, upload, cx);
     }
 

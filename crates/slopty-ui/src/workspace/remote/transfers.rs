@@ -242,7 +242,7 @@ impl WorkspaceView {
         if !self.transfers.downloads.is_empty() {
             return true;
         }
-        self.uploads.values().any(|u| u.drag.is_none()) || !self.transfers.waiting.is_empty()
+        self.uploads.values().any(Upload::listed) || !self.transfers.waiting.is_empty()
     }
 
     fn write_ledger(&self) {
@@ -326,7 +326,7 @@ impl WorkspaceView {
         let Down { worker, xfer, source, dest, versions } = down.clone();
         let name = super::worker_name(&source).to_owned();
         // A drop's place may be another app's scratch, which nobody reads after this run.
-        if bringing != Bringing::Drag {
+        if bringing.kept() {
             let way = Way::Down { source: source.clone(), dest: dest.clone(), versions };
             self.keep_transfer(Kept { xfer, worker, way });
         }
@@ -354,8 +354,7 @@ impl WorkspaceView {
                     let Some(d) = this.transfers.downloads.get_mut(&xfer) else { return };
                     d.pace.note(at, now.done);
                     // A file begun is kept with its version, so the next run resumes it.
-                    let begun = (now.versions != d.brought.versions
-                        && d.bringing != Bringing::Drag)
+                    let begun = (now.versions != d.brought.versions && d.bringing.kept())
                         .then(|| (d.worker, d.source.clone(), d.dest.clone()));
                     d.brought = now;
                     if let Some((worker, source, dest)) = begun {
@@ -390,8 +389,9 @@ impl WorkspaceView {
         let text = match (result, bringing) {
             (Ok(()), Bringing::Copy) => Some(format!("Saved a copy of {name}")),
             (Ok(()), Bringing::Download) => Some(format!("Downloaded {}", super::tildes(&dest))),
-            // The drop's own window showed it land.
-            (Ok(()), Bringing::Drag) => None,
+            // The drop's own window showed it land; the paste it came down for goes on, or
+            // says why not.
+            (Ok(()), Bringing::Drag) | (_, Bringing::Paste) => None,
             (Err(e), _) => Some(format!("{name} was not {}: {e}", bringing.done())),
         };
         if let Some(text) = text {
@@ -402,9 +402,15 @@ impl WorkspaceView {
 
     /// Stop transfer `xfer`, whichever way it goes, or one that waits for its worker; what the
     /// worker holds of an upload stays there.
+    ///
+    /// A drop's files stop with the drop itself: the window lets go of it on the worker, whose
+    /// button no longer waits for them, and the drop's other files stop too.
     pub fn cancel_transfer(&mut self, xfer: XferId, cx: &mut Context<Self>) {
-        if self.uploads.contains_key(&xfer) {
-            self.cancel_upload(xfer, cx);
+        if let Some(upload) = self.uploads.get(&xfer) {
+            match upload.drag {
+                Some(drag) => self.cancel_drop(upload.tile, drag, cx),
+                None => self.cancel_upload(xfer, cx),
+            }
             return;
         }
         #[cfg(not(target_os = "ios"))]
@@ -427,7 +433,7 @@ impl WorkspaceView {
         let mut ups: Vec<TransferRow> = self
             .uploads
             .iter()
-            .filter(|(_, u)| u.drag.is_none())
+            .filter(|(_, u)| u.listed())
             .map(|(xfer, u)| {
                 let machine = machine(u.tile.worker);
                 let words = if u.away_since.is_some() {
@@ -436,7 +442,11 @@ impl WorkspaceView {
                     progress_words(u.done, u.total, &u.pace, now)
                 };
                 let fraction = u.away_since.is_none().then(|| u.fraction());
-                let name = sent(&u.names);
+                // A drop says the window it lands in, as the person aimed it.
+                let name = match self.item(u.tile).filter(|_| u.drag.is_some()) {
+                    Some(item) => format!("{} into {}", sent(&u.names), self.tile_title(item)),
+                    None => sent(&u.names),
+                };
                 let (done, total) = (u.done, u.total);
                 TransferRow { xfer: *xfer, up: true, name, machine, fraction, done, total, words }
             })

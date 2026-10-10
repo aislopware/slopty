@@ -9792,3 +9792,74 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `project::tests::a_merge_whose_push_failed_says_so`,
     `project::tests::a_running_agent_is_told_its_next_step_in_the_person_s_words`;
     `workspace::tests::projects::the_boards_actions_reach_the_server` (slopty-ui).
+
+- ✅ **Files into and out of a remote window are listed, stop, and never freeze the tile**
+  (2026-10-12, readiness audit item 11).
+  - **The defect.** A file dropped on a remote window, dragged out of one, or pasted from
+    another machine had no row in the transfers list, no Cancel and no hold on quitting. While
+    a drop waited for its files, the worker's button stayed down and a pointer move dragged
+    what it dropped. ⌘V of a large file held every key and click with no word, then sent the
+    whole queue at once. Finder's bar for a fetched file counted one unit.
+  - **Drops.** A drag's files still hovering are a guess that goes when the drag leaves, so
+    they stay unlisted. Once dropped they are what the drop waits for (`Upload::dropped`).
+    They are listed as "<files> into <window>" and hold a quit (`Upload::listed`). Cancel,
+    whether in the list or on the header's ring, lets go of the drop on the worker with the
+    drag's leave, which releases its button, and stops the drop's other files too
+    (`cancel_drop`). While the drop ring turns, the tile sends no pointer moves.
+  - **Pastes.** While input waits behind a paste of files, the tile says "Keys and clicks wait
+    for the pasted files", with Cancel. Pointer moves are not kept meanwhile, since a click
+    carries its own point. A stopped paste lets go only of what releases a key or a button
+    (`ScreenView::cancel_paste`), so the chord pastes nothing stale and nothing stays down.
+    Files coming over from another machine for a paste are listed while they come down
+    (`Bringing::Paste`). A cancel there says nothing and sends nothing on.
+  - **Drags out.** Each file a window's drag out keeps for the drop's app is listed while it
+    comes down, with its stop, as a folder tile's drag out already was (`tell_downloads`).
+  - **Finder.** A fetch's progress counts the file's bytes once the transfer names its size,
+    and never runs past its end (`slopty-files` `units`). Creating or saving a file still shows
+    one unit: the File Provider upload path tells no progress yet.
+  - Tests: `screen::tests::a_held_paste_says_so_and_stops_letting_go_of_keys_only`,
+    `screen::drop::tests::no_move_leaves_the_tile_while_a_drop_lands`,
+    `workspace::tests::remote::a_drops_files_are_listed_and_cancel_lets_go_of_the_drop`
+    (slopty-ui); `extension::tests::a_fetch_s_progress_counts_the_file_s_bytes` and the
+    progress check in `tests/domain.rs` `a_fetch_goes_on_once_the_worker_is_back`
+    (slopty-files).
+
+- ✅ **A merged sheet ends its agent and removes the worktree, and follows the pull request**
+  (2026-10-12, readiness audit item 9's A half; the worker's half is lane W's).
+  - **The defect.** "Remove this worktree" on a merged pull request's sheet was refused by the
+    sheet's own thread, which still ran there. The pull request's state showed only when the
+    sheet opened. The composer's foot chip read the sheet's last fetch, while the header chip
+    read the worker's row, so the two could disagree.
+  - **End and remove.** While the sheet's own agent still runs in the worktree, the button
+    reads "End <agent> and remove". Every agent running there in a terminal of its own is
+    ended and its terminal closed. The worktree goes once the worker's table shows none
+    working there (`ended_for_removal`), and at once when none ran. An agent driven over its
+    protocol is not ended on the person's behalf, and the refusal names it.
+  - **One chip, live.** The composer's foot chip is deleted; the header's, from the worker's
+    row, says the same. While the sheet is up, a move of the row's pull request mark (merged
+    on the forge's page, a check that ended) asks for the pull request again.
+  - Tests: `workspace::tests::worktrees::ending_the_agent_frees_its_worktree_once_it_exited`,
+    `conversation::thread::tests::commit::the_sheet_asks_again_when_the_rows_pull_request_moves`
+    (slopty-ui).
+
+- ✅ **The commit sheet takes the thread's own files, keeps its words, and offers a fix**
+  (2026-10-12, readiness audit item 17's A half; the worker restores the index on a failed
+  commit).
+  - **Own files.** A thread's sheet ticks only the files its review over all its turns names,
+    a renamed file by its old path too. The rest stay listed, unticked. Nothing is ticked until
+    that review comes. A folder's sheet, or a thread whose review cannot tell, ticks every
+    file. The person's own ticks win over either.
+  - **Words kept.** The message, the pull request's title and its description are kept per
+    machine and folder in the drafts file, and come back after a relaunch. A press on the
+    scrim or Esc closes the sheet only while it holds no words, since a stray press would
+    otherwise put them out of sight.
+  - **A failed commit.** Under git's or gh's words, "Ask <agent> to fix" tells the thread's
+    agent those words whole, asking it to fix what stopped the commit and leave the commit to
+    the person, where the agent takes a message.
+  - **⌘T.** A new tab's start goes in a new worktree when the last start on that machine, in
+    the same repository, chose one (`worktree_again`), as "New agent…" already did.
+  - Tests: `conversation::thread::tests::commit::a_threads_sheet_ticks_only_its_own_files`,
+    `…::a_sheet_that_cannot_tell_ticks_every_file`,
+    `…::a_failed_commit_offers_to_ask_the_agent_to_fix_it`,
+    `…::a_sheet_with_words_stays_and_its_words_come_back`;
+    `workspace::tests::tab_commands::cmd_t_keeps_the_last_starts_worktree_choice` (slopty-ui).

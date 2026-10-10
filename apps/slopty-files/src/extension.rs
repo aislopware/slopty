@@ -36,7 +36,7 @@ use objc2_foundation::{
 use objc2_uniform_type_identifiers::{
     UTType, UTTypeAliasFile, UTTypeData, UTTypeFolder, UTTypePackage, UTTypeSymbolicLink,
 };
-use slopty_client::xfer::XferError;
+use slopty_client::xfer::{Brought, XferError};
 use slopty_core::{WorkerId, XferId};
 use tokio::runtime::Runtime;
 
@@ -352,15 +352,25 @@ impl Extension {
         let id = id_of(identifier);
         let started = spawn(async move {
             let into = temporary.join(xfer.to_string());
+            let (seen, mut heard) = tokio::sync::watch::channel(Brought::default());
+            let fed = Retained::clone(&done);
+            // Ends when the fetch does, which drops the sender.
+            let _feeding = spawn(async move {
+                while heard.changed().await.is_ok() {
+                    let (total, landed) = units(&heard.borrow_and_update());
+                    fed.setTotalUnitCount(total);
+                    fed.setCompletedUnitCount(landed);
+                }
+            });
             let fetched = match tokio::fs::create_dir_all(&into).await {
-                Ok(()) => domain.fetch(&id, &into, xfer).await,
+                Ok(()) => domain.fetch(&id, &into, xfer, Some(seen)).await,
                 Err(e) => Err(FilesError::Transfer(XferError::Local {
                     path: into.display().to_string(),
                     source: e,
                 })),
             };
             answer_contents(&reply, fetched);
-            done.setCompletedUnitCount(1);
+            done.setCompletedUnitCount(done.totalUnitCount());
         });
         if !started {
             tracing::error!("no runtime to fetch a file on");
@@ -901,7 +911,17 @@ fn no_domain() -> FilesError {
     FilesError::Unreachable("no domain".to_owned())
 }
 
-/// A progress of one unit whose cancel stops transfer `xfer` of `domain`.
+/// A fetch's progress in the units Finder's bar counts: the file's bytes, as the transfer
+/// tells them, its total and how many landed. One unit, none of it landed, until the
+/// transfer names its size, so the bar never runs past its end.
+fn units(brought: &Brought) -> (i64, i64) {
+    let total = i64::try_from(brought.total.max(1)).unwrap_or(i64::MAX);
+    let landed = i64::try_from(brought.done).unwrap_or(i64::MAX).min(total);
+    (total, if brought.total == 0 { 0 } else { landed })
+}
+
+/// A progress of one unit whose cancel stops transfer `xfer` of `domain`; a fetch's counts
+/// the file's bytes once its transfer names them ([`units`]).
 fn cancellable(domain: &Arc<Domain>, xfer: XferId) -> Retained<NSProgress> {
     let progress = NSProgress::discreteProgressWithTotalUnitCount(1);
     let stopping = Arc::clone(domain);
@@ -1169,3 +1189,20 @@ define_class!(
         }
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finder's bar counts a fetch's bytes once its transfer names the file's size, and never
+    /// runs past its end; before that it is one unit, none of it done.
+    #[test]
+    fn a_fetch_s_progress_counts_the_file_s_bytes() {
+        let brought = |done, total| Brought { done, total, ..Brought::default() };
+        assert_eq!(units(&brought(0, 0)), (1, 0), "no size yet");
+        assert_eq!(units(&brought(0, 6_000_000)), (6_000_000, 0));
+        assert_eq!(units(&brought(2_500_000, 6_000_000)), (6_000_000, 2_500_000));
+        assert_eq!(units(&brought(7_000_000, 6_000_000)), (6_000_000, 6_000_000), "capped");
+        assert_eq!(units(&brought(u64::MAX, u64::MAX)), (i64::MAX, i64::MAX));
+    }
+}

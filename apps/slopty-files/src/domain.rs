@@ -6,6 +6,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use parking_lot::Mutex;
+use slopty_client::xfer::Seen;
 use slopty_core::{WorkerId, XferId};
 use slopty_platform::files::Directory;
 use slopty_proto::folder::{FileVersion, FsOp};
@@ -137,8 +138,8 @@ impl Domain {
         listed
     }
 
-    /// Bring the file `id` down into `into` as transfer `xfer`; where it landed, and the item
-    /// as its folder lists it now, its version with it.
+    /// Bring the file `id` down into `into` as transfer `xfer`, telling `seen` how far it got;
+    /// where it landed, and the item as its folder lists it now, its version with it.
     ///
     /// A link that goes meanwhile is dialed again, and the transfer goes on over the new one
     /// from what it holds (`slopty_client::xfer::Line`).
@@ -152,10 +153,11 @@ impl Domain {
         id: &str,
         into: &Path,
         xfer: XferId,
+        seen: Option<Seen>,
     ) -> Result<(PathBuf, Item), FilesError> {
         let worker = self.worker().await?;
         let landed = tokio::select! {
-            landed = worker.fetch(id, into, xfer) => landed?,
+            landed = worker.fetch(id, into, xfer, seen) => landed?,
             never = self.keep_linked() => match never {},
         };
         Ok((landed, self.worker().await?.item(id).await?))

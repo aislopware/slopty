@@ -1383,6 +1383,64 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     assert_eq!(fresh.drag(), None);
 }
 
+/// The files of a drag still hovering over a remote window are a guess, which goes when the
+/// drag leaves: not listed, holding no quit. Dropped, the drop waits for them on the worker,
+/// so they are listed by the window they land in and hold a quit; Cancel there lets go of the
+/// drop on the worker, whose button no longer waits, and stops their upload.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_drops_files_are_listed_and_cancel_lets_go_of_the_drop(cx: &mut TestAppContext) {
+    use slopty_platform::file_drop::Taken;
+    use slopty_proto::drag::{DragEvent, DragInput, DragOp};
+
+    use crate::workspace::remote::DropIn;
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut calls, _board) = connect_remote(&view, cx);
+    let tile = streaming(&view, cx, &studio, StreamId(1));
+    paired(&view, cx, &studio, tile, 2);
+    studio.drain();
+    let body = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn").center();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("shot.png");
+    std::fs::write(&file, b"png").unwrap();
+    let url = format!("file://{}", file.display());
+    let board = Memory::default();
+    board.copy_items(&[&[("public.file-url", url.as_bytes())]]);
+    let mut state = DropIn::default();
+    view.update_in(cx, |v, _w, cx| v.drag_over(&mut state, body, carried(&board, None), cx));
+    let drag = state.drag().expect("the worker's drag");
+    let Some(Call::Upload(xfer, _, Dest::Drag(_))) = calls.try_recv().ok() else {
+        panic!("the files go up as the drag enters")
+    };
+    let rows = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| v.transfer_rows(cx.background_executor().now()))
+    };
+    assert!(rows(cx).is_empty(), "a hover's files are not listed");
+    assert!(!view.read_with(cx, |v, _| v.transfers_in_flight()), "nor hold a quit");
+
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let event = DragEvent::Operation { drag, op: DragOp::Copy };
+        v.screen_event(key, ScreenEvent::Drag { stream: StreamId(1), event }, cx);
+    });
+    let taken = view.update_in(cx, |v, _w, cx| v.drag_dropped(&mut state, body, 0, cx));
+    assert_eq!(taken, Taken::CallIn);
+    let title = view.read_with(cx, |v, _| v.tile_title(v.item(tile).unwrap()));
+    let listed = rows(cx);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].xfer, xfer);
+    assert_eq!(listed[0].name, format!("shot.png into {title}"));
+    assert!(view.read_with(cx, |v, _| v.transfers_in_flight()), "a drop holds a quit");
+    studio.drain();
+
+    view.update_in(cx, |v, _w, cx| v.cancel_transfer(xfer, cx));
+    cx.run_until_parked();
+    assert_eq!(drag_steps(studio.drain()), [DragInput::Leave { drag }], "the drop let go of");
+    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == xfer), "its upload stops");
+    assert!(rows(cx).is_empty(), "nothing left to list");
+    assert!(cx.debug_bounds("screen-drop-ring").is_none(), "no ring turns for it");
+}
+
 /// A drag out the tile hands over goes on as this Mac's drag, and the worker's link is told of
 /// it first, so the catch reaches it off the main thread where a target's read of its data
 /// waits.
@@ -1412,7 +1470,7 @@ fn a_drag_out_going_on_here_is_heard_by_the_link(cx: &mut TestAppContext) {
     };
     let items = vec![DragItem { file: Some(file), promised: None, reps: Vec::new() }];
     let shared = Arc::new(Shared::new(Outgoing::began(drag, items)));
-    let began = view.update_in(cx, |v, _w, _cx| v.drag_out_of(studio.key, &shared));
+    let began = view.update_in(cx, |v, _w, cx| v.drag_out_of(studio.key, &shared, cx));
     assert!(began);
     assert_eq!(parked.get(), 1, "the file goes on as a promise");
     assert!(matches!(calls.try_recv(), Ok(Call::WatchDragOut(d)) if d == drag));
@@ -1485,7 +1543,7 @@ fn a_drag_out_back_over_its_worker_names_its_files_there(cx: &mut TestAppContext
     };
     let own = DragItem { file: Some(file), promised: None, reps: Vec::new() };
     let shared = Arc::new(Shared::new(Outgoing::began(DragId::new(), vec![own.clone()])));
-    assert!(view.update_in(cx, |v, _w, _cx| v.drag_out_of(studio.key, &shared)));
+    assert!(view.update_in(cx, |v, _w, cx| v.drag_out_of(studio.key, &shared, cx)));
     while calls.try_recv().is_ok() {}
     let body = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn").center();
     let dir = tempfile::tempdir().unwrap();

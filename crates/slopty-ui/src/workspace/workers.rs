@@ -1228,12 +1228,13 @@ impl WorkspaceView {
                     }
                     #[cfg(target_os = "macos")]
                     crate::screen::ScreenViewEvent::DragOut(shared) => {
-                        if !this.drag_out_of(tile.worker, shared) {
+                        if !this.drag_out_of(tile.worker, shared, cx) {
                             this.show_notice("The drag could not go on here".to_owned(), cx);
                         }
                     }
                     #[cfg(not(target_os = "macos"))]
                     crate::screen::ScreenViewEvent::DragOut(_) => {}
+                    crate::screen::ScreenViewEvent::CancelPaste => this.cancel_paste_of(&view, cx),
                     crate::screen::ScreenViewEvent::DragOutFailed(why) => {
                         this.show_failure(format!("The drag did not come out: {why}"), cx);
                     }

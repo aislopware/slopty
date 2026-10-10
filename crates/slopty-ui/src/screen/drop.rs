@@ -250,6 +250,12 @@ impl ScreenView {
         Some(icons)
     }
 
+    /// Whether a drop is being landed: its ring shows, and the worker holds its button down
+    /// at the point until the drop is in.
+    pub(super) fn landing(&self) -> bool {
+        self.drop.is_some_and(|d| d.ring.is_some())
+    }
+
     /// The drag over the tile, if one is.
     #[must_use]
     pub fn dragging(&self) -> Option<DragId> {
