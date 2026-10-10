@@ -15847,3 +15847,40 @@ times the whole review, which includes cutting the hunks. It then reads the same
 ```sh
 cargo test -p slopty-worker --release --test review -- --ignored --nocapture review_read_cost
 ```
+
+## 2026-10-10 — CI with the proc macros unoptimised and no doctest step
+
+The first gate run with `.cargo/ci-profile.toml` (every proc-macro dependency at opt-level 0)
+and without the doctest step, against the two runs before it. Every dependent's sccache entry was
+cold on that run, because the macro builds changed, so it is the worst case for the change.
+The batches differ in what they touched: one run each, indicative.
+
+| job (minutes, start to end) | 38025222722 | 38030292188 | 38034648755 (new) |
+| --- | --- | --- | --- |
+| tests worker | 16 | 15 | 11 |
+| tests rest | 16 | 11 | 14 |
+| tests ui | 10 | 11 | 7 |
+| linux | 12 | 12 | 10 |
+| clippy-ios (with rustdoc) | 10 | 9 | 7 |
+| clippy-host | 9 | 6 | 8 |
+| the longest job | 16 | 15 | 14 |
+
+| step (s) | 38025222722 | 38030292188 | 38034648755 |
+| --- | --- | --- | --- |
+| worker `nextest build` | 395.5 | 320.7 | 200.7 |
+| ui `nextest build` | 436.8 | 436.9 | 257.5 |
+| rest `nextest build` | 326.3 | 271.9 | 418.8 |
+| linux `nextest build` | 375.0 | 378.3 | 318.9 |
+| iOS clippy | 247.3 | 231.5 | 156.8 |
+
+- **The worker shard is no longer the critical path.** It was last in 16 of 27 green runs; here
+  it finished three minutes before the rest shard.
+- **The rest shard grew** on this batch, which changed the server, the deploy crate and the
+  proto that rest builds, with its dependents' cache entries cold. The next runs, warm, decide
+  whether opt-level 0 stays (`docs/decisions/tooling.md`, "CI compiles the proc macros
+  unoptimised").
+
+```sh
+gh run view <id> --log | grep -E "✓ (nextest build|clippy|rustdoc)"
+gh run view <id> --json jobs --jq '.jobs[] | "\(.name) \(.startedAt) \(.completedAt)"'
+```
