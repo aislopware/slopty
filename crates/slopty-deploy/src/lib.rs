@@ -50,13 +50,14 @@ mod trust;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 pub use platform::{Arch, Os, Platform, Unsupported};
 pub use secrecy::{ExposeSecret, SecretString};
 use slopty_platform::service::{NOBODY_LOGGED_IN, Report, WORKER_BINARIES};
 pub use slopty_platform::service::{Ptyd, Removed};
 use slopty_proto::ctl::Health;
-pub use ssh::{Echo, Job, Local, OnEvent, PERSIST, Pending, Ran, Runner, Signed, Ssh};
+pub use ssh::{ALIVE, Echo, Job, Local, OnEvent, PERSIST, Pending, Ran, Runner, Signed, Ssh};
 pub use target::{REMEMBERED, Remembered, Server, Target};
 pub use trust::{Fingerprint, HostKey, TrustError};
 
@@ -65,6 +66,25 @@ pub const STAGE: &str = ".slopty/deploy";
 
 /// How many of the install's last lines a failure keeps.
 pub const TAIL: usize = 8;
+
+/// The longest a step that only asks something there may take: a script that answers at once,
+/// on a link `ssh` keeps alive ([`ALIVE`]). Past it the step fails as
+/// [`DeployError::Stalled`].
+pub const ASK_LIMIT: Duration = Duration::from_mins(2);
+/// The longest the install there may take, with the person watching: it stops and starts the
+/// worker's services and waits for them.
+pub const INSTALL_LIMIT: Duration = Duration::from_mins(10);
+/// How long an upload may take before its bytes count ([`upload_limit`]).
+pub const UPLOAD_BASE: Duration = Duration::from_mins(1);
+/// The slowest an upload may go, in bytes a second, before it counts as stalled.
+pub const UPLOAD_FLOOR: u64 = 64 * 1024;
+
+/// The longest an upload of `bytes` may take: [`UPLOAD_BASE`], and its bytes at
+/// [`UPLOAD_FLOOR`].
+#[must_use]
+pub const fn upload_limit(bytes: u64) -> Duration {
+    UPLOAD_BASE.saturating_add(Duration::from_secs(bytes.div_ceil(UPLOAD_FLOOR)))
+}
 
 /// What to deploy, and how.
 #[derive(Clone, Debug)]
@@ -293,6 +313,17 @@ pub enum DeployError {
         /// How many sessions it would end, when they could be counted.
         sessions: Option<u32>,
     },
+    /// A step there did not end within its limit: the link stalled, or the script hung. The
+    /// step was stopped.
+    #[error("`{script}` on {target} did not end within {} s", limit.as_secs())]
+    Stalled {
+        /// The script.
+        script: String,
+        /// The machine.
+        target: String,
+        /// How long it was given.
+        limit: Duration,
+    },
     /// The sign-in with a password failed: `ssh` could not reach the machine, or the machine
     /// refused the password.
     #[error("signing in to {target} failed{}: {stderr}", ended(*status))]
@@ -452,6 +483,15 @@ impl DeployError {
                 ssh_failure(target, *status, stderr, || format!("A step failed on {target}"))
             }
             Self::SignIn { target, status, stderr } => signing_in(target, *status, stderr),
+            Self::Stalled { target, limit, .. } => Failure::new(
+                format!("{target} stopped answering"),
+                Some(format!(
+                    "A step there went on past {} minutes without ending, so it was stopped. \
+                     Check that it is awake and on your tailnet or VPN, then try again.",
+                    limit.as_secs().div_ceil(60)
+                )),
+                Vec::new(),
+            ),
             Self::Upload { name, target, status, stderr } => {
                 ssh_failure(target, *status, stderr, || {
                     format!("Could not copy {name} to {target}")
@@ -1080,6 +1120,23 @@ fn run_error(runner: &dyn Runner, source: std::io::Error) -> DeployError {
     DeployError::Run { program: runner.program(), source }
 }
 
+/// Run `job` on `runner`, stopping it once it has taken `limit`: dropped, the runner's child
+/// is killed.
+async fn run_within(
+    runner: &dyn Runner,
+    job: Job<'_>,
+    on: &mut OnEvent<'_>,
+    limit: Duration,
+) -> Result<Ran, DeployError> {
+    let script = job.script.to_owned();
+    match tokio::time::timeout(limit, runner.run(job, on)).await {
+        Ok(ran) => ran.map_err(|e| run_error(runner, e)),
+        Err(_elapsed) => {
+            Err(DeployError::Stalled { script, target: runner.target().to_owned(), limit })
+        }
+    }
+}
+
 /// What `script` printed; its error output when it fails.
 async fn output(
     runner: &dyn Runner,
@@ -1087,7 +1144,7 @@ async fn output(
     on: &mut OnEvent<'_>,
 ) -> Result<String, DeployError> {
     let job = Job { script, input: None, watch: false };
-    let ran = runner.run(job, on).await.map_err(|e| run_error(runner, e))?;
+    let ran = run_within(runner, job, on, ASK_LIMIT).await?;
     if !ran.status.success() {
         return Err(DeployError::Failed {
             script: script.to_owned(),
@@ -1116,7 +1173,7 @@ async fn install(
         on(event);
     };
     let job = Job { script, input: None, watch: true };
-    let ran = runner.run(job, &mut keep).await.map_err(|e| run_error(runner, e))?;
+    let ran = run_within(runner, job, &mut keep, INSTALL_LIMIT).await?;
     if !ran.status.success() {
         return Err(DeployError::Install {
             script: script.to_owned(),
@@ -1149,7 +1206,7 @@ async fn upload(
         other => on(other),
     };
     let job = Job { script: &script, input: Some((file, len)), watch: false };
-    let ran = runner.run(job, &mut placed).await.map_err(|e| run_error(runner, e))?;
+    let ran = run_within(runner, job, &mut placed, upload_limit(len)).await?;
     if !ran.status.success() {
         return Err(DeployError::Upload {
             name,

@@ -107,6 +107,13 @@ pub struct Ssh {
     pub askpass: Option<PathBuf>,
 }
 
+/// What keeps every `ssh` a deploy runs from hanging on a dead link.
+///
+/// It sends a probe every 5 s inside the encrypted channel and gives the connection up after 3
+/// go unanswered, so a stalled step ends in about 15 s. A caller's own `-o` for either, given
+/// first, wins.
+pub const ALIVE: [&str; 4] = ["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"];
+
 /// How much of a file goes up per write: small enough that the bar moves often.
 const CHUNK: usize = 256 * 1024;
 
@@ -136,9 +143,9 @@ impl Ssh {
     }
 
     /// `script` run by `sh` there, whatever the login shell (the scripts hold no `'`).
-    fn command(&self, script: &str) -> Command {
+    pub(crate) fn command(&self, script: &str) -> Command {
         let mut ssh = Command::new(&self.program);
-        ssh.args(&self.options).arg(&self.target).arg(format!("sh -c '{script}'"));
+        ssh.args(&self.options).args(ALIVE).arg(&self.target).arg(format!("sh -c '{script}'"));
         ssh.kill_on_drop(true);
         ssh
     }
@@ -305,7 +312,7 @@ impl Ssh {
         {
             ssh.arg("-o").arg(option);
         }
-        ssh.args(["-f", "-N"]).args(&self.options).arg(&self.target);
+        ssh.args(["-f", "-N"]).args(&self.options).args(ALIVE).arg(&self.target);
         ssh.env("SSH_ASKPASS_REQUIRE", "force").env("SSH_ASKPASS", helper).env(askpass::SOCK, sock);
         ssh.kill_on_drop(true);
         ssh

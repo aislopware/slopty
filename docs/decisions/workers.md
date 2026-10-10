@@ -1263,3 +1263,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `tests::{a_removal_uploads_the_cli_and_runs_its_purge,
     a_local_removal_runs_in_place_and_a_password_signs_in_once, a_removal_that_cannot_go_says_why}`;
     `slopty-workerd` `purge::a_purge_leaves_nothing_the_daemons_wrote`.
+
+- ✅ **A deploy step that stalls ends, and says the machine stopped answering** (2026-10-11,
+  readiness 10-11 rank 15, W half).
+  - **The defect.** An Update over a link that stalled mid-upload never ended. `ssh` had only
+    `ConnectTimeout`, so a connection that died after it was made waited on TCP for as long as
+    the OS let it.
+  - **Keepalives.** Every `ssh` a deploy runs, the steps and the password sign-in's shared
+    master alike, now carries `ServerAliveInterval=5` and `ServerAliveCountMax=3`
+    (`slopty_deploy::ALIVE`). A dead link ends the step in about 15 s. The caller's own `-o`
+    comes first and wins.
+  - **Step limits.** A script that hangs on a live link is stopped at its step's limit:
+    - a question (`uname`, the plan, the doctor): 2 minutes;
+    - the install the person watches: 10 minutes;
+    - an upload: 1 minute plus its bytes at 64 KiB/s, so a large binary on a slow link is not
+      cut off.
+    The step's child is killed, and the deploy fails as `DeployError::Stalled`, which the
+    window shows as "{machine} stopped answering" with what to check.
+  - Test: `a_step_that_stalls_fails_within_its_bound` (slopty-deploy). A runner that never ends
+    fails each kind of step at exactly its bound, scaled by bytes for an upload, and the `ssh`
+    command carries the keepalives.

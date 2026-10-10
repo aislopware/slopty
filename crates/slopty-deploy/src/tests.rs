@@ -89,7 +89,8 @@ impl Host {
         let (ssh, log) = (dir.path().join("ssh"), dir.path().join("log"));
         let doctor = serde_json::to_string(health).unwrap();
         let script = format!(
-            "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
+            "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\n\
+             printf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
              case $2 in\n\
              *'uname -sm'*) echo '{uname}' ;;\n\
              *'--plan'*) echo '{KEPT}' ;;\n\
@@ -819,11 +820,10 @@ impl Sshd {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let deadline =
-            tokio::time::Instant::now().checked_add(std::time::Duration::from_secs(10)).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
         while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
             assert!(tokio::time::Instant::now() < deadline, "sshd listens on {port}");
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Some(Self { dir, port, _daemon: sshd })
     }
@@ -1287,7 +1287,7 @@ fn the_key_is_the_agent_s_first_else_the_newest_id_pub() {
     write("id_rsa.pub", "ssh-rsa AAAAold old\n");
     write("id_ed25519.pub", "ssh-ed25519 AAAAnew new\n");
     let aged = |name: &str, secs: u64| {
-        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(secs);
         std::fs::File::options()
             .write(true)
             .open(dir.path().join(name))
@@ -1407,4 +1407,64 @@ async fn a_removal_that_cannot_go_says_why() {
     let failed = done.unwrap_err();
     assert!(matches!(failed, DeployError::NotRemoved { .. }), "{failed:?}");
     assert_eq!(failed.failure().title, "The uninstall did not say what it removed");
+}
+
+/// A runner whose scripts never end: a link that stalled mid-step, or a script that hung.
+#[derive(Debug)]
+struct Stalls;
+
+impl Runner for Stalls {
+    fn target(&self) -> &'static str {
+        "mini"
+    }
+
+    fn program(&self) -> String {
+        "ssh".to_owned()
+    }
+
+    fn run<'a>(
+        &'a self,
+        job: Job<'a>,
+        on: &'a mut OnEvent<'_>,
+    ) -> Pending<'a, std::io::Result<Ran>> {
+        if let Some((_file, len)) = &job.input {
+            on(Event::Sent { sent: len / 4, total: *len });
+        }
+        Box::pin(std::future::pending())
+    }
+}
+
+/// A step that never ends fails within its limit, says the machine stopped answering, and an
+/// upload's limit grows with its bytes; `ssh` itself is told to give up a dead link.
+#[tokio::test(start_paused = true)]
+async fn a_step_that_stalls_fails_within_its_bound() {
+    let mut on = |_event: Event| {};
+    let started = tokio::time::Instant::now();
+    let asked = output(&Stalls, "uname -sm", &mut on).await.unwrap_err();
+    let DeployError::Stalled { limit, .. } = &asked else { panic!("{asked:?}") };
+    assert_eq!(*limit, ASK_LIMIT);
+    assert_eq!(started.elapsed(), ASK_LIMIT, "given up at its bound, not after");
+    let failure = asked.failure();
+    assert_eq!(failure.title, "mini stopped answering");
+
+    let started = tokio::time::Instant::now();
+    let installed = install(&Stalls, "slopty worker install", &mut on).await.unwrap_err();
+    assert!(matches!(installed, DeployError::Stalled { limit, .. } if limit == INSTALL_LIMIT));
+    assert_eq!(started.elapsed(), INSTALL_LIMIT);
+
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("slopty-workerd");
+    let bytes = 8 * UPLOAD_FLOOR;
+    std::fs::write(&binary, vec![0; usize::try_from(bytes).unwrap()]).unwrap();
+    let started = tokio::time::Instant::now();
+    let sent = upload(&Stalls, &binary, "slopty-workerd", (0, bytes), &mut on).await.unwrap_err();
+    let bound = UPLOAD_BASE + Duration::from_secs(8);
+    assert!(matches!(sent, DeployError::Stalled { limit, .. } if limit == bound), "{sent:?}");
+    assert_eq!(started.elapsed(), bound, "scaled to its bytes");
+
+    let ssh = Ssh::new(PathBuf::from("ssh"), "mini".to_owned());
+    let args: Vec<String> =
+        ssh.command("true").as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let alive = ALIVE.map(str::to_owned);
+    assert!(args.windows(4).any(|w| w == alive), "{args:?}");
 }
