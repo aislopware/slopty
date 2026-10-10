@@ -39,7 +39,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     std::fs::create_dir_all(&home).unwrap();
     let doctor = serde_json::to_string(&health()).unwrap();
     let script = format!(
-        "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
+        "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
          case $2 in\n\
          *'uname -sm'*) echo 'Darwin arm64' ;;\n\
          *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2}}' ;;\n\
@@ -112,7 +112,7 @@ async fn a_server_deploy_installs_the_server_and_names_where_it_is() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let script = format!(
-        "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
+        "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
          case $2 in\n\
          *'uname -sm'*) echo 'Darwin arm64'; echo '100.64.0.2 51234 100.64.0.9 22' ;;\n\
          *'server install'*) ;;\n\
