@@ -349,6 +349,7 @@ impl Model {
             from: file.from.clone(),
             stamp: file.to.clone(),
             hunks,
+            old_path: file.old_path.clone(),
         };
         Some(if keep { Intent::Keep(pick) } else { Intent::Revert(pick) })
     }
@@ -503,6 +504,7 @@ mod tests {
                 from: Some("src/a.rs@old".to_owned()),
                 stamp: Some("src/a.rs@new".to_owned()),
                 hunks: vec![0],
+                old_path: None,
             }))
         );
         assert_eq!(model.keep_all().len(), 2, "mark reviewed keeps every file");

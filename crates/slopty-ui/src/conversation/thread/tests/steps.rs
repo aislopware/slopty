@@ -483,6 +483,7 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
         from: Some("old".to_owned()),
         stamp: Some("new".to_owned()),
         hunks: Vec::new(),
+        old_path: None,
     };
     assert_eq!(kept, [Intent::Keep(pick)], "each file as the review showed it");
     let rows = view.read_with(cx, |v, _| v.rows().to_vec());

@@ -770,8 +770,13 @@ mod pi {
         let stamp = git(&["hash-object", "a.txt"]);
         let snapshots =
             Snapshots::new(rig.host.clone(), &rig.data.join("snapshots"), Some("git".into()));
-        let pick =
-            Pick { path: "a.txt".to_owned(), from: Some(from), stamp: Some(stamp), hunks: vec![] };
+        let pick = Pick {
+            path: "a.txt".to_owned(),
+            from: Some(from),
+            stamp: Some(stamp),
+            hunks: vec![],
+            old_path: None,
+        };
         let id = IntentId::new();
         assert_eq!(snapshots.pick(thread, id, &Intent::Revert(pick)).await, Some(Outcome::Done));
         assert_eq!(std::fs::read_to_string(rig.work.join("a.txt")).unwrap(), "first\n");

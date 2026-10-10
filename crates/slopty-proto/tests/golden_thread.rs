@@ -862,6 +862,7 @@ mod golden_thread {
             from: Some("aa11".to_owned()),
             stamp: Some("bb22".to_owned()),
             hunks: vec![0],
+            old_path: None,
         };
         snap("review_keep", &Intent::Keep(pick.clone()));
         snap("review_revert", &Intent::Revert(Pick { hunks: vec![], ..pick }));

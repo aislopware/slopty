@@ -15827,3 +15827,23 @@ each.
 cargo test -p slopty-ui --lib measure_a_key_into_the_outbound_queue -- --ignored --nocapture
 # before: HEAD's crates/slopty-ui/src/terminal/view.rs copied over the file, run, then restored
 ```
+
+## 2026-10-11 — reading a review's blobs: one batch against one git each
+
+A review used to read each changed file's two sides with a `git cat-file blob` of its own, in
+turn. It now reads every side of the review through one `git cat-file --batch`. A side past the
+size cut into hunks streams through and is not held. The test writes 300 changed files and
+times the whole review, which includes cutting the hunks. It then reads the same 600 blobs one
+`cat-file` each, as the review did before. Release test profile, mac-studio, one run.
+
+| what | time |
+| --- | --- |
+| the whole review of 300 changed files, blobs batched | 16.0 ms |
+| their 600 blobs, one `git cat-file` each | 4.38 s |
+
+- **A process per blob was nearly all of it.** A review of a few hundred files went from seconds
+  to milliseconds, so a big review opens about as fast as a small one.
+
+```sh
+cargo test -p slopty-worker --release --test review -- --ignored --nocapture review_read_cost
+```

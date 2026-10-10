@@ -78,6 +78,7 @@ impl ThreadView {
                 from: file.from.clone(),
                 stamp: file.to.clone(),
                 hunks: Vec::new(),
+                old_path: file.old_path.clone(),
             };
             let intent = if keep { Intent::Keep(pick) } else { Intent::Revert(pick) };
             let _id = self.intent(intent, cx);

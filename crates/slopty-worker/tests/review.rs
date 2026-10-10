@@ -132,7 +132,13 @@ mod review {
 
     fn pick(review: &Review, path: &str, hunks: Vec<u32>) -> Pick {
         let diff = file(review, path).unwrap();
-        Pick { path: path.to_owned(), from: diff.from.clone(), stamp: diff.to.clone(), hunks }
+        Pick {
+            path: path.to_owned(),
+            from: diff.from.clone(),
+            stamp: diff.to.clone(),
+            hunks,
+            old_path: diff.old_path.clone(),
+        }
     }
 
     /// A turn's start is snapshotted when the agent starts working, its end when it ends, both
@@ -230,6 +236,62 @@ mod review {
         assert_eq!(rig.pick(IntentId::new(), &gone).await, Outcome::Done);
         assert!(!repo.join("new.txt").exists(), "an added file put back is no file");
         assert!(to_review(), "what was kept is gone from the tree: a change to review");
+    }
+
+    /// A review tells each file for what it is: a file moved and touched is one rename with
+    /// its old path and its hunks, a picture its size, a text file too large to cut its size, a
+    /// binary file none, and a mode change its two modes. A rename kept takes the old path out
+    /// of what is kept, and put back whole it goes back to where it was.
+    #[tokio::test]
+    async fn renames_pictures_large_files_and_modes_are_told_and_a_rename_keeps_whole() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use slopty_proto::thread::wire::{FileKind, Modes};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let rig = Rig::new(dir.path(), &repo);
+        rig.status(Phase::Working);
+        rig.begin(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
+        std::fs::remove_file(repo.join("a.txt")).unwrap();
+        std::fs::write(repo.join("moved.txt"), A.replace("twelve\n", "TWELVE\n")).unwrap();
+        let png = [&b"\x89PNG\r\n\x1a\n"[..], &[0; 24]].concat();
+        std::fs::write(repo.join("pic.png"), &png).unwrap();
+        let big = "x\n".repeat(slopty_worker::repo::snapshot::TEXT_BYTES / 2 + 1);
+        std::fs::write(repo.join("big.txt"), &big).unwrap();
+        std::fs::write(repo.join("bin.dat"), b"a\0b").unwrap();
+        let gone = repo.join("gone.txt");
+        std::fs::set_permissions(&gone, std::fs::Permissions::from_mode(0o755)).unwrap();
+        rig.end(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
+        rig.until(|s| s.to_review).await;
+        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
+
+        let moved = file(&review, "moved.txt").unwrap();
+        assert_eq!(moved.old_path.as_deref(), Some("a.txt"), "one rename: {review:#?}");
+        assert!(file(&review, "a.txt").is_none(), "not a removal beside an addition");
+        assert_eq!((moved.kind, moved.patch.hunks.len()), (FileKind::Text, 1));
+        let size = |path: &str| file(&review, path).map(|f| f.kind);
+        let png_bytes = u64::try_from(png.len()).unwrap();
+        assert_eq!(size("pic.png"), Some(FileKind::Image { bytes: png_bytes }));
+        let big_bytes = u64::try_from(big.len()).unwrap();
+        assert_eq!(size("big.txt"), Some(FileKind::TooLarge { bytes: big_bytes }));
+        assert_eq!(size("bin.dat"), Some(FileKind::Binary));
+        let mode = file(&review, "gone.txt").unwrap();
+        assert_eq!(mode.modes, Some(Modes { from: 0o100_644, to: 0o100_755 }));
+        assert!(mode.patch.hunks.is_empty(), "the bytes are the same");
+
+        let keep = Intent::Keep(pick(&review, "moved.txt", vec![]));
+        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
+        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
+        let named = |path: &str| file(&left, path).is_some();
+        assert!(!named("moved.txt") && !named("a.txt"), "the rename kept whole: {left:#?}");
+
+        let back = Intent::Revert(pick(&review, "moved.txt", vec![]));
+        assert_eq!(rig.pick(IntentId::new(), &back).await, Outcome::Done);
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), A, "back where it was");
+        assert!(!repo.join("moved.txt").exists(), "and gone from where it went");
     }
 
     /// A file two turns changed, neither kept: keeping the last turn's review (the scope a
@@ -612,5 +674,38 @@ mod review {
         for (label, took) in timed {
             eprintln!("  {label:>18}: {took:?}");
         }
+    }
+
+    /// What a review of many changed files costs to read: the whole review, its blobs read by
+    /// one `git cat-file --batch`, beside the same blobs read one `git cat-file` each, as the
+    /// review read them before. Printed, not judged.
+    #[tokio::test]
+    #[ignore = "a measurement: cargo test -p slopty-worker --release --test review -- --ignored --nocapture"]
+    async fn review_read_cost_of_many_files() {
+        const FILES: usize = 300;
+        let dir = tempfile::tempdir().unwrap();
+        let root = repository(dir.path());
+        let repo = Repo { git: git(), root: root.clone(), index: dir.path().join("index") };
+        for i in 0..FILES {
+            std::fs::write(root.join(format!("f{i}.txt")), A).unwrap();
+        }
+        let from = repo.take().await.unwrap();
+        for i in 0..FILES {
+            std::fs::write(root.join(format!("f{i}.txt")), A.replace("six\n", "SIX\n")).unwrap();
+        }
+        let to = repo.take().await.unwrap();
+        let started = std::time::Instant::now();
+        let files = repo.changes(&from, &to).await.unwrap();
+        let review = started.elapsed();
+        assert_eq!(files.len(), FILES);
+        let started = std::time::Instant::now();
+        for file in &files {
+            for id in file.from.iter().chain(file.to.iter()) {
+                repo.object(id).await.unwrap();
+            }
+        }
+        let one_each = started.elapsed();
+        eprintln!("a review of {FILES} changed files: {review:?} whole, batched");
+        eprintln!("  their {} blobs one cat-file each: {one_each:?}", FILES * 2);
     }
 }

@@ -467,6 +467,10 @@ pub struct Pick {
     pub stamp: Option<String>,
     /// The hunks, by their place in [`FileDiff::patch`]; empty for the whole file.
     pub hunks: Vec<u32>,
+    /// Where the file was on the old side when the review found it renamed
+    /// ([`FileDiff::old_path`]); `None` otherwise. Keeping a rename takes the old path away;
+    /// putting it back whole puts the file back there.
+    pub old_path: Option<String>,
 }
 
 impl Intent {
@@ -661,8 +665,8 @@ pub enum FileKind {
     Text,
     /// Bytes that are not text and not a picture the client draws.
     Binary,
-    /// Text larger than the worker cuts into hunks; its whole diff is asked for by
-    /// [`crate::git::GitOp::FileDiff`].
+    /// Text larger than the worker cuts into hunks, review or [`crate::git::GitOp::FileDiff`]
+    /// alike: shown by its size, the file opened whole to read it.
     TooLarge {
         /// The larger side's size, in bytes.
         bytes: u64,

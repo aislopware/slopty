@@ -2726,3 +2726,34 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     to review, keeping the first then leaves nothing, and a later change over a line kept
     otherwise is refused naming it. Also `three_ways_merge_apart_and_meet_where_they_touch`
     (`repo/snapshot.rs`).
+
+- ✅ **A review tells renames, pictures, large files and modes, and reads its blobs in one batch**
+  (2026-10-11, readiness 10-11 rank 18, worker half).
+  - **What was wrong.**
+    - A file moved and touched read as a removal and an addition.
+    - A large text file and a picture both said "Binary file".
+    - A change to the executable bit said "No lines to show".
+    - Every side of every file cost a `git cat-file` of its own, in turn.
+  - **Renames.** The worker diffs the two trees with `-M`, so a rename is one `FileDiff` with its
+    `old_path`. A `Pick` carries the `old_path` too (a wire field, added for this):
+    - Keeping a rename takes the old path out of what is kept.
+    - Putting a rename back whole writes the old side back to its old path and removes the new
+      one. It is refused when something else is at the old path again.
+    - A hunk of a rename put back stays at the new path.
+  - **Kinds.**
+    - A picture (by extension) is `Image` with its larger side's size, and the client asks for
+      its blobs (`GitOp::Blob`).
+    - Text past `TEXT_BYTES` is `TooLarge` with its size, opened whole to read it.
+    - Bytes with a NUL in git's 8000-byte head are `Binary`.
+    - A mode change carries both modes.
+  - **One read per review.** Every side of a review is read by one `git cat-file --batch`. A
+    side past `TEXT_BYTES` streams through, and only its head is kept. 300 changed files: 16 ms
+    for the whole review, against 4.4 s to read the same blobs one process each
+    (`docs/MEASUREMENTS.md`).
+  - **One review at a time.** A thread's stream aborts the review it is still reading when
+    another is asked for, and when the stream ends. Only the latest is shown.
+  - Tests:
+    - `renames_pictures_large_files_and_modes_are_told_and_a_rename_keeps_whole` (slopty-worker
+      `tests/review.rs`);
+    - `a_review_asked_again_stops_the_one_before` (slopty-workerd `threads.rs`);
+    - the `review_keep`/`review_revert` goldens.

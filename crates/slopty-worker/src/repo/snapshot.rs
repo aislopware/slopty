@@ -19,6 +19,7 @@
 //! its place ([`Pick::hunks`]) is the hunk the review showed, as long as both of its sides are
 //! the blobs it showed. Each change is checked against them before anything is written.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,7 +29,7 @@ use similar::{Algorithm, DiffOp, DiffTag};
 use slopty_proto::git::BLOB_MAX;
 use slopty_proto::thread::detail::{Hunk, heading};
 use slopty_proto::thread::wire::{
-    Against, FileDiff, FileKind, Pick, Review, ReviewScope, reading_order,
+    Against, FileDiff, FileKind, Modes, Pick, Review, ReviewScope, reading_order,
 };
 use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
 use tokio::io::AsyncWriteExt as _;
@@ -319,9 +320,9 @@ impl Repo {
     pub async fn trailed(
         &self,
         commits: &[String],
-    ) -> Result<std::collections::HashMap<String, (ThreadId, slopty_core::WallMs)>, Failed> {
+    ) -> Result<HashMap<String, (ThreadId, slopty_core::WallMs)>, Failed> {
         if commits.is_empty() {
-            return Ok(std::collections::HashMap::new());
+            return Ok(HashMap::new());
         }
         let format =
             "--format=%H%x1f%ct%x1f%(trailers:key=Slopty-Thread,valueonly,separator=%x2C)%x1e";
@@ -399,25 +400,91 @@ impl Repo {
     /// # Errors
     ///
     /// When git fails.
+    ///
+    /// A file moved with its content mostly kept is one rename (`-M`), its old path named. Its
+    /// sides are read in one `git cat-file --batch` for the whole review, and only a text side
+    /// small enough to cut is held whole: a picture or a larger file says its size instead.
     pub async fn changes(&self, from: &TreeRef, to: &TreeRef) -> Result<Vec<FileDiff>, Failed> {
-        let raw = self
-            .run(&["diff-tree", "-r", "-z", "--no-renames", &from.0, &to.0], None, None)
-            .await?;
+        let raw = self.run(&["diff-tree", "-r", "-z", "-M", &from.0, &to.0], None, None).await?;
+        let entries = parse_raw(&raw);
+        let ids: Vec<&str> = entries
+            .iter()
+            .flat_map(|e| e.from.iter().chain(e.to.iter()))
+            .map(String::as_str)
+            .collect();
+        let read = self.read_blobs(&ids).await?;
+        let none = Read::default();
+        let side =
+            |id: &Option<String>| id.as_ref().map_or(&none, |id| read.get(id).unwrap_or(&none));
         let mut files = Vec::new();
-        for entry in parse_raw(&raw) {
-            let (binary, patch) = self.patch(entry.from.as_deref(), entry.to.as_deref()).await?;
+        for entry in entries {
+            let (old, new) = (side(&entry.from), side(&entry.to));
+            let bytes = old.size.max(new.size);
+            let (kind, patch) = match (old.text(), new.text()) {
+                _ if is_picture(&entry.path) => (FileKind::Image { bytes }, empty_patch()),
+                (Some(old), Some(new)) => (FileKind::Text, diff(&lossy(old), &lossy(new))),
+                _ if old.binary || new.binary => (FileKind::Binary, empty_patch()),
+                _ => (FileKind::TooLarge { bytes }, empty_patch()),
+            };
+            let modes = entry.modes.filter(|m| m.from != 0 && m.to != 0 && m.from != m.to);
             files.push(FileDiff {
                 path: entry.path,
-                old_path: None,
+                old_path: entry.old_path,
                 from: entry.from,
                 to: entry.to,
-                kind: if binary { FileKind::Binary } else { FileKind::Text },
-                modes: None,
+                kind,
+                modes,
                 patch,
             });
         }
         spend(&mut files, REVIEW_LINES);
         Ok(files)
+    }
+
+    /// The blobs `ids` names, read by one `git cat-file --batch`: each one's size, whether its
+    /// head holds a NUL (git's own test for binary), and its bytes when it is text no larger
+    /// than [`TEXT_BYTES`]. A larger blob streams past without being held.
+    async fn read_blobs(&self, ids: &[&str]) -> Result<HashMap<String, Read>, Failed> {
+        let mut unique: Vec<&str> = ids.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut command = tokio::process::Command::new(&self.git);
+        command
+            .arg("-C")
+            .arg(&self.root)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut asked = unique.join("\n");
+        asked.push('\n');
+        let run = async {
+            let mut child = command.spawn().map_err(|e| Failed(format!("git: {e}")))?;
+            let mut stdin = child.stdin.take();
+            let feed = async move {
+                if let Some(stdin) = stdin.as_mut() {
+                    stdin.write_all(asked.as_bytes()).await?;
+                }
+                drop(stdin);
+                Ok::<(), std::io::Error>(())
+            };
+            let stdout = child.stdout.take().ok_or_else(|| Failed("git: no output".to_owned()))?;
+            let (fed, read) = tokio::join!(feed, batch(stdout, unique.len()));
+            fed.map_err(|e| Failed(format!("git cat-file: {e}")))?;
+            let read = read.map_err(|e| Failed(format!("git cat-file: {e}")))?;
+            let status = child.wait().await.map_err(|e| Failed(format!("git: {e}")))?;
+            if !status.success() {
+                return Err(Failed(format!("git cat-file --batch ended {status}")));
+            }
+            Ok(read)
+        };
+        tokio::time::timeout(GIT_TIMEOUT, run)
+            .await
+            .map_err(|_elapsed| Failed("git cat-file took too long".to_owned()))?
     }
 
     /// One file's hunks whole, from blob `from` to blob `to` (none for a side the file lacks),
@@ -474,6 +541,26 @@ impl Repo {
             return Err(Failed(format!("{} changed since it was reviewed", pick.path)));
         }
         let old = self.blob(pick.from.as_deref()).await?;
+        // A rename put back whole goes back to where it was.
+        if let Some(was) =
+            pick.old_path.as_deref().filter(|was| pick.hunks.is_empty() && *was != pick.path)
+        {
+            let there = self.stamp(was).await?;
+            if there.is_some() && there != pick.from {
+                return Err(Failed(format!(
+                    "{was} is there again, so {} cannot go back to it",
+                    pick.path
+                )));
+            }
+            let back = self.inside(was)?;
+            if let Some(dir) = back.parent() {
+                tokio::fs::create_dir_all(dir).await.map_err(|e| Failed(format!("{was}: {e}")))?;
+            }
+            tokio::fs::write(&back, &old).await.map_err(|e| Failed(format!("{was}: {e}")))?;
+            return tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| Failed(format!("{}: {e}", pick.path)));
+        }
         let bytes = if pick.hunks.is_empty() {
             if pick.from.is_none() {
                 return tokio::fs::remove_file(&path)
@@ -517,7 +604,11 @@ impl Repo {
         pick: &Pick,
     ) -> Result<TreeRef, Failed> {
         let kept = self.kept(thread).await?.unwrap_or_else(|| base.clone());
-        let now = self.entry(&kept, &pick.path).await?;
+        // A rename not kept yet is still at its old path in what is kept.
+        let now = match (self.entry(&kept, &pick.path).await?, pick.old_path.as_deref()) {
+            (None, Some(old)) => self.entry(&kept, old).await?,
+            (now, _) => now,
+        };
         let kept_blob = now.as_ref().map(|(_, blob)| blob.clone());
         let as_reviewed = kept_blob == pick.from;
         let chosen = if pick.hunks.is_empty() {
@@ -568,6 +659,10 @@ impl Repo {
                 let mode = now.map_or_else(|| "100644".to_owned(), |(mode, _)| mode);
                 let info = format!("{mode},{blob},{}", pick.path);
                 self.run(&["update-index", "--add", "--cacheinfo", &info], index, None).await?;
+                // Keeping a rename takes the file away from where it was.
+                if let Some(old) = pick.old_path.as_deref().filter(|old| *old != pick.path) {
+                    self.run(&["update-index", "--force-remove", "--", old], index, None).await?;
+                }
             }
             None => {
                 self.run(&["update-index", "--force-remove", "--", &pick.path], index, None)
@@ -645,7 +740,7 @@ fn blamed(porcelain: &str) -> Vec<Option<String>> {
 }
 
 /// `trailed`'s answer read: each commit with a thread in its trailer, and its time.
-fn trailers(out: &str) -> std::collections::HashMap<String, (ThreadId, slopty_core::WallMs)> {
+fn trailers(out: &str) -> HashMap<String, (ThreadId, slopty_core::WallMs)> {
     out.split('\x1e')
         .filter_map(|record| {
             let mut fields = record.trim().split('\x1f');
@@ -785,12 +880,16 @@ const fn empty_patch() -> Patch {
 /// One line of `git diff-tree -r -z` output.
 struct Entry {
     path: String,
+    /// Where a rename came from.
+    old_path: Option<String>,
     from: Option<String>,
     to: Option<String>,
+    /// Each side's mode, zero for a side that is not there.
+    modes: Option<Modes>,
 }
 
 /// `:old_mode new_mode old_blob new_blob status\0path\0`, a blob of zeros for a side that is
-/// not there.
+/// not there; a rename's status (`R<score>`) is followed by its old path, then its new one.
 fn parse_raw(raw: &[u8]) -> Vec<Entry> {
     let text = String::from_utf8_lossy(raw);
     let mut fields = text.split('\0');
@@ -800,12 +899,93 @@ fn parse_raw(raw: &[u8]) -> Vec<Entry> {
         let side = |at: usize| {
             words.get(at).filter(|b| !b.bytes().all(|c| c == b'0')).map(|b| (*b).to_owned())
         };
-        if words.len() < 5 {
-            break;
-        }
-        entries.push(Entry { path: path.to_owned(), from: side(2), to: side(3) });
+        let mode = |at: usize| words.get(at).and_then(|m| u32::from_str_radix(m, 8).ok());
+        let Some(status) = words.get(4) else { break };
+        let (old_path, path) = if status.starts_with(['R', 'C']) {
+            let Some(new) = fields.next() else { break };
+            (Some(path.to_owned()), new.to_owned())
+        } else {
+            (None, path.to_owned())
+        };
+        let modes = mode(0).zip(mode(1)).map(|(from, to)| Modes { from, to });
+        entries.push(Entry { path, old_path, from: side(2), to: side(3), modes });
     }
     entries
+}
+
+/// One blob as a review reads it ([`Repo::read_blobs`]).
+#[derive(Debug, Default)]
+struct Read {
+    /// Its size, in bytes.
+    size: u64,
+    /// Its head holds a NUL, so it is not text.
+    binary: bool,
+    /// Its bytes, when it is text no larger than [`TEXT_BYTES`].
+    bytes: Option<Vec<u8>>,
+}
+
+impl Read {
+    /// Its bytes when they are text to cut into hunks; a side that is not there is empty text.
+    fn text(&self) -> Option<&[u8]> {
+        if self.size == 0 && !self.binary {
+            return Some(&[]);
+        }
+        self.bytes.as_deref()
+    }
+}
+
+/// How far into a blob git looks for a NUL to call it binary.
+const BINARY_HEAD: usize = 8000;
+
+/// Read `count` answers of `git cat-file --batch` from `out`, by object id.
+async fn batch(
+    out: tokio::process::ChildStdout,
+    count: usize,
+) -> std::io::Result<HashMap<String, Read>> {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    let mut out = tokio::io::BufReader::new(out);
+    let mut read = HashMap::with_capacity(count);
+    let mut header = String::new();
+    for _ in 0..count {
+        header.clear();
+        if out.read_line(&mut header).await? == 0 {
+            break;
+        }
+        let mut words = header.split_whitespace();
+        let (Some(id), Some(_kind), Some(size)) = (words.next(), words.next(), words.next()) else {
+            continue;
+        };
+        let size: u64 = size.parse().map_err(std::io::Error::other)?;
+        let held = usize::try_from(size).is_ok_and(|n| n <= TEXT_BYTES);
+        let mut bytes = Vec::new();
+        let mut body = (&mut out).take(size);
+        if held {
+            body.read_to_end(&mut bytes).await?;
+        } else {
+            let mut head = vec![0; BINARY_HEAD];
+            let n = body.read(&mut head).await?;
+            head.truncate(n);
+            bytes = head;
+            tokio::io::copy(&mut body, &mut tokio::io::sink()).await?;
+        }
+        let binary = bytes.iter().take(BINARY_HEAD).any(|b| *b == 0);
+        let mut end = [0_u8; 1];
+        out.read_exact(&mut end).await?;
+        let bytes = (held && !binary).then_some(bytes);
+        read.insert(id.to_owned(), Read { size, binary, bytes });
+    }
+    Ok(read)
+}
+
+/// Whether the file at `path` is a picture the client draws: by its extension, as an editor
+/// would open it.
+fn is_picture(path: &str) -> bool {
+    const PICTURES: [&str; 10] =
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg"];
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| PICTURES.iter().any(|p| e.eq_ignore_ascii_case(p)))
 }
 
 /// Whether `bytes` are cut into hunks: small enough, and with no NUL where git looks for one.

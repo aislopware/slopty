@@ -1328,6 +1328,28 @@ async fn table(host: Host, mut have: Option<Cursor>, out: mpsc::Sender<WorkerMsg
     }
 }
 
+/// The review a thread's stream is reading, if any: aborted when another starts and when the
+/// stream ends, its git children killed with it.
+#[derive(Debug, Default)]
+struct Reviewing(Option<tokio::task::JoinHandle<()>>);
+
+impl Reviewing {
+    /// Read `task` in place of the review before it.
+    fn start(&mut self, task: tokio::task::JoinHandle<()>) {
+        if let Some(before) = self.0.replace(task) {
+            before.abort();
+        }
+    }
+}
+
+impl Drop for Reviewing {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
 /// A followed thread's stream: what the client lacks from its cursor, then every change, with
 /// the pages and expansions it asks for between them; finished when it unfollows or the
 /// thread goes.
@@ -1348,6 +1370,9 @@ async fn stream(
     };
     // What runs git comes back here from a task of its own, so the thread's frames go on.
     let (slow_tx, mut slow) = mpsc::unbounded_channel();
+    // The review being read, stopped when another is asked for or the stream ends: only the
+    // latest is shown, and a big one need not run on for nobody.
+    let mut reviewing = Reviewing::default();
     let why = loop {
         let frame = tokio::select! {
             frame = follower.next() => match frame {
@@ -1380,10 +1405,10 @@ async fn stream(
                 // go on meanwhile.
                 Some(Command::Review { scope }) => {
                     let (snapshots, done) = (threads.snapshots.clone(), slow_tx.clone());
-                    tokio::spawn(async move {
+                    reviewing.start(tokio::spawn(async move {
                         let review = snapshots.review(thread, scope).await;
                         let _gone = done.send(ThreadFrame::Review(Box::new(review)));
-                    });
+                    }));
                     continue;
                 }
             },
@@ -1548,6 +1573,25 @@ impl Threads {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A review asked for again stops the one still being read, and the stream's end stops the
+    /// last: only the latest is read.
+    #[tokio::test]
+    async fn a_review_asked_again_stops_the_one_before() {
+        let mut reviewing = Reviewing::default();
+        let first = tokio::spawn(std::future::pending::<()>());
+        let first_handle = first.abort_handle();
+        reviewing.start(first);
+        let second = tokio::spawn(std::future::pending::<()>());
+        let second_handle = second.abort_handle();
+        reviewing.start(second);
+        tokio::task::yield_now().await;
+        assert!(first_handle.is_finished(), "the earlier review stopped");
+        assert!(!second_handle.is_finished(), "the latest goes on");
+        drop(reviewing);
+        tokio::task::yield_now().await;
+        assert!(second_handle.is_finished(), "the stream's end stops it");
+    }
 
     /// An intent's answer that finds the client's control queue full waits for room rather
     /// than being dropped, and comes after what was queued before it.

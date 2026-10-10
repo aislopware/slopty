@@ -528,6 +528,7 @@ mod threads {
             from: None,
             stamp: None,
             hunks: Vec::new(),
+            old_path: None,
         };
         let kept = a.intent(IntentId::new(), thread, Intent::Keep(pick)).await;
         assert!(matches!(kept, Outcome::Refused { .. }), "{kept:?}");

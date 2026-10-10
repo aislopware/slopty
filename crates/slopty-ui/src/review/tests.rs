@@ -299,6 +299,7 @@ fn keeping_a_hunk_sends_its_pick_and_says_so_at_once(cx: &mut TestAppContext) {
             from: Some("src/lib.rs@old".to_owned()),
             stamp: Some("src/lib.rs@new".to_owned()),
             hunks: vec![0],
+            old_path: None,
         })]
     );
     assert!(cx.debug_bounds("review-keep-hunk-1-0").is_none(), "Keeping, in its place");
@@ -1147,6 +1148,7 @@ fn keys_walk_the_changes_and_keep_them(cx: &mut TestAppContext) {
             from: Some("src/lib.rs@old".to_owned()),
             stamp: Some("src/lib.rs@new".to_owned()),
             hunks: vec![1],
+            old_path: None,
         })],
         "the source's second change, kept by its key"
     );
