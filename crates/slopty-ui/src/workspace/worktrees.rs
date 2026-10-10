@@ -9,6 +9,12 @@
 //! on the worker while a terminal works in it or anything in it is not committed. What went and
 //! what stayed is said in a notice, and the folder tiles left showing it close.
 //!
+//! The commit sheet of a merged pull request offers "End `<agent>` and remove" while its agent
+//! still runs there ([`WorkspaceView::end_and_remove`]): each agent running in the worktree in a
+//! terminal of its own has that terminal closed, which ends it as closing its tile does, and the
+//! worktree is asked to go once the worker's table says none works there any more. An agent
+//! driven over its protocol is not ended for it: the refusal names it, as above.
+//!
 //! "Remove merged worktrees" sweeps the clone the focus is in (`GitOp::Worktrees`): every agent's
 //! worktree whose work has landed, with nothing in it not committed, no terminal in it and no
 //! agent that has not exited working there, is asked to go as one would be alone. A worktree
@@ -19,6 +25,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{Context, Window};
 use slopty_client::layout::WorkerKey;
+use slopty_core::SessionId;
 use slopty_proto::git::GitOp;
 use slopty_proto::items::{ItemKind, ItemOp};
 
@@ -44,6 +51,8 @@ pub(super) struct Asked {
     removals: HashSet<(WorkerKey, String)>,
     /// The sweeps' listings: each folder they were asked in, on its machine.
     listings: HashSet<(WorkerKey, String)>,
+    /// The worktrees whose agents were ended to free them: each goes once none works there.
+    ending: HashSet<(WorkerKey, String)>,
     /// Each sweep whose removals are not all answered.
     sweeps: Vec<Sweep>,
 }
@@ -136,6 +145,46 @@ impl WorkspaceView {
         self.worktrees.removals.insert((key, root.to_owned()));
         let hub = self.thread_hub(key, cx);
         let _asked = hub.update(cx, |hub, cx| hub.git_op(root, GitOp::RemoveWorktree, cx));
+    }
+
+    /// "End `<agent>` and remove": every agent running in the worktree at `root` on `key` in a
+    /// terminal of its own is ended, its terminal closed, and the worktree goes once none
+    /// works there ([`Self::ended_for_removal`]). With none running it goes at once. An agent
+    /// driven over its protocol is not ended for the person: the refusal names it.
+    pub(super) fn end_and_remove(&mut self, key: WorkerKey, root: &str, cx: &mut Context<Self>) {
+        let working = self.threads_working_in(key, root);
+        if let Some(driven) = working.iter().find(|t| self.own_terminal(**t).is_none()) {
+            let who = self.thread_named(*driven).unwrap_or_else(|| "An agent".to_owned());
+            self.show_notice(format!("{who} still works in this worktree; end it first"), cx);
+            return;
+        }
+        if working.is_empty() {
+            self.remove_worktree_at(key, root, cx);
+            return;
+        }
+        tracing::info!(%key, %root, agents = working.len(), "end the agents, then remove");
+        let sessions: Vec<SessionId> =
+            working.iter().filter_map(|t| self.own_terminal(*t)).collect();
+        for session in sessions {
+            self.close_session_on(key, session);
+        }
+        self.worktrees.ending.insert((key, root.to_owned()));
+    }
+
+    /// `key`'s agents moved: a worktree whose agents were ended to free it goes once none
+    /// works there.
+    pub(super) fn ended_for_removal(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let free: Vec<String> = self
+            .worktrees
+            .ending
+            .iter()
+            .filter(|(k, root)| *k == key && self.threads_working_in(key, root).is_empty())
+            .map(|(_, root)| root.clone())
+            .collect();
+        for root in free {
+            self.worktrees.ending.remove(&(key, root.clone()));
+            self.remove_worktree_at(key, &root, cx);
+        }
     }
 
     /// "Remove merged worktrees": the agents' worktrees of the clone the focus is in, listed with

@@ -139,7 +139,7 @@ fn the_files_ticked_are_committed_and_pushed_after(cx: &mut TestAppContext) {
     answer(&hub, cx, last(&sent, &GitOp::Push), pushed);
     assert!(cx.debug_bounds("commit-said").is_some(), "pushed, said");
     assert!(cx.debug_bounds("commit-pull-standing").is_some(), "the pull request the push carried");
-    assert!(cx.debug_bounds("thread-pull").is_some(), "and its number in the composer");
+    assert!(cx.debug_bounds("thread-pull").is_none(), "the tile's header says it, not the foot");
 }
 
 /// The merge is offered only while the pull request is ready, for the head on show, by the
@@ -170,13 +170,14 @@ fn a_merge_is_offered_only_while_ready_for_the_head_on_show(cx: &mut TestAppCont
             method: "rebase".to_owned(),
             head: Some("c0ffee".to_owned()),
             delete_branch: false,
+            auto: false,
         })
     );
 }
 
 /// A repository whose `origin` is on GitLab speaks of merge requests: before one is open the
-/// sheet offers to open a merge request, and once one is, its number is written `!12`, in the
-/// sheet and in the composer, and read as a merge request.
+/// sheet offers to open a merge request, and once one is, its number is written `!12` in the
+/// sheet, and read as a merge request.
 #[gpui::test]
 fn a_gitlab_repository_s_sheet_speaks_of_merge_requests(cx: &mut TestAppContext) {
     use slopty_proto::git::Forge;
@@ -203,10 +204,6 @@ fn a_gitlab_repository_s_sheet_speaks_of_merge_requests(cx: &mut TestAppContext)
     answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(mr))));
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Link", Some("Merge request 12"))), "{tree:#?}");
-    assert!(
-        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Merge request 12,"))),
-        "the composer's chip reads it too"
-    );
 }
 
 /// What git said when it refused is shown as it said it, and Close, or a press on the tile
@@ -488,7 +485,7 @@ fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) 
     let into = Rc::clone(&heard);
     cx.update(|_, cx| {
         cx.subscribe(&view, move |_v, event: &ThreadViewEvent, _cx| {
-            if let ThreadViewEvent::RemoveWorktree(root) = event {
+            if let ThreadViewEvent::EndAndRemove(root) = event {
                 into.borrow_mut().push(root.clone());
             }
         })
@@ -514,6 +511,17 @@ fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) 
     });
     let merged = PullStatus { state: "MERGED".to_owned(), ..pull("CLEAN", &[]) };
     answer(&hub, cx, read(&sent), GitDone::PullStatus(Some(Box::new(merged))));
+    cx.update(|window, _cx| {
+        window.set_a11y_active(true);
+        window.refresh();
+    });
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let end = crate::conversation::thread::commit::end_and_remove("Claude Code");
+    assert!(
+        tree.iter().any(|n| n.label.as_deref() == Some(end.as_str())),
+        "its agent still runs there, so the press ends it first: {tree:#?}"
+    );
     click(cx, "commit-remove-worktree");
     assert_eq!(*heard.borrow(), [ROOT], "handed to the workspace, by its root");
 
@@ -532,4 +540,55 @@ fn a_merged_pull_request_outside_a_worktree_offers_no_removal(cx: &mut TestAppCo
     answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(merged))));
     assert!(cx.debug_bounds("commit-pull-standing").is_some(), "the merged pull request shows");
     assert!(cx.debug_bounds("commit-remove-worktree").is_none());
+}
+
+/// The worker reads the pull request on its own clock and says it on the thread's row: while the
+/// sheet is up, a row whose pull request moved (merged on the forge's page) has the sheet ask
+/// its own again at once; a table that leaves it as it was asks nothing.
+#[gpui::test]
+fn the_sheet_asks_again_when_the_rows_pull_request_moves(cx: &mut TestAppContext) {
+    use slopty_proto::git::Forge;
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{PullSeen, PullStands, TableFrame};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    click(cx, "thread-attach");
+    click(cx, "thread-add-menu-commit");
+    let reads = |sent: &Sent| asks(sent).iter().filter(|(_, op)| *op == GitOp::PullStatus).count();
+    let opened = reads(&sent);
+    let table = |state: &slopty_proto::thread::ThreadState, seq, pull: Option<PullSeen>| {
+        let mut row = state.row(slopty_core::WallMs::ZERO);
+        row.pull = pull;
+        TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, rows: vec![row] }
+    };
+    let seen = |stands| PullSeen {
+        forge: Forge::GitHub,
+        number: 7,
+        url: "https://github.com/o/r/pull/7".to_owned(),
+        title: "Fix".to_owned(),
+        base: "main".to_owned(),
+        stands,
+        failed: 0,
+        failed_first: None,
+        running: 0,
+    };
+    state.meta.title = "edit".to_owned();
+    hub.update(cx, |hub, cx| hub.table(&table(&state, 1, None), cx));
+    cx.run_until_parked();
+    assert_eq!(reads(&sent), opened, "no pull request on the row, nothing moved");
+    hub.update(cx, |hub, cx| hub.table(&table(&state, 2, Some(seen(PullStands::Running))), cx));
+    cx.run_until_parked();
+    assert_eq!(reads(&sent), opened.saturating_add(1), "one came to the row");
+    hub.update(cx, |hub, cx| hub.table(&table(&state, 3, Some(seen(PullStands::Running))), cx));
+    cx.run_until_parked();
+    assert_eq!(reads(&sent), opened.saturating_add(1), "the same again asks nothing");
+    hub.update(cx, |hub, cx| hub.table(&table(&state, 4, Some(seen(PullStands::Merged))), cx));
+    cx.run_until_parked();
+    assert_eq!(reads(&sent), opened.saturating_add(2), "merged elsewhere, asked again");
 }

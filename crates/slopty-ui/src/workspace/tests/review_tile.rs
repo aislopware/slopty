@@ -595,7 +595,7 @@ fn a_reviews_sheet_frees_a_merged_worktree(cx: &mut TestAppContext) {
     let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
     let folder = folder.expect("the folder's review");
     studio.drain();
-    folder.update(cx, |_, cx| cx.emit(ReviewEvent::RemoveWorktree(root.clone())));
+    folder.update(cx, |_, cx| cx.emit(ReviewEvent::EndAndRemove(root.clone())));
     frames(cx);
     let asked = studio.drain().into_iter().any(
         |m| matches!(m, ClientMsg::Git { repo, op: GitOp::RemoveWorktree, .. } if repo == root),

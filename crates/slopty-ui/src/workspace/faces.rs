@@ -1168,7 +1168,7 @@ impl WorkspaceView {
 
     /// The terminal whose own thread `thread` is: not one a subagent's row shares with its
     /// parent's.
-    fn own_terminal(&self, thread: ThreadId) -> Option<SessionId> {
+    pub(super) fn own_terminal(&self, thread: ThreadId) -> Option<SessionId> {
         self.thread_terminal(thread).filter(|s| self.session_thread(*s) == Some(thread))
     }
 
@@ -1268,6 +1268,7 @@ impl WorkspaceView {
             self.update_awake(cx);
             self.agents_moved(cx);
             self.update_run_targets(cx);
+            self.ended_for_removal(key, cx);
         }
         // A note's verdict that waited for its request answers it as the table brings it.
         if self.approvals.taps_waiting() {
@@ -1497,6 +1498,7 @@ impl WorkspaceView {
                 }
             }
             ThreadViewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, &root, cx),
+            ThreadViewEvent::EndAndRemove(root) => self.end_and_remove(key, &root, cx),
             ThreadViewEvent::FindFiles { root, query } => {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
@@ -1655,6 +1657,11 @@ impl WorkspaceView {
             ThreadViewEvent::RemoveWorktree(root) => {
                 if let Some(key) = self.worker_of_session(session) {
                     self.remove_worktree_at(key, &root, cx);
+                }
+            }
+            ThreadViewEvent::EndAndRemove(root) => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.end_and_remove(key, &root, cx);
                 }
             }
             ThreadViewEvent::FindFiles { root, query } => {

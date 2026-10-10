@@ -33,8 +33,8 @@ use slopty_proto::RequestId;
 use slopty_proto::git::{
     CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStanding, PullStatus,
 };
-use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Delivery, IntentId, ThreadId, TurnState};
+use slopty_proto::thread::wire::{Intent, PullSeen};
+use slopty_proto::thread::{Cap, Delivery, IntentId, Liveness, ThreadId, TurnState};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::git::{self, Method, Pull, Repo, Said};
@@ -48,6 +48,12 @@ const FILES_SHOWN: usize = 8;
 
 /// Checks shown, the most pressing first, before "+N more checks".
 const CHECKS_SHOWN: usize = 6;
+
+/// The merged sheet's button while its agent still runs in the worktree.
+#[must_use]
+pub fn end_and_remove(agent: &str) -> String {
+    format!("End {agent} and remove")
+}
 
 /// What "Ask `<agent>` to commit" sends the thread's agent.
 pub const ASK_TO_COMMIT: &str = "Commit what you changed, with a message saying why.";
@@ -69,8 +75,9 @@ pub enum CommitEvent {
     /// The person closed it.
     Close,
     /// The pull request merged, and the person asked to free the agent's worktree the
-    /// repository is, at this root: the workspace asks it of the worker, as anywhere else.
-    RemoveWorktree(String),
+    /// repository is, at this root: the workspace ends the agents still running in it in a
+    /// terminal of their own, waits for them to exit, then asks the worker, as anywhere else.
+    EndAndRemove(String),
 }
 
 /// Which face the sheet shows.
@@ -107,6 +114,8 @@ pub struct CommitSheet {
     asked: Option<Asked>,
     /// Why the worker turned the ask down.
     ask_refused: Option<String>,
+    /// The thread's pull request as its row last said it: a move there asks the sheet's again.
+    pull_seen: Option<PullSeen>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -146,6 +155,7 @@ impl CommitSheet {
             cx.subscribe_in(&hub, window, move |this, _hub, event, window, cx| match event {
                 HubEvent::Git(r) if *r == watched => this.heard(window, cx),
                 HubEvent::Thread(t) if this.ask == Some(*t) => this.ask_moved(cx),
+                HubEvent::Table => this.row_moved(cx),
                 _ => {}
             });
         let typing = [
@@ -171,6 +181,7 @@ impl CommitSheet {
             ask: None,
             asked: None,
             ask_refused: None,
+            pull_seen: None,
             focus: cx.focus_handle(),
             _subscriptions: std::iter::once(hearing).chain(typing).collect(),
         };
@@ -179,10 +190,13 @@ impl CommitSheet {
         sheet
     }
 
-    /// The sheet of `thread`'s repository, its agent offered the commit.
+    /// The sheet of `thread`'s repository, its agent offered the commit, its row's pull
+    /// request followed.
     #[must_use]
-    pub const fn asking(mut self, thread: ThreadId) -> Self {
+    pub fn asking(mut self, thread: ThreadId, cx: &App) -> Self {
         self.ask = Some(thread);
+        self.pull_seen =
+            self.hub.read(cx).threads().rows().rows.get(&thread).and_then(|r| r.pull.clone());
         self
     }
 
@@ -292,6 +306,32 @@ impl CommitSheet {
         });
     }
 
+    /// The sheet's agent by name while its process still runs.
+    fn running_agent(&self, cx: &App) -> Option<String> {
+        let state = self.hub.read(cx).threads().mirror(self.ask?).and_then(Mirror::state)?;
+        (state.status.liveness == Liveness::Live)
+            .then(|| super::view::agent_label(&state.meta.agent))
+    }
+
+    /// The thread's row moved. The worker reads its pull request on its own clock and says it
+    /// on the row, so a pull request that moved there (merged on the forge's page, a check
+    /// that ended) is asked again here while the sheet is up.
+    fn row_moved(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.ask else { return };
+        let seen =
+            self.hub.read(cx).threads().rows().rows.get(&thread).and_then(|r| r.pull.clone());
+        if seen == self.pull_seen {
+            return;
+        }
+        let was = std::mem::replace(&mut self.pull_seen, seen);
+        if was.is_some() || self.pull_seen.is_some() {
+            let repo = self.repo.clone();
+            self.hub.update(cx, |hub, cx| {
+                let _pull = hub.git_op(&repo, GitOp::PullStatus, cx);
+            });
+        }
+    }
+
     /// The agent the sheet can ask to commit, by name: the thread's, where it takes a message.
     fn asker(&self, cx: &App) -> Option<String> {
         let state = self.hub.read(cx).threads().mirror(self.ask?).and_then(Mirror::state)?;
@@ -382,6 +422,7 @@ impl CommitSheet {
             method: self.method.wire().to_owned(),
             head: Some(pull.head_commit.clone()),
             delete_branch: self.delete_branch,
+            auto: false,
         };
         self.methods_open = false;
         self.op(op, cx);
@@ -748,7 +789,8 @@ impl CommitSheet {
 
     /// Once the pull request merged, the worktree the repository is goes on the person's
     /// press: its work has landed, so nothing is left for it to hold. Only for an agent's
-    /// worktree under its clone's `.claude/worktrees/`, and not once it went.
+    /// worktree under its clone's `.claude/worktrees/`, and not once it went. While the sheet's
+    /// own agent still runs there the press ends it first, and says so ([`end_and_remove`]).
     fn free_row(&self, pull: &PullStatus, repo: &Repo, cx: &Context<Self>) -> Option<AnyElement> {
         if pull.standing() != PullStanding::Merged {
             return None;
@@ -757,6 +799,10 @@ impl CommitSheet {
         if matches!(repo.said, Some((_, Said::Freed { .. }))) {
             return None;
         }
+        let label = self.running_agent(cx).map_or_else(
+            || SharedString::from(super::view::exited::REMOVE_WORKTREE),
+            |agent| end_and_remove(&agent).into(),
+        );
         let busy = self.busy(cx).is_some();
         Some(
             div()
@@ -767,17 +813,12 @@ impl CommitSheet {
                 .gap(px(self.theme.spacing.xs))
                 .pt(px(self.theme.spacing.xs))
                 .child(
-                    self.button(
-                        "commit-remove-worktree",
-                        super::view::exited::REMOVE_WORKTREE,
-                        ButtonKind::Secondary,
-                        busy,
-                    )
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        if this.busy(cx).is_none() {
-                            cx.emit(CommitEvent::RemoveWorktree(root.clone()));
-                        }
-                    })),
+                    self.button("commit-remove-worktree", label, ButtonKind::Secondary, busy)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            if this.busy(cx).is_none() {
+                                cx.emit(CommitEvent::EndAndRemove(root.clone()));
+                            }
+                        })),
                 )
                 .into_any_element(),
         )
@@ -1197,6 +1238,7 @@ impl CommitSheet {
                 GitOp::Merge { .. } => "Merging\u{2026}",
                 GitOp::RemoveWorktree => "Removing the worktree\u{2026}",
                 GitOp::PullReview { .. } => "Posting the review\u{2026}",
+                GitOp::MarkReady => "Marking it ready\u{2026}",
                 GitOp::Status
                 | GitOp::PullStatus
                 | GitOp::PullComments { .. }

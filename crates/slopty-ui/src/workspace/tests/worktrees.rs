@@ -351,3 +351,48 @@ fn remove_merged_says_when_there_is_nothing_to_take(cx: &mut TestAppContext) {
     let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
     assert_eq!(told, "The worktrees could not be listed: /w/atlas is in no git repository");
 }
+
+/// The merged commit sheet's "End `<agent>` and remove": the agent running in the worktree in a
+/// terminal of its own has that terminal closed, and the worktree is asked to go only once its
+/// worker's table says the agent exited, so the worker never refuses it for a terminal still
+/// there.
+#[gpui::test]
+fn ending_the_agent_frees_its_worktree_once_it_exited(cx: &mut TestAppContext) {
+    use slopty_proto::terminal::TermRequest;
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let session = SessionId::new();
+    let _tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.cwd = ROOT.to_owned();
+    state.meta.terminal = Some(session);
+    let table = |state: &slopty_proto::thread::ThreadState, seq| TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table(&state, 1), cx));
+    cx.run_until_parked();
+    studio.drain();
+
+    view.update_in(cx, |v, _w, cx| v.end_and_remove(key, ROOT, cx));
+    cx.run_until_parked();
+    let sent = studio.drain();
+    let closed = sent.iter().any(
+        |m| matches!(m, ClientMsg::Term { session: s, req: TermRequest::Close } if *s == session),
+    );
+    assert!(closed, "the agent's terminal is closed: {sent:?}");
+    assert!(
+        !sent.iter().any(|m| matches!(m, ClientMsg::Git { op: GitOp::RemoveWorktree, .. })),
+        "nothing asked while the agent still runs"
+    );
+
+    state.status.liveness = slopty_proto::thread::Liveness::Exited { resumable: true };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table(&state, 2), cx));
+    cx.run_until_parked();
+    let asked = removals(&mut studio);
+    let [(_, repo)] = asked.as_slice() else { panic!("one removal: {asked:?}") };
+    assert_eq!(repo, ROOT, "asked once it exited");
+}

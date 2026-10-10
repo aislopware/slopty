@@ -185,6 +185,9 @@ pub enum ThreadViewEvent {
     PickPhotos,
     /// Free the worktree the thread's exited agent worked in, at this root.
     RemoveWorktree(String),
+    /// The commit sheet's "End `<agent>` and remove", its pull request merged: end the agents
+    /// still running in the worktree at this root, then free it.
+    EndAndRemove(String),
     /// Open the screen the agent drives beside the thread, to watch it and take control.
     Watch {
         /// The thread.
@@ -1222,7 +1225,7 @@ impl ThreadView {
         }
         let Some(repo) = self.repo(cx) else { return };
         let (hub, theme, thread) = (self.hub.clone(), self.theme.clone(), self.thread);
-        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx).asking(thread));
+        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx).asking(thread, cx));
         let closing =
             cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
                 CommitEvent::Close => {
@@ -1230,8 +1233,8 @@ impl ThreadView {
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
                     cx.notify();
                 }
-                CommitEvent::RemoveWorktree(root) => {
-                    cx.emit(ThreadViewEvent::RemoveWorktree(root.clone()));
+                CommitEvent::EndAndRemove(root) => {
+                    cx.emit(ThreadViewEvent::EndAndRemove(root.clone()));
                 }
             });
         self.commit = Some((sheet, closing));

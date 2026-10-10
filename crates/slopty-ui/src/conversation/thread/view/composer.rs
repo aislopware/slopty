@@ -282,53 +282,6 @@ impl ThreadView {
         })
     }
 
-    /// The branch's pull request, once this client has heard of it: its number in the tone of
-    /// where it stands, which opens the commit sheet with the pull request at its head.
-    fn pull_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let repo = self.repo(cx)?;
-        let hub = self.hub.read(cx);
-        let pull = hub.git().repo(&repo)?.pull.status()?;
-        let words = crate::conversation::thread::git::standing_words(pull);
-        let tone = crate::conversation::thread::commit::standing_tone(theme, pull.standing());
-        let glyph = crate::icons::GitGlyph::of_pull(pull.standing());
-        let glyph_ink = glyph.state_ink(theme).unwrap_or(tone);
-        Some(
-            crate::a11y::tab_stop(
-                div()
-                    .id("thread-pull")
-                    .debug_selector(|| "thread-pull".to_owned())
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(format!(
-                        "{} {}, {words}",
-                        pull.forge.title(),
-                        pull.number
-                    )))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xxs))
-                    .px(px(theme.spacing.xs))
-                    .rounded(px(theme.radii.xs))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)))
-                    .child(
-                        crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
-                            .size(px(theme.typography.icon())),
-                    )
-                    .child(kit::tabular(div()).child(SharedString::from(format!(
-                        "{}{}",
-                        pull.forge.mark(),
-                        pull.number
-                    ))))
-                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
-                s.focus,
-            )
-            .into_any_element(),
-        )
-    }
-
     /// A quiet chip in the composer's foot: the model, the mode.
     fn chip(&self, id: &'static str, label: String) -> gpui::Stateful<Div> {
         let theme = &self.theme;
@@ -873,7 +826,7 @@ impl ThreadView {
 
     /// The composer's foot, one row that fits the room it is given (`kit::priority_row`): the
     /// "+" and the send never leave; the rest leave the least needed first (the handoff, the
-    /// screen, the pull request, the mode, effort and work, the changes, the model) and wait in
+    /// screen, the mode, effort and work, the changes, the model) and wait in
     /// the "+" menu, so Send never leaves the card (`docs/decisions/ui.md`, "How surfaces adapt
     /// to their room"). Where the work is and how full the context is stand on the ledge over
     /// the field ([`Self::ledge`]).
@@ -893,7 +846,6 @@ impl ThreadView {
         let row = item(row, FOOT_EFFORT, self.effort_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
         let row = item(row, FOOT_TASKS, self.tasks_chip(cx));
-        let row = item(row, FOOT_PULL, self.pull_chip(cx));
         let row = item(row, FOOT_CHANGES, self.changes(cx));
         let row = item(row, FOOT_SCREEN, self.screen_chip(cx));
         let meter = (!self.on_ledge(cx)).then(|| self.meter(cx)).flatten();
@@ -928,8 +880,6 @@ const FOOT_EFFORT: (&str, kit::Priority) = ("effort", kit::Priority::MEDIUM);
 const FOOT_MODE: (&str, kit::Priority) = ("mode", kit::Priority::MEDIUM);
 /// The background work.
 const FOOT_TASKS: (&str, kit::Priority) = ("tasks", kit::Priority::MEDIUM);
-/// The branch's pull request.
-const FOOT_PULL: (&str, kit::Priority) = ("pull", kit::Priority(112));
 /// The agent's screen.
 const FOOT_SCREEN: (&str, kit::Priority) = ("screen", kit::Priority(96));
 /// "Continue in the terminal".

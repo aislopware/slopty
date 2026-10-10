@@ -199,9 +199,9 @@ pub enum ReviewEvent {
         /// Its whole path on the machine.
         path: String,
     },
-    /// The commit sheet over it asked to free the agent's worktree at this root, its pull
-    /// request merged.
-    RemoveWorktree(String),
+    /// The commit sheet over it asked to end the agents still running in the worktree at this
+    /// root and free it, its pull request merged.
+    EndAndRemove(String),
 }
 
 /// One row of the diff.
@@ -744,7 +744,7 @@ impl ReviewView {
         let sheet = cx.new(|cx| {
             let sheet = CommitSheet::new(hub, repo, theme, window, cx);
             match thread {
-                Some(thread) => sheet.asking(thread),
+                Some(thread) => sheet.asking(thread, cx),
                 None => sheet,
             }
         });
@@ -755,8 +755,8 @@ impl ReviewView {
                     window.focus(&this.focus, cx);
                     cx.notify();
                 }
-                CommitEvent::RemoveWorktree(root) => {
-                    cx.emit(ReviewEvent::RemoveWorktree(root.clone()));
+                CommitEvent::EndAndRemove(root) => {
+                    cx.emit(ReviewEvent::EndAndRemove(root.clone()));
                 }
             });
         self.commit = Some((sheet, closing));
