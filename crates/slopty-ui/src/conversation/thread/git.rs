@@ -556,6 +556,7 @@ mod tests {
             branch: Some("feature".to_owned()),
             head: Some("abc".to_owned()),
             upstream: Some("origin/feature".to_owned()),
+            merge_base: None,
             ahead: 2,
             behind: 0,
             files: files
@@ -586,6 +587,8 @@ mod tests {
             merge_state: "CLEAN".to_owned(),
             checks: Vec::new(),
             more_checks: 0,
+            methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+            method: "squash".to_owned(),
         }
     }
 

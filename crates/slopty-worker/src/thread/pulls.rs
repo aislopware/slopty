@@ -201,6 +201,8 @@ mod tests {
             merge_state: "CLEAN".to_owned(),
             checks: vec![check("test", "SUCCESS"), check("lint", "SUCCESS")],
             more_checks: 0,
+            methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+            method: "squash".to_owned(),
         };
         edit(&mut status);
         status

@@ -16,7 +16,7 @@ use slopty_proto::git::{
 use tokio::io::AsyncWriteExt as _;
 
 /// How long a status or a commit may take: a commit runs the person's hooks.
-const LOCAL: Duration = Duration::from_mins(5);
+pub(super) const LOCAL: Duration = Duration::from_mins(5);
 /// How long a push or a pull request may take.
 pub(super) const REMOTE: Duration = Duration::from_mins(10);
 
@@ -177,7 +177,22 @@ async fn status(git: &Path, root: &Path) -> Result<GitStatus, GitOutcome> {
     let out = run(git, root, &args, None, LOCAL).await?;
     let mut status = parse_status(&root.to_string_lossy(), &out);
     status.forge = crate::repo::forge_of(root);
+    if let Some(branch) = &status.branch {
+        status.merge_base = config(git, root, &merge_base_key(branch)).await;
+    }
     Ok(status)
+}
+
+/// The config key that names the branch `branch`'s pull request merges into: gh reads it when
+/// `gh pr create` is given no `--base` (gh 2.102).
+pub(super) fn merge_base_key(branch: &str) -> String {
+    format!("branch.{branch}.gh-merge-base")
+}
+
+/// The config `key` of the repository at `root`, when it is set to something.
+pub(super) async fn config(git: &Path, root: &Path, key: &str) -> Option<String> {
+    let said = run(git, root, &["config", "--get", "--end-of-options", key], None, LOCAL).await;
+    said.ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
 
 /// `git status --porcelain=v2 --branch -z` read: its branch headers, then one record per
@@ -189,6 +204,7 @@ fn parse_status(root: &str, out: &str) -> GitStatus {
         branch: None,
         head: None,
         upstream: None,
+        merge_base: None,
         ahead: 0,
         behind: 0,
         files: Vec::new(),
@@ -373,7 +389,7 @@ async fn push_branch(git: &Path, root: &Path) -> Result<(String, String, bool), 
 /// forge's command line is missing, says the branch has none, or fails, since the push itself
 /// went.
 async fn pushed_pull(programs: &Programs, root: &Path) -> Option<Box<PullStatus>> {
-    super::pull::status(programs, root).await.ok().flatten().map(Box::new)
+    super::pull::offered(programs, root).await.ok().flatten().map(Box::new)
 }
 
 /// `program args…` in `root`, with `input` on its stdin, within `within`: its stdout when it

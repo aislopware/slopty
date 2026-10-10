@@ -277,6 +277,8 @@ pub(super) fn read(view: &str, jobs: Option<&str>) -> Result<PullStatus, GitOutc
         merge_state: merge_state(detailed).to_owned(),
         checks: all.into_iter().take(CHECKS_MAX).collect(),
         more_checks: more,
+        methods: Vec::new(),
+        method: String::new(),
     })
 }
 

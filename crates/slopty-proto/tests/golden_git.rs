@@ -49,6 +49,7 @@ mod golden_git {
             branch: Some("feature".to_owned()),
             head: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
             upstream: Some("origin/feature".to_owned()),
+            merge_base: Some("release-2".to_owned()),
             ahead: 2,
             behind: 1,
             files: vec![
@@ -85,6 +86,8 @@ mod golden_git {
                 link: Some("https://github.com/o/demo/actions/runs/1".to_owned()),
             }],
             more_checks: 0,
+            methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+            method: "squash".to_owned(),
         }
     }
 
@@ -179,6 +182,7 @@ mod golden_git {
         let merge_request = PullStatus {
             forge: Forge::GitLab,
             url: "https://gitlab.example.com/o/demo/-/merge_requests/7".to_owned(),
+            method: "merge".to_owned(),
             ..pull()
         };
         let read = GitDone::PullStatus(Some(Box::new(merge_request)));

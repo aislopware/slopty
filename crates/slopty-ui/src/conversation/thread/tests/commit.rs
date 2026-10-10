@@ -38,6 +38,7 @@ fn status() -> GitStatus {
         branch: Some("feature".to_owned()),
         head: Some("abc".to_owned()),
         upstream: Some("origin/feature".to_owned()),
+        merge_base: None,
         ahead: 0,
         behind: 0,
         files: vec![file(".M", "src/lib.rs"), file("??", "notes.md")],
@@ -69,6 +70,8 @@ fn pull(merge_state: &str, checks: &[&str]) -> PullStatus {
             })
             .collect(),
         more_checks: 0,
+        methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+        method: "squash".to_owned(),
     }
 }
 

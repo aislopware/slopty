@@ -610,6 +610,8 @@ fn the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet(cx: &mut 
         merge_state: "BLOCKED".to_owned(),
         checks: Vec::new(),
         more_checks: 0,
+        methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+        method: "squash".to_owned(),
     };
     let done = GitOutcome::Done(GitDone::PullStatus(Some(Box::new(pull))));
     hub.update(cx, |hub, cx| hub.git_done(reads[0], done, cx));
@@ -1014,6 +1016,7 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
         branch: Some("main".to_owned()),
         head: None,
         upstream: None,
+        merge_base: None,
         ahead: 0,
         behind: 0,
         files: Vec::new(),
@@ -1327,6 +1330,7 @@ fn a_picture_shows_both_sides_and_a_large_file_opens_whole(cx: &mut TestAppConte
         branch: Some("main".to_owned()),
         head: None,
         upstream: None,
+        merge_base: None,
         ahead: 0,
         behind: 0,
         files: Vec::new(),
@@ -1379,6 +1383,8 @@ fn forge_threads_hang_on_their_lines_and_comments_post_as_a_review(cx: &mut Test
         merge_state: "BLOCKED".to_owned(),
         checks: Vec::new(),
         more_checks: 0,
+        methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+        method: "squash".to_owned(),
     };
     let done = GitOutcome::Done(GitDone::PullStatus(Some(Box::new(pull))));
     hub.update(cx, |hub, cx| hub.git_done(read, done, cx));

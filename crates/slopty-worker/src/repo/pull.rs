@@ -7,12 +7,16 @@
 //! sign-in is read or passed. What the forge reports is kept in GitHub's words, a merge
 //! request's put in them.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use serde_json::Value;
 use slopty_proto::git::{CHECKS_MAX, Forge, GitDone, GitOutcome, PullCheck, PullStatus};
 
-use super::commit::{Programs, REMOTE, run};
+use super::commit::{Programs, REMOTE, config, merge_base_key, run};
 
 mod comments;
 mod gitlab;
@@ -32,6 +36,95 @@ const MERGED: &str = "MERGED";
 
 /// The merge methods gh and glab take, by the flag each is.
 const METHODS: [&str; 3] = ["merge", "squash", "rebase"];
+
+/// The repository-local config key the method the person last merged by from Slopty is kept
+/// under; a clone's worktrees share it.
+const MERGE_METHOD_KEY: &str = "slopty.merge-method";
+
+/// What `gh repo view` is asked for: the person's last merge method there and what is allowed.
+const WAYS: &str =
+    "viewerDefaultMergeMethod,mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed";
+
+/// How long what a repository allows is kept before gh is asked again: a pull request is read
+/// every minute while it is lively, and its repository's settings hardly move.
+const WAYS_KEPT: Duration = Duration::from_mins(10);
+
+/// What a GitHub repository allows a merge by, as gh last said it, per checkout.
+static KEPT_WAYS: LazyLock<Mutex<HashMap<PathBuf, (Instant, Ways)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The ways a repository lets a pull request merge.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Ways {
+    /// Allowed, in [`METHODS`] order.
+    allowed: Vec<String>,
+    /// The one the person last chose on the forge, lowercased.
+    last: Option<String>,
+}
+
+impl Ways {
+    /// Every method, none chosen: a GitLab's, or a repository gh could not read.
+    fn all() -> Self {
+        Self { allowed: METHODS.map(str::to_owned).to_vec(), last: None }
+    }
+
+    /// `gh repo view --json` [`WAYS`] read; `None` when it is not that.
+    fn parse(out: &str) -> Option<Self> {
+        let doc: Value = serde_json::from_str(out).ok()?;
+        let on = |key: &str| doc.get(key).and_then(Value::as_bool).unwrap_or(false);
+        let flags = [on("mergeCommitAllowed"), on("squashMergeAllowed"), on("rebaseMergeAllowed")];
+        let allowed =
+            METHODS.iter().zip(flags).filter(|(_, on)| *on).map(|(m, _)| (*m).to_owned()).collect();
+        let last = doc.get("viewerDefaultMergeMethod").and_then(Value::as_str);
+        Some(Self { allowed, last: last.map(str::to_ascii_lowercase) })
+    }
+
+    /// The method to offer first: `kept` (the last merged by from here) when allowed, else the
+    /// one last chosen on the forge when allowed, else the first allowed, else `merge`.
+    fn first(&self, kept: Option<&str>) -> String {
+        let allowed = |m: &&str| self.allowed.iter().any(|a| a == m);
+        kept.filter(allowed)
+            .or_else(|| self.last.as_deref().filter(allowed))
+            .or_else(|| self.allowed.first().map(String::as_str))
+            .unwrap_or("merge")
+            .to_owned()
+    }
+}
+
+/// What the GitHub repository of the checkout at `root` allows a merge by, kept for
+/// [`WAYS_KEPT`]; every method when gh cannot say.
+async fn github_ways(gh: &Path, root: &Path) -> Ways {
+    let now = Instant::now();
+    let kept =
+        KEPT_WAYS.lock().get(root).filter(|(at, _)| now.duration_since(*at) < WAYS_KEPT).cloned();
+    if let Some((_, ways)) = kept {
+        return ways;
+    }
+    let read = run(gh, root, &["repo", "view", "--json", WAYS], None, REMOTE).await;
+    let Some(ways) = read.ok().as_deref().and_then(Ways::parse) else { return Ways::all() };
+    KEPT_WAYS.lock().insert(root.to_path_buf(), (now, ways.clone()));
+    ways
+}
+
+/// `pull` given the ways its repository lets it merge, and the one to offer first.
+async fn with_ways(
+    programs: &Programs,
+    root: &Path,
+    program: &Path,
+    mut pull: PullStatus,
+) -> PullStatus {
+    let ways = match pull.forge {
+        Forge::GitHub => github_ways(program, root).await,
+        Forge::GitLab => Ways::all(),
+    };
+    let kept = match programs.git.as_deref() {
+        Some(git) => config(git, root, MERGE_METHOD_KEY).await,
+        None => None,
+    };
+    pull.method = ways.first(kept.as_deref());
+    pull.methods = ways.allowed;
+    pull
+}
 
 /// The forge of the repository rooted at `root`: GitHub's when its `origin` names no other.
 fn forge(root: &Path) -> Forge {
@@ -65,14 +158,29 @@ pub(super) fn program(programs: &Programs, forge: Forge) -> Result<&Path, GitOut
 pub async fn status(programs: &Programs, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
     let forge = forge(root);
     let program = program(programs, forge)?;
-    if forge == Forge::GitLab {
-        return gitlab::status(program, root).await;
-    }
-    match run(program, root, &["pr", "view", "--json", FIELDS], None, REMOTE).await {
-        Ok(out) => parse(&out).map(Some),
-        Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => Ok(None),
-        Err(other) => Err(other),
-    }
+    let read = if forge == Forge::GitLab {
+        gitlab::status(program, root).await?
+    } else {
+        match run(program, root, &["pr", "view", "--json", FIELDS], None, REMOTE).await {
+            Ok(out) => Some(parse(&out)?),
+            Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => None,
+            Err(other) => return Err(other),
+        }
+    };
+    Ok(read)
+}
+
+/// [`status`], with the ways its repository lets it merge and the one to offer first.
+///
+/// For a person about to merge it: what the forge reads it for besides costs a request of its
+/// own, kept for a while, so a watch of the pull request never asks it.
+///
+/// # Errors
+/// As [`status`].
+pub async fn offered(programs: &Programs, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
+    let Some(pull) = status(programs, root).await? else { return Ok(None) };
+    let program = program(programs, pull.forge)?;
+    Ok(Some(with_ways(programs, root, program, pull).await))
 }
 
 /// The review still open on pull request `number` of the repository at `root`, for its agent
@@ -109,13 +217,16 @@ pub async fn review(
     review::post(forge, program, root, review).await
 }
 
-/// [`status`], as a done op.
+/// [`offered`], as a done op.
 pub async fn status_done(programs: &Programs, root: &Path) -> Result<GitDone, GitOutcome> {
-    Ok(GitDone::PullStatus(status(programs, root).await?.map(Box::new)))
+    Ok(GitDone::PullStatus(offered(programs, root).await?.map(Box::new)))
 }
 
-/// Open a pull request for the branch checked out: with `title` and `body`, or both from the
-/// commits when the title is empty; into `base`, else the repository's default; as a draft.
+/// Open a pull request for the branch checked out.
+///
+/// It has `title` and `body`, or both from the commits when the title is empty. It merges into
+/// `base`, else the branch's `gh-merge-base`, else the repository's default: gh reads the
+/// branch's `gh-merge-base` itself, and glab is given it. It opens as a draft when asked.
 ///
 /// # Errors
 /// The body is too long, the forge's command line is missing, or it refused, in its words.
@@ -138,6 +249,13 @@ pub async fn create(
         });
     }
     let base = base.filter(|b| !b.trim().is_empty());
+    let merge_base = match (forge, base, programs.git.as_deref(), crate::repo::branch_of(root)) {
+        (Forge::GitLab, None, Some(git), Some(branch)) => {
+            config(git, root, &merge_base_key(&branch)).await
+        }
+        _ => None,
+    };
+    let base = base.or(merge_base.as_deref());
     let args = match forge {
         Forge::GitHub => {
             let mut args = vec!["pr", "create"];
@@ -313,7 +431,7 @@ pub async fn merge(
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let ran = run(program, root, &args, None, REMOTE).await;
-    let pull = status(programs, root).await.ok().flatten().map(Box::new);
+    let pull = offered(programs, root).await.ok().flatten().map(Box::new);
     let said = match ran {
         Ok(said) => said,
         Err(GitOutcome::Failed { said }) if pull.as_ref().is_some_and(|p| p.state == MERGED) => {
@@ -321,6 +439,17 @@ pub async fn merge(
         }
         Err(failed) => return Err(failed),
     };
+    // Offered first next time, in this repository and every worktree of it.
+    if let Some(git) = programs.git.as_deref() {
+        let keep = ["config", "--local", MERGE_METHOD_KEY, &method];
+        if let Err(e) = run(git, root, &keep, None, REMOTE).await {
+            tracing::debug!(?e, "the merge method not kept");
+        }
+    }
+    let mut pull = pull;
+    if let Some(read) = pull.as_mut().filter(|p| p.methods.contains(&method)) {
+        read.method.clone_from(&method);
+    }
     Ok(GitDone::Merged { said: said.trim().to_owned(), pull })
 }
 
@@ -371,6 +500,8 @@ fn parse(out: &str) -> Result<PullStatus, GitOutcome> {
         merge_state: text("mergeStateStatus"),
         checks: all.into_iter().take(CHECKS_MAX).collect(),
         more_checks: more,
+        methods: Vec::new(),
+        method: String::new(),
     })
 }
 

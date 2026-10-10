@@ -88,6 +88,19 @@ fn a_status_is_read_from_git_s_own_records() {
     assert_eq!((fresh.head, fresh.branch), (None, None));
 }
 
+/// A status names the branch its pull request merges into when the branch's `gh-merge-base`
+/// says it, and none when it does not or `HEAD` is detached.
+#[tokio::test]
+async fn a_status_names_the_branch_s_merge_base() {
+    let (_tmp, work, _bare) = repo();
+    assert_eq!(status_of(&work).await.merge_base, None, "none set");
+    let branch = git_in(&work, &["branch", "--show-current"]);
+    git_in(&work, &["config", &format!("branch.{}.gh-merge-base", branch.trim()), "release-2"]);
+    assert_eq!(status_of(&work).await.merge_base.as_deref(), Some("release-2"));
+    git_in(&work, &["checkout", "--quiet", "--detach"]);
+    assert_eq!(status_of(&work).await.merge_base, None, "detached");
+}
+
 /// The person's commit takes exactly the files chosen, new, changed or gone, and leaves what
 /// else was staged staged; their message is the commit's. Then the branch pushes, setting its
 /// upstream the first time, and the status says it is level with it.

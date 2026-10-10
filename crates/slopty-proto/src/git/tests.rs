@@ -21,6 +21,8 @@ fn open(checks: &[&str]) -> PullStatus {
         merge_state: "CLEAN".to_owned(),
         checks: checks.iter().map(|s| check(s)).collect(),
         more_checks: 0,
+        methods: ["merge", "squash", "rebase"].map(str::to_owned).to_vec(),
+        method: "squash".to_owned(),
     }
 }
 

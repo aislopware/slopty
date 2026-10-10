@@ -2685,3 +2685,41 @@ reordering and edited allows are gone" in `agents.md`.*
     nothing new.
   - Tests: `a_push_takes_every_merge_before_it` (`project/merge/tests.rs`);
     `a_merge_left_unpushed_is_pushed_on_the_person_s_word` (`hub/queue/tests.rs`).
+
+- ✅ **A worktree's pull request goes back into the branch it came from, and the merge sheet
+  offers the person's own method first** (2026-10-12, readiness 10-12 below the line 1, the
+  worker's half). A pull request opened from an agent's worktree always targeted the
+  repository's default branch, so a worktree made from `release-2` asked to merge into
+  `main`. The merge sheet always started on Squash, whatever the repository allows or the
+  person last chose.
+  - **The base.** A new worktree from a branch records it as the branch's `gh-merge-base`
+    (`git config branch.worktree-<name>.gh-merge-base <base>`). That is the key `gh pr create`
+    reads when it is given no `--base` (gh 2.102), so gh needs nothing more. A start from a
+    pull request's head, or from a detached `HEAD`, records none. `GitStatus.merge_base` carries
+    the key to the client, and on a GitLab the worker passes it to glab as `--target-branch`
+    when the person names no target.
+  - **The method.** `PullStatus.methods` lists the ways the repository allows, in gh's words
+    and in the order merge, squash, rebase, from `gh repo view --json
+    viewerDefaultMergeMethod,…MergeAllowed`. `PullStatus.method` is the one to offer first, in
+    this order of preference:
+    - the method last merged by from Slopty, kept repo-local as `slopty.merge-method` (a
+      clone's worktrees share it) and written on every merge that succeeds, while the
+      repository still allows it;
+    - else the person's last method on GitHub;
+    - else the first one allowed.
+    A GitLab's project settings are not read by glab, so all three are offered there, with the
+    kept method else `merge` first.
+  - **Cost.** What a repository allows is asked once and kept 10 minutes per checkout. The pull
+    request watcher and the landed-worktree check read the pull request without it
+    (`pull::status`); only what a person sees (`GitOp::PullStatus`, the read after a merge or
+    a push) carries it (`pull::offered`).
+  - Tests: slopty-worker:
+    - `a_pull_request_offers_the_ways_its_repository_allows_and_the_last_merged_by`;
+    - `the_method_offered_first_falls_back_in_order`;
+    - `a_merge_request_goes_into_the_branch_s_merge_base`;
+    - `a_merge_request_is_opened_and_merged_with_glab` (the kept method);
+    - `a_status_names_the_branch_s_merge_base`;
+    - the `gh-merge-base` cases of `a_new_worktree_starts_current_and_carries_the_ignored_files_it_names`
+      and `a_worktree_of_a_merge_request_checks_out_its_head_and_tracks_it`.
+    The `worker_git_status`, `worker_git_pull_status`, `worker_git_merge_request_status`,
+    `worker_git_merged` and `worker_git_pushed` goldens moved.

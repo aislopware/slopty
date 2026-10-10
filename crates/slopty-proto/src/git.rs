@@ -520,6 +520,14 @@ pub struct PullStatus {
     pub checks: Vec<PullCheck>,
     /// How many more checks there are.
     pub more_checks: u32,
+    /// The ways its repository lets it merge, in gh's words (`merge`, `squash`, `rebase`), in
+    /// that order; all three on a GitLab, whose project settings glab does not read.
+    pub methods: Vec<String>,
+    /// The way to offer first, one of `methods`: the one the person last merged by in this
+    /// repository from Slopty, else the one they last chose on the forge (GitHub's
+    /// `viewerDefaultMergeMethod`), else the first allowed; `merge` on a GitLab never merged
+    /// from here.
+    pub method: String,
 }
 
 /// One of a pull request's checks: a CI job, or a commit status another service set.
@@ -631,6 +639,9 @@ pub struct GitStatus {
     pub head: Option<String>,
     /// The branch's upstream, as git names it (`origin/main`).
     pub upstream: Option<String>,
+    /// The branch its pull request merges into, as the branch's `gh-merge-base` config says;
+    /// the repository's default when none (and on a detached `HEAD`).
+    pub merge_base: Option<String>,
     /// Commits the branch has that its upstream lacks.
     pub ahead: u32,
     /// Commits its upstream has that the branch lacks.

@@ -26,6 +26,7 @@ fn stand_in(dir: &Path, mode: &str) -> PathBuf {
     let gh = dir.join("gh");
     std::fs::write(dir.join("view.json"), VIEW).expect("written");
     std::fs::write(dir.join("review.json"), REVIEW).expect("written");
+    std::fs::write(dir.join("ways.json"), WAYS_SAID).expect("written");
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{dir}/asked\"\n\
          case \"$1 $2\" in\n\
@@ -36,6 +37,7 @@ fn stand_in(dir: &Path, mode: &str) -> PathBuf {
          'api graphql'*) cat \"{dir}/review.json\" ;;\n\
          'pr create') echo 'https://github.com/o/demo/pull/7' ;;\n\
          'pr ready') echo '✓ Pull request #7 is marked as \"ready for review\"' ;;\n\
+         'repo view') cat \"{dir}/ways.json\" ;;\n\
          *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
          esac\n",
         dir = dir.display()
@@ -61,9 +63,99 @@ fn repo(dir: &Path) -> PathBuf {
     work
 }
 
+/// What gh answers `gh repo view --json` with: squash last chosen, rebase not allowed.
+const WAYS_SAID: &str = r#"{"viewerDefaultMergeMethod":"SQUASH","mergeCommitAllowed":true,
+"squashMergeAllowed":true,"rebaseMergeAllowed":false}"#;
+
+/// What the forge's stand-in was asked, but what its repository allows ([`asked_all`]).
 fn asked(dir: &Path) -> Vec<String> {
+    asked_all(dir).into_iter().filter(|a| !a.starts_with("repo view")).collect()
+}
+
+fn asked_all(dir: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(dir.join("asked")).unwrap_or_default();
     text.lines().map(str::to_owned).collect()
+}
+
+/// The repository-local config `key` of `work`.
+fn config_of(work: &Path, key: &str) -> Option<String> {
+    let git = crate::changes::git()?;
+    let out = std::process::Command::new(git)
+        .arg("-C")
+        .arg(work)
+        .args(["config", "--get", key])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git runs");
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// Set the repository-local config `key` of `work` to `value`.
+fn set_config(work: &Path, key: &str, value: &str) {
+    let git = crate::changes::git().expect("git");
+    let ran = std::process::Command::new(git)
+        .arg("-C")
+        .arg(work)
+        .args(["config", key, value])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(ran.status.success());
+}
+
+/// A pull request carries the ways its repository lets it merge, in gh's words, and the one to
+/// offer first: the one last merged by from Slopty, kept in the repository's own config, while
+/// it is allowed; else the person's last on GitHub; else the first allowed. gh is asked about
+/// the repository once while what it said is fresh.
+#[tokio::test]
+async fn a_pull_request_offers_the_ways_its_repository_allows_and_the_last_merged_by() {
+    let dir = tempfile::tempdir().expect("temp");
+    let programs = Programs {
+        git: crate::changes::git().map(Path::to_path_buf),
+        gh: Some(stand_in(dir.path(), "open")),
+        glab: None,
+        path: None,
+    };
+    let work = repo(dir.path());
+    let at = work.to_string_lossy().into_owned();
+    let read = async || {
+        let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
+            apply(&programs, &at, GitOp::PullStatus, &[]).await
+        else {
+            panic!("no pull request read")
+        };
+        (pull.methods, pull.method)
+    };
+    let allowed = vec!["merge".to_owned(), "squash".to_owned()];
+    assert_eq!(read().await, (allowed.clone(), "squash".to_owned()), "the person's last on GitHub");
+    let merge =
+        GitOp::Merge { method: "merge".to_owned(), head: None, delete_branch: false, auto: false };
+    let GitOutcome::Done(GitDone::Merged { pull, .. }) = apply(&programs, &at, merge, &[]).await
+    else {
+        panic!("not merged")
+    };
+    assert_eq!(pull.map(|p| p.method).as_deref(), Some("merge"), "as merged");
+    assert_eq!(config_of(&work, "slopty.merge-method").as_deref(), Some("merge"));
+    assert_eq!(read().await, (allowed.clone(), "merge".to_owned()), "the last merged by here");
+    set_config(&work, "slopty.merge-method", "rebase");
+    assert_eq!(read().await, (allowed, "squash".to_owned()), "one not allowed is passed over");
+    let views = asked_all(dir.path()).iter().filter(|a| a.starts_with("repo view")).count();
+    assert_eq!(views, 1, "the repository asked about once");
+}
+
+/// The method offered first falls back in order, and gh's answer reads as the ways allowed.
+#[test]
+fn the_method_offered_first_falls_back_in_order() {
+    let ways = Ways::parse(WAYS_SAID).expect("read");
+    assert_eq!(ways.allowed, ["merge", "squash"]);
+    assert_eq!(ways.first(Some("merge")), "merge");
+    assert_eq!(ways.first(Some("rebase")), "squash");
+    assert_eq!(ways.first(None), "squash");
+    let none_chosen = Ways { last: None, ..ways };
+    assert_eq!(none_chosen.first(None), "merge", "the first allowed");
+    let nothing = Ways { allowed: Vec::new(), last: None };
+    assert_eq!(nothing.first(Some("squash")), "merge");
+    assert_eq!(Ways::parse("not json"), None);
 }
 
 /// gh's answer is read in the forge's own words: a job's conclusion, a running job's status, a
@@ -441,7 +533,10 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
     else {
         panic!("not merged")
     };
-    assert_eq!(pull.map(|p| p.number), Some(12));
+    let pull = pull.expect("read after");
+    assert_eq!(pull.number, 12);
+    assert_eq!(pull.methods, ["merge", "squash", "rebase"], "glab reads no project settings");
+    assert_eq!(pull.method, "squash", "the last merged by here");
     let calls = asked(&root);
     assert_eq!(
         calls.get(..2),
@@ -455,6 +550,45 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
             .as_slice()
         )
     );
+}
+
+/// A branch whose `gh-merge-base` names its base opens its merge request into that branch
+/// when no target is asked, as gh does for a pull request; one asked for wins. A merge request
+/// never merged from here offers `merge` first.
+#[tokio::test]
+async fn a_merge_request_goes_into_the_branch_s_merge_base() {
+    let dir = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(dir.path()).expect("real");
+    let work = gitlab_repo(&root);
+    let _forge = pushing_to_a_forge(&root, &work);
+    set_config(&work, "branch.feature.gh-merge-base", "release-2");
+    let at = work.to_string_lossy().into_owned();
+    let programs = with_glab(stand_in_glab(&root, "open"));
+    let open = |base: Option<&str>| GitOp::PullRequest {
+        title: "Keep it".to_owned(),
+        body: "Why.".to_owned(),
+        base: base.map(str::to_owned),
+        draft: false,
+    };
+    let opened = apply(&programs, &at, open(None), &[]).await;
+    assert!(matches!(opened, GitOutcome::Done(GitDone::PullRequest { .. })), "{opened:?}");
+    let opened = apply(&programs, &at, open(Some("main")), &[]).await;
+    assert!(matches!(opened, GitOutcome::Done(GitDone::PullRequest { .. })), "{opened:?}");
+    let creates: Vec<String> =
+        asked(&root).into_iter().filter(|a| a.starts_with("mr create")).collect();
+    assert_eq!(
+        creates,
+        [
+            "mr create --yes --title Keep it --description Why. --target-branch release-2",
+            "mr create --yes --title Keep it --description Why. --target-branch main",
+        ]
+    );
+    let GitOutcome::Done(GitDone::PullStatus(Some(pull))) =
+        apply(&programs, &at, GitOp::PullStatus, &[]).await
+    else {
+        panic!("no merge request read")
+    };
+    assert_eq!(pull.method, "merge");
 }
 
 /// What the stand-in gh answers GitHub's GraphQL with: a reviewer asking for changes, a thread

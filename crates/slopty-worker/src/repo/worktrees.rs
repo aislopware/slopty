@@ -157,13 +157,21 @@ pub async fn make(
     let exists = ["rev-parse", "--verify", "--quiet", "--end-of-options", &branch_ref(&branch)?];
     let fresh = bundle::run(git, &clone, &exists).await.is_err();
     if fresh {
+        let wanted = base.or(clone_branch.as_deref());
         let (from, tracks) = match pull {
             Some(number) => pull_head(git, &clone, number).await?,
-            None => (base_of(git, &clone, base.or(clone_branch.as_deref())).await?, None),
+            None => (base_of(git, &clone, wanted).await?, None),
         };
         let args =
             ["worktree", "add", "--no-track", "-b", &branch, "--end-of-options", &path_text, &from];
         bundle::run(git, &clone, &args).await?;
+        // Its pull request merges back into the branch it came from, not the repository's
+        // default: gh reads this for a `gh pr create` with no `--base`, and the worker for glab.
+        // Not for a pull request's head, nor a start from a detached `HEAD`.
+        if let (None, Some(wanted)) = (pull, wanted.filter(|_| from != "HEAD")) {
+            let key = super::commit::merge_base_key(&branch);
+            bundle::run(git, &clone, &["config", &key, wanted]).await?;
+        }
         if let Some(merge) = tracks {
             let (remote, merged) =
                 (format!("branch.{branch}.remote"), format!("branch.{branch}.merge"));
@@ -1071,6 +1079,8 @@ mod tests {
         let key = |k: &str| format!("branch.worktree-mr-3.{k}");
         assert_eq!(git_in(&clone, &["config", &key("merge")]), "refs/merge-requests/3/head");
         assert_eq!(git_in(&clone, &["config", &key("remote")]), "origin");
+        let unset = git_in(&clone, &["config", "--default", "", "--get", &key("gh-merge-base")]);
+        assert_eq!(unset, "", "a merge request's head merges where it already does");
         let none = make(git, &clone, "mr-9", None, Some(9)).await;
         assert_eq!(none, Err(Failed::NotOne("origin has no merge request !9".to_owned())));
     }
@@ -1105,6 +1115,11 @@ mod tests {
         }
         let behind = make(git, &clone, "behind", None, None).await.expect("made");
         assert_eq!(git_in(&behind.path, &["rev-parse", "HEAD"]), c1, "origin's, fetched");
+        let merge_base = |name: &str| {
+            let key = format!("branch.worktree-{name}.gh-merge-base");
+            git_in(&clone, &["config", "--default", "", "--get", &key])
+        };
+        assert_eq!(merge_base("behind"), "main", "its pull request merges back where it came from");
         let read = |file: &str| std::fs::read_to_string(behind.path.join(file)).ok();
         assert_eq!(read(".env").as_deref(), Some("KEY=1"));
         assert_eq!(read("certs/dev.pem").as_deref(), Some("pem"));
@@ -1119,12 +1134,14 @@ mod tests {
 
         let feature = make(git, &clone, "feature", Some("feature"), None).await.expect("made");
         assert_eq!(git_in(&feature.path, &["rev-parse", "HEAD"]), c1, "a branch origin alone has");
+        assert_eq!(merge_base("feature"), "feature");
         let none = make(git, &clone, "none", Some("nowhere"), None).await;
         assert!(matches!(none, Err(Failed::NotOne(_))), "{none:?}");
 
         git_in(&clone, &["checkout", "-q", "--detach", "HEAD~1"]);
         let detached = make(git, &clone, "detached", None, None).await.expect("made");
         assert_eq!(git_in(&detached.path, &["rev-parse", "HEAD"]), c1, "from HEAD");
+        assert_eq!(merge_base("detached"), "", "none from a detached HEAD");
     }
 
     /// A start naming a worktree moves into it, made from the main checkout of the repository
