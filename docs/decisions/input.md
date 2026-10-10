@@ -1208,3 +1208,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_layout_names_the_key_each_character_is_on` (`slopty-platform`'s main-thread harness),
     which reads French, German, US, Russian and both Dvorak layouts macOS ships without
     selecting any; the `client_screen_key` golden (`slopty-proto`).
+
+- ✅ **Secure keyboard entry is on at passwords or off** (2026-10-10, orchestrator-first audit
+  §C.5). This amends "Secure keyboard entry, balanced". `[terminal] secure_keyboard_entry` is
+  now a switch: on (the default) holds secure event input while the focused tile takes a
+  password and an app window is in front, and off never holds it. "Always" is gone. It blinded
+  every other app's shortcuts, and "Send system shortcuts", whenever Slopty was in front, which
+  costs more than a password needs, and the prompt detection already covers the moments that
+  matter.
+  - **Gone.** The `SecureEntry` enums in `slopty-settings` and `slopty-theme`.
+    `Behaviour::secure_entry` is now a `bool`.
+  - A file that still says `"passwords"`, `"always"` or `"never"` no longer reads, and says so
+    in the bar.
+  - Tests: `worker_choices` (slopty-settings), `terminal_settings_ride_on_the_theme`
+    (slopty-app), `workspace::tests::secure_entry_holds_while_the_focused_shell_reads_a_password`.

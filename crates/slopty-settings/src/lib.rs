@@ -121,24 +121,6 @@ pub enum OptionAsAlt {
     Right,
 }
 
-/// When typing into Slopty is kept from other programs on this Mac (macOS secure event input,
-/// Terminal's "Secure Keyboard Entry").
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum SecureEntry {
-    /// While a terminal waits for a password, or a remote window's password field has the
-    /// keyboard.
-    #[default]
-    #[schemars(title = "At passwords")]
-    Passwords,
-    /// Whenever a Slopty window is in front.
-    #[schemars(title = "Always")]
-    Always,
-    /// Never.
-    #[schemars(title = "Never")]
-    Never,
-}
-
 /// What keeps a worker Mac out of idle sleep. A display that streams is kept on unless it is
 /// [`Self::Never`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -369,12 +351,12 @@ pub struct TerminalSettings {
     pub option_as_alt: OptionAsAlt,
     /// Keeps passwords typed here from other apps, as Terminal does.
     ///
-    /// When macOS keeps what is typed into Slopty from other programs on this Mac (secure
-    /// event input): while a terminal waits for a password or a remote window's password
-    /// field has the keyboard, whenever a Slopty window is in front, or never. While it holds,
-    /// other apps' shortcuts and "Send system shortcuts" do not see the keys.
+    /// Whether macOS keeps what is typed into Slopty from other programs on this Mac (secure
+    /// event input) while a terminal waits for a password or a remote window's password
+    /// field has the keyboard, and only then. While it holds, other apps' shortcuts and
+    /// "Send system shortcuts" do not see the keys.
     #[schemars(title = "Secure keyboard entry")]
-    pub secure_keyboard_entry: SecureEntry,
+    pub secure_keyboard_entry: bool,
 }
 
 impl Default for TerminalSettings {
@@ -384,7 +366,7 @@ impl Default for TerminalSettings {
             copy_on_select: false,
             alert: Alert::Hidden,
             option_as_alt: OptionAsAlt::False,
-            secure_keyboard_entry: SecureEntry::Passwords,
+            secure_keyboard_entry: true,
         }
     }
 }
@@ -1220,15 +1202,15 @@ mod tests {
     fn worker_choices() {
         let d = WorkerSettings::default();
         assert_eq!(d.keep_awake, KeepAwake::Working);
-        assert_eq!(Settings::default().terminal.secure_keyboard_entry, SecureEntry::Passwords);
+        assert!(Settings::default().terminal.secure_keyboard_entry, "at passwords by default");
 
         let loaded = Settings::parse(
-            "[worker]\nkeep_awake = \"never\"\n[terminal]\nsecure_keyboard_entry = \"always\"\n",
+            "[worker]\nkeep_awake = \"never\"\n[terminal]\nsecure_keyboard_entry = false\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         let worker = &loaded.settings.worker;
         assert_eq!(worker.keep_awake, KeepAwake::Never);
-        assert_eq!(loaded.settings.terminal.secure_keyboard_entry, SecureEntry::Always);
+        assert!(!loaded.settings.terminal.secure_keyboard_entry);
 
         let gone =
             Settings::parse("[worker]\ninput_source_sync = false\ndisplay_linger_mins = 0\n");

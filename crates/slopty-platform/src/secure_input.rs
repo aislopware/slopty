@@ -3,8 +3,8 @@
 //! While it is on, no other program on this Mac sees the keys typed into the app: event taps
 //! (a keylogger's, a launcher's, a remapper's) and global shortcuts go blind to them. The app
 //! turns it on while a terminal waits for a password or a remote window's password field has
-//! the keyboard, or whenever its window is in front if the person asks (`[terminal]
-//! secure_keyboard_entry`), and off as soon as that ends or the app goes to the back.
+//! the keyboard, unless the person turns it off (`[terminal] secure_keyboard_entry`), and off
+//! as soon as that ends or the app goes to the back.
 //!
 //! `EnableSecureEventInput` and `DisableSecureEventInput` are counted per process
 //! (`<HIToolbox/CarbonEvents.h>`): every enable needs its disable, and one left over keeps

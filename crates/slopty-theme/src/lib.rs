@@ -1731,17 +1731,14 @@ pub struct Behaviour {
     pub copy_on_select: bool,
     /// ⌥ as Alt: sent with every key, since the encoder is the worker's.
     pub option_as_alt: OptionAsAlt,
-    /// When typing is kept from other programs on this Mac (secure event input).
-    pub secure_entry: SecureEntry,
+    /// Whether typing is kept from other programs on this Mac (secure event input) while the
+    /// focused tile takes a password.
+    pub secure_entry: bool,
 }
 
 impl Default for Behaviour {
     fn default() -> Self {
-        Self {
-            copy_on_select: false,
-            option_as_alt: OptionAsAlt::False,
-            secure_entry: SecureEntry::Passwords,
-        }
+        Self { copy_on_select: false, option_as_alt: OptionAsAlt::False, secure_entry: true }
     }
 }
 
@@ -1771,19 +1768,6 @@ impl OptionAsAlt {
             Self::Right => right,
         }
     }
-}
-
-/// When typing into the app is kept from other programs on this Mac (macOS secure event
-/// input, Terminal's "Secure Keyboard Entry").
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum SecureEntry {
-    /// While a terminal waits for a password or a remote password field has the keyboard.
-    #[default]
-    Passwords,
-    /// Whenever an app window is in front.
-    Always,
-    /// Never.
-    Never,
 }
 
 /// The whole theme.

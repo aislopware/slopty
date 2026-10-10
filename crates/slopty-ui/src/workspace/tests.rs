@@ -1777,8 +1777,8 @@ fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) 
 }
 
 /// Secure keyboard entry holds while the focused shell reads a password, and lets go when
-/// another tile has the focus, the program echoes again, or the person turns it off; set to
-/// always, it holds while the window is in front.
+/// another tile has the focus, the program echoes again, the app goes behind other windows,
+/// or the person turns it off.
 #[gpui::test]
 fn secure_entry_holds_while_the_focused_shell_reads_a_password(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1810,20 +1810,18 @@ fn secure_entry_holds_while_the_focused_shell_reads_a_password(cx: &mut TestAppC
     cx.run_until_parked();
     assert!(!on(cx), "the shell's own prompt again");
 
-    let with = |entry, cx: &mut VisualTestContext| {
-        let mut theme = view.read_with(cx, |v, _| v.theme.clone());
-        theme.behaviour.secure_entry = entry;
-        view.update(cx, |v, cx| v.set_theme(theme, cx));
-        cx.run_until_parked();
-    };
-    with(slopty_theme::SecureEntry::Always, cx);
-    assert!(on(cx), "always, while the window is in front");
+    view.update_in(cx, |v, _w, cx| v.term_event(asking, prompt(4, password), cx));
+    cx.run_until_parked();
+    assert!(on(cx), "a password again");
     cx.deactivate_window();
     cx.run_until_parked();
     assert!(!on(cx), "the app behind other windows");
     cx.update(|window, _| window.activate_window());
-    with(slopty_theme::SecureEntry::Never, cx);
-    view.update_in(cx, |v, _w, cx| v.term_event(asking, prompt(4, password), cx));
     cx.run_until_parked();
-    assert!(!on(cx), "never, even at a password");
+    assert!(on(cx), "in front again, at the password");
+    let mut theme = view.read_with(cx, |v, _| v.theme.clone());
+    theme.behaviour.secure_entry = false;
+    view.update(cx, |v, cx| v.set_theme(theme, cx));
+    cx.run_until_parked();
+    assert!(!on(cx), "off, even at a password");
 }

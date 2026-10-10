@@ -7,7 +7,7 @@ use std::path::Path;
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, Loaded, OptionAsAlt, Palette, SecureEntry, Settings, SettingsError, bounds,
+    Appearance, Color, Loaded, OptionAsAlt, Palette, Settings, SettingsError, bounds,
 };
 use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -132,11 +132,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         OptionAsAlt::Left => slopty_theme::OptionAsAlt::Left,
         OptionAsAlt::Right => slopty_theme::OptionAsAlt::Right,
     };
-    theme.behaviour.secure_entry = match settings.terminal.secure_keyboard_entry {
-        SecureEntry::Passwords => slopty_theme::SecureEntry::Passwords,
-        SecureEntry::Always => slopty_theme::SecureEntry::Always,
-        SecureEntry::Never => slopty_theme::SecureEntry::Never,
-    };
+    theme.behaviour.secure_entry = settings.terminal.secure_keyboard_entry;
     theme
 }
 
@@ -349,10 +345,9 @@ mod tests {
         let t = theme_for(&s, true);
         assert_eq!(t.terminal.minimum_contrast, 450);
         assert!(t.behaviour.copy_on_select);
-        assert_eq!(t.behaviour.secure_entry, slopty_theme::SecureEntry::Passwords);
-        s.terminal.secure_keyboard_entry = SecureEntry::Always;
-        let secure = theme_for(&s, true).behaviour.secure_entry;
-        assert_eq!(secure, slopty_theme::SecureEntry::Always);
+        assert!(t.behaviour.secure_entry, "at passwords by default");
+        s.terminal.secure_keyboard_entry = false;
+        assert!(!theme_for(&s, true).behaviour.secure_entry);
         assert!(t.typography.ligatures);
         s.font.ligatures = false;
         assert!(!theme_for(&s, true).typography.ligatures);
