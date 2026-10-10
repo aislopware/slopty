@@ -771,6 +771,55 @@ fn the_draft_follows_the_person_through_the_worker(cx: &mut TestAppContext) {
     assert_eq!(drafts(&sent).last().map(String::as_str), Some(""), "the draft there is cleared");
 }
 
+/// A message sent on another device leaves this composer too: the worker's empty draft clears
+/// words this view took up and left untouched, but not words the person changed here. Nothing
+/// goes to the worker while it is not linked.
+#[gpui::test]
+fn a_message_sent_elsewhere_leaves_this_composer(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{Draft, TableFrame};
+
+    use crate::conversation::thread::view::sharing::DRAFT_SHARE_PAUSE;
+
+    let (hub, sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    let table = |text: &str, at: u64, seq: u64| {
+        let mut row = state.row(WallMs::ZERO);
+        row.draft = Some(Draft { text: text.to_owned(), at_ms: WallMs::from_millis(at) });
+        TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, rows: vec![row] }
+    };
+    hub.update(cx, |hub, cx| hub.table(&table("Fix the flaky test", 5, 1), cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "Fix the flaky test", "taken up");
+    // The phone sent it: the worker clears the draft, an empty one of its time.
+    hub.update(cx, |hub, cx| hub.table(&table("", 9, 2), cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, ThreadView::draft), "", "the sent words leave here too");
+
+    hub.update(cx, |hub, cx| hub.table(&table("Now the docs", 12, 3), cx));
+    cx.run_until_parked();
+    cx.simulate_input(", and the changelog");
+    cx.run_until_parked();
+    hub.update(cx, ThreadHub::disconnected);
+    cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
+    cx.run_until_parked();
+    let drafted =
+        |sent: &super::Sent| intents(sent).iter().any(|i| matches!(i, Intent::Draft { .. }));
+    assert!(!drafted(&sent), "nothing goes while the worker is away");
+    hub.update(cx, ThreadHub::connected);
+    hub.update(cx, |hub, cx| hub.table(&table("", 14, 4), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, ThreadView::draft),
+        "Now the docs, and the changelog",
+        "words changed here stay"
+    );
+}
+
 /// Words this device kept and opened with give way to a worker draft kept later on another
 /// device, heard once the table comes; nothing goes to the worker before then.
 #[gpui::test]
