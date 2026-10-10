@@ -1011,7 +1011,7 @@ impl ThreadView {
     /// `/config`, a bare `/model`), which nobody would see while the thread is on show.
     fn opens_dialog(&self, text: &str, cx: &App) -> bool {
         self.state(cx).is_some_and(|st| {
-            st.meta.agent.0 == AgentId::CLAUDE_CODE && crate::conversation::menu::opens_dialog(text)
+            st.meta.agent.0 == AgentId::CLAUDE_CODE && slopty_agent::commands::opens_dialog(text)
         })
     }
 

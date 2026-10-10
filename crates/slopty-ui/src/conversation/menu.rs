@@ -114,56 +114,14 @@ pub fn commands<'a>(all: &'a [Command], query: &str) -> Vec<&'a Command> {
     ranked.into_iter().take(ROWS).map(|(_, _, command)| command).collect()
 }
 
-/// Claude Code's own commands that open a dialog in its terminal whatever follows them. Its
-/// command list does not say which do, so they are named here, from its `local-jsx` commands.
-const DIALOGS: &[&str] = &[
-    "agents",
-    "bashes",
-    "config",
-    "context",
-    "doctor",
-    "help",
-    "hooks",
-    "ide",
-    "install-github-app",
-    "login",
-    "logout",
-    "mcp",
-    "memory",
-    "permissions",
-    "plugin",
-    "plugins",
-    "privacy-settings",
-    "rewind",
-    "settings",
-    "status",
-    "tasks",
-    "terminal-setup",
-    "theme",
-    "upgrade",
-    "usage",
-];
-
-/// Its commands that open a dialog only when run bare: with an argument they act at once
-/// (`/model sonnet`).
-const BARE_DIALOGS: &[&str] = &["add-dir", "export", "model", "output-style", "resume"];
-
-/// Whether Claude Code's built-in command `name` can open a dialog in its terminal: the menu
-/// says so beside it.
+/// Whether Claude Code's built-in command `name` can open a dialog in its terminal.
+///
+/// Its build says which do ([`slopty_agent::commands`]), and the menu says so beside it. A
+/// command of the person's own with the same name opens none.
 #[must_use]
 pub fn may_open_dialog(command: &Command) -> bool {
     matches!(command.source.as_str(), "built-in" | "")
-        && (DIALOGS.contains(&command.name.as_str())
-            || BARE_DIALOGS.contains(&command.name.as_str()))
-}
-
-/// Whether Claude Code shows `draft`, sent, as a dialog in its terminal, which nobody sees
-/// while the thread is on show: `/config`, a bare `/model`.
-#[must_use]
-pub fn opens_dialog(draft: &str) -> bool {
-    let Some(command) = draft.trim().strip_prefix('/') else { return false };
-    let (name, args) = command.split_once(char::is_whitespace).unwrap_or((command, ""));
-    DIALOGS.contains(&name) || (BARE_DIALOGS.contains(&name) && args.trim().is_empty())
+        && slopty_agent::commands::may_open_dialog(&command.name)
 }
 
 /// The draft once command `name` is picked, and where the caret goes: `/name ` in place of the
@@ -278,17 +236,13 @@ mod tests {
         assert_eq!(pick_path("@sh", 0, 3, "a b.png"), ("@\"a b.png\" ".to_owned(), 11));
     }
 
-    /// A command that opens a dialog is told by its name, and a bare one only bare.
+    /// The menu marks Claude Code's own dialog commands, never one of the person's own by the
+    /// same name.
     #[test]
-    fn a_dialog_command_is_told_by_its_name() {
-        use super::{may_open_dialog, opens_dialog};
-        assert!(opens_dialog("/config"));
-        assert!(opens_dialog(" /mcp "));
-        assert!(opens_dialog("/model"));
-        assert!(!opens_dialog("/model sonnet"), "sets the model at once");
-        assert!(!opens_dialog("/compact"));
-        assert!(!opens_dialog("Run /config later"));
+    fn a_dialog_command_is_claude_codes_own() {
+        use super::may_open_dialog;
         assert!(may_open_dialog(&command("resume", "", "built-in")));
+        assert!(!may_open_dialog(&command("compact", "", "built-in")));
         assert!(!may_open_dialog(&command("config", "", "project")), "the person's own");
     }
 }

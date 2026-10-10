@@ -55,6 +55,9 @@ regex.workspace = true
 raw-window-handle.workspace = true
 # Which lines an agent's edit changed, when a file tile reads its file again (`file`).
 similar.workspace = true
+# Which of Claude Code's commands open a dialog in its terminal, as its build says
+# (`slopty_agent::commands`). The captured sessions feed the face's tests too.
+slopty-agent.workspace = true
 slopty-client.workspace = true
 slopty-platform.workspace = true
 slopty-core.workspace = true
@@ -83,7 +86,5 @@ gpui = { workspace = true, features = [ "test-support" ] }
 # The platform's own text system (Core Text), for the grid's paint oracle to shape and
 # rasterise real glyphs (`terminal::view::paint_oracle`).
 gpui_platform = { workspace = true, features = [ "font-kit" ] }
-# The captured Claude Code sessions, decoded as the worker decodes them, feed the face's tests.
-slopty-agent.workspace = true
 slopty-client = { workspace = true, features = [ "headless" ] }
 tempfile.workspace = true
