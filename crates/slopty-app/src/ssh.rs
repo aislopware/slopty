@@ -572,6 +572,12 @@ fn update_all_words(updating: usize, away: usize) -> String {
     }
 }
 
+/// What a failed server update says: why, in `said`, and when "Update all" was to update the
+/// workers after it (`held`), that they were left as they are.
+fn update_failed_words(said: &str, held: bool) -> String {
+    if held { format!("{said}. The machines were not updated") } else { said.to_owned() }
+}
+
 /// How long a removed machine's worker has to go off the server's list before the removal
 /// says it still answers.
 const GOES_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
@@ -919,8 +925,8 @@ impl Workspace {
             .collect()
     }
 
-    /// The server's update that "Update all" started ended, `updated` or not: the workers'
-    /// turn.
+    /// The server's update that "Update all" started came back on this build: the workers'
+    /// turn. One that failed stops "Update all" there ([`Self::server_update_failed`]).
     pub(crate) fn server_update_ended(&mut self, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.workers_after_server) {
             for (worker, host) in self.older_workers(cx) {
@@ -1513,8 +1519,10 @@ impl Workspace {
             (None, Some(line)) => format!("{}: {line}", failure.title),
             (None, None) => failure.title,
         };
-        self.show_notice(said, cx);
-        self.server_update_ended(cx);
+        // "Update all" stops here: workers brought to a build their server does not run would
+        // lose it.
+        let held = std::mem::take(&mut self.workers_after_server);
+        self.show_notice(update_failed_words(&said, held), cx);
     }
 
     /// The server the sheet's run `id` set up answered at `address`: it is this app's server

@@ -1090,6 +1090,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `--server`, on every machine added here by address that the server's directory does not
     list and whose SSH target was kept. The directory's first listing after a link says how
     many there are, once a server. Each keeps its sessions (custody, above).
+  - **A failed server update stops it** (2026-10-11, orchestrator-first study item 20). "Update
+    all" updates the server first and the workers once it is back. A server run that failed
+    still sent the workers on, to a build their server did not run, which would cut them off.
+    Now a failed run stops there, and its notice ends "The machines were not updated". Test:
+    `ssh::tests::update_all_goes_server_first_and_catches_machines_away`.
   - **Only where `ssh` runs** (2026-10-10, orchestrator-first study item 7). "Update all
     machines" and "Update the server" are palette lines and keymap commands on a Mac only
     (`ssh::OFFERED`). On a phone each could only say machines are updated from a Mac. The

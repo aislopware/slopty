@@ -870,6 +870,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `worker_install_with_no_server_installs_one_beside_it`,
     `a_worker_name_resolves_through_the_server`; e2e: `the_first_run_offers_one_way_in`,
     `this_mac_walks_its_checklist`.
+  - **A server on another build still counts** (2026-10-11, the orchestrator-first study, item
+    20). The look counted only servers that answered Ready, so a second Mac that found the one
+    server on an older build, or one that turned it away, saw none and started a second. Every
+    server that answers now counts. One that is not Ready makes "Use this Mac" ask
+    (`Asking::Unready`), with its row to update it or copy the grant that lets this Mac in; an
+    empty address there starts nothing and says so. Test:
+    `this_mac_joins_a_server_on_another_build_rather_than_serve`.
 
 - ✅ **One verb each way moves a file** (2026-10-05, from the feature audit). The CLI had two
   verbs each way: `put` replaced a file with standard input in one `WriteFile`, `push` sent a

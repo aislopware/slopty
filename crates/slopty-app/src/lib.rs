@@ -328,15 +328,24 @@ struct Adding {
 enum Asking {
     /// Several servers answered on the tailnet.
     Several,
+    /// One server answered, on another build or turning this device away: it is updated or
+    /// lets this device in, rather than a second one started here.
+    Unready,
     /// No look was possible: Tailscale is not up here, or this device cannot read it.
     Blind,
 }
+
+/// What an empty address says while the one server found cannot take this Mac yet.
+const UNREADY_EMPTY: &str = "Update the server above or let this Mac in, or type another address";
 
 impl Asking {
     /// What the panel says above the field.
     const fn words(self) -> &'static str {
         match self {
             Self::Several => "Several servers answered. Pick one, or type its address.",
+            Self::Unready => {
+                "A server answered that this Mac can't join yet. Update it, or copy the grant that lets this Mac in, rather than run a second one here."
+            }
             Self::Blind => {
                 "No tailnet to look for a server on. Type its address, or leave it empty to run one on this Mac."
             }
@@ -424,16 +433,11 @@ impl Search {
         }
     }
 
-    /// The servers that answered ready, once the look is done; `None` while it looks or where
-    /// it could not look.
-    fn ready_servers(&self) -> Option<Vec<&Offer>> {
+    /// The servers that answered, on any build and whether or not they let this device in,
+    /// once the look is done; `None` while it looks or where it could not look.
+    fn answered_servers(&self) -> Option<&[Offer]> {
         match self {
-            Self::Answered { servers, running: true, .. } => Some(
-                servers
-                    .iter()
-                    .filter(|o| o.answer == slopty_net::discover::Answer::Ready)
-                    .collect(),
-            ),
+            Self::Answered { servers, running: true, .. } => Some(servers),
             Self::Looking | Self::Answered { .. } => None,
         }
     }
@@ -1862,8 +1866,12 @@ impl Workspace {
             return;
         }
         let address = adding.address.read(cx).value().trim().to_owned();
-        if adding.asking.is_some() {
+        if let Some(asking) = adding.asking {
             let serve = if address.is_empty() {
+                // A server is there: an empty field does not start a second.
+                if asking == Asking::Unready {
+                    return self.panel_failed(UNREADY_EMPTY.to_owned(), cx);
+                }
                 this_mac::Serve::Here
             } else {
                 match slopty_net::HostAddr::parse_with_port(
@@ -1940,8 +1948,13 @@ impl Workspace {
         let search = self.adding.as_ref().and_then(|a| a.search.as_ref());
         match search {
             Some(Search::Looking) => Err(None),
-            Some(search) => match search.ready_servers().as_deref() {
+            // Any server that answered counts, whatever its build or grant: a second Mac joins
+            // it, once updated or let in, rather than serving beside it.
+            Some(search) => match search.answered_servers() {
                 Some([]) => Ok(this_mac::Serve::Here),
+                Some([one]) if one.answer != slopty_net::discover::Answer::Ready => {
+                    Err(Some(Asking::Unready))
+                }
                 // A tailnet IP always parses; were it not to, the person says which.
                 Some([one]) => slopty_net::HostAddr::parse_with_port(
                     &one.at,
@@ -5731,6 +5744,52 @@ mod tests {
         cx.run_until_parked();
         let here = this_mac::Serve::Here.address();
         assert_eq!(host.asked().first(), Some(&format!("install join {here}")), "its own server");
+    }
+
+    /// One server answering on another build, or turning this Mac away, still counts: "Use
+    /// this Mac" offers to update it or let this Mac in rather than run a second server, and
+    /// an empty address starts nothing.
+    #[gpui::test]
+    fn this_mac_joins_a_server_on_another_build_rather_than_serve(cx: &mut TestAppContext) {
+        use slopty_net::discover::{Answer, Found};
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        let host = StandIn::answering(None);
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
+        for answer in [Answer::OtherBuild("0.0.9+wire.0badf00d".to_owned()), Answer::NotGranted] {
+            let old = net::Tailnet {
+                servers: vec![Found {
+                    name: "hub".to_owned(),
+                    addr: "100.64.0.1:45560".parse().unwrap(),
+                    tags: Vec::new(),
+                    answer: Some(answer.clone()),
+                }],
+                workers: Vec::new(),
+                running: true,
+            };
+            cx.update(|window, cx| {
+                ws.update(cx, |ws, cx| {
+                    ws.show_add_worker(Panel::Worker, window, cx);
+                    if let Some(adding) = &mut ws.adding {
+                        adding.search = Some(Search::Looking);
+                    }
+                    ws.offer_found(old, window, cx);
+                    ws.use_this_mac(window, cx);
+                });
+            });
+            cx.run_until_parked();
+            let asking = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.asking));
+            assert_eq!(asking, Some(Asking::Unready), "{answer:?}");
+            assert!(cx.debug_bounds("add-worker-found-0").is_some(), "its row, to act on");
+            cx.update(|window, cx| ws.update(cx, |ws, cx| ws.enter_address(window, cx)));
+            cx.run_until_parked();
+            assert!(host.asked().is_empty(), "{answer:?}: no second server");
+            let error = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.error.clone()));
+            assert_eq!(error.as_deref(), Some(UNREADY_EMPTY), "{answer:?}");
+        }
     }
 
     /// A failed install is the checklist's first line, red with a way to try again; back to

@@ -1268,8 +1268,10 @@ fn a_worker_on_an_older_build_of_this_wire_is_offered_update(cx: &mut TestAppCon
     assert!(deployer.asked().is_empty(), "once a launch");
 }
 
-/// "Update all" updates the server first and the workers once its run ends; a machine away
-/// then is updated when it answers again on an older build, and not on this one.
+/// "Update all" updates the server first and the workers once it is back on this build; a
+/// server run that fails stops it there, saying the machines were not updated, since workers on
+/// a build their server does not run would lose it. A machine away then is updated when it
+/// answers again on an older build, and not on this one.
 #[gpui::test]
 fn update_all_goes_server_first_and_catches_machines_away(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -1306,12 +1308,11 @@ fn update_all_goes_server_first_and_catches_machines_away(cx: &mut TestAppContex
     let finish = deployer.served.borrow_mut().take().expect("a server run");
     finish.send(Err(failure("no route to hub"))).unwrap();
     cx.run_until_parked();
-    assert_eq!(
-        deployer.asked(),
-        ["deploy 100.64.0.2 None None server=hub:45560"],
-        "then the workers, whatever the server's run came to"
-    );
-    deployer.end(cx, Ok(deployed()));
+    assert!(deployer.asked().is_empty(), "no worker goes ahead of its server");
+    let said = toast(cx).unwrap_or_default();
+    assert!(said.ends_with(". The machines were not updated"), "{said}");
+    ws.update(cx, |ws, cx| ws.heard_build(mini, &older_build(), true, cx));
+    assert!(deployer.asked().is_empty(), "nor once it is heard again");
 
     ws.update(cx, |ws, cx| ws.heard_build(away, &older_build(), false, cx));
     assert!(deployer.asked().is_empty(), "a listing is not the machine answering");
