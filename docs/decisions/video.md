@@ -2932,6 +2932,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       - Keys and buttons held down at the desk as the hold starts get a tagged release, so the
         session sees none stuck.
       - The tapped kinds come from `CGEventType` and `NSEventType`.
+    - **Locked before the worker ends** (2026-10-10, the orchestrator-first study, item 19).
+      The shield and the input hold belong to the worker's process, so a worker that ended
+      with the curtain up left the session open at the desk.
+      - On SIGTERM or SIGINT, and when the daemon thread panics or stops with an error, the
+        worker locks the Mac first while the curtain is up and waits until it reads as locked
+        (`Curtain::lock_for_exit`, at most `EXIT_WAIT`, 6 s). The shield is not lowered for
+        it: it goes with the process, behind the lock. The panicked thread has no runtime
+        left, so it waits on a plain channel while the main thread, still running, locks.
+      - A kill or a crash locks nothing. So while the curtain is up the worker keeps a
+        `curtain-up` file in its data directory (`MARKER`). A worker that starts and finds it
+        locks the Mac before it serves anyone. The file goes when the curtain falls or the
+        Mac reads as locked, so a later start never locks a desk the person has since
+        unlocked. A lock that cannot be had leaves it for the next start.
+      - Tests: `a_worker_ending_with_the_curtain_up_locks_the_mac_before_the_shield_goes` and
+        `a_worker_killed_with_the_curtain_up_locks_the_mac_as_it_starts_again`
+        (`screen::curtain`, fake drapes).
     - **Open, for the VM lane's guest.** Two checks are still open. Whether Caps Lock's light
       and state, which the keyboard toggles below the tap, change under a held curtain. And
       whether Secure Event Input (a password field focused at the desk) lets keys past the

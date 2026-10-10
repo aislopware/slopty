@@ -18,8 +18,10 @@
 //! stream takes its filter again then.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -39,6 +41,8 @@ const RENEW_EVERY: Duration = Duration::from_secs(1);
 const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// How often it looks meanwhile.
 const LOCK_POLL: Duration = Duration::from_millis(100);
+/// The file beside the worker's data that says the curtain is up ([`Curtain::keep_marker_at`]).
+pub const MARKER: &str = "curtain-up";
 
 /// What renews the input hold's lease, from the runtime.
 pub type Renew = Arc<dyn Fn() + Send + Sync>;
@@ -189,6 +193,49 @@ impl<D: Drapes> Stage<D> {
     }
 }
 
+/// How long a worker about to end waits for the Mac to read as locked: the lock's own wait, and
+/// a moment for the main thread to take the job.
+pub const EXIT_WAIT: Duration = LOCK_WAIT.saturating_add(Duration::from_secs(1));
+
+/// Answer on `tx` once `stage`'s Mac reads as locked, taking the marker away then, or `false`
+/// once `polls` more looks, each [`LOCK_POLL`] apart on the main thread, found it not.
+fn confirm_locked<D: Drapes>(
+    stage: &Stage<D>,
+    main: &Arc<dyn Main<Stage<D>>>,
+    holders: Arc<Mutex<Holders>>,
+    tx: SyncSender<bool>,
+    polls: u32,
+) {
+    if stage.drapes.locked() {
+        let marker = holders.lock().marker.clone();
+        if let Some(path) = marker
+            && let Err(e) = unmark(&path)
+        {
+            tracing::warn!(path = %path.display(), error = %e, "the curtain's marker stays");
+        }
+        let _asker_gone = tx.send(true);
+        return;
+    }
+    let Some(left) = polls.checked_sub(1) else {
+        tracing::warn!("the Mac did not read as locked before the worker ends");
+        let _asker_gone = tx.send(false);
+        return;
+    };
+    let again = Arc::clone(main);
+    main.run_after(
+        LOCK_POLL,
+        Box::new(move |stage: &mut Stage<D>| confirm_locked(stage, &again, holders, tx, left)),
+    );
+}
+
+/// Take the marker at `path` away; one already gone is no error.
+fn unmark(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Say on `moved` that the shield's windows changed.
 fn bump(moved: &watch::Sender<u64>) {
     moved.send_modify(|n| *n = n.wrapping_add(1));
@@ -213,6 +260,8 @@ struct Holders {
     lease: Option<Renew>,
     /// A task renews it.
     renewing: bool,
+    /// The file that says the curtain is up, while one is kept ([`Curtain::keep_marker_at`]).
+    marker: Option<PathBuf>,
 }
 
 /// How a change left the curtain: where it stands, and whether that moved, so every client is
@@ -356,8 +405,74 @@ impl<D: Drapes> Curtain<D> {
             let why = "the worker's main thread is gone".to_owned();
             Settled::new(CurtainState::Refused { why }, false)
         });
+        if settled.changed {
+            self.mark(matches!(settled.state, CurtainState::Up { .. }));
+        }
         self.keep_renewing();
         settled
+    }
+
+    /// Keep the file at `path` while the curtain is up, so a worker that ends with it up, by a
+    /// kill or a crash that locks nothing, finds the file as it starts again. Found now, the
+    /// Mac is locked first, before any client is served, and the file goes once it reads as
+    /// locked: the shield went with the process that drew it, so the desk would be open.
+    pub async fn keep_marker_at(&self, path: PathBuf) {
+        let found = path.exists();
+        self.holders.lock().marker = Some(path);
+        if !found {
+            return;
+        }
+        tracing::warn!("the last worker ended with the curtain up; locking the Mac first");
+        let answer = self.lock_and_confirm(false);
+        let locked = tokio::task::spawn_blocking(move || answer.recv_timeout(EXIT_WAIT))
+            .await
+            .is_ok_and(|answer| answer == Ok(true));
+        if !locked {
+            tracing::warn!("the Mac did not read as locked; the marker stays for the next start");
+        }
+    }
+
+    /// Lock the Mac now when the curtain is up, for a worker about to end: the shield and the
+    /// input hold end with the process, so the desk must be locked before they go. Answered
+    /// `true` once the Mac reads as locked or when the curtain was down, `false` when the lock
+    /// could not be asked for or did not land within [`LOCK_WAIT`]. Blocking on the answer is
+    /// for a thread off the main one with no runtime left, as a panicked daemon's is
+    /// ([`EXIT_WAIT`] bounds it).
+    #[must_use]
+    pub fn lock_for_exit(&self) -> Receiver<bool> {
+        self.lock_and_confirm(true)
+    }
+
+    /// Ask the lock on the main thread, only while the curtain is up when `only_up`, and answer
+    /// once it reads as locked (the marker gone then), it fails, or [`LOCK_WAIT`] passed.
+    fn lock_and_confirm(&self, only_up: bool) -> Receiver<bool> {
+        let (tx, rx) = sync_channel(1);
+        let main = Arc::clone(&self.main);
+        let holders = Arc::clone(&self.holders);
+        self.main.run(Box::new(move |stage: &mut Stage<D>| {
+            if only_up && stage.raised.is_none() {
+                let _asker_gone = tx.send(true);
+                return;
+            }
+            if let Err(why) = stage.drapes.lock() {
+                tracing::warn!(%why, "the Mac not locked before the worker ends");
+                let _asker_gone = tx.send(false);
+                return;
+            }
+            let polls = LOCK_WAIT.as_millis().checked_div(LOCK_POLL.as_millis()).unwrap_or(0);
+            let polls = u32::try_from(polls).unwrap_or(u32::MAX);
+            confirm_locked(stage, &main, holders, tx, polls);
+        }));
+        rx
+    }
+
+    /// Keep the marker while the curtain is `up`, and take it away once it is down.
+    fn mark(&self, up: bool) {
+        let Some(path) = self.holders.lock().marker.clone() else { return };
+        let kept = if up { std::fs::write(&path, b"") } else { unmark(&path) };
+        if let Err(e) = kept {
+            tracing::warn!(path = %path.display(), error = %e, up, "the curtain's marker");
+        }
     }
 
     /// Renew the input hold's lease from the runtime every [`RENEW_EVERY`] while there is one:

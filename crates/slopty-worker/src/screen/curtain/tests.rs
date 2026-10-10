@@ -318,3 +318,70 @@ async fn the_hold_s_lease_is_renewed_while_the_curtain_is_up() {
     assert!(after <= renewed + 1, "down: no more renewals, {renewed} then {after}");
     assert!(HOLD_LEASE > RENEW_EVERY * 2, "a renewal or two may be late without a lapse");
 }
+
+/// What a worker about to end hears from [`Curtain::lock_for_exit`], waited on off the
+/// runtime as the panicked daemon's thread waits.
+async fn exit_answer(curtain: &Curtain<Fake>) -> Option<bool> {
+    let answer = curtain.lock_for_exit();
+    tokio::task::spawn_blocking(move || answer.recv_timeout(EXIT_WAIT).ok()).await.unwrap()
+}
+
+/// A worker ending with the curtain up locks the Mac before the shield goes with the process,
+/// and says so once it reads as locked, however late; the shield is not lowered first, so the
+/// desk never shows the session. A curtain down locks nothing, and a lock that cannot be asked
+/// says so.
+#[tokio::test]
+async fn a_worker_ending_with_the_curtain_up_locks_the_mac_before_the_shield_goes() {
+    let fake = Fake::default();
+    let ending = curtain(&fake);
+    assert_eq!(exit_answer(&ending).await, Some(true), "down: nothing to lock");
+    assert_eq!(fake.drawn(), []);
+
+    ending.link(ClientId::new()).hold().await;
+    let late = Arc::clone(&fake.locked);
+    tokio::spawn(async move {
+        tokio::time::sleep(LOCK_POLL * 3).await;
+        late.store(true, Ordering::Relaxed);
+    });
+    assert_eq!(exit_answer(&ending).await, Some(true), "once it reads as locked");
+    assert_eq!(fake.drawn(), [Drawn::Raised, Drawn::Locked], "locked, the shield still up");
+
+    let fake = Fake { unlockable: true, ..Fake::default() };
+    let stuck = curtain(&fake);
+    stuck.link(ClientId::new()).hold().await;
+    assert_eq!(exit_answer(&stuck).await, Some(false), "no lock to be had");
+}
+
+/// The marker is kept while the curtain is up and goes when it falls or the Mac locks for the
+/// worker's end. A worker that finds it as it starts (the last one killed with the curtain up)
+/// locks the Mac first and takes it away; one that finds none locks nothing.
+#[tokio::test]
+async fn a_worker_killed_with_the_curtain_up_locks_the_mac_as_it_starts_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join(MARKER);
+    let fake = Fake::locking();
+    let first = curtain(&fake);
+    first.keep_marker_at(marker.clone()).await;
+    assert_eq!(fake.drawn(), [], "no marker: no lock");
+    let a = first.link(ClientId::new());
+    a.hold().await;
+    assert!(marker.exists(), "kept while up");
+    a.let_go().await;
+    assert!(!marker.exists(), "down on the word: gone");
+    a.hold().await;
+    assert!(marker.exists());
+    assert_eq!(exit_answer(&first).await, Some(true));
+    assert!(!marker.exists(), "locked for the end: gone");
+
+    std::fs::write(&marker, b"").unwrap();
+    let fake = Fake::locking();
+    let next = curtain(&fake);
+    next.keep_marker_at(marker.clone()).await;
+    assert_eq!(fake.drawn(), [Drawn::Locked], "locked before anything else");
+    assert!(!marker.exists(), "and the marker gone");
+
+    std::fs::write(&marker, b"").unwrap();
+    let fake = Fake { unlockable: true, ..Fake::default() };
+    curtain(&fake).keep_marker_at(marker.clone()).await;
+    assert!(marker.exists(), "no lock: the next start tries again");
+}

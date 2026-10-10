@@ -607,6 +607,7 @@ pub fn main() -> Result<std::process::ExitCode> {
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
     let displays = slopty_worker::screen::sized::on_main_queue();
     let curtain = slopty_worker::screen::curtain::on_main_queue();
+    let exit_lock = curtain.clone();
     let sources = slopty_input::sources::Sources::system();
     // Lives as long as the main thread's run loop, which never returns.
     let _heard = hear_switches(&sources);
@@ -624,10 +625,12 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
                 Ok(Ok(())) => 0,
                 Ok(Err(e)) => {
                     tracing::error!(error = ?e, "worker stopped");
+                    lock_now(exit_lock.as_ref());
                     1
                 }
                 Err(_panic) => {
                     tracing::error!("the daemon thread panicked; the worker ends");
+                    lock_now(exit_lock.as_ref());
                     PANICKED
                 }
             };
@@ -698,6 +701,11 @@ async fn run(
     let own = slopty_settings::Settings::load(&slopty_settings::path_in(&data_dir)).settings.worker;
     // A run that ended with a client's source still selected puts the worker's own back first.
     sources.keep_at(data_dir.join("input-source"));
+    // A worker killed with the curtain up left the desk open: the Mac locks before anything
+    // else.
+    if let Some(curtain) = &curtain {
+        curtain.keep_marker_at(data_dir.join(slopty_worker::screen::curtain::MARKER)).await;
+    }
     if let Some(displays) = &displays {
         displays.set_linger(slopty_worker::screen::sized::LINGER);
     }
@@ -946,6 +954,11 @@ async fn run(
             }
         }
     };
+    // The shield and the input hold end with the process: while they are up, the Mac locks
+    // first.
+    if let Some(curtain) = &daemon.curtain {
+        lock_before_exit(curtain).await;
+    }
     // Nobody is in front of anything once the worker is gone: Claude Code only checks that a
     // presence file exists, so one left behind would hold its phone pushes for good.
     if let Err(e) = std::fs::remove_dir_all(&presence_dir)
@@ -969,6 +982,34 @@ async fn run(
         tracing::warn!("the input source was not put back in time");
     }
     ended
+}
+
+/// Lock the Mac while the curtain is up, before the worker ends
+/// ([`slopty_worker::screen::curtain::Curtain::lock_for_exit`]).
+async fn lock_before_exit(
+    curtain: &slopty_worker::screen::curtain::Curtain<slopty_worker::screen::curtain::Native>,
+) {
+    use slopty_worker::screen::curtain::EXIT_WAIT;
+    let answer = curtain.lock_for_exit();
+    let locked = tokio::task::spawn_blocking(move || answer.recv_timeout(EXIT_WAIT)).await;
+    if !matches!(locked, Ok(Ok(true))) {
+        tracing::warn!("the Mac not locked before the worker ends; its next start locks it");
+    }
+}
+
+/// [`lock_before_exit`] for a daemon thread whose runtime is gone: waited on here, the main
+/// thread drawing the curtain still running.
+#[cfg(target_os = "macos")]
+fn lock_now(
+    curtain: Option<
+        &slopty_worker::screen::curtain::Curtain<slopty_worker::screen::curtain::Native>,
+    >,
+) {
+    use slopty_worker::screen::curtain::EXIT_WAIT;
+    let Some(curtain) = curtain else { return };
+    if curtain.lock_for_exit().recv_timeout(EXIT_WAIT) != Ok(true) {
+        tracing::warn!("the Mac not locked before the worker ends; its next start locks it");
+    }
 }
 
 /// Once a client asked this daemon to start again; never for one no service manager keeps
