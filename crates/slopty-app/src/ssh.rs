@@ -33,7 +33,6 @@ use slopty_net::server::ServerLink;
 use slopty_ui::add_worker::{self, Bar, Install, Mark, StepLine, Updates};
 use slopty_ui::colors::hsla;
 use slopty_ui::kit::{self, ButtonKind};
-use slopty_ui::workspace::WorkerStatus;
 use tokio::sync::mpsc;
 
 use crate::this_mac::{self, Pending};
@@ -559,9 +558,20 @@ pub struct UpdateRun {
 /// Every update under way or failed.
 pub type Updating = HashMap<String, UpdateRun>;
 
-/// What a tile's first Update says where which build is the newer cannot be told: it may take
-/// the machine back to an older one, so it asks, and the second press goes on.
-const MAYBE_NEWER: &str = "It may run a newer build than this one";
+/// What "Update all" says it did: how many machines it is `updating`, and how many it found
+/// `away`, each checked, and updated if older, once it is back.
+fn update_all_words(updating: usize, away: usize) -> String {
+    let machines = |n: usize| if n == 1 { "1 machine".to_owned() } else { format!("{n} machines") };
+    let back = |n: usize| if n == 1 { "is" } else { "are" };
+    match (updating, away) {
+        (0, 0) => "Every machine runs this build".to_owned(),
+        (n, 0) => format!("Updating {}", machines(n)),
+        (0, a) => format!("{} away {} updated once back, if older", machines(a), back(a)),
+        (n, a) => {
+            format!("Updating {}; {a} away {} updated once back, if older", machines(n), back(a))
+        }
+    }
+}
 
 /// How long a removed machine's worker has to go off the server's list before the removal
 /// says it still answers.
@@ -827,84 +837,102 @@ impl Workspace {
 
     /// Replace the worker at `host` (a tile's "Update"): deploy with `--update`, through the SSH
     /// target it was installed with or else the host it was dialled at, then dial it again at
-    /// once. The pill follows each step; the link coming up ends it.
+    /// once. The pill follows each step; the link coming up ends it. A worker on a newer build
+    /// is never taken back to this one.
     pub(crate) fn update_worker(&mut self, host: &str, cx: &mut Context<Self>) {
-        let view = self.view.read(cx);
-        let found = view.workers().find_map(|(key, _, status)| match status {
-            WorkerStatus::NeedsUpdate(notice) if notice.host == host => Some((key, notice.clone())),
-            _ => None,
-        });
-        let Some((key, notice)) = found else { return };
-        let Some(worker) = self.workers.iter().find(|w| w.key == key) else { return };
-        let worker = worker.id;
+        let Some((worker, notice)) = self.update_notice_at(host, cx) else { return };
         // A machine on a newer build is not taken back to this one: this device is the older.
         if notice.this_is_older() {
             self.show_notice(format!("{host} runs a newer build: update Slopty here"), cx);
             return;
         }
-        let stopped = self.updates.get(host).filter(|run| run.task.is_none());
-        let said_before = |title: &str| {
-            stopped.and_then(|run| run.progress.failure()).is_some_and(|f| f.title == title)
-        };
-        // Which build is the newer cannot be told: the first press asks, the second is the yes.
-        if notice.newer().is_none() && !said_before(MAYBE_NEWER) {
-            let Some(deployer) = self.deployer.as_ref() else { return };
-            let target = deployer.target_of(worker).unwrap_or_else(|| Target::host(host));
-            let mut progress = Progress::new(host.to_owned(), Kind::Update);
-            progress.failed(Failure::new(
-                MAYBE_NEWER.to_owned(),
-                Some(format!("{} Update again to put this build there anyway.", notice.detail())),
-                Vec::new(),
-            ));
-            self.updates
-                .insert(host.to_owned(), UpdateRun { worker, target, progress, task: None });
-            self.publish_updates(cx);
-            return;
-        }
         // Pressed again after the run stopped to say it ends sessions there: that is the yes.
+        let stopped = self.updates.get(host).filter(|run| run.task.is_none());
         let end_sessions = stopped
             .is_some_and(|run| run.progress.failure().is_some_and(|f| f.ends_sessions.is_some()));
         self.start_update(worker, host, Said { end_sessions, ..Said::default() }, cx);
     }
 
-    /// Bring every worker that answered on a different build to this one, each as its tile's
-    /// "Update" does; each pill follows its own run.
+    /// The worker at `host` that runs another build, and what updates it: one that refused
+    /// this build, or one that links on an older one.
+    fn update_notice_at(
+        &self,
+        host: &str,
+        cx: &Context<Self>,
+    ) -> Option<(WorkerId, slopty_client::update::UpdateNotice)> {
+        let view = self.view.read(cx);
+        self.workers.iter().find_map(|slot| {
+            let notice = view.update_notice(slot.key).filter(|n| n.host == host)?;
+            Some((slot.id, notice.clone()))
+        })
+    }
+
+    /// Bring every machine on an older build to this one: the server first, then each worker
+    /// as its tile's "Update" does, each pill following its own run. A worker away now is
+    /// updated once it answers again.
     pub(crate) fn update_all_workers(&mut self, cx: &mut Context<Self>) {
         if self.deployer.is_none() {
             self.show_notice("Machines are updated from Slopty on a Mac".to_owned(), cx);
             return;
         }
-        let hosts: Vec<(WorkerId, String)> = self
-            .view
-            .read(cx)
-            .workers()
-            .filter_map(|(key, _, status)| match status {
-                // Only where this build is known to be the newer: a newer machine is not taken
-                // back, and one that cannot be told asks on its own tile.
-                WorkerStatus::NeedsUpdate(notice)
-                    if notice.newer() == Some(slopty_client::update::Newer::Here) =>
-                {
-                    let slot = self.workers.iter().find(|w| w.key == key)?;
-                    Some((slot.id, notice.host.clone()))
-                }
-                _ => None,
+        // Away, and not known to need an update: what it runs is told once it answers.
+        let away: Vec<WorkerId> = {
+            let view = self.view.read(cx);
+            let statuses: HashMap<_, _> = view.workers().map(|(key, _, s)| (key, s)).collect();
+            self.workers
+                .iter()
+                .filter(|slot| statuses.get(&slot.key).is_some_and(|s| !s.is_up()))
+                .filter(|slot| view.update_notice(slot.key).is_none())
+                .map(|slot| slot.id)
+                .collect()
+        };
+        self.update_when_back.extend(away.iter().copied());
+        let server = self.server_update_notice().is_some_and(|n| !n.this_is_older());
+        if server {
+            self.workers_after_server = true;
+            self.update_server(cx);
+        }
+        let older = self.older_workers(cx);
+        // The server's run is under way: the workers follow once it ends.
+        if !(server && self.server_update.is_some()) {
+            self.workers_after_server = false;
+            for (worker, host) in &older {
+                self.start_update(*worker, host, Said::default(), cx);
+            }
+        }
+        self.show_notice(
+            update_all_words(older.len().saturating_add(usize::from(server)), away.len()),
+            cx,
+        );
+    }
+
+    /// Each worker on an older build than this one, and the host it is updated at. One that
+    /// cannot be told older or newer is left to its own tile.
+    fn older_workers(&self, cx: &Context<Self>) -> Vec<(WorkerId, String)> {
+        let view = self.view.read(cx);
+        self.workers
+            .iter()
+            .filter_map(|slot| {
+                let notice = view.update_notice(slot.key)?;
+                (notice.newer() == Some(slopty_client::update::Newer::Here))
+                    .then(|| (slot.id, notice.host.clone()))
             })
-            .collect();
-        if hosts.is_empty() {
-            self.show_notice("Every machine that answers runs this build".to_owned(), cx);
-            return;
+            .collect()
+    }
+
+    /// The server's update that "Update all" started ended, `updated` or not: the workers'
+    /// turn.
+    pub(crate) fn server_update_ended(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.workers_after_server) {
+            for (worker, host) in self.older_workers(cx) {
+                self.start_update(worker, &host, Said::default(), cx);
+            }
         }
-        for (worker, host) in &hosts {
-            self.start_update(*worker, host, Said::default(), cx);
-        }
-        let count = hosts.len();
-        let workers = if count == 1 { "1 machine".to_owned() } else { format!("{count} machines") };
-        self.show_notice(format!("Updating {workers}"), cx);
     }
 
     /// Worker `worker` answered on a different build: an update that brought it back says so,
-    /// and one on this Mac is brought to this build at once where this app is an installed
-    /// build, once a launch, so an app update carries this Mac's worker with it.
+    /// and it is brought to this build unasked where it is older and on this Mac or left by
+    /// "Update all" for its return ([`Self::update_unasked`]).
     pub(crate) fn heard_other_build(
         &mut self,
         worker: WorkerId,
@@ -912,10 +940,60 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.update_still_wrong(worker, cx);
-        // Never back to an older build: an app older than its own Mac's worker leaves it.
-        let older = notice.this_is_older();
-        if notice.here() && !older && self.updates_itself() && self.updated_unasked.insert(worker) {
-            tracing::info!(%worker, peer = %notice.peer, "this Mac's worker runs another build");
+        self.update_unasked(worker, notice, cx);
+    }
+
+    /// Worker `worker` said its build on this wire, on its link (`linked`) or in the server's
+    /// list: one older than this app has its rows offer Update, and once it links it is
+    /// brought to this build unasked where [`Self::update_unasked`] says so.
+    pub(crate) fn heard_build(
+        &mut self,
+        worker: WorkerId,
+        build: &str,
+        linked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use slopty_client::update::{Newer, Of, UpdateNotice};
+        let Some(key) = self.workers.iter().find(|w| w.id == worker).map(|w| w.key) else {
+            return;
+        };
+        // A listing that says no build (a machine the server has not heard from yet) tells
+        // nothing, unlike a wire prefix without one.
+        let older = !build.is_empty()
+            && slopty_proto::wire::newer(&slopty_proto::wire::this_build(), build)
+                == Some(Newer::Here);
+        let notice = older.then(|| self.directory_address(worker)).flatten().map(|at| {
+            UpdateNotice { of: Of::Worker, host: at.host().to_owned(), peer: build.to_owned() }
+        });
+        self.view.update(cx, |v, cx| v.set_worker_behind(key, notice.clone(), cx));
+        if !linked {
+            return;
+        }
+        match notice {
+            Some(notice) => self.update_unasked(worker, &notice, cx),
+            None => {
+                self.update_when_back.remove(&worker);
+            }
+        }
+    }
+
+    /// Bring `worker`, on another build (`notice`), to this one without a press, where this
+    /// build is known to be the newer: on this Mac where this app is an installed build, once
+    /// a launch, so an app update carries this Mac's worker with it; elsewhere once, where
+    /// "Update all" found it away.
+    fn update_unasked(
+        &mut self,
+        worker: WorkerId,
+        notice: &slopty_client::update::UpdateNotice,
+        cx: &mut Context<Self>,
+    ) {
+        if notice.newer() != Some(slopty_client::update::Newer::Here) {
+            return;
+        }
+        let here = notice.here() && self.updates_itself() && self.updated_unasked.insert(worker);
+        let back = self.update_when_back.remove(&worker);
+        if here || back {
+            tracing::info!(%worker, peer = %notice.peer, here, "update a worker on an older build");
             self.start_update(worker, &notice.host, Said::default(), cx);
         }
     }
@@ -1321,7 +1399,7 @@ impl Workspace {
             self.show_notice("No server is set".to_owned(), cx);
             return;
         };
-        let Some(notice) = self.server_other_build_notice().cloned() else {
+        let Some(notice) = self.server_update_notice().cloned() else {
             let said = if self.directory.linked() {
                 "The server runs this build"
             } else {
@@ -1330,6 +1408,11 @@ impl Workspace {
             self.show_notice(said.to_owned(), cx);
             return;
         };
+        // Never back to an older build: this device is the one to update.
+        if notice.this_is_older() {
+            self.show_notice("The server runs a newer build: update Slopty here".to_owned(), cx);
+            return;
+        }
         let Some(deployer) = self.deployer.clone() else {
             self.show_notice(format!("Update it from a Mac with {}", notice.command()), cx);
             return;
@@ -1405,6 +1488,7 @@ impl Workspace {
         }
         self.show_notice(format!("Updated {name}"), cx);
         self.refresh_menu(cx);
+        self.server_update_ended(cx);
         cx.notify();
     }
 
@@ -1431,6 +1515,7 @@ impl Workspace {
             (None, None) => failure.title,
         };
         self.show_notice(said, cx);
+        self.server_update_ended(cx);
     }
 
     /// The server the sheet's run `id` set up answered at `address`: it is this app's server

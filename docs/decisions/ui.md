@@ -9518,13 +9518,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     server…") and "Update Slopty on this device to match it.", with no Update and no command
     to copy, and the navigator row offers none either. Update all skips such a machine.
   - **When the order cannot be told** (6). Two builds of one version with no stamp to compare
-    cannot be ordered. The first press then stops and says "It may run a newer build than
-    this one"; a second press deploys. Update all touches only machines known to be older.
+    cannot be ordered. The tile's Update deploys on the first press (the two-press ask was
+    deleted on 2026-10-12, see "Every older daemon is offered Update" below); Update all
+    touches only machines known to be older.
   - Tests: `workspace::tests::bars::an_update_under_way_can_be_cancelled_and_one_stopped_at_a_password_continues`,
     `workspace::tests::tiles::a_worker_on_a_newer_build_asks_this_device_to_update`,
     `ssh::tests::a_tile_cancels_an_update_and_a_password_goes_to_the_sheet`,
     `…::a_tile_sends_a_new_machine_s_key_to_the_sheet`,
-    `…::an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell`.
+    `…::an_update_never_takes_a_machine_back_and_goes_when_it_cannot_tell`.
 
 - ✅ **A failed dial says what to do, and a machine that keeps Slopty's hooks off says so**
   (2026-10-11, readiness audit item 5's A half and the `runs_own_hooks` deletion line).
@@ -9676,3 +9677,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Not covered by a test: the system's own press of a delivered note's button. That needs
     XCUITest or synthetic input, and the session rules forbid the latter. The person checks it
     on a device.
+
+- ✅ **Every older daemon is offered Update, the server goes first, and nothing goes back**
+  (2026-10-12, readiness audit item 5's A half).
+  - **The defect.** Updates came only from a wire mismatch, so a release that kept the wire
+    reached no daemon, this Mac's own included. Update all touched only workers refused at
+    that moment and never the server. A Mac on an older build updated its own server unasked.
+  - **The comparison.** Each daemon now says its full build (the worker in its caps, the
+    server in its welcome), and the app compares it with its own (`wire::newer`). A worker
+    that links from an older build keeps working. Its navigator row shows Update before its
+    readouts and actions, and its menu offers Update too (`set_worker_behind`,
+    `update_notice`). An empty build in the server's list (a machine it has not heard from)
+    tells nothing.
+  - **Unasked.** This Mac's own worker on an older build is updated as soon as it links,
+    where the app is an installed build, once a launch, as a refused one already was. An
+    older server on this Mac is updated the same way. Anywhere else, an older server is said
+    once with its way on ("The server runs an older build … Run "Update the server" from the
+    palette.").
+  - **Update all.** It updates the server first, then the workers once the server's run has
+    ended, whether it succeeded or not. A machine away at the press is updated when it next
+    links, if it is older, and only then; a listing is not the machine answering. The notice
+    counts both: "Updating 2 machines; 1 away is updated once back, if older".
+  - **Never back.** Nothing is taken to an older build: not the server from the palette, not
+    a server on another wire unasked unless it is known to be the older, and not a worker
+    whose build is the newer. The tile's two-press ask for an order that cannot be told is
+    deleted. The tile deploys at once. A refusal in the deploy itself, read from the remote's
+    plan, is the worker lane's half.
+  - Tests: `ssh::tests::a_worker_on_an_older_build_of_this_wire_is_offered_update`,
+    `…::update_all_goes_server_first_and_catches_machines_away`,
+    `…::an_older_server_is_offered_update_and_a_newer_one_never_taken_back`,
+    `…::an_update_never_takes_a_machine_back_and_goes_when_it_cannot_tell` (slopty-app);
+    `workspace::tests::tiles::a_linked_worker_on_an_older_build_is_offered_update_on_its_row`
+    (slopty-ui).

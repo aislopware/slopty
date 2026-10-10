@@ -594,6 +594,32 @@ impl WorkspaceView {
         }
     }
 
+    /// `key` runs an older build on this wire (`Some`, what updates it), or no longer does: it
+    /// links and works, and its rows offer Update as a refused one's do.
+    pub fn set_worker_behind(
+        &mut self,
+        key: WorkerKey,
+        notice: Option<slopty_client::update::UpdateNotice>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        if w.behind != notice {
+            w.behind = notice;
+            cx.notify();
+        }
+    }
+
+    /// What updates `key`: the notice of a worker that refused this build, else of one that
+    /// links on an older build.
+    #[must_use]
+    pub fn update_notice(&self, key: WorkerKey) -> Option<&slopty_client::update::UpdateNotice> {
+        let w = self.workers.get(&key)?;
+        match &w.status {
+            WorkerStatus::NeedsUpdate(notice) => Some(notice),
+            _ => w.behind.as_ref(),
+        }
+    }
+
     /// `key`'s load average moved, as its link or the server says.
     pub fn set_worker_load(&mut self, key: WorkerKey, load: f32, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&key) else { return };

@@ -3292,6 +3292,10 @@ impl WorkspaceView {
         let rest =
             if touch { rest } else { rest.group_hover(group.clone(), gpui::Styled::invisible) }
                 .when(menu_up && !touch, gpui::Styled::invisible);
+        // A linked machine on an older build keeps its readouts and actions: Update stands
+        // before them, at rest too.
+        let (update_beside, update_in_place) =
+            if worker.linked { (update, None) } else { (None, update) };
         let trailing = div()
             .debug_selector(move || format!("nav-worker-slot-{key}"))
             .relative()
@@ -3301,7 +3305,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_end()
-            .map(|el| match update {
+            .map(|el| match update_in_place {
                 Some(update) => el.child(update),
                 None => el.child(rest).child(hover),
             });
@@ -3311,6 +3315,7 @@ impl WorkspaceView {
             .group(group)
             .child(lead)
             .child(name)
+            .children(update_beside)
             .child(trailing)
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 let group = GroupKey::machine(key);

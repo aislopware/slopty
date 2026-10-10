@@ -477,6 +477,9 @@ struct Worker {
     settings: Option<String>,
     /// What it can do, as its link or the server's directory last said.
     caps: Option<WorkerCaps>,
+    /// It answers on this wire from an older build: what updates it, beside a link that works
+    /// ([`Self::set_worker_behind`]).
+    behind: Option<slopty_client::update::UpdateNotice>,
     /// Its one-minute load average, as its link or the server last said.
     load: Option<f32>,
     /// The paths the worker was last asked to watch for its file tiles, sorted.
@@ -551,6 +554,7 @@ impl Worker {
             home: None,
             settings: None,
             caps: None,
+            behind: None,
             load: None,
             watched: Vec::new(),
             watched_folders: Vec::new(),

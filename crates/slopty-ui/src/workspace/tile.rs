@@ -633,9 +633,7 @@ impl WorkspaceView {
     /// while one is under way): what the navigator's row and the hosts popover offer as Update,
     /// as its tiles' pills do.
     pub(super) fn update_run(&self, key: WorkerKey, cx: &App) -> Option<MenuRun> {
-        let WorkerStatus::NeedsUpdate(notice) = &self.workers.get(&key)?.status else {
-            return None;
-        };
+        let notice = self.update_notice(key)?;
         if notice.this_is_older() {
             return None;
         }

@@ -1571,3 +1571,34 @@ fn a_worker_on_a_newer_build_asks_this_device_to_update(cx: &mut TestAppContext)
     }
     assert!(view.read_with(cx, |v, cx| v.update_run(key, cx)).is_none(), "nor on its row");
 }
+
+/// A linked machine on an older build of this wire keeps working, and its navigator row offers
+/// Update beside it; once it runs this build, the offer goes.
+#[gpui::test]
+fn a_linked_worker_on_an_older_build_is_offered_update_on_its_row(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.update(|_w, cx| {
+        let start: crate::add_worker::Update = Rc::new(|_host: &str, _w, _cx| ());
+        cx.set_global(crate::add_worker::Updates { start: Some(start), ..Default::default() });
+    });
+    let key = fake.key;
+    let notice = UpdateNotice {
+        of: Of::Worker,
+        host: "studio".to_owned(),
+        peer: "0.0.1+wire.0badf00d.20240101T0000Z".to_owned(),
+    };
+    view.update_in(cx, |v, _w, cx| v.set_worker_behind(key, Some(notice), cx));
+    cx.run_until_parked();
+    let row: &'static str = Box::leak(format!("nav-update-{key}").into_boxed_str());
+    assert!(cx.debug_bounds(row).is_some(), "Update on its row");
+    let shell: &'static str = Box::leak(format!("nav-new-shell-{key}").into_boxed_str());
+    assert!(cx.debug_bounds(shell).is_some(), "its actions stay beside it");
+    let up = view.read_with(cx, |v, _| v.workers().any(|(k, _, s)| k == key && s.is_up()));
+    assert!(up, "it stays linked");
+    view.update_in(cx, |v, _w, cx| v.set_worker_behind(key, None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(row).is_none(), "gone on this build");
+}

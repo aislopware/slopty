@@ -11,6 +11,7 @@ use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
 use slopty_deploy::{Arch, Os, Platform};
 use slopty_proto::ctl::{Health, PasteboardAccess, Tailscale};
 use slopty_proto::server::{Os as WorkerOs, WorkerCaps};
+use slopty_ui::workspace::WorkerStatus;
 use tokio::sync::oneshot;
 
 use super::actions::{UpdateAllWorkers, UpdateServer};
@@ -873,7 +874,7 @@ fn every_worker_on_another_build_is_updated_and_this_mac_s_unasked(cx: &mut Test
     let toast =
         |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
     cx.dispatch_action(UpdateAllWorkers);
-    assert_eq!(toast(cx).as_deref(), Some("Every machine that answers runs this build"));
+    assert_eq!(toast(cx).as_deref(), Some("Every machine runs this build"));
 
     let notice =
         |host: &str| UpdateNotice { of: Of::Worker, host: host.to_owned(), peer: String::new() };
@@ -1163,10 +1164,10 @@ fn a_removal_takes_the_worker_off_then_the_server_forgets_it(cx: &mut TestAppCon
 }
 
 /// A machine on a newer build is never updated from here, by its tile or by "Update all": this
-/// device is the one to update. One whose build cannot be told newer or older asks on the first
-/// press and deploys on the second.
+/// device is the one to update. One whose build cannot be told newer or older is updated on the
+/// first press of its tile, and "Update all" leaves it to that tile.
 #[gpui::test]
-fn an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell(cx: &mut TestAppContext) {
+fn an_update_never_takes_a_machine_back_and_goes_when_it_cannot_tell(cx: &mut TestAppContext) {
     use slopty_client::update::{Of, UpdateNotice};
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -1193,10 +1194,192 @@ fn an_update_never_takes_a_machine_back_and_asks_when_it_cannot_tell(cx: &mut Te
 
     let same = slopty_proto::wire::BUILD.split('+').next().unwrap_or_default().to_owned();
     set(cx, notice(&same));
+    cx.dispatch_action(UpdateAllWorkers);
+    assert!(deployer.asked().is_empty(), "update all leaves it to its tile");
     ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
-    assert!(deployer.asked().is_empty(), "the first press asks");
-    let asked = cx.update(|_, cx| cx.global::<Updates>().runs.get("mini").cloned()).expect("kept");
-    assert_eq!(asked.failed.map(|f| f.title).as_deref(), Some(MAYBE_NEWER));
-    ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
-    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"], "the second goes");
+    assert_eq!(
+        deployer.asked(),
+        ["deploy mini None None server=hub:45560"],
+        "the first press goes"
+    );
+}
+
+/// A build older than this one, on the same wire.
+fn older_build() -> String {
+    "0.0.1+wire.0badf00d.20240101T0000Z".to_owned()
+}
+
+/// A worker that links on this wire from an older build is offered Update on its rows, and
+/// "Update all" brings it to this build; this Mac's is updated unasked by an installed app, once
+/// a launch. A build this app cannot place, its own, or a newer one offers nothing.
+#[gpui::test]
+fn a_worker_on_an_older_build_of_this_wire_is_offered_update(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    let id = WorkerId::new();
+    list(&ws, cx, id, "mini");
+    let key = crate::workers::worker_key(id);
+    let _dials = deployer.asked();
+    let offered = |cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| ws.view.read(cx).update_notice(key).map(|n| n.peer.clone()))
+    };
+
+    for build in [String::new(), slopty_proto::wire::this_build(), "99.0.0+wire.1".to_owned()] {
+        ws.update(cx, |ws, cx| ws.heard_build(id, &build, true, cx));
+        assert_eq!(offered(cx), None, "{build:?} offers nothing");
+    }
+    ws.update(cx, |ws, cx| ws.heard_build(id, &older_build(), true, cx));
+    assert_eq!(offered(cx), Some(older_build()), "its rows offer Update");
+    assert!(deployer.asked().is_empty(), "elsewhere, only on the person's word");
+    cx.dispatch_action(UpdateAllWorkers);
+    assert_eq!(deployer.asked(), ["deploy 100.64.0.2 None None server=hub:45560"]);
+    ws.update(cx, |ws, cx| ws.heard_build(id, &slopty_proto::wire::this_build(), true, cx));
+    assert_eq!(offered(cx), None, "back on this build, nothing left to offer");
+
+    // This Mac's worker, dialled on loopback, goes unasked where the app is installed.
+    let here = WorkerId::new();
+    list(&ws, cx, here, "studio");
+    let at_home = slopty_proto::server::WorkerInfo {
+        worker: here,
+        name: "studio".to_owned(),
+        address: "127.0.0.1:45550".to_owned(),
+        liveness: slopty_proto::server::Liveness::Online,
+        caps: WorkerCaps::bare(WorkerOs::MacOs),
+        load: 0.0,
+        last_seen_ms: slopty_core::WallMs::ZERO,
+    };
+    let listing = slopty_proto::server::FromServer::Worker(at_home);
+    ws.update(cx, |ws, cx| {
+        ws.server_event(slopty_client::server::ServerEvent::Message(Box::new(listing)), cx);
+    });
+    cx.run_until_parked();
+    let _dials = deployer.asked();
+    ws.update(cx, |ws, cx| ws.heard_build(here, &older_build(), true, cx));
+    assert!(deployer.asked().is_empty(), "a build from a source tree leaves it alone");
+    deployer.installed.set(true);
+    ws.update(cx, |ws, cx| ws.heard_build(here, &older_build(), true, cx));
+    assert_eq!(deployer.asked(), ["deploy 127.0.0.1 None None server=hub:45560"], "unasked");
+    ws.update(cx, |ws, cx| {
+        if let Some(run) = ws.updates.get_mut("127.0.0.1") {
+            run.task = None;
+        }
+        ws.heard_build(here, &older_build(), true, cx);
+    });
+    assert!(deployer.asked().is_empty(), "once a launch");
+}
+
+/// "Update all" updates the server first and the workers once its run ends; a machine away
+/// then is updated when it answers again on an older build, and not on this one.
+#[gpui::test]
+fn update_all_goes_server_first_and_catches_machines_away(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    let toast =
+        |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+    let address = HostAddr::new("hub", SERVER_PORT);
+    ws.update(cx, |ws, _cx| ws.server = Some(crate::server::ServerSlot::stand_in(address)));
+    let (mini, away) = (WorkerId::new(), WorkerId::new());
+    list(&ws, cx, mini, "mini");
+    list(&ws, cx, away, "box");
+    let _dials = deployer.asked();
+    ws.update(cx, |ws, cx| {
+        ws.heard_build(mini, &older_build(), true, cx);
+        let linked = slopty_client::server::ServerEvent::Linked {
+            name: "hub".to_owned(),
+            link: 1,
+            build: older_build(),
+        };
+        ws.server_event(linked, cx);
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(UpdateAllWorkers);
+    assert_eq!(deployer.asked(), ["serve hub"], "the server first, alone");
+    assert_eq!(
+        toast(cx).as_deref(),
+        Some("Updating 2 machines; 1 away is updated once back, if older")
+    );
+    let finish = deployer.served.borrow_mut().take().expect("a server run");
+    finish.send(Err(failure("no route to hub"))).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        deployer.asked(),
+        ["deploy 100.64.0.2 None None server=hub:45560"],
+        "then the workers, whatever the server's run came to"
+    );
+    deployer.end(cx, Ok(deployed()));
+
+    ws.update(cx, |ws, cx| ws.heard_build(away, &older_build(), false, cx));
+    assert!(deployer.asked().is_empty(), "a listing is not the machine answering");
+    ws.update(cx, |ws, cx| ws.heard_build(away, &older_build(), true, cx));
+    assert_eq!(deployer.asked(), ["deploy 100.64.0.2 None None server=hub:45560"], "back");
+    let _done = deployer.finish.borrow_mut().take();
+    ws.update(cx, |ws, cx| {
+        ws.updates.clear();
+        ws.heard_build(away, &older_build(), true, cx);
+    });
+    assert!(deployer.asked().is_empty(), "once");
+}
+
+/// A server that links on this wire from an older build is said once, with the way to update
+/// it, and the palette's update goes. A newer server is left alone: this app is the older, and
+/// neither the palette nor this Mac's own update takes the server back.
+#[gpui::test]
+fn an_older_server_is_offered_update_and_a_newer_one_never_taken_back(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    let deployer = StandIn::new();
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    deployer.installed.set(true);
+    let toast =
+        |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+    let linked = |ws: &Entity<Workspace>, cx: &mut VisualTestContext, build: String| {
+        let event =
+            slopty_client::server::ServerEvent::Linked { name: "hub".to_owned(), link: 1, build };
+        ws.update(cx, |ws, cx| ws.server_event(event, cx));
+        cx.run_until_parked();
+    };
+    let address = HostAddr::new("hub", SERVER_PORT);
+    ws.update(cx, |ws, _cx| ws.server = Some(crate::server::ServerSlot::stand_in(address)));
+
+    linked(&ws, cx, "99.0.0+wire.1".to_owned());
+    let said = toast(cx).unwrap_or_default();
+    assert!(!said.starts_with(crate::server::OLDER_SERVER), "{said}");
+    cx.dispatch_action(UpdateServer);
+    assert_eq!(toast(cx).as_deref(), Some("The server runs this build"), "nothing to update");
+
+    linked(&ws, cx, older_build());
+    let said = toast(cx).unwrap_or_default();
+    assert!(
+        said.starts_with(crate::server::OLDER_SERVER)
+            && said.contains(crate::server::UPDATE_SERVER),
+        "{said}"
+    );
+    cx.dispatch_action(UpdateServer);
+    assert_eq!(deployer.asked(), ["serve hub"]);
+    let _run = deployer.served.borrow_mut().take();
+    ws.update(cx, |ws, _cx| ws.server_update = None);
+
+    // On another wire too, a newer server is never updated, asked or not.
+    let newer =
+        UpdateNotice { of: Of::Server, host: "127.0.0.1".to_owned(), peer: "99.0.0".into() };
+    ws.update(cx, |ws, cx| {
+        ws.server_event(slopty_client::server::ServerEvent::WrongBuild(newer), cx);
+    });
+    cx.run_until_parked();
+    assert!(deployer.asked().is_empty(), "this Mac's newer server is left as it is");
+    cx.dispatch_action(UpdateServer);
+    assert!(deployer.asked().is_empty(), "nor from the palette");
+    assert_eq!(toast(cx).as_deref(), Some("The server runs a newer build: update Slopty here"));
 }

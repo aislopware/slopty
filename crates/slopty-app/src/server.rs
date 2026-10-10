@@ -13,12 +13,13 @@ use gpui::Context;
 use slopty_client::directory::{self, Change, Dial, Directory, ServerState};
 use slopty_client::layout::WorkerKey;
 use slopty_client::server::{ServerCaller, ServerEvent, ServerTask};
-use slopty_client::update::UpdateNotice;
+use slopty_client::update::{Newer, Of, UpdateNotice};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
 use slopty_proto::orchestration::{Happening, Outcome};
 use slopty_proto::server::{FromServer, Liveness, Refusal, WorkerCaps};
+use slopty_proto::wire;
 use slopty_ui::workspace::WorkerStatus;
 
 use crate::net::DialFailed;
@@ -77,6 +78,8 @@ pub(crate) struct ServerSlot {
     task: Option<ServerTask>,
     /// It answered last on a different build: what to say of it, and what updates it.
     other_build: Option<UpdateNotice>,
+    /// It linked on this wire from an older build: what updates it.
+    behind: Option<UpdateNotice>,
     /// A test's own end of the link: the verbs sent up it wait in the test's queue
     /// ([`ServerCaller::queued`]).
     #[cfg(test)]
@@ -87,7 +90,7 @@ pub(crate) struct ServerSlot {
 impl ServerSlot {
     /// The server at `address`, its link not started: what a test sets to have a server.
     pub(crate) const fn stand_in(address: HostAddr) -> Self {
-        Self { address, task: None, other_build: None, caller: None }
+        Self { address, task: None, other_build: None, behind: None, caller: None }
     }
 
     /// [`Self::stand_in`], the verbs sent to it queued for the test to answer.
@@ -263,6 +266,7 @@ impl Workspace {
             address,
             task: None,
             other_build: None,
+            behind: None,
             #[cfg(test)]
             caller: None,
         });
@@ -329,14 +333,15 @@ impl Workspace {
     /// One thing the server link said.
     pub(crate) fn server_event(&mut self, event: ServerEvent, cx: &mut Context<Self>) {
         match event {
-            ServerEvent::Linked { name, link, .. } => {
-                tracing::info!(%name, link, "server linked");
+            ServerEvent::Linked { name, link, build } => {
+                tracing::info!(%name, link, %build, "server linked");
                 if let Some(slot) = &mut self.server {
                     slot.other_build = None;
                 }
                 self.directory.set_server(ServerState::Linked { name, link });
                 self.view.update(cx, |v, cx| v.set_server_status(None, cx));
                 self.server_leads(true, cx);
+                self.server_build(&build, cx);
             }
             ServerEvent::Unlinked { why } => self.server_down(why, UNREACHABLE, cx),
             ServerEvent::WrongBuild(notice) => self.server_other_build(&notice, cx),
@@ -387,7 +392,8 @@ impl Workspace {
             return;
         }
         tracing::warn!(server = %notice.host, peer = %notice.peer, "the server runs a different build");
-        if notice.here() && self.updates_itself() {
+        // Never back to an older build: only a server known to be the older is updated unasked.
+        if notice.here() && notice.newer() == Some(Newer::Here) && self.updates_itself() {
             self.update_server(cx);
         } else {
             self.show_notice(other_build_notice(notice, self.deployer.is_some()), cx);
@@ -397,6 +403,37 @@ impl Workspace {
     /// What the server answered on a different build says, while it does.
     pub(crate) fn server_other_build_notice(&self) -> Option<&UpdateNotice> {
         self.server.as_ref()?.other_build.as_ref()
+    }
+
+    /// The server linked, on this wire, saying `build`: one older than this app is said once
+    /// with the way to update it, and brought to this build at once where it runs on this Mac
+    /// and this app is an installed build. A newer one is left as it is: this app is the one to
+    /// update.
+    fn server_build(&mut self, build: &str, cx: &mut Context<Self>) {
+        let Some(slot) = &mut self.server else { return };
+        let older =
+            !build.is_empty() && wire::newer(&wire::this_build(), build) == Some(Newer::Here);
+        let notice = older.then(|| UpdateNotice {
+            of: Of::Server,
+            host: slot.address.host().to_owned(),
+            peer: build.to_owned(),
+        });
+        let new = notice.is_some() && slot.behind != notice;
+        slot.behind.clone_from(&notice);
+        let Some(notice) = notice.filter(|_| new) else { return };
+        tracing::info!(server = %notice.host, peer = %notice.peer, "the server runs an older build");
+        if notice.here() && self.updates_itself() {
+            self.update_server(cx);
+        } else {
+            self.show_notice(older_server_notice(&notice, self.deployer.is_some()), cx);
+        }
+    }
+
+    /// What updates the server: the notice of one that refused this build, else of one that
+    /// links on an older one.
+    pub(crate) fn server_update_notice(&self) -> Option<&UpdateNotice> {
+        let slot = self.server.as_ref()?;
+        slot.other_build.as_ref().or(slot.behind.as_ref())
     }
 
     /// The link to the server at the address in use starts again on `link`, which reached it
@@ -496,19 +533,21 @@ impl Workspace {
 
     /// What the directory says each worker can do, for those whose own link is down: a link
     /// that is up says so itself, and more recently.
-    fn directory_caps(&self, cx: &mut Context<Self>) {
-        let listed: Vec<(WorkerKey, WorkerCaps, f32)> = self
+    fn directory_caps(&mut self, cx: &mut Context<Self>) {
+        let listed: Vec<(WorkerId, WorkerCaps, f32)> = self
             .directory
             .workers()
             .filter(|info| self.slot(info.worker).is_some_and(|slot| !slot.linked()))
-            .map(|info| (worker_key(info.worker), info.caps.clone(), info.load))
+            .map(|info| (info.worker, info.caps.clone(), info.load))
             .collect();
-        self.view.update(cx, |v, cx| {
-            for (key, caps, load) in listed {
+        for (worker, caps, load) in listed {
+            self.heard_build(worker, &caps.build, false, cx);
+            self.view.update(cx, |v, cx| {
+                let key = worker_key(worker);
                 v.set_worker_caps(key, caps, cx);
                 v.set_worker_load(key, load, cx);
-            }
-        });
+            });
+        }
     }
 
     /// Write the directory for the next launch, off the main thread ([`write_cache`]).
@@ -529,7 +568,7 @@ impl Workspace {
     }
 
     /// The directory's address for `id`, whatever its liveness.
-    fn directory_address(&self, id: WorkerId) -> Option<HostAddr> {
+    pub(crate) fn directory_address(&self, id: WorkerId) -> Option<HostAddr> {
         let info = self.directory.get(id)?;
         HostAddr::parse_with_port(&info.address, slopty_net::endpoint::WORKER_PORT).ok()
     }
@@ -570,13 +609,27 @@ impl Workspace {
 /// brought to this build: from the palette where this app can run `ssh` (`deploys`), else by
 /// the command on a Mac.
 fn other_build_notice(notice: &UpdateNotice, deploys: bool) -> String {
-    let how = if deploys {
+    format!("{}. {} {}", notice.title(), notice.detail(), update_how(notice, deploys))
+}
+
+/// How the server in `notice` is brought to this build: from the palette where this app can
+/// run `ssh` (`deploys`), else by the command on a Mac.
+fn update_how(notice: &UpdateNotice, deploys: bool) -> String {
+    if deploys {
         format!("Run \u{201c}{UPDATE_SERVER}\u{201d} from the palette.")
     } else {
         format!("Update it from a Mac with {}.", notice.command())
-    };
-    format!("{}. {} {how}", notice.title(), notice.detail())
+    }
 }
+
+/// What the person hears once of a server on an older build of this wire: it works, and how it
+/// is brought to this build, as [`other_build_notice`] says.
+fn older_server_notice(notice: &UpdateNotice, deploys: bool) -> String {
+    format!("{OLDER_SERVER}. {} {}", notice.detail(), update_how(notice, deploys))
+}
+
+/// What a server on an older build of this wire is said to be.
+pub(crate) const OLDER_SERVER: &str = "The server runs an older build";
 
 /// What the person hears of a wake sent for the worker called `name`.
 fn wake_notice(name: &str, outcome: Outcome) -> String {
@@ -645,11 +698,8 @@ mod tests {
     fn a_refusal_by_the_tailnet_policy_is_named_over_other_words() {
         let other = || DialFailed::Other("no answer".to_owned());
         let at = Dial::At(HostAddr::new("studio", 45_550));
-        let notice = UpdateNotice {
-            of: slopty_client::update::Of::Worker,
-            host: "studio".to_owned(),
-            peer: String::new(),
-        };
+        let notice =
+            UpdateNotice { of: Of::Worker, host: "studio".to_owned(), peer: String::new() };
         for dial in [at.clone(), Dial::Hold(Liveness::Unreachable), Dial::Unlisted] {
             assert_eq!(failure_status(&dial, DialFailed::NotGranted), WorkerStatus::NotGranted);
             assert_eq!(
@@ -744,7 +794,7 @@ mod tests {
     #[test]
     fn a_server_on_another_build_is_told_with_its_way_on() {
         let notice = UpdateNotice {
-            of: slopty_client::update::Of::Server,
+            of: Of::Server,
             host: "hub".to_owned(),
             peer: "0.0.9+wire.0badf00d".to_owned(),
         };

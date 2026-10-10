@@ -575,6 +575,11 @@ pub struct Workspace {
     removals: ssh::Removing,
     /// This Mac's workers brought to this build unasked this launch: once each.
     updated_unasked: std::collections::HashSet<WorkerId>,
+    /// The machines "Update all" found away: each is updated once it answers again on an
+    /// older build ([`Workspace::update_all_workers`]).
+    update_when_back: std::collections::HashSet<WorkerId>,
+    /// "Update all" updates the server first, and the workers once its run has ended.
+    workers_after_server: bool,
     /// The server being brought to this build ([`Workspace::update_server`]).
     server_update: Option<gpui::Task<()>>,
     /// What reaches the system's notifications while the app is not in front.
@@ -727,6 +732,8 @@ impl Workspace {
             updates: ssh::Updating::new(),
             removals: ssh::Removing::new(),
             updated_unasked: std::collections::HashSet::new(),
+            update_when_back: std::collections::HashSet::new(),
+            workers_after_server: false,
             server_update: None,
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
@@ -1470,6 +1477,7 @@ impl Workspace {
                 let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
                 let home = ack.home.clone();
+                let build = ack.caps.build.clone();
                 let sessions = ack.sessions.len();
                 let (resume_tx, mut resumes) = tokio::sync::mpsc::unbounded_channel();
                 let replaced = std::mem::take(&mut replacing);
@@ -1496,6 +1504,7 @@ impl Workspace {
                     });
                     ws.refresh_menu(cx);
                     ws.update_linked(id, cx);
+                    ws.heard_build(id, &build, true, cx);
                     true
                 });
                 if !matches!(alive, Ok(true)) {
