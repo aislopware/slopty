@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -13,6 +11,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
@@ -24,7 +24,6 @@ Tab │ Terminal
 Tab │ Input
 Heading │ Machines
 Tab │ Agents
-Tab │ Streams
 Tab │ Network
 Heading │ Help
 Tab │ Keyboard
@@ -42,23 +41,11 @@ SpinButton │ Line height │ 1.0×
 Button │ Decrease
 Button │ Increase
 Switch │ Ligatures
-Heading │ Cursor
-RadioGroup │ Shape │ Auto
-RadioButton │ Auto
-RadioButton │ Block
-RadioButton │ Bar
-RadioButton │ Underline
-RadioGroup │ Blink │ Never
-RadioButton │ Auto
-RadioButton │ Always
-RadioButton │ Never
 Heading │ Text
 SpinButton │ Minimum contrast │ 3.0:1
 Button │ Decrease
 Button │ Increase
-Switch │ Bold is bright
 Heading │ Behaviour
-Switch │ Confirm close
 RadioGroup │ Alert │ When hidden
 RadioButton │ Never
 RadioButton │ When hidden

@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -10,17 +12,13 @@ Button │ Machine actions, e2e-worker
 Button │ Do these steps in order, using the named tools, then reply "done". 1)…
 Image │ Claude Code
 Button │ Close tile
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ e2e-worker
 TabList
 Tab │ Do these steps in order, using the named tools, then reply "done". 1)…
+Image │ Claude Code
 Button │ Close tab
 Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
 Label │ home
 Button │ Show terminal
-Button │ Needs you
 Button │ More
 Group │ Do these steps in order, using the named tools, then reply "done". 1)…
 Group │ Thread

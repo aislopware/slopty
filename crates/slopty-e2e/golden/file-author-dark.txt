@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -21,16 +23,10 @@ Image │ Claude Code
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ e2e-worker
 TabList
 Tab │ refresh.rs
 Image │ Done
 Button │ Close tab
-Button │ Needs you
-Status │ 1 new
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
@@ -41,7 +37,6 @@ Terminal │ shell │ ~ %
 Group │ refresh.rs
 Heading │ file refresh.rs
 Tab │ Retry the refresh
-Image │ Claude Code
 Image │ Done
 Button │ Close tile
 Tab │ refresh.rs

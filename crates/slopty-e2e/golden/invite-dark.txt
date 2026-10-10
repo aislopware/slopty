@@ -1,7 +1,5 @@
 Window │ e2e-worker
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -13,6 +11,8 @@ Heading │ terminal Terminal
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Status
 Button │ Show the tab's terminal

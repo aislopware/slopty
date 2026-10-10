@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -15,6 +13,8 @@ Button │ Needs you
 Status │ 1 new
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker, 1 needs you
 Image │ Needs you
 Group │ Claude Code

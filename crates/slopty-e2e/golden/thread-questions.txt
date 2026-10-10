@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -14,20 +16,15 @@ Button │ Do these steps in order with the named tools, then reply "done". 1) R
 Image │ Claude Code
 Button │ Close tile
 Image │ Needs you
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ e2e-worker
 TabList
 Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Image │ Claude Code
 Button │ Close tab
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
 Label │ home
 Status │ Asks: Which layout should the review use?
 Image │ Needs you
 Button │ Show terminal
-Button │ Needs you
-Status │ 1 new
 Button │ More
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Group │ Thread

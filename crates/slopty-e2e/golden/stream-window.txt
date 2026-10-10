@@ -1,7 +1,5 @@
 Window │ e2e-worker
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -12,6 +10,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Heading │ window Synthetic editor
 Tab │ Terminal

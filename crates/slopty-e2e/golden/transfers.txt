@@ -1,8 +1,6 @@
 Window │ drop-here
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -17,7 +15,10 @@ Button │ Stop upload │ ↑ 0%
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ drop-here
+Button │ e2e-worker, checking
 Group │ drop-here
 Group (focused)
 Terminal │ shell │ ~/drop-here %

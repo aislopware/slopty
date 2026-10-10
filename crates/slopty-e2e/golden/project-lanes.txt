@@ -1,6 +1,8 @@
 Window │ studio
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -18,18 +20,14 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ studio
 TabList
 Tab │ Terminal
 Button │ Close tab
 Tab │ Orchestrator
+Image │ Claude Code
 Button │ Close tab
 Heading │ Claude Code Orchestrator
 Button │ Show thread
-Button │ Needs you
 Button │ More
 Group │ Orchestrator
 Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)

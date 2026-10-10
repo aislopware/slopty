@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -13,6 +11,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Terminal
 Heading │ terminal Terminal
@@ -43,5 +43,3 @@ ListBoxOption │ New project…
 ListBoxOption │ New note ⇧⌘N
 ListBoxOption │ Add a window or display ⌘O
 ListBoxOption │ Open file… ⌘P
-ListBoxOption │ Open folder…
-Label │ ↑↓ Move · Esc Close · ↩ Run

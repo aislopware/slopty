@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -13,14 +15,9 @@ Button │ RELEASE.md
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ e2e-worker
 TabList
 Tab │ Terminal
 Button │ Close tab
-Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal

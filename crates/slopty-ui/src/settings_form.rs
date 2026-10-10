@@ -1169,8 +1169,9 @@ impl SettingsForm {
     }
 
     /// A group's heading over the rows it names, as System Settings titles its groups: the
-    /// section role in the secondary tone, on a row's height at the group's leading inset, with
-    /// space above it. In a search or a single column it names the section instead.
+    /// section role in the secondary tone, on a row's height at the group's leading inset (the
+    /// card's, so it starts over its rows' titles), with space above it. In a search or a single
+    /// column it names the section instead.
     fn heading(&self, text: impl Into<SharedString>, n: usize, first: bool) -> AnyElement {
         let text: SharedString = text.into();
         let theme = &self.theme;
@@ -1184,7 +1185,7 @@ impl SettingsForm {
             .h(px(theme.density.row))
             .flex()
             .items_center()
-            .px(px(spacing.inset()))
+            .px(px(spacing.lg))
             .text_color(hsla(theme.surfaces.text_secondary))
             .mt(px(if first { spacing.sm } else { spacing.lg }))
             .child(text)
@@ -1201,7 +1202,7 @@ impl SettingsForm {
             .aria_label(words)
             .flex_none()
             .pt(px(theme.spacing.xs))
-            .px(px(theme.spacing.inset()))
+            .px(px(theme.spacing.lg))
             .text_color(hsla(theme.surfaces.text_muted))
             .child(words)
             .into_any_element()

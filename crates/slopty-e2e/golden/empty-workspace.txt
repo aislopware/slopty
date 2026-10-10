@@ -1,16 +1,17 @@
 Window │ e2e-worker
 Group │ Workspace (focused)
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
+Button │ Scroll tabs forward
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ New agent
 Button │ New terminal
 Button │ Add a window or display

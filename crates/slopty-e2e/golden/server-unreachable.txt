@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -16,6 +14,8 @@ Button │ Server offline
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Terminal
 Group (focused)

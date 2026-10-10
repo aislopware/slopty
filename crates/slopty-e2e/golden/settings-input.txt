@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -13,6 +11,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
@@ -24,7 +24,6 @@ Tab │ Terminal
 Tab │ Input
 Heading │ Machines
 Tab │ Agents
-Tab │ Streams
 Tab │ Network
 Heading │ Help
 Tab │ Keyboard
@@ -39,11 +38,7 @@ RadioButton │ Off
 RadioButton │ Both
 RadioButton │ Left
 RadioButton │ Right
-Switch │ Natural text editing
-RadioGroup │ Secure keyboard entry │ At passwords
-RadioButton │ At passwords
-RadioButton │ Always
-RadioButton │ Never
+Switch │ Secure keyboard entry
 Heading │ Clipboard
 Switch │ Share the clipboard
 TextInput │ By machine
@@ -55,9 +50,3 @@ ListItem │ studio
 Switch │ studio
 Button │ Remove
 Switch │ Copy on select
-Switch │ Paste protection
-Heading │ Pointer
-Switch │ Hide pointer while typing
-SpinButton │ Scroll speed │ 1.0×
-Button │ Decrease
-Button │ Increase

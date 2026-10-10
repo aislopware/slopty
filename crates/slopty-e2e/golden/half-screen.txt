@@ -11,6 +11,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Terminal
 Heading │ terminal Terminal

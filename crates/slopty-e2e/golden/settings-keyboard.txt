@@ -1,8 +1,6 @@
 Window │ e2e-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
@@ -13,6 +11,8 @@ Button │ Close tab
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
@@ -24,7 +24,6 @@ Tab │ Terminal
 Tab │ Input
 Heading │ Machines
 Tab │ Agents
-Tab │ Streams
 Tab │ Network
 Heading │ Help
 Tab │ Keyboard
@@ -130,8 +129,6 @@ ListItem │ Trackpad mode
 Button │ Keys for Trackpad mode
 ListItem │ Gestures to the remote app
 Button │ Keys for Gestures to the remote app
-ListItem │ Start a project here
-Button │ Keys for Start a project here
 ListItem │ Open settings │ ⌘,
 Button │ Keys for Open settings │ ⌘,
 ListItem │ About Slopty
@@ -267,14 +264,10 @@ ListItem │ Queue message │ ⌘↩
 Button │ Keys for Queue message │ ⌘↩
 ListItem │ Edit the last queued message │ ⌥↑
 Button │ Keys for Edit the last queued message │ ⌥↑
-ListItem │ Next effort level
-Button │ Keys for Next effort level
 ListItem │ Ask aside
 Button │ Keys for Ask aside
 ListItem │ Review changes
 Button │ Keys for Review changes
-ListItem │ Branch from here…
-Button │ Keys for Branch from here…
 ListItem │ Resume the agent
 Button │ Keys for Resume the agent
 ListItem │ Previous prompt │ ⌘↑
@@ -391,24 +384,14 @@ ListItem │ Tell the task's agent to address the comments
 Button │ Keys for Tell the task's agent to address the comments
 ListItem │ Tell the task's agent to resolve the conflicts
 Button │ Keys for Tell the task's agent to resolve the conflicts
-ListItem │ Push the task's merge again
-Button │ Keys for Push the task's merge again
 ListItem │ Cancel the task
 Button │ Keys for Cancel the task
-ListItem │ Stop the task's agent
-Button │ Keys for Stop the task's agent
-ListItem │ Start the task fresh
-Button │ Keys for Start the task fresh
-ListItem │ Give the task to another agent…
-Button │ Keys for Give the task to another agent…
 ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
 ListItem │ Message the orchestrator… │ C
 Button │ Keys for Message the orchestrator… │ C
 ListItem │ Start the task │ S
 Button │ Keys for Start the task │ S
-ListItem │ Run the task on… │ O
-Button │ Keys for Run the task on… │ O
 ListItem │ Push after each merge
 Button │ Keys for Push after each merge
 ListItem │ Delete the project

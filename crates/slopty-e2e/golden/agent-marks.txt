@@ -1,6 +1,8 @@
 Window │ atlas
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -30,10 +32,6 @@ Button │ Claude Code 2, Working
 Image │ Claude Code
 Button │ Close tile
 Image │ Working
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ atlas
 TabList
 Tab │ Claude Code
 Image │ Needs you
@@ -42,11 +40,11 @@ Tab │ Claude Code 2
 Image │ Working
 Button │ Close tab
 Tab │ pi
+Image │ pi
 Button │ Close tab
 Tab │ Codex
+Image │ Codex
 Button │ Close tab
-Button │ Needs you
-Status │ 1 new
 Button │ More
 Group │ opencode
 Heading │ opencode

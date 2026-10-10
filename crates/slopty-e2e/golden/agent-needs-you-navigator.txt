@@ -1,6 +1,8 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
+Button │ Back
+Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
@@ -17,16 +19,10 @@ Image │ Needs you
 Button │ Fix the login redirect
 Image │ Claude Code
 Button │ Close tile
-Button │ Back
-Button │ Forward
-Group │ Where
-Button │ e2e-worker
 TabList
 Tab │ Fix the login redirect
 Image │ Needs you
 Button │ Close tab
-Button │ Needs you
-Status │ 1 new
 Button │ More
 Group │ Claude Code
 Heading │ Claude Code
