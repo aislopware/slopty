@@ -27,7 +27,7 @@ use crate::icons::Status;
 use crate::project::create::{Filled, GoalSheet, NewGoal, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
-use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
+use crate::project::{AgentSeen, Asked, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 /// What a board's action says when no server is linked to take it.
 pub(crate) const NOT_SENT: &str = "Not sent: the server is away";
@@ -253,6 +253,39 @@ impl WorkspaceView {
     #[must_use]
     pub const fn projects(&self) -> &Projects {
         &self.projects.mirror
+    }
+
+    /// The tasks of every project whose work waits to be merged, project by project, each in
+    /// its merge queue's order.
+    #[must_use]
+    pub(super) fn ready_to_merge(&self) -> Vec<(ProjectId, TaskId)> {
+        self.projects
+            .mirror
+            .boards()
+            .flat_map(|board| {
+                let ready = board
+                    .lanes()
+                    .into_iter()
+                    .filter(|(lane, _)| *lane == Lane::ReadyToMerge)
+                    .flat_map(|(_, tasks)| tasks);
+                ready.map(|task| (board.project.id.clone(), task)).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Whether what `about` names is a project task's agent: its terminal on a task, or its
+    /// thread a task's seat.
+    pub(super) fn task_agent(&self, about: super::attention::About) -> bool {
+        use super::attention::About;
+        match about {
+            About::Session(session) => self.projects.mirror.of_agent(session).is_some(),
+            About::Thread(thread) => self.projects.mirror.boards().any(|board| {
+                board
+                    .tasks
+                    .values()
+                    .any(|card| card.assignment.as_ref().is_some_and(|a| a.thread == Some(thread)))
+            }),
+        }
     }
 
     /// Whether `session`'s tile shows its project's board.
@@ -666,6 +699,9 @@ impl WorkspaceView {
                 }
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
                 ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
+                ProjectEvent::Answer { session, ask, pressed } => {
+                    this.answer_session(*session, ask, pressed, cx);
+                }
                 ProjectEvent::CloseRecap => {
                     if this.projects.recaps.remove(&asked).is_some() {
                         this.projects_moved(cx);
@@ -715,6 +751,12 @@ impl WorkspaceView {
             }
         };
         self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// Merge `task`, ready, on the person's word from outside its board: its row under *Ready
+    /// to merge*.
+    pub(super) fn merge_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+        self.act_on_task(project, task, TaskAction::Merge, cx);
     }
 
     /// "Review" on a finished task: its worktree's changes on its machine, the whole branch
@@ -1096,9 +1138,27 @@ impl WorkspaceView {
                 let agent = self.agent_state(session)?;
                 let status = agent_mark_of(agent);
                 let asks = agent_ask_text(agent);
-                Some((session, AgentSeen { status, asks }))
+                let asked = (status == Status::NeedsYou).then(|| self.asked(session)).flatten();
+                Some((session, AgentSeen { status, asks, asked }))
             })
             .collect()
+    }
+
+    /// What `session`'s agent can be answered with from its board row: its thread's open
+    /// request, while it takes a press and was not answered here already.
+    fn asked(&self, session: SessionId) -> Option<Asked> {
+        let thread = self.session_thread(session)?;
+        let card = self.thread_request(thread)?;
+        if self.thread_answered_here(thread) == Some(&card.id) {
+            return None;
+        }
+        let yes_no = card.answerable();
+        let picks = if yes_no {
+            Vec::new()
+        } else {
+            card.buttons.iter().map(|b| (b.choice.clone(), b.label.clone())).collect()
+        };
+        (yes_no || !picks.is_empty()).then(|| Asked { ask: card.id.clone(), yes_no, picks })
     }
 
     /// Counts of what the projects keep, for the leak checks.

@@ -53,8 +53,8 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
 }
 
 /// The breadcrumb's project segment is how the bar goes between projects: its menu lists each
-/// one (the one on show ticked), and a row shows it. What waits in another project shows as a
-/// mark on the segment, inside it, and its label says so; no chord is spelled on it.
+/// one (the one on show ticked), and a row shows it. What waits in another project is the
+/// bell's, so the segment says only the project's name; no chord is spelled on it.
 #[gpui::test]
 fn the_breadcrumb_goes_between_projects(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -71,21 +71,15 @@ fn the_breadcrumb_goes_between_projects(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     assert!(cx.debug_bounds("crumb-project").is_some());
-    assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "at rest, no mark");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     cx.run_until_parked();
-    let (segment, mark) = (
-        cx.debug_bounds("crumb-project").expect("drawn"),
-        cx.debug_bounds("crumb-elsewhere").expect("what waits elsewhere"),
-    );
-    assert!(segment.contains(&mark.center()), "inside its segment: {segment:?} {mark:?}");
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let crumbs: Vec<String> =
         tree.into_iter().filter(|n| n.role == "Button").filter_map(|n| n.label).collect();
-    assert!(crumbs.iter().any(|l| l.ends_with(", elsewhere 1 needs you")), "{crumbs:#?}");
+    assert!(crumbs.iter().any(|l| l == "studio"), "the project alone: {crumbs:#?}");
     assert!(crumbs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords: {crumbs:#?}");
 
     click(cx, "crumb-project");

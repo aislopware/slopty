@@ -154,6 +154,32 @@ impl WorkspaceView {
         true
     }
 
+    /// Answer the request `ask` that the agent in `session` waits on, as `pressed` says: a
+    /// board row's press. Nothing when it no longer waits on that request.
+    pub(in crate::workspace) fn answer_session(
+        &mut self,
+        session: SessionId,
+        ask: &AskId,
+        pressed: &Pressed,
+        cx: &mut Context<Self>,
+    ) {
+        let seat = || {
+            self.projects().boards().find_map(|board| {
+                let card = board.tasks.values().find(|card| {
+                    card.assignment.as_ref().is_some_and(|a| a.term.session == session)
+                })?;
+                card.assignment.as_ref()?.thread
+            })
+        };
+        let thread = self.session_thread(session).or_else(seat);
+        let worker = self
+            .agent_state(session)
+            .or_else(|| thread.and_then(|t| self.thread_stand(t)))
+            .map(|stand| stand.worker);
+        let (Some(worker), Some(thread)) = (worker, thread) else { return };
+        self.answer_pressed(worker, thread, ask, pressed, cx);
+    }
+
     /// The request this client answered on `thread` that its worker's table still shows open.
     #[must_use]
     pub(in crate::workspace) fn thread_answered_here(&self, thread: ThreadId) -> Option<&AskId> {
@@ -450,11 +476,7 @@ pub(in crate::workspace) struct Answer {
     ask: AskId,
 }
 
-/// The button that allows a waiting agent's call.
-pub(in crate::workspace) const ALLOW: &str = "Allow";
-
-/// The button that refuses it.
-pub(in crate::workspace) const DENY: &str = "Deny";
+pub(in crate::workspace) use crate::project::{ALLOW, DENY};
 
 impl WorkspaceView {
     /// What "Deny" and "Allow" would answer for `session`'s agent: its thread's open request,

@@ -173,23 +173,3 @@ fn what_runs_out_of_sight_and_the_tabs_terminal_are_at_the_bars_end(cx: &mut Tes
     assert!(!view.read_with(cx, |v, _| v.layout.on_show(terminal)), "put away");
     assert!(labels(&view, cx).iter().any(|l| l == SHOW_TERMINAL));
 }
-
-/// The focused tile's agent is named at the bar's start, after the plan, with how it is doing.
-#[gpui::test]
-fn the_focused_agent_is_named_in_the_foot_bar(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let session = SessionId::new();
-    let tile = opens(&view, cx, &fake, session, fake.me, 1);
-    assert!(cx.debug_bounds("foot-agent").is_none(), "a plain shell names no agent");
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(blocked(session), cx);
-        v.focus_tile(tile, cx);
-    });
-    cx.run_until_parked();
-    let foot = cx.debug_bounds("foot").expect("the foot bar");
-    let agent = cx.debug_bounds("foot-agent").expect("the agent");
-    assert!(foot.contains(&agent.center()));
-    let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "Claude Code, Needs you"), "{names:#?}");
-}

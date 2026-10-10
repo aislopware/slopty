@@ -22,12 +22,13 @@ use gpui::{
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_platform::notify::Pressed;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Autonomy, NativeCounts, ProjectId, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
-use slopty_proto::thread::AgentId;
+use slopty_proto::thread::{AgentId, AskId};
 use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
@@ -49,6 +50,12 @@ use crate::palette::{Plate, age_label, dotted};
 
 /// The key context of a board; its keys are bound in it.
 pub const CTX: &str = "ProjectBoard";
+
+/// The button that allows what an agent asks, wherever it is answered away from its thread.
+pub(crate) const ALLOW: &str = "Allow";
+
+/// The button that refuses it.
+pub(crate) const DENY: &str = "Deny";
 
 /// What a board with no tasks yet says.
 pub(crate) const NO_TASKS: &str = "No tasks yet";
@@ -99,6 +106,28 @@ pub enum ProjectEvent {
     Tell(String),
     /// The person read the recap: close it.
     CloseRecap,
+    /// Answer the request `ask` that the agent in `session` waits on, as `pressed` says: from
+    /// its row, in place.
+    Answer {
+        /// The agent's terminal, or its seat.
+        session: SessionId,
+        /// The request answered, so a newer one is never answered by an older press.
+        ask: AskId,
+        /// Allow, Deny, or one of its picks.
+        pressed: Pressed,
+    },
+}
+
+/// What a waiting agent's row answers in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asked {
+    /// The request it waits on.
+    pub ask: AskId,
+    /// Its whole answer is a yes or no: Deny and Allow.
+    pub yes_no: bool,
+    /// Else the picks it offers, each its choice and its words; none for a question asked on
+    /// its own sheet, which its agent's tile answers.
+    pub picks: Vec<(String, String)>,
 }
 
 /// What the message to the orchestrator says while it is empty.
@@ -159,6 +188,8 @@ pub struct AgentSeen {
     pub status: Status,
     /// What it asks the person, while it waits on them.
     pub asks: Option<String>,
+    /// What its row answers in place, while its request takes a press.
+    pub asked: Option<Asked>,
 }
 
 /// A worker as the board names it.
@@ -1076,7 +1107,13 @@ impl ProjectView {
             .row_frame(key.to_owned(), said(&[ORCHESTRATOR, &asks]), false)
             .role(Role::Button)
             .child(line)
-            .children(self.detail(vec![self.asks_line(key, asks)]));
+            .children(
+                self.detail(
+                    std::iter::once(self.asks_line(key, asks))
+                        .chain(self.answers(key, board, None, cx))
+                        .collect(),
+                ),
+            );
         let el = tab_stop(el, s.focus).on_click(cx.listener(|_this, _ev, _w, cx| {
             cx.emit(ProjectEvent::Open(None));
         }));
@@ -1628,6 +1665,77 @@ impl ProjectView {
         })
     }
 
+    /// The answers a waiting agent's row gives in place, under what it asks: Allow, the move
+    /// that frees the task, then Deny; or the picks of a question that asks one thing. A press
+    /// answers where the agent is, without going to it; anything else opens its tile.
+    fn answers(
+        &self,
+        key: &str,
+        board: &Board,
+        node: Node,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let asked = self.agent(board, node)?.asked.clone()?;
+        let (_, session) = board.terminal(node)?;
+        let choices: Vec<(Pressed, String)> = if asked.yes_no {
+            vec![(Pressed::Allow, ALLOW.to_owned()), (Pressed::Deny, DENY.to_owned())]
+        } else {
+            asked
+                .picks
+                .iter()
+                .map(|(choice, words)| (Pressed::Pick(choice.clone()), words.clone()))
+                .collect()
+        };
+        if choices.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let buttons = choices.into_iter().enumerate().map(|(ix, (pressed, words))| {
+            let id = format!("{key}-answer-{ix}");
+            let selector = id.clone();
+            let el = div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(SharedString::from(words.clone()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(theme.density.hit))
+                .px(px(sp.sm))
+                .rounded(px(theme.radii.sm))
+                .text_size(px(theme.typography.small()))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .cursor_pointer()
+                .child(SharedString::from(words));
+            // The first is the move that frees the task, solid as a held card's first action;
+            // the rest are controls beside it.
+            let el = if ix == 0 {
+                crate::kit::solid_pressable(el, theme)
+            } else {
+                el.text_color(hsla(s.text_secondary))
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+            };
+            let ask = asked.ask.clone();
+            tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                cx.stop_propagation();
+                let pressed = pressed.clone();
+                cx.emit(ProjectEvent::Answer { session, ask: ask.clone(), pressed });
+            }))
+        });
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(sp.xs))
+                .children(buttons)
+                .into_any_element(),
+        )
+    }
+
     /// What an agent asks the person, as a row's second line in the secondary ink.
     fn asks_line(&self, key: &str, asks: String) -> AnyElement {
         let id = format!("{key}-asks");
@@ -1857,6 +1965,7 @@ impl ProjectView {
             .map(|words| self.handing_line(&key, words))
             .into_iter()
             .chain(asks.map(|asks| self.asks_line(&key, asks)))
+            .chain(self.answers(&key, board, node, cx))
             .chain(self.pipeline_row(&key, &loud).map(IntoElement::into_any_element))
             .chain(
                 check

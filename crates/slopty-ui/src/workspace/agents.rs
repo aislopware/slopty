@@ -268,7 +268,8 @@ impl WorkspaceView {
     /// worker says their changes wait unkept (their row's [`Rung::ToReview`], the same on every
     /// device, until the person keeps them), then the turns that ended while nobody looked. A
     /// terminal's agent counts while its tile is here; a thread with no terminal (Codex beside
-    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one.
+    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one. A project task's
+    /// agent never does: its work reaches the person as the task ready to merge.
     pub(super) fn to_review(&self) -> Vec<Step> {
         let waiting = self
             .agent_sessions()
@@ -279,11 +280,24 @@ impl WorkspaceView {
         let mut steps: Vec<Step> = Vec::new();
         for step in self.steps_in_reading_order(waiting).into_iter().chain(unread) {
             let about = step_about(step);
-            if !steps.iter().any(|s| step_about(*s) == about) {
+            if !self.task_agent(about) && !steps.iter().any(|s| step_about(*s) == about) {
                 steps.push(step);
             }
         }
         steps
+    }
+
+    /// The agents and threads whose turn stopped on an error, a usage limit among them, in
+    /// reading order: a terminal's agent while its tile is here, a thread with no terminal with
+    /// or without one.
+    pub(super) fn failed(&self) -> Vec<Step> {
+        let sessions = self
+            .agent_sessions()
+            .filter(|(_, stand)| stand.rung == Rung::Failed)
+            .filter_map(|(session, _)| self.step_of(About::Session(session)))
+            .collect::<Vec<_>>();
+        let threads = self.threads_on(Rung::Failed).into_iter().map(Step::Thread);
+        self.steps_in_reading_order(sessions.into_iter().chain(threads))
     }
 
     /// The ladder's step for what `about` names: a terminal whose tile is here, or a thread

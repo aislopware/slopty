@@ -10188,3 +10188,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Deleted.** The "New project" steps (`For`, `StartOrchestrator`, `NewProjectOf`,
     `NewProjectOn`), the old sheet (`ProjectSheet`) and its refusals.
   - Test: `workspace::tests::projects::a_new_goal_starts_its_orchestrator_and_hands_it_the_goal`.
+
+- ✅ **What waits on the person is one list** (2026-10-11, the orchestrator-first study, item 14,
+  first half). The bell counted Needs you and To review only: a turn stopped on a usage limit
+  showed nowhere but the next-attention ladder, a task ready to merge reached nobody, and every
+  task agent's finished turn filled To review although its work arrives as the task. The same
+  waiting was also counted again on the breadcrumb and named again in the foot. Ruled:
+  - **Four sections, one count.** The navigator's attention sections are Needs you, Failed (an
+    agent or a thread whose turn stopped on an error or a limit), Ready to merge (each
+    project's tasks whose work passed, in the merge queue's order, with Merge on the row and
+    the board behind a press) and To review. The bell, the note's unread count and ⌘⇧U are
+    the four together (`bell_count`). A project task's agent is never To review.
+  - **No Working section.** The study listed one; it is not taken. Every agent at work is
+    already marked on its tile's row, and a list of them would repeat the projects' rows with
+    nothing for the person to do.
+  - **Answered in place on the board.** A waiting row on the board (the orchestrator's, a
+    task's) carries Allow and Deny for a plain yes or no, or the picks of a question that asks
+    one thing, under what it asks. A press answers through the agent's worker as the
+    navigator's row does, and the board stays where it is. Anything else opens the agent.
+  - **Deleted.** The breadcrumb's mark for what waits in other projects, and the foot's
+    focused agent (its state is the tile header's).
+  - Tests: `workspace::tests::projects::{what_waits_on_the_person_is_one_list,
+    a_board_row_answers_its_agent_in_place}`, `workspace::tests::tab_strip::the_breadcrumb_goes_between_projects`.

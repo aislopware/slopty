@@ -3,12 +3,16 @@
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
-//! *Needs you* appears only while an agent or a thread waits on the human, and *To review* only
-//! while an agent's turn ended unseen (its row says what it did, else how long it ran). They are
-//! what the bell counts, and the bell (⌘⇧U) shows the navigator at them. Each lists every one,
-//! whether its tile's row is in view or not, since its row says what it asks, carries "Deny" and
-//! "Allow" for a yes or no held here, and says its project, then its machine where there are
-//! several. What is at work is marked on its tile's row, with no section of its own.
+//! Four sections are the one list of what waits on the person, each shown only while it holds
+//! something: *Needs you* (an agent or a thread waits on them), *Failed* (a turn stopped on an
+//! error or a usage limit), *Ready to merge* (a project task whose work passed, with "Merge" on
+//! its row) and *To review* (an agent's turn ended unseen, its row saying what it did, else how
+//! long it ran; never a task's agent, whose work arrives as its task). They are what the bell
+//! counts, and the bell (⌘⇧U) shows the navigator at them. Each lists every one, whether its
+//! tile's row is in view or not, since its row says what it asks, carries "Deny" and "Allow" for
+//! a yes or no held here, and says its project, then its machine where there are several. What
+//! is at work is marked on its tile's row, with no section of its own: a list of every agent at
+//! work would repeat the projects' rows and is never the person's to act on.
 //!
 //! Then *Projects*: the tiles grouped by the first fact of the layout's chain each has
 //! ([`slopty_client::groups`]): its declared project, else its repository (one block for every
@@ -76,7 +80,7 @@ use slopty_client::groups::{self, GroupKey, fact};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
 use slopty_proto::items::{Item, ItemKind};
-use slopty_proto::project::ProjectId;
+use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
@@ -164,6 +168,15 @@ pub(super) const NEEDS_YOU: &str = "Needs you";
 
 /// The section of agents' turns that ended unseen.
 pub(super) const TO_REVIEW: &str = "To review";
+
+/// The section of agents and threads whose turn stopped on an error or a usage limit.
+pub(super) const FAILED: &str = "Failed";
+
+/// The section of project tasks whose work waits to be merged.
+pub(super) const READY_TO_MERGE: &str = "Ready to merge";
+
+/// A ready task's button that merges it.
+pub(super) const MERGE: &str = "Merge";
 
 /// A round trip the navigator names: above it typing starts to feel remote, below it the
 /// number is noise beside every worker. The hosts popover gives it always.
@@ -993,6 +1006,17 @@ struct NavAgent {
     answer: Option<Answer>,
 }
 
+/// A project task ready to merge, as its row under *Ready to merge* says it.
+#[derive(Clone)]
+struct NavReady {
+    project: ProjectId,
+    task: TaskId,
+    /// The task's title.
+    title: String,
+    /// Its project, and its place in the merge queue.
+    words: String,
+}
+
 /// One row of the navigator's list.
 #[derive(Clone)]
 enum NavRow {
@@ -1001,6 +1025,7 @@ enum NavRow {
         text: SharedString,
     },
     Agent(NavAgent),
+    Ready(NavReady),
     Worker(NavHeader),
     Group(NavGroup),
     Board(NavBoard),
@@ -1026,6 +1051,7 @@ impl NavRow {
             Self::Group(g) => (false, g.gap),
             Self::Heading { .. }
             | Self::Agent(_)
+            | Self::Ready(_)
             | Self::Board(_)
             | Self::Thread(_)
             | Self::Earlier(..)
@@ -1047,6 +1073,7 @@ impl NavRow {
             Self::Board(b) => Some(Anchor::Board(&b.project)),
             Self::Heading { .. }
             | Self::Agent(_)
+            | Self::Ready(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
             | Self::Vacant(_)
@@ -2536,13 +2563,14 @@ impl WorkspaceView {
         div().flex_none().flex().flex_col().children(lights).children(filter).children(actions)
     }
 
-    /// Every row the list holds this frame: *Needs you* while an agent or a thread waits, *To
-    /// review* while a turn ended unseen, then the projects, each header with its tiles unless
-    /// it is folded, then the workers, each with what belongs to no project. A section's
-    /// heading shows only under another section. While the filter holds something, a fold hides
-    /// nothing; under a scope, only its project's rows are left.
+    /// Every row the list holds this frame: *Needs you* while an agent or a thread waits,
+    /// *Failed* while a turn stopped on an error, *Ready to merge* while a task's work waits to
+    /// be merged, *To review* while a turn ended unseen, then the projects, each header with its
+    /// tiles unless it is folded, then the workers, each with what belongs to no project. A
+    /// section's heading shows only under another section. While the filter holds something, a
+    /// fold hides nothing; under a scope, only its project's rows are left.
     ///
-    /// The two attention sections list every one, its tile's row in view or not: they are what
+    /// The attention sections list every one, its tile's row in view or not: they are what
     /// the bell counts and opens, and a waiting row is where its yes or no is answered.
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
         let parsed = Query::parse(&self.nav.filter.query);
@@ -2590,6 +2618,16 @@ impl WorkspaceView {
             rows.push(heading("nav-needs-you", NEEDS_YOU));
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
+        let failed = agents(self.failed(), Status::Failed);
+        if !failed.is_empty() {
+            rows.push(heading("nav-failed", FAILED));
+            rows.extend(failed.into_iter().map(NavRow::Agent));
+        }
+        let ready = self.nav_ready(scope, &projects, &query);
+        if !ready.is_empty() {
+            rows.push(heading("nav-ready", READY_TO_MERGE));
+            rows.extend(ready.into_iter().map(NavRow::Ready));
+        }
         let review = agents(self.to_review(), Status::Done);
         if !review.is_empty() {
             rows.push(heading("nav-to-review", TO_REVIEW));
@@ -2626,6 +2664,40 @@ impl WorkspaceView {
             rows.push(NavRow::Nothing);
         }
         rows
+    }
+
+    /// The tasks ready to merge, as their rows say them: under a scope only its project's (the
+    /// one its orchestrator's tile is grouped in), and under words only those they match.
+    fn nav_ready(
+        &self,
+        scope: Option<&GroupKey>,
+        projects: &Grouping,
+        query: &str,
+    ) -> Vec<NavReady> {
+        let mirror = self.projects();
+        self.ready_to_merge()
+            .into_iter()
+            .filter_map(|(project, task)| {
+                let board = mirror.get(&project)?;
+                let in_scope = scope.is_none_or(|scope| {
+                    let tile =
+                        board.project.orchestrator.and_then(|t| self.tile_of_session(t.session));
+                    tile.and_then(|t| projects.group_of(t)).is_some_and(|g| g.key == *scope)
+                });
+                let card = board.tasks.get(&task).filter(|_| in_scope)?;
+                let queue = board
+                    .queue_place(task)
+                    .map(|(place, _)| crate::project::model::queue_words(place));
+                let words = [Some(board.project.title.clone()), queue]
+                    .into_iter()
+                    .flatten()
+                    .filter(|w| !w.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(META_SEPARATOR);
+                Some(NavReady { project, task, title: card.title.clone(), words })
+            })
+            .filter(|r| matches(query, &[&r.title, &r.words]))
+            .collect()
     }
 
     /// `blocks` onto the list: each header, then unless it is folded what it holds.
@@ -2706,6 +2778,7 @@ impl WorkspaceView {
                 heading(theme, selector.clone(), text.clone(), ix == 0).into_any_element()
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
+            Some(NavRow::Ready(ready)) => self.ready_row(ready, cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
             Some(NavRow::Group(group)) => self.group_header(group, cx),
             Some(NavRow::Board(board)) => self.board_row(board, cx),
@@ -3081,7 +3154,11 @@ impl WorkspaceView {
             Step::Thread(at) => at.thread.to_string(),
         }
         .into();
-        let prefix = if agent.status == Status::NeedsYou { "nav-waiting" } else { "nav-review" };
+        let prefix = match agent.status {
+            Status::NeedsYou => "nav-waiting",
+            Status::Failed => "nav-failed",
+            _ => "nav-review",
+        };
         let label = [agent.title.as_str(), agent.words.as_str(), agent.status.label()]
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -3166,6 +3243,83 @@ impl WorkspaceView {
                         },
                     ))
             })
+            .into_any_element()
+    }
+
+    /// A task ready to merge: its mark, its title, then its project and its place in the queue
+    /// with "Merge", which sends the merge as the person's word. The row opens its board.
+    fn ready_row(&self, ready: &NavReady, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (first, second) = line_heights(theme);
+        let key = format!("{}-{}", ready.project, ready.task);
+        let label = [ready.title.as_str(), ready.words.as_str(), READY_TO_MERGE]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let line1 = div()
+            .h(px(first))
+            .line_height(px(first))
+            .flex()
+            .items_center()
+            .child(title(ready.title.clone(), hsla(s.text_secondary)));
+        let words = {
+            let key = key.clone();
+            div()
+                .debug_selector(move || format!("nav-ready-words-{key}"))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(crate::palette::dotted(theme, ready.words.clone()))
+        };
+        let merge = {
+            let (project, task) = (ready.project.clone(), ready.task);
+            let id = format!("nav-merge-{key}");
+            let selector = id.clone();
+            let el = div()
+                .id(ElementId::Name(id.into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(MERGE)
+                .flex_none()
+                .h(px(second))
+                .px(px(theme.spacing.xs))
+                .flex()
+                .items_center()
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .text_color(hsla(s.text))
+                .font_weight(gpui::FontWeight(theme.roles().action.weight))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .child(MERGE);
+            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.merge_task(&project, task, cx);
+            }))
+        };
+        let line2 = meta(div(), theme)
+            .h(px(second))
+            .line_height(px(second))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(words)
+            .child(merge);
+        let project = ready.project.clone();
+        row(theme, kit::Row::Two, format!("nav-ready-{key}"), label.into(), false)
+            .items_start()
+            .pt(px(theme.spacing.xs))
+            .child(lead_slot(theme, {
+                let side = px(theme.typography.icon());
+                let tone = hsla(Status::Done.ink(theme));
+                crate::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
+            }))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
 

@@ -6,8 +6,8 @@
 //! machine when there are several, so one project on three machines never reads as one.
 //!
 //! The project on show leads in the medium weight: its name, and a menu of every project,
-//! which is how the bar switches between them. What waits in another project shows as its
-//! rollup's mark on this segment, so it is not lost from view. The checkout is the focused
+//! which is how the bar switches between them. What waits anywhere is the bell's and the
+//! navigator's one list, so this segment carries no count of its own. The checkout is the focused
 //! shell's repository (else its directory), with a menu of the same repository's other
 //! checkouts in the layout, on any worker, when there are some; with no menu it is left out
 //! when the project already goes by its name. The
@@ -26,7 +26,6 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::{RepoChanges, RepoId};
 use slopty_theme::Typography;
 
-use super::rollup::{Rollup, rollup_slot};
 use super::tile::place_name;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
@@ -112,20 +111,6 @@ impl WorkspaceView {
         (projects.machines(group).len() > 1).then(|| self.worker_name(focused.worker))
     }
 
-    /// What the projects other than the one on show add up to: what waits out of view.
-    fn waiting_elsewhere(&self) -> Rollup {
-        let shown = self.layout.shown_index();
-        let mut all = Rollup::default();
-        for ix in (0..self.layout.projects().len()).filter(|ix| Some(*ix) != shown) {
-            let (rollup, _) = self.project_rollup(ix);
-            all.needs_you = all.needs_you.saturating_add(rollup.needs_you);
-            all.working = all.working.saturating_add(rollup.working);
-            all.unseen = all.unseen.saturating_add(rollup.unseen);
-            all.running = all.running.saturating_add(rollup.running);
-        }
-        all
-    }
-
     /// The breadcrumb, laid in the bar after the navigator's toggle, before the project's tabs.
     ///
     /// It is a [`kit::priority_row`]: the project always stands; the worker goes first and then
@@ -145,16 +130,11 @@ impl WorkspaceView {
                 .into_any_element()
         };
         let name = SharedString::from(self.project_name());
-        let elsewhere = self.waiting_elsewhere();
-        let label = match elsewhere.words() {
-            Some(words) => format!("{name}, elsewhere {words}"),
-            None => name.to_string(),
-        };
         let stepped = |segment: AnyElement| {
             div().flex().items_center().gap(px(spacing.xxs)).child(step()).child(segment)
         };
         let project = self
-            .crumb(MenuKind::Projects, "crumb-project", label.into(), cx)
+            .crumb(MenuKind::Projects, "crumb-project", name.clone(), cx)
             .child(
                 div()
                     .debug_selector(|| "crumb-project-name".to_owned())
@@ -164,10 +144,7 @@ impl WorkspaceView {
                     .text_color(hsla(s.text))
                     .child(ChromeText::new(name.clone(), px(theme.typography.ui_size)).fill()),
             )
-            .child(self.chevron())
-            .when(elsewhere.shown().is_some(), |el| {
-                el.child(rollup_slot(theme, "crumb-elsewhere".to_owned(), elsewhere, true))
-            });
+            .child(self.chevron());
         let mut row = kit::priority_row("breadcrumb")
             .fit_content()
             .flex_initial()

@@ -4,11 +4,11 @@
 //!
 //! It holds what is always worth a glance and never a warning. On the left, the plan's usage on
 //! the focused tile's machine and agent (`Plan 5h 23% · 7d 41%`, in `warn` once a window is 80 %
-//! used), which lists every machine's readings when clicked; then the focused agent: its mark,
-//! its name and how it is doing. On the right, the ports forwarded here, the transfers in
-//! flight, a chip for each shell of the project on show whose command runs out of sight (in
-//! another tab, behind a pane's other tab, or in the tab's terminal put away; a click goes to
-//! it), and the toggle of the tab's terminal, a chip that says "Terminal" (⌘⌥T, which the
+//! used), which lists every machine's readings when clicked. The focused agent's state is its
+//! tile header's alone, so the foot does not say it again. On the right, the ports forwarded here,
+//! the transfers in flight, a chip for each shell of the project on show whose command runs out of
+//! sight (in another tab, behind a pane's other tab, or in the tab's terminal put away; a click
+//! goes to it), and the toggle of the tab's terminal, a chip that says "Terminal" (⌘⌥T, which the
 //! palette names), in the accent while the terminal shows. A shell on show
 //! says its command in its own header, so it has no chip. The title bar keeps only the readouts
 //! that warn: the server out of reach, a link on a relay, a newer build. The frame time is the
@@ -34,7 +34,7 @@ use super::actions::TabTerminal;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Drawn, IconSize, Status, Symbol};
+use crate::icons::{Drawn, IconSize, Symbol};
 use crate::kit;
 
 /// The toggle's name while the tab's terminal is put away, or the tab has none.
@@ -104,7 +104,6 @@ impl WorkspaceView {
         *self.foot.running.borrow_mut() = running.iter().map(|(_, s)| *s).collect();
 
         let plan = self.plan_button(cx).map(gpui::IntoElement::into_any_element);
-        let agent = self.foot_agent().map(gpui::IntoElement::into_any_element);
         let ports = self.ports_button(cx).map(gpui::IntoElement::into_any_element);
         let transfers = self.transfers_button(cx).map(gpui::IntoElement::into_any_element);
         let chips: Vec<gpui::AnyElement> = running
@@ -126,8 +125,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(gap))
-            .children(plan)
-            .children(agent);
+            .children(plan);
         let trailing = div()
             .flex_none()
             .flex()
@@ -167,48 +165,6 @@ impl WorkspaceView {
             .children(plans)
             .children(transfer_list)
             .into_any_element()
-    }
-
-    /// The focused tile's agent: its mark, its name, and how it is doing unless at rest.
-    fn foot_agent(&self) -> Option<gpui::Stateful<gpui::Div>> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let tile = self.focused()?;
-        let item = self.item(tile)?;
-        let agent = self.item_agent(item)?;
-        let name = super::projects::agent_label(&slopty_proto::thread::AgentId(agent.to_owned()));
-        let status = self.tile_status(tile, item).filter(|st| *st != Status::Idle);
-        let role = theme.roles().metadata;
-        let mark = Drawn::beside(theme, self.kind_glyph(item), role)
-            .slot(px(IconSize::beside_slot(theme, role)), hsla(s.text_muted));
-        let label = match status {
-            Some(st) => format!("{name}, {}", st.label()),
-            None => name.clone(),
-        };
-        let state = status.map(|st| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xxs))
-                .child(crate::icons::status_mark(theme, Some(st)))
-                .child(div().text_color(hsla(st.word(theme))).child(st.label()))
-        });
-        Some(
-            div()
-                .id("foot-agent")
-                .debug_selector(|| "foot-agent".to_owned())
-                .role(Role::Status)
-                .aria_label(SharedString::from(label))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.xs))
-                .whitespace_nowrap()
-                .child(mark)
-                .child(div().text_color(hsla(s.text_secondary)).child(SharedString::from(name)))
-                .children(state),
-        )
     }
 
     /// A shell whose command runs: its terminal mark and its command; a click shows it.

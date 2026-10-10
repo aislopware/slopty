@@ -1,6 +1,6 @@
 //! Agents' turns that ended while nobody looked: which are left for the person to review. They
 //! are what the navigator's *To review* lists and what the bell counts beside the agents that
-//! need the person.
+//! need the person, those that failed and the tasks ready to merge.
 //!
 //! What is unread is the worker's word, not this device's: each thread's row carries its latest
 //! turn that ended and the person's seen mark, set by whichever device looked
@@ -40,11 +40,15 @@ pub(super) fn wall_ms() -> u64 {
 }
 
 impl WorkspaceView {
-    /// What the bell counts: the agents and threads that need the person, and the turns left to
-    /// review. A shell's finish is its tile's dot alone.
+    /// What the bell counts, the navigator's attention sections each once: the agents and
+    /// threads that need the person, those that failed, the project tasks ready to merge, and
+    /// the turns left to review. A shell's finish is its tile's dot alone.
     #[must_use]
     pub fn bell_count(&self) -> usize {
-        self.needs_you_count().saturating_add(self.to_review().len())
+        self.needs_you_count()
+            .saturating_add(self.failed().len())
+            .saturating_add(self.ready_to_merge().len())
+            .saturating_add(self.to_review().len())
     }
 
     /// The turn `thread` is seen through: its row's mark, or this device's own ahead of it.

@@ -438,7 +438,7 @@ impl WorkspaceView {
         // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
         // left to review; it opens the navigator at them.
         let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
-        let unread = total.saturating_add(self.to_review().len());
+        let unread = self.bell_count();
         let bell = (has_workers && !docked).then(|| {
             // No count disc, the one web badge the app had: the glyph itself says it, as the
             // Mac's own monochrome `bell.badge` does, in its words' tier, and in the warn fill

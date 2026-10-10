@@ -860,6 +860,116 @@ fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppCont
     );
 }
 
+/// What waits on the person is one list, the bell's count. An agent whose turn stopped on a
+/// usage limit is under *Failed*; a task ready to merge is under *Ready to merge*, whose Merge
+/// sends `TaskMerge`; a task's agent whose turn ended unseen is not left to review, since its
+/// work reaches the person as its task.
+#[gpui::test]
+fn what_waits_on_the_person_is_one_list(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, agent) = setup.agent;
+    let failing = SessionId::new();
+    let _shell = opens(&view, cx, &setup.fake, failing, setup.fake.me, 3);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        let limit =
+            AgentStatus::Failed { error: AgentStatus::RATE_LIMIT.to_owned(), until_ms: None };
+        v.agent_event(working(failing), cx);
+        v.agent_event(AgentEvent { status: limit, ..working(failing) }, cx);
+        let done = AgentEvent {
+            status: AgentStatus::Done,
+            since_ms: WallMs::from_millis(200_000),
+            ..working(agent)
+        };
+        v.agent_event(done, cx);
+        v.project_update(11, task_changed("board", card(5, "Land it", TaskState::Done), None), cx);
+    });
+    cx.run_until_parked();
+    let project = fixtures::id("board");
+    view.read_with(cx, |v, _| {
+        let failed: Vec<_> = v.failed().iter().map(|s| s.tile()).collect();
+        assert_eq!(failed, [v.tile_of_session(failing)], "the limit is a failure");
+        assert_eq!(v.ready_to_merge(), [(project.clone(), TaskId(5))]);
+        assert!(v.to_review().is_empty(), "the task's agent is not left to review");
+        assert_eq!(v.bell_count(), v.needs_you_count().saturating_add(2), "both are the bell's");
+    });
+    assert!(cx.debug_bounds("nav-failed").is_some(), "the Failed section");
+    let row: &'static str = Box::leak(format!("nav-failed-{failing}").into_boxed_str());
+    assert!(cx.debug_bounds(row).is_some(), "its row");
+    assert!(cx.debug_bounds("nav-ready").is_some(), "the Ready to merge section");
+    assert!(cx.debug_bounds("nav-to-review").is_none());
+    click(cx, "nav-merge-board-5");
+    assert_eq!(sent(&mut queue, cx, done), [Verb::TaskMerge { project, task: TaskId(5) }]);
+}
+
+/// A task whose agent waits on a plain yes or no is answered from its row on the board, in
+/// place: Allow sends the request's own plain allow through its worker, once, and the row takes
+/// its buttons back until the worker's table moves.
+#[gpui::test]
+fn a_board_row_answers_its_agent_in_place(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{Intent, RequestCard, TableFrame, ThreadRequest};
+    use slopty_proto::thread::{AskId, Choice, Cursor, Effect, Request};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let mut fake = setup.fake;
+    let key = fake.key;
+    let (_, orchestrator) = setup.orchestrator;
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(setup.blocked);
+    let mut row = state.row(WallMs::ZERO);
+    row.requests = vec![RequestCard {
+        buttons: Vec::new(),
+        id: AskId("ask-1".to_owned()),
+        item: None,
+        kind: Request::APPROVAL.to_owned(),
+        title: "Run `cargo test`".to_owned(),
+        options: vec![choice("accept", Effect::Allow), choice("decline", Effect::Deny)],
+        opened_ms: WallMs::ZERO,
+    }];
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    fake.drain();
+    click(cx, "project-card-2-answer-0");
+    let sent: Vec<Intent> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                intent: i @ Intent::Answer { .. }, ..
+            }) => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [Intent::Answer {
+            ask: AskId("ask-1".to_owned()),
+            choice: "accept".to_owned(),
+            message: None
+        }],
+        "the plain allow, once"
+    );
+    assert!(shown(&view, cx, orchestrator), "answered where it stands, without going to it");
+    assert!(
+        cx.debug_bounds("project-card-2-answer-0").is_none(),
+        "answered here, the row waits for its worker"
+    );
+}
+
 /// The task the board stands on offers Cancel task until it is merged, after what it waits
 /// for and quieter, and nothing that stops, restarts or moves its agent: those are the
 /// orchestrator's. A task not stood on offers none. Cancel gives it up with the person's word,
