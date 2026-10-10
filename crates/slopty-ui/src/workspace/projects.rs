@@ -2,9 +2,11 @@
 //! orchestrator's tile.
 //!
 //! The app hands over the server's snapshot and its changes ([`WorkspaceView::projects_part`],
-//! [`WorkspaceView::project_update`]). The board is one of an orchestrator's faces, beside its
-//! thread and its TUI (the header's switch, ⌘J, the palette's line for the project); its rows open
-//! the tiles of the agents they name. Everything a board draws is handed to it in the frame
+//! [`WorkspaceView::project_update`]). The board is a side panel of the orchestrator's tile, on
+//! its right beside the thread or the TUI, so the plan and the conversation show together; a
+//! tile too narrow for both (a phone's, a thin pane) shows the board over them instead. The
+//! header's button, ⌘⇧J and the palette's line for the project show it or put it away; its rows
+//! open the tiles of the agents they name. Everything a board draws is handed to it in the frame
 //! after it changed, compared first, so a board is drawn again only when what it shows moved.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -64,7 +66,7 @@ pub(super) struct ProjectsState {
     pub views: HashMap<ProjectId, Entity<ProjectView>>,
     /// What each board asks of the workspace.
     pub subscriptions: HashMap<ProjectId, gpui::Subscription>,
-    /// The orchestrators whose tiles show the board rather than the terminal.
+    /// The orchestrators whose tiles show their board beside them (or over them, too narrow).
     pub shown: HashSet<SessionId>,
     /// The tiles that show a board on their own, by the project each shows
     /// ([`super::board_tiles`]).
@@ -95,6 +97,24 @@ pub(super) struct ProjectsState {
     /// The task's agent last opened as the helper preview, which the next one opened takes
     /// over while it is on show ([`WorkspaceView::open_helper`]).
     pub helper: Option<slopty_client::layout::TileRef>,
+}
+
+/// The palette's line that shows or puts away the focused orchestrator's board.
+pub(crate) const TOGGLE_BOARD: &str = "Show or hide the board";
+
+/// The narrowest orchestrator's tile, in points, that its board stands beside: a thread at its
+/// least and the panel. Narrower, the board covers the tile while it shows.
+pub(super) const BOARD_BESIDE_MIN: f32 = 760.0;
+
+/// The board's panel beside its orchestrator, in points: two fifths of a tile `tile_w` wide,
+/// within a card's least and a reading column's most.
+pub(super) fn board_panel_w(tile_w: f32) -> f32 {
+    (tile_w * 0.4).clamp(320.0, 460.0)
+}
+
+/// The header button's and the menu row's word for the board, `shown` or not.
+pub(super) const fn board_word(shown: bool) -> &'static str {
+    if shown { "Hide board" } else { "Show board" }
 }
 
 /// The last entry of `board`'s timeline, 0 for an empty one.
@@ -302,7 +322,44 @@ impl WorkspaceView {
         self.projects.views.get(&board.project.id)
     }
 
-    /// Turn `session`'s tile to its project's board, or back to its terminal.
+    /// Whether `session`'s board shows over its tile rather than beside it: its tile was drawn
+    /// narrower than [`BOARD_BESIDE_MIN`].
+    #[must_use]
+    pub(super) fn board_covers(&self, session: SessionId) -> bool {
+        self.board_shown(session)
+            && self
+                .tile_of_session(session)
+                .and_then(|tile| self.tile_bounds(tile))
+                .is_some_and(|b| f32::from(b.size.width) < BOARD_BESIDE_MIN)
+    }
+
+    /// ⌘⇧J: the focused orchestrator's board, shown beside it with the keyboard, or put away.
+    pub(super) fn toggle_board(
+        &mut self,
+        _: &super::actions::ToggleBoard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.focused_session() else { return };
+        let shown = self.board_shown(session);
+        self.show_board(session, !shown, cx);
+    }
+
+    /// The board beside `session`'s tile was pressed: it takes the keyboard, in place of the
+    /// thread or the terminal the tile's own press would give it to.
+    pub(super) fn board_pressed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        let Some(project) =
+            self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
+        else {
+            return;
+        };
+        self.projects.focus.insert(project);
+        self.projects.dirty = true;
+        cx.notify();
+    }
+
+    /// Show `session`'s board beside its tile, with the keyboard, or put it away and give the
+    /// keyboard back to the thread or the terminal.
     pub fn show_board(&mut self, session: SessionId, board: bool, cx: &mut Context<Self>) {
         let Some(project) =
             self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
@@ -456,6 +513,7 @@ impl WorkspaceView {
             self.open_project(&project, cx);
         }
         self.projects.dirty = true;
+        self.task_reviews_moved(cx);
         self.unseat_helpers(cx);
         // Whether a thread is a project's to brief moves with the boards.
         self.faces_dirty = true;
@@ -753,17 +811,97 @@ impl WorkspaceView {
         self.send_to_server(verb, |_, _| (), cx);
     }
 
+    /// What `thread`'s review is to its project, when it is a task's: Merge while the task's
+    /// work waits to be merged.
+    pub(super) fn task_door(
+        &self,
+        thread: slopty_proto::thread::ThreadId,
+    ) -> Option<crate::review::TaskDoor> {
+        let (project, task) = self.reviews.task_of(thread)?;
+        let lane = self.projects.mirror.get(project)?.lane(*task)?;
+        Some(crate::review::TaskDoor { merge: lane == Lane::ReadyToMerge })
+    }
+
+    /// A task review's comments, `text`, back to the task's agent as the person's word, through
+    /// the project; `done` hears whether they went. A refusal is said.
+    pub(super) fn send_back(
+        &self,
+        thread: slopty_proto::thread::ThreadId,
+        text: String,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(bool, &mut gpui::App) + 'static,
+    ) {
+        let (Some((project, task)), Some(caller)) =
+            (self.reviews.task_of(thread).cloned(), self.projects.caller.clone())
+        else {
+            Self::not_sent(cx);
+            done(false, cx);
+            return;
+        };
+        let verb = Verb::TaskTell { project, task: Some(task), text };
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(verb).await;
+            let sent = !matches!(outcome, Outcome::Error { .. });
+            let _gone = this.update(cx, |this, cx| {
+                if let Outcome::Error { message, .. } = outcome {
+                    this.show_notice(message, cx);
+                }
+                let said = format!("Sent back to #{task}'s agent");
+                if sent {
+                    this.show_notice(said, cx);
+                }
+                done(sent, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The task reviews open: what their foot offers follows their tasks.
+    fn task_reviews_moved(&self, cx: &mut Context<Self>) {
+        let doors: Vec<_> = self
+            .reviews
+            .task_threads()
+            .filter_map(|thread| Some((self.review_of(thread)?.clone(), self.task_door(thread))))
+            .collect();
+        for (view, door) in doors {
+            view.update(cx, |v, cx| v.set_task(door, cx));
+        }
+    }
+
     /// Merge `task`, ready, on the person's word from outside its board: its row under *Ready
-    /// to merge*.
+    /// to merge*, or its review's foot.
     pub(super) fn merge_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
         self.act_on_task(project, task, TaskAction::Merge, cx);
     }
 
-    /// "Review" on a finished task: its worktree's changes on its machine, the whole branch
-    /// since it left the project's target, which is what its merge brings, in a tile of their
-    /// own beside the board. It reads the worktree itself, so it opens
-    /// whether or not the task's agent still runs, or has a tile here.
-    fn review_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+    /// "Review" on a finished task: its thread's review over its whole branch, which is what
+    /// its merge brings, in a tile of its own on its machine. Its comments go back to the
+    /// task's agent as the person's word, and its foot merges it once its work passed. A task
+    /// whose agent has no thread here any more has its worktree's changes read instead, with
+    /// no way back to an agent.
+    pub(super) fn review_task(
+        &mut self,
+        project: &ProjectId,
+        task: TaskId,
+        cx: &mut Context<Self>,
+    ) {
+        let board = self.projects.mirror.get(project);
+        let seat = board.and_then(|b| b.tasks.get(&task)).and_then(|c| c.assignment.as_ref());
+        let thread = seat.and_then(|a| a.thread.or_else(|| self.session_thread(a.term.session)));
+        if let (Some(thread), Some(seat)) = (thread, seat) {
+            let key = worker_key(seat.term.worker);
+            if self.workers.contains_key(&key) {
+                self.reviews.make_task(thread, project.clone(), task);
+                if let Some(view) = self.review_of(thread).cloned() {
+                    let door = self.task_door(thread);
+                    view.update(cx, |v, cx| v.set_task(door, cx));
+                }
+                self.faces_dirty = true;
+                self.ask_review(key, thread, Some(crate::review::Scope::WholeBranch));
+                cx.notify();
+                return;
+            }
+        }
         let board = self.projects.mirror.get(project);
         let Some(((worker, path), target)) =
             board.and_then(|b| Some((b.worktree(task)?, b.project.target.clone())))

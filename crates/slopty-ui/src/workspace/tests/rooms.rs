@@ -202,7 +202,7 @@ fn nothing_escapes_its_tile_at_any_room(app: &mut TestAppContext) {
         v.show_face(session, false, cx);
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-j");
+    cx.simulate_keystrokes("cmd-shift-j");
     settle(cx);
     assert!(view.read_with(cx, |v, _| v.board_shown(session)), "on its board");
     contained(&view, cx, &studio, orchestrator, "a board");

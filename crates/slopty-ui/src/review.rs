@@ -25,7 +25,7 @@ pub mod model;
 pub mod view;
 
 pub use model::Scope;
-pub use view::{ReviewEvent, ReviewView};
+pub use view::{ReviewEvent, ReviewView, TaskDoor};
 
 gpui::actions!(
     review,

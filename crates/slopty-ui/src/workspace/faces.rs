@@ -212,17 +212,15 @@ impl ThreadFaces {
 /// thread yet.
 pub(crate) const NO_THREAD_YET: &str = "This agent has no thread yet";
 
-/// What an agent's tile shows: its thread, its agent's own terminal, or, for a project's
-/// orchestrator, the project's board. One switch in the tile's header picks it, and ⌘J goes to
-/// the next.
+/// What an agent's tile shows: its thread or its agent's own terminal. One button in the
+/// tile's header switches it, and ⌘J. An orchestrator's board is not a face: it stands beside
+/// whichever shows ([`WorkspaceView::toggle_board`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Face {
     /// The agent's thread, in place of its TUI.
     Thread,
     /// The agent's own terminal.
     Terminal,
-    /// The board of the project the agent orchestrates.
-    Board,
 }
 
 impl Face {
@@ -232,7 +230,6 @@ impl Face {
         match self {
             Self::Thread => "Thread",
             Self::Terminal => "Terminal",
-            Self::Board => "Board",
         }
     }
 
@@ -242,7 +239,6 @@ impl Face {
         match self {
             Self::Thread => Symbol::TextBubble,
             Self::Terminal => Symbol::Terminal,
-            Self::Board => Symbol::RectangleSplit3x1,
         }
     }
 
@@ -252,7 +248,6 @@ impl Face {
         match self {
             Self::Thread => "thread",
             Self::Terminal => "terminal",
-            Self::Board => "board",
         }
     }
 }
@@ -276,46 +271,32 @@ impl WorkspaceView {
     }
 
     /// The faces `session`'s tile can show, in the switch's order: the thread while an agent
-    /// runs in it and its worker's table names its thread, the terminal always, the board
-    /// while it orchestrates a project.
+    /// runs in it and its worker's table names its thread, the terminal always.
     #[must_use]
     pub(crate) fn faces_of(&self, session: SessionId) -> Vec<Face> {
-        let mut faces = Vec::with_capacity(3);
+        let mut faces = Vec::with_capacity(2);
         if self.agent_state(session).is_some() && self.session_thread(session).is_some() {
             faces.push(Face::Thread);
         }
         faces.push(Face::Terminal);
-        if self.projects().of_orchestrator(session).is_some() {
-            faces.push(Face::Board);
-        }
         faces
     }
 
     /// The face `session`'s tile shows.
     #[must_use]
     pub(crate) fn tile_face(&self, session: SessionId) -> Face {
-        if self.board_shown(session) {
-            Face::Board
-        } else if self.face_shown(session) {
-            Face::Thread
-        } else {
-            Face::Terminal
-        }
+        if self.face_shown(session) { Face::Thread } else { Face::Terminal }
     }
 
-    /// Turn `session`'s tile to `face`.
+    /// Turn `session`'s tile to `face`. A board covering a tile too narrow to stand beside it
+    /// is put away, so the face asked for shows.
     pub(crate) fn set_face(&mut self, session: SessionId, face: Face, cx: &mut Context<Self>) {
-        if face == Face::Board {
-            self.show_board(session, true, cx);
-            return;
-        }
-        // Off the board, the face shown takes the keyboard back even where it was the pick.
-        let from_board = self.board_shown(session);
-        if from_board {
+        let covered = self.board_covers(session);
+        if covered {
             self.show_board(session, false, cx);
         }
         let thread = face == Face::Thread;
-        if from_board || self.face_shown(session) != thread {
+        if covered || self.face_shown(session) != thread {
             self.show_face(session, thread, cx);
         }
     }

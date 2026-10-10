@@ -10210,3 +10210,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     focused agent (its state is the tile header's).
   - Tests: `workspace::tests::projects::{what_waits_on_the_person_is_one_list,
     a_board_row_answers_its_agent_in_place}`, `workspace::tests::tab_strip::the_breadcrumb_goes_between_projects`.
+
+- ✅ **The board stands beside its orchestrator** (2026-10-11, the orchestrator-first study,
+  item 14, second half). The board was one of an orchestrator tile's faces with its thread and
+  its TUI (⌘J went round all three), so the person saw the plan or the conversation, never
+  both. Ruled:
+  - **A side panel.** Shown, the board stands on the tile's right behind a hairline, two
+    fifths of the tile between 320 and 460 pt, and the thread or the TUI keeps the rest. A
+    tile narrower than 760 pt (a phone's, a thin pane) has no room for both, and the board
+    covers it while it shows, as the face did.
+  - **Its own switch.** The faces are the thread and the terminal again (⌘J). The board is
+    shown and put away by ⌘⇧J, the header's Board toggle beside the face button (on while it
+    shows), the header menu's "Show board" or "Hide board", and the palette's "Show or hide
+    the board". Opening a project from the navigator or the palette shows it.
+  - **The keyboard.** Shown, the board takes the keyboard. Focusing the tile again gives it to
+    the thread or the terminal, and a press on the board takes it back; a board that covers
+    its tile keeps it, as before.
+  - **One composer.** Beside its orchestrator the board draws no "Message the orchestrator" of
+    its own, since the thread's composer stands next to it; its key goes to that composer. A
+    board over a narrow tile, or in a tile of its own, keeps its line.
+  - Tests: `workspace::tests::projects::{the_board_stands_beside_its_orchestrator,
+    the_orchestrators_tile_turns_to_its_board_and_opens_its_agents}`.
+
+- ✅ **A task's review is its thread's** (2026-10-11, the orchestrator-first study, item 15).
+  Review on a finished task opened a folder's changes tile over its worktree, whose comments
+  went to a new agent rather than the task's own, and which had no Merge. Ruled:
+  - **Its thread's review.** Review opens the task thread's review tile (`ItemKind::Review`)
+    over its whole branch, which is what its merge brings, on its machine. A task whose agent
+    has no thread here any more still has its worktree's changes read, with no way back.
+  - **Comments go back through the project.** Its foot's send reads "Send back N comments" and
+    hands them to the task's agent as the person's `TaskTell` to that task, so the server keeps
+    them on the timeline and delivers them however the agent runs. They stay in the review
+    until the server took them. A task review has no "Add to message" and no "Mark reviewed":
+    its merge decides it.
+  - **Merge in its foot.** While the task's work waits to be merged, the foot offers Merge,
+    the solid when no comment waits; it follows the board as the task moves.
+  - Tests: `review::tests::a_task_s_review_sends_back_and_merges`,
+    `workspace::tests::review_tile::a_task_s_review_is_its_thread_s_and_its_comments_go_back_through_the_project`.

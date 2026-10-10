@@ -16,31 +16,30 @@ const STEP: Duration = Duration::from_secs(30);
 /// The renders' window: the board and the agent's tile beside it.
 const WINDOW: (f32, f32) = (1280.0, 800.0);
 const PROJECT: &str = "board";
-/// How long a face takes to turn after ⌘J: a frame, given a slow machine's slack.
-const FACE_TURN: Duration = Duration::from_secs(2);
+/// How long the board takes to show after ⌘⇧J: a frame, given a slow machine's slack.
+const FACE_TURN: Duration = Duration::from_secs(6);
 
 fn project(d: &Dump) -> Option<&ProjectInfo> {
     d.projects.iter().find(|p| p.id == PROJECT)
 }
 
-/// ⌘J round the focused orchestrator's faces (its thread, its terminal, its board) until its
-/// tile shows `project`'s board, as the person presses it.
+/// ⌘⇧J on the focused orchestrator until its tile shows `project`'s board beside it, as the
+/// person presses it.
 ///
 /// Each press is read back by plain dumps rather than `wait_for`, whose timeout leaves a dump's
 /// answer on the socket for the next command to trip on.
 pub async fn to_board(driver: &mut Driver, project: &str) {
     let shown = |d: &Dump| d.projects.iter().any(|p| p.id == project && p.shown);
-    for _ in 0..3 {
-        driver.keys("cmd-j").await.unwrap();
-        let pressed = std::time::Instant::now();
-        while pressed.elapsed() < FACE_TURN {
-            if shown(&driver.dump().await.unwrap()) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    // Once: a second press would put the board away again.
+    driver.keys("cmd-shift-j").await.unwrap();
+    let pressed = std::time::Instant::now();
+    while pressed.elapsed() < FACE_TURN {
+        if shown(&driver.dump().await.unwrap()) {
+            return;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("⌘J never reached the board");
+    panic!("⌘⇧J never showed the board");
 }
 
 fn term(opened: &Value) -> String {
@@ -498,8 +497,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     to_board(&mut stack.driver, PROJECT).await;
     // Time shows from a minute at work, and says "1m" until the second.
     tokio::time::sleep(AT_WORK.saturating_sub(at_work())).await;
-    // The board's tile has the keys, the task's agent a row of it.
-    stack.driver.reveal(&orchestrator_session).await.unwrap();
+    // The board, shown, has the keys, the task's agent a row of it.
     stack
         .driver
         .wait_for("the board with the keyboard", STEP, |d| d.focused.starts_with("project:"))

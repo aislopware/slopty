@@ -47,6 +47,4 @@ Button │ Add to the message
 Button │ Model, Claude
 Button │ Stop
 Group │ Status
-Status │ Claude Code, Working
-Image │ Working
 Button │ Show the tab's terminal

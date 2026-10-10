@@ -165,6 +165,7 @@ pub(super) struct Drawn {
 pub(super) enum Handed {
     Shell { covered: bool },
     Face { width: f32 },
+    Board { beside: bool },
     Review { width: f32, height: f32 },
     Stream { painted: f32 },
     Text { pad: f32, size: f32 },

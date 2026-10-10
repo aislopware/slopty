@@ -34,5 +34,4 @@ Button │ Model, Opus 5.5
 Label │ Context 34% of 200k
 Button │ Send
 Group │ Status
-Status │ Claude Code
 Button │ Show the tab's terminal

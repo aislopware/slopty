@@ -27,9 +27,15 @@ Tab │ Orchestrator
 Image │ Claude Code
 Button │ Close tab
 Heading │ Claude Code Orchestrator
-Button │ Show thread
+Button │ Show terminal
+Button │ Board
 Button │ More
 Group │ Orchestrator
+Group │ Thread
+MultilineTextInput │ Message
+Button │ Add to the message
+Button │ Model, Claude
+Button │ Send
 Group │ Project board │ Working 1, Up next 1 (focused)
 Heading
 Button │ Verifier
@@ -45,7 +51,6 @@ Heading │ Working
 ListItem │ Read a pull request's checks, Working, studio · macOS, worktree-slopty-board-1, PR #42, clippy (macos) failed
 Image │ Working
 Label │ PR #42
-Label │ worktree-slopty-board-1
 Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
 Button │ Fix CI #1
 Label │ clippy (macos) failed
@@ -53,8 +58,5 @@ List │ Up next
 Heading │ Up next
 ListItem │ Draw the pipeline row, Up next
 Image │ Up next
-MultilineTextInput │ Message the orchestrator
-Button │ Send
 Group │ Status
-Status │ Claude Code
 Button │ Show the tab's terminal

@@ -3,7 +3,7 @@
 //! has ended, or its machine is away. The board is the server's, so the person can still read,
 //! tell, move and cancel the tasks while no orchestrator is there.
 //!
-//! Where the orchestrator's tile can show the board, it still does, as one of that tile's faces.
+//! Where the orchestrator's tile can show the board, it still does, beside its thread or terminal.
 //! A board tile belongs to no machine. It sits under [`BOARD_WORKER`], a key no worker has, and
 //! is saved with the layout (`Saved::boards`) so a relaunch puts it back.
 
@@ -137,6 +137,9 @@ impl WorkspaceView {
         });
         let body = div().flex_1().min_h_0().w_full();
         let body = if let Some(view) = board.and_then(|_| self.projects.views.get(project)) {
+            self.hand_over(cx, view, super::area::Handed::Board { beside: false }, |v, cx| {
+                v.set_beside(false, cx);
+            });
             body.child(self.body_view(view, placed, cx))
         } else {
             let linked = self.projects.caller.is_some();

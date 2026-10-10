@@ -107,7 +107,7 @@ impl WorkspaceView {
         let kind = self.focused().and_then(|tile| Some((tile, self.item(tile)?.kind.clone())));
         match kind {
             Some((_, ItemKind::Terminal { session }))
-                if self.board_shown(session)
+                if self.board_covers(session)
                     && let Some(board) = self.board_view(session).cloned() =>
             {
                 board.update(cx, |v, cx| v.focus(window, cx));

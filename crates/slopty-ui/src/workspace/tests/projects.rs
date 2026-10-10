@@ -1,5 +1,6 @@
-//! A project's board in its orchestrator's tile: turned to with ⌘J and from with the switch, kept
-//! in step with the server's changes, and every row a way to its agent's tile.
+//! A project's board in its orchestrator's tile: beside its thread or terminal (over them in a
+//! narrow tile), shown and put away with ⌘⇧J and the header's toggle, kept in step with the
+//! server's changes, and every row a way to its agent's tile.
 
 use slopty_core::WorkerId;
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
@@ -95,10 +96,10 @@ fn shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext, session: SessionI
     view.read_with(cx, |v, _| v.board_shown(session))
 }
 
-/// ⌘J turns the orchestrator's tile from its terminal to its board, which takes the keyboard:
-/// the header and the lanes, what waits on the person first. ↓ and ↩ open a task's agent in its
-/// own tile; back on the orchestrator the board has the keyboard again, and the switch's
-/// terminal gives the terminal back.
+/// ⌘⇧J shows the board over an orchestrator's tile too narrow to stand it beside, and it takes
+/// the keyboard: the header and the lanes, what waits on the person first. ↓ and ↩ open a
+/// task's agent in its own tile; back on the orchestrator the board has the keyboard again, and
+/// the switch's terminal puts it away and gives the terminal back.
 #[gpui::test]
 fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -110,7 +111,7 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     cx.run_until_parked();
     assert!(!shown(&view, cx, orchestrator), "the terminal is the default");
 
-    cx.simulate_keystrokes("cmd-j");
+    cx.simulate_keystrokes("cmd-shift-j");
     cx.run_until_parked();
     assert!(shown(&view, cx, orchestrator));
     assert!(cx.debug_bounds("project").is_some(), "the board is drawn in the tile");
@@ -175,6 +176,64 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     assert!(!shown(&view, cx, orchestrator));
     assert!(cx.debug_bounds("project").is_none());
     assert!(terminal_focused(&view, cx, orchestrator), "the terminal takes the keyboard back");
+    drop(setup.fake);
+}
+
+/// In a tile wide enough for both, the board stands beside the orchestrator's terminal on its
+/// right, behind a hairline, and the terminal stays on show; the board draws no composer, the
+/// orchestrator's own being beside it. Shown, the board has the keyboard;
+/// the tile focused again gives it to the terminal, and a press on the board takes it back. The
+/// header's toggle puts the board away, and the terminal has the whole tile again.
+#[gpui::test]
+fn the_board_stands_beside_its_orchestrator(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    cx.simulate_resize(size(px(2400.0), px(900.0)));
+    view.update_in(cx, |v, _w, cx| {
+        v.show_face(orchestrator, false, cx);
+        v.focus_tile(orchestrator_tile, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-j");
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let tile = view.read_with(cx, |v, _| v.tile_bounds(orchestrator_tile)).expect("drawn");
+    let panel: &'static str = Box::leak(format!("board-panel-{orchestrator}").into_boxed_str());
+    let panel = cx.debug_bounds(panel).expect("the board beside the terminal");
+    assert!((panel.right() - tile.right()).abs() < px(1.0), "on the tile's right: {panel:?}");
+    let width = f32::from(panel.size.width);
+    let tile_w = f32::from(tile.size.width);
+    assert!(width < tile_w * 0.5, "the terminal keeps the larger part: {width} of {tile_w}");
+    assert!(
+        cx.debug_bounds("project-composer").is_none(),
+        "beside its orchestrator, the board draws no composer of its own"
+    );
+    let b = board(&view, cx, orchestrator);
+    let board_focused = |cx: &mut VisualTestContext, b: &Entity<ProjectView>| {
+        cx.update(|window, cx| b.read(cx).focus_handle(cx).is_focused(window))
+    };
+    assert!(board_focused(cx, &b), "shown, it has the keyboard");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, orchestrator), "the tile's keyboard is its terminal's");
+    view.update_in(cx, |v, _w, cx| v.board_pressed(orchestrator, cx));
+    cx.run_until_parked();
+    assert!(board_focused(cx, &b), "a press on the board takes it");
+
+    let toggle: &'static str =
+        Box::leak(format!("board-toggle-{}", orchestrator_tile.item.as_uuid()).into_boxed_str());
+    let header = cx.debug_bounds(selector("title", orchestrator_tile.item)).expect("its header");
+    cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    // Pressed where it stands: it is the header's, not the board's to scroll to.
+    let at = cx.debug_bounds(toggle).expect("its header's toggle, under the pointer");
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!shown(&view, cx, orchestrator), "the toggle puts it away");
+    assert!(cx.debug_bounds("project").is_none());
     drop(setup.fake);
 }
 
@@ -1239,14 +1298,15 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     done.pull = Some(seen);
     done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };
     let working = card(2, "Golden files", TaskState::Running);
-    // Zoomed over its tab, so the card has the room for every fact on its line.
-    cx.simulate_keystrokes("cmd-shift-enter");
-    cx.run_until_parked();
+    // In a tile of its own, zoomed over its tab, so the card has the room for every fact on
+    // its line.
     view.update_in(cx, |v, _w, cx| {
         v.project_update(11, task_changed("board", done, None), cx);
         v.project_update(12, task_changed("board", working, None), cx);
-        v.show_board(orchestrator, true, cx);
+        v.open_board_tile(&fixtures::id("board"), cx);
     });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
     for part in [
         "project-card-1-branch",

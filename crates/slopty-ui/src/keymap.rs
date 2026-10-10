@@ -375,6 +375,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "font_smaller", ws::FontSmaller, &["cmd--"], W),
         c(Workspace, "font_reset", ws::FontReset, &["cmd-0"], W),
         c(Workspace, "switch_face", ws::SwitchFace, &["cmd-j"], W),
+        c(Workspace, "toggle_board", ws::ToggleBoard, &["cmd-shift-j"], W),
         c(Workspace, "edit_address", ws::EditAddress, &["cmd-l"], W),
         c(Workspace, "toggle_trackpad", crate::screen::ToggleTrackpad, &[], W),
         c(Workspace, "toggle_remote_gestures", crate::screen::ToggleRemoteGestures, &[], W),

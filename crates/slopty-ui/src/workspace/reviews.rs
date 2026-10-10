@@ -52,6 +52,34 @@ pub(super) struct Reviews {
     hearing: HashMap<ThreadId, Subscription>,
     /// The view of each folder's changes tile, kept and heard while its tile is there.
     changes: HashMap<ItemId, (Entity<ReviewView>, Subscription)>,
+    /// The threads whose review is a project task's, by the task: its comments go back
+    /// through the project, and its foot merges ([`crate::review::TaskDoor`]).
+    tasks: HashMap<ThreadId, (slopty_proto::project::ProjectId, slopty_proto::project::TaskId)>,
+}
+
+impl Reviews {
+    /// The project task `thread`'s review is, when it is one's.
+    pub(super) fn task_of(
+        &self,
+        thread: ThreadId,
+    ) -> Option<&(slopty_proto::project::ProjectId, slopty_proto::project::TaskId)> {
+        self.tasks.get(&thread)
+    }
+
+    /// Make `thread`'s review the review of `task` in `project`.
+    pub(super) fn make_task(
+        &mut self,
+        thread: ThreadId,
+        project: slopty_proto::project::ProjectId,
+        task: slopty_proto::project::TaskId,
+    ) {
+        self.tasks.insert(thread, (project, task));
+    }
+
+    /// The threads whose review is a task's.
+    pub(super) fn task_threads(&self) -> impl Iterator<Item = ThreadId> + '_ {
+        self.tasks.keys().copied()
+    }
 }
 
 impl WorkspaceView {
@@ -60,6 +88,8 @@ impl WorkspaceView {
     pub(super) fn settle_reviews(&mut self, cx: &mut Context<Self>) {
         while let Some((key, thread, view)) = self.take_review() {
             self.hear_review(key, thread, &view, cx);
+            let door = self.task_door(thread);
+            view.update(cx, |v, cx| v.set_task(door, cx));
             if let Some(id) = self.review_item(thread) {
                 self.go_to(id, cx);
                 continue;
@@ -136,6 +166,7 @@ impl WorkspaceView {
             .collect();
         for thread in gone {
             self.reviews.hearing.remove(&thread);
+            self.reviews.tasks.remove(&thread);
             self.review_closed(thread);
         }
         self.reviews.shown = shown;
@@ -211,6 +242,17 @@ impl WorkspaceView {
             ReviewEvent::OpenThread(opens) => self.open_thread_at(*opens, cx),
             ReviewEvent::OpenFile { path } => self.open_file_on(Some(key), path, None, cx),
             ReviewEvent::EndAndRemove(root) => self.end_and_remove(key, root, cx),
+            ReviewEvent::SendBack { thread, text, id } => {
+                let (review, id) = (view.downgrade(), *id);
+                self.send_back(*thread, text.clone(), cx, move |sent, cx| {
+                    let _gone = review.update(cx, |v, cx| v.added(id, sent, cx));
+                });
+            }
+            ReviewEvent::Merge { thread } => {
+                if let Some((project, task)) = self.reviews.tasks.get(thread).cloned() {
+                    self.merge_task(&project, task, cx);
+                }
+            }
             ReviewEvent::Drafted => self.drafts_changed(cx),
             // A folder's alone, heard with the window it starts in (`sync_changes`).
             ReviewEvent::NewAgent { .. } => {}

@@ -24,3 +24,4 @@ Button │ Page down
 Button │ Alt
 Button │ Command
 Button │ Find
+Button │ Hide the keyboard

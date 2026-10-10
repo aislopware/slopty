@@ -708,3 +708,82 @@ fn a_messages_runs_are_reviewed_side_by_side(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(reviewed, [mine, sibling], "its own first, then the other run: {others:?}");
 }
+
+/// A finished task's Review opens its thread's review over its whole branch, as a tile on its
+/// machine. Its comments go back to the task's agent as one `TaskTell` to that task, the
+/// person's word through the project, and its foot's Merge sends `TaskMerge`.
+#[gpui::test]
+fn a_task_s_review_is_its_thread_s_and_its_comments_go_back_through_the_project(
+    cx: &mut TestAppContext,
+) {
+    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::project::{TaskId, TaskState};
+
+    use crate::project::fixtures::{self, card, on, project, snapshot, status};
+    use crate::review::ReviewEvent;
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let session = SessionId::new();
+    let _agent = opens(&view, cx, &studio, session, studio.me, 1);
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    let worker = super::super::projects::worker_id(key).expect("a worker id");
+    let done = on(card(8, "Ship the parser", TaskState::Done), worker, session);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+        v.set_server_caller(Some(caller));
+        v.projects_part(snapshot(10, vec![status(project("board", None), vec![done], vec![])]), cx);
+    });
+    frames(cx);
+    studio.drain();
+    let board = fixtures::id("board");
+    view.update_in(cx, |v, _w, cx| v.review_task(&board, TaskId(8), cx));
+    frames(cx);
+    let added: Vec<Item> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(item)) => Some(item),
+            _ => None,
+        })
+        .collect();
+    let [item] = added.as_slice() else { panic!("one review item: {added:?}") };
+    assert_eq!(item.kind, ItemKind::Review { thread }, "its thread's review");
+    let op = ItemOp::Add(item.clone());
+    view.update_in(cx, |v, _w, cx| {
+        v.apply_sync(key, ItemSync::Delta { version: 2, by: studio.me, op }, cx);
+    });
+    frames(cx);
+    let review = view.read_with(cx, |v, _| v.review_of(thread).cloned()).expect("its review");
+
+    let mut sent = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        let mut verbs = Vec::new();
+        while let Some((verb, reply)) = queue.try_next() {
+            let _gone = reply.send(Outcome::Done);
+            verbs.push(verb);
+        }
+        cx.run_until_parked();
+        verbs
+    };
+    let text = "Why swap these?".to_owned();
+    review.update(cx, |_, cx| {
+        cx.emit(ReviewEvent::SendBack { thread, text: text.clone(), id: 1 });
+    });
+    assert_eq!(
+        sent(cx),
+        [Verb::TaskTell { project: board.clone(), task: Some(TaskId(8)), text }],
+        "once, to that task"
+    );
+    review.update(cx, |_, cx| cx.emit(ReviewEvent::Merge { thread }));
+    assert_eq!(sent(cx), [Verb::TaskMerge { project: board, task: TaskId(8) }]);
+}

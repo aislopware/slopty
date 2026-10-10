@@ -165,9 +165,10 @@ actions!(
         FontSmaller,
         /// Terminal text back to the settings' size.
         FontReset,
-        /// The focused agent's tile to its next face: thread, terminal, and an orchestrator's
-        /// board.
+        /// The focused agent's tile to its other face: its thread or its terminal.
         SwitchFace,
+        /// The focused orchestrator's board, beside its thread or terminal, shown or put away.
+        ToggleBoard,
         /// The focused page's address as a field in its header, all of it selected: ↩ goes
         /// there, Esc leaves it as it was. With no page focused, "Open URL…".
         EditAddress,
@@ -474,7 +475,8 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Close other tabs", Box::new(CloseOtherTabs)),
         w(MOVE_TO_PROJECT, Box::new(MoveToProject)),
         w("Next tab in the pane", Box::new(NextPaneTab)),
-        w("Switch thread, terminal or board", Box::new(SwitchFace)),
+        w("Switch thread or terminal", Box::new(SwitchFace)),
+        w(super::projects::TOGGLE_BOARD, Box::new(ToggleBoard)),
         w("Thread density", Box::new(CycleDensity)),
         w("Stop the agent", Box::new(Interrupt)),
         w("Queue message", Box::new(QueueMessage)),
@@ -545,6 +547,8 @@ pub(super) struct Applies {
     pub terminal: bool,
     /// A terminal an agent runs in.
     pub agent: bool,
+    /// A terminal whose agent orchestrates a project.
+    pub orchestrator: bool,
     /// A tile that takes files from this device: a shell, a folder or a remote picture.
     pub upload: bool,
     /// A remote tile with a window of its own on this Mac, or one that can have one.
@@ -581,6 +585,7 @@ impl super::WorkspaceView {
             file: matches!(kind, Some(ItemKind::File { .. })),
             terminal: self.active_terminal().is_some(),
             agent: agent.is_some(),
+            orchestrator: session.is_some_and(|s| self.projects().of_orchestrator(s).is_some()),
             upload: matches!(
                 kind,
                 Some(

@@ -1465,3 +1465,44 @@ fn forge_threads_hang_on_their_lines_and_comments_post_as_a_review(cx: &mut Test
     let said = view.read_with(cx, |v, _| v.came_words());
     assert_eq!(said.as_deref(), Some("Posted 1 comment to #12"));
 }
+
+/// A project task's review sends its comments back to the task's agent through the project:
+/// "Send back" hands them to the host and sends nothing to the thread itself, and they stay
+/// until the host says they went. Its foot offers Merge while the task waits to be merged, and
+/// no "Add to message" or "Mark reviewed".
+#[gpui::test]
+fn a_task_s_review_sends_back_and_merges(cx: &mut TestAppContext) {
+    let (view, _hub, sent, cx) = tile(cx, 800.0);
+    let heard: Rc<RefCell<Vec<ReviewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
+            if !matches!(event, ReviewEvent::Drafted) {
+                into.borrow_mut().push(event.clone());
+            }
+        })
+        .detach();
+    });
+    view.update(cx, |v, cx| v.set_task(Some(super::TaskDoor { merge: true }), cx));
+    cx.run_until_parked();
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-add").is_none(), "its comments go one way");
+    assert!(cx.debug_bounds("review-mark").is_none(), "its merge decides it");
+    click(cx, "review-send");
+    assert!(intents(&sent).is_empty(), "nothing sent to the thread itself");
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
+    let [ReviewEvent::SendBack { thread: to, id, .. }] = heard.borrow().clone()[..] else {
+        panic!("one send back: {:?}", heard.borrow());
+    };
+    assert_eq!(to, thread);
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "kept until it went");
+    view.update(cx, |v, cx| v.added(id, true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_none(), "gone once it went");
+    heard.borrow_mut().clear();
+    click(cx, "review-merge");
+    assert_eq!(*heard.borrow(), [ReviewEvent::Merge { thread }]);
+}

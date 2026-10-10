@@ -6,6 +6,9 @@ Button │ Forward
 Button │ Navigator
 Button │ Search
 Button │ New agent
+Heading │ Ready to merge
+Button │ Mirror the merge queue, Ship the project board, Ready to merge
+Button │ Merge
 Heading │ Projects
 Button │ repo
 Button │ Fold

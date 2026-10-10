@@ -1961,9 +1961,10 @@ impl WorkspaceView {
     /// here, so the views drawn after this one show it in this frame.
     fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
-            // A tile showing its project's board takes the keyboard in the board, one showing
-            // its thread in its composer.
-            if let Some(board) = self.board_view(session).filter(|_| self.board_shown(session)) {
+            // A tile its board covers takes the keyboard in the board, one showing its thread
+            // in its composer. A board beside its tile takes it only when asked
+            // ([`WorkspaceView::show_board`]) or pressed.
+            if let Some(board) = self.board_view(session).filter(|_| self.board_covers(session)) {
                 board.clone().update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(thread) = self.thread_face(session).cloned() {
                 thread.update(cx, |v, cx| v.focus(window, cx));
@@ -2226,6 +2227,7 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::rename_item))
             })
             .when(applies.agent, |el| el.on_action(cx.listener(Self::switch_face)))
+            .when(applies.orchestrator, |el| el.on_action(cx.listener(Self::toggle_board)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.tabs, |el| {
                 el.on_action(cx.listener(Self::other_tabs))

@@ -245,6 +245,9 @@ struct Handing {
 pub struct ProjectView {
     id: ProjectId,
     seen: Seen,
+    /// It stands beside its orchestrator's thread or terminal, whose own composer is the way
+    /// to message it: the board draws none of its own.
+    beside: bool,
     /// The card the keyboard stands on.
     picked: Option<Node>,
     /// The person opened *Merged*, which otherwise folds to its head.
@@ -294,6 +297,7 @@ impl ProjectView {
         Self {
             id,
             seen: Seen::default(),
+            beside: false,
             picked: None,
             merged_open: false,
             hint_theme: Rc::new(theme.clone()),
@@ -385,6 +389,15 @@ impl ProjectView {
             cx.notify();
         }
         cx.emit(ProjectEvent::Act(task, action));
+    }
+
+    /// Whether it stands beside its orchestrator's thread or terminal, rather than in a tile
+    /// of its own or over one too narrow for both.
+    pub fn set_beside(&mut self, beside: bool, cx: &mut Context<Self>) {
+        if self.beside != beside {
+            self.beside = beside;
+            cx.notify();
+        }
     }
 
     /// Draw by another theme.
@@ -2019,6 +2032,11 @@ impl ProjectView {
 
     /// The keyboard goes to the line to the orchestrator.
     fn compose(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.beside {
+            // Its orchestrator's own composer stands beside it.
+            cx.emit(ProjectEvent::Open(None));
+            return;
+        }
         if let Some((input, _)) = &self.composer {
             input.update(cx, |input, cx| input.focus(window, cx));
         }
@@ -2158,7 +2176,7 @@ impl ProjectView {
         window: &Window,
         cx: &Context<Self>,
     ) -> Option<Stateful<Div>> {
-        board.project.orchestrator?;
+        board.project.orchestrator.filter(|_| !self.beside)?;
         let (input, _) = self.composer.as_ref()?;
         let theme = &self.theme;
         let sp = theme.spacing;

@@ -105,6 +105,25 @@ pub const SEND_TO_NEW_AGENT: &str = "Send to a new agent";
 /// The foot's way to keep every file as it is.
 const MARK_REVIEWED: &str = "Mark reviewed";
 
+/// A task review's foot: merge the task's work into the project's target.
+pub const MERGE: &str = "Merge";
+
+/// A project task's review: its comments go back to its agent through the project as the
+/// person's word, and its foot merges the task while its work waits to be merged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskDoor {
+    /// Its work passed and waits to be merged: the foot offers Merge.
+    pub merge: bool,
+}
+
+/// A task review's send: its comments, back to the task's agent.
+fn send_back_words(n: usize) -> String {
+    match n {
+        1 => "Send back 1 comment".to_owned(),
+        n => format!("Send back {n} comments"),
+    }
+}
+
 /// About how wide a letter of the findings' words is, as a share of their size: how tall the
 /// band would be drawn whole is guessed from it before it is laid out.
 const LETTER: f32 = 0.55;
@@ -202,6 +221,22 @@ pub enum ReviewEvent {
     /// The commit sheet over it asked to end the agents still running in the worktree at this
     /// root and free it, its pull request merged.
     EndAndRemove(String),
+    /// A task review's comments go back to the task's agent as the person's word, through the
+    /// project: the host sends `text`, then says whether it went ([`ReviewView::added`]). The
+    /// comments stay until it did.
+    SendBack {
+        /// The task's thread.
+        thread: ThreadId,
+        /// The comments as one message.
+        text: String,
+        /// Which hand-over this is, for its answer.
+        id: u64,
+    },
+    /// A task review's Merge: merge the task's work.
+    Merge {
+        /// The task's thread.
+        thread: ThreadId,
+    },
 }
 
 /// One row of the diff.
@@ -399,6 +434,8 @@ pub struct ReviewView {
     post_open: bool,
     /// The opened stretches' lines as drawn, by the file's place and the stretch.
     context: HashMap<(usize, usize), Rc<[Line]>>,
+    /// The project task this reviews, when it is one's.
+    task: Option<TaskDoor>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -552,6 +589,7 @@ impl ReviewView {
             posting: None,
             post_open: false,
             context: HashMap::new(),
+            task: None,
             _subscriptions: vec![writing, hearing, watching],
         };
         if let Some(thread) = view.own() {
@@ -1100,10 +1138,30 @@ impl ReviewView {
         self.sending.is_some() || self.adding.is_some()
     }
 
+    /// Make this a project task's review, or no longer one: what its foot offers follows.
+    pub fn set_task(&mut self, door: Option<TaskDoor>, cx: &mut Context<Self>) {
+        if self.task != door {
+            self.task = door;
+            cx.notify();
+        }
+    }
+
     /// Send the comments as one message. They stay until the worker takes it
-    /// ([`Self::settle_send`]): a send turned down loses none.
+    /// ([`Self::settle_send`]): a send turned down loses none. A task's go back to its agent
+    /// through the project, the host saying whether they went ([`Self::added`]).
     fn send_comments(&mut self, cx: &mut Context<Self>) {
         if self.comments_away() {
+            return;
+        }
+        if self.task.is_some() {
+            let Some(thread) = self.own() else { return };
+            let Some((text, batch)) = self.model.message() else { return };
+            self.adds = self.adds.wrapping_add(1);
+            let id = self.adds;
+            self.adding = Some((id, batch));
+            self.came = None;
+            cx.emit(ReviewEvent::SendBack { thread, text, id });
+            cx.notify();
             return;
         }
         let Some((text, batch)) = self.model.message() else { return };
@@ -2466,13 +2524,16 @@ impl ReviewView {
         let n = self.model.waiting();
         let away = self.comments_away();
         let folder = self.own().is_none();
+        let task = self.task;
         let send_words = match n {
             _ if away => SENDING.to_owned(),
             _ if folder => SEND_TO_NEW_AGENT.to_owned(),
+            n if task.is_some() => send_back_words(n),
             1 => "Send 1 comment".to_owned(),
             n => format!("Send {n} comments"),
         };
-        let mark = !folder && !self.model.listed().is_empty();
+        // A task's review is decided by its merge, so it keeps nothing reviewed of its own.
+        let mark = !folder && task.is_none() && !self.model.listed().is_empty();
         let selector = if folder { "review-send-new" } else { "review-send" };
         let mut row = kit::priority_row("review-foot-row")
             .h_full()
@@ -2497,13 +2558,24 @@ impl ReviewView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     if folder { this.send_to_new_agent(cx) } else { this.send_comments(cx) }
                 }));
-            if !folder {
+            if !folder && task.is_none() {
                 let add = self
                     .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
                     .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
                 row = row.item(FOOT_ADD, kit::Priority(160), add);
             }
             row = row.item("send", kit::Priority::ESSENTIAL, send);
+        }
+        if task.is_some_and(|t| t.merge) {
+            // The way on while nothing waits to go back; beside comments, a step after them.
+            let merge = self.action("review-merge".to_owned(), MERGE, n == 0).on_click(
+                cx.listener(|this, _ev, _w, cx| {
+                    if let Some(thread) = this.own() {
+                        cx.emit(ReviewEvent::Merge { thread });
+                    }
+                }),
+            );
+            row = row.item("merge", kit::Priority::ESSENTIAL, merge);
         }
         if let Some(words) = self.post_label(cx) {
             let posting = self.posting.is_some();

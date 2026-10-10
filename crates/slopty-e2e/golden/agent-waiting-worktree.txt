@@ -29,6 +29,4 @@ Button │ Add to the message
 Button │ Model, Opus 5.5
 Button │ Send
 Group │ Status
-Status │ Claude Code, Waiting
-Image │ Waiting
 Button │ Show the tab's terminal
