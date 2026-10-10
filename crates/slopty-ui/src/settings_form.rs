@@ -1197,10 +1197,11 @@ impl SettingsForm {
     }
 
     /// The page's head, as a macOS 26 pane titles itself: the page's name on its line, with no
-    /// rule under it (the page fades under it once scrolled). The section list beside it holds
-    /// the ways out; in one column, with no list, the head says "Settings" and offers the file
-    /// and Done at its end, the file's words giving way to its glyph alone where there is no
-    /// room for them (`kit::priority_row`).
+    /// rule under it (the page fades under it once scrolled), and at its end, on a page of a
+    /// daemon's keys, whose settings they are. The section list beside it holds the ways out; in
+    /// one column, with no list, the head says "Settings" and offers the file and Done at its
+    /// end, the file's words giving way to its glyph alone where there is no room for them
+    /// (`kit::priority_row`).
     fn head(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
@@ -1222,6 +1223,13 @@ impl SettingsForm {
             .gap(px(spacing.sm))
             .title(title, px(theme.typography.ui_size * TITLE_FLOOR_EMS))
             .end();
+        let picks =
+            !self.narrow && !searching && Self::picks_machine(self.section) && self.picks_any();
+        let row = if picks {
+            row.item("machine", crate::kit::Priority::ESSENTIAL, self.machine_pick(true, cx))
+        } else {
+            row
+        };
         let row = if self.narrow {
             let file = crate::kit::button(theme, "settings-edit-toml", EDIT_FILE, ButtonKind::Link)
                 .on_click(
@@ -1610,8 +1618,16 @@ impl SettingsForm {
         let mut last: Option<&'static str> = None;
         // The group whose rows run now: its footer closes its ring when the next group starts.
         let mut group: Option<&'static str> = None;
-        if !searching && (self.narrow || Self::picks_machine(self.section)) && self.picks_any() {
-            parts.push((Part::Apart, self.machine_bar(cx)));
+        // Whose settings the page shows: the picker sits at the head's end where it has room
+        // (`Self::head`), and only how the picked machine's file stands leads the page.
+        if !searching && self.picks_any() {
+            if self.narrow {
+                parts.push((Part::Apart, self.machine_bar(cx)));
+            } else if let Some(status) =
+                self.machine_status().filter(|_| Self::picks_machine(self.section))
+            {
+                parts.push((Part::Apart, status));
+            }
         }
         for &ix in shown {
             let Some(row) = rows().get(ix) else { continue };
@@ -2809,6 +2825,11 @@ mod map_tests {
         click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
         let entry = |name: &str| leak(format!("settings-entry-{acp}-{name}"));
         assert!(cx.debug_bounds(entry("mine")).is_some(), "this Mac's own file first");
+        // Whose settings they are sits at the end of the page's head, where the page's name is.
+        let (pick, head) = (cx.debug_bounds("settings-machine"), cx.debug_bounds("settings-head"));
+        let (Some(pick), Some(head)) = (pick, head) else { panic!("the picker in the head") };
+        assert!(head.contains(&pick.center()), "{pick:?} in {head:?}");
+        assert!(pick.right() > head.center().x, "at the head's end: {pick:?} in {head:?}");
 
         click(cx, "settings-machine");
         click(cx, "settings-machines-machine-1");

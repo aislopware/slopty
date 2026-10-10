@@ -341,9 +341,10 @@ impl SettingsForm {
         }
     }
 
-    /// The page's head where it holds a daemon's keys: whose settings they are, with the way to
-    /// pick another machine, and how its file stands.
-    pub(super) fn machine_bar(&self, cx: &Context<Self>) -> AnyElement {
+    /// The picker of whose settings the page shows, with its menu hanging under it while open:
+    /// from its end where it sits at the end of the page's head (`at_end`), else from its
+    /// start.
+    pub(super) fn machine_pick(&self, at_end: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let name = self.remote.as_ref().map_or(THIS_DEVICE, |r| r.machine.name.as_str()).to_owned();
@@ -376,25 +377,61 @@ impl SettingsForm {
                 this.machines.open = !this.machines.open;
                 cx.notify();
             }));
-        let menu = self.machines.open.then(|| self.machine_menu(cx));
-        let said = self.remote.as_ref().and_then(|remote| {
-            let name = &remote.machine.name;
-            let (words, tone) = match (&remote.reading, &remote.unsaved) {
-                (Reading::Failed(why), _) => (failed_words(name, why), s.error),
-                (_, Some(why)) => (unsaved_words(name, why), s.error),
-                (Reading::Asking, None) => (reading_words(name), s.text_muted),
-                (Reading::Ready, None) => (remote.problems.first()?.clone(), s.error),
+        let menu = self.machines.open.then(|| {
+            let hang = div().absolute().top_full().pt(px(spacing.xxs));
+            let (hang, anchor) = if at_end {
+                (hang.right_0(), gpui::Anchor::TopRight)
+            } else {
+                (hang.left_0(), gpui::Anchor::TopLeft)
             };
-            Some(
-                crate::kit::meta(div(), theme)
-                    .id("settings-machine-said")
-                    .debug_selector(|| "settings-machine-said".to_owned())
-                    .role(gpui::accesskit::Role::Status)
-                    .aria_label(SharedString::from(words.clone()))
-                    .text_color(hsla(tone))
-                    .child(SharedString::from(words)),
+            hang.child(
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(anchor)
+                        .snap_to_window_with_margin(px(spacing.sm))
+                        .child(self.machine_menu(cx)),
+                )
+                .with_priority(crate::palette::Layer::Submenu.priority()),
             )
         });
+        div()
+            .relative()
+            .flex_none()
+            .child(crate::a11y::tab_stop(pick, s.focus))
+            .children(menu)
+            .into_any_element()
+    }
+
+    /// How the picked machine's file stands, when there is something to say: read, failed,
+    /// not written, or wrong.
+    pub(super) fn machine_status(&self) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let remote = self.remote.as_ref()?;
+        let name = &remote.machine.name;
+        let (words, tone) = match (&remote.reading, &remote.unsaved) {
+            (Reading::Failed(why), _) => (failed_words(name, why), s.error),
+            (_, Some(why)) => (unsaved_words(name, why), s.error),
+            (Reading::Asking, None) => (reading_words(name), s.text_muted),
+            (Reading::Ready, None) => (remote.problems.first()?.clone(), s.error),
+        };
+        Some(
+            crate::kit::meta(div(), theme)
+                .id("settings-machine-said")
+                .debug_selector(|| "settings-machine-said".to_owned())
+                .role(gpui::accesskit::Role::Status)
+                .aria_label(SharedString::from(words.clone()))
+                .text_color(hsla(tone))
+                .child(SharedString::from(words))
+                .into_any_element(),
+        )
+    }
+
+    /// In one column, where the head has no room for the picker: the page leads with whose
+    /// settings they are, the way to pick another machine, and how its file stands.
+    pub(super) fn machine_bar(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let spacing = theme.spacing;
         div()
             .flex()
             .flex_col()
@@ -406,15 +443,9 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.sm))
                     .child(crate::kit::meta(div(), theme).flex_none().child("Settings of"))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_none()
-                            .child(crate::a11y::tab_stop(pick, s.focus))
-                            .children(menu),
-                    ),
+                    .child(self.machine_pick(false, cx)),
             )
-            .children(said)
+            .children(self.machine_status())
             .into_any_element()
     }
 
@@ -456,9 +487,7 @@ impl SettingsForm {
                 }
             },
         );
-        gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopLeft).child(panel))
-            .with_priority(crate::palette::Layer::Submenu.priority())
-            .into_any_element()
+        panel.into_any_element()
     }
 }
 

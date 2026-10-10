@@ -9620,11 +9620,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The defect.** The Agents page, and the worker and server groups on Network, edited
     `[worker]` and `[server]` keys in this device's own `settings.toml`. That set nothing
     when the worker or the server was another machine. A phone had no Agents page at all.
-  - **The picker.** A page that holds a daemon's keys leads with "Settings of", followed by
-    the machine they are for. The choices are this Mac's own file (where this device runs a
-    worker or a server), the server, and each worker the workspace lists. A phone or an iPad
-    starts on the server and has an Agents page again. A narrow window shows the picker once,
-    at the top of its single column.
+  - **The picker.** A page that holds a daemon's keys names the machine they are for at the
+    end of its head, across from the page's name, as a scope control sits in a pane's title
+    bar. A row of its own above the groups pushed every page of keys down by a line. The
+    choices are this Mac's own file (where this device runs a worker or a server), the
+    server, and each worker the workspace lists. A phone or an iPad starts on the server and
+    has an Agents page again. A narrow window has no room in its head ("Settings" and Done),
+    so its single column leads with "Settings of" and the picker, once. How the picked file
+    stands (reading, failed, not written) leads the page under the head.
   - **Another machine's file.** Picking a machine reads its file once. Its rows wait,
     saying "Reading mini's settings…". They then show what that file holds, and only the
     machine's own table: a worker's `[worker]` rows, or the server's `[server]` rows. Group
