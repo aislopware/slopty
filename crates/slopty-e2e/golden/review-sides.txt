@@ -1,0 +1,50 @@
+Window │ project
+Group │ Workspace (focused)
+Button │ Navigator
+Button │ Search
+Button │ New agent
+Button │ Back
+Button │ Forward
+Group │ Where
+Button │ project
+TabList
+Tab │ Changes
+Button │ Close tab
+Button │ New
+Button │ Needs you
+Button │ More
+Navigation │ Projects
+Button │ project
+Button │ e2e-worker
+Group │ Changes
+Heading │ changes Changes
+Tab │ project
+Button │ Close tile
+Tab │ Changes
+Button │ Close tile
+Button │ Close tile
+Group │ Review
+TabList
+Tab │ Uncommitted
+Tab │ Whole branch
+Button │ Collapse all files
+Button │ Refresh
+Button │ Commit…
+List │ Files
+ListItem │ art/authors.txt
+ListItem │ art/logo.png
+ListItem │ capture.log
+ListItem │ deploy.sh
+Button │ art/authors.txt
+CheckBox │ Viewed
+Button │ art/logo.png
+CheckBox │ Viewed
+Image │ Before: art/logo.png
+Image │ After: art/logo.png
+Button │ capture.log
+CheckBox │ Viewed
+Button │ Open the whole file
+Button │ deploy.sh
+CheckBox │ Viewed
+Group │ Status
+Button │ Show the tab's terminal

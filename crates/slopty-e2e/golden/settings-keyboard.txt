@@ -55,6 +55,8 @@ ListItem │ Open URL…
 Button │ Keys for Open URL…
 ListItem │ Review changes
 Button │ Keys for Review changes
+ListItem │ Review next │ ⇧⌘R
+Button │ Keys for Review next │ ⇧⌘R
 ListItem │ Remove this worktree
 Button │ Keys for Remove this worktree
 ListItem │ Remove merged worktrees
@@ -87,6 +89,8 @@ ListItem │ Toggle own window │ ⌃⌘N
 Button │ Keys for Toggle own window │ ⌃⌘N
 ListItem │ Toggle system keys
 Button │ Keys for Toggle system keys
+ListItem │ Toggle curtain
+Button │ Keys for Toggle curtain
 ListItem │ Show or hide the navigator │ ⌘B
 Button │ Keys for Show or hide the navigator │ ⌘B
 ListItem │ Toggle navigator lens
@@ -286,6 +290,25 @@ ListItem │ Allow the request │ ⌘↩
 Button │ Keys for Allow the request │ ⌘↩
 ListItem │ Deny the request │ ⌘⌫
 Button │ Keys for Deny the request │ ⌘⌫
+Heading │ Reviews
+ListItem │ Next change │ ↓, J
+Button │ Keys for Next change │ ↓, J
+ListItem │ Previous change │ ↑, K
+Button │ Keys for Previous change │ ↑, K
+ListItem │ Next file │ ⇧↓, ⇧J
+Button │ Keys for Next file │ ⇧↓, ⇧J
+ListItem │ Previous file │ ⇧↑, ⇧K
+Button │ Keys for Previous file │ ⇧↑, ⇧K
+ListItem │ Keep the change │ ⌘Y
+Button │ Keys for Keep the change │ ⌘Y
+ListItem │ Put back the change │ ⌘N
+Button │ Keys for Put back the change │ ⌘N
+ListItem │ Comment on the change │ C
+Button │ Keys for Comment on the change │ C
+ListItem │ Mark the file viewed │ V
+Button │ Keys for Mark the file viewed │ V
+ListItem │ Show the review's files │ ⇧⌘O
+Button │ Keys for Show the review's files │ ⇧⌘O
 Heading │ Files
 ListItem │ Save file │ ⌘S
 Button │ Keys for Save file │ ⌘S
@@ -397,6 +420,8 @@ ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
 ListItem │ Message the orchestrator… │ C
 Button │ Keys for Message the orchestrator… │ C
+ListItem │ Start the task │ S
+Button │ Keys for Start the task │ S
 ListItem │ Run the task on… │ O
 Button │ Keys for Run the task on… │ O
 ListItem │ Push after each merge
