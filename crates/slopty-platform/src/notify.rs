@@ -485,7 +485,8 @@ impl Notifier for Memory {
 #[cfg(target_vendor = "apple")]
 pub use apple::{
     System, answer_unheard, ask, ask_quietly, content_of, deliver_launching, delivered, install,
-    open_settings, post_alone, register_then, settings, take_back, taps, taps_finished,
+    open_settings, post_alone, register_then, settings, take_back, tap_finished, taps,
+    taps_finished,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -634,23 +635,42 @@ mod apple {
     }
 
     /// The word owed to the system for each tap the app still works on ([`Tap::finished_later`]),
-    /// oldest first. The delegate may run off the main thread, the app says it on the main one.
-    static UNFINISHED: Mutex<Vec<Finish>> = Mutex::new(Vec::new());
+    /// by its note's id ([`Tap::id`]), oldest first. The delegate may run off the main thread,
+    /// the app says it on the main one.
+    static UNFINISHED: Mutex<Vec<(String, Finish)>> = Mutex::new(Vec::new());
 
-    /// Owe the system `finish` until [`taps_finished`].
-    pub(super) fn finish_later(finish: Finish) {
-        UNFINISHED.lock().push(finish);
+    /// Owe the system `finish` for the tap on note `id` until [`tap_finished`] or
+    /// [`taps_finished`].
+    pub(super) fn finish_later(id: &str, finish: Finish) {
+        UNFINISHED.lock().push((id.to_owned(), finish));
     }
 
-    /// The app's answers to every tap handed on so far are out, or given up: tell the system it
-    /// is done with each response it was owed, so it may suspend the app again. Nothing when
-    /// nothing is owed.
+    /// The app's answer to the tap on note `id` is out, or given up: tell the system it is done
+    /// with that response, and only that one.
+    ///
+    /// A press handed on since keeps the app awake for its own answer. Nothing when nothing is
+    /// owed for it.
+    pub fn tap_finished(id: &str) {
+        let all = std::mem::take(&mut *UNFINISHED.lock());
+        let (mine, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|(of, _)| of == id);
+        UNFINISHED.lock().extend(rest);
+        let owed: Vec<Finish> = mine.into_iter().map(|(_, finish)| finish).collect();
+        if !owed.is_empty() {
+            tracing::debug!(id, taps = owed.len(), "tap finished");
+        }
+        for Finish(finish) in owed {
+            finish();
+        }
+    }
+
+    /// The app gives up on every tap handed on so far: tell the system it is done with each
+    /// response it was owed, so it may suspend the app again. Nothing when nothing is owed.
     pub fn taps_finished() {
         let owed = std::mem::take(&mut *UNFINISHED.lock());
         if !owed.is_empty() {
             tracing::debug!(taps = owed.len(), "taps finished");
         }
-        for Finish(finish) in owed {
+        for (_, Finish(finish)) in owed {
             finish();
         }
     }
@@ -1414,7 +1434,7 @@ mod apple {
                     if tap.finished_later() {
                         // Owed before the tap goes, so the app's word cannot come first.
                         let owed = Owed(done.copy());
-                        finish_later(Finish::new(move || owed.say()));
+                        finish_later(&tap.id, Finish::new(move || owed.say()));
                         deliver(tap);
                         return;
                     }
@@ -1594,24 +1614,32 @@ mod tests {
         assert!(!tap(Some("maybe")).finished_later());
     }
 
-    /// What the system is owed is said once each, when the app's answers are out, and only
-    /// then; with nothing owed, nothing is said.
+    /// What the system is owed is said once each, when the app's answer to that tap is out,
+    /// and only then: a tap's finish leaves another's owed, and giving up says the rest. With
+    /// nothing owed, nothing is said.
     #[cfg(target_vendor = "apple")]
     #[test]
-    fn the_system_hears_a_tap_is_done_once_the_answers_are_out() {
+    fn the_system_hears_a_tap_is_done_once_its_answer_is_out() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let said = Arc::new(AtomicUsize::new(0));
-        for _ in 0..2 {
+        for id in ["first-note", "second-note"] {
             let said = Arc::clone(&said);
-            apple::finish_later(apple::Finish::new(move || {
-                said.fetch_add(1, Ordering::SeqCst);
-            }));
+            apple::finish_later(
+                id,
+                apple::Finish::new(move || {
+                    said.fetch_add(1, Ordering::SeqCst);
+                }),
+            );
         }
         assert_eq!(said.load(Ordering::SeqCst), 0, "owed, not said");
+        tap_finished("first-note");
+        assert_eq!(said.load(Ordering::SeqCst), 1, "its own only");
+        tap_finished("first-note");
+        assert_eq!(said.load(Ordering::SeqCst), 1, "once");
         taps_finished();
-        assert_eq!(said.load(Ordering::SeqCst), 2, "each said once");
+        assert_eq!(said.load(Ordering::SeqCst), 2, "the rest, given up");
         taps_finished();
         assert_eq!(said.load(Ordering::SeqCst), 2, "nothing more owed");
     }

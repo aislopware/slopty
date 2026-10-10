@@ -137,9 +137,6 @@ fn hardware_keyboard_attached() -> bool {
 
 /// Link events applied per foreground turn at most (see the link loop).
 const LINK_BATCH: usize = 256;
-/// How long an answer sent from a note is given to leave the link before the system hears the
-/// app is done with the tap, and the grace that woke the app for it goes.
-const ANSWER_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys). In the order a phone shows them before the row scrolls: the keys the
@@ -602,13 +599,13 @@ pub struct Workspace {
     #[cfg(target_os = "ios")]
     pushing: push::Pushing,
     /// The time iOS grants an app woken in the background by a note's "Allow" or "Deny", held
-    /// until the answer is out ([`WorkspaceEvent::TapsSettled`] and [`ANSWER_FLUSH`] after),
-    /// so it is not suspended while the answer waits for its link.
+    /// until the answer is taken ([`WorkspaceEvent::TapsSettled`]), so it is not suspended
+    /// while the answer waits for its link.
     #[cfg(target_os = "ios")]
     answer_grace: Option<slopty_platform::notify::BackgroundGrace>,
-    /// Tells the system the taps are done, and on iOS lets the answer grace go, once the
-    /// answers have had time to leave.
-    answer_flush: Option<gpui::Task<()>>,
+    /// The notes whose button the workspace is answering, by id: each is told done to the
+    /// system once the answers settle, and a press handed on since is not.
+    answering: Vec<String>,
     /// The system's paste button over the key bar's Paste, made with the first key bar, so a
     /// paste there needs no permission alert.
     #[cfg(target_os = "ios")]
@@ -672,7 +669,7 @@ impl Workspace {
             WorkspaceEvent::ClipboardShared { worker, share } => {
                 ws.keep_clipboard_shared(*worker, *share, cx);
             }
-            WorkspaceEvent::TapsSettled => ws.answers_out(cx),
+            WorkspaceEvent::TapsSettled => ws.answers_out(),
         });
         // The key bar follows the focused tile: the app's own build is drawn again only when
         // the tile it sends keys to moves, never for the rest of the view's news.
@@ -744,7 +741,7 @@ impl Workspace {
             pushing: push::Pushing::default(),
             #[cfg(target_os = "ios")]
             answer_grace: None,
-            answer_flush: None,
+            answering: Vec::new(),
             #[cfg(target_os = "ios")]
             paste_key: None,
         };
@@ -1124,11 +1121,11 @@ impl Workspace {
 
     /// A note was tapped: its tile comes forward, on whichever worker it lives. A note's
     /// "Allow" or "Deny" may have woken the app in the background: the system is told the tap
-    /// is done only once the answer is out ([`Self::answers_out`]), and on iOS the app holds
-    /// the grace the system grants until then too.
+    /// is done only once the worker took the answer ([`Self::answers_out`]), and on iOS the app
+    /// holds the grace the system grants until then too.
     fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         if slopty_ui::workspace::attention::answers(tap) {
-            self.answer_flush = None;
+            self.answering.push(tap.id.clone());
             #[cfg(target_os = "ios")]
             if self.answer_grace.is_none() {
                 self.answer_grace =
@@ -1138,18 +1135,16 @@ impl Workspace {
         self.view.update(cx, |v, cx| v.open_notification(tap, cx));
     }
 
-    /// Every tapped answer is out, or said to have found nothing: once the last has had
-    /// [`ANSWER_FLUSH`] to leave the link, the system hears the taps are done and the grace
-    /// held for them goes.
-    fn answers_out(&mut self, cx: &Context<Self>) {
-        self.answer_flush = Some(cx.spawn(async |ws, cx| {
-            cx.background_executor().timer(ANSWER_FLUSH).await;
-            slopty_platform::notify::taps_finished();
-            #[cfg(target_os = "ios")]
-            let _gone = ws.update(cx, |ws, _cx| ws.answer_grace = None);
-            #[cfg(not(target_os = "ios"))]
-            let _unused = ws;
-        }));
+    /// Every tapped answer is taken by its worker, or said to have found nothing or not to
+    /// have gone: the system hears each of those taps is done, and the grace held for them goes.
+    fn answers_out(&mut self) {
+        for id in std::mem::take(&mut self.answering) {
+            slopty_platform::notify::tap_finished(&id);
+        }
+        #[cfg(target_os = "ios")]
+        {
+            self.answer_grace = None;
+        }
     }
 
     /// Start (or refresh) a worker the directory lists: its tiles wait in the workspace and a

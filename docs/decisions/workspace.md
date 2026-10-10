@@ -1254,10 +1254,28 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     app says it (`notify::taps_finished`) when its grace goes. A tap that names no request
     settles at once, so nothing is owed for long. The note itself and Show are done when handed
     on, as before.
+  - **Settled on the worker's word** (2026-10-11, the orchestrator-first study, item 22).
+    The grace ended a fixed two seconds after the answer was handed to the link, not when
+    the worker took it. A server's failure read "no longer waiting" and hid the request for
+    the run, and the app's word to the system released every press owed, not its own. Now:
+    - A note's answer settles when its worker acknowledges the intent. One it turns down, or
+      never acknowledges within the note's hold (`HOLD_VERDICT`, 15 s), says "Your answer was
+      not sent" (`ANSWER_NOT_SENT`) and clears its sent mark, so the request can be answered
+      again. The fixed `ANSWER_FLUSH` is deleted.
+    - Through the server, a lost link (`ServerUnreachable`) is tried again each second within
+      the same hold. A request the server no longer finds is "no longer waiting"; a call that
+      fails is "not sent", and the request may be answered again.
+    - The system's completion handlers are owed by note id (`notify::tap_finished`). The app
+      releases only the taps it handed to the workspace, so a press still on its way keeps
+      the app awake for its own answer. `taps_finished` stays for the windowless answer,
+      which gives up on all.
+    - Still to come with the server's push word to clients: a phone nothing can be pushed to
+      says so and keeps listening through its grace.
   - Tests: `a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note`
     (`tests/thread_waits.rs`), `a_notes_answer_waits_for_its_request` (`tests/attention.rs`),
+    `a_notes_answer_goes_through_the_server_while_its_worker_is_away` (`tests/approvals.rs`),
     `only_an_answer_in_the_background_is_finished_later` and
-    `the_system_hears_a_tap_is_done_once_the_answers_are_out` (`slopty-platform` `notify`).
+    `the_system_hears_a_tap_is_done_once_its_answer_is_out` (`slopty-platform` `notify`).
 
 - ✅ **Every transfer is on one list in the status bar, and survives a relaunch** (2026-10-04,
   readiness N22). The bar counted only uploads, as one percentage. A download (Save a copy,

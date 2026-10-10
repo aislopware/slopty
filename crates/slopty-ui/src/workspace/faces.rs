@@ -706,6 +706,7 @@ impl WorkspaceView {
                 this.scripts_heard(key, repo, cx);
             }
             HubEvent::Drafted => this.drafts_changed(cx),
+            HubEvent::Thread(_) => this.answers_heard(cx),
             _ => {}
         });
         let kept = self.drafts.commits_on(key);

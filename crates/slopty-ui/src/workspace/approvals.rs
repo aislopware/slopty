@@ -17,6 +17,12 @@
 //! the link came up), or at most [`HOLD_VERDICT`] for a worker not reached; one that finds no
 //! request says so, in a toast with the app in front and in a note of its own while it is away.
 //!
+//! A note's answer is done when its worker says it took it, not when it leaves: the tap settles
+//! ([`WorkspaceEvent::TapsSettled`]) once each answer sent for one is acknowledged, turned down,
+//! or out of time. One turned down, or never acknowledged within [`HOLD_VERDICT`], says
+//! [`ANSWER_NOT_SENT`], apart from a request that no longer waits, and may be answered again.
+//! Through the server, a lost link is tried again within the same time.
+//!
 //! The handing back follows the workspace's changes, never a frame: it sends messages, which
 //! nothing drawing does.
 
@@ -27,10 +33,10 @@ use gpui::Context;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
 use slopty_platform::notify::Pressed;
-use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
-use slopty_proto::thread::{AskId, Delivery, ThreadId};
+use slopty_proto::thread::{AskId, Delivery, IntentId, ThreadId};
 
 use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 use crate::workspace::{WorkspaceEvent, WorkspaceView};
@@ -49,6 +55,14 @@ pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's 
 /// What a note's reply says when it did not reach the agent.
 pub(in crate::workspace) const REPLY_NOT_SENT: &str = "Your reply was not sent";
 
+/// What a note's answer says when it did not reach the agent: turned down, or never taken in
+/// time. The request may still wait, unlike [`NO_LONGER_WAITING`].
+pub(in crate::workspace) const ANSWER_NOT_SENT: &str = "Your answer was not sent";
+
+/// How long a call through the server waits before it is tried again after the link to the
+/// server dropped.
+const RETRY_SERVER: Duration = Duration::from_secs(1);
+
 /// A note's "Allow", "Deny" or pick whose request is not here yet.
 #[derive(Debug)]
 struct Tapped {
@@ -61,6 +75,18 @@ struct Tapped {
     at: Instant,
 }
 
+/// A note's answer sent to its worker, waiting for the worker to say it took it.
+#[derive(Debug)]
+struct Awaited {
+    route: Route,
+    thread: ThreadId,
+    ask: AskId,
+    /// The intent that carries it.
+    id: IntentId,
+    /// When its note was tapped: it is taken within [`HOLD_VERDICT`] of then, or not sent.
+    at: Instant,
+}
+
 /// What the workspace keeps of the requests answered here.
 #[derive(Debug, Default)]
 pub(in crate::workspace) struct Approvals {
@@ -68,6 +94,8 @@ pub(in crate::workspace) struct Approvals {
     linked: HashMap<WorkerKey, (ClientId, Instant)>,
     /// Verdicts from notes waiting for their request, oldest first.
     tapped: Vec<Tapped>,
+    /// Verdicts from notes sent to their worker, not acknowledged yet.
+    awaiting: Vec<Awaited>,
     /// The request each thread was answered or handed back here on, until its worker's table
     /// moves past it: each goes once.
     sent: HashMap<ThreadId, AskId>,
@@ -99,7 +127,7 @@ impl Approvals {
 
     /// Whether a note's verdict waits for its request.
     pub(in crate::workspace) const fn taps_waiting(&self) -> bool {
-        !self.tapped.is_empty() || self.through_server > 0
+        !self.tapped.is_empty() || !self.awaiting.is_empty() || self.through_server > 0
     }
 }
 
@@ -116,13 +144,13 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let pressed = if allow { Pressed::Allow } else { Pressed::Deny };
-        self.answer_pressed(worker, thread, ask, &pressed, cx)
+        self.answer_pressed(worker, thread, ask, &pressed, cx).is_some()
     }
 
     /// Answer `thread`'s open request `ask` on `worker` as `pressed` says: Allow and Deny with
     /// its plain allow or deny while it is a yes or no they answer whole, a pick with its own
-    /// choice while it offers that pick; `false` when it does not, or it was answered here
-    /// already.
+    /// choice while it offers that pick: the intent that carries it, or `None` when it does
+    /// not, or it was answered here already.
     fn answer_pressed(
         &mut self,
         worker: WorkerKey,
@@ -130,7 +158,7 @@ impl WorkspaceView {
         ask: &AskId,
         pressed: &Pressed,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<IntentId> {
         let open = self.thread_request(thread).filter(|a| a.id == *ask);
         let choice = open.and_then(|a| match pressed {
             Pressed::Allow | Pressed::Deny => {
@@ -140,18 +168,18 @@ impl WorkspaceView {
         });
         let Some(choice) = choice else {
             tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
-            return false;
+            return None;
         };
         if self.approvals.sent.get(&thread) == Some(ask) {
-            return false;
+            return None;
         }
         tracing::info!(%thread, ask = ask.0, ?pressed, "request answered");
         self.approvals.sent.insert(thread, ask.clone());
         let intent = Intent::Answer { ask: ask.clone(), choice, message: None };
         let hub = self.thread_hub(worker, cx);
-        let _id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
         cx.notify();
-        true
+        Some(id)
     }
 
     /// Answer the request `ask` that the agent in `session` waits on, as `pressed` says: a
@@ -177,7 +205,7 @@ impl WorkspaceView {
             .or_else(|| thread.and_then(|t| self.thread_stand(t)))
             .map(|stand| stand.worker);
         let (Some(worker), Some(thread)) = (worker, thread) else { return };
-        self.answer_pressed(worker, thread, ask, pressed, cx);
+        let _sent = self.answer_pressed(worker, thread, ask, pressed, cx);
     }
 
     /// The request this client answered on `thread` that its worker's table still shows open.
@@ -304,8 +332,11 @@ impl WorkspaceView {
                 About::Thread(thread) => Some(thread),
             };
             if let Some(thread) = thread
-                && self.answer_pressed(tap.route.worker, thread, &tap.ask, &tap.pressed, cx)
+                && let Some(id) =
+                    self.answer_pressed(tap.route.worker, thread, &tap.ask, &tap.pressed, cx)
             {
+                let Tapped { route, ask, at, .. } = tap;
+                self.approvals.awaiting.push(Awaited { route, thread, ask, id, at });
                 continue;
             }
             // Its worker not linked here yet, while the server's ladder has its thread waiting
@@ -334,6 +365,18 @@ impl WorkspaceView {
                 self.approvals.tapped.push(tap);
             }
         }
+        for awaited in std::mem::take(&mut self.approvals.awaiting) {
+            let hold = HOLD_VERDICT.saturating_sub(now.saturating_duration_since(awaited.at));
+            match self.answer_heard(&awaited, cx) {
+                Some(true) => {}
+                Some(false) => self.answer_not_sent(&awaited, cx),
+                None if hold.is_zero() => self.answer_not_sent(&awaited, cx),
+                None => {
+                    due = Some(due.map_or(hold, |due| due.min(hold)));
+                    self.approvals.awaiting.push(awaited);
+                }
+            }
+        }
         if !self.approvals.taps_waiting() {
             cx.emit(WorkspaceEvent::TapsSettled);
         }
@@ -343,6 +386,39 @@ impl WorkspaceView {
                 let _gone = this.update(cx, Self::settle_taps);
             })
         });
+    }
+
+    /// What the worker said of `awaited`'s answer: `Some(true)` once it took it, `Some(false)`
+    /// once it turned it down, `None` while it has said nothing.
+    fn answer_heard(&mut self, awaited: &Awaited, cx: &mut Context<Self>) -> Option<bool> {
+        let hub = self.thread_hub(awaited.route.worker, cx);
+        let hub = hub.read(cx);
+        if hub.refusals(awaited.thread).any(|r| r.id == awaited.id) {
+            return Some(false);
+        }
+        // Gone from the outbox without a refusal: taken, and the thread shows it.
+        let sent = hub.threads().outbox().all().iter().find(|s| s.id == awaited.id);
+        match sent.map(|s| (s.outcome.is_some(), s.failed())) {
+            None | Some((true, false)) => Some(true),
+            Some((true, true)) => Some(false),
+            Some((false, _)) => None,
+        }
+    }
+
+    /// `awaited`'s answer did not reach the agent: said so, and its request may be answered
+    /// again.
+    fn answer_not_sent(&mut self, awaited: &Awaited, cx: &mut Context<Self>) {
+        if self.approvals.sent.get(&awaited.thread) == Some(&awaited.ask) {
+            self.approvals.sent.remove(&awaited.thread);
+        }
+        self.unanswered(awaited.route, ANSWER_NOT_SENT, cx);
+    }
+
+    /// A worker's threads moved: a note's answer waiting for it may have been taken.
+    pub(in crate::workspace) fn answers_heard(&mut self, cx: &mut Context<Self>) {
+        if !self.approvals.awaiting.is_empty() {
+            self.settle_taps(cx);
+        }
     }
 
     /// The thread of `route`'s note, when its worker is not linked here and the server's ladder
@@ -368,8 +444,9 @@ impl WorkspaceView {
 
     /// Answer `tap` on `thread` through the server: read the thread's open requests there for
     /// the choice that allows or denies once, or find the request a pick answers, then answer
-    /// with it, once. A request the server no
-    /// longer finds, or a server that refuses, is said as a note's answer that found nothing.
+    /// with it, once. A lost link to the server is tried again until [`HOLD_VERDICT`] from the
+    /// tap. A request the server no longer finds is one that no longer waits; a call that
+    /// fails is an answer not sent, and the request may be answered again.
     fn answer_through_server(&mut self, tap: Tapped, thread: ThreadId, cx: &Context<Self>) {
         let Some(caller) = self.projects.caller.clone() else { return };
         if self.approvals.sent.get(&thread) == Some(&tap.ask) {
@@ -378,37 +455,55 @@ impl WorkspaceView {
         tracing::info!(%thread, ask = tap.ask.0, pressed = ?tap.pressed, "answered through the server");
         self.approvals.sent.insert(thread, tap.ask.clone());
         self.approvals.through_server = self.approvals.through_server.saturating_add(1);
-        let Tapped { route, ask, pressed, .. } = tap;
+        let Tapped { route, ask, pressed, at } = tap;
+        let deadline = at.checked_add(HOLD_VERDICT).unwrap_or(at);
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
+            let call = async |verb: Verb| loop {
+                let out = caller.call(verb.clone()).await;
+                let lost = matches!(out, Outcome::Error { code: ErrorCode::ServerUnreachable, .. });
+                if !lost || executor.now() >= deadline {
+                    break out;
+                }
+                executor.timer(RETRY_SERVER).await;
+            };
             let read = Verb::ReadThread {
                 of: ThreadOf::Thread(thread),
                 view: ThreadView::Messages,
                 after: None,
                 hold: false,
             };
-            let choice = match caller.call(read).await {
-                Outcome::Thread(read) => read
-                    .requests
-                    .iter()
-                    .find(|r| r.ask == ask)
-                    .and_then(|r| pressed.choice(&r.choices, &r.picks)),
-                _ => None,
-            };
-            let answered = match choice {
-                Some(choice) => {
-                    let verb = Verb::AnswerRequest {
-                        of: ThreadOf::Thread(thread),
-                        ask,
-                        choice,
-                        message: None,
-                    };
-                    !matches!(caller.call(verb).await, Outcome::Error { .. })
+            let why = match call(read).await {
+                Outcome::Thread(read) => {
+                    let choice = read
+                        .requests
+                        .iter()
+                        .find(|r| r.ask == ask)
+                        .and_then(|r| pressed.choice(&r.choices, &r.picks));
+                    match choice {
+                        Some(choice) => {
+                            let verb = Verb::AnswerRequest {
+                                of: ThreadOf::Thread(thread),
+                                ask: ask.clone(),
+                                choice,
+                                message: None,
+                            };
+                            match call(verb).await {
+                                Outcome::Error { .. } => Some(ANSWER_NOT_SENT),
+                                _ => None,
+                            }
+                        }
+                        None => Some(NO_LONGER_WAITING),
+                    }
                 }
-                None => false,
+                _ => Some(ANSWER_NOT_SENT),
             };
             let _gone = this.update(cx, |this, cx| {
-                if !answered {
-                    this.unanswered(route, NO_LONGER_WAITING, cx);
+                if let Some(why) = why {
+                    if why == ANSWER_NOT_SENT && this.approvals.sent.get(&thread) == Some(&ask) {
+                        this.approvals.sent.remove(&thread);
+                    }
+                    this.unanswered(route, why, cx);
                 }
                 this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
                 if !this.approvals.taps_waiting() {

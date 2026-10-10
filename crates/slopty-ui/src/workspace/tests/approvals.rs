@@ -14,6 +14,7 @@ use slopty_proto::thread::{AgentId, AskId, Choice, Effect, Phase, Request, Threa
 use super::super::projects::worker_key;
 use super::*;
 use crate::workspace::WorkspaceEvent;
+use crate::workspace::approvals::ANSWER_NOT_SENT;
 use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 
 /// A note's button on `thread`'s request `ask` on `worker`, as the pushed note carries it.
@@ -146,6 +147,47 @@ fn a_notes_answer_goes_through_the_server_while_its_worker_is_away(cx: &mut Test
         events.borrow().as_slice(),
         [WorkspaceEvent::Unanswered { route, why: NO_LONGER_WAITING }, WorkspaceEvent::TapsSettled]
     );
+
+    // A lost link to the server is tried again; a server that refuses the answer says it was
+    // not sent, apart from a request gone, and the request may be answered again.
+    let lost = || Outcome::Error {
+        code: slopty_proto::orchestration::ErrorCode::ServerUnreachable,
+        message: "the link dropped".to_owned(),
+    };
+    let refused = || Outcome::Error {
+        code: slopty_proto::orchestration::ErrorCode::Failed,
+        message: "the worker went away".to_owned(),
+    };
+    let ask8 = (laptop, gone, "ask-8");
+    for attempt in 0..2 {
+        events.borrow_mut().clear();
+        view.update_in(cx, |v, _w, cx| {
+            v.open_notification(&tapped(ask8.0, ask8.1, ask8.2, notify::ALLOW), cx);
+        });
+        cx.run_until_parked();
+        let (_, reply) = queue.try_next().expect("read");
+        let _gone = reply.send(lost());
+        cx.run_until_parked();
+        assert!(queue.try_next().is_none(), "not at once");
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let (verb, reply) = queue.try_next().expect("read again");
+        assert!(matches!(verb, Verb::ReadThread { .. }), "{verb:?}");
+        let _gone = reply.send(read(laptop_id, gone, "ask-8"));
+        cx.run_until_parked();
+        let (verb, reply) = queue.try_next().expect("then answered");
+        assert!(matches!(verb, Verb::AnswerRequest { .. }), "attempt {attempt}: {verb:?}");
+        let _gone = reply.send(refused());
+        cx.run_until_parked();
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                WorkspaceEvent::Unanswered { route, why: ANSWER_NOT_SENT },
+                WorkspaceEvent::TapsSettled
+            ],
+            "attempt {attempt}: not sent, and a second tap goes again"
+        );
+    }
 }
 
 /// A note's reply to a thread whose worker this client has no link to goes through the server

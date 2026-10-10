@@ -800,6 +800,16 @@ fn intents(sent: &[ThreadRequest]) -> Vec<Intent> {
         .collect()
 }
 
+/// The id of the one answer among `sent`.
+fn answer_id(sent: &[ThreadRequest]) -> slopty_proto::thread::IntentId {
+    sent.iter()
+        .find_map(|r| match r {
+            ThreadRequest::Intent { id, intent: Intent::Answer { .. }, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("an answer sent")
+}
+
 fn allowed(ask: &str) -> Intent {
     Intent::Answer { ask: AskId(ask.to_owned()), choice: "accept".to_owned(), message: None }
 }
@@ -1046,13 +1056,17 @@ fn a_request_whose_terminal_is_in_front_goes_back_to_it(cx: &mut TestAppContext)
 }
 
 /// A note's "Allow" that comes before its request (the tap launched the app, or the link is
-/// new and the worker's table has not come) waits for it and answers it once it is here. One
-/// whose request never comes says so once the table has had time to come: a toast in front,
-/// the app's own note while it is away. One whose worker is not reached gives up after a while.
-/// One that names no request settles at once.
+/// new and the worker's table has not come) waits for it and answers it once it is here, and
+/// settles once the worker says it took the answer. One the worker turns down, or never
+/// acknowledges in time, says it was not sent and may be answered again. One whose request
+/// never comes says so once the table has had time to come: a toast in front, the app's own
+/// note while it is away. One whose worker is not reached gives up after a while. One that
+/// names no request settles at once.
 #[gpui::test]
 fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
-    use crate::workspace::approvals::{HOLD_VERDICT, NOT_REACHED, SYNCED};
+    use slopty_proto::thread::wire::{IntentDone, Outcome};
+
+    use crate::workspace::approvals::{ANSWER_NOT_SENT, HOLD_VERDICT, NOT_REACHED, SYNCED};
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let key = WorkerKey::new(7);
@@ -1087,12 +1101,18 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
     assert!(intents(&thread_sent(&mut link)).is_empty(), "the request is not here yet: it waits");
     assert_eq!(toast(cx), None, "nothing said yet");
     table(&view, cx, key, asking_row(&state, Some(("ask-8", Request::APPROVAL))));
-    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-8")], "answered as it came");
-    assert_eq!(
-        events.borrow().last(),
-        Some(&WorkspaceEvent::TapsSettled),
-        "out: an app woken for it may sleep again"
-    );
+    let sent = thread_sent(&mut link);
+    assert_eq!(intents(&sent), [allowed("ask-8")], "answered as it came");
+    let settled = |events: &Rc<std::cell::RefCell<Vec<WorkspaceEvent>>>| {
+        events.borrow().last() == Some(&WorkspaceEvent::TapsSettled)
+    };
+    assert!(!settled(&events), "sent is not taken: the app stays awake for it");
+    let done = |id, outcome| IntentDone { id, outcome };
+    view.update_in(cx, |v, _window, cx| {
+        v.thread_done(key, &done(answer_id(&sent), Outcome::Done), cx);
+    });
+    cx.run_until_parked();
+    assert!(settled(&events), "taken: an app woken for it may sleep again");
     events.borrow_mut().clear();
 
     view.update_in(cx, |v, _window, cx| {
@@ -1130,6 +1150,37 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
         [WorkspaceEvent::Unanswered { route: far, why: NOT_REACHED }, WorkspaceEvent::TapsSettled],
         "until it is given up on"
     );
+
+    view.update_in(cx, |v, _window, cx| v.set_app_active(true, cx));
+    events.borrow_mut().clear();
+    // Turned down by the worker: not sent, and it may be answered again.
+    table(&view, cx, key, asking_row(&state, Some(("ask-11", Request::APPROVAL))));
+    view.update_in(cx, |v, _window, cx| {
+        v.open_notification(&tap(route, "ask-11", notify::ALLOW), cx);
+    });
+    cx.run_until_parked();
+    let sent = thread_sent(&mut link);
+    let refused = Outcome::Refused { reason: "the agent moved on".to_owned() };
+    view.update_in(cx, |v, _window, cx| v.thread_done(key, &done(answer_id(&sent), refused), cx));
+    cx.run_until_parked();
+    assert_eq!(toast(cx).as_deref(), Some(ANSWER_NOT_SENT), "said truly, not as gone");
+    assert!(settled(&events));
+    view.update(cx, |v, _cx| assert!(v.session_answer(session).is_some(), "offered again"));
+    events.borrow_mut().clear();
+
+    // Never acknowledged: not sent, once the note's time is up.
+    view.update_in(cx, |v, _window, cx| {
+        v.open_notification(&tap(route, "ask-11", notify::ALLOW), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-11")], "tried again");
+    view.update_in(cx, |v, _window, cx| v.show_notice(String::new(), cx));
+    cx.executor().advance_clock(HOLD_VERDICT);
+    cx.run_until_parked();
+    assert_eq!(toast(cx).as_deref(), Some(ANSWER_NOT_SENT), "a worker that never says");
+    assert!(settled(&events));
+    events.borrow_mut().clear();
+    table(&view, cx, key, asking_row(&state, None));
 
     // A button on a note that names no request answers nothing, and settles at once: the
     // system waits on the app's word that it is done with the tap.
