@@ -506,10 +506,9 @@ pub fn standing_words(pull: &PullStatus) -> String {
 }
 
 /// How a pull request is merged, as gh names it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
     /// One commit of the branch's.
-    #[default]
     Squash,
     /// A merge commit.
     Merge,
@@ -520,6 +519,21 @@ pub enum Method {
 impl Method {
     /// Every method, in the menu's order.
     pub const ALL: [Self; 3] = [Self::Squash, Self::Merge, Self::Rebase];
+
+    /// The method gh calls `name`.
+    #[must_use]
+    pub fn of_wire(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.wire() == name)
+    }
+
+    /// The methods `pull`'s repository allows, in the menu's order; every one where it says
+    /// none.
+    #[must_use]
+    pub fn offered(pull: &PullStatus) -> Vec<Self> {
+        let allowed: Vec<Self> =
+            Self::ALL.into_iter().filter(|m| pull.methods.iter().any(|w| w == m.wire())).collect();
+        if allowed.is_empty() { Self::ALL.to_vec() } else { allowed }
+    }
 
     /// gh's name for it.
     #[must_use]

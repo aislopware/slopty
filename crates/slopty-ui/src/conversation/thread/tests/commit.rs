@@ -246,6 +246,48 @@ fn a_merge_goes_now_where_the_forge_allows_it_for_the_head_on_show(cx: &mut Test
     );
 }
 
+/// The merge offers only the methods the repository allows, and goes by the one the worker
+/// offers first (the last used there) until the person picks another.
+#[gpui::test]
+fn a_merge_goes_by_the_repository_s_offered_method(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let mut offered = pull("CLEAN", &["SUCCESS"]);
+    offered.methods = ["merge", "rebase"].map(str::to_owned).to_vec();
+    offered.method = "rebase".to_owned();
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(offered))));
+    click(cx, "commit-merge-methods");
+    assert!(cx.debug_bounds("commit-method-merge").is_some(), "an allowed method, offered");
+    assert!(cx.debug_bounds("commit-method-squash").is_none(), "a method the repository forbids");
+    click(cx, "commit-merge-methods");
+    click(cx, "commit-merge");
+    let rebase = GitOp::Merge {
+        method: "rebase".to_owned(),
+        head: Some("c0ffee".to_owned()),
+        delete_branch: true,
+        auto: false,
+    };
+    assert_eq!(merges(&sent), [rebase], "the offered method, without a pick");
+}
+
+/// A new pull request merges into the base its worktree started from, filled in for the person,
+/// who may still type another.
+#[gpui::test]
+fn a_new_pull_request_merges_into_the_worktree_s_base(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let mut based = status();
+    based.merge_base = Some("release".to_owned());
+    answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(based)));
+    answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(None));
+    click(cx, "commit-open-pull");
+    cx.simulate_input("Ship the sheet");
+    click(cx, "commit-open");
+    let opened = asks(&sent).into_iter().rev().find_map(|(_, op)| match op {
+        GitOp::PullRequest { title, base, .. } => Some((title, base)),
+        _ => None,
+    });
+    assert_eq!(opened, Some(("Ship the sheet".to_owned(), Some("release".to_owned()))));
+}
+
 /// The merges asked so far, in order.
 fn merges(sent: &Sent) -> Vec<GitOp> {
     asks(sent)

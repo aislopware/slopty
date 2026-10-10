@@ -169,7 +169,9 @@ pub struct CommitSheet {
     own: Own,
     /// The person's own ticks, by path, over what [`Self::own`] says.
     picked: HashMap<String, bool>,
-    method: Method,
+    /// The merge method the person picked in this sheet; until then, the one the worker offers
+    /// first ([`Self::method`]).
+    picked_method: Option<Method>,
     methods_open: bool,
     delete_branch: bool,
     /// The commit this sheet asked for: its message goes once it is made.
@@ -250,7 +252,7 @@ impl CommitSheet {
             draft: false,
             own: Own::All,
             picked: HashMap::new(),
-            method: Method::default(),
+            picked_method: None,
             methods_open: false,
             delete_branch: true,
             committing: None,
@@ -529,7 +531,7 @@ impl CommitSheet {
             MergeGate::Draft | MergeGate::Waits(_) => return,
         };
         let op = GitOp::Merge {
-            method: self.method.wire().to_owned(),
+            method: self.method(pull).wire().to_owned(),
             head: Some(pull.head_commit.clone()),
             delete_branch: self.delete_branch,
             auto,
@@ -538,8 +540,29 @@ impl CommitSheet {
         self.op(op, cx);
     }
 
+    /// The merge method in force for `pull`: the person's pick in this sheet while its
+    /// repository still allows it, else the one the worker offers first (the last used in this
+    /// repository, or on the forge), else the first allowed.
+    fn method(&self, pull: &PullStatus) -> Method {
+        let offered = Method::offered(pull);
+        self.picked_method
+            .filter(|m| offered.contains(m))
+            .or_else(|| Method::of_wire(&pull.method).filter(|m| offered.contains(m)))
+            .or_else(|| offered.first().copied())
+            .unwrap_or(Method::Squash)
+    }
+
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.page = page;
+        // A new pull request merges into the branch's base, the one its worktree started from
+        // as the worker reads it, until the person types another.
+        let base = self.state(cx).and_then(|r| r.status.as_ref()?.merge_base.clone());
+        if page == Page::Open
+            && let Some(base) = base
+            && self.base.read(cx).value().trim().is_empty()
+        {
+            self.base.update(cx, |b, cx| b.set_value(&base, window, cx));
+        }
         let field = match page {
             Page::Commit => self.message.focus_handle(cx),
             Page::Open => self.title.focus_handle(cx),
@@ -985,7 +1008,7 @@ impl CommitSheet {
                         .child(SharedString::from(warn))
                         .into_any_element()
                 });
-                (self.method.verb().into(), note)
+                (self.method(pull).verb().into(), note)
             }
             MergeGate::WhenReady { waits } => {
                 // gh's words for an auto-merge it took stand in the outcome below; the row says
@@ -1063,7 +1086,7 @@ impl CommitSheet {
                 this.delete_branch = !this.delete_branch;
                 cx.notify();
             }));
-        let menu = self.methods_open.then(|| self.methods_menu(cx));
+        let menu = self.methods_open.then(|| self.methods_menu(pull, cx));
         Some(
             div()
                 .w_full()
@@ -1085,20 +1108,22 @@ impl CommitSheet {
         )
     }
 
-    /// The merge's methods, under the split button: the one chosen ticked.
-    fn methods_menu(&self, cx: &Context<Self>) -> AnyElement {
+    /// The merge's methods the repository allows, under the split button: the one in force
+    /// ticked.
+    fn methods_menu(&self, pull: &PullStatus, cx: &Context<Self>) -> AnyElement {
         let this = cx.entity().downgrade();
         let mut menu = kit::Menu::new();
-        for method in Method::ALL {
+        let chosen = self.method(pull);
+        for method in Method::offered(pull) {
             let this = this.clone();
             menu.push(
                 kit::MenuItem::new(method.wire(), method.verb(), move |_w, cx| {
                     let _gone = this.update(cx, |this, cx| {
-                        this.method = method;
+                        this.picked_method = Some(method);
                         cx.notify();
                     });
                 })
-                .mark(kit::menu::Mark::Radio(method == self.method)),
+                .mark(kit::menu::Mark::Radio(method == chosen)),
             );
         }
         kit::MenuPanel::new("commit-method", "Merge method", Rc::new(menu), &self.theme, {
