@@ -91,6 +91,10 @@ pub fn note_of(body: &PushBody) -> Note {
     if let Some(ask) = &body.ask {
         keys.insert(info::ASK.to_owned(), ask.0.clone());
     }
+    if let (Some(task), Subject::Project { project, .. }) = (body.merges, &notice.about) {
+        keys.insert(info::PROJECT.to_owned(), project.to_string());
+        keys.insert(info::TASK.to_owned(), task.0.to_string());
+    }
     let title = Some(notice.title.trim())
         .filter(|t| !t.is_empty())
         .map_or_else(|| slopty_push::apns::TITLE.to_owned(), str::to_owned);
@@ -115,11 +119,15 @@ pub fn note_of(body: &PushBody) -> Note {
 
 /// The buttons a pushed note carries: a question's options are its picks ([`Note::picking`]),
 /// which take a category of their own; else Allow and Deny on a yes or no, else a reply on an
-/// agent's own moment (one that needs the person, failed or finished). A program's record and
-/// a project's notice have none.
+/// agent's own moment (one that needs the person, failed or finished), else Merge on a
+/// project's work ready to merge that names the task to merge ([`PushBody::merges`]). A
+/// program's record and a project's other notices have none.
 fn category_of(body: &PushBody) -> Option<super::Category> {
     if body.ask.is_some() && !body.choices.is_empty() {
         return None;
+    }
+    if body.merges.is_some() && matches!(body.notice.about, Subject::Project { .. }) {
+        return Some(super::MERGING);
     }
     if body.ask.is_some() {
         return Some(APPROVAL);
@@ -428,6 +436,44 @@ mod tests {
             worked_ms: None,
             via: None,
         }
+    }
+
+    /// Work ready to merge carries "Merge" with the project and the task it merges, which a
+    /// press hands back to merge with no round trip; the same notice naming no task, or a
+    /// thread's note, has no Merge.
+    #[test]
+    fn a_ready_note_merges_the_task_it_names() {
+        let project = ProjectId::new("store").expect("a name");
+        let about = Subject::Project { project: project.clone(), entry: 7 };
+        let body = PushBody {
+            notice: notice(NoticeKind::ReadyToMerge, about, None),
+            ask: None,
+            choices: Vec::new(),
+            quiet: false,
+            merges: Some(slopty_proto::project::TaskId(4)),
+        };
+        let note = note_of(&body);
+        assert_eq!(note.category, Some(super::super::MERGING));
+        assert_eq!(note.info.get(info::PROJECT), Some(&"store".to_owned()));
+        assert_eq!(note.info.get(info::TASK), Some(&"4".to_owned()));
+        let tap = super::super::Tap {
+            id: note.id.clone(),
+            info: note.info,
+            action: Some(super::super::MERGE.to_owned()),
+            text: None,
+        };
+        assert_eq!(
+            super::super::merge_of(&tap),
+            Some((project, slopty_proto::project::TaskId(4))),
+            "a press merges the task the note names"
+        );
+        assert!(tap.finished_later(), "answered where the note is");
+        let shown = super::super::Tap { action: Some(super::super::SHOW.to_owned()), ..tap };
+        assert_eq!(super::super::merge_of(&shown), None, "Show only opens");
+
+        let unnamed = note_of(&PushBody { merges: None, ..body });
+        assert_eq!(unnamed.category, None, "no task, no Merge");
+        assert!(!unnamed.info.contains_key(info::TASK));
     }
 
     /// A thread at a terminal is that terminal's note, with its worker and session for the

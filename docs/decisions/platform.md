@@ -1355,3 +1355,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back` (slopty-server),
     `notes_reach_a_phone_as_server_push_says` (slopty-serverd),
     `this_mac::tests::a_server_here_says_how_notes_reach_a_phone` (slopty-app).
+
+- ✅ **Merge on a note of work ready to merge** (2026-10-11, the orchestrator-first study, item
+  13, the app's half).
+  - A pushed `ReadyToMerge` note whose body names a task (`PushBody.merges`) carries the
+    `slopty.merge` category: "Merge", answered where the note is (on an unlocked device), and
+    "Show". The note keeps the project and the task in its `userInfo` (`info::PROJECT`,
+    `info::TASK`), so a press merges with no round trip to learn which. A note naming no task
+    has no buttons.
+  - A press is `Verb::TaskMerge`, the person's word, as the board's Merge is. With the app
+    running it goes through the workspace's server link and settles the tap once answered; a
+    refusal is a toast in the server's words. With no window (an iOS press that launched or woke
+    the app) `verdict::answer_alone` sends it on a link of its own. A task merged already or
+    gone is said quietly in place of the note ("That work no longer waits to merge"); one that
+    did not reach the server keeps its Merge, to press again.
+  - Tests: `notify::pushed::tests::a_ready_note_merges_the_task_it_names` (slopty-platform),
+    `verdict::tests::a_merge_pressed_on_a_ready_note_merges_its_task` (slopty-app),
+    `workspace::tests::approvals::a_ready_notes_merge_merges_the_task_it_names` (slopty-ui).

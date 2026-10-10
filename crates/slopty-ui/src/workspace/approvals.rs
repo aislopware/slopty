@@ -233,6 +233,38 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// A ready note's "Merge": task `task` of `project` into its merge queue, the person's word,
+    /// through the server, which refuses a task merged already. What did not go is said in a
+    /// toast, in the server's words; the tap settles once the server has answered.
+    pub(in crate::workspace) fn merge_tapped(
+        &mut self,
+        project: slopty_proto::project::ProjectId,
+        task: slopty_proto::project::TaskId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(caller) = self.projects.caller.clone() else {
+            self.show_failure(super::projects::NOT_SENT.to_owned(), cx);
+            self.settle_taps(cx);
+            return;
+        };
+        tracing::info!(%project, %task, "a note's Merge sent");
+        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
+        cx.spawn(async move |this, cx| {
+            let merged = caller.call(Verb::TaskMerge { project, task }).await;
+            let _gone = this.update(cx, |this, cx| {
+                if let Outcome::Error { message, .. } = merged {
+                    tracing::info!(message, "a note's Merge was refused");
+                    this.show_failure(message, cx);
+                }
+                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
+                if !this.approvals.taps_waiting() {
+                    cx.emit(WorkspaceEvent::TapsSettled);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Answer each waiting verdict whose request is here now; let go of one whose worker's
     /// table came without it, or whose time ran out, saying so. Looks again when the next is
     /// due.

@@ -76,11 +76,13 @@ pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 /// sound with each flip.
 pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
-/// Whether `tap` is a note's "Allow", "Deny", pick or reply, which answers where the note is
-/// and may have woken the app in the background to do it.
+/// Whether `tap` is a note's "Allow", "Deny", pick, reply or "Merge", which answers where the
+/// note is and may have woken the app in the background to do it.
 #[must_use]
 pub fn answers(tap: &Tap) -> bool {
-    tap.action.as_deref() == Some(notify::REPLY) || notify::Pressed::of(tap).is_some()
+    tap.action.as_deref() == Some(notify::REPLY)
+        || notify::Pressed::of(tap).is_some()
+        || notify::merge_of(tap).is_some()
 }
 
 /// What a note's buttons answer of `card`, an open request: a yes or no's id, with no picks,
@@ -879,11 +881,15 @@ impl WorkspaceView {
     /// The human tapped a note: focus the tile it names and give it the keyboard. A note without
     /// a route (one another part of the app posted, tagged by its session) reveals that session.
     /// An agent with no tile here gets one. An approval note's "Allow" or "Deny" answers its
-    /// prompt and a reply goes to its agent, each leaving the workspace where it is; "Show" is a
-    /// tap.
+    /// prompt, a reply goes to its agent and a ready note's "Merge" merges the task it names,
+    /// each leaving the workspace where it is; "Show" is a tap.
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
         tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
+        if let Some((project, task)) = notify::merge_of(tap) {
+            self.merge_tapped(project, task, cx);
+            return;
+        }
         if tap.action.as_deref() == Some(notify::REPLY) {
             match (route, tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())) {
                 (Some(route), Some(text)) => self.reply_tapped(route, text.to_owned(), cx),

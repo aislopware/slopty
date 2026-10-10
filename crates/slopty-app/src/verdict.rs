@@ -1,5 +1,5 @@
-//! "Allow" and "Deny" on an approval note, and a reply typed on an agent's other notes,
-//! answered with no window.
+//! "Allow" and "Deny" on an approval note, a reply typed on an agent's other notes, and
+//! "Merge" on a note of work ready to merge, answered with no window.
 //!
 //! The press may have launched the iOS app in the background, or woken it from suspension
 //! before anything listens for taps.
@@ -9,8 +9,10 @@
 //! ([`slopty_platform::notify::answer_unheard`]) is answered here instead, through the server:
 //! a link of its own to the server the settings name, the thread's open requests read for the
 //! choice that allows or denies once, and that choice sent, as the workspace answers a note
-//! whose worker it is not linked to. The system is told the press is done once the answer is
-//! out or given up ([`slopty_platform::notify::taps_finished`]), within the time it grants.
+//! whose worker it is not linked to. "Merge" puts the task the note names in its project's merge
+//! queue (`Verb::TaskMerge`), the person's word. The system is told the press is done once the
+//! answer is out or given up ([`slopty_platform::notify::taps_finished`]), within the time it
+//! grants.
 //!
 //! An answer that did not land is said in a note in place of the one pressed ([`missed_note`]),
 //! so the person does not walk away believing it went: the machine was not reached, or the
@@ -21,7 +23,8 @@ use std::time::Duration;
 use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WorkerId};
 use slopty_platform::notify::{self, Note, Pressed, Tap, info};
-use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
+use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};
+use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::thread::{AskId, ThreadId};
 
 /// The most a background answer takes before it gives up: well inside the half minute iOS
@@ -51,12 +54,23 @@ pub enum Press {
         /// What the person typed.
         text: String,
     },
+    /// "Merge" on work ready to merge: the task the note names, into its project's merge
+    /// queue (`Verb::TaskMerge`).
+    Merge {
+        /// In which project.
+        project: ProjectId,
+        /// Which task.
+        task: TaskId,
+    },
 }
 
 /// What `tap` does: a verdict ([`verdict_of`]), or a reply with words in it to the thread
 /// the note names.
 #[must_use]
 pub fn press_of(tap: &Tap) -> Option<Press> {
+    if let Some((project, task)) = notify::merge_of(tap) {
+        return Some(Press::Merge { project, task });
+    }
     if tap.action.as_deref() == Some(notify::REPLY) {
         let text = tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())?;
         return Some(Press::Reply { of: thread_of(tap)?, text: text.to_owned() });
@@ -108,6 +122,22 @@ pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
             Outcome::Error { message, .. } => Answered::Failed(message),
             _ => Answered::Sent,
         },
+        Press::Merge { project, task } => {
+            merged(caller.call(Verb::TaskMerge { project, task }).await)
+        }
+    }
+}
+
+/// How a "Merge" went, from what the server answered: a task already merged, or no longer
+/// there, waits on nobody's merge; any other refusal did not land.
+fn merged(outcome: Outcome) -> Answered {
+    match outcome {
+        Outcome::Error {
+            code: ErrorCode::Invalid | ErrorCode::UnknownTask | ErrorCode::UnknownProject,
+            ..
+        } => Answered::Gone,
+        Outcome::Error { message, .. } => Answered::Failed(message),
+        _ => Answered::Sent,
     }
 }
 
@@ -138,6 +168,11 @@ pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
     }
 }
 
+/// What a note says when the work a background "Merge" names no longer waits on a merge.
+pub const NO_LONGER_READY: &str = "That work no longer waits to merge";
+/// Under it.
+pub const MERGED_ELSEWHERE: &str = "It was merged already, or its task is gone.";
+
 /// What a note says when a background answer prompt is no longer waiting.
 pub const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 /// Under it.
@@ -155,8 +190,15 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
     info.remove(info::ASK);
     info.retain(|key, _| !key.starts_with(notify::PICK));
     let note = Note { id: tap.id.clone(), info, ..Note::default() };
+    let merge = tap.action.as_deref() == Some(notify::MERGE);
     match answered {
         Answered::Sent => None,
+        Answered::Gone if merge => Some(Note {
+            title: NO_LONGER_READY.to_owned(),
+            body: MERGED_ELSEWHERE.to_owned(),
+            silent: true,
+            ..note
+        }),
         Answered::Gone => Some(Note {
             title: NO_LONGER_WAITING.to_owned(),
             body: ANSWERED_ELSEWHERE.to_owned(),
@@ -166,6 +208,7 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
         Answered::Failed(why) => {
             let (pressed, category) = match tap.action.as_deref() {
                 Some(notify::REPLY) => ("Your reply", Some(notify::REPLYING)),
+                Some(notify::MERGE) => ("Merge", Some(notify::MERGING)),
                 Some(notify::DENY) => ("Deny", None),
                 Some(action) if action.starts_with(notify::PICK) => ("Your answer", None),
                 _ => ("Allow", None),
@@ -177,7 +220,9 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
             tracing::info!(why, "a background answer failed");
             Some(Note {
                 title,
-                body: if category.is_some() {
+                body: if merge {
+                    format!("{pressed} was not sent. The work still waits.")
+                } else if category.is_some() {
                     format!("{pressed} was not sent.")
                 } else {
                     format!("{pressed} was not sent. The agent is still waiting.")
@@ -232,7 +277,8 @@ pub fn answer_unheard(tap: Tap) {
 pub fn answer_alone(tap: &Tap) -> Answered {
     let Some(press) = press_of(tap) else {
         return Answered::Failed(
-            "not an Allow, a Deny or a reply that names its thread".to_owned(),
+            "not an Allow, a Deny, a reply that names its thread, or a Merge that names its task"
+                .to_owned(),
         );
     };
     let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.network.server;
@@ -307,6 +353,34 @@ mod tests {
             None
         );
         assert_eq!(verdict_of(&tap(notify::ALLOW, &[(info::THREAD, thread.to_string())])), None);
+    }
+
+    /// "Merge" on a ready note merges the task it names, through the server: a task merged
+    /// already or gone waits on nobody, and is said so quietly; a refusal that did not land
+    /// keeps the button to press again; one that went says nothing.
+    #[test]
+    fn a_merge_pressed_on_a_ready_note_merges_its_task() {
+        let pressed = tap(
+            notify::MERGE,
+            &[(info::PROJECT, "store".to_owned()), (info::TASK, "4".to_owned())],
+        );
+        let project = ProjectId::new("store").expect("a name");
+        assert_eq!(press_of(&pressed), Some(Press::Merge { project, task: TaskId(4) }));
+        assert_eq!(press_of(&tap(notify::MERGE, &[(info::TASK, "4".to_owned())])), None);
+
+        let refused = |code| Outcome::Error { code, message: "no".to_owned() };
+        assert_eq!(merged(refused(ErrorCode::Invalid)), Answered::Gone, "merged already");
+        assert_eq!(merged(refused(ErrorCode::UnknownTask)), Answered::Gone);
+        assert_eq!(merged(refused(ErrorCode::Failed)), Answered::Failed("no".to_owned()));
+
+        assert_eq!(missed_note(&pressed, &Answered::Sent, None), None);
+        let gone = missed_note(&pressed, &Answered::Gone, None).expect("said");
+        assert_eq!((gone.title.as_str(), gone.silent), (NO_LONGER_READY, true));
+        let failed = Answered::Failed("no answer in time".to_owned());
+        let again = missed_note(&pressed, &failed, Some("studio")).expect("said");
+        assert_eq!(again.body, "Merge was not sent. The work still waits.");
+        assert_eq!(again.category, Some(notify::MERGING), "to press again");
+        assert_eq!(again.info.get(info::TASK), Some(&"4".to_owned()), "naming the same task");
     }
 
     /// A background answer that did not land is said in place of the pressed note, by the
