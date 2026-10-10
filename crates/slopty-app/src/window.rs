@@ -191,6 +191,13 @@ pub(crate) fn open(
             ws.view.update(cx, |_v, cx| WorkspaceView::accept_dropped_files(window, cx));
             let handle = ws.view.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
+            // A phone opens again on its home: what waits on the person, before any tile. The
+            // first run opens on the first shell, which is what the person just asked for.
+            ws.view.update(cx, |v, cx| {
+                if v.relaunched() {
+                    v.show_home(window, cx);
+                }
+            });
         });
     })?;
     Ok(window)

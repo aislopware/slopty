@@ -757,9 +757,9 @@ impl WorkspaceView {
                 } else {
                     Vec::new()
                 };
-                // A Mac opens the palette by its keys and its menu bar; a phone, with neither,
-                // by this row.
-                if phone {
+                // A Mac opens the palette by its keys and its menu bar; a phone or an iPad,
+                // with neither, by this row.
+                if phone || self.theme.density == slopty_theme::Density::TOUCH {
                     entries.push(action("Command palette", &OpenCommands, |this, w, cx| {
                         this.open_commands(&OpenCommands, w, cx);
                     }));
@@ -904,8 +904,7 @@ impl WorkspaceView {
 
 /// A phone's title's type: an iOS inline navigation title, the size of the task title's role
 /// (17 pt on touch) in the strong weight, so it stands a step above the rows beside it by weight
-/// and not by size. The panel title's 20 pt was a large title squeezed into a 44 pt bar. The
-/// drawer's title takes it too.
+/// and not by size. The panel title's 20 pt was a large title squeezed into a 44 pt bar.
 pub(super) fn phone_title_role(theme: &slopty_theme::Theme) -> slopty_theme::TypeRole {
     slopty_theme::TypeRole {
         weight: slopty_theme::Typography::STRONG_WEIGHT,

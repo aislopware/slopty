@@ -266,7 +266,7 @@ mod tests {
 
     /// A trackpad's pointer touches go as mouse buttons: a primary click on the first of two
     /// panes gives it the keyboard, and a secondary click (a two-finger click) on the pane's
-    /// tab opens the tile's menu where it landed, or on a phone, whose pane has no tab, on the
+    /// header opens the tile's menu where it landed, or on a phone, whose pane has no tab, on the
     /// shell's text its own menu; Esc closes it.
     /// The pointer takes the cursor of what it is over: a beam over text.
     #[tokio::test]
@@ -296,8 +296,11 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let tab = focused.a11y_node("Tab", Some("Terminal"));
-            middle(tab.unwrap_or_else(|| panic!("its tab: {:#?}", focused.a11y)).bounds)
+            // Its pane's header, spoken as its kind and its title; the second is "Terminal 2".
+            let header = focused.a11y.iter().find(|n| {
+                n.role == "Heading" && n.label.as_deref().is_some_and(|l| l.ends_with(" Terminal"))
+            });
+            middle(header.unwrap_or_else(|| panic!("its header: {:#?}", focused.a11y)).bounds)
         } else {
             // A phone's pane has no tab: the shell's own menu opens on its rows, clear of a
             // notice at the pane's top.

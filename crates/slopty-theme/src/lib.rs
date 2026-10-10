@@ -840,13 +840,6 @@ pub mod alpha {
     pub const RING: f32 = 0.3;
     /// The window under a modal, in both variants: `MonoCode`'s `bg-black/40`.
     pub const SCRIM: f32 = 0.40;
-    /// The work under a dark floating sidebar (a phone's drawer): about half a modal's.
-    ///
-    /// The sidebar is a way through the work, not a question over it, as iOS dims only lightly
-    /// under the sidebar it floats over a compact window.
-    pub const SCRIM_ASIDE: f32 = 0.22;
-    /// The work under a light floating sidebar.
-    pub const SCRIM_ASIDE_ON_PAPER: f32 = 0.10;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
     /// An unlit dot of the mark on a dark surface (the brand's ink plate).
@@ -1466,8 +1459,6 @@ pub struct Elevation {
     pub shade: Rgb,
     /// How much the scrim under a modal dims the window.
     pub scrim: f32,
-    /// How much the scrim under a floating sidebar dims the window: lighter than a modal's.
-    pub aside: f32,
     /// The shadow under a menu, a popover, the palette or a toast, tightest first: Zed's
     /// elevated surface.
     pub float: [Shadow; 2],
@@ -1482,7 +1473,6 @@ impl Elevation {
     pub const DARK: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
-        aside: alpha::SCRIM_ASIDE,
         float: [Self::layer(1.0, 0.0, 0.06), Self::layer(2.0, 3.0, 0.12)],
         dialog: [
             Self::layer(1.0, 0.0, 0.12),
@@ -1496,7 +1486,6 @@ impl Elevation {
     pub const LIGHT: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
-        aside: alpha::SCRIM_ASIDE_ON_PAPER,
         float: [Self::layer(1.0, 0.0, 0.03), Self::layer(2.0, 3.0, 0.12)],
         dialog: [
             Self::layer(1.0, 0.0, 0.04),

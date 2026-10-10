@@ -747,43 +747,40 @@ fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
     assert_eq!(age.as_deref(), Some("2m"), "from its rest: {lines:#?}");
 }
 
-/// A phone's drawer floats as iOS 26's sidebar does: clear of the window's leading and bottom
-/// edges by the small step and of the status bar by the same, its search field its first row,
-/// with no large title and no row of window controls above it, over a scrim lighter than a
-/// modal's.
+/// A phone's home is the whole screen: the panel meets every edge of the window, its search
+/// field its first row, with no large title, no row of window controls and no scrim, and what
+/// waits on the person is the first thing listed under it.
 #[gpui::test]
-fn a_phone_drawer_floats_clear_of_the_edges(cx: &mut TestAppContext) {
+fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let session = SessionId::new();
+    let _tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     let (w, h) = (px(390.0), px(844.0));
     cx.simulate_resize(size(w, h));
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-b");
+    view.update_in(cx, |v, window, cx| v.show_home(window, cx));
     cx.run_until_parked();
     let theme = Theme::default();
-    let step = px(theme.spacing.sm);
-    let panel = cx.debug_bounds("navigator").expect("the drawer is out");
+    let panel = cx.debug_bounds("navigator").expect("the home is out");
     let near = |a: Pixels, b: Pixels| (a - b).abs() < px(0.5);
-    assert!(near(panel.left(), step), "clear of the leading edge: {panel:?}");
-    assert!(near(panel.top(), step), "clear of the top (no status bar here): {panel:?}");
-    assert!(near(h - panel.bottom(), step), "clear of the bottom: {panel:?}");
-    assert!(w - panel.right() > step, "the panes still show past it: {panel:?}");
+    assert!(near(panel.left(), px(0.0)) && near(panel.top(), px(0.0)), "{panel:?}");
+    assert!(near(panel.right(), w) && near(panel.bottom(), h), "the whole screen: {panel:?}");
     assert!(!shown(cx, "nav-lights-row"), "no row of window controls");
     assert!(!shown(cx, "nav-workspace-title"), "no large title");
     let field = cx.debug_bounds("nav-filter-field").expect("the search field");
-    // The step in from the panel's hairline rim.
-    let below = field.top() - panel.top();
-    assert!(below >= step && below <= step + px(1.0), "its first row: {field:?} {panel:?}");
+    let needs = cx.debug_bounds("nav-needs-you").expect("what waits on the person");
+    assert!(field.top() < needs.top(), "the field first: {field:?} {needs:?}");
+    assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "its row");
+    let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the machine");
+    assert!(needs.top() < worker.top(), "before the machines: {needs:?} {worker:?}");
     let headed = tree(cx).into_iter().any(|n| n.is("Heading", Some("studio")));
     assert!(!headed, "the workspace's name is the bar's, not a heading here");
-    let (aside, modal) = (crate::kit::aside_scrim(&theme), crate::kit::scrim(&theme));
-    let painted = |cx: &mut VisualTestContext, dim: gpui::Hsla| {
-        let dim = gpui::Background::from(dim);
-        cx.update(|window, _| window.painted_quads().into_iter().any(|q| q.background == dim))
-    };
-    assert!(painted(cx, aside), "the lighter scrim");
-    assert!(!painted(cx, modal), "not a modal's");
+    let modal = gpui::Background::from(crate::kit::scrim(&theme));
+    let dimmed =
+        cx.update(|window, _| window.painted_quads().into_iter().any(|q| q.background == modal));
+    assert!(!dimmed, "nothing shows round it, so nothing is dimmed");
 }
 
 /// A shell whose directory is in `repo` on `branch`, as its worker reports it.

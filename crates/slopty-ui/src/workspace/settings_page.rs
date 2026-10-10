@@ -4,7 +4,7 @@
 //! page takes the panes' place under the title bar; the foot bar goes with the panes, as
 //! `MonoCode`'s usage footer does. While the navigator is docked its body becomes the form's
 //! section list (its lights row stays), so the sections sit where the projects were; anywhere
-//! else (hidden, over the panes, a phone's drawer) the navigator stays the navigator and the
+//! else (hidden, over the panes, a phone's home) the navigator stays the navigator and the
 //! page carries the list itself, or one column of every section on a narrow window.
 //!
 //! The page leaves by its own ways (Back, Esc, ⌘↩) and when the person turns to the work: an

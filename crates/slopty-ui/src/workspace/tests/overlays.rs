@@ -80,10 +80,10 @@ fn a_waiting_row_says_what_it_asks_and_since_when(cx: &mut TestAppContext) {
     );
 }
 
-/// On a phone the drawer and the palette never stack: opening the palette puts the drawer
-/// away, since whatever the palette goes to is under it.
+/// On a phone the home and the palette never stack: opening the palette puts the home away,
+/// since whatever the palette goes to is under it.
 #[gpui::test]
-fn opening_the_palette_puts_the_phone_drawer_away(cx: &mut TestAppContext) {
+fn opening_the_palette_puts_the_phone_home_away(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -91,7 +91,7 @@ fn opening_the_palette_puts_the_phone_drawer_away(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("navigator").is_some(), "the drawer is out");
+    assert!(cx.debug_bounds("navigator").is_some(), "the home is out");
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some());

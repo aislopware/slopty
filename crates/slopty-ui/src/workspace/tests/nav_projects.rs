@@ -78,6 +78,41 @@ fn a_projects_board_heads_its_group(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.board_shown(orchestrator)), "the board is shown");
 }
 
+/// Once the orchestrator has said where the goal stands, the board's row carries the first line
+/// of it under the tasks' words, so a phone's home shows each goal's line.
+#[gpui::test]
+fn a_boards_row_carries_where_its_goal_stands(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (worker, studio) = studio(&view, cx);
+    let orchestrator = SessionId::new();
+    let _tile = opens_in(&view, cx, &studio, orchestrator, studio.me, 1, Some("/w/board"));
+    declare(&view, cx, worker, orchestrator);
+    let one = cx.debug_bounds("nav-board-board").expect("the row");
+    assert!(cx.debug_bounds("nav-board-summary-board").is_none(), "nothing said yet");
+    let term = TermRef { worker, session: orchestrator };
+    let mut record = project("board", Some(term));
+    record.progress = Some(slopty_proto::project::Progress {
+        summary: "\nStore merged, wiring the board\nthen the goldens".to_owned(),
+        next: None,
+        done: false,
+        at_ms: WallMs::from_millis(1),
+    });
+    view.update_in(cx, |v, _w, cx| {
+        v.projects_part(snapshot(2, vec![status(record, vec![], vec![])]), cx);
+    });
+    cx.run_until_parked();
+    let two = cx.debug_bounds("nav-board-board").expect("the row");
+    let words = cx.debug_bounds("nav-board-words-board").expect("the tasks' words");
+    let line = cx.debug_bounds("nav-board-summary-board").expect("the goal's line");
+    assert!(two.size.height > one.size.height, "a second line: {one:?} {two:?}");
+    assert!(line.top() >= words.bottom() - px(0.5), "under the words: {words:?} {line:?}");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let label = "Board, No tasks yet, Store merged, wiring the board";
+    assert!(tree.iter().any(|n| n.is("Button", Some(label))), "its first line: {tree:#?}");
+}
+
 /// A project whose orchestrator has no tile here is still listed, its board row alone under
 /// its header; a click opens the orchestrator's terminal in a tile on its worker and shows the
 /// board there.
@@ -171,9 +206,9 @@ fn a_thread_with_no_tile_lists_under_its_project_and_opens_its_tile(cx: &mut Tes
     );
 }
 
-/// On a phone the drawer lists the projects, then the workers with what is in no project.
+/// On a phone the home lists the projects, then the workers with what is in no project.
 #[gpui::test]
-fn on_a_phone_the_drawer_lists_the_projects_then_the_workers(cx: &mut TestAppContext) {
+fn on_a_phone_the_home_lists_the_projects_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (_, atlas) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
@@ -182,7 +217,7 @@ fn on_a_phone_the_drawer_lists_the_projects_then_the_workers(cx: &mut TestAppCon
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("navigator").is_some(), "the drawer is out");
+    assert!(cx.debug_bounds("navigator").is_some(), "the home is out");
     let group = view
         .read_with(cx, |v, _| v.project_groups().group_of(atlas).map(|g| g.key.clone()))
         .expect("atlas's group");

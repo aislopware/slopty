@@ -67,7 +67,7 @@ fn the_navigator_docks_only_where_the_panes_keep_their_room() {
     assert_eq!(mode(1210.0, 248.0, 700.0, true), Mode::Docked, "an 11-inch iPad in landscape");
     assert_eq!(mode(1032.0, 248.0, 700.0, true), Mode::Overlay, "a 13-inch iPad upright");
     assert_eq!(mode(1032.0, 248.0, 700.0, false), Mode::Docked, "a Mac window as wide");
-    assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Drawer, "a phone");
+    assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Home, "a phone");
 }
 
 /// A window too narrow to dock the navigator folds it to the rail rather than to nothing, as
@@ -584,7 +584,7 @@ const NARROW: f32 = 500.0;
 
 /// The bars and the navigator fit the workspace's own width, not the window's: laid out in
 /// 500 points of a 1200-point window, "…" stays inside the workspace's edge, and the navigator
-/// is a phone's drawer that fits in it.
+/// is a phone's home that fills it and no more.
 #[gpui::test]
 fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -617,9 +617,9 @@ fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("navigator-away").is_some(), "a phone's drawer, not docked");
-    let drawer = cx.debug_bounds("navigator").expect("drawn");
-    assert!(f32::from(drawer.right()) < NARROW, "the drawer fits: {drawer:?}");
+    assert!(cx.debug_bounds("navigator-away").is_some(), "a phone's home, not docked");
+    let home = cx.debug_bounds("navigator").expect("drawn");
+    assert!((f32::from(home.right()) - NARROW).abs() < 0.5, "the home fits: {home:?}");
 }
 
 /// A worker's round trip shows only when it is slow enough to matter, on the row's right edge.

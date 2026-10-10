@@ -2450,18 +2450,17 @@ impl WorkspaceView {
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
+        use gpui::prelude::FluentBuilder as _;
         use gpui::{
             Animation, AnimationExt as _, InteractiveElement as _, IntoElement as _, MouseButton,
             ParentElement as _, Styled as _, px,
         };
         let safe = window.insets().effective();
-        // A phone's drawer floats as iOS 26's sidebar does: inset from the safe area's top and
-        // leading edges and from the window's bottom, its corners rounded, over a lighter scrim.
+        // A phone's home is the whole screen, over the frame, with nothing showing round it.
         // Laid over a wider frame, the panel meets the window's edges and runs under the
         // leading safe area, which its rows clear.
-        let floats = mode == navigator::Mode::Drawer;
-        let inset = px(self.theme.spacing.sm);
-        let width = if floats {
+        let home = mode == navigator::Mode::Home;
+        let width = if home {
             px(self.navigator_panel_width(mode, window))
         } else {
             px(self.navigator_panel_width(mode, window)) + safe.left
@@ -2474,12 +2473,8 @@ impl WorkspaceView {
             Animation::new(slopty_theme::Motion::DEFAULT.sheet).with_easing(crate::kit::drawer())
         };
         let moves = self.animate && crate::kit::motion(cx);
-        let dim = if floats {
-            crate::kit::aside_scrim(&self.theme)
-        } else {
-            crate::kit::scrim(&self.theme)
-        };
-        let scrim = gpui::div().absolute().inset_0().bg(dim);
+        let dim = crate::kit::scrim(&self.theme);
+        let scrim = gpui::div().absolute().inset_0().when(!home, |el| el.bg(dim));
         let scrim = if moves {
             scrim
                 .with_animation("navigator-scrim", sheet(), gpui::Styled::opacity)
@@ -2487,11 +2482,7 @@ impl WorkspaceView {
         } else {
             scrim.into_any_element()
         };
-        let (top, bottom, left) = if floats {
-            (safe.top + inset, inset, safe.left + inset)
-        } else {
-            (px(0.0), px(0.0), px(0.0))
-        };
+        let (top, bottom, left) = (px(0.0), px(0.0), px(0.0));
         let drawn = gpui::div()
             .debug_selector(|| "navigator-sheet".to_owned())
             .absolute()
@@ -2531,7 +2522,7 @@ impl WorkspaceView {
             // phone or an iPad, the panel is drawn after everything and unclipped, down to the
             // window's bottom edge, so it and its scrim cover the band; the workspace starts
             // at the window's top.
-            navigator::Mode::Drawer | navigator::Mode::Overlay => {
+            navigator::Mode::Home | navigator::Mode::Overlay => {
                 gpui::deferred(away.bottom_auto().h(window.viewport_size().height))
                     .into_any_element()
             }

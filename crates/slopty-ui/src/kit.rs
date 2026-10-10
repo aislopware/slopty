@@ -716,13 +716,6 @@ pub fn scrim(theme: &Theme) -> Hsla {
     hsla_alpha(theme.elevation.shade, theme.elevation.scrim)
 }
 
-/// The scrim under a floating sidebar (a phone's drawer): the same shade, lighter than a
-/// modal's, since the work under it is one tap away.
-#[must_use]
-pub fn aside_scrim(theme: &Theme) -> Hsla {
-    hsla_alpha(theme.elevation.shade, theme.elevation.aside)
-}
-
 /// Where every overlay's top sits, as a share of the window's height below its safe area.
 ///
 /// The palette, the pickers, the settings and the add-worker dialog open at one place, so
@@ -1929,10 +1922,10 @@ mod tests {
         if named || line.contains(".shadow(") {
             return Some("a shadow of its own, not `kit::elevate` or `kit::dialog`");
         }
-        let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.aside", "elevation.shade"];
+        let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.shade"];
         dim.iter()
             .any(|token| line.contains(token))
-            .then_some("a scrim of its own, not `kit::scrim` or `kit::aside_scrim`")
+            .then_some("a scrim of its own, not `kit::scrim`")
     }
 
     #[test]
@@ -3083,7 +3076,6 @@ mod tests {
             let deepest = dialog.iter().map(|l| l.blur_radius).fold(px(0.0), gpui::Pixels::max);
             assert!(deepest > layers[1].blur_radius, "{variant:?}: a dialog stands above");
             assert!((scrim(&theme).a - theme.elevation.scrim).abs() < f32::EPSILON);
-            assert!(aside_scrim(&theme).a < scrim(&theme).a, "{variant:?}: a sidebar dims less");
         }
     }
 

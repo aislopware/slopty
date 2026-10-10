@@ -685,6 +685,35 @@ fn the_notices_the_bar_has_no_room_for_go_behind_a_count_that_opens_them(cx: &mu
     assert!(cx.debug_bounds("notices-more").is_none(), "room again, the count goes");
 }
 
+/// An iPad has neither a hardware keyboard nor a menu bar to open the palette by, as a phone
+/// has not, so its "…" offers "Command palette" too; a Mac's does not.
+#[gpui::test]
+fn a_touch_screens_more_menu_opens_the_palette(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shells = three_shells(&view, cx, &studio);
+    cx.simulate_resize(size(px(1210.0), px(834.0)));
+    cx.run_until_parked();
+    let rows = |cx: &mut VisualTestContext| -> Vec<String> {
+        click_at(cx, "more");
+        let rows = tree(cx).into_iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label);
+        let rows = rows.collect();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        rows
+    };
+    let mac = rows(cx);
+    assert!(!mac.iter().any(|r| r == "Command palette"), "a Mac has its keys: {mac:?}");
+    view.update(cx, |v, cx| {
+        let mut theme = v.theme().clone();
+        theme.density = slopty_theme::Density::TOUCH;
+        v.set_theme(theme, cx);
+    });
+    cx.run_until_parked();
+    let pad = rows(cx);
+    assert!(pad.iter().any(|r| r == "Command palette"), "an iPad's: {pad:?}");
+}
+
 /// On a phone under the touch density every button is a finger's 44 pt, and the title bar
 /// still holds them all: taller to fit them, nothing past its right edge.
 #[gpui::test]

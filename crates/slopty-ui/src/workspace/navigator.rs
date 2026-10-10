@@ -50,9 +50,10 @@
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
 //! at 248; ⌘B shows or hides it, and both are kept with the device's layout. Hidden there, a
 //! 40 pt rail keeps one server glyph per worker, with what its tiles add up to, so what wants
-//! the human stays on screen. On an iPad it opens over the frame and a scrim, and on a phone it
-//! slides in as a drawer over the scrim, down through the home indicator's band; either closes
-//! once a row is chosen.
+//! the human stays on screen. On an iPad it opens over the frame and a scrim, closing once a row
+//! is chosen. On a phone it is the home: the whole screen, which the app opens on, so what waits
+//! on the person, each goal's line and the notes and server lines are what a phone shows first,
+//! never inside a closed drawer. A row goes to its tile; the bar's navigator button comes back.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, only a
 //! change to the workspace or its own clock does (`WorkspaceView::render_frame`).
@@ -194,8 +195,8 @@ pub(super) enum Mode {
     /// Over the frame, which keeps its width: an iPad, or a window too narrow to give the
     /// room without leaving the panes a phone's width.
     Overlay,
-    /// Over the frame and a scrim, from the left edge: a phone.
-    Drawer,
+    /// The whole screen, over the frame: a phone's home.
+    Home,
 }
 
 /// The width a touch screen keeps for the panes beside a docked navigator: an iPad's regular
@@ -204,13 +205,13 @@ pub(super) enum Mode {
 pub(super) const TOUCH_DOCK_PANES: f32 = 900.0;
 
 /// How the navigator sits in a window `window_w` wide, `width` its own width. A window that
-/// is a phone's gets the drawer; a window that would leave the panes a phone's width, or a
+/// is a phone's gets the home; a window that would leave the panes a phone's width, or a
 /// touch screen (an iPad) that would leave them less than [`TOUCH_DOCK_PANES`], gets the overlay;
 /// anything else docks it.
 pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> Mode {
     let panes = window_w - width;
     if window_w < phone_below {
-        Mode::Drawer
+        Mode::Home
     } else if panes < phone_below || (touch && panes < TOUCH_DOCK_PANES) {
         Mode::Overlay
     } else {
@@ -912,6 +913,8 @@ struct NavBoard {
     status: Option<Status>,
     /// How many tasks wait on the person and how many are merged, as quiet words.
     words: String,
+    /// Where the goal stands, its orchestrator's last summary's first line: a second line.
+    summary: Option<String>,
 }
 
 /// A thread at work with no tile here, set back under its project: ↩ opens its tile.
@@ -1049,10 +1052,10 @@ impl NavRow {
             Self::Tile(t) => (!t.two_lines(), false),
             Self::Worker(h) => (h.warning.is_some(), h.gap),
             Self::Group(g) => (false, g.gap),
+            Self::Board(b) => (b.summary.is_some(), false),
             Self::Heading { .. }
             | Self::Agent(_)
             | Self::Ready(_)
-            | Self::Board(_)
             | Self::Thread(_)
             | Self::Earlier(..)
             | Self::EarlierMore(_)
@@ -1109,7 +1112,7 @@ impl WorkspaceView {
                 self.nav.open = false;
                 self.layout_touched(cx);
             }
-            Mode::Overlay | Mode::Drawer => self.nav.open = !self.nav.open,
+            Mode::Overlay | Mode::Home => self.nav.open = !self.nav.open,
         }
         // Hidden while its filter held the keyboard, the keyboard would stay with a field
         // that is no longer drawn, where no key reaches the workspace.
@@ -1134,7 +1137,7 @@ impl WorkspaceView {
                     self.layout_touched(cx);
                 }
             }
-            Mode::Overlay | Mode::Drawer => self.nav.open = true,
+            Mode::Overlay | Mode::Home => self.nav.open = true,
         }
         self.reveal_navigator_filter(cx);
     }
@@ -1157,10 +1160,10 @@ impl WorkspaceView {
         })
     }
 
-    /// Whether the filter's row shows: in a drawer always, else while asked for or while it
+    /// Whether the filter's row shows: on a phone's home always, else while asked for or while it
     /// holds a query or a scope.
     fn navigator_filter_shown(&self) -> bool {
-        self.nav.drawn == Some(Mode::Drawer)
+        self.nav.drawn == Some(Mode::Home)
             || self.nav.filter.shown
             || !self.nav.filter.query.is_empty()
             || self.nav.scope.is_some()
@@ -1212,7 +1215,7 @@ impl WorkspaceView {
                     self.layout_touched(cx);
                 }
             }
-            Mode::Overlay | Mode::Drawer => self.nav.open = true,
+            Mode::Overlay | Mode::Home => self.nav.open = true,
         }
         if !self.nav.filter.query.is_empty()
             && let Some(input) = self.nav.filter.input.clone()
@@ -1358,7 +1361,7 @@ impl WorkspaceView {
         !self.workers.is_empty()
             && match mode {
                 Mode::Docked => self.navigator().shown,
-                Mode::Overlay | Mode::Drawer => self.nav.open,
+                Mode::Overlay | Mode::Home => self.nav.open,
             }
     }
 
@@ -1372,7 +1375,7 @@ impl WorkspaceView {
             && match mode {
                 Mode::Docked => !visible,
                 Mode::Overlay => true,
-                Mode::Drawer => false,
+                Mode::Home => false,
             };
         if !visible {
             self.nav.resize = None;
@@ -1386,13 +1389,10 @@ impl WorkspaceView {
         self.navigator().width
     }
 
-    /// The panel's width in `mode`: a phone's drawer leaves a margin of the panes showing.
+    /// The panel's width in `mode`: a phone's home is the window's.
     pub(super) fn navigator_panel_width(&self, mode: Mode, window: &Window) -> f32 {
         match mode {
-            Mode::Drawer => {
-                let room = self.theme.spacing.xl.mul_add(-2.0, self.width(window));
-                self.navigator_width().min(room)
-            }
+            Mode::Home => self.width(window),
             Mode::Docked | Mode::Overlay => self.navigator_width(),
         }
     }
@@ -1415,6 +1415,15 @@ impl WorkspaceView {
     pub(super) fn go_to_step(&mut self, step: Step, cx: &mut Context<Self>) {
         self.navigated();
         self.reveal_step(step, cx);
+    }
+
+    /// A phone's home, opened: where the app opens on a phone, and where its bar's navigator
+    /// button goes. Elsewhere the navigator is as it was.
+    pub fn show_home(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.navigator_mode(window) == Mode::Home {
+            self.nav.open = true;
+            cx.notify();
+        }
     }
 
     /// Show project `ix`, on the tab it was left on.
@@ -2010,7 +2019,12 @@ impl WorkspaceView {
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(META_SEPARATOR);
-                Some((key, NavBoard { project: project.id.clone(), status, words }))
+                let summary = project
+                    .progress
+                    .as_ref()
+                    .and_then(|p| p.summary.lines().map(str::trim).find(|l| !l.is_empty()))
+                    .map(str::to_owned);
+                Some((key, NavBoard { project: project.id.clone(), status, words, summary }))
             })
             .collect()
     }
@@ -2402,14 +2416,14 @@ impl WorkspaceView {
     /// The lights row is the title bar's height, with no line under it, and holds the traffic
     /// lights on a Mac and, pushed to its end, back and forward through the tabs visited and the
     /// navigator's toggle (`MonoCode`'s `TabVisitNav`): while the navigator is docked the title
-    /// bar holds the tabs alone. A phone's drawer has no such row: it floats below the status
-    /// bar, its filter its first row, as iOS 26's floating sidebar opens on its search field.
+    /// bar holds the tabs alone. A phone's home has no such row: below the status bar its filter
+    /// is its first row, as an iOS list opens on its search field.
     ///
     /// The Search row is a box a row tall in the border's ring: a press, ⌘F with the keyboard
     /// in the navigator, ⌘⇧E, or typing while a row holds the keyboard puts the filter in its
     /// place with the keyboard, settling in over [`kit::Pace::Settle`], at once under Reduce
-    /// Motion. Esc, or the keyboard leaving it empty, gives the row back. A drawer keeps the
-    /// filter always. The New agent row under it starts "New agent…".
+    /// Motion. Esc, or the keyboard leaving it empty, gives the row back. A phone's home keeps
+    /// the filter always. The New agent row under it starts "New agent…".
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2422,7 +2436,7 @@ impl WorkspaceView {
         let docked = !self.workers.is_empty() && self.nav.drawn == Some(Mode::Docked);
         let toggle = docked.then(|| self.navigator_toggle(cx));
         let arrows = (docked && !self.phone).then(|| self.visit_arrows(cx));
-        let drawer = self.nav.drawn == Some(Mode::Drawer);
+        let home = self.nav.drawn == Some(Mode::Home);
         // Back, forward and the toggle, pushed to the lights row's end.
         let ends = div()
             .ml_auto()
@@ -2497,11 +2511,11 @@ impl WorkspaceView {
         let row = div()
             .flex_none()
             .px(px(spacing.sm))
-            .when(drawer, |row| row.pt(px(spacing.sm)))
+            .when(home, |row| row.pt(px(spacing.sm)))
             .child(field);
         let reveals = self.nav.filter.reveals;
         let filter = self.navigator_filter_shown().then(|| {
-            if drawer || reveals == 0 || !kit::motion(cx) {
+            if home || reveals == 0 || !kit::motion(cx) {
                 return row.into_any_element();
             }
             // Only its opacity moves, so it takes the pointer and the keys from its first
@@ -2510,7 +2524,7 @@ impl WorkspaceView {
             row.with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
                 .into_any_element()
         });
-        let actions = (!drawer && !self.workers.is_empty()).then(|| {
+        let actions = (!home && !self.workers.is_empty()).then(|| {
             let bindings = super::key_bindings();
             let search = filter.is_none().then(|| {
                 let keys = crate::palette::keys_for(&super::actions::FilterNavigator, &bindings);
@@ -2549,7 +2563,7 @@ impl WorkspaceView {
                 .children(search)
                 .child(new_agent)
         });
-        let lights = (!drawer).then(|| {
+        let lights = (!home).then(|| {
             div()
                 .debug_selector(|| "nav-lights-row".to_owned())
                 .h(px(titlebar_height(theme)) + safe.top)
@@ -2835,12 +2849,12 @@ impl WorkspaceView {
             .occlude()
             .size_full()
             // Laid over the frame it runs under the leading safe area and through the home
-            // indicator's band, and its rows clear both. A phone's drawer floats inside the
-            // safe area's leading edge, its bottom a step above the window's.
+            // indicator's band, and its rows clear both. A phone's home fills the screen, its
+            // rows clear of the status bar and the home indicator.
             .map(|panel| match mode {
                 Mode::Docked => panel,
                 Mode::Overlay => panel.pl(safe.left).pb(safe.bottom),
-                Mode::Drawer => panel.pb((safe.bottom - px(theme.spacing.sm)).max(px(0.0))),
+                Mode::Home => panel.pt(safe.top).pl(safe.left).pr(safe.right).pb(safe.bottom),
             })
             .flex()
             .flex_col()
@@ -2849,12 +2863,11 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. Over a wider frame it
             // meets the window's top, left and bottom edges, so only its trailing edge carries
-            // the hairline; a phone's drawer stands clear of every edge, rimmed all round and
-            // rounded as a sheet is.
+            // the hairline; a phone's home is the screen itself, on the ground.
             .map(|panel| match mode {
                 Mode::Docked => panel,
                 Mode::Overlay => kit::elevate(panel, theme).border_0().border_r(kit::HAIR),
-                Mode::Drawer => kit::elevate(panel, theme).rounded(px(theme.radii.lg)),
+                Mode::Home => panel.bg(hsla(theme.surfaces.ground)),
             })
             // Esc in the filter empties it, hides it and hands the keyboard back; with it empty,
             // Esc lets go of the scope.
@@ -3785,13 +3798,18 @@ impl WorkspaceView {
     }
 
     /// A declared project's board, first under its header and set in as its tiles are: the
-    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand.
-    /// ↩ or a click shows the board in its orchestrator's tile.
+    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand,
+    /// with where the goal stands, as its orchestrator last said, on a second line. ↩ or a click
+    /// shows the board in its orchestrator's tile.
     fn board_row(&self, board: &NavBoard, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = board.project.as_str().to_owned();
-        let label = SharedString::from(format!("{BOARD}, {}", board.words));
+        let label = [Some(BOARD), Some(board.words.as_str()), board.summary.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
         let state = board.status.filter(|m| *m != Status::Idle);
         // The board wears its project's own colour, as the project's head above it does.
         let project_key = GroupKey::new(fact::PROJECT, board.project.as_str());
@@ -3800,9 +3818,10 @@ impl WorkspaceView {
             crate::palette::lead_mark(theme, Symbol::RectangleSplit3x1, hsla(ink), LEAD_SLOT);
         let words_id = id.clone();
         let project = board.project.clone();
-        row(theme, kit::Row::One, format!("nav-board-{id}"), label, false)
-            .pl(px(theme.spacing.sm + nest_step(theme)))
-            .child(lead)
+        let line1 = div()
+            .flex()
+            .items_center()
+            .min_w_0()
             // "Board" is one short word and stays whole; the words beside it give way instead.
             .child(title(BOARD, hsla(s.text_secondary)).flex_none())
             .child(
@@ -3816,8 +3835,35 @@ impl WorkspaceView {
                     .child(board.words.clone())
                     .debug_selector(move || format!("nav-board-words-{words_id}")),
             )
-            .children(state.map(|st| status_mark(theme, Some(st))))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
+            .children(state.map(|st| status_mark(theme, Some(st))));
+        let lines = if board.summary.is_some() { kit::Row::Two } else { kit::Row::One };
+        let el = row(theme, lines, format!("nav-board-{id}"), label.into(), false)
+            .pl(px(theme.spacing.sm + nest_step(theme)));
+        let el = match &board.summary {
+            None => el.child(lead).child(line1.flex_1()),
+            Some(summary) => {
+                let (first, second) = line_heights(theme);
+                let summary_id = id;
+                let line2 = meta(div(), theme)
+                    .debug_selector(move || format!("nav-board-summary-{summary_id}"))
+                    .h(px(second))
+                    .line_height(px(second))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(summary.clone());
+                el.items_start().pt(px(theme.spacing.xs)).child(lead).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(line1.h(px(first)).line_height(px(first)))
+                        .child(line2),
+                )
+            }
+        };
+        el.on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
 

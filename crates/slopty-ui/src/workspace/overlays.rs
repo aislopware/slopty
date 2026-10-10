@@ -430,8 +430,8 @@ impl WorkspaceView {
         self.menu = None;
         // A palette opens on an empty field: no ask of the last one's is waited on or shown.
         self.faces.search = super::faces::ThreadSearch::default();
-        // The palette is where the human went next: a drawer or an overlaid navigator over the
-        // panes would only sit between it and what it goes to.
+        // The palette is where the human went next: a phone's home or an overlaid navigator
+        // over the panes would only sit between it and what it goes to.
         self.nav.open = false;
         let chords = self.hardware_keyboard;
         let phone_below = self.layout.config().phone_below;

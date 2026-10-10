@@ -9935,7 +9935,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`context_worker`). A phone's "…" still leads with the new tiles, since it has no menu
     bar.
   - **The "…" menu** holds Settings and Add a machine. Stream stats stays in the palette and
-    the View menu; "Command palette" stays in the "…" menu on a phone only.
+    the View menu; "Command palette" stays in the "…" menu on a touch screen only, a phone's
+    or an iPad's, since neither has a menu bar nor, mostly, a keyboard (amended 2026-10-11:
+    the phone-only row had left an iPad no way to the palette;
+    `workspace::tests::chrome::a_touch_screens_more_menu_opens_the_palette`).
   - **⌃⌘⇧P is kept**, unlike the study's list: inside a remote window ⌘⇧P belongs to the
     remote app, so it is the only way to the palette there.
   - **"Close other tabs"** in a pane tab's menu reads "Close other tiles", since it closes the
@@ -10174,20 +10177,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`agent_start::runs_in_terminal`), the last started first; machines go last-started first,
     then the focus's, then by name. With no such agent anywhere it says why and opens nothing.
   - **Under "More".** The agent and the machine, each a segmented track only when there is a
-    choice; the target branch, blank meaning the focused checkout's branch, else the
-    orchestrator's, else `main`; the verifier, guessed from the repository's run scripts the
-    machine has read (the first named gate, check, verify, test or ci); and the autonomy (Ask,
-    Edits, Own). Pushing starts off and is set on the board's head.
+    choice; the target branch, blank by default, which asks the server for a branch of the
+    project's own off the checkout (its hint says so); the verifier, guessed from the
+    repository's run scripts the machine has read (the first named gate, check, verify, test or
+    ci); and the autonomy (Ask, Edits, Own). Pushing starts off and is set on the board's head.
   - **Then.** Create starts the agent at once with nothing said. Once its tile is its terminal's,
     one `ProjectCreate` carries the goal, the autonomy, the target and the verifier, with that
     terminal as orchestrator. The project's title is the goal's first line cut at a word within
-    48 characters, its id the title slugged and cut at a word. Once the server agrees, the goal
-    goes to the orchestrator as the person's first message (`TaskTell` with no task), since the
-    server does not start the orchestrator on `Project.goal` itself; the board opens once the
-    mirror names that terminal.
+    48 characters, its id the title slugged and cut at a word. The server hands the goal to the
+    orchestrator as the person's first message (see `projects.md`, "The server hands over the
+    goal"), and the board opens once the mirror names that terminal.
   - **Deleted.** The "New project" steps (`For`, `StartOrchestrator`, `NewProjectOf`,
     `NewProjectOn`), the old sheet (`ProjectSheet`) and its refusals.
-  - Test: `workspace::tests::projects::a_new_goal_starts_its_orchestrator_and_hands_it_the_goal`.
+  - Test: `workspace::tests::projects::a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it`.
 
 - ✅ **What waits on the person is one list** (2026-10-11, the orchestrator-first study, item 14,
   first half). The bell counted Needs you and To review only: a turn stopped on a usage limit
@@ -10247,3 +10249,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the solid when no comment waits; it follows the board as the task moves.
   - Tests: `review::tests::a_task_s_review_sends_back_and_merges`,
     `workspace::tests::review_tile::a_task_s_review_is_its_thread_s_and_its_comments_go_back_through_the_project`.
+
+- ✅ **A phone opens on its home** (2026-10-11, the orchestrator-first study, item 17). On a
+  phone the navigator was a drawer floating over a lighter scrim, closed at launch, so what
+  waited on the person sat behind the bar's button while the screen showed one tile. Ruled:
+  - **The home is the whole screen.** On a window a phone's width the navigator is the home
+    (`navigator::Mode::Home`): the screen from edge to edge on the ground, its rows clear of
+    the status bar and the home indicator, with no rim, no rounding and nothing dimmed round
+    it, since nothing shows round it. The drawer, its inset and its lighter scrim
+    (`kit::aside_scrim`, `Elevation::aside`) are deleted.
+  - **The app opens on it.** A launch after the first opens the home with its window
+    (`show_home`), so a phone first shows *Needs you*, *Failed*, *Ready to merge* and *To
+    review*, then each project with its board and the machines. The first run opens on the
+    shell the person just connected for, since nothing can wait on them yet. A row goes to its
+    tile and puts the home away; the bar's navigator button brings it back. Elsewhere the
+    navigator opens as it was left.
+  - **Each goal's line.** Once its orchestrator has said where the goal stands, a board's row
+    carries the summary's first line under the tasks' words, so the home reads as where every
+    goal is.
+  - Tests: `workspace::tests::nav_rows::a_phone_home_is_the_whole_screen_with_what_waits_first`,
+    `workspace::tests::nav_projects::a_boards_row_carries_where_its_goal_stands`,
+    `workspace::tests::nav_list::the_phone_home_runs_through_the_home_indicator_band`.

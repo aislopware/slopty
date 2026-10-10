@@ -45,7 +45,7 @@ const SHARE: f32 = 0.6;
 /// `gpui::deferred(..).with_priority(layer.priority())`.
 ///
 /// Named once, so a notice cannot fall under a dialog, nor a menu opened from a popover under
-/// the popover, nor the phone's drawer over the palette. A panel that is part of the frame (the
+/// the popover, nor the phone's home over the palette. A panel that is part of the frame (the
 /// docked or drawn-out navigator) is drawn at the default priority, under all of them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Layer {

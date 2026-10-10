@@ -18,6 +18,8 @@ pub(super) struct Restore {
     pub faces: Vec<SavedFace>,
     /// The tiles shown in their own windows last run whose streams are not open yet.
     pub popouts: Vec<SavedPopout>,
+    /// An earlier run left a layout: this launch is not the first.
+    pub again: bool,
 }
 
 impl Restore {
@@ -27,6 +29,7 @@ impl Restore {
             window: saved.window.clone().filter(WindowFrame::sane),
             faces: saved.faces.clone(),
             popouts: saved.popouts.iter().filter(|p| p.frame.sane()).cloned().collect(),
+            again: true,
         })
     }
 }
@@ -37,6 +40,12 @@ impl WorkspaceView {
     #[must_use]
     pub const fn window_frame(&self) -> Option<&WindowFrame> {
         self.restore.window.as_ref()
+    }
+
+    /// Whether an earlier run left a layout, so this launch is not the first.
+    #[must_use]
+    pub const fn relaunched(&self) -> bool {
+        self.restore.again
     }
 
     /// The main window stands at `frame` now; saved with the layout.

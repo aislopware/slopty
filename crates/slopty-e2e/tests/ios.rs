@@ -291,9 +291,8 @@ mod tests {
         })
         .await
         .unwrap();
-        // The navigator from the title bar's toggle: on a phone a drawer over a scrim that
-        // leaves an edge of the panes, on an iPad a panel over them. The shell's row
-        // closes it with the shell focused.
+        // The navigator from the title bar's toggle: on a phone its home, the whole screen, on
+        // an iPad a panel over the panes. The shell's row closes it with the shell focused.
         tap(drv, "Button", "Navigator").await;
         let shown = drv
             .wait_for("the navigator", STEP, |d| {
@@ -302,11 +301,9 @@ mod tests {
             .await
             .unwrap();
         let [nav_x, _, nav_w, _] = shown.a11y_node("Navigation", Some("Navigator")).unwrap().bounds;
-        // A phone's drawer floats a small step in from the edge; an iPad's panel meets it.
-        assert!(
-            (-1.0..=9.0).contains(&nav_x) && nav_w < shown.window.width * 0.9,
-            "{nav_x} {nav_w}"
-        );
+        // Both meet the leading edge; a phone's home runs to the other one too.
+        let whole = (nav_w - shown.window.width).abs() < 1.0;
+        assert!((-1.0..=1.0).contains(&nav_x) && whole == (dev == "phone"), "{nav_x} {nav_w}");
         golden(drv, &dir, dev, "navigator", None).await;
         // A shell is titled by what it runs or where it stands, so its row is found by the
         // title its tile goes by. A phone draws the focused pane alone, here the note's, so the

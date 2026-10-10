@@ -1,19 +1,18 @@
 Window │ e2e-ios-worker
 Group │ Workspace
 Button │ Navigator
-Button │ Search
-Button │ New agent
 Button │ Back
 Button │ Forward
 Group │ Where
 Button │ e2e-ios-worker
 TabList
-Tab │ scratch
+Tab │ scratch, Terminal
 Button │ Close tab
-Button │ New
 Button │ Needs you
 Button │ More
 Navigation │ Projects
+Button │ Search
+Button │ New agent
 Button │ e2e-ios-worker
 Group │ Terminal
 Heading │ terminal Terminal
