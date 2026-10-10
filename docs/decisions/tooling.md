@@ -1482,3 +1482,24 @@ more full-window layer.
     timing tests of the main run (`threads-required = "num-test-threads"`) now have company.
   - **Kept if,** over the next ten gate runs, no new VideoToolbox TIMEOUT appears and no timing
     test fails in the main run. Otherwise it goes back to running after it.
+  - **Trial result (2026-10-11): it failed, and the cause was a wedge, not timing.** Of 17
+    worker jobs after the change, 3 had the guest's codec wedge, and 2 of those hung until the
+    job was cancelled (runs 38064911295, 38079171227). Before the change the same wedges ended as
+    a warning on a green job (`.research/ci-vt-hang-2026-10-11.md`). Linking VideoToolbox
+    attaches nothing; creating a session does. The main run's links warm a decoder at launch
+    (`slopty-client` `warm_up_decoder`), about 39 processes per worker shard, so a wedge landing
+    during the main run left three `slopty-files::domain` processes stuck exiting in the
+    kernel, holding every test slot.
+
+- **The main test run warms no decoder, and the VideoToolbox group runs one at a time**
+  (2026-10-11).
+  - **The change.** `test_lane` sets `SLOPTY_NO_DECODER_WARM_UP=1` on the main nextest run, so
+    only the VideoToolbox group opens codec sessions. `ci-videotoolbox` runs those one at a time
+    (`test-threads = 1`, 63 s serial beside a main run of three or four minutes) to learn
+    whether sessions side by side are what wedges the guest's codec.
+  - **Next.** Move the warm-up out of `WorkerLink::launch` into the app, so a File Provider
+    extension and the tests never open a decoder, and move any other session-making test into
+    the group (the report's fix 1). Then a watchdog that ends nextest once every remaining test
+    is stuck exiting (fix 2).
+  - **Kept if** 25 worker jobs in a row finish without a cancel, with at least two of them
+    wedged runs ending "⚠ videotoolbox … the runner's encoder stopped" and then "✓ nextest".
