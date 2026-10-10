@@ -117,6 +117,15 @@ pub(super) enum ToastKind {
         /// What happened.
         line: String,
     },
+    /// A Mac may not record its screen: what to do at its desk, and "Restart its worker",
+    /// which a running worker needs before it sees the grant. It stays until one is chosen,
+    /// since the grant is made at the other Mac first.
+    Grant {
+        /// The worker.
+        worker: slopty_client::layout::WorkerKey,
+        /// What is so and what to do.
+        line: String,
+    },
     /// A tile off screen came to need the person while the app is in front: "Go" goes to it. A
     /// pointer, never an answer: it carries no Allow, Deny or choice.
     Attention {
@@ -162,7 +171,10 @@ impl WorkspaceView {
         let seq = toast.seq;
         // One on its way out gives its place at once to the one coming in.
         toast.shown.retain(|shown| !shown.leaving);
-        let sticky = matches!(what, ToastKind::Failed(_) | ToastKind::OldUnsaved(_));
+        let sticky = matches!(
+            what,
+            ToastKind::Failed(_) | ToastKind::OldUnsaved(_) | ToastKind::Grant { .. }
+        );
         toast.shown.push(Shown { seq, what, at, leaving: false, held: false });
         // Past the most shown in its place, the oldest there goes, one that waits for an
         // answer only when nothing else is left to go.
@@ -320,6 +332,21 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Trashed { worker, back, line }, cx);
     }
 
+    /// Say `worker` may not record its screen, with the way to restart its worker once the
+    /// grant is made at its desk.
+    pub(super) fn show_grant(
+        &mut self,
+        worker: slopty_client::layout::WorkerKey,
+        line: String,
+        cx: &mut Context<Self>,
+    ) {
+        // One notice per machine: a second ask says the same.
+        self.drop_toasts(
+            |shown| matches!(shown.what, ToastKind::Grant { worker: w, .. } if w == worker),
+        );
+        self.show_toast(ToastKind::Grant { worker, line }, cx);
+    }
+
     /// The text of the newest notice up now, for tests and the self-test dump.
     #[must_use]
     pub fn toast_text(&self) -> Option<String> {
@@ -339,7 +366,7 @@ impl WorkspaceView {
                 Some(item) => format!("{} {what}", self.tile_title(item)),
                 None => what.clone(),
             },
-            ToastKind::Trashed { line, .. } => line.clone(),
+            ToastKind::Trashed { line, .. } | ToastKind::Grant { line, .. } => line.clone(),
         }
     }
 
@@ -450,6 +477,23 @@ impl WorkspaceView {
                     },
                 ));
                 ("trashed", Some(Symbol::Trash.into()), vec![put_back])
+            }
+            ToastKind::Grant { worker, .. } => {
+                let (worker, seq) = (*worker, shown.seq);
+                let restart = action("toast-restart-worker", super::workers::RESTART_WORKER)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.drop_toasts(|shown| shown.seq == seq);
+                        this.restart_worker(worker, cx);
+                        cx.notify();
+                    }));
+                let dismiss = action("toast-dismiss", "Dismiss")
+                    .text_color(hsla(s.text_secondary))
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        if this.drop_toasts(|shown| shown.seq == seq) {
+                            cx.notify();
+                        }
+                    }));
+                ("grant", Some(Symbol::Display.into()), vec![restart, dismiss])
             }
             ToastKind::Attention { tile, status, .. } => {
                 let tile = *tile;

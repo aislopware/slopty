@@ -3368,15 +3368,25 @@ impl WorkspaceView {
         let theme = &self.theme;
         let machine = self.workers.get(&tile.worker).map_or("The machine", |w| w.name.as_str());
         let (title, detail, pick) = failed_words(item, &self.derived_title(item), why, machine);
-        let choose = kit::button(theme, "choose-another", pick, kit::ButtonKind::Secondary)
-            .h(px(theme.density.control))
-            .px(px(theme.spacing.md))
-            .text_size(px(theme.typography.ui_size))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
+        let button = |id: &'static str, label: &'static str| {
+            kit::button(theme, id, label, kit::ButtonKind::Secondary)
+                .h(px(theme.density.control))
+                .px(px(theme.spacing.md))
+                .text_size(px(theme.typography.ui_size))
+        };
+        // Another window would be refused the same way: the way on is the grant at its desk,
+        // then the restart its running worker needs to see it.
+        let way = if *why == slopty_proto::screen::ScreenFailure::NotPermitted {
+            button("restart-worker", super::workers::RESTART_WORKER).on_click(
+                cx.listener(move |this, _ev, _window, cx| this.restart_worker(tile.worker, cx)),
+            )
+        } else {
+            button("choose-another", pick).on_click(cx.listener(move |this, _ev, window, cx| {
                 this.focus_tile(tile, cx);
                 this.add_window(&AddWindow, window, cx);
-            }));
-        self.ended_body(item.id, "failed", &title, &detail, choose)
+            }))
+        };
+        self.ended_body(item.id, "failed", &title, &detail, way)
     }
 
     /// A remote window or display whose stream the worker ended twice in quick succession

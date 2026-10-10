@@ -237,16 +237,35 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     let warned = navigator::worker_warning(&lingerless);
     assert_eq!(warned.as_deref(), Some(navigator::STOPS_AT_LOGOUT), "for as long as it does");
 
-    view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
+    // ⌘O says what the tile would, and offers the restart a running worker needs to see the
+    // grant: the person's press sends the server's verb for it.
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, window, cx| {
+        v.set_server_caller(Some(caller));
+        v.add_window(&AddWindow, window, cx);
+    });
     cx.run_until_parked();
     let notices = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(notices.iter().any(|n| n.contains("Screen Recording is off")), "{notices:?}");
+    let tile_words =
+        crate::screen::failure_text(&slopty_proto::screen::ScreenFailure::NotPermitted, "studio");
+    assert!(notices.contains(&tile_words), "the tile's words: {notices:?}");
+    click(cx, "toast-restart-worker");
+    let mut verbs = Vec::new();
+    while let Some((verb, reply)) = queue.try_next() {
+        let _gone = reply.send(slopty_proto::orchestration::Outcome::Done);
+        verbs.push(verb);
+    }
+    let worker = crate::workspace::projects::worker_id(key).expect("a server id");
+    assert_eq!(verbs, [slopty_proto::orchestration::Verb::RestartWorker { worker }]);
+    cx.run_until_parked();
+    let notices = view.read_with(cx, |v, _| v.toast_texts());
+    assert!(notices.iter().any(|n| n.starts_with("Restarting Slopty on studio")), "{notices:?}");
     // A Linux worker has no capture at all: ⌘O says so, not that a Mac's grant is off.
     view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, linux, cx));
     view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
     cx.run_until_parked();
     let notices = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(notices.iter().any(|n| n.contains("it has no screen capture")), "{notices:?}");
+    assert!(notices.iter().any(|n| n.contains("has no screen to share")), "{notices:?}");
 
     let facts = view.read_with(cx, |v, _| v.machine_facts(key));
     assert!(facts.first().is_some_and(|l| l.starts_with("Linux")), "its machine: {facts:?}");

@@ -688,16 +688,19 @@ impl WorkspaceView {
             return;
         }
         let Some(w) = self.workers.get_mut(&key) else { return };
-        // A worker that cannot capture lists no window worth picking: say why rather than show
-        // an empty picker (a Mac without Screen Recording, a Linux worker with no capture).
+        // A worker that cannot capture lists no window worth picking: say why, in the tile's
+        // own words, rather than show an empty picker. A Mac is offered the restart its worker
+        // needs to see a grant made at its desk; a Linux worker has no capture to grant.
         if let Some(caps) = w.caps.as_ref().filter(|c| !c.can_capture) {
-            let why = if caps.os == Os::MacOs {
-                "Screen Recording is off"
+            if caps.os == Os::MacOs {
+                let why = slopty_proto::screen::ScreenFailure::NotPermitted;
+                let text = crate::screen::failure_text(&why, &w.name);
+                self.show_grant(key, text, cx);
             } else {
-                "it has no screen capture"
-            };
-            let text = format!("{} can\u{2019}t share its screen: {why}", w.name);
-            self.show_notice(text, cx);
+                let why = slopty_proto::screen::ScreenFailure::Unsupported;
+                let text = crate::screen::failure_text(&why, &w.name);
+                self.show_notice(text, cx);
+            }
             return;
         }
         w.picker_wanted = true;

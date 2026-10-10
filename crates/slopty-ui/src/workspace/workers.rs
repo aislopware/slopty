@@ -33,6 +33,10 @@ const QUOTE_WAIT: Duration = Duration::from_secs(5);
 /// tile says it stopped and offers to reopen, rather than flicker between a picture and none.
 pub(super) const STOP_AGAIN: Duration = Duration::from_secs(10);
 
+/// The way to have a worker see a Screen Recording grant made at its desk: a running process
+/// never does, so its daemon exits for its service manager to start it again.
+pub const RESTART_WORKER: &str = "Restart Slopty there";
+
 /// A remote tile whose stream the worker ended unasked ([`Worker::stopped`]).
 #[derive(Debug)]
 pub(super) struct Stopped {
@@ -1317,7 +1321,11 @@ impl WorkspaceView {
                 w.display_wanted = false;
                 if std::mem::take(&mut w.picker_wanted) {
                     let text = crate::screen::failure_text(&why, &w.name);
-                    self.show_notice(format!("No windows to list: {text}"), cx);
+                    if why == ScreenFailure::NotPermitted {
+                        self.show_grant(key, text, cx);
+                    } else {
+                        self.show_notice(format!("No windows to list: {text}"), cx);
+                    }
                 }
             }
             ScreenEvent::Drag { stream, event } => {
@@ -1372,6 +1380,10 @@ impl WorkspaceView {
             return;
         }
         let text = crate::screen::failure_text(&why, &w.name);
+        if why == ScreenFailure::NotPermitted {
+            self.show_grant(key, text, cx);
+            return;
+        }
         let item = w.doc.get(id).cloned();
         let title = item
             .map_or_else(String::new, |i| i.name.clone().unwrap_or_else(|| self.derived_title(&i)));
@@ -1687,4 +1699,20 @@ struct Quote {
 pub(super) struct Quotes {
     waiting: Vec<Quote>,
     next: u64,
+}
+
+impl WorkspaceView {
+    /// Have `key`'s worker exit for its service manager to start it again
+    /// ([`slopty_proto::orchestration::Verb::RestartWorker`]), on the person's press: a grant
+    /// made at its desk is seen once it is back. Its shells stay with ptyd.
+    pub(super) fn restart_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let name = self.worker_name(key);
+        let Some(worker) = super::projects::worker_id(key) else {
+            self.show_failure(format!("Couldn\u{2019}t restart Slopty on {name}"), cx);
+            return;
+        };
+        let verb = slopty_proto::orchestration::Verb::RestartWorker { worker };
+        let said = format!("Restarting Slopty on {name}\u{2026}");
+        self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
+    }
 }

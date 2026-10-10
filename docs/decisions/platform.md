@@ -1157,3 +1157,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `slopty-server`
     `hub::ladder::tests::a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it`; the
     existing `needs_you_pushes_once_per_ask` now expects the push when the desk is left.
+
+- ✅ **A remote Mac's Screen Recording grant has a door from here** (2026-10-12, readiness
+  10-12 rank 20, the app's half). A running worker never sees a grant made at its desk, and
+  only this Mac's worker was ever restarted, so a grant on another Mac did nothing until
+  someone restarted its worker by hand. ⌘O said only that Screen Recording was off.
+  - Every place that meets the refusal now says the tile's own words (`failure_text`, "may
+    not record its screen. Turn on Screen Recording for slopty-worker in its System
+    Settings.") and offers "Restart Slopty there", which sends `Verb::RestartWorker`. The
+    worker exits for launchd to start it again, and its shells stay with ptyd. ⌘O on a Mac
+    that cannot capture, a window list refused and an open refused all raise one notice per
+    machine. It stays until it is pressed or dismissed, because the grant is made at the
+    other Mac first. A tile whose window was refused offers the restart in its pane in place
+    of "Choose another window", which would be refused the same way.
+  - ⌘O's own second wording ("can't share its screen: Screen Recording is off") is deleted.
+    A Linux worker with no capture says the tile's "has no screen to share".
+  - The words say "Slopty", not "worker": the chrome names a computer a machine, and
+    what restarts is Slopty's service on it.
+  - Tests: `workspace::tests::facts::a_workers_health_shows_only_when_something_is_wrong`,
+    `workspace::tests::bodies::a_window_refused_for_screen_recording_offers_the_restart`
+    (slopty-ui).

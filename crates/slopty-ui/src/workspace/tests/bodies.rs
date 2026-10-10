@@ -361,3 +361,38 @@ fn the_header_and_its_hit_test_follow_the_density(cx: &mut TestAppContext) {
     assert_eq!(at(header.bottom() - px(1.0)), Some((tile, false)), "still the header");
     assert_eq!(at(header.bottom() + px(1.0)), Some((tile, true)), "the body");
 }
+
+/// A window refused for want of Screen Recording offers no other window, which would be
+/// refused the same way: its pane offers "Restart its worker", the restart a running worker
+/// needs to see a grant made at its desk, sent to the server on the press.
+#[gpui::test]
+fn a_window_refused_for_screen_recording_offers_the_restart(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::screen::{CaptureTarget, OpenAsk, ScreenEvent, ScreenFailure};
+
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let _tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        let asked = OpenAsk::Target(CaptureTarget::Window(window));
+        v.screen_event(
+            key,
+            ScreenEvent::OpenFailed { asked, why: ScreenFailure::NotPermitted },
+            cx,
+        );
+    });
+    cx.executor().advance_clock(LOADING_GRACE);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("choose-another").is_none(), "another window would fail the same");
+    let at = bounds(cx, "restart-worker").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let (verb, reply) = queue.try_next().expect("the server is asked");
+    let _gone = reply.send(Outcome::Done);
+    let worker = crate::workspace::projects::worker_id(key).expect("a server id");
+    assert_eq!(verb, Verb::RestartWorker { worker });
+}
