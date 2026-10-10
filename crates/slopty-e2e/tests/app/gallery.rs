@@ -940,6 +940,12 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
         .await
         .unwrap();
     let tile = dump.items.iter().find(|i| i.id == shell.id).unwrap().bounds;
+    // The worker held still while the frame is drawn, so it has taken no byte of the upload
+    // and the tile says 0% on every run: a running worker would have taken some, and a
+    // different share each time.
+    let worker = stack.worker_pid().expect("the worker's pid").to_string();
+    signal("-STOP", &worker);
+    let drv = &mut stack.driver;
     drv.drop_files(&[source.as_path()], tile[0] + tile[2] / 2.0, tile[1] + tile[3] / 2.0)
         .await
         .unwrap();
@@ -951,6 +957,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
         .unwrap();
     assert!(dump.a11y_node("Button", Some("1 port")).is_some(), "{:#?}", dump.a11y);
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
+    signal("-CONT", &worker);
     assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();
     let cancel = drv.dump().await.unwrap();
     if let Some(node) = cancel.a11y_node("Button", Some("Stop upload")) {
@@ -958,6 +965,12 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
         drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     }
     stack.shutdown().await;
+}
+
+/// Send `signal` (`-STOP`, `-CONT`) to process `pid`.
+fn signal(signal: &str, pid: &str) {
+    let sent = std::process::Command::new("/bin/kill").args([signal, pid]).status().unwrap();
+    assert!(sent.success(), "kill {signal} {pid}: {sent}");
 }
 
 /// The first port of a fixed run that is free here, with the one after it: the app forwards a
