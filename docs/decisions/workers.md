@@ -1283,3 +1283,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `a_step_that_stalls_fails_within_its_bound` (slopty-deploy). A runner that never ends
     fails each kind of step at exactly its bound, scaled by bytes for an upload, and the `ssh`
     command carries the keepalives.
+
+- ✅ **The last silent drops wait, are kept, or are owed** (2026-10-11, readiness 10-11 rank 22).
+  - **The worker's answers to a client.** `post` used to drop whatever it answered a client
+    whose control queue was full, with only a log line. That covered a failed attach's error, the
+    items after a refused item change, and a clipboard fetch a paste waits on. Now only a pong is
+    dropped, since the next ping asks again. Everything else goes through one ordered queue per
+    connection that waits for room off the loop (`in_order`), as the handoffs' words already did.
+  - **The client's clipboard answer.** The answer to a worker's clipboard fetch waits for room
+    (`send_soon`) instead of being dropped on a full link queue.
+  - **Subagents and the task list.** Reports of an agent's own subagents and task-list items,
+    made while the server link was down, went to a broadcast nobody heard, so a missed
+    `SubagentStopped` left a subagent shown running. The agent table now keeps the latest report
+    per subagent and per item for each live agent (`AgentTable::native_report`, at most
+    `NATIVES_KEPT`, the oldest finished dropped first). Every registration retells them, and so
+    does a report stream that fell behind, beside the permissions. The agent's end and the
+    terminal's close take them away.
+  - **Phone notes.** A note the push queue could not take was dropped; only take-backs were owed.
+    Now the latest note per phone and subject is owed and goes on the same retry as the
+    take-backs. A note owed, and a take-back owed, for the same subject replace each other, the
+    later one winning. A note whose thread no longer needs the person is never sent. Owed notes
+    are not kept across a restart, where they would be stale.
+  - **The picture paste's offer.** Its half is in the terminal view, which is lane A's file.
+  - Tests:
+    - `an_answer_to_a_full_queue_waits_for_room_and_a_pong_is_dropped` (slopty-workerd
+      `conn.rs`);
+    - `a_clipboard_answer_to_a_full_queue_waits_for_room` (slopty-client `remote.rs`);
+    - `the_natives_reported_stand_for_the_next_link` (slopty-agent);
+    - `a_note_a_full_queue_refused_is_owed_and_goes_once_there_is_room` (slopty-server
+      `hub/ladder/tests.rs`).

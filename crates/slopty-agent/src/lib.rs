@@ -69,7 +69,7 @@ pub mod transcript;
 pub mod trust;
 pub mod vouch;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -1262,6 +1262,45 @@ impl Tracker {
     }
 }
 
+/// The most subagents, and the most task-list items, a session keeps to tell a server link
+/// again; past it, the oldest finished go first.
+pub const NATIVES_KEPT: usize = 64;
+
+/// One session agent's own subagents and task-list items, each as it was last reported, by id.
+#[derive(Debug, Default)]
+struct Natives {
+    subagents: BTreeMap<String, (u64, AgentReport)>,
+    tasks: BTreeMap<String, (u64, AgentReport)>,
+    next: u64,
+}
+
+impl Natives {
+    /// Keep `report` in place of what its id last said, in `kept`, dropping the oldest
+    /// finished (then the oldest) past [`NATIVES_KEPT`].
+    fn keep(
+        kept: &mut BTreeMap<String, (u64, AgentReport)>,
+        next: &mut u64,
+        id: &str,
+        report: &AgentReport,
+    ) {
+        *next = next.saturating_add(1);
+        kept.insert(id.to_owned(), (*next, report.clone()));
+        while kept.len() > NATIVES_KEPT {
+            let finished = |r: &AgentReport| match r {
+                AgentReport::SubagentStopped { .. } => true,
+                AgentReport::NativeTask { task, .. } => task.done,
+                _ => false,
+            };
+            let oldest = kept
+                .iter()
+                .min_by_key(|(_, (at, r))| (!finished(r), *at))
+                .map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else { break };
+            kept.remove(&oldest);
+        }
+    }
+}
+
 /// All sessions' agents.
 #[derive(Debug, Default)]
 pub struct AgentTable {
@@ -1278,6 +1317,9 @@ pub struct AgentTable {
     reported_modes: HashMap<SessionId, String>,
     /// What loosens each session's agent, as last reported ([`Self::loosening_report`]).
     reported_loosened: HashMap<SessionId, Vec<String>>,
+    /// Each session agent's own subagents and task list, as last reported
+    /// ([`Self::native_report`]).
+    natives: HashMap<SessionId, Natives>,
     /// What the worker adds to the agents it starts, which loosens nothing
     /// ([`Self::set_own`]).
     own: loosening::Own,
@@ -1296,6 +1338,7 @@ impl AgentTable {
         if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
+            self.natives.remove(&session);
             if hook.event == HookEvent::SessionEnd
                 && !resume::ended_by_the_person(hook.reason.as_deref())
                 && let resume::Resumable::Yes(conversation) = before
@@ -1354,6 +1397,7 @@ impl AgentTable {
         if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
+            self.natives.remove(&session);
         }
         event
     }
@@ -1460,6 +1504,40 @@ impl AgentTable {
         Some(now)
     }
 
+    /// Keep what `report` says of a session agent's own subagents or task list, for
+    /// [`Self::native_reports`]; any other report is passed over, and so is one about a session
+    /// with no agent.
+    pub fn native_report(&mut self, report: &AgentReport) {
+        let (session, id, subagent) = match report {
+            AgentReport::SubagentStarted { session, agent, .. }
+            | AgentReport::SubagentStopped { session, agent, .. } => (*session, agent, true),
+            AgentReport::NativeTask { session, task } => (*session, &task.id, false),
+            _ => return,
+        };
+        if !self.sessions.contains_key(&session) {
+            return;
+        }
+        let natives = self.natives.entry(session).or_default();
+        let kept = if subagent { &mut natives.subagents } else { &mut natives.tasks };
+        Natives::keep(kept, &mut natives.next, id, report);
+    }
+
+    /// What was last reported of each live agent's own subagents and task list, oldest first
+    /// in each session. A server link that was down, or fell behind, when they were reported
+    /// missed them, so every new link is told them again: a subagent whose stop was missed
+    /// would show running for good.
+    #[must_use]
+    pub fn native_reports(&self) -> Vec<AgentReport> {
+        let mut all: Vec<&(u64, AgentReport)> = Vec::new();
+        for natives in self.natives.values() {
+            let mut session: Vec<_> =
+                natives.subagents.values().chain(natives.tasks.values()).collect();
+            session.sort_by_key(|(at, _)| *at);
+            all.extend(session);
+        }
+        all.into_iter().map(|(_, report)| report.clone()).collect()
+    }
+
     /// Every session's pull request and worktree, for a joining client.
     #[must_use]
     pub fn branches(&self) -> Vec<AgentBranch> {
@@ -1529,6 +1607,7 @@ impl AgentTable {
         self.ended.retain(|session| live.contains(session));
         self.reported_modes.retain(|session, _mode| live.contains(session));
         self.reported_loosened.retain(|session, _found| live.contains(session));
+        self.natives.retain(|session, _natives| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -1584,6 +1663,7 @@ impl AgentTable {
         self.ended.remove(&session);
         self.reported_modes.remove(&session);
         self.reported_loosened.remove(&session);
+        self.natives.remove(&session);
     }
 
     /// The agent's process in `session`, once the worker has seen it in the foreground.
@@ -3104,5 +3184,39 @@ mod tests {
         );
         table.forget(sid);
         assert_eq!(table.permission_reports(), [], "gone with its session");
+    }
+
+    /// Each live agent's own subagents and task list stand to be told again to a new server
+    /// link, each as last reported: a subagent's stop missed while the link was down comes
+    /// with the next link, so it does not show running for good. The agent's end takes them.
+    #[test]
+    fn the_natives_reported_stand_for_the_next_link() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        table.observe(sid, &claude(""));
+        let said = |table: &mut AgentTable, json: &str| {
+            let hook = hook(json);
+            let report = hook.report(sid).expect("a native's report");
+            table.apply(sid, &hook);
+            table.native_report(&report);
+            report
+        };
+        let started = said(
+            &mut table,
+            r#"{"session_id":"a","hook_event_name":"SubagentStart","agent_id":"s1","agent_type":"Explore"}"#,
+        );
+        let task = said(
+            &mut table,
+            r#"{"session_id":"a","hook_event_name":"TaskCreated","task_id":"t1","task_subject":"Read"}"#,
+        );
+        assert_eq!(table.native_reports(), [started, task.clone()]);
+        let stopped = said(
+            &mut table,
+            r#"{"session_id":"a","hook_event_name":"SubagentStop","agent_id":"s1","last_assistant_message":"Found it."}"#,
+        );
+        assert_eq!(table.native_reports(), [task, stopped], "the stop stands in for the start");
+        table.native_report(&AgentReport::Delivered { session: sid, batch: 1 });
+        assert_eq!(table.native_reports().len(), 2, "only natives are kept");
+        table.forget(sid);
+        assert_eq!(table.native_reports(), [], "gone with its session");
     }
 }

@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
 use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, TunnelRefusal};
+use tokio::sync::mpsc;
 
 use crate::clip::{ClipCache, Fetched, fits_inline};
 #[cfg(target_vendor = "apple")]
@@ -115,6 +116,20 @@ impl LinkRemote {
     }
 }
 
+/// Queue `msg` on the link without making the caller wait, and never drop it: a program
+/// waits on what it answers (a paste on the clipboard's bytes). With the queue full, a task of
+/// `runtime` waits for room; with the link gone, there is nobody to tell.
+fn send_soon(runtime: &tokio::runtime::Handle, out: &mpsc::Sender<ClientMsg>, msg: ClientMsg) {
+    if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(msg) {
+        let out = out.clone();
+        runtime.spawn(async move {
+            if out.send(msg).await.is_err() {
+                tracing::debug!("clipboard answer not sent: the link is gone");
+            }
+        });
+    }
+}
+
 impl Remote for LinkRemote {
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest, again: bool) {
         let (up, line) = (self.up.clone(), Arc::clone(&self.line));
@@ -146,9 +161,7 @@ impl Remote for LinkRemote {
                     Fetched::TooBig(size) => ClipMsg::TooBig { rep, size },
                     Fetched::Gone => ClipMsg::Unavailable { source: rep.source },
                 };
-                if let Err(e) = self.up.out.try_send(ClientMsg::Clip(msg)) {
-                    tracing::debug!(error = %e, "clipboard answer not sent");
-                }
+                send_soon(&self.runtime, &self.up.out, ClientMsg::Clip(msg));
                 return;
             }
         };
@@ -203,5 +216,28 @@ impl Remote for LinkRemote {
     #[cfg(target_vendor = "apple")]
     fn watch_drag_out(&self, shared: &Arc<Shared>) {
         self.drag_outs.watch(shared);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_net::ClientMsg;
+    use slopty_proto::transfer::ClipMsg;
+    use tokio::sync::mpsc;
+
+    /// The answer to a worker's clipboard fetch reaches it though the link's queue is full when
+    /// it is made, once there is room, rather than leaving the worker's paste waiting.
+    #[tokio::test]
+    async fn a_clipboard_answer_to_a_full_queue_waits_for_room() {
+        let (out, mut worker) = mpsc::channel(1);
+        out.try_send(ClientMsg::Ping { sent_at: slopty_core::MonoTime::now() }).expect("room");
+        let source = slopty_proto::transfer::Source::Drag(slopty_proto::drag::DragId::new());
+        let gone = ClipMsg::Unavailable { source };
+        super::send_soon(&tokio::runtime::Handle::current(), &out, ClientMsg::Clip(gone));
+        let first = worker.recv().await.expect("open");
+        assert!(matches!(first, ClientMsg::Ping { .. }), "{first:?}");
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), worker.recv()).await;
+        let answer = answer.expect("it came").expect("open");
+        assert!(matches!(answer, ClientMsg::Clip(ClipMsg::Unavailable { .. })), "{answer:?}");
     }
 }

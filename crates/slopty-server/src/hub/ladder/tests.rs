@@ -980,6 +980,48 @@ async fn a_take_back_a_full_queue_refused_is_owed_and_kept() {
     assert_eq!(back.what, Sending::TakeBack(vec![at(&two)]), "answered while the server was away");
 }
 
+/// A note the push queue cannot take is owed, not lost: the latest per phone and thread goes
+/// once there is room and its try comes round. One whose thread no longer needs the person by
+/// then is not sent at all.
+#[tokio::test(start_paused = true)]
+async fn a_note_a_full_queue_refused_is_owed_and_goes_once_there_is_room() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let publishing = tokio::spawn(Hub::publish_ladder(hub.downgrade()));
+    let _kept = hub.keep_phones(PushKept::default());
+    let (out, mut pushed) = mpsc::channel(1);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let phone = Client::sit(&hub, "phone");
+    let client = ClientId::new();
+    pocketed_phone(&hub, phone.seated.link(), client);
+    let rows: Vec<ThreadRow> =
+        std::iter::repeat_with(|| row(Phase::Working, 1_000, None)).take(3).collect();
+    lease.handle(snapshot(rows.clone()));
+    hub.rank_ladder();
+    let at = |row: &ThreadRow| Subject::Thread(ThreadAt { worker, thread: row.id });
+    let ask = |row: &ThreadRow, since| asking(moved(row, Phase::NeedsYou, since), "Allow?");
+    lease.handle(delta(rows.iter().map(|r| ask(r, 2_000)).collect()));
+    hub.rank_ladder();
+
+    // The queue took the first note; the other two wait for room. The third is answered
+    // before its try, so only the second goes.
+    let first = pushed.recv().await.unwrap().what;
+    let Sending::Note(first) = first else { panic!("{first:?}") };
+    let rest: Vec<&ThreadRow> = rows.iter().filter(|r| at(r) != first.notice.about).collect();
+    let [second, third] = rest.as_slice() else { panic!("{rest:?}") };
+    lease.handle(delta(vec![moved(third, Phase::Done, 3_000)]));
+    hub.rank_ladder();
+    tokio::time::sleep(TAKE_BACK_RETRY).await;
+    let again = tokio::time::timeout(Duration::from_secs(5), pushed.recv()).await.unwrap();
+    let Sending::Note(owed) = again.unwrap().what else { panic!("a note") };
+    assert_eq!(owed.notice.about, at(second), "the owed note, once there is room");
+    tokio::time::sleep(TAKE_BACK_RETRY.saturating_mul(2)).await;
+    assert!(pushed.try_recv().is_err(), "the answered thread's note never went");
+    publishing.abort();
+}
+
 /// A notice for the desk the person is at whose link cannot take it is pushed to the pocketed
 /// phone instead, so it is not lost.
 #[tokio::test]

@@ -249,15 +249,20 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
         return Err("no such session".to_owned());
     }
     daemon.follows.lock().board.heard(session, &hook);
+    let native = hook.report(session);
     let (mut event, branch, mode) = {
         let mut agents = daemon.agents.lock();
         let event = agents.apply(session, &hook);
+        // Kept as well as sent: a server link that is down now is told it when it is back.
+        if let Some(native) = &native {
+            agents.native_report(native);
+        }
         (event, agents.branch(session, &hook), agents.permission_mode_report(session))
     };
     if let Some(branch) = branch {
         let _sent = daemon.events.send(WorkerMsg::AgentBranch(branch));
     }
-    for report in hook.report(session).into_iter().chain(mode) {
+    for report in native.into_iter().chain(mode) {
         let _sent = daemon.reports.send(report);
     }
     // A question or an elicitation the notification did not spell out (a `Stop` always carries

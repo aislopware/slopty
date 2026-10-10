@@ -110,7 +110,11 @@ struct Phones {
     asked: BTreeMap<ClientId, HashSet<Asked>>,
     /// What each phone is owed a take-back of, decided and not yet taken by the push queue.
     owed: BTreeMap<ClientId, HashSet<Asked>>,
-    /// When the owed take-backs are next tried, once a try is set.
+    /// The notes the push queue could not take when they were made, the latest per phone and
+    /// subject, oldest first: sent with the owed take-backs. Not kept across a restart, where
+    /// the note would be stale.
+    owed_notes: Vec<(ClientId, PushBody)>,
+    /// When the owed take-backs and notes are next tried, once a try is set.
     retry_at: Option<tokio::time::Instant>,
 }
 
@@ -197,27 +201,26 @@ impl Phones {
                 continue;
             }
             let body = PushBody { notice: notice.clone(), ask: ask.cloned() };
-            let what = Sending::Note(body);
-            let push = Outgoing { client: *client, device: device.clone(), what };
-            if out.try_send(push).is_err() {
-                tracing::debug!(%client, "a push found its queue full or gone");
-                continue;
-            }
-            // The phone shows one note per thread or terminal: this one replaced whatever was up.
-            let about = match notice.about {
-                Subject::Thread(at) => Asked::Thread(at),
-                Subject::Terminal(term) => Asked::Terminal(term),
-                Subject::Project { .. } => continue,
-            };
-            // A take-back owed for what this note replaced would take this one back.
-            if let Some(owed) = self.owed.get_mut(client) {
+            // A note waiting for room, or a take-back owed, about the same subject is older
+            // than this one, which replaces it on the phone.
+            self.owed_notes.retain(|(c, owed)| *c != *client || owed.notice.about != notice.about);
+            if let Some(about) = asked_about(&notice.about)
+                && let Some(owed) = self.owed.get_mut(client)
+            {
                 owed.remove(&about);
             }
-            let asked = self.asked.entry(*client).or_default();
-            if notice.kind == NoticeKind::NeedsYou {
-                asked.insert(about);
-            } else {
-                asked.remove(&about);
+            let push =
+                Outgoing { client: *client, device: device.clone(), what: Sending::Note(body) };
+            match out.try_send(push) {
+                Ok(()) => noted(&mut self.asked, *client, notice),
+                Err(mpsc::error::TrySendError::Full(push)) => {
+                    tracing::debug!(%client, "a push found its queue full; owed");
+                    let Sending::Note(body) = push.what else { continue };
+                    self.owed_notes.push((*client, body));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!(%client, "a push found its queue gone");
+                }
             }
         }
         self.asked.retain(|_, asked| !asked.is_empty());
@@ -237,6 +240,11 @@ impl Phones {
         }
         let devices = &self.devices;
         self.owed.retain(|client, _| devices.contains_key(client));
+        // A note still waiting for room about what no longer needs the person goes unsent.
+        self.owed_notes.retain(|(client, body)| {
+            devices.contains_key(client)
+                && asked_about(&body.notice.about).is_none_or(|about| !answered(&about))
+        });
         let owed = &mut self.owed;
         self.asked.retain(|client, asked| {
             if !devices.contains_key(client) {
@@ -257,6 +265,23 @@ impl Phones {
     fn send_owed(&mut self) -> bool {
         if let Some(out) = &self.out {
             let devices = &self.devices;
+            let mut waiting = std::mem::take(&mut self.owed_notes).into_iter();
+            for (client, body) in waiting.by_ref() {
+                let Some(device) = devices.get(&client) else { continue };
+                let notice = body.notice.clone();
+                let push = Outgoing { client, device: device.clone(), what: Sending::Note(body) };
+                match out.try_send(push) {
+                    Ok(()) => noted(&mut self.asked, client, &notice),
+                    Err(mpsc::error::TrySendError::Full(push)) => {
+                        if let Sending::Note(body) = push.what {
+                            self.owed_notes.push((client, body));
+                        }
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
+                }
+            }
+            self.owed_notes.extend(waiting);
             for (client, owed) in &mut self.owed {
                 let Some(device) = devices.get(client) else {
                     owed.clear();
@@ -277,8 +302,9 @@ impl Phones {
             }
         }
         self.owed.retain(|_, owed| !owed.is_empty());
+        self.asked.retain(|_, asked| !asked.is_empty());
         self.keep();
-        !self.owed.is_empty()
+        !self.owed.is_empty() || !self.owed_notes.is_empty()
     }
 
     /// Take back each phone's pushed note about `term`'s program: it no longer waits on the
@@ -311,7 +337,31 @@ impl Phones {
     fn listening(&mut self, client: ClientId) {
         self.asked.remove(&client);
         self.owed.remove(&client);
+        self.owed_notes.retain(|(c, _)| *c != client);
         self.keep();
+    }
+}
+
+/// What a note about `subject` puts up on a phone that a take-back can take down: one per
+/// thread or terminal; a project's note has none.
+const fn asked_about(subject: &Subject) -> Option<Asked> {
+    match subject {
+        Subject::Thread(at) => Some(Asked::Thread(*at)),
+        Subject::Terminal(term) => Some(Asked::Terminal(*term)),
+        Subject::Project { .. } => None,
+    }
+}
+
+/// The push queue took `notice` for `client`'s phone: it shows one note per thread or terminal,
+/// so this one replaced whatever was up there, and is to be taken back once answered when it
+/// needs the person.
+fn noted(asked: &mut BTreeMap<ClientId, HashSet<Asked>>, client: ClientId, notice: &Notice) {
+    let Some(about) = asked_about(&notice.about) else { return };
+    let asked = asked.entry(client).or_default();
+    if notice.kind == NoticeKind::NeedsYou {
+        asked.insert(about);
+    } else {
+        asked.remove(&about);
     }
 }
 

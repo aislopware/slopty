@@ -302,7 +302,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let (watch_folders, folders) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch_folders(hello.client, out.clone(), folders));
     let (told, mut told_rx) = mpsc::unbounded_channel();
-    daemon.clip.attach(link, clip_sink(out.clone(), hello.client));
+    let posted = in_order(out.clone());
+    daemon.clip.attach(link, clip_sink(posted.clone()));
     let (saves, saved) = mpsc::unbounded_channel();
     // Not one of the connection's tasks: saves and edit ends already sent are written and
     // heard after the connection drops, so a waiting program still gets its answer.
@@ -327,6 +328,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         conn,
         client: hello.client,
         out,
+        posted,
         reports,
         attached: HashMap::new(),
         screens: HashMap::new(),
@@ -395,10 +397,12 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     result
 }
 
-/// Where the clipboard sends this client a fetch its promises need: the control stream, without
-/// waiting, since a promise is answered on a thread AppKit chose.
-fn clip_sink(out: mpsc::Sender<WorkerMsg>, client: ClientId) -> slopty_worker::clip::Sink {
-    Arc::new(move |msg| post(&out, client, WorkerMsg::Clip(msg)))
+/// Where the clipboard sends this client a fetch its promises need: the control stream, in
+/// order and waiting for room ([`in_order`]) off the thread AppKit chose to answer a promise on.
+fn clip_sink(posted: mpsc::UnboundedSender<WorkerMsg>) -> slopty_worker::clip::Sink {
+    Arc::new(move |msg| {
+        let _gone = posted.send(WorkerMsg::Clip(msg));
+    })
 }
 
 /// Wake when a paste waiting for the client's clipboard is due to go on regardless.
@@ -603,6 +607,15 @@ impl InputOrder {
 /// lost leaves an ask on the client that is over. The handoffs call it under their lock, so a
 /// task of its own does the waiting; it ends when the handoffs let go of the client.
 fn handoff_sink(out: mpsc::Sender<WorkerMsg>) -> slopty_worker::handoff::Sink {
+    let told = in_order(out);
+    Arc::new(move |msg| {
+        let _gone = told.send(msg);
+    })
+}
+
+/// A queue into `out` that never drops and never makes its sender wait: what is sent goes on
+/// in order, a task of its own waiting for room, until `out` closes or every sender is gone.
+fn in_order(out: mpsc::Sender<WorkerMsg>) -> mpsc::UnboundedSender<WorkerMsg> {
     let (told, mut telling) = mpsc::unbounded_channel::<WorkerMsg>();
     tokio::spawn(async move {
         while let Some(msg) = telling.recv().await {
@@ -611,9 +624,7 @@ fn handoff_sink(out: mpsc::Sender<WorkerMsg>) -> slopty_worker::handoff::Sink {
             }
         }
     });
-    Arc::new(move |msg| {
-        let _gone = told.send(msg);
-    })
+    told
 }
 
 /// Tell the client a request about `session` failed, from a task that may wait for room.
@@ -622,15 +633,22 @@ async fn report(out: &mpsc::Sender<WorkerMsg>, client: ClientId, session: Sessio
     let _sent = out.send(WorkerMsg::Term { session, event: TermEvent::Error(e) }).await;
 }
 
-/// Queue `msg` for the client without waiting. A client whose control queue is full has not
-/// read a thousand messages; what the loop answers it (a pong, an error, a clipboard fetch) is
-/// dropped rather than let it hold every other terminal on the connection.
-fn post(out: &mpsc::Sender<WorkerMsg>, client: ClientId, msg: WorkerMsg) {
-    match out.try_send(msg) {
-        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-        Err(mpsc::error::TrySendError::Full(msg)) => {
-            tracing::warn!(%client, ?msg, "control queue full; answer dropped");
-        }
+/// Queue `msg` for the client without making the loop wait: a client whose control queue is
+/// full must not hold every other terminal on the connection. A pong is dropped then, as the
+/// next ping asks again; everything else the loop answers (a terminal's error, the items after a
+/// refused change, a clipboard fetch) goes on in order through `posted` ([`in_order`]) once
+/// there is room, since the client waits on it.
+fn post(
+    (out, posted): (&mpsc::Sender<WorkerMsg>, &mpsc::UnboundedSender<WorkerMsg>),
+    client: ClientId,
+    msg: WorkerMsg,
+) {
+    if !matches!(msg, WorkerMsg::Pong { .. }) {
+        let _gone = posted.send(msg);
+        return;
+    }
+    if let Err(mpsc::error::TrySendError::Full(msg)) = out.try_send(msg) {
+        tracing::debug!(%client, ?msg, "control queue full; pong dropped");
     }
 }
 
@@ -847,6 +865,8 @@ struct Peer<'d> {
     daemon: &'d Daemon,
     conn: Connection,
     client: ClientId,
+    /// What the loop answers the client, in order and never dropped ([`post`]).
+    posted: mpsc::UnboundedSender<WorkerMsg>,
     out: mpsc::Sender<WorkerMsg>,
     /// Receiver reports, for the task that applies them.
     reports: mpsc::Sender<Asked>,
@@ -936,7 +956,7 @@ fn tell_curtain(daemon: &Daemon, state: CurtainState) {
 impl Peer<'_> {
     /// Queue `msg` for the client without waiting ([`post`]).
     fn post(&self, msg: WorkerMsg) {
-        post(&self.out, self.client, msg);
+        post((&self.out, &self.posted), self.client, msg);
     }
 
     /// Tell the client a request about `session` failed, without waiting.
@@ -1679,6 +1699,37 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, [1, 2, 3], "every word, in order");
+    }
+
+    /// What the loop answers a client whose control queue is full is not lost: a terminal's
+    /// error and the items after a refused change reach it once there is room, in order, while
+    /// a pong is dropped, the next ping asking again.
+    #[tokio::test]
+    async fn an_answer_to_a_full_queue_waits_for_room_and_a_pong_is_dropped() {
+        use slopty_proto::terminal::{TermError, TermEvent};
+
+        let (out, mut client) = tokio::sync::mpsc::channel(1);
+        let filler =
+            WorkerMsg::SessionClosed { session: SessionId::new(), reason: CloseReason::Exited };
+        out.try_send(filler).expect("room for one");
+        let posted = super::in_order(out.clone());
+        let session = SessionId::new();
+        let failed = WorkerMsg::Term { session, event: TermEvent::Error(TermError::NoSuchSession) };
+        let ponged = WorkerMsg::Pong { sent_at: slopty_core::MonoTime::now() };
+        let client_id = ClientId::new();
+        super::post((&out, &posted), client_id, failed);
+        super::post((&out, &posted), client_id, ponged);
+        let items = WorkerMsg::Items(ItemSync::Snapshot { version: 1, items: Vec::new() });
+        super::post((&out, &posted), client_id, items);
+        let mut heard = Vec::new();
+        while heard.len() < 3 {
+            heard.push(client.recv().await.expect("the queue stays open"));
+        }
+        assert!(matches!(heard[0], WorkerMsg::SessionClosed { .. }), "{heard:?}");
+        assert!(matches!(heard[1], WorkerMsg::Term { .. }), "the error, first: {heard:?}");
+        assert!(matches!(heard[2], WorkerMsg::Items(_)), "then the items: {heard:?}");
+        let more = tokio::time::timeout(std::time::Duration::from_millis(50), client.recv()).await;
+        assert!(more.is_err(), "the pong went nowhere: {more:?}");
     }
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {

@@ -214,11 +214,13 @@ async fn session(
         return Ok("the writer stopped");
     }
     // Nor where each agent's work lands, which the status lines said before this link, nor
-    // each agent's permissions, which the server's guard judges.
+    // each agent's permissions, which the server's guard judges, nor each agent's own
+    // subagents and task list, which the tree shows.
     let standing = {
         let agents = daemon.agents.lock();
         let branches = agents.branches().into_iter().map(AgentReport::Branch);
-        branches.chain(agents.permission_reports()).collect::<Vec<_>>()
+        let natives = agents.native_reports();
+        branches.chain(agents.permission_reports()).chain(natives).collect::<Vec<_>>()
     };
     for report in standing {
         if out.send(ToServer::Report(report)).await.is_err() {
@@ -365,12 +367,16 @@ async fn session(
             report = reports.recv() => {
                 let msg = match report {
                     Ok(report) => ToServer::Report(report),
-                    // A subagent's start or stop the tree missed is only a leaf short.
-                    // What was dropped of each agent's permissions is told again whole, and
-                    // so is the last batch each agent read.
+                    // What was dropped of each agent's permissions, subagents and task list
+                    // is told again whole, and so is the last batch each agent read.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "agent reports dropped; their permissions told again");
-                        let mut standing = daemon.agents.lock().permission_reports();
+                        tracing::warn!(missed, "agent reports dropped; their standing told again");
+                        let mut standing = {
+                            let agents = daemon.agents.lock();
+                            let mut standing = agents.permission_reports();
+                            standing.extend(agents.native_reports());
+                            standing
+                        };
                         standing.extend(read_last(daemon).await);
                         let mut sent = true;
                         for report in standing {
