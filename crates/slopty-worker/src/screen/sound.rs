@@ -58,7 +58,8 @@ impl SoundClock {
         self.packets.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
+    /// Mark a packet sent at `now_us`, for the Apple platform's stream tests, which use it alone.
+    #[cfg(all(test, target_vendor = "apple"))]
     pub(super) fn sent_at(&self, now_us: u64) {
         self.last_us.store(now_us, Ordering::Relaxed);
     }

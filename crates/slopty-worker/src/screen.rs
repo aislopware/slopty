@@ -2813,8 +2813,9 @@ impl<P: Platform> Shared<P> {
     }
 
     /// While an encode is inside the encoder: how long the beat has charged it, and its
-    /// patience, microseconds ([`StuckWatch`]).
-    #[cfg(test)]
+    /// patience, microseconds ([`StuckWatch`]). The synthetic platform's tests read it, which
+    /// only macOS builds.
+    #[cfg(all(test, target_os = "macos"))]
     fn coding(&self) -> Option<(u64, u64)> {
         let inside = self.gate.inside.load(Ordering::Acquire);
         let stuck = self.stuck.lock();
@@ -3970,8 +3971,8 @@ const fn align(codec: VideoCodec) -> u32 {
 }
 
 /// [`configs_padded`] with the codec's own padding, as every stream but a measurement's has it,
-/// for a target of two pixels a point.
-#[cfg(test)]
+/// for a target of two pixels a point. Only the Apple platform's stream tests use it.
+#[cfg(all(test, target_vendor = "apple"))]
 fn configs(
     native: (u32, u32),
     quality: &Quality,

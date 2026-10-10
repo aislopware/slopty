@@ -1389,3 +1389,18 @@ more full-window layer.
   - Not yet on upstream master, so kept on the fork: the stack #92 (unsupported sequences),
     #93 (new OSC commands) and #94 (secure random). #94 is merged into #93's branch, which has
     not reached master yet.
+
+- ✅ **The worker's tests are linted for Linux, not yet run there** (2026-10-11).
+  - **Why.** `slopty-worker` and `slopty-workerd` were linted for Linux as libraries only, so
+    four test helpers had grown that a Linux test build never used:
+    - `Shared::coding`, read by the macOS-only synthetic platform's tests;
+    - `configs` and `SoundClock::sent_at`, used by the Apple platform's stream tests;
+    - `Dnd::with_helper` and `Dnd::watching`, used by the Apple-only fake platform's drag tests.
+
+    Each now has its users' gate, `all(test, target_os = "macos")` or
+    `all(test, target_vendor = "apple")`, and none is an `allow`.
+  - **The lists.** `LINUX_UNTESTED` (libraries only) keeps `slopty-capture` and `slopty-input`.
+    The two worker crates move to `LINUX_UNRUN`: clippy takes their tests with `--all-targets`
+    on both Linux triples, and the Linux lane does not run them yet (`linux_tested`). Their
+    Mac-only tests are gated to the Mac. Whether the rest pass on a Linux host is untried.
+    Running them there is the next step, after which they leave `LINUX_UNRUN`.

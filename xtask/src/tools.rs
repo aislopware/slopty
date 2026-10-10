@@ -60,8 +60,11 @@ pub const LINUX_CRATES: [&str; 22] = [
 /// The [`LINUX_CRATES`] whose tests are the Mac's: they drive `ScreenCaptureKit`, `CGEvent` or
 /// `VideoToolbox`, or take objc2 as a dev-dependency. The Linux lane lints only their libraries
 /// and binaries; every other crate's tests build for Linux too.
-pub const LINUX_UNTESTED: [&str; 4] =
-    ["slopty-capture", "slopty-input", "slopty-worker", "slopty-workerd"];
+pub const LINUX_UNTESTED: [&str; 2] = ["slopty-capture", "slopty-input"];
+
+/// The [`LINUX_CRATES`] whose tests build for Linux and are linted there, but are not run: their
+/// Mac-only tests are gated to the Mac, and the rest have not yet been run on a Linux host.
+pub const LINUX_UNRUN: [&str; 2] = ["slopty-worker", "slopty-workerd"];
 
 /// Clippy `-D warnings` for Linux on those of `crates` that build there: every one of
 /// [`LINUX_CRATES`] on [`LINUX_TRIPLES`], with its tests unless it is one of

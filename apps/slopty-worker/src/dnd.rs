@@ -185,8 +185,9 @@ impl Dnd {
         }
     }
 
-    /// No drag yet, and `helper` in the helper's place: a test's.
-    #[cfg(test)]
+    /// No drag yet, and `helper` in the helper's place: a test's, over the Apple-only fake
+    /// platform.
+    #[cfg(all(test, target_vendor = "apple"))]
     #[must_use]
     pub fn with_helper(transfers: Arc<Transfers>, helper: mpsc::UnboundedSender<ToHelper>) -> Self {
         let helper = Arc::new(Mutex::new(Some(helper)));
@@ -201,8 +202,8 @@ impl Dnd {
     }
 
     /// Watch drags out on the pasteboard called `name` in place of the system's drag
-    /// pasteboard: a test's.
-    #[cfg(test)]
+    /// pasteboard: a test's, over the Apple-only fake platform.
+    #[cfg(all(test, target_vendor = "apple"))]
     #[must_use]
     pub fn watching(mut self, name: &str) -> Self {
         self.drag_board = Some(name.to_owned());

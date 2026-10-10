@@ -36,8 +36,8 @@ use pass::{Inputs, Plan, Scope};
 use xshell::{Shell, cmd};
 
 use crate::tools::{
-    LINUX_CRATES, LINUX_UNTESTED, TRIPLES, WORKSPACE_HACK, has, host_only_present, quiet_step,
-    repo_root, workspace_packages,
+    LINUX_CRATES, LINUX_UNRUN, LINUX_UNTESTED, TRIPLES, WORKSPACE_HACK, has, host_only_present,
+    quiet_step, repo_root, workspace_packages,
 };
 
 /// Gate options.
@@ -1113,9 +1113,14 @@ fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
     result
 }
 
-/// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`].
+/// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`] and
+/// [`LINUX_UNRUN`].
 fn linux_tested() -> Vec<&'static str> {
-    LINUX_CRATES.iter().copied().filter(|c| !LINUX_UNTESTED.contains(c)).collect()
+    LINUX_CRATES
+        .iter()
+        .copied()
+        .filter(|c| !LINUX_UNTESTED.contains(c) && !LINUX_UNRUN.contains(c))
+        .collect()
 }
 
 /// The Linux lane, on a Linux host: the worker, its ptyd, the CLI and the server built as a
@@ -1736,6 +1741,10 @@ mod tests {
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
+        let (all, unrun, libs) =
+            (crate::tools::LINUX_CRATES, crate::tools::LINUX_UNRUN, crate::tools::LINUX_UNTESTED);
+        assert!(tested.iter().all(|c| !unrun.contains(c)), "linted there, not run");
+        assert!(unrun.iter().all(|c| all.contains(c) && !libs.contains(c)));
     }
 
     /// Nothing that compiles runs in the quick gate, which is the tools lane; CI carries the
