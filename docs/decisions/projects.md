@@ -2578,3 +2578,26 @@ reordering and edited allows are gone" in `agents.md`.*
       `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (slopty-server);
     - `task_restart_hands_a_task_to_a_new_agent` and the tool list (slopty-tools);
     - `restart_and_push_name_their_task` (slopty-cli).
+
+- ✅ **A task on another machine starts from the merged target, and a dependent waits for the
+  merge** (2026-10-12, readiness 10-12 rank 3).
+  - **The start.** Pushing is off by default, so what the merge queue merged stays in the
+    orchestrator's clone. A task placed in a clone on another machine branched its worktree
+    from that machine's `origin/<target>`. It worked on stale code, and its conflicts showed up
+    only at merge.
+    - Now, before such a start, the server sends the target the way a give-back does
+      (`Hub::send_target_to`, sharing the trip with `send_target`). It goes as
+      `slopty/<project>/target`, and the worktree starts from that branch.
+    - While it goes, the task's card shows a clone step, which settles to where the target
+      came from.
+    - When the forge holds everything (`NothingNew`), the worktree starts from the target as
+      before. A task in the orchestrator's own clone sends nothing.
+    - A target that cannot be sent refuses the start, saying why. Starting an agent on code
+      the person has already moved past would only waste its work.
+  - **Dependencies.** A dependent task could start once its dependency was Done, before that
+    work was merged anywhere a new worktree starts from. A dependency now counts only once it
+    is Merged (`project::delivered`). A read-only task is the exception: it has nothing to
+    merge, so Done is enough. `ignore_dependencies` still starts it anyway.
+  - Tests: `a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds`
+    (slopty-server `hub/project_tests.rs`), with the earlier start tests now answering the
+    target's trip; `a_dependent_starts_once_its_dependency_is_merged` (`project/tests.rs`).

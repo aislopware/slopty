@@ -902,3 +902,34 @@ fn a_project_at_its_review_limit_starts_no_more_agent_work() {
     p.ask_merge(&id(), a, now()).unwrap();
     p.room_to_review(&id()).unwrap();
 }
+
+/// A task that depends on another starts once that one's work is merged into the target, where
+/// its own worktree starts from: done is not enough, as its work is then in no clone but its
+/// own. One that only reads has nothing to merge, so its being done is enough. Saying
+/// `ignore_dependencies` starts it anyway.
+#[test]
+fn a_dependent_starts_once_its_dependency_is_merged() {
+    let fleet = Fleet::default();
+    let mut p = project(None);
+    let builds = task(&mut p, "Build it");
+    let reads = TaskSpec { read_only: true, ..spec("Read the logs") };
+    let reads = p.create_task(&id(), reads, now()).unwrap().0.id;
+    let after = TaskSpec { depends_on: vec![builds, reads], ..spec("Use it") };
+    let after = p.create_task(&id(), after, now()).unwrap().0.id;
+    let waits = |p: &Projects| {
+        let refused = p.may_start(&id(), after, false, &fleet.running()).unwrap_err();
+        assert_eq!(code(&refused), ErrorCode::Conflict);
+        message(&refused).to_owned()
+    };
+    assert!(waits(&p).contains(&format!("depends on task {builds}, which is Planned")));
+
+    p.update_task(&id(), builds, to(TaskState::Done), Caller::Person, now()).unwrap();
+    let said = waits(&p);
+    assert!(said.contains(&format!("task {builds}, which is Done; start it once")), "{said}");
+    p.may_start(&id(), after, true, &fleet.running()).unwrap();
+
+    p.update_task(&id(), builds, to(TaskState::Merged), Caller::Person, now()).unwrap();
+    assert!(waits(&p).contains(&format!("depends on task {reads}, which is Planned")));
+    p.update_task(&id(), reads, to(TaskState::Done), Caller::Person, now()).unwrap();
+    p.may_start(&id(), after, false, &fleet.running()).unwrap();
+}

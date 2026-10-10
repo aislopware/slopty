@@ -1930,6 +1930,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let writes = new_task(&hub, Some(linux)).await;
     let verb = Verb::TaskSpawn { project: project(), task: writes, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let Verb::SpawnAgent { cwd, args, worktree, .. } = start.1.clone() else {
         panic!("{:?}", start.1)
@@ -1954,6 +1955,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let launch =
         TaskLaunch { run: Runner::Codex { prompt: None, args: Vec::new() }, ..anywhere.clone() };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: codex_task, launch });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let Verb::OpenTerminal { cwd, command, worktree, .. } = start.1.clone() else {
         panic!("{:?}", start.1)
@@ -2024,6 +2026,74 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     assert!(said.contains("no address to clone it from is known"), "{said}");
 }
 
+/// A task placed on another machine than the orchestrator's starts its worktree from the target
+/// as the orchestrator's clone holds it: with pushing off, what the merge queue merged is only
+/// there. The target goes across first as `slopty/<p>/target`, and the worktree starts from
+/// that. A target that cannot be sent refuses the start, saying why, rather than starting the
+/// agent on a stale copy.
+#[tokio::test]
+async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds() {
+    use slopty_proto::project::{StepKind, StepState};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio = vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
+
+    let task = new_task(&hub, Some(linux)).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: launch.clone() });
+    let (id, verb) = request(&mut studio_rx).await;
+    let Verb::BundleBranch { repo, branch, target, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(
+        (repo.as_str(), branch.as_str(), target.as_deref()),
+        ("/w/demo", "main", Some("main"))
+    );
+    let head = format!("{}9e1f0", "9e1f0c2".repeat(5));
+    let name = "main-9e1f0c200000.bundle".to_owned();
+    let path = format!("/Users/c/.cache/slopty/bundles/{name}");
+    let made =
+        BranchBundle { path, name, size: 6, digest: [5; 32], head: head.clone(), base: None };
+    answer(&studio_lease, id, Outcome::Bundle(Box::new(made)));
+    let (id, verb) = request(&mut studio_rx).await;
+    assert!(matches!(verb, Verb::ReadFile { offset: 0, .. }), "{verb:?}");
+    answer(&studio_lease, id, Outcome::File { bytes: b"bundle".to_vec(), offset: 0, size: 6 });
+    for _part in 0..2 {
+        let (id, verb) = request(&mut linux_rx).await;
+        assert!(matches!(verb, Verb::Upload { .. }), "{verb:?}");
+        answer(&linux_lease, id, Outcome::Done);
+    }
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::FetchBundle { repo, into, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!((repo.as_str(), into.as_str()), ("/home/c/demo", "slopty/slopty/target"));
+    answer(&linux_lease, id, Outcome::Fetched { branch: into, head });
+    let start = request(&mut linux_rx).await;
+    let Verb::SpawnAgent { cwd, worktree, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    assert_eq!(cwd, "/home/c/demo");
+    let base = worktree.and_then(|w| w.base);
+    assert_eq!(base.as_deref(), Some("slopty/slopty/target"), "from the merged target");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let step = step_of(&hub, task).await.map(|s| (s.kind, s.worker, s.state));
+    let detail = "main as the orchestrator's clone has it, at 9e1f0c2".to_owned();
+    assert_eq!(step, Some((StepKind::Clone, linux, StepState::Done { detail })));
+
+    let next = new_task(&hub, Some(linux)).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: next, launch });
+    let (id, verb) = request(&mut studio_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "{verb:?}");
+    let message = "fatal: bad object refs/heads/main".to_owned();
+    answer(&studio_lease, id, Outcome::Error { code: ErrorCode::Failed, message });
+    let said = refused(&asked.await.unwrap(), ErrorCode::Failed).to_owned();
+    assert!(said.contains("could not start from its target"), "{said}");
+    assert!(said.contains("bad object"), "{said}");
+    let failed = step_of(&hub, next).await.map(|s| s.state);
+    assert!(matches!(failed, Some(StepState::Failed { .. })), "the card says so too: {failed:?}");
+    assert!(linux_rx.try_recv().is_err(), "nothing started");
+}
+
 /// A shell in the clone at `path` of the repository `origin`, cloned from `url`.
 pub(super) fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> SessionSummary {
     SessionSummary {
@@ -2047,6 +2117,16 @@ pub(super) fn answer(lease: &Lease, id: RequestId, outcome: Outcome) {
     lease.handle(ToServer::Reply { id, outcome });
 }
 
+/// The orchestrator's worker is asked for the target before a task starts in a clone on another
+/// machine, and the forge has all of it: the task's worktree starts from the target there.
+pub(super) async fn forge_has_the_target(lease: &Lease, rx: &mut mpsc::Receiver<FromServer>) {
+    let (id, verb) = request(rx).await;
+    let Verb::BundleBranch { branch, target, .. } = &verb else { panic!("{verb:?}") };
+    assert_eq!((branch.as_str(), target.as_deref()), ("main", Some("main")));
+    let message = "main has no commit beyond origin/main".to_owned();
+    answer(lease, id, Outcome::Error { code: ErrorCode::NothingNew, message });
+}
+
 /// A task with no directory pinned to a worker with no clone of the project's repository gets
 /// one there first, from the address the orchestrator's clone names: the card
 /// shows how far it is as git says, the timeline its start and end, and the agent then starts
@@ -2058,7 +2138,7 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     let orchestrator = SessionId::new();
     let url = "https://example.com/o/demo.git";
     let studio = vec![in_repo(orchestrator, "/w/demo", Some(url))];
-    let (studio, _studio_lease, _studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
@@ -2083,6 +2163,7 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     let path = "/home/c/slopty/clones/example.com/o/demo".to_owned();
     let repo = in_repo(SessionId::new(), &path, Some(url)).repo_id.unwrap();
     answer(&linux_lease, id, Outcome::Cloned { path: path.clone(), repo });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
     assert_eq!(cwd, path, "the agent starts in the clone made");
@@ -2090,7 +2171,8 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     let done = step_of(&hub, task).await.map(|s| s.state);
-    assert_eq!(done, Some(StepState::Done { detail: path.clone() }));
+    let target = "main from its origin".to_owned();
+    assert_eq!(done, Some(StepState::Done { detail: target }), "and then the target is there");
     let steps: Vec<_> = status(&hub)
         .await
         .timeline
@@ -2100,8 +2182,13 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
             _ => None,
         })
         .collect();
+    let made = StepState::Done { detail: path.clone() };
     assert!(
-        matches!(steps.as_slice(), [StepState::Running { .. }, StepState::Done { .. }]),
+        matches!(
+            steps.as_slice(),
+            [StepState::Running { .. }, d, StepState::Running { .. }, StepState::Done { .. }]
+                if *d == made
+        ),
         "{steps:?}"
     );
 
@@ -2109,6 +2196,7 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     let next = new_task(&hub, Some(linux)).await;
     let verb = Verb::TaskSpawn { project: project(), task: next, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     assert!(matches!(&start.1, Verb::SpawnAgent { cwd, .. } if *cwd == path), "{:?}", start.1);
     opened(&linux_lease, &start);
@@ -2147,6 +2235,7 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
     let task = new_task(&hub, Some(linux)).await;
     let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -2225,7 +2314,8 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
         })
         .collect();
     let detail = format!("{branch} as slopty/slopty/{task} at 4a7aa6d in /w/demo");
-    assert_eq!(arrived, [(StepKind::Home, studio, detail)], "the branch arrived");
+    let target = (StepKind::Clone, linux, "main from its origin".to_owned());
+    assert_eq!(arrived, [target, (StepKind::Home, studio, detail)], "the branch arrived");
     let nothing = format!("{branch} has no commit beyond main");
     answer(&linux_lease, id, Outcome::Error { code: ErrorCode::Failed, message: nothing.clone() });
     let failed = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2253,7 +2343,8 @@ async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
     let orchestrator = SessionId::new();
     let studio_terms =
         || vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
-    let (studio, studio_lease, studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio_terms());
+    let (studio, studio_lease, mut studio_rx) =
+        worker_on(&hub, "studio", Os::MacOs, studio_terms());
     let agent = SessionId::new();
     let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
@@ -2261,6 +2352,7 @@ async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
     let task = new_task(&hub, Some(linux)).await;
     let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));

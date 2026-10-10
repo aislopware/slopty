@@ -821,7 +821,9 @@ mod tests {
         let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
         let cloned = linux_home.join("slopty/clones/example.com/o/demo");
         let step = spawned.step.map(|s| (s.kind, s.state));
-        let detail = cloned.to_string_lossy().into_owned();
+        // The clone is made, and then the target is there as the forge has it: nothing was
+        // merged in the orchestrator's clone that the forge lacks.
+        let detail = "main from its origin".to_owned();
         assert_eq!(step, Some((StepKind::Clone, StepState::Done { detail })), "shown as a step");
         let config: Value =
             serde_json::from_slice(&std::fs::read(linux_home.join(".claude.json")).unwrap())
@@ -893,6 +895,8 @@ mod tests {
         assert_eq!(
             moments,
             [
+                (StepKind::Clone, false),
+                (StepKind::Clone, true),
                 (StepKind::Clone, false),
                 (StepKind::Clone, true),
                 (StepKind::Home, false),
@@ -1161,6 +1165,8 @@ mod tests {
             [
                 "Clone began",
                 "Clone done",
+                "Clone began",
+                "Clone done",
                 "Home began",
                 "Home done",
                 "Verify began",
@@ -1282,6 +1288,8 @@ mod tests {
         assert_eq!(
             steps,
             [
+                "Clone began",
+                "Clone done",
                 "Clone began",
                 "Clone done",
                 "Home began",

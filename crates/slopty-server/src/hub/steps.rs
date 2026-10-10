@@ -14,9 +14,12 @@ use slopty_core::{WallMs, WorkerId, XferId};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, ErrorCode, Outcome, TermRef, UploadPart, Verb,
 };
-use slopty_proto::project::{Commits, ProjectId, StepKind, StepState, Task, TaskId, TaskStep};
+use slopty_proto::project::{
+    Commits, Project, ProjectId, StepKind, StepState, Task, TaskId, TaskStep,
+};
 use slopty_proto::terminal::{RepoId, SessionState};
 
+use super::queue::short;
 use super::{Hub, State, projects};
 use crate::project::Keep;
 
@@ -393,10 +396,70 @@ impl Hub {
             into: Task::target_branch(project),
             target: route.target,
         };
+        self.send_back((project, task), back, (StepKind::Merge, worker)).await
+    }
+
+    /// Send the project's target, as the orchestrator's clone has it, to `clone` on `worker`,
+    /// where `task` is about to start in a worktree, as [`Task::target_branch`]: with pushing
+    /// off the forge never saw what the merge queue merged, and a task elsewhere would start
+    /// from the worker's stale copy of the target. Shown on `task`'s clone step as it goes, and
+    /// settled there once it ends.
+    pub(super) async fn send_target_to(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        (worker, clone): (WorkerId, String),
+    ) -> Onto {
+        let from = {
+            let state = self.inner.state.lock();
+            state
+                .projects
+                .project(project)
+                .ok()
+                .map(|record| (orchestrator_clone(&state, record), record.target.clone()))
+        };
+        let back = match from {
+            Some((Ok(Some(from)), target)) => Trip {
+                from,
+                to: (worker, clone),
+                branch: target.clone(),
+                into: Task::target_branch(project),
+                target,
+            },
+            None | Some((Ok(None), _)) => return Onto::Here,
+            Some((Err((_, why)), _)) => return Onto::Failed(why),
+        };
+        if back.there() {
+            return Onto::Here;
+        }
+        let target = back.target.clone();
+        let onto = self.send_back((project, task), back, (StepKind::Clone, worker)).await;
+        let ended = match &onto {
+            Onto::Here => None,
+            Onto::Sent { head, .. } => Some(StepState::Done {
+                detail: format!("{target} as the orchestrator's clone has it, at {}", short(head)),
+            }),
+            Onto::Forge => Some(StepState::Done { detail: format!("{target} from its origin") }),
+            Onto::Failed(why) => Some(StepState::Failed {
+                why: format!("{target} could not be sent to the task's clone: {why}"),
+            }),
+        };
+        if let Some(ended) = ended {
+            self.step_now((project, task), StepKind::Clone, worker, ended);
+        }
+        onto
+    }
+
+    /// Carry the target back along `back`, showing it on `task`'s step of `kind` on `worker`.
+    async fn send_back(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        back: Trip,
+        (kind, worker): (StepKind, WorkerId),
+    ) -> Onto {
         let label = format!("Sending {} to the task's clone", back.branch);
-        let shown = (StepKind::Merge, worker, label.as_str());
+        let shown = (kind, worker, label.as_str());
         let phase = StepState::Running { phase: label.clone(), percent: None };
-        self.step_now((project, task), StepKind::Merge, worker, phase);
+        self.step_now((project, task), kind, worker, phase);
         let at = (project, task);
         let carried = match self.carry(at, &back, Some(back.target.clone()), shown).await {
             Err(Carry::Lacking) => self.carry(at, &back, None, shown).await,
@@ -540,29 +603,15 @@ fn route_in(
     else {
         return Ok(None);
     };
-    let (Some(id), Some(orchestrator)) = (record.repo_id.as_ref(), record.orchestrator) else {
-        return Ok(None);
-    };
+    let Some(id) = record.repo_id.as_ref() else { return Ok(None) };
     let (Some(branch), Some(assigned)) =
         (branch.or_else(|| card.branch.clone()), card.assignment.as_ref())
     else {
         return Ok(None);
     };
+    let Some((to, to_repo)) = orchestrator_clone(state, record)? else { return Ok(None) };
     let from = assigned.term;
-    let to = orchestrator.worker;
-    let session_repo = |term: TermRef| {
-        let entry = state.workers.get(&term.worker)?;
-        let s = entry.sessions.iter().find(|s| s.id == term.session)?;
-        s.repo_id.as_ref().is_some_and(|other| other.same(id)).then(|| s.repo.clone())?
-    };
-    // The orchestrator's own checkout while it is still in the project's repository, else
-    // any clone of it on that worker.
-    let Some(to_repo) =
-        session_repo(orchestrator).or_else(|| projects::clone_on(state, record, to))
-    else {
-        let why = "the orchestrator's worker has no clone of the project's repository";
-        return Err((to, why.to_owned()));
-    };
+    let session_repo = |term: TermRef| session_repo(state, id, term);
     let Some(from_repo) = card
         .worktree
         .clone()
@@ -580,6 +629,33 @@ fn route_in(
         target: record.target.clone(),
     };
     Ok(Some(trip))
+}
+
+/// The clone of `term`'s session when it is in the repository `id`.
+fn session_repo(state: &State, id: &RepoId, term: TermRef) -> Option<String> {
+    let entry = state.workers.get(&term.worker)?;
+    let s = entry.sessions.iter().find(|s| s.id == term.session)?;
+    s.repo_id.as_ref().is_some_and(|other| other.same(id)).then(|| s.repo.clone())?
+}
+
+/// The orchestrator's worker and clone in `record`'s project: its own checkout while it is
+/// still in the project's repository, else any clone of it on that worker. `None` for a
+/// project with no repository or no orchestrator.
+///
+/// # Errors
+/// The orchestrator's worker, which has no clone of the repository, and why.
+fn orchestrator_clone(
+    state: &State,
+    record: &Project,
+) -> Result<Option<(WorkerId, String)>, (WorkerId, String)> {
+    let (Some(id), Some(orchestrator)) = (record.repo_id.as_ref(), record.orchestrator) else {
+        return Ok(None);
+    };
+    let to = orchestrator.worker;
+    let clone =
+        session_repo(state, id, orchestrator).or_else(|| projects::clone_on(state, record, to));
+    let why = "the orchestrator's worker has no clone of the project's repository";
+    clone.map(|clone| Some((to, clone))).ok_or_else(|| (to, why.to_owned()))
 }
 
 /// A branch's way home.

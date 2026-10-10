@@ -1440,8 +1440,9 @@ impl Projects {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.room_to_review()
     }
 
-    /// Whether a task may be started now: it exists, is not merged, and nothing runs or is
-    /// being started for it; and the project has room for one more.
+    /// Whether a task may be started now: it exists, is not merged, each task it depends on
+    /// has delivered ([`delivered`]), and nothing runs or is being started for it; and the
+    /// project has room for one more.
     pub(crate) fn may_start(
         &self,
         id: &ProjectId,
@@ -1452,18 +1453,14 @@ impl Projects {
         let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
         let t = record.task(task)?;
         if !ignore_dependencies
-            && let Some(dep) = t.depends_on.iter().find_map(|d| {
-                record
-                    .task(*d)
-                    .ok()
-                    .filter(|d| !matches!(d.state, TaskState::Done | TaskState::Merged))
-            })
+            && let Some(dep) =
+                t.depends_on.iter().find_map(|d| record.task(*d).ok().filter(|d| !delivered(d)))
         {
             return Err(refuse(
                 ErrorCode::Conflict,
                 format!(
-                    "task {task} depends on task {}, which is {:?}; start it when that is done, or \
-                     say ignore_dependencies",
+                    "task {task} depends on task {}, which is {:?}; start it once that is merged, \
+                     or say ignore_dependencies",
                     dep.id, dep.state
                 ),
             ));
@@ -2188,6 +2185,13 @@ enum Took {
     Unchanged,
     /// The node changed, with the moment worth the timeline, if any.
     Changed(Option<Moment>),
+}
+
+/// Whether what a task that others depend on made is there for them: its work merged into
+/// the target, where a dependent's worktree starts from; or, for one that only reads, its
+/// agent done. A task done and not merged has work no other clone holds yet.
+const fn delivered(t: &Task) -> bool {
+    matches!(t.state, TaskState::Merged) || t.read_only && matches!(t.state, TaskState::Done)
 }
 
 /// Take a status line's worktree into `t`; a new branch is worth the timeline.

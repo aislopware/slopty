@@ -24,6 +24,7 @@ use slopty_proto::terminal::{RepoId, SessionSummary};
 use slopty_proto::thread::wire::{NewWorktree, Start};
 use slopty_proto::thread::{AgentId, ThreadId};
 
+use super::steps::Onto;
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, codex, digest, error, keep_start, keyed,
     known_term, remember, start_again, start_answered, term_of,
@@ -1806,6 +1807,22 @@ impl Hub {
         let (cwd, worktree) = match at {
             Some(Place { path, worktree }) => (path, worktree),
             None => (cwd, None),
+        };
+        // Its worktree starts from the target as the orchestrator's clone has it, sent there
+        // first when that is another clone: with pushing off, only that clone holds what the
+        // merge queue merged.
+        let worktree = match worktree {
+            Some(Worktree::Worker { name, base }) => {
+                match self.send_target_to((project, task), (worker, cwd.clone())).await {
+                    Onto::Sent { branch, .. } => Some(Worktree::Worker { name, base: branch }),
+                    Onto::Here | Onto::Forge => Some(Worktree::Worker { name, base }),
+                    Onto::Failed(why) => {
+                        let why = format!("task {task} could not start from its target: {why}");
+                        return error(ErrorCode::Failed, &why);
+                    }
+                }
+            }
+            None => None,
         };
         // Last, so they win over the caller's own.
         env.push((PROJECT_ENV.to_owned(), project.to_string()));
