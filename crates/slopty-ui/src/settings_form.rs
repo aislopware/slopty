@@ -98,7 +98,8 @@ pub const RESET_KEYS: &str = "Reset to default";
 /// What the font list says while it looks for the installed monospace families.
 pub const FINDING_FONTS: &str = "Finding monospace fonts";
 
-/// What an empty colour field says: the theme's own colour applies.
+/// What an empty colour field says when the theme's own colour is not known here: it applies.
+/// One that is known is said as its hex, muted, as the field's placeholder.
 pub const THEME_COLOUR: &str = "Theme";
 
 /// How long a stepper or a field waits after the last click or keystroke before its value is
@@ -145,6 +146,14 @@ pub fn narrow(window: &Window, theme: &Theme) -> bool {
 /// A field's width: a colour's hex beside its swatch. A longer host scrolls in its field, and
 /// the row's words keep one line beside it.
 const FIELD_WIDTH: f32 = 140.0;
+
+/// A typed field's width: a URL, a key's path or a list of addresses reads whole at a glance,
+/// where a colour's width cut it mid-word. Never more than [`FIELD_SHARE`] of its row, so the
+/// row's words keep their line on a narrow window.
+const TEXT_WIDTH: f32 = 260.0;
+
+/// The most of its row a typed field takes.
+const FIELD_SHARE: f32 = 0.6;
 
 /// The font picker's width: a family's name, drawn in itself.
 const FONT_WIDTH: f32 = 184.0;
@@ -287,9 +296,9 @@ impl SettingsForm {
             })];
         let mut fields = Vec::with_capacity(rows().len());
         for (ix, row) in rows().iter().enumerate() {
-            let placeholder = match row.field.kind {
-                Kind::Text | Kind::List => row.field.example.as_deref().unwrap_or_default(),
-                Kind::Colour => THEME_COLOUR,
+            let placeholder: SharedString = match row.field.kind {
+                Kind::Text | Kind::List => row.field.example.clone().unwrap_or_default().into(),
+                Kind::Colour => colour_hint(row.table(), row.key()),
                 Kind::Map(_) => {
                     let state =
                         cx.new(|cx| InputState::new(window, cx).placeholder(map::ADD_ENTRY));
@@ -2154,7 +2163,8 @@ impl SettingsForm {
         well(theme)
             .id(("settings-field", ix))
             .debug_selector(move || format!("settings-field-{ix}"))
-            .w(px(FIELD_WIDTH))
+            .w(px(if row.field.kind == Kind::Colour { FIELD_WIDTH } else { TEXT_WIDTH }))
+            .max_w(gpui::relative(FIELD_SHARE))
             .gap(px(spacing.xs))
             .px(px(crate::kit::FIELD_INSET))
             .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
@@ -2341,6 +2351,17 @@ fn parse_hex(text: &str) -> Option<Rgb> {
     let hex = text.strip_prefix('#').unwrap_or(text);
     (hex.len() == 6).then_some(())?;
     u32::from_str_radix(hex, 16).ok().map(Rgb::hex)
+}
+
+/// What an empty colour field shows: the colour that applies meanwhile, the theme's, as its
+/// hex beside its swatch; [`THEME_COLOUR`] where it is not known here.
+fn colour_hint(table: &str, key: &str) -> SharedString {
+    theme_colour(table, key).map_or_else(|| THEME_COLOUR.into(), |c| hex_of(c).into())
+}
+
+/// `colour` as a field types it: `#rrggbb`.
+fn hex_of(colour: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", colour.r, colour.g, colour.b)
 }
 
 /// The theme's own colour that a `[colors.light]` or `[colors.dark]` key stands in for, so an
@@ -2753,8 +2774,22 @@ mod map_tests {
         assert_eq!(text, "[worker.acp]\nmine = [\"/opt/mine\", \"--acp\"]\n");
     }
 
+    /// An empty colour field shows the theme's own colour as its hex, the one the swatch beside
+    /// it shows, of the appearance its table names; one the theme has no colour for says so.
+    #[test]
+    fn an_empty_colour_field_shows_the_themes_own() {
+        let light = TerminalPalette::LIGHT.fg;
+        let hex = format!("#{:02x}{:02x}{:02x}", light.r, light.g, light.b);
+        assert_eq!(colour_hint("colors.light", "foreground"), SharedString::from(hex));
+        assert_ne!(
+            colour_hint("colors.dark", "background"),
+            colour_hint("colors.light", "background")
+        );
+        assert_eq!(colour_hint("colors.light", "palette"), SharedString::from(THEME_COLOUR));
+    }
+
     /// The Agents page writes its keys to their own tables: a step of the live agents to
-    /// `[server.projects]`, a relay typed to `[server.push]`.
+    /// `[server.projects]`, a relay typed to `[server.push]`, in a field wide enough to read it.
     #[gpui::test]
     fn the_agents_page_writes_the_projects_and_the_notes_tables(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -2780,6 +2815,9 @@ mod map_tests {
         let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
         assert_eq!(text(cx), "[server.projects]\nlive_agents = 25\n");
 
+        // A URL's field is wide enough to read one whole, wider than a colour's.
+        let wide = cx.debug_bounds(leak(format!("settings-field-{relay}"))).expect("its field");
+        assert!(f32::from(wide.size.width) > FIELD_WIDTH, "{wide:?}");
         click(cx, leak(format!("settings-field-{relay}")));
         cx.simulate_input("https://relay.example.dev");
         cx.executor().advance_clock(SETTLE);
