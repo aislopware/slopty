@@ -6,7 +6,7 @@ Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
-Tab │ Fix the login redirect
+Tab │ Fix the login redirect, Claude Code
 Image │ Needs you
 Button │ Close tab
 Button │ Needs you

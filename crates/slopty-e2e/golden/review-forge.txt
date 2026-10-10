@@ -6,7 +6,7 @@ Button │ Forward
 Group │ Where
 Button │ slopty
 TabList
-Tab │ Changes
+Tab │ Changes, project
 Button │ Close tab
 Button │ Needs you
 Button │ More

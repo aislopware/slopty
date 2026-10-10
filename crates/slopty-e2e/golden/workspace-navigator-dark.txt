@@ -16,7 +16,7 @@ Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
 TabList
-Tab │ Terminal
+Tab │ Terminal, 3 tiles
 Button │ Close tab
 Button │ More
 Group │ Terminal

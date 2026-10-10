@@ -20,7 +20,7 @@ Button │ Fix the login redirect
 Image │ Claude Code
 Button │ Close tile
 TabList
-Tab │ Fix the login redirect
+Tab │ Fix the login redirect, Claude Code
 Image │ Needs you
 Button │ Close tab
 Button │ More

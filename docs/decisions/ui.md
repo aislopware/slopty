@@ -10128,3 +10128,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     off the navigator, type roles), `workspace::tab_look::tests`, `kit::tests` (the track is
     ringed, a modal is rounded xl, density sizes the targets), `workspace::tests::{tab_strip,
     tiles, frame, foot, focus, nav_list, nav_rows, overlays, palette}`.
+
+- ✅ **A tab of several tiles reads as two levels** (2026-10-11, the MonoCode port's review).
+  A tab of two panes drew its title tab and its focused pane's tab as the same filled pill with
+  the same words, 40 pt apart, so the frame read as doubled. MonoCode names the focused pane in
+  its title tab too, but gives a tab of several panes a second line and heads a session pane in
+  a split with words, not a pill. Ruled:
+  - A title tab holding more than its focused tile says what else it holds on a second line:
+    the other tile's title, or "N tiles" (`MonoCode`'s `tabCopy`). Both lines are at the
+    caption's size on a 1.25 leading, so they fit the 30 pt pill; the title is medium, the rest
+    muted. A screen reader hears "Terminal 2, Terminal".
+  - A pane's tab on show carries no fill, only the text's full tone and its close
+    (`tab_look::pane_tab`); the title tab alone wears `selected`. The hover's 5 % wash was tried
+    first and read the same as light's 6.5 % selection.
+  - Tests: `workspace::tests::focus::a_tab_of_several_tiles_reads_as_two_levels`,
+    `workspace::tab_look::tests::a_pane_tab_on_show_is_a_level_under_a_title_tab`.
+
+- ✅ **The board's head says where the goal stands** (2026-10-11, the orchestrator-first study,
+  item 12, the UI's half). Under the project's place line, the latest `Project.progress` the
+  orchestrator gave (`project_update`): its summary in the text's tone, clamped at three lines,
+  and "Next:" and the next step under it in the secondary tone. Once the goal is met, "Goal met"
+  leads it with the success mark and no next step is drawn. Nothing shows before the
+  orchestrator has said anything. A screen reader hears the whole as one status line.
+  - Test: `workspace::tests::projects::the_board_says_where_the_goal_stands`.

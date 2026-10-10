@@ -36,7 +36,7 @@ Button │ Close tab
 Tab │ Orchestrator
 Image │ Claude Code
 Button │ Close tab
-Tab │ Terminal 2
+Tab │ Terminal 2, 3 tiles
 Button │ Close tab
 Button │ More
 Group │ #1 Mirror the server's projects

@@ -6,7 +6,7 @@ Button │ Forward
 Group │ Where
 Button │ project
 TabList
-Tab │ project
+Tab │ project, project
 Button │ Close tab
 Button │ Needs you
 Button │ More

@@ -6,7 +6,7 @@ Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
-Tab │ Terminal 2
+Tab │ Terminal 2, Terminal
 Button │ Close tab
 Button │ Needs you
 Button │ More

@@ -21,7 +21,7 @@ Button │ Close tile
 Button │ Review
 Button │ Close tile
 TabList
-Tab │ Review
+Tab │ Review, 3 tiles
 Image │ Done
 Button │ Close tab
 Button │ More

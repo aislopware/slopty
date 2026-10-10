@@ -24,7 +24,7 @@ Button │ Close tile
 Button │ Terminal
 Button │ Close tile
 TabList
-Tab │ refresh.rs
+Tab │ refresh.rs, 3 tiles
 Image │ Done
 Button │ Close tab
 Button │ More

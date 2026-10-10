@@ -103,10 +103,11 @@ pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool
     }
 }
 
-/// A pane's tab: [`tab`], a level under the title bar's. The one on show takes the hover's
-/// wash, where a title tab takes `selected`, so a tab of several tiles never reads as the same
-/// pill twice, its title tab over the pane tab of its focused tile. Words, close and slots are
-/// a title tab's.
+/// A pane's tab: [`tab`], a level under the title bar's. The one on show carries no fill, only
+/// the text's full tone (and its close), where a title tab wears `selected`, so a tab of several
+/// tiles never reads as the same pill twice, its title tab over the pane tab of its focused
+/// tile (`MonoCode`'s split header names its pane the same way). Slots, words and close are a
+/// title tab's, and every pane tab takes the hover's wash under the pointer.
 #[must_use]
 pub(super) fn pane_tab(
     theme: &Theme,
@@ -114,9 +115,8 @@ pub(super) fn pane_tab(
     shown: bool,
     closable: bool,
 ) -> Stateful<Div> {
-    let wash = theme.surfaces.hover;
-    let el = tab(theme, el, shown, closable);
-    if shown { el.bg(hsla(wash)) } else { el }
+    let el = tab(theme, el, false, closable);
+    if shown { el.text_color(hsla(theme.surfaces.text)) } else { el }
 }
 
 /// A tab's lead: `mark` in one 14 pt slot, in the text's tone on the tab on show and at
@@ -239,8 +239,8 @@ mod tests {
         }
     }
 
-    /// A pane's tab on show is a level under a title tab's: the hover's wash, not `selected`,
-    /// in the text's full tone; one not on show is bare, as a title tab's is.
+    /// A pane's tab on show is a level under a title tab's: no fill, the text's full tone; one
+    /// not on show is bare in the secondary tone, as a title tab's is.
     #[test]
     fn a_pane_tab_on_show_is_a_level_under_a_title_tab() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -248,10 +248,10 @@ mod tests {
             let s = theme.surfaces;
             let mut shown = pane_tab(&theme, div().id("a"), true, true);
             let style = shown.style();
-            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.hover))), "{variant:?}");
+            assert!(style.background.is_none(), "{variant:?}: no fill");
             assert_eq!(style.text.color, Some(hsla(s.text)), "{variant:?}");
-            assert_ne!(s.hover, s.selected, "{variant:?}: two levels");
             let mut rest = pane_tab(&theme, div().id("b"), false, true);
+            assert_eq!(rest.style().text.color, Some(hsla(s.text_secondary)), "{variant:?}");
             assert!(rest.style().background.is_none(), "{variant:?}: bare");
         }
     }

@@ -36,7 +36,7 @@ TabList
 Tab │ Claude Code
 Image │ Needs you
 Button │ Close tab
-Tab │ Claude Code 2
+Tab │ Claude Code 2, opencode
 Image │ Working
 Button │ Close tab
 Tab │ pi

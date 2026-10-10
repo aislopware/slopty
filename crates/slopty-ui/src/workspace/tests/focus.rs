@@ -144,8 +144,8 @@ fn a_pane_of_tabs_leads_with_its_dot_on_the_lone_panes_edge(cx: &mut TestAppCont
 
 /// A tab of several tiles reads as two levels, never its focused tile's pill twice: its title
 /// tab says what else it holds on a second line (the other's title, then how many once there
-/// are more), and the pane's tab on show takes the hover's wash where the title tab wears
-/// `selected`. A tab of one tile has no second line.
+/// are more), and the pane's tab on show is its words in the full tone, with no fill, where the
+/// title tab wears `selected`. A tab of one tile has no second line.
 #[gpui::test]
 fn a_tab_of_several_tiles_reads_as_two_levels(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -179,8 +179,8 @@ fn a_tab_of_several_tiles_reads_as_two_levels(cx: &mut TestAppContext) {
     let theme = Theme::default();
     let pane_tab = cx.debug_bounds(selector("tab", second.item)).expect("the pane's tab on show");
     let fills = fills_at(cx, pane_tab);
-    assert!(fills.contains(&crate::colors::hsla(theme.surfaces.hover)), "the lighter wash");
     assert!(!fills.contains(&crate::colors::hsla(theme.surfaces.selected)), "{fills:?}");
+    assert!(!fills.contains(&crate::colors::hsla(theme.surfaces.hover)), "no fill: {fills:?}");
 
     let third = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
     one_pane(&view, cx, &[first, third]);
