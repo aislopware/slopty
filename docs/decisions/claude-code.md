@@ -2309,3 +2309,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The GUI.** Lane A shows the fact.
   - Tests: `managed_settings_that_keep_the_hooks_off_are_said_as_they_change` (slopty-worker
     `caps.rs`), and the `machine_hello_ack` golden.
+
+- ✅ **The transcript decoder's vocabulary lives with the decoder, and its diffs are the thread
+  model's** (2026-10-11, readiness 10-11 deletions).
+  - **What was wrong.** `slopty_proto::conversation` sat in the wire crate. Its 1150 lines are
+    what the worker decodes from Claude Code's transcript and hooks, and no message ever sent
+    names them. Its `Patch`, `Hunk`, `EditDetail` and `WriteDetail` repeated
+    `thread::detail`'s, and `observed` copied one into the other field by field.
+  - **Now.** The module is `slopty_agent::conversation`, in `conversation/vocabulary.rs`, and
+    every type keeps its name. The wire crate holds only what goes on the wire.
+  - **One diff type.** The decoder builds `thread::detail::{Patch, Hunk, EditDetail,
+    WriteDetail}` itself.
+    - A clipped diff's `full` is the `ContentRef` of its thread and record
+      (`observed::content_ref`), made where the result is read.
+    - A write says `created: Option<bool>` where it used to say `WriteKind`.
+    - `observed`'s `patch` copy is gone, and so is `driven::replaced_patch`'s.
+  - No golden moved. The decoder's own snapshots (`conversation__edit`,
+    `conversation__tools`) now say `created` where they said `kind`. The whole-diff test also
+    checks that the reference names the thread it is in.

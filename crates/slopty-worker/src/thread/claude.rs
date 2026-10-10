@@ -36,12 +36,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use slopty_agent::conversation::{Part, Transcripts};
+use slopty_agent::conversation::{Part, PermissionEvent, PermissionPrompt, Transcripts};
 use slopty_agent::observed::{self, Observed, Out};
 use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
-use slopty_proto::conversation::{PermissionEvent, PermissionPrompt};
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadId, ThreadState};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -399,7 +398,7 @@ struct Session {
     title: String,
     hooks: u64,
     /// The status line's latest meters, for a thread begun after they came.
-    meters: Option<slopty_proto::conversation::Meters>,
+    meters: Option<slopty_agent::conversation::Meters>,
     /// When Slopty opened the Claude Code here, while no hook has spoken since
     /// ([`observed::UNHEARD`]).
     silent_since: Option<Instant>,

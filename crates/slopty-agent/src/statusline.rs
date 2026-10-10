@@ -29,7 +29,7 @@ use crate::{Hook, HookEvent};
 /// The wrapper's words after the `slopty` binary.
 const WRAPPER_WORDS: &str = "hook statusline";
 
-pub use slopty_proto::conversation::{Meters, RateWindow};
+pub use crate::conversation::{Meters, RateWindow};
 
 /// The meters in Claude Code's status-line input; what is missing stays `None`.
 #[must_use]

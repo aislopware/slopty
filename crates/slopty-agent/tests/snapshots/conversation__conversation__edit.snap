@@ -75,7 +75,7 @@ expression: "decode(\"edit\").snapshot()"
             Write:
               path: /work/notes.txt
               lines: 4
-              kind: Overwrite
+              created: false
               patch:
                 hunks:
                   - old_start: 1

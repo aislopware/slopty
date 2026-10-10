@@ -36,7 +36,6 @@
 pub mod agent;
 pub mod cloning;
 pub mod codec;
-pub mod conversation;
 pub mod ctl;
 pub mod datagram;
 pub mod dnd;

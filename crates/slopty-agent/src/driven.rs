@@ -57,25 +57,7 @@ pub fn tool(call: ToolCall) -> ItemBody {
 /// the texts, not where in the file they are. An empty `old` is a whole file written.
 #[must_use]
 pub fn replaced_patch(replacements: &[(String, String)]) -> Patch {
-    let made = crate::conversation::proposed_patch(replacements);
-    Patch {
-        hunks: made
-            .hunks
-            .into_iter()
-            .map(|h| Hunk {
-                old_start: h.old_start,
-                old_lines: h.old_lines,
-                new_start: h.new_start,
-                new_lines: h.new_lines,
-                heading: h.heading,
-                lines: h.lines,
-            })
-            .collect(),
-        added: made.added,
-        removed: made.removed,
-        clipped_lines: made.clipped_lines,
-        full: None,
-    }
+    crate::conversation::proposed_patch(replacements)
 }
 
 /// A unified diff's hunks, as Codex writes a file change's and pi an edit's: file headers are

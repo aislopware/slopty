@@ -45,9 +45,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::conversation::{Declined, Grant, PermissionPrompt, Suggestion, Verdict};
 use slopty_proto::ctl::Decision;
 
+use crate::conversation::{Declined, Grant, PermissionPrompt, Suggestion, Verdict};
 use crate::{Hook, HookEvent};
 
 /// The hooks the relay asks the worker with and waits on, registered without `async`: a
@@ -279,9 +279,8 @@ pub fn suggestions(value: &Value) -> Vec<Suggestion> {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::conversation::Answer;
-
     use super::*;
+    use crate::conversation::Answer;
 
     /// A decision prints what the hooks reference defines, and no decision prints nothing.
     /// (The socket lines are pinned beside `CtlRequest` in `slopty-proto`.)
@@ -343,7 +342,7 @@ mod tests {
             (prompt.tool.as_str(), prompt.ask, prompt.mode.as_deref()),
             ("Edit", 7, Some("default"))
         );
-        let slopty_proto::conversation::ToolDetail::Edit(edit) = &prompt.detail else {
+        let crate::conversation::ToolDetail::Edit(edit) = &prompt.detail else {
             panic!("an edit: {:?}", prompt.detail);
         };
         assert_eq!(

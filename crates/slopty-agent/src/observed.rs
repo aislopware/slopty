@@ -42,10 +42,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use slopty_core::{ClientId, SessionId, WallMs};
-use slopty_proto::conversation::{
-    self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
-    PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
-};
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped,
     Compaction, ContentRef, Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
@@ -54,6 +50,10 @@ use slopty_proto::thread::{
     kind,
 };
 
+use crate::conversation::{
+    self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
+    PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
+};
 use crate::live;
 use crate::status::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 
@@ -1577,29 +1577,13 @@ impl Observed {
         let mut input = Clipped::default();
         let mut child = None;
         let (kind, title, detail) = match &call.detail {
-            conv::ToolDetail::Edit(e) => (
-                kind::EDIT,
-                format!("Edit {}", e.path),
-                Some(detail::ToolDetail::Edit(detail::EditDetail {
-                    path: e.path.clone(),
-                    edits: e.edits,
-                    replace_all: e.replace_all,
-                    patch: patch(thread, &e.patch),
-                })),
-            ),
+            conv::ToolDetail::Edit(e) => {
+                (kind::EDIT, format!("Edit {}", e.path), Some(detail::ToolDetail::Edit(e.clone())))
+            }
             conv::ToolDetail::Write(w) => (
                 kind::WRITE,
                 format!("Write {}", w.path),
-                Some(detail::ToolDetail::Write(detail::WriteDetail {
-                    path: w.path.clone(),
-                    lines: w.lines,
-                    created: match w.kind {
-                        conv::WriteKind::Unknown => None,
-                        conv::WriteKind::Create => Some(true),
-                        conv::WriteKind::Overwrite => Some(false),
-                    },
-                    patch: patch(thread, &w.patch),
-                })),
+                Some(detail::ToolDetail::Write(w.clone())),
             ),
             conv::ToolDetail::Read(r) => (
                 kind::READ,
@@ -1931,27 +1915,6 @@ fn image(thread: &conv::ThreadId, i: &conv::Image) -> thread::Image {
     }
 }
 
-fn patch(thread: &conv::ThreadId, p: &conv::Patch) -> thread::Patch {
-    thread::Patch {
-        hunks: p
-            .hunks
-            .iter()
-            .map(|h| detail::Hunk {
-                old_start: h.old_start,
-                old_lines: h.old_lines,
-                new_start: h.new_start,
-                new_lines: h.new_lines,
-                heading: h.heading.clone(),
-                lines: h.lines.clone(),
-            })
-            .collect(),
-        added: p.added,
-        removed: p.removed,
-        clipped_lines: p.clipped_lines,
-        full: p.full.as_ref().map(|r| content_ref(thread, r)),
-    }
-}
-
 fn question(q: &conv::QuestionDetail) -> detail::QuestionDetail {
     detail::QuestionDetail {
         questions: q
@@ -2181,8 +2144,8 @@ fn request(prompt: &PermissionPrompt) -> Request {
                 choice("allow", TRY_AGAIN, Effect::Allow, None, false),
             ];
             let proposed = match detail {
-                conv::ToolDetail::Edit(e) => Some(patch(&thread, &e.patch)),
-                conv::ToolDetail::Write(w) => Some(patch(&thread, &w.patch)),
+                conv::ToolDetail::Edit(e) => Some(e.patch.clone()),
+                conv::ToolDetail::Write(w) => Some(w.patch.clone()),
                 _ => None,
             };
             let title = match rule(reason) {
@@ -2224,8 +2187,8 @@ fn request(prompt: &PermissionPrompt) -> Request {
                 }
                 options.extend([deny, deny_stop]);
                 let proposed = match detail {
-                    conv::ToolDetail::Edit(e) => Some(patch(&thread, &e.patch)),
-                    conv::ToolDetail::Write(w) => Some(patch(&thread, &w.patch)),
+                    conv::ToolDetail::Edit(e) => Some(e.patch.clone()),
+                    conv::ToolDetail::Write(w) => Some(w.patch.clone()),
                     _ => None,
                 };
                 (Request::APPROVAL, approval_title(prompt), options, Vec::new(), proposed)

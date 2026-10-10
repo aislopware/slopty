@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use slopty_core::WallMs;
-use slopty_proto::conversation::{Body, Change, Clipped, Live, LiveId, LiveKind, Meters, ThreadId};
 
 use crate::claude_mod::{MOD_CLAUDE_VERSIONS, MOD_PROTOCOL};
+use crate::conversation::{Body, Change, Clipped, Live, LiveId, LiveKind, Meters, ThreadId};
 
 /// How long after its step stopped a block the transcript has not settled is dropped.
 pub const SETTLE_GRACE: Duration = Duration::from_secs(5);

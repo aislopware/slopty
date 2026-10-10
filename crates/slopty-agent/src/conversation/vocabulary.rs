@@ -2,7 +2,7 @@
 //!
 //! The worker is the only place that reads Claude Code's transcript (the tolerant decoder in
 //! `slopty-agent`), and `slopty_agent::observed` turns what it reads into the agent-neutral
-//! thread model (`crate::thread`), which is what clients are sent. The types here are that
+//! thread model (`slopty_proto::thread`), which is what clients are sent. The types here are that
 //! decoder's vocabulary, and the parts of it the thread model and the hooks share.
 //!
 //! **Entries.** A thread ([`ThreadId`]) is the session's own conversation or one subagent's.
@@ -33,6 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs};
+pub use slopty_proto::thread::detail::{EditDetail, Hunk, Patch, WriteDetail};
 
 /// A clipping limit: whichever of the two is reached first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,76 +413,6 @@ pub enum ToolDetail {
         /// The input as JSON.
         input: Clipped,
     },
-}
-
-/// A diff.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Patch {
-    /// Hunks, as `git diff` would cut them.
-    pub hunks: Vec<Hunk>,
-    /// Lines added, over the whole diff.
-    pub added: u32,
-    /// Lines removed.
-    pub removed: u32,
-    /// Diff lines left out of `hunks` past the decoder's cap.
-    pub clipped_lines: u32,
-    /// Where the whole diff is, when lines were left out.
-    pub full: Option<TextRef>,
-}
-
-/// One hunk of a diff.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Hunk {
-    /// First line in the old file.
-    pub old_start: u32,
-    /// Lines of the old file the hunk spans.
-    pub old_lines: u32,
-    /// First line in the new file.
-    pub new_start: u32,
-    /// Lines of the new file the hunk spans.
-    pub new_lines: u32,
-    /// What it is in, as git's `@@ … @@` line names it: the enclosing function or block, when
-    /// one is known (`crate::thread::detail::heading`).
-    pub heading: Option<String>,
-    /// The lines, each starting with ` `, `-` or `+` (or `\` for "no newline at end").
-    pub lines: Vec<String>,
-}
-
-/// `Edit` / `MultiEdit`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EditDetail {
-    /// The file.
-    pub path: String,
-    /// Replacements asked for (`MultiEdit` asks several).
-    pub edits: u32,
-    /// Every occurrence was replaced.
-    pub replace_all: bool,
-    /// What changed, from the result; empty until it arrives.
-    pub patch: Patch,
-}
-
-/// `Write`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriteDetail {
-    /// The file.
-    pub path: String,
-    /// Lines written.
-    pub lines: u32,
-    /// Whether the file was new.
-    pub kind: WriteKind,
-    /// For an overwrite, what changed.
-    pub patch: Patch,
-}
-
-/// Whether a `Write` made a file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WriteKind {
-    /// Not known until the result arrives.
-    Unknown,
-    /// A new file.
-    Create,
-    /// An existing file replaced.
-    Overwrite,
 }
 
 /// `Read`.

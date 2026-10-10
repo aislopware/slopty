@@ -223,7 +223,7 @@ expression: "decode(\"tools\").snapshot()"
             Write:
               path: /work/notes.md
               lines: 2
-              kind: Create
+              created: true
               patch:
                 hunks: []
                 added: 2

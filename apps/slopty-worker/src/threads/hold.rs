@@ -30,9 +30,9 @@
 
 use std::time::Duration;
 
+use slopty_agent::conversation::{PermissionEvent, PermissionPrompt, Settled, Verdict};
 use slopty_agent::{Hook, HookEvent, permission};
 use slopty_core::{ClientId, SessionId, WallMs};
-use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, Settled, Verdict};
 use slopty_proto::ctl::Decision;
 use slopty_worker::clip::Link;
 use slopty_worker::conversation::{Board, Held, Holds, ORCHESTRATION, Reach};

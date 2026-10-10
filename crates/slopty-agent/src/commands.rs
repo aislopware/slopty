@@ -23,8 +23,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use slopty_proto::conversation::{CommandSource, SlashCommand};
 
+use crate::conversation::{CommandSource, SlashCommand};
 use crate::live::CommandInfo;
 
 /// Most bytes of a command or skill file read for its front matter and first line.

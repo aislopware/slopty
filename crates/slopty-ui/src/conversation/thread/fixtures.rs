@@ -31,7 +31,7 @@ pub(crate) fn empty() -> ThreadState {
 
 /// What the worker's transcript decoder reads from the recorded session `name` under
 /// `slopty-agent`'s fixtures: its main transcript, then each subagent's.
-fn changes(name: &str) -> Vec<slopty_proto::conversation::Change> {
+fn changes(name: &str) -> Vec<slopty_agent::conversation::Change> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../slopty-agent/tests/fixtures/conversation")
         .join(name);
@@ -43,7 +43,7 @@ fn changes(name: &str) -> Vec<slopty_proto::conversation::Change> {
         files.extend(agents);
     }
     let mut decoder = slopty_agent::conversation::Conversation::default();
-    let mut changes = vec![slopty_proto::conversation::Change::Reset { thread: None }];
+    let mut changes = vec![slopty_agent::conversation::Change::Reset { thread: None }];
     for file in files {
         let mut tail = slopty_agent::transcript::Tail::default();
         changes.extend(decoder.read(&mut tail, &file).expect("a recorded transcript"));

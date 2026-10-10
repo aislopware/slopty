@@ -55,20 +55,14 @@ use std::path::Path;
 
 use serde_json::Value;
 use slopty_core::WallMs;
-pub use slopty_proto::conversation::{
-    AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Choice, Clipped, Compact,
-    EditDetail, Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note,
-    NoteKind, Origin, Output, Part, Patch, Prompt, Question, QuestionDetail, ReadDetail,
-    ResultStatus, Retry, ShellStatus, Stop, Task, TaskCreateDetail, TaskUpdateDetail, TextRef,
-    ThreadId, ThreadState, ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail,
-    WebSearchDetail, WriteDetail, WriteKind,
-};
+pub use vocabulary::*;
 
 use crate::transcript::Tail;
 
 pub mod media;
 pub mod output;
 mod session;
+mod vocabulary;
 pub use session::{Located, Transcripts, subagents_dir};
 
 /// Prose: prompts, answers, thinking, plans, subagent reports, compaction summaries. Long enough
@@ -858,7 +852,8 @@ impl Conversation {
         };
         let structured = result.filter(|r| r.is_object());
         let images = media::in_result(ctx.uuid, id, block, structured);
-        let shown = apply_result(&mut call.detail, status, &text, structured, ctx.uuid, id);
+        let shown =
+            apply_result(&mut call.detail, status, &text, structured, (ctx.thread, ctx.uuid), id);
         let text = (!shown || status != ResultStatus::Ok).then(|| {
             Clipped::head(
                 text.trim(),
@@ -1098,7 +1093,7 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
         "Write" => ToolDetail::Write(WriteDetail {
             path: path(),
             lines: to_u32(str_at(input, "content").map_or(0, |c| c.lines().count())),
-            kind: WriteKind::Unknown,
+            created: None,
             patch: Patch::default(),
         }),
         "Read" => ToolDetail::Read(ReadDetail {
@@ -1252,11 +1247,11 @@ fn apply_result(
     status: ResultStatus,
     text: &str,
     result: Option<&Value>,
-    uuid: &str,
+    (thread, uuid): (&ThreadId, &str),
     id: &str,
 ) -> bool {
     let field = |key: &str| result.and_then(|r| r.get(key));
-    let patch = || result.map(|r| patch(r, uuid)).unwrap_or_default();
+    let patch = || result.map(|r| patch(r, thread, uuid)).unwrap_or_default();
     match detail {
         ToolDetail::Edit(edit) => {
             edit.patch = match result {
@@ -1266,14 +1261,14 @@ fn apply_result(
             result.is_some()
         }
         ToolDetail::Write(write) => {
-            write.kind = match field("type").and_then(Value::as_str) {
-                Some("create") => WriteKind::Create,
-                Some("update") => WriteKind::Overwrite,
-                _ => write.kind,
+            write.created = match field("type").and_then(Value::as_str) {
+                Some("create") => Some(true),
+                Some("update") => Some(false),
+                _ => write.created,
             };
             write.patch = patch();
             // A file made whole comes with an empty diff: every line it wrote is added.
-            if write.kind == WriteKind::Create && write.patch.hunks.is_empty() {
+            if write.created == Some(true) && write.patch.hunks.is_empty() {
                 write.patch.added = write.patch.added.max(write.lines);
             }
             result.is_some()
@@ -1420,7 +1415,7 @@ fn apply_result(
 
 /// The diff in a result's `structuredPatch`, each hunk headed as git heads it from the file as
 /// it was (`originalFile`).
-fn patch(result: &Value, uuid: &str) -> Patch {
+fn patch(result: &Value, thread: &ThreadId, uuid: &str) -> Patch {
     let mut out = Patch::default();
     let Some(hunks) = result.get("structuredPatch").and_then(Value::as_array) else { return out };
     let original = original_lines(result);
@@ -1456,7 +1451,8 @@ fn patch(result: &Value, uuid: &str) -> Patch {
         }
     }
     if out.clipped_lines > 0 {
-        out.full = Some(TextRef { record: uuid.to_owned(), part: Part::Patch });
+        let whole = TextRef { record: uuid.to_owned(), part: Part::Patch };
+        out.full = Some(crate::observed::content_ref(thread, &whole));
     }
     out
 }

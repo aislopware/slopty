@@ -252,12 +252,15 @@ fn a_long_diff_keeps_its_counts() {
     let mut c = Conversation::default();
     c.ingest_jsonl(&MAIN, &jsonl);
     let ToolDetail::Write(write) = &tool(&c, &MAIN, "t1").detail else { panic!("write") };
-    assert_eq!((write.kind, write.lines), (WriteKind::Overwrite, 2));
+    assert_eq!((write.created, write.lines), (Some(false), 2));
     let patch = &write.patch;
     assert_eq!((patch.added, patch.removed), (1000, 1));
     assert_eq!(patch.hunks.len(), 1, "the second hunk is past the cap");
     assert_eq!(patch.clipped_lines, 601);
-    let whole = full_text(&jsonl, patch.full.as_ref().expect("ref")).expect("patch");
+    let (thread, at) =
+        crate::observed::text_ref(patch.full.as_ref().expect("ref")).expect("the decoder's own");
+    assert_eq!(thread, MAIN, "the whole diff names the thread it is in");
+    let whole = full_text(&jsonl, &at).expect("patch");
     assert!(whole.starts_with("@@ -1,1 +1,1000 @@\n+added 0\n"));
     assert!(whole.ends_with("@@ -2000,1 +3000,0 @@\n-gone\n"));
 }
@@ -282,7 +285,7 @@ fn a_created_file_counts_its_lines_as_added() {
     let mut c = Conversation::default();
     c.ingest_jsonl(&MAIN, &jsonl);
     let ToolDetail::Write(write) = &tool(&c, &MAIN, "t1").detail else { panic!("write") };
-    assert_eq!((write.kind, write.lines), (WriteKind::Create, 2));
+    assert_eq!((write.created, write.lines), (Some(true), 2));
     assert_eq!((write.patch.added, write.patch.removed), (2, 0));
     assert!(write.patch.hunks.is_empty(), "no diff to show");
 }

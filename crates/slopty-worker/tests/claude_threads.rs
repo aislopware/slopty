@@ -10,14 +10,15 @@ mod claude_threads {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use slopty_agent::conversation::{Conversation, ThreadId as ConvThread};
+    use slopty_agent::conversation::{
+        Conversation, PermissionEvent, PermissionPrompt, ThreadId as ConvThread, ToolDetail,
+    };
     use slopty_agent::live::{Batch, Board, ModEvent};
     use slopty_agent::observed::{terminal_thread, thread_of};
     use slopty_agent::status::{AgentEvent, AgentSource, AgentStatus};
     use slopty_agent::transcript::Tail;
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
-    use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState};
     use slopty_worker::conversation::Seen;
@@ -285,9 +286,9 @@ mod claude_threads {
             tool: "Bash".to_owned(),
             call: None,
             detail: ToolDetail::Other {
-                input: slopty_proto::conversation::Clipped::head(
+                input: slopty_agent::conversation::Clipped::head(
                     "{}",
-                    slopty_proto::conversation::Cap { lines: 1, chars: 10 },
+                    slopty_agent::conversation::Cap { lines: 1, chars: 10 },
                     None,
                 ),
             },
@@ -544,9 +545,9 @@ mod claude_threads {
         let rig = Rig::new();
         let host = rig.host();
         let _observer = rig.observe(&host);
-        let meters = slopty_proto::conversation::Meters {
+        let meters = slopty_agent::conversation::Meters {
             context_window: Some(1_000_000),
-            ..slopty_proto::conversation::Meters::default()
+            ..slopty_agent::conversation::Meters::default()
         };
         rig.seen.seen.send_modify(|seen| seen.meters = Some(meters));
         rig.status(AgentStatus::Working);

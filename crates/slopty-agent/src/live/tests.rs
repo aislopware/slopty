@@ -3,11 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use slopty_proto::conversation::{Entry, Live, LiveId, LiveKind, Meters, ThreadId};
 
 use super::*;
 use crate::claude_mod;
-use crate::conversation::Transcripts;
+use crate::conversation::{Entry, Live, LiveId, LiveKind, Meters, ThreadId, Transcripts};
 
 const SCENARIOS: [&str; 3] = ["bash", "think", "agent"];
 
@@ -290,10 +289,7 @@ fn blocks_settle_on_their_entry_or_after_the_grace() {
     let later = now + Duration::from_secs(1);
     board.apply(&stop("t", 0), later);
     overlay.update(&board, later, WallMs::ZERO);
-    assert_eq!(
-        overlay.expire(later + SETTLE_GRACE / 2),
-        Vec::<slopty_proto::conversation::Live>::new()
-    );
+    assert_eq!(overlay.expire(later + SETTLE_GRACE / 2), Vec::<crate::conversation::Live>::new());
     assert_eq!(overlay.expire(later + SETTLE_GRACE), [Live::Clear { id: id("t", 0, 1) }]);
     assert!(
         overlay.update(&board, later + SETTLE_GRACE, WallMs::ZERO).is_empty(),
@@ -324,17 +320,14 @@ fn a_call_settles_by_its_id_and_a_long_answer_by_its_head() {
         text: "a long…".to_owned(),
         lines: 1,
         chars: 13,
-        full: Some(slopty_proto::conversation::TextRef {
+        full: Some(crate::conversation::TextRef {
             record: "u".to_owned(),
-            part: slopty_proto::conversation::Part::Block { index: 0 },
+            part: crate::conversation::Part::Block { index: 0 },
         }),
     };
     let tool = crate::conversation::proposed("Bash", &json!({"command": "ls"}));
-    let call = slopty_proto::conversation::ToolCall {
-        name: "Bash".to_owned(),
-        detail: tool,
-        result: None,
-    };
+    let call =
+        crate::conversation::ToolCall { name: "Bash".to_owned(), detail: tool, result: None };
     let settled = overlay.settle(&[
         upsert(ThreadId::Main, "toolu_2", Body::Tool(Box::new(call.clone()))),
         upsert(ThreadId::Main, "u:0", Body::Text(clipped)),

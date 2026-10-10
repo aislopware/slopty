@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
+use slopty_agent::conversation::Meters;
 use slopty_core::SessionId;
-use slopty_proto::conversation::Meters;
 
 /// Where a session's conversation is written, and what the daemon heard of it.
 #[derive(Clone, Debug, Default, PartialEq)]

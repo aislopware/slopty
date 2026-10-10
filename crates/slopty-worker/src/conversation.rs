@@ -43,10 +43,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
 
+use slopty_agent::conversation::Meters;
 use slopty_agent::live::{self, ModEvent};
 use slopty_agent::{Hook, HookEvent};
 use slopty_core::SessionId;
-use slopty_proto::conversation::Meters;
 use tokio::sync::watch;
 
 use crate::clip::Link;
