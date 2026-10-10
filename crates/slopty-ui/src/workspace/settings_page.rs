@@ -16,6 +16,7 @@ use gpui::{Context, Entity, IntoElement as _, ParentElement as _, Styled as _, W
 
 use super::WorkspaceView;
 use crate::settings_editor::SettingsEditor;
+use crate::settings_form::remote::{Machine, SERVER};
 
 impl WorkspaceView {
     /// Show `editor` as a page in the panes' place, or, with `None`, the panes again.
@@ -53,6 +54,22 @@ impl WorkspaceView {
         if form.read(cx).aside() != aside {
             form.update(cx, |form, cx| form.set_aside(aside, cx));
         }
+        let machines = self.settings_machines();
+        let caller = self.projects.caller.clone();
+        if form.read(cx).machines_differ(&machines, caller.is_some()) {
+            form.update(cx, |form, cx| form.set_machines(machines, caller, cx));
+        }
+    }
+
+    /// The machines whose daemons' settings the page can edit: the server, while this device
+    /// is linked to one, then each worker it lists, by name.
+    fn settings_machines(&self) -> Vec<Machine> {
+        let server =
+            self.projects.caller.is_some().then(|| Machine { of: None, name: SERVER.to_owned() });
+        let workers = self.workers.iter().filter_map(|(key, w)| {
+            Some(Machine { of: Some(super::projects::worker_id(*key)?), name: w.name.clone() })
+        });
+        server.into_iter().chain(workers).collect()
     }
 
     /// Whether the navigator's body is the settings' section list: the page is up and the

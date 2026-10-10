@@ -65,6 +65,9 @@ pub mod schema;
 #[path = "settings_form_map.rs"]
 pub mod map;
 
+#[path = "settings_form_remote.rs"]
+pub mod remote;
+
 use schema::{Group, KeyRow, Row, Section, System, rows};
 
 /// What the search field says before anything is typed.
@@ -251,6 +254,10 @@ pub struct SettingsForm {
     login: Option<Login>,
     /// Each segmented row's thumb, by row, which slides to the option chosen.
     thumbs: std::cell::RefCell<std::collections::HashMap<usize, crate::palette::Plate>>,
+    /// Another machine's settings file, while its daemon's rows show it ([`remote`]).
+    remote: Option<remote::Remote>,
+    /// The machines the daemons' rows can show, and the way to them.
+    machines: remote::Machines,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -355,6 +362,8 @@ impl SettingsForm {
             entry_moved: None,
             scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
+            remote: None,
+            machines: remote::Machines::default(),
             _subscriptions: subscriptions,
         };
         form.sync_entries(window, cx);
@@ -437,6 +446,7 @@ impl SettingsForm {
     pub fn flush(&mut self, cx: &mut Context<Self>) -> Option<String> {
         self.pending = None;
         self.check_typed(cx);
+        self.send_edits(cx);
         cx.notify();
         (self.text != self.applied).then(|| {
             self.applied.clone_from(&self.text);
@@ -511,6 +521,9 @@ impl SettingsForm {
                 if r.system.is_some() && matches!(self.login, None | Some(Login::Unavailable)) {
                     return false;
                 }
+                if !self.shown_for_machine(r) {
+                    return false;
+                }
                 if self.query.trim().is_empty() {
                     self.narrow || r.section == self.section
                 } else {
@@ -525,7 +538,8 @@ impl SettingsForm {
 
     /// Row `ix`'s value in the file, else its default.
     fn value(&self, row: &Row) -> Value {
-        edit::read(&self.text, row.table(), row.key()).unwrap_or_else(|| row.field.default.clone())
+        edit::read(self.text_for(row), row.table(), row.key())
+            .unwrap_or_else(|| row.field.default.clone())
     }
 
     fn switch_on(&self, row: &Row) -> bool {
@@ -578,12 +592,15 @@ impl SettingsForm {
             *error = checked.as_ref().err().cloned();
         }
         if checked.is_ok() {
-            self.text = edit::write(&self.text, row.table(), row.key(), literal);
+            self.edit_text(row, None, Some(literal), |text| {
+                edit::write(text, row.table(), row.key(), literal)
+            });
         }
     }
 
     /// Hand the text to the dialog to apply now, along with anything still waiting.
     fn apply(&mut self, cx: &mut Context<Self>) {
+        self.send_edits(cx);
         if let Some(text) = self.flush(cx) {
             cx.emit(SettingsFormEvent::Apply(text));
         }
@@ -617,7 +634,7 @@ impl SettingsForm {
                 continue;
             };
             let typed = field.read(cx).value().to_string();
-            if typed == field_text(&self.text, row) {
+            if typed == field_text(self.text_for(row), row) {
                 continue;
             }
             let literal = match row.field.kind {
@@ -1143,14 +1160,15 @@ impl SettingsForm {
     /// A group's heading over the rows it names, as System Settings titles its groups: the
     /// section role in the secondary tone, on a row's height at the group's leading inset, with
     /// space above it. In a search or a single column it names the section instead.
-    fn heading(&self, text: &'static str, n: usize, first: bool) -> AnyElement {
+    fn heading(&self, text: impl Into<SharedString>, n: usize, first: bool) -> AnyElement {
+        let text: SharedString = text.into();
         let theme = &self.theme;
         let spacing = theme.spacing;
         crate::kit::typed(div(), theme.roles().section)
             .id(("settings-heading", n))
             .debug_selector(move || format!("settings-heading-{n}"))
             .role(gpui::accesskit::Role::Heading)
-            .aria_label(text)
+            .aria_label(text.clone())
             .flex_none()
             .h(px(theme.density.row))
             .flex()
@@ -1592,6 +1610,9 @@ impl SettingsForm {
         let mut last: Option<&'static str> = None;
         // The group whose rows run now: its footer closes its ring when the next group starts.
         let mut group: Option<&'static str> = None;
+        if !searching && (self.narrow || Self::picks_machine(self.section)) && self.picks_any() {
+            parts.push((Part::Apart, self.machine_bar(cx)));
+        }
         for &ix in shown {
             let Some(row) = rows().get(ix) else { continue };
             if group.is_some_and(|g| g != row.group)
@@ -1602,7 +1623,8 @@ impl SettingsForm {
             group = Some(row.group);
             let heading = if by_section { row.section.label() } else { row.group };
             if last != Some(heading) {
-                parts.push((Part::Apart, self.heading(heading, parts.len(), last.is_none())));
+                let said = if by_section { heading.into() } else { self.group_title(heading) };
+                parts.push((Part::Apart, self.heading(said, parts.len(), last.is_none())));
                 last = Some(heading);
             }
             placed.push((ix, parts.len()));
@@ -2351,6 +2373,7 @@ impl Focusable for SettingsForm {
 
 impl Render for SettingsForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_machine_fields(window, cx);
         self.narrow = !self.aside && narrow(window, &self.theme);
         let shown = self.visible();
         let page = self.page(&shown, cx);
@@ -2749,5 +2772,105 @@ mod map_tests {
             text(cx),
             "[server.projects]\nlive_agents = 25\n\n[server.push]\nrelay = \"https://relay.example.dev\"\n"
         );
+    }
+
+    /// Another machine's settings: the Agents page leads with whose they are, and picking a
+    /// worker reads its file. While it is read its rows wait; then they show what it holds, its
+    /// own `[worker]` table alone, and an edit goes to it as the edit made here would be, this
+    /// device's file left as it was. A machine that cannot answer says why, and this device's
+    /// own file comes back with a pick.
+    #[gpui::test]
+    fn another_machines_settings_are_read_and_edited_there(cx: &mut TestAppContext) {
+        use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+        use slopty_proto::settings::{DaemonSettings, SettingEdit};
+
+        use super::remote::{Machine, SERVER, unsaved_words};
+
+        cx.update(gpui_kit::init);
+        let file = "[worker.acp]\nmine = []\n";
+        let (form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new(file, Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let ix = |table: &str, key: &str| {
+            rows()
+                .iter()
+                .position(|r| r.table() == table && r.key() == key)
+                .unwrap_or_else(|| panic!("{table}.{key}"))
+        };
+        let (acp, live) = (ix("worker", "acp"), ix("server.projects", "live_agents"));
+        let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+        let mini = slopty_core::WorkerId::new();
+        let machines = vec![
+            Machine { of: None, name: SERVER.to_owned() },
+            Machine { of: Some(mini), name: "mini".to_owned() },
+        ];
+        form.update(cx, |f, cx| f.set_machines(machines, Some(caller), cx));
+        click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
+        let entry = |name: &str| leak(format!("settings-entry-{acp}-{name}"));
+        assert!(cx.debug_bounds(entry("mine")).is_some(), "this Mac's own file first");
+
+        click(cx, "settings-machine");
+        click(cx, "settings-machines-machine-1");
+        assert!(cx.debug_bounds("settings-machine-said").is_some(), "reading it");
+        assert!(cx.debug_bounds(leak(format!("settings-row-{acp}"))).is_none(), "rows wait");
+        let (verb, reply) = queue.try_next().expect("its file asked");
+        assert_eq!(verb, Verb::Settings { of: Some(mini), edits: Vec::new() });
+        let there = DaemonSettings {
+            path: "/home/me/.config/slopty/settings.toml".to_owned(),
+            text: "[worker.acp]\nzed = [\"zed\", \"--acp\"]\n".to_owned(),
+            tables: vec!["worker".to_owned()],
+            problems: Vec::new(),
+        };
+        let _sent = reply.send(Outcome::Settings(Box::new(there.clone())));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(entry("zed")).is_some(), "what mini's file holds");
+        assert!(cx.debug_bounds(entry("mine")).is_none(), "not this Mac's");
+        assert!(
+            cx.debug_bounds(leak(format!("settings-row-{live}"))).is_none(),
+            "nor the server's"
+        );
+        let heads: Vec<String> =
+            form.read_with(cx, |f, _| f.machine().map(|m| m.name.clone())).into_iter().collect();
+        assert_eq!(heads, ["mini"]);
+
+        click(cx, leak(format!("settings-field-{acp}")));
+        cx.simulate_input("gemini");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (verb, reply) = queue.try_next().expect("the edit sent");
+        let edit = SettingEdit {
+            table: "worker".to_owned(),
+            key: "acp".to_owned(),
+            entry: Some("gemini".to_owned()),
+            literal: Some("[]".to_owned()),
+        };
+        assert_eq!(verb, Verb::Settings { of: Some(mini), edits: vec![edit] });
+        assert_eq!(form.read_with(cx, |f, _| f.text().to_owned()), file, "this Mac's file stays");
+        let away = Outcome::Error {
+            code: ErrorCode::ServerUnreachable,
+            message: "mini is away".to_owned(),
+        };
+        let _sent = reply.send(away);
+        cx.run_until_parked();
+        let said = form.read_with(cx, |f, _| f.machine_said());
+        assert_eq!(said, Some(unsaved_words("mini", "mini is away")));
+        let (verb, reply) = queue.try_next().expect("its file read again");
+        assert_eq!(verb, Verb::Settings { of: Some(mini), edits: Vec::new() });
+        let _sent = reply.send(Outcome::Settings(Box::new(there)));
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(entry("gemini")).is_none(), "what it holds, not what did not go");
+        assert!(cx.debug_bounds(entry("zed")).is_some());
+        let said = form.read_with(cx, |f, _| f.machine_said());
+        assert_eq!(said, Some(unsaved_words("mini", "mini is away")), "still said");
+
+        click(cx, "settings-machine");
+        click(cx, "settings-machines-this");
+        assert!(cx.debug_bounds(entry("mine")).is_some(), "this Mac's own file again");
+        assert!(queue.try_next().is_none(), "nothing asked of it");
     }
 }

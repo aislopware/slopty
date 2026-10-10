@@ -9614,3 +9614,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     keeps every comment and says why in the error's tone ("Review not posted to #42: …").
     The commit sheet says "Posted the review · 2 comments", with its page.
   - Test: `review::tests::forge_threads_hang_on_their_lines_and_comments_post_as_a_review`.
+
+- ✅ **The settings of another machine's worker or server are edited from here** (2026-10-11,
+  readiness audit item 24's picker; W's half answers `Verb::Settings`).
+  - **The defect.** The Agents page, and the worker and server groups on Network, edited
+    `[worker]` and `[server]` keys in this device's own `settings.toml`. That set nothing
+    when the worker or the server was another machine. A phone had no Agents page at all.
+  - **The picker.** A page that holds a daemon's keys leads with "Settings of", followed by
+    the machine they are for. The choices are this Mac's own file (where this device runs a
+    worker or a server), the server, and each worker the workspace lists. A phone or an iPad
+    starts on the server and has an Agents page again. A narrow window shows the picker once,
+    at the top of its single column.
+  - **Another machine's file.** Picking a machine reads its file once. Its rows wait,
+    saying "Reading mini's settings…". They then show what that file holds, and only the
+    machine's own table: a worker's `[worker]` rows, or the server's `[server]` rows. Group
+    headings name it ("Share mini's shells and windows"). This app's own rows on the same page
+    stay this device's.
+  - **Edits.** An edit is written the way the form writes its own file
+    (`slopty_settings::edit`), so the rows answer at once. It is kept as a `SettingEdit` and
+    sent when the hand pauses, the same pause a local write waits for. The machine answers with
+    its file as it then stands. Edits made while an answer is on its way are replayed over it
+    and go next.
+  - **What did not go.** An edit turned down says so ("Not changed on mini: …"), and the file
+    is read again so the rows show what it holds. A machine that cannot be read says why.
+  - Test: `settings_form::tests::another_machines_settings_are_read_and_edited_there`.

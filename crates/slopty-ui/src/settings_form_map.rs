@@ -97,7 +97,7 @@ const fn first_value(kind: &Kind) -> &'static str {
 impl SettingsForm {
     /// Map row `row`'s entries in the file, in its order.
     pub(super) fn entries_of(&self, row: &Row) -> Vec<(String, Value)> {
-        edit::entries(&self.text, row.table(), row.key())
+        edit::entries(self.text_for(row), row.table(), row.key())
     }
 
     /// Make the parts of every map entry the file holds and drop those of the ones it no longer
@@ -165,7 +165,9 @@ impl SettingsForm {
             *error = checked.as_ref().err().cloned();
         }
         if checked.is_ok() {
-            self.text = edit::write_entry(&self.text, row.table(), row.key(), name, literal);
+            self.edit_text(row, Some(name), Some(literal), |text| {
+                edit::write_entry(text, row.table(), row.key(), name, literal)
+            });
         }
         checked.is_ok()
     }
@@ -220,7 +222,9 @@ impl SettingsForm {
     fn remove_entry(&mut self, ix: usize, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = rows().get(ix) else { return };
         self.check_typed(cx);
-        self.text = edit::remove_entry(&self.text, row.table(), row.key(), name);
+        self.edit_text(row, Some(name), None, |text| {
+            edit::remove_entry(text, row.table(), row.key(), name)
+        });
         self.apply(cx);
         self.sync_entries(window, cx);
         if let Some(Some(adding)) = self.fields.get(ix) {

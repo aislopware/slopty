@@ -42,26 +42,13 @@ pub enum Section {
 }
 
 impl Section {
-    /// Every section, in order. An iPhone or an iPad runs no worker or server, whose keys are
-    /// all the Agents page holds (`HOSTS_DAEMONS`), so it lists no such page.
-    #[cfg(not(target_os = "ios"))]
+    /// Every section, in order. An iPhone or an iPad runs no worker or server of its own; its
+    /// Agents page edits the server's or a worker's ([`super::remote`]).
     pub const ALL: [Self; 8] = [
         Self::Appearance,
         Self::Terminal,
         Self::Input,
         Self::Agents,
-        Self::Streams,
-        Self::Network,
-        Self::Keyboard,
-        Self::About,
-    ];
-    /// Every section, in order. An iPhone or an iPad runs no worker or server, whose keys are
-    /// all the Agents page holds (`HOSTS_DAEMONS`), so it lists no such page.
-    #[cfg(target_os = "ios")]
-    pub const ALL: [Self; 7] = [
-        Self::Appearance,
-        Self::Terminal,
-        Self::Input,
         Self::Streams,
         Self::Network,
         Self::Keyboard,
@@ -367,8 +354,7 @@ impl Row {
 #[must_use]
 pub fn rows() -> &'static [Row] {
     static ROWS: LazyLock<Vec<Row>> = LazyLock::new(|| {
-        let fields: Vec<&Field> =
-            schema::fields().iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table)).collect();
+        let fields: Vec<&Field> = schema::fields().iter().collect();
         let mut rows = rows_of(&fields);
         if LOGIN_ITEMS {
             let at = rows.iter().rposition(|r| r.group == THIS_APP).map_or(rows.len(), |i| i + 1);
@@ -397,12 +383,9 @@ static OPEN_AT_LOGIN: LazyLock<Field> = LazyLock::new(|| Field {
     example: None,
 });
 
-/// Whether this platform runs `slopty-worker` and `slopty-server`: an iPhone or an iPad runs
-/// neither, so their tables would set nothing there.
-const HOSTS_DAEMONS: bool = !cfg!(target_os = "ios");
-
-/// Whether `table` is read by a daemon rather than by this app.
-fn daemons(table: &str) -> bool {
+/// Whether `table` is read by a daemon rather than by this app: a worker's or the server's,
+/// which another machine's may be ([`super::remote`]).
+pub(in crate::settings_form) fn daemons(table: &str) -> bool {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
     matches!(root, "worker" | "server")
 }
@@ -735,7 +718,7 @@ mod tests {
     #[test]
     fn every_key_is_a_row_once() {
         let fields = schema::fields();
-        let shown = fields.iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table));
+        let shown = fields.iter();
         let (system, file): (Vec<&Row>, Vec<&Row>) =
             rows().iter().partition(|r| r.system.is_some());
         assert_eq!(file.len(), shown.clone().count(), "a row per key");
@@ -852,17 +835,13 @@ mod tests {
         assert_eq!(once.len(), heads.len(), "no page heads two groups alike: {heads:?}");
     }
 
-    /// An iPhone or an iPad runs no worker or server, so the form there lists no row of
-    /// theirs, and the app's own rows stay.
+    /// Every platform lists the daemons' rows, a phone's for another machine's file
+    /// ([`super::remote`]), and the Agents page that holds most of them.
     #[test]
-    fn a_phone_lists_no_daemon_table() {
-        let phone: Vec<&Field> = schema::fields().iter().filter(|f| !daemons(&f.table)).collect();
-        let phone = rows_of(&phone);
-        assert!(phone.iter().all(|r| !daemons(r.table())), "{phone:#?}");
-        assert!(phone.iter().any(|r| r.table() == "client"), "the app's own stay");
-        assert_eq!(rows().iter().any(|r| r.table() == "worker"), HOSTS_DAEMONS);
-        assert!(phone.iter().all(|r| r.section != Section::Agents), "no Agents page there");
-        assert_eq!(Section::ALL.contains(&Section::Agents), HOSTS_DAEMONS, "nor its section");
+    fn every_platform_lists_the_daemons_rows() {
+        assert!(rows().iter().any(|r| r.table() == "worker"));
+        assert!(rows().iter().any(|r| r.table() == "client"), "beside the app's own");
+        assert!(Section::ALL.contains(&Section::Agents));
     }
 
     /// The Agents page holds what the machines run agents by: the ACP agents beside the known
@@ -875,21 +854,17 @@ mod tests {
             .filter(|r| r.section == Section::Agents)
             .map(|r| (r.group, format!("{}.{}", r.table(), r.key())))
             .collect();
-        let expected: Vec<(&str, String)> = if HOSTS_DAEMONS {
-            [
-                ("ACP agents", "worker.acp"),
-                ("Projects", "server.projects.live_agents"),
-                ("Projects", "server.projects.permission_flags"),
-                ("Notes on your phone", "server.push.relay"),
-                ("Notes on your phone", "server.push.apns_key"),
-                ("Notes on your phone", "server.push.key_id"),
-                ("Notes on your phone", "server.push.team_id"),
-            ]
-            .map(|(g, k)| (g, k.to_owned()))
-            .to_vec()
-        } else {
-            Vec::new()
-        };
+        let expected: Vec<(&str, String)> = [
+            ("ACP agents", "worker.acp"),
+            ("Projects", "server.projects.live_agents"),
+            ("Projects", "server.projects.permission_flags"),
+            ("Notes on your phone", "server.push.relay"),
+            ("Notes on your phone", "server.push.apns_key"),
+            ("Notes on your phone", "server.push.key_id"),
+            ("Notes on your phone", "server.push.team_id"),
+        ]
+        .map(|(g, k)| (g, k.to_owned()))
+        .to_vec();
         assert_eq!(page, expected);
         assert!(footer("ACP agents").is_some(), "its group says what a command is");
     }
