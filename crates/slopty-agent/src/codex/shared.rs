@@ -1770,7 +1770,6 @@ pub fn ask_of(id: &RequestId) -> AskId {
     }
 }
 
-/// A thread's name for people: its own, else what it was first asked.
 /// The command a skill is in the composer: its name, its short description where it has one,
 /// and where it comes from in the composer's words.
 fn command_of(skill: &p::SkillMetadata) -> Command {
@@ -1854,6 +1853,7 @@ pub fn past(thread: &p::Thread) -> PastSession {
     }
 }
 
+/// A thread's name for people: its own, else what it was first asked.
 fn title_of(thread: &p::Thread) -> String {
     thread
         .name
