@@ -595,6 +595,12 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
+/// What leads the board's progress line once the orchestrator says the goal is met.
+pub(crate) const GOAL_MET: &str = "Goal met";
+/// What leads the progress line's next step.
+pub(crate) const NEXT: &str = "Next";
+/// The most lines the progress line's summary takes before it ends in an ellipsis.
+const STANDING_LINES: usize = 3;
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 /// The header's toggle for the panel that sets how the work is checked, and the panel's name.
@@ -754,7 +760,73 @@ impl ProjectView {
             .pb(px(sp.sm))
             .child(title)
             .child(meta)
+            .children(self.standing(board))
             .child(self.bar(board))
+    }
+
+    /// Where the goal stands, as the orchestrator last said it
+    /// ([`slopty_proto::project::Progress`]): its summary in the text's tone, what comes next
+    /// under it in the secondary tone, and, once the goal is met, "Goal met" leading with the
+    /// success mark. None until it has said anything.
+    fn standing(&self, board: &Board) -> Option<Stateful<Div>> {
+        let progress = board.project.progress.as_ref()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let roles = theme.roles();
+        let summary = progress.summary.trim();
+        let next = progress.next.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let mut said = Vec::new();
+        if progress.done {
+            said.push(GOAL_MET.to_owned());
+        }
+        said.push(summary.to_owned());
+        if let Some(next) = next {
+            said.push(format!("{NEXT}: {next}"));
+        }
+        let met = progress.done.then(|| {
+            div()
+                .debug_selector(|| "project-goal-met".to_owned())
+                .flex()
+                .items_center()
+                .gap(px(sp.xs))
+                .text_color(hsla(s.success))
+                .child(icon(
+                    theme,
+                    Symbol::CheckmarkCircleFill,
+                    IconSize::Inline,
+                    hsla(s.success_fill),
+                ))
+                .child(GOAL_MET)
+        });
+        let summary = crate::kit::typed(div(), roles.chrome)
+            .debug_selector(|| "project-standing-summary".to_owned())
+            .min_w_0()
+            .line_clamp(STANDING_LINES)
+            .text_color(hsla(s.text))
+            .child(SharedString::from(summary.to_owned()));
+        let next = next.map(|next| {
+            crate::kit::typed(div(), roles.metadata)
+                .debug_selector(|| "project-standing-next".to_owned())
+                .min_w_0()
+                .line_clamp(2)
+                .text_color(hsla(s.text_secondary))
+                .child(SharedString::from(format!("{NEXT}: {next}")))
+        });
+        Some(
+            div()
+                .id("project-standing")
+                .debug_selector(|| "project-standing".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(said.join(". ")))
+                .mt(px(sp.sm))
+                .flex()
+                .flex_col()
+                .gap(px(sp.xxs))
+                .children(met)
+                .child(summary)
+                .children(next),
+        )
     }
 
     /// What the merge queue landed that is not on the forge yet, while pushing is off or a

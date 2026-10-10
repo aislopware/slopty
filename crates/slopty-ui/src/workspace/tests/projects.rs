@@ -1614,3 +1614,58 @@ fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     let notice = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(notice.as_deref(), Some(crate::workspace::projects::NOT_SENT));
 }
+
+/// The board's head says where the goal stands as its orchestrator last said it: the summary,
+/// then what comes next; once the goal is met, "Goal met" leads it and the next step goes.
+/// Nothing is said before the orchestrator has said anything.
+#[gpui::test]
+fn the_board_says_where_the_goal_stands(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let term = TermRef { worker: fixtures_worker(&view, cx, orchestrator), session: orchestrator };
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-standing").is_none(), "nothing said yet");
+
+    let says = |summary: &str, next: Option<&str>, done: bool, seq: u64| {
+        let mut record = project("board", Some(term));
+        record.progress = Some(slopty_proto::project::Progress {
+            summary: summary.to_owned(),
+            next: next.map(str::to_owned),
+            done,
+            at_ms: WallMs::from_millis(seq.saturating_mul(1000)),
+        });
+        ProjectUpdate {
+            project: fixtures::id("board"),
+            record: Some(record),
+            task: None,
+            native: None,
+            entry: None,
+        }
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, says("Store and wire merged", Some("Golden files"), false, 11), cx);
+    });
+    cx.run_until_parked();
+    let (title, line) = (
+        cx.debug_bounds("project-title").expect("the title"),
+        cx.debug_bounds("project-standing").expect("the progress line"),
+    );
+    assert!(line.top() > title.bottom(), "under the title: {line:?}");
+    let next = cx.debug_bounds("project-standing-next").expect("what comes next");
+    let summary = cx.debug_bounds("project-standing-summary").expect("the summary");
+    assert!(next.top() >= summary.bottom() - px(0.5), "next under the summary");
+    assert!(cx.debug_bounds("project-goal-met").is_none(), "not met yet");
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "Store and wire merged. Next: Golden files"), "{said:#?}");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(12, says("All three merged and pushed", None, true, 12), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-goal-met").is_some(), "the goal met leads");
+    assert!(cx.debug_bounds("project-standing-next").is_none(), "nothing comes next");
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "Goal met. All three merged and pushed"), "{said:#?}");
+}
