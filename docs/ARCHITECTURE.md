@@ -15,7 +15,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
 ```
                                   ┌──────────── server (slopty-server) ────────────┐
                                   │ worker directory · leases · orchestration verbs │
-                                  │ QUIC front end · MCP (Streamable HTTP)          │
+                                  │ QUIC front end (agents' MCP via `slopty mcp`)   │
                                   └───────▲───────────────────────────────▲─────────┘
                         workers dial in: │ lease + verbs     clients: directory, verbs
                      ┌───────────────────┼──── worker (macOS · Linux) ────┼─────────────────┐
@@ -1716,7 +1716,7 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
 | `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and a project's MCP tools | all |
-| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, placement, verify and merge), QUIC and MCP front ends | server |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, placement, verify and merge), the QUIC front end | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model, grouping tiles by their facts (`groups`) | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |

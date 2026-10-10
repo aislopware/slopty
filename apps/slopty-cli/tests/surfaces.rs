@@ -1,6 +1,5 @@
-//! One contract on two surfaces: the same `tools/call`s through the server's MCP endpoint over
-//! HTTP and through `slopty mcp` dialled to that server give the same results, over a real
-//! server and a fake worker on loopback.
+//! The one MCP surface: `tools/call`s through `slopty mcp` dialled to a real server, with a fake
+//! worker on loopback, answer with the tools' views, a tool's error as a result the model reads.
 
 #[cfg(test)]
 mod tests {
@@ -18,7 +17,7 @@ mod tests {
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_server::{Config, Server};
-    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::Command;
 
     /// The CLI, started from a clean environment with its home at `home`
@@ -95,29 +94,6 @@ mod tests {
         }
     }
 
-    /// `tools/call` on the server's endpoint: one POST, one JSON body.
-    async fn over_http(mcp: SocketAddr, id: u64, name: &str, arguments: &Value) -> Value {
-        let body = request(id, name, arguments).to_string();
-        let mut stream = tokio::net::TcpStream::connect(mcp).await.unwrap();
-        let head = format!(
-            "POST /mcp HTTP/1.1\r\nHost: {mcp}\r\nContent-Type: application/json\r\n\
-             Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: {REVISION}\r\n\
-             Mcp-Method: tools/call\r\nMcp-Name: {name}\r\nContent-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            body.len()
-        );
-        stream.write_all(head.as_bytes()).await.unwrap();
-        stream.write_all(body.as_bytes()).await.unwrap();
-        let mut response = String::new();
-        tokio::time::timeout(PATIENCE, stream.read_to_string(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
-        let (head, body) = response.split_once("\r\n\r\n").unwrap();
-        assert!(head.starts_with("HTTP/1.1 200"), "{response}");
-        serde_json::from_str(body).unwrap()
-    }
-
     fn request(id: u64, name: &str, arguments: &Value) -> Value {
         json!({
             "jsonrpc": "2.0",
@@ -135,7 +111,7 @@ mod tests {
         })
     }
 
-    /// The part of an answer both surfaces must agree on: the tool result, its text parsed.
+    /// The tool result of an answer: whether it is an error, and its text parsed.
     fn result(reply: &Value) -> (Value, Value) {
         let result = &reply["result"];
         assert!(result.is_object(), "a tool result: {reply}");
@@ -145,12 +121,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_server_endpoint_and_slopty_mcp_answer_a_call_alike() {
+    async fn slopty_mcp_answers_each_call_with_the_tools_views() {
         let dir = tempfile::tempdir().unwrap();
         let server = Server::start(Config {
             name: "test-server".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().to_path_buf(),
             admission: Admission::default(),
             push: slopty_server::PushConfig::Off,
@@ -203,13 +178,12 @@ mod tests {
             ("read_thread", json!({ "term": by_name })),
             ("read_thread", json!({ "term": "no-such-worker/0199" })),
         ];
+        let mut answers = Vec::new();
         for (id, (name, arguments)) in (1_u64..).zip(&calls) {
-            let http = result(&over_http(server.mcp_addr(), id, name, arguments).await);
-
             let line = format!("{}\n", request(id, name, arguments));
             stdin.write_all(line.as_bytes()).await.unwrap();
             stdin.flush().await.unwrap();
-            let stdio = loop {
+            let answer = loop {
                 let line = tokio::time::timeout(PATIENCE, stdout.next_line())
                     .await
                     .expect("an answer in time")
@@ -220,18 +194,27 @@ mod tests {
                     break result(&msg);
                 }
             };
-            assert_eq!(http, stdio, "{name} answers alike on both surfaces");
-            println!("{name}: {}", http.1);
+            println!("{name}: {}", answer.1);
+            answers.push(answer);
         }
 
-        // Spot checks that the shared answers are the tools' views, not the wire's.
-        let status = result(&over_http(server.mcp_addr(), 99, "project_status", &calls[0].1).await);
+        // The answers are the tools' views, not the wire's; a tool's error is a result.
+        let [status, unknown, task, waited, thread, nowhere] = answers.as_slice() else {
+            panic!("{answers:?}")
+        };
         assert_ne!(status.0, json!(true), "{status:?}");
         assert_eq!(status.1["project"]["title"], json!("Demo"), "{status:?}");
-        let unknown =
-            result(&over_http(server.mcp_addr(), 98, "project_status", &calls[1].1).await);
         assert_eq!(unknown.0, json!(true), "{unknown:?}");
         assert!(unknown.1.as_str().unwrap().ends_with("(UnknownProject)"), "{unknown:?}");
+        for (answered, code) in [
+            (task, "(UnknownTask)"),
+            (waited, "(UnknownTask)"),
+            (thread, "(Invalid)"),
+            (nowhere, "(UnknownWorker)"),
+        ] {
+            assert_eq!(answered.0, json!(true), "{answered:?}");
+            assert!(answered.1.as_str().unwrap().ends_with(code), "{answered:?}");
+        }
 
         drop(stdin);
         let _exited = tokio::time::timeout(PATIENCE, child.wait()).await;

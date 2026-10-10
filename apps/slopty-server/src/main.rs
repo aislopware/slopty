@@ -1,11 +1,11 @@
 //! `slopty-server` — the control plane daemon.
 //!
 //! Workers register over QUIC on `--port` and hold their lease there; clients, the CLI and
-//! agents get the worker directory and send verbs on the same port; AI agents also reach the
-//! verbs over MCP (Streamable HTTP) on `--mcp-port`. Both listeners admit loopback, the tailnet
-//! and the `[server] allow` ranges of `settings.toml` (a VPN Tailscale does not vouch for). The
-//! worker list survives restarts in `workers.json` in the data directory. Notes reach a
-//! pocketed phone once `[server.push]` names a relay or an APNs key.
+//! agents get the worker directory and send verbs on the same port, an agent's tools through
+//! `slopty mcp` among them. It admits loopback, the tailnet and the `[server] allow` ranges of
+//! `settings.toml` (a VPN Tailscale does not vouch for). The worker list survives restarts in
+//! `workers.json` in the data directory. Notes reach a pocketed phone once `[server.push]` names a
+//! relay or an APNs key.
 
 #![forbid(unsafe_code)]
 
@@ -25,10 +25,6 @@ struct Args {
     /// `SLOPTY_SERVER_PORT`.
     #[arg(long, env = "SLOPTY_SERVER_PORT", default_value_t = slopty_net::endpoint::SERVER_PORT)]
     port: u16,
-    /// TCP port for the MCP endpoint (`http://<host>:<port>/mcp`); 0 picks a free one. Also
-    /// `SLOPTY_MCP_PORT`.
-    #[arg(long, env = "SLOPTY_MCP_PORT", default_value_t = slopty_net::endpoint::MCP_PORT)]
-    mcp_port: u16,
     /// Where `workers.json` lives (default: `server` in `$SLOPTY_DATA_DIR`, else in
     /// `~/Library/Application Support/Slopty` on macOS and `$XDG_DATA_HOME/slopty` on Linux).
     #[arg(long)]
@@ -37,8 +33,8 @@ struct Args {
     /// machine's computer name).
     #[arg(long, env = "SLOPTY_SERVER_NAME")]
     name: Option<String>,
-    /// Once both listeners are bound, print where on stdout as one JSON line,
-    /// `{"quic":"[::]:45560","mcp":"[::]:45561"}` (a harness reads the ports `0` picked).
+    /// Once the listener is bound, print where on stdout as one JSON line,
+    /// `{"quic":"[::]:45560"}` (a harness reads the port `0` picked).
     #[arg(long)]
     print_addr: bool,
 }
@@ -227,7 +223,6 @@ async fn main() -> Result<()> {
             slopty_platform::computer_name().unwrap_or_else(|| "server".to_owned())
         }),
         quic: slopty_net::endpoint::any(args.port),
-        mcp: slopty_net::endpoint::any(args.mcp_port),
         data_dir: data_dir.clone(),
         admission,
         push: push(&settings.server.push),
@@ -264,7 +259,6 @@ async fn main() -> Result<()> {
     if args.print_addr {
         let bound = serde_json::json!({
             "quic": server.quic_addr().to_string(),
-            "mcp": server.mcp_addr().to_string(),
         });
         #[expect(clippy::print_stdout, reason = "the addresses are what a harness waits for")]
         {

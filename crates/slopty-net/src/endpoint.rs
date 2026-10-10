@@ -16,9 +16,6 @@ pub const WORKER_PORT: u16 = 45550;
 /// server address names none.
 pub const SERVER_PORT: u16 = 45560;
 
-/// TCP port the server's MCP endpoint (Streamable HTTP) listens on unless told otherwise.
-pub const MCP_PORT: u16 = 45561;
-
 /// Keep-alive on every link, the server's and a worker's.
 ///
 /// An idle link still carries a ping and its ACK each second, so a peer that stops answering is

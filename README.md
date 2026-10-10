@@ -71,8 +71,7 @@ Your own `claude` runs unmodified, with your flags; `SLOPTY_NO_CLAUDE_MOD=1` lea
 For Claude Code started elsewhere, add the tools yourself:
 
 ```sh
-claude mcp add slopty -- slopty mcp                          # stdio, through the CLI
-claude mcp add --transport http slopty http://<server-host>:45561/mcp
+claude mcp add slopty -- slopty mcp
 ```
 
 and `slopty hook install` registers the hooks that report whether it is working, waiting or

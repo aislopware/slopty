@@ -320,12 +320,15 @@ mod tests {
         stack.slopty(&["send", &term, "--keys", "ctrl+c"]).await?;
         clock.lap("ports");
 
-        // 7. A project's tools over MCP's HTTP: the eight listed, and a call the hub answers. The
-        //    screen of a terminal, as an agent reads it with `slopty screen`.
+        // 7. A project's tools through `slopty mcp`: the nine listed, and a call the hub answers.
+        //    The screen of a terminal, as an agent reads it with `slopty screen`.
         let listed = stack.mcp(1, "tools/list", json!({})).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        ensure!(names.len() == 8 && names.contains(&"task_start"), "{listed}");
+        ensure!(
+            names.len() == 9 && names.contains(&"task_start") && names.contains(&"task_restart"),
+            "{listed}"
+        );
         let params = json!({ "name": "project_status", "arguments": { "project": "nope" } });
         let called = stack.mcp(2, "tools/call", params).await?;
         let said = str_of(&called["result"]["content"][0], "text")?;

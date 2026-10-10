@@ -329,17 +329,7 @@ impl Stack {
         let mut server = spawn(
             "server",
             "slopty-server",
-            &[
-                "--port",
-                "0",
-                "--mcp-port",
-                "0",
-                "--print-addr",
-                "--data-dir",
-                &server_dir,
-                "--name",
-                "soak-server",
-            ],
+            &["--port", "0", "--print-addr", "--data-dir", &server_dir, "--name", "soak-server"],
         )?;
         let printed = first_line(&mut server, out, "server");
         // Held before anything can fail, so the stack's drop kills it.

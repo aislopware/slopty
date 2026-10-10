@@ -2,15 +2,15 @@
 //!
 //! Workers dial it and hold one QUIC link each, which is their lease and the channel verbs go
 //! down. Clients, the CLI and agents dial it for the worker directory, its changes, and to send
-//! verbs; AI agents also reach the same verbs over MCP. It is never on the data path: terminal
-//! rows and video go client ↔ worker directly.
+//! verbs; an agent reaches the same verbs as Slopty's MCP tools through `slopty mcp`, the CLI
+//! dialled in from its terminal. It is never on the data path: terminal rows and video go
+//! client ↔ worker directly.
 //!
 //! * [`hub`] — the registry, the leases and the one verb dispatch.
 //! * [`project`] — projects: their records, path claims, placement, and how agents move tasks.
 //! * [`store`] — the state files: known workers, every project and the phones, across restarts.
 //! * [`push`] — notices pushed to pocketed phones, through the relay or straight to APNs.
-//! * [`link`] — the QUIC front end.
-//! * [`mcp`] — the MCP front end (Streamable HTTP).
+//! * [`link`] — the QUIC front end, the only one.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -22,7 +22,6 @@
 mod deliver;
 pub mod hub;
 pub mod link;
-pub mod mcp;
 mod placement;
 pub mod project;
 pub mod push;
@@ -31,10 +30,7 @@ pub mod store;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use hub::{
-    Acting, GONE_AFTER, Hold, Hub, KeepAwake, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS,
-};
-pub use mcp::Mcp;
+pub use hub::{GONE_AFTER, Hold, Hub, KeepAwake, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS};
 pub use push::PushConfig;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
@@ -108,14 +104,6 @@ pub enum ServerError {
     /// The QUIC listener did not bind.
     #[error(transparent)]
     Net(#[from] slopty_net::NetError),
-    /// The MCP listener did not bind.
-    #[error("mcp listener on {addr}: {source}")]
-    Mcp {
-        /// Where.
-        addr: SocketAddr,
-        /// Why.
-        source: std::io::Error,
-    },
     /// Pushing to phones could not be set up.
     #[error("push: {0}")]
     Push(#[from] push::SetupError),
@@ -136,23 +124,20 @@ pub struct Config {
     pub name: String,
     /// Where the QUIC listener binds (UDP).
     pub quic: SocketAddr,
-    /// Where the MCP listener binds (TCP).
-    pub mcp: SocketAddr,
     /// Where the state file lives.
     pub data_dir: PathBuf,
-    /// Who may connect, on both listeners.
+    /// Who may connect.
     pub admission: Admission,
     /// How notices reach a pocketed phone.
     pub push: PushConfig,
 }
 
-/// A running server: both listeners, the registry and its state file.
+/// A running server: its listener, the registry and its state file.
 #[derive(Debug)]
 pub struct Server {
     hub: Hub,
     listener: ServerListener,
     quic: SocketAddr,
-    mcp: SocketAddr,
     store: Store,
     /// Keeps the reports on their way to the agents, written once more at shutdown.
     deliveries: DeliveryStore,
@@ -162,7 +147,7 @@ pub struct Server {
 }
 
 impl Server {
-    /// Load the state file, bind both listeners and start serving.
+    /// Load the state file, bind the listener and start serving.
     pub async fn start(config: Config) -> Result<Self, ServerError> {
         let store = Store::in_dir(&config.data_dir);
         let projects = ProjectStore::in_dir(&config.data_dir);
@@ -182,11 +167,6 @@ impl Server {
         push_as(&hub, config.push, &config.data_dir).await?;
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
-        let mcp_listener = mcp::bind(config.mcp)
-            .map_err(|source| ServerError::Mcp { addr: config.mcp, source })?;
-        let mcp = mcp_listener
-            .local_addr()
-            .map_err(|source| ServerError::Mcp { addr: config.mcp, source })?;
         if let Some(api) = config.admission.local_api() {
             tokio::spawn(say_relay(api));
         }
@@ -197,12 +177,11 @@ impl Server {
             tokio::spawn(hub.keep_deliveries(deliveries.clone())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
-            tokio::spawn(mcp::serve(mcp_listener, config.admission, hub.clone())),
             tokio::spawn(Hub::settle_finished(hub.downgrade())),
         ];
 
-        tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, mcp, store, deliveries, tasks, keeper })
+        tracing::info!(name = %hub.name(), %quic, state = %store.path().display(), "serving");
+        Ok(Self { hub, listener, quic, store, deliveries, tasks, keeper })
     }
 
     /// The registry.
@@ -217,14 +196,8 @@ impl Server {
         self.quic
     }
 
-    /// Where the MCP listener listens.
-    #[must_use]
-    pub const fn mcp_addr(&self) -> SocketAddr {
-        self.mcp
-    }
-
     /// Stop: close every link (workers see their lease end and reconnect to the next server),
-    /// stop both listeners, and write the state file one last time.
+    /// stop the listener, and write the state file one last time.
     pub async fn shutdown(self) {
         self.listener
             .endpoint()

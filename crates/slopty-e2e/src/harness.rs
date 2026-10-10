@@ -6,7 +6,6 @@
 //! process gets its own data directory under the temp dir, so nothing installed on the machine is
 //! read or written, and everything is killed on drop.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -1817,29 +1816,28 @@ mod tests {
     }
 }
 
-/// The MCP protocol revision the server speaks: stateless, no `initialize`.
+/// The MCP protocol revision `slopty mcp` speaks: stateless, no `initialize`.
 pub const MCP_REVISION: &str = "2026-07-28";
 
-/// `slopty-server` from this build, on ephemeral ports and with its own data directory. Killed
+/// `slopty-server` from this build, on an ephemeral port and with its own data directory. Killed
 /// on drop.
 #[derive(Debug)]
 pub struct ServerDaemon {
     child: Child,
     address: String,
-    mcp: std::net::SocketAddr,
     data_dir: PathBuf,
 }
 
 impl ServerDaemon {
     /// Start the server named `name` on ports of its choosing, keeping its state in `data_dir`,
-    /// and return once it has printed where both listeners are bound.
+    /// and return once it has printed where its listener is bound.
     ///
     /// # Errors
     ///
     /// When the binary is missing, or the server dies or does not listen in time.
     pub async fn start(data_dir: &Path, name: &str, log: &str) -> Result<Self> {
         let mut child = scrubbed(bin("slopty-server")?, &data_dir.join("home"))
-            .args(["--port", "0", "--mcp-port", "0", "--print-addr"])
+            .args(["--port", "0", "--print-addr"])
             .arg("--data-dir")
             .arg(data_dir)
             .arg("--name")
@@ -1864,10 +1862,8 @@ impl ServerDaemon {
                 addr.parse().with_context(|| format!("slopty-server printed {line:?}"))?;
             Ok(addr.port())
         };
-        let (quic, mcp) = (port("quic")?, port("mcp")?);
-        let address = format!("127.0.0.1:{quic}");
-        let mcp = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, mcp));
-        Ok(Self { child, address, mcp, data_dir: data_dir.to_path_buf() })
+        let address = format!("127.0.0.1:{}", port("quic")?);
+        Ok(Self { child, address, data_dir: data_dir.to_path_buf() })
     }
 
     /// `127.0.0.1:<port>`: what a worker's and the CLI's `--server` take.
@@ -1881,12 +1877,6 @@ impl ServerDaemon {
     pub fn address_v6(&self) -> String {
         let port = self.address.rsplit_once(':').map_or("", |(_ip, port)| port);
         format!("[::1]:{port}")
-    }
-
-    /// The MCP endpoint on loopback (`http://<mcp>/mcp`).
-    #[must_use]
-    pub const fn mcp(&self) -> std::net::SocketAddr {
-        self.mcp
     }
 
     /// Where it keeps `workers.json`.
@@ -2287,17 +2277,19 @@ pub async fn slopty_out(
     Ok(out.stdout)
 }
 
-/// One JSON-RPC request to the MCP endpoint at `addr`, over plain HTTP/1.1; the response.
+/// One JSON-RPC request through `slopty mcp`, the CLI's MCP server on stdio, dialled to `server`
+/// with its data in `data_dir`, as an agent's own tools are; the answer with the request's id.
 ///
 /// It goes the way a stateless client of revision [`MCP_REVISION`] sends it: the revision in
-/// `_meta` and the headers, no `initialize`. `params` is an object; `tools/call` names its tool
-/// in `params.name`.
+/// `_meta`, no `initialize`. `params` is an object; `tools/call` names its tool in
+/// `params.name`. A JSON-RPC error is an answer too, carrying `error`.
 ///
 /// # Errors
 ///
-/// When the endpoint cannot be reached, answers other than 200, or not with one JSON body.
+/// When the CLI does not start, ends, or does not answer in time.
 pub async fn mcp_request(
-    addr: std::net::SocketAddr,
+    server: &str,
+    data_dir: &Path,
     id: u64,
     method: &str,
     params: Value,
@@ -2309,36 +2301,41 @@ pub async fn mcp_request(
         "io.modelcontextprotocol/clientCapabilities": {},
     });
     params.as_object_mut().context("MCP params are an object")?.insert("_meta".to_owned(), meta);
-    let name = params.get("name").and_then(Value::as_str).map(str::to_owned);
-    let body =
+    let mut line =
         json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
-    let mut request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
-         Connection: close\r\nMCP-Protocol-Version: {MCP_REVISION}\r\nMcp-Method: {method}\r\n",
-        body.len()
-    );
-    if let (Some(name), "tools/call") = (&name, method) {
-        write!(request, "Mcp-Name: {name}\r\n")?;
-    }
-    request.push_str("\r\n");
-    request.push_str(&body);
+    line.push('\n');
+    let mut child = scrubbed(bin("slopty")?, &data_dir.join("home"))
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args(["--server", server, "mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawn slopty mcp")?;
+    let mut input = child.stdin.take().context("slopty mcp stdin")?;
+    let mut lines = BufReader::new(child.stdout.take().context("slopty mcp stdout")?).lines();
     let exchange = async {
-        let mut stream = tokio::net::TcpStream::connect(addr).await?;
-        stream.write_all(request.as_bytes()).await?;
-        let mut response = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response).await?;
-        anyhow::Ok(response)
+        input.write_all(line.as_bytes()).await?;
+        input.flush().await?;
+        loop {
+            let Some(said) = lines.next_line().await? else {
+                bail!("slopty mcp ended before answering {method}");
+            };
+            let msg: Value =
+                serde_json::from_str(&said).with_context(|| format!("slopty mcp said {said:?}"))?;
+            if msg.get("id") == Some(&json!(id)) {
+                return anyhow::Ok(msg);
+            }
+        }
     };
-    let response = tokio::time::timeout(STARTUP, exchange)
+    let answer = tokio::time::timeout(STARTUP, exchange)
         .await
-        .with_context(|| format!("MCP {method} did not answer within {STARTUP:?}"))??;
-    let response = String::from_utf8(response).context("MCP answered non-UTF-8")?;
-    let (head, body) =
-        response.split_once("\r\n\r\n").with_context(|| format!("no HTTP head: {response:?}"))?;
-    let status = head.split(' ').nth(1).unwrap_or_default();
-    ensure!(status == "200", "MCP {method}: HTTP {status}: {body}");
-    serde_json::from_str(body).with_context(|| format!("MCP {method} answered {body:?}"))
+        .with_context(|| format!("MCP {method} did not answer within {STARTUP:?}"))?;
+    drop(input);
+    reap(&mut child, "slopty mcp").await;
+    answer
 }
 
 /// A server and one worker registered with it, in a temporary directory: the server, then
@@ -2432,7 +2429,7 @@ impl ServerStack {
     ///
     /// As [`mcp_request`].
     pub async fn mcp(&self, id: u64, method: &str, params: Value) -> Result<Value> {
-        mcp_request(self.server.mcp(), id, method, params).await
+        mcp_request(self.server.address(), &self.path("cli"), id, method, params).await
     }
 
     /// The worker as `slopty workers --json` lists it, if it does.

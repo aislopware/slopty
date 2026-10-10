@@ -19,7 +19,7 @@ use crate::tools::step;
 pub enum RunCmd {
     /// The worker side: `slopty-ptyd` + `slopty-worker` (prints the address it listens on).
     Worker(RunOpts),
-    /// The control plane: `slopty-server` (QUIC on 45560, MCP on 45561).
+    /// The control plane: `slopty-server` (QUIC on 45560).
     Server(RunOpts),
     /// The macOS app.
     App(RunOpts),

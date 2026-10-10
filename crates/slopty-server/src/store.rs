@@ -534,7 +534,6 @@ mod tests {
         let config = || crate::Config {
             name: "server".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.path().join("server"),
             admission: slopty_net::admission::Admission::default(),
             push: crate::PushConfig::Off,
@@ -640,7 +639,6 @@ mod tests {
         let config = crate::Config {
             name: "server".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: data_dir.clone(),
             admission: slopty_net::admission::Admission::default(),
             push: crate::PushConfig::Off,

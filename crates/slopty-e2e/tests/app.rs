@@ -776,7 +776,7 @@ mod tests {
         }
     }
 
-    /// `slopty-server` again on the ports and data directory of the one that was killed.
+    /// `slopty-server` again on the port and data directory of the one that was killed.
     fn restart_server(
         server: &slopty_e2e::harness::ServerDaemon,
     ) -> anyhow::Result<tokio::process::Child> {
@@ -785,7 +785,7 @@ mod tests {
             tokio::process::Command::new(slopty_e2e::harness::bin_dir()?.join("slopty-server"));
         slopty_testkit::env::scrub(command.as_std_mut(), &server.data_dir().join("home"));
         Ok(command
-            .args(["--port", &port, "--mcp-port", &server.mcp().port().to_string()])
+            .args(["--port", &port])
             .arg("--data-dir")
             .arg(server.data_dir())
             .args(["--name", "e2e-server"])

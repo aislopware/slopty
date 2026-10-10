@@ -890,3 +890,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_agent_screen_and_file_verbs_parse`; `slopty-e2e` `server`
   `the_cli_and_mcp_drive_a_real_worker_through_the_server` (text and binary through `-`, a
   range, and 9 MiB piped both ways).
+
+- ✅ **The server's HTTP MCP endpoint is deleted; an agent's tools come only through `slopty
+  mcp`** (2026-10-11, readiness 10-11 deletions). This overrules the 2026-09-25 "MCP" ruling
+  above.
+  - **Why.** Every agent Slopty wires gets its tools from stdio `slopty mcp`. That is the
+    `--mcp-config` an agent is started with, and the only one `loosening` admits. The HTTP
+    endpoint was a second always-on TCP listener on 45561:
+    - nothing Slopty started used it;
+    - a taken port stopped the server from starting;
+    - it could only speak as an unproven agent, never from a terminal the server can vouch
+      for.
+  - **Gone.**
+    - `slopty-server`'s `mcp` module and `hub::Acting`, the `Config::mcp` field and
+      `Server::mcp_addr`, and `ServerError::Mcp`;
+    - rmcp's Streamable HTTP feature and socket2 in slopty-server;
+    - serverd's `--mcp-port` and `SLOPTY_MCP_PORT`, and the `"mcp"` key of `--print-addr`;
+    - `slopty_net::endpoint::MCP_PORT`;
+    - the README's `--transport http` line;
+    - the endpoint's own tests (`tests/mcp.rs`, `tests/mcp_bind.rs`).
+  - **Kept.** The tool contract and its coverage now run over the one surface:
+    - `surfaces.rs`, `slopty_mcp_answers_each_call_with_the_tools_views`, is real server
+      calls through `slopty mcp`, each answer the tools' view, and a tool's error a result;
+    - `server.rs`, `mcp_lists_tools_calls_them_and_announces_a_blocked_agent`, covers the
+      list and its order;
+    - the e2e stack's `Stack::mcp` speaks through a `slopty mcp` child. An agent's call to
+      `answer_request` is still refused there.

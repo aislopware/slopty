@@ -71,7 +71,6 @@ mod tests {
         Server::start(Config {
             name: "test-server".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: dir.to_path_buf(),
             admission: Admission::with_tailnet(Vec::new(), None),
             push: slopty_server::PushConfig::Off,

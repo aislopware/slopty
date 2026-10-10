@@ -180,7 +180,6 @@ mod tests {
         let server = Server::start(Config {
             name: "projects-test".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
             data_dir: root.join("server"),
             admission: slopty_net::admission::Admission::default(),
             push: slopty_server::PushConfig::Off,

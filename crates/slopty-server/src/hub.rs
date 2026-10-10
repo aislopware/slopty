@@ -1461,31 +1461,6 @@ impl slopty_tools::Dispatch for Hub {
     }
 }
 
-/// The hub as one speaker sees it: what the MCP endpoint serves agents through.
-#[derive(Clone, Debug)]
-pub struct Acting {
-    hub: Hub,
-    speaker: Speaker,
-}
-
-impl Acting {
-    /// `hub`, answering `speaker`.
-    #[must_use]
-    pub const fn new(hub: Hub, speaker: Speaker) -> Self {
-        Self { hub, speaker }
-    }
-}
-
-impl slopty_tools::Dispatch for Acting {
-    fn send(
-        &self,
-        key: Option<IdempotencyKey>,
-        verb: Verb,
-    ) -> impl Future<Output = Outcome> + Send {
-        self.hub.dispatch_as(self.speaker, key, verb)
-    }
-}
-
 impl Lease {
     /// The worker holding it.
     #[must_use]
