@@ -39,8 +39,8 @@ pub struct NewGoal {
     pub worker: WorkerKey,
     /// Which agent orchestrates.
     pub agent: AgentId,
-    /// The branch finished work lands on; blank when the sheet knew no checkout's branch, for
-    /// the orchestrator's own.
+    /// The branch finished work lands on; blank for a branch of the project's own, which the
+    /// server makes off what the folder has checked out.
     pub target: String,
     /// The command that passes when a task's work is right; none when blank.
     pub verifier: Option<String>,
@@ -64,8 +64,6 @@ pub struct Starter {
 pub struct Filled {
     /// The folder, from the focus or the last start.
     pub folder: String,
-    /// The branch the checkout there is on, shown as the target until another is typed.
-    pub target: String,
     /// The verifier guessed from the repository's own scripts, when one reads as a check.
     pub verifier: Option<String>,
     /// The agents that can orchestrate, the last started first.
@@ -96,6 +94,9 @@ pub const FOLDER: &str = "Folder";
 /// The target field's name.
 pub const TARGET: &str = "Target branch";
 
+/// What the target field says while blank: the goal's work lands on a branch of its own.
+pub const TARGET_HINT: &str = "Blank: a branch of its own, off the checkout";
+
 /// The disclosure that opens the rarely changed settings.
 pub const MORE: &str = "More";
 
@@ -115,8 +116,6 @@ pub struct GoalSheet {
     theme: Theme,
     fields: Fields,
     starters: Vec<Starter>,
-    /// The checkout's branch the target stands for while it is blank.
-    checkout: String,
     /// Which of [`Self::starters`] starts.
     agent: usize,
     /// On which machine.
@@ -156,12 +155,10 @@ impl GoalSheet {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
             input
         };
-        let checkout = filled.target;
-        let target_hint = if checkout.is_empty() { "main".to_owned() } else { checkout.clone() };
         let fields = Fields {
             goal,
             folder: field(filled.folder, "The folder the orchestrator starts in".to_owned()),
-            target: field(String::new(), target_hint),
+            target: field(String::new(), TARGET_HINT.to_owned()),
             verifier: field(filled.verifier.unwrap_or_default(), VERIFIER_HINT.to_owned()),
         };
         let goal_enter = cx.subscribe(&fields.goal, |this, _input, event, cx| {
@@ -184,7 +181,6 @@ impl GoalSheet {
             theme,
             fields,
             starters: filled.starters,
-            checkout,
             agent: 0,
             machine,
             autonomy: Autonomy::default(),
@@ -199,8 +195,7 @@ impl GoalSheet {
         self.starters.get(self.agent)
     }
 
-    /// What the sheet holds now, trimmed, a blank target standing for the checkout's branch;
-    /// none while it names no machine to start on.
+    /// What the sheet holds now, trimmed; none while it names no machine to start on.
     #[must_use]
     pub fn typed(&self, cx: &gpui::App) -> Option<NewGoal> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
@@ -211,9 +206,7 @@ impl GoalSheet {
             folder: read(&self.fields.folder),
             worker: self.machine?,
             agent: starter.agent.clone(),
-            target: Some(read(&self.fields.target))
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| self.checkout.clone()),
+            target: read(&self.fields.target),
             verifier: (!verifier.is_empty()).then_some(verifier),
             autonomy: self.autonomy,
         })

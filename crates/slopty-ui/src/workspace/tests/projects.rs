@@ -797,10 +797,11 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
 /// "New goal…" is one sheet: the goal written, the folder filled from the focused shell, and
 /// only the agents that run in a terminal offered, as an orchestrator must (pi is passed over).
 /// ↵ starts the agent at once with nothing said; once its tile is its terminal's, one
-/// `ProjectCreate` makes the project around it, named from the goal, on the shell's branch,
-/// and the goal goes to the orchestrator as the person's first message.
+/// `ProjectCreate` makes the project around it, named from the goal, carrying the goal for the
+/// server to hand over. A blank target stays blank, though the shell stands on a branch: the
+/// server lands the goal on a branch of its own.
 #[gpui::test]
-fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppContext) {
+fn a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it(cx: &mut TestAppContext) {
     use slopty_proto::project::{Autonomy, LimitsChange, ProjectId};
     use slopty_proto::server::InstalledAgent;
     use slopty_proto::thread::wire::{IntentDone, Outcome as Done, TableFrame, ThreadRequest};
@@ -843,8 +844,8 @@ fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppCont
     let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
     assert_eq!(
         (typed.folder.as_str(), typed.agent.clone(), typed.target.as_str()),
-        ("/src/app", AgentId::named(AgentId::CLAUDE_CODE), "trunk"),
-        "filled from the focus; pi has no terminal"
+        ("/src/app", AgentId::named(AgentId::CLAUDE_CODE), ""),
+        "filled from the focus, the target left blank; pi has no terminal"
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -895,12 +896,12 @@ fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppCont
     assert_eq!(
         sent(&mut queue, cx, done),
         [Verb::ProjectCreate {
-            project: project.clone(),
+            project,
             title: "Ship the dark mode toggle, with its docs".to_owned(),
             goal: Some("Ship the dark mode toggle, with its docs.".to_owned()),
             autonomy: Autonomy::default(),
             repo: "/src/app".to_owned(),
-            target: "trunk".to_owned(),
+            target: String::new(),
             verifier: None,
             push: false,
             orchestrator: Some(term),
@@ -908,15 +909,7 @@ fn a_new_goal_starts_its_orchestrator_and_hands_it_the_goal(cx: &mut TestAppCont
             metadata: None,
         }]
     );
-    assert_eq!(
-        sent(&mut queue, cx, done),
-        [Verb::TaskTell {
-            project,
-            task: None,
-            text: "Ship the dark mode toggle, with its docs.".to_owned(),
-        }],
-        "the goal is the orchestrator's first word"
-    );
+    assert_eq!(sent(&mut queue, cx, done), [], "the server hands the goal over itself");
 }
 
 /// What waits on the person is one list, the bell's count. An agent whose turn stopped on a

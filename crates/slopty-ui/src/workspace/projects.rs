@@ -1053,9 +1053,8 @@ impl WorkspaceView {
         let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
         let folder = here.or(last).unwrap_or_else(|| "~".to_owned());
         let repo = self.repo_at(worker, &folder, cx);
-        let target = self.focused_branch(worker).unwrap_or_default();
         let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
-        let filled = Filled { folder, target, verifier, starters };
+        let filled = Filled { folder, verifier, starters };
         let theme = self.theme.clone();
         let view = cx.new(|cx| GoalSheet::new(theme, filled, window, cx));
         let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
@@ -1108,13 +1107,6 @@ impl WorkspaceView {
                 })
             })
             .collect()
-    }
-
-    /// The branch the focused shell on `worker` stands on, as its session said.
-    fn focused_branch(&self, worker: WorkerKey) -> Option<String> {
-        let tile = self.focused().filter(|t| t.worker == worker)?;
-        let ItemKind::Terminal { session } = self.item(tile)?.kind else { return None };
-        self.summary(session)?.branch.clone()
     }
 
     /// A verifier guessed from `repo`'s run scripts on `worker`, as the machine last read them:
@@ -1181,8 +1173,8 @@ impl WorkspaceView {
         self.create_project(goal, TermRef { worker, session }, cx);
     }
 
-    /// Make the project `goal` names around its orchestrator `term`, then hand the orchestrator
-    /// the goal as the person's first message, and show its board once the server has it. A
+    /// Make the project `goal` names around its orchestrator `term`, which the server hands the
+    /// goal to as the person's first message, and show its board once the server has it. A
     /// refusal is said.
     fn create_project(&mut self, goal: NewGoal, term: TermRef, cx: &mut Context<Self>) {
         let title = name_from_goal(&goal.goal);
@@ -1197,18 +1189,14 @@ impl WorkspaceView {
             .and_then(|s| s.repo.clone())
             .or_else(|| self.repo_at(key, &goal.folder, cx))
             .unwrap_or_else(|| goal.folder.clone());
-        let target = if goal.target.is_empty() {
-            summary.and_then(|s| s.branch.clone()).unwrap_or_else(|| "main".to_owned())
-        } else {
-            goal.target
-        };
         let verb = Verb::ProjectCreate {
             project: project.clone(),
             title,
             goal: Some(goal.goal.clone()),
             autonomy: goal.autonomy,
             repo,
-            target,
+            // Blank asks the server for a branch of the project's own off the checkout.
+            target: goal.target,
             verifier: goal.verifier,
             // Pushing is the board head's one setting, off until the person turns it on.
             push: false,
@@ -1216,14 +1204,10 @@ impl WorkspaceView {
             limits: LimitsChange::default(),
             metadata: None,
         };
-        let told = goal.goal;
+        // The server hands the goal to the orchestrator itself, as the person's first word.
         self.send_to_server(
             verb,
-            move |this, cx| {
-                let tell = Verb::TaskTell { project: project.clone(), task: None, text: told };
-                this.send_to_server(tell, |_, _| (), cx);
-                this.open_when_orchestrated(project, term, cx);
-            },
+            move |this, cx| this.open_when_orchestrated(project, term, cx),
             cx,
         );
     }
