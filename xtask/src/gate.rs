@@ -403,7 +403,17 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
             handles.push((
                 "rustdoc",
                 scope.spawn(|| {
-                    cached(inputs, &tree, &build("rustdoc"), |_| doc(&lane("rustdoc")?, false))
+                    cached(inputs, &tree, &build("rustdoc"), |_| {
+                        // On a runner rustdoc runs just before iOS clippy, on its Mac: one target
+                        // dir builds the build scripts and proc macros once for both, which took
+                        // 70–90 s twice (.research/dev-speed-2026-10-10.md item 8). Here the two
+                        // run side by side, and would wait on each other's lock.
+                        if only.ci {
+                            rustdoc_for(&lane("clippy ios")?, false, Some(TRIPLES[0]))
+                        } else {
+                            doc(&lane("rustdoc")?, false)
+                        }
+                    })
                 }),
             ));
         }
@@ -1549,11 +1559,22 @@ pub fn test(sh: &Shell, extra: &[String]) -> Result<()> {
 }
 
 pub fn doc(sh: &Shell, open: bool) -> Result<()> {
+    rustdoc_for(sh, open, None)
+}
+
+/// rustdoc over the workspace, for `target` when given. With `--target`, the host's build
+/// scripts and proc macros are the units a clippy run for any triple builds, and the target's
+/// rustflags stay off them.
+fn rustdoc_for(sh: &Shell, open: bool, target: Option<&str>) -> Result<()> {
     let open: &[&str] = if open { &["--open"] } else { &[] };
+    let target: Vec<&str> = target.map_or_else(Vec::new, |t| vec!["--target", t]);
     let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
     quiet_step(
         "rustdoc",
-        cmd!(sh, "cargo doc --keep-going --workspace --no-deps --document-private-items {open...}"),
+        cmd!(
+            sh,
+            "cargo doc --keep-going --workspace --no-deps --document-private-items {target...} {open...}"
+        ),
     )
 }
 

@@ -566,8 +566,13 @@ fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken
 
 /// Print a warning line for each source past its `check_every_days` whose upstream branch moved
 /// past its base; an upstream that cannot be reached is warned about by the dates alone. Never
-/// fails: the gate calls it and a broken config is reported as the warning itself.
+/// fails: the gate calls it and a broken config is reported as the warning itself. Not on a
+/// GitHub runner: nobody there acts on it, and asking an unreachable upstream once held a CI
+/// gate step for 78 s (run 38019864850).
 pub fn warn_if_stale() {
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        return;
+    }
     let report = || -> Result<Vec<String>> {
         let root = repo_root()?;
         let config = Config::load(&root)?;
@@ -1257,7 +1262,7 @@ fn today_days() -> Result<i64> {
     clippy::arithmetic_side_effects,
     reason = "the days-to-civil formula cannot overflow an i64 for any day count from the epoch"
 )]
-fn civil_from_days(days: i64) -> String {
+pub fn civil_from_days(days: i64) -> String {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

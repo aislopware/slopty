@@ -1442,3 +1442,14 @@ more full-window layer.
   - **Open.** Trial: the first runs pay one cold compile, since every dependent's sccache key
     names the new macro builds. The build steps' times on the next green runs, against the
     study's medians, decide whether it stays at 0 or moves to 1.
+
+- ✅ **On a runner, rustdoc shares iOS clippy's target dir, and the upstream warnings stay
+  quiet** (2026-10-10).
+  - **rustdoc.** CI runs it on iOS clippy's Mac just before it, and the two built the build
+    scripts and proc macros once each, 70–90 s twice (`.research/dev-speed-2026-10-10.md`
+    item 8). Under `--ci` rustdoc now builds in `clippy-ios` with `--target
+    aarch64-apple-darwin`, so the host units match the ones clippy builds and the target's
+    rustflags stay off them. Here the two lanes run side by side, so each keeps its own dir.
+  - **Upstream warnings.** `upstream::warn_if_stale` returns at once on a GitHub runner, where
+    nobody acts on it; asking an unreachable gpui-kit held one gate step for 78 s
+    (run 38019864850).
