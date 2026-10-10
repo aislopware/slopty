@@ -123,7 +123,7 @@ pub async fn make(
     git: &Path,
     clone: &Path,
     name: &str,
-    base: Option<&str>,
+    (base, merge_base): (Option<&str>, Option<&str>),
     pull: Option<u32>,
 ) -> Result<Made, Failed> {
     let plain = !name.is_empty()
@@ -165,12 +165,14 @@ pub async fn make(
         let args =
             ["worktree", "add", "--no-track", "-b", &branch, "--end-of-options", &path_text, &from];
         bundle::run(git, &clone, &args).await?;
-        // Its pull request merges back into the branch it came from, not the repository's
-        // default: gh reads this for a `gh pr create` with no `--base`, and the worker for glab.
-        // Not for a pull request's head, nor a start from a detached `HEAD`.
-        if let (None, Some(wanted)) = (pull, wanted.filter(|_| from != "HEAD")) {
+        // Its pull request merges back into the branch asked for, else the one it came from,
+        // not the repository's default: gh reads this for a `gh pr create` with no `--base`,
+        // and the worker for glab. Not for a pull request's head, nor a start from a detached
+        // `HEAD` with nothing asked.
+        let merges_into = merge_base.or_else(|| wanted.filter(|_| from != "HEAD"));
+        if let (None, Some(into)) = (pull, merges_into) {
             let key = super::commit::merge_base_key(&branch);
-            bundle::run(git, &clone, &["config", &key, wanted]).await?;
+            bundle::run(git, &clone, &["config", &key, into]).await?;
         }
         if let Some(merge) = tracks {
             let (remote, merged) =
@@ -365,7 +367,7 @@ pub async fn open(
     asked: NewWorktree,
     said: &(dyn Fn(&Setup) + Sync),
 ) -> Result<(String, Worktree), Failed> {
-    let NewWorktree { name, base, pull, setup } = asked;
+    let NewWorktree { name, base, merge_base, pull, setup } = asked;
     let git =
         crate::changes::git().ok_or_else(|| Failed::Other("this machine has no git".to_owned()))?;
     let cwd = crate::file::expand_home(Path::new(cwd));
@@ -375,7 +377,7 @@ pub async fn open(
             .await
             .map_err(|e| Failed::Other(e.to_string()))??
     };
-    let made = make(git, &clone, &name, base.as_deref(), pull).await?;
+    let made = make(git, &clone, &name, (base.as_deref(), merge_base.as_deref()), pull).await?;
     let home = slopty_platform::dirs::home();
     let (at, path) = (made.path.join(&within), made.path.clone());
     let at = tokio::task::spawn_blocking(move || {
@@ -977,7 +979,7 @@ mod tests {
         git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
         let head = git_in(&clone, &["rev-parse", "HEAD"]);
 
-        let made = make(git, &clone, "slopty-p-1", None, None).await.expect("made");
+        let made = make(git, &clone, "slopty-p-1", (None, None), None).await.expect("made");
         let root = std::fs::canonicalize(&clone).expect("canonical");
         assert_eq!(made.path, root.join(".claude/worktrees/slopty-p-1"));
         assert_eq!(
@@ -986,22 +988,22 @@ mod tests {
         );
         assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), head);
         std::fs::write(made.path.join("half.txt"), "kept").expect("write");
-        let again = make(git, &clone, "slopty-p-1", None, None).await.expect("found");
+        let again = make(git, &clone, "slopty-p-1", (None, None), None).await.expect("found");
         assert_eq!(again.path, made.path);
         assert!(again.path.join("half.txt").exists(), "reopened as it is");
 
         let (tree, branch) = agent_tree(&clone, "slopty-p-2");
         let work = git_in(&tree, &["rev-parse", "HEAD"]);
         git_in(&clone, &["worktree", "remove", "--force", &tree.to_string_lossy()]);
-        let tried_again = make(git, &clone, "slopty-p-2", None, None).await.expect("made");
+        let tried_again = make(git, &clone, "slopty-p-2", (None, None), None).await.expect("made");
         assert_eq!(tried_again.branch, branch);
         assert_eq!(git_in(&tried_again.path, &["rev-parse", "HEAD"]), work, "its work kept");
 
         for name in ["", "../out", "a/b", ".hidden", "with space"] {
-            let refused = make(git, &clone, name, None, None).await;
+            let refused = make(git, &clone, name, (None, None), None).await;
             assert!(matches!(refused, Err(Failed::NotOne(_))), "{name:?}: {refused:?}");
         }
-        let inside = make(git, &clone.join(".claude"), "slopty-p-3", None, None).await;
+        let inside = make(git, &clone.join(".claude"), "slopty-p-3", (None, None), None).await;
         assert!(matches!(inside, Err(Failed::NotOne(_))), "{inside:?}");
     }
 
@@ -1037,17 +1039,17 @@ mod tests {
             )
         };
 
-        let made = make(git, &clone, "pr-7", None, Some(7)).await.expect("made");
+        let made = make(git, &clone, "pr-7", (None, None), Some(7)).await.expect("made");
         assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), fork);
         assert_eq!(tracked("pr-7"), ("origin".to_owned(), "refs/pull/7/head".to_owned()));
 
-        let made = make(git, &clone, "pr-8", None, Some(8)).await.expect("made");
+        let made = make(git, &clone, "pr-8", (None, None), Some(8)).await.expect("made");
         assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), own);
         assert_eq!(tracked("pr-8"), ("origin".to_owned(), "refs/heads/fix-login".to_owned()));
 
-        let none = make(git, &clone, "pr-9", None, Some(9)).await;
+        let none = make(git, &clone, "pr-9", (None, None), Some(9)).await;
         assert_eq!(none, Err(Failed::NotOne("origin has no pull request #9".to_owned())));
-        let again = make(git, &clone, "pr-7", None, Some(8)).await.expect("reopened");
+        let again = make(git, &clone, "pr-7", (None, None), Some(8)).await.expect("reopened");
         assert_eq!(git_in(&again.path, &["rev-parse", "HEAD"]), fork, "as it was");
     }
 
@@ -1074,21 +1076,22 @@ mod tests {
         let head = git_in(&other, &["rev-parse", "HEAD"]);
         git_in(&other, &["push", "-q", "origin", "HEAD:refs/merge-requests/3/head"]);
 
-        let made = make(git, &clone, "mr-3", None, Some(3)).await.expect("made");
+        let made = make(git, &clone, "mr-3", (None, None), Some(3)).await.expect("made");
         assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), head);
         let key = |k: &str| format!("branch.worktree-mr-3.{k}");
         assert_eq!(git_in(&clone, &["config", &key("merge")]), "refs/merge-requests/3/head");
         assert_eq!(git_in(&clone, &["config", &key("remote")]), "origin");
         let unset = git_in(&clone, &["config", "--default", "", "--get", &key("gh-merge-base")]);
         assert_eq!(unset, "", "a merge request's head merges where it already does");
-        let none = make(git, &clone, "mr-9", None, Some(9)).await;
+        let none = make(git, &clone, "mr-9", (None, None), Some(9)).await;
         assert_eq!(none, Err(Failed::NotOne("origin has no merge request !9".to_owned())));
     }
 
     /// A new worktree starts from its branch as `origin` has it, fetched first, unless the
     /// clone holds commits `origin` lacks; from a branch only `origin` has; from `HEAD` when
-    /// the clone is detached; and not at all from a branch neither has. It gets a copy of the
-    /// ignored files `.worktreeinclude` names, and nothing else untracked.
+    /// the clone is detached; and not at all from a branch neither has. Its pull request merges
+    /// back into the branch it started from, or the one asked for apart from it. It gets a copy
+    /// of the ignored files `.worktreeinclude` names, and nothing else untracked.
     #[tokio::test]
     async fn a_new_worktree_starts_current_and_carries_the_ignored_files_it_names() {
         let Some(git) = crate::changes::git() else { return };
@@ -1113,7 +1116,7 @@ mod tests {
         {
             std::fs::write(clone.join(file), text).expect("write");
         }
-        let behind = make(git, &clone, "behind", None, None).await.expect("made");
+        let behind = make(git, &clone, "behind", (None, None), None).await.expect("made");
         assert_eq!(git_in(&behind.path, &["rev-parse", "HEAD"]), c1, "origin's, fetched");
         let merge_base = |name: &str| {
             let key = format!("branch.worktree-{name}.gh-merge-base");
@@ -1129,17 +1132,23 @@ mod tests {
         git_in(&clone, &["pull", "-q", "--ff-only", "origin", "main"]);
         git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c2 not pushed"]);
         let c2 = git_in(&clone, &["rev-parse", "HEAD"]);
-        let ahead = make(git, &clone, "ahead", None, None).await.expect("made");
+        let ahead = make(git, &clone, "ahead", (None, None), None).await.expect("made");
         assert_eq!(git_in(&ahead.path, &["rev-parse", "HEAD"]), c2, "the work not pushed kept");
 
-        let feature = make(git, &clone, "feature", Some("feature"), None).await.expect("made");
+        let feature = make(git, &clone, "feature", (Some("feature"), None), None).await;
+        let feature = feature.expect("made");
         assert_eq!(git_in(&feature.path, &["rev-parse", "HEAD"]), c1, "a branch origin alone has");
         assert_eq!(merge_base("feature"), "feature");
-        let none = make(git, &clone, "none", Some("nowhere"), None).await;
+        // A task started on another task's work merges back into the project's target.
+        let on_work = make(git, &clone, "on-work", (Some("feature"), Some("main")), None).await;
+        let on_work = on_work.expect("made");
+        assert_eq!(git_in(&on_work.path, &["rev-parse", "HEAD"]), c1, "from the work");
+        assert_eq!(merge_base("on-work"), "main", "back into the target");
+        let none = make(git, &clone, "none", (Some("nowhere"), None), None).await;
         assert!(matches!(none, Err(Failed::NotOne(_))), "{none:?}");
 
         git_in(&clone, &["checkout", "-q", "--detach", "HEAD~1"]);
-        let detached = make(git, &clone, "detached", None, None).await.expect("made");
+        let detached = make(git, &clone, "detached", (None, None), None).await.expect("made");
         assert_eq!(git_in(&detached.path, &["rev-parse", "HEAD"]), c1, "from HEAD");
         assert_eq!(merge_base("detached"), "", "none from a detached HEAD");
     }
@@ -1224,12 +1233,7 @@ mod tests {
         git_in(&clone, &["add", "."]);
         git_in(&clone, &["commit", "-q", "-m", "c0"]);
         let cwd = clone.to_string_lossy().into_owned();
-        let asked = |name: &str, setup| NewWorktree {
-            name: name.to_owned(),
-            base: None,
-            pull: None,
-            setup,
-        };
+        let asked = |name: &str, setup| NewWorktree { setup, ..NewWorktree::named(name) };
         let runs = || std::fs::read_to_string(clone.join("runs")).unwrap_or_default();
 
         let failed = open(&cwd, asked("w1", true), &|_| {}).await;
@@ -1378,7 +1382,7 @@ mod tests {
         std::fs::create_dir_all(&clone).expect("mkdir");
         git_in(&clone, &["init", "-q", "-b", "main"]);
         git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
-        let made = make(git, &clone, "fix-login", None, None).await.expect("made");
+        let made = make(git, &clone, "fix-login", (None, None), None).await.expect("made");
         let tree = made.path.clone();
         for step in ["one", "two"] {
             std::fs::write(tree.join(format!("{step}.txt")), step).expect("write");

@@ -273,6 +273,10 @@ pub struct NewWorktree {
     /// from `origin`'s copy when that holds every commit of the clone's own, so the worktree
     /// is current without losing work not yet pushed.
     pub base: Option<String>,
+    /// The branch its pull request merges back into, which gh reads for a `gh pr create` with
+    /// no `--base`: a project's target for a task's worktree, whose `base` may be another
+    /// task's work. The branch it starts from when `None`.
+    pub merge_base: Option<String>,
     /// The pull request of `origin` whose head it checks out, in place of `base`, which is then
     /// not read. Its branch tracks the pull request, so gh finds it from the worktree: a pull
     /// request from a branch of `origin` itself tracks that branch, one from a fork its
@@ -289,7 +293,7 @@ impl NewWorktree {
     /// The worktree `name`, from the branch the clone has checked out, set up.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
-        Self { name: name.into(), base: None, pull: None, setup: true }
+        Self { name: name.into(), base: None, merge_base: None, pull: None, setup: true }
     }
 }
 

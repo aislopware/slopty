@@ -712,6 +712,45 @@ pub(super) fn announce(lease: &Lease, session: SessionId, with_agent: bool) {
     }
 }
 
+/// A start a restart of the server cut off is kept: the next server counts it, refuses a
+/// second start of its task, and puts the terminal on the task once its worker comes back
+/// showing it, whenever that is.
+#[tokio::test]
+async fn a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let mut kept = hub.keep_projects();
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, None).await;
+    let task = new_task(&hub, None).await;
+    let _asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    let start = request(&mut rx).await;
+    let (_, session) = chosen(&start.1);
+    let mut file = hub.projects_file(0);
+    assert_eq!(file.starts.len(), 1, "kept while it is under way");
+    // The store's own replica hears it as the hub's file has it.
+    let mut replica = crate::project::ProjectsFile::default();
+    while let Ok(change) = kept.try_recv() {
+        replica.apply(&change);
+    }
+    assert_eq!(replica.starts, file.starts);
+    let known = hub.directory();
+    drop((lease, rx, hub));
+
+    let hub = Hub::new("server".to_owned(), known);
+    file.starts.iter_mut().for_each(|s| s.conversation = None);
+    hub.adopt_projects(file);
+    let again = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: claude() });
+    assert!(refused(&again.await, ErrorCode::Conflict).contains("being started"));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut shells = vec![summary(session)];
+    shells[0].id = session;
+    let (_, lease, _rx) = worker_again(&hub, linux, "box", Os::Linux, shells);
+    announce(&lease, session, true);
+    let on = assigned(&hub, task).await.assignment.expect("put on its task");
+    assert_eq!(on.term, TermRef { worker: linux, session });
+    assert!(hub.projects_file(0).starts.is_empty(), "and kept no longer");
+}
+
 /// A start whose answer was lost may still have opened: it counts on, a second start of its
 /// task is refused, and the terminal the worker then announces under the id the server chose
 /// is put on the task with its conversation. No caller chooses that id.
@@ -2046,6 +2085,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     linux_lease
         .handle(ToServer::Reply { id: start.0, outcome: Outcome::OpenedIn { term, worktree } });
     let Outcome::Task(task) = asked.await.unwrap() else { panic!("no task") };
+    let task = assigned(&hub, task.id).await;
     assert_eq!(task.worktree.as_deref(), Some(path.as_str()), "the task knows its worktree");
 
     let spec = TaskSpec {
@@ -2146,18 +2186,34 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
     let detail = "main as the orchestrator's clone has it, at 9e1f0c2".to_owned();
     assert_eq!(step, Some((StepKind::Clone, linux, StepState::Done { detail })));
 
+    // The start answers once placed, the target's trip still to go; one that fails then says
+    // why on the card and to the orchestrator, and starts nothing.
     let next = new_task(&hub, Some(linux)).await;
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: next, launch });
+    let asked = hub.dispatch(Verb::TaskSpawn { project: project(), task: next, launch }).await;
+    let Outcome::Task(placed) = asked else { panic!("{asked:?}") };
+    let readying =
+        placed.step.map(|s| (s.kind, s.worker, matches!(s.state, StepState::Running { .. })));
+    assert_eq!(
+        readying,
+        Some((StepKind::Clone, linux, true)),
+        "answered at once, its clone being readied"
+    );
+    assert!(placed.assignment.is_none());
     let (id, verb) = request(&mut studio_rx).await;
     assert!(matches!(verb, Verb::BundleBranch { .. }), "{verb:?}");
     let message = "fatal: bad object refs/heads/main".to_owned();
     answer(&studio_lease, id, Outcome::Error { code: ErrorCode::Failed, message });
-    let said = refused(&asked.await.unwrap(), ErrorCode::Failed).to_owned();
+    let said = delivered(&hub, &mut studio_rx, &format!("task {next} could not start")).await;
     assert!(said.contains("main could not be sent to the task's clone"), "{said}");
     assert!(said.contains("bad object"), "{said}");
     let failed = step_of(&hub, next).await.map(|s| s.state);
     assert!(matches!(failed, Some(StepState::Failed { .. })), "the card says so too: {failed:?}");
     assert!(linux_rx.try_recv().is_err(), "nothing started");
+    let again = spawn(&hub, Verb::TaskSpawn { project: project(), task: next, launch: claude() });
+    let (id, verb) = request(&mut studio_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "a failed start holds no place: {verb:?}");
+    answer(&studio_lease, id, Outcome::Error { code: ErrorCode::Failed, message: "no".to_owned() });
+    assert!(matches!(again.await.unwrap(), Outcome::Task(_)));
 }
 
 /// A task that starts from its dependency's work starts on that work's branch once it is done
@@ -2234,8 +2290,9 @@ async fn a_task_starts_on_its_dependency_s_checked_branch() {
     answer(&linux_lease, id, Outcome::Fetched { branch: into, head: head.clone() });
     let start = request(&mut linux_rx).await;
     let Verb::SpawnAgent { worktree, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
-    let base = worktree.and_then(|w| w.base);
+    let (base, merge_base) = worktree.map(|w| (w.base, w.merge_base)).unwrap_or_default();
     assert_eq!(base.as_deref(), Some("slopty/slopty/1"), "from task 1's work");
+    assert_eq!(merge_base.as_deref(), Some("main"), "its pull request merges into the target");
     assert!(args.iter().any(|a| a.contains("starts on task 1's work")), "told: {args:?}");
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -2260,6 +2317,41 @@ pub(super) fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> Sess
 /// The task's step as its card has it now.
 async fn step_of(hub: &Hub, task: TaskId) -> Option<slopty_proto::project::TaskStep> {
     task_now(hub, task).await.step
+}
+
+/// The task's card once its start put its terminal on it: a start that sends its clone what
+/// it starts from answers before that.
+pub(super) async fn assigned(hub: &Hub, task: TaskId) -> TaskCard {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let card = task_now(hub, task).await;
+            if card.assignment.is_some() {
+                return card;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("its terminal goes on the task")
+}
+
+/// What the hub delivers to an agent through `rx`'s worker, as its delivery loop would, until
+/// a delivery holds `words`, answering nothing else.
+async fn delivered(hub: &Hub, rx: &mut mpsc::Receiver<FromServer>, words: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let _next = hub.deliver_due();
+            let got = tokio::time::timeout(Duration::from_millis(20), rx.recv()).await;
+            if let Ok(Some(FromServer::Deliver { reports, .. })) = got {
+                let text = reports.text();
+                if text.contains(words) {
+                    return text;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("nothing delivered saying {words:?}"))
 }
 
 /// The worker's answer to `verb` request `id`.
@@ -2352,16 +2444,17 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
-    // A clone that fails: the start is refused saying why, and so is the card.
+    // A clone that fails: the orchestrator hears why, and so does the card.
     let (other, other_lease, mut other_rx) = worker_on(&hub, "other", Os::Linux, Vec::new());
     let failing = new_task(&hub, Some(other)).await;
     let verb = Verb::TaskSpawn { project: project(), task: failing, launch: anywhere };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut other_rx).await;
     assert!(matches!(verb, Verb::CloneRepo { .. }), "{verb:?}");
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)), "answered once placed");
     let denied = "fatal: Authentication failed for 'https://example.com/o/demo.git/'".to_owned();
     answer(&other_lease, id, Outcome::Error { code: ErrorCode::Failed, message: denied.clone() });
-    let said = refused(&asked.await.unwrap(), ErrorCode::Failed).to_owned();
+    let said = delivered(&hub, &mut studio_rx, &format!("task {failing} could not start")).await;
     assert!(said.contains("Authentication failed"), "{said}");
     let failed = step_of(&hub, failing).await.map(|s| (s.kind, s.state));
     assert_eq!(failed, Some((StepKind::Clone, StepState::Failed { why: denied })));
@@ -2389,6 +2482,7 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    assigned(&hub, task).await;
 
     let branch = format!("worktree-slopty-slopty-{task}");
     let report = Report {
@@ -2506,6 +2600,7 @@ async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    assigned(&hub, task).await;
     let branch = format!("worktree-slopty-slopty-{task}");
     let report = Report {
         note: "Built it.".to_owned(),
@@ -2564,6 +2659,77 @@ async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
     .await;
     assert!(queued.is_ok(), "the merge is queued once the branch is home");
     assert!(hub.projects_file(0).merges.is_empty(), "and waits no longer");
+}
+
+/// A branch on its way home when the server stopped goes again only once both ends are back,
+/// in whichever order the two workers register: the orchestrator's first leaves the trip
+/// waiting, not failed, for the task's; the task's first asks it nothing until the
+/// orchestrator's is back.
+#[tokio::test]
+async fn a_branch_on_its_way_home_waits_for_both_ends_after_a_restart() {
+    use slopty_proto::project::{Report, StepKind, StepState};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio_terms =
+        || vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, mut studio_rx) =
+        worker_on(&hub, "studio", Os::MacOs, studio_terms());
+    let agent = SessionId::new();
+    let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, Some(linux)).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
+    let start = request(&mut linux_rx).await;
+    let term = opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    assigned(&hub, task).await;
+    let report = Report {
+        note: "Built it.".to_owned(),
+        artifacts: Vec::new(),
+        branch: Some(format!("worktree-slopty-slopty-{task}")),
+        pr: None,
+    };
+    let verb = Verb::TaskReport { project: project(), task, report };
+    let done = hub.dispatch_as(Speaker::Proven(term.session), None, verb).await;
+    assert!(matches!(done, Outcome::Task(_)), "{done:?}");
+    let (_, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "on its way home: {verb:?}");
+    let restart = |hub: Hub| {
+        let (file, known) = (hub.projects_file(0), hub.directory());
+        drop(hub);
+        let hub = Hub::new("server".to_owned(), known);
+        hub.adopt_projects(file);
+        hub
+    };
+    drop((linux_lease, linux_rx, studio_lease, studio_rx));
+    let hub = restart(hub);
+
+    // The orchestrator's worker first: the trip waits for the task's.
+    let (_, studio_lease, studio_rx) =
+        worker_again(&hub, studio, "studio", Os::MacOs, studio_terms());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let step = task_now(&hub, task).await.step.map(|s| (s.kind, s.state));
+    assert!(
+        matches!(step, Some((StepKind::Home, StepState::Running { .. }))),
+        "waiting, not failed: {step:?}"
+    );
+    let (_, linux_lease, mut linux_rx) = worker_again(&hub, linux, "box", Os::Linux, linux_terms());
+    let (_, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "taken up with both here: {verb:?}");
+    drop((linux_lease, linux_rx, studio_lease, studio_rx));
+    let hub = restart(hub);
+
+    // The task's worker first: nothing is asked of it until the orchestrator's is back.
+    let (_, linux_lease, mut linux_rx) = worker_again(&hub, linux, "box", Os::Linux, linux_terms());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(linux_rx.try_recv().is_err(), "the trip waits for its other end");
+    let (_, _studio_lease, _studio_rx) =
+        worker_again(&hub, studio, "studio", Os::MacOs, studio_terms());
+    let (_, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "taken up with both here: {verb:?}");
+    drop(linux_lease);
 }
 
 /// Only the person lets a project go. Every client is sent the projects afresh without it, its

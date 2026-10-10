@@ -1479,6 +1479,7 @@ mod tests {
             worktree: Some(NewWorktree {
                 name: "slopty-demo-1".to_owned(),
                 base: Some("main".to_owned()),
+                merge_base: None,
                 pull: None,
                 setup: true,
             }),

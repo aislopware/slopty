@@ -32,8 +32,6 @@ pub(super) struct Steps {
     next_clone: u64,
     /// Each clone under way, by the number its progress names: the task it is for.
     cloning: HashMap<u64, (ProjectId, TaskId, WorkerId)>,
-    /// The clones made, by worker: their paths and repositories.
-    made: HashMap<WorkerId, Vec<(String, RepoId)>>,
     /// The tasks whose branch is on its way home, one trip each at a time; `true` when it was
     /// reported done again meanwhile, so the trip goes once more for the newer commits.
     homing: HashMap<(ProjectId, TaskId), bool>,
@@ -52,12 +50,6 @@ impl Steps {
         task: &(ProjectId, TaskId),
     ) -> Option<(TermRef, Commits, WallMs)> {
         self.reattach.remove(task)
-    }
-
-    /// The clones the server had made on `worker`: a worker's `repos` fact holds them beside
-    /// its shells' (`facts_of`).
-    pub(super) fn made_on(&self, worker: WorkerId) -> &[(String, RepoId)] {
-        self.made.get(&worker).map_or(&[], Vec::as_slice)
     }
 
     /// The merges the person asked for that wait for their branch to come home.
@@ -97,7 +89,7 @@ impl Hub {
     }
 
     /// [`Self::step`] to `now`, from its own lock.
-    fn step_now(
+    pub(super) fn step_now(
         &self,
         (project, task): (&ProjectId, TaskId),
         kind: StepKind,
@@ -139,9 +131,7 @@ impl Hub {
         state.steps.cloning.remove(&clone);
         let (ended, cloned) = match outcome {
             Outcome::Cloned { path, repo } => {
-                let made = state.steps.made.entry(worker).or_default();
-                made.retain(|(at, _)| *at != path);
-                made.push((path.clone(), repo));
+                projects::cloned(&mut state, worker, &path, &repo);
                 (StepState::Done { detail: path.clone() }, Ok(path))
             }
             other => {
@@ -200,7 +190,12 @@ impl Hub {
                         }
                     });
                 }
-                StepKind::Home => self.bring_home_soon(state, (project, task), None),
+                // A branch goes home only once both ends are here: the worker it ran on may
+                // register after the orchestrator's, and the trip waits for it then.
+                StepKind::Home => match away_from(state, &project, task) {
+                    Some(from) => state.projects.resume_on(from, (project, task), step),
+                    None => self.bring_home_soon(state, (project, task), None),
+                },
                 StepKind::Verify => {
                     if let (Some(term), Some(commits)) = (running, step.commits) {
                         state
@@ -416,31 +411,13 @@ impl Hub {
         (worker, clone): (WorkerId, String),
         on: Option<TaskId>,
     ) -> Result<String, String> {
-        let target = {
-            let state = self.inner.state.lock();
-            state.projects.project(project).ok().map(|record| record.target.clone())
-        };
-        let Some(target) = target else { return Err(format!("no project {project}")) };
-        let (from, branch, into) = if let Some(on) = on {
-            let Some(Landed { worker, clone, branch }) = self.landed(project, on)? else {
-                return Err(format!("task {on}'s work is in no clone the server knows"));
-            };
-            ((worker, clone), branch, Task::home_branch(project, on))
-        } else {
-            let from = {
-                let state = self.inner.state.lock();
-                state.projects.project(project).ok().map(|r| orchestrator_clone(&state, r))
-            };
-            match from {
-                Some(Ok(Some(from))) => (from, target.clone(), Task::target_branch(project)),
-                None | Some(Ok(None)) => return Ok(target),
-                Some(Err((_, why))) => return Err(why),
+        let (back, target) = match self.start_from(project, (worker, clone), on)? {
+            StartFrom::There(base) => return Ok(base),
+            StartFrom::Send(back) => {
+                let target = back.target.clone();
+                (*back, target)
             }
         };
-        let back = Trip { from, to: (worker, clone), branch, into, target: target.clone() };
-        if back.there() {
-            return Ok(back.branch);
-        }
         let what = on.map_or_else(|| target.clone(), |on| format!("task {on}'s work"));
         let onto = self.send_back((project, task), back, (StepKind::Clone, worker)).await;
         let (ended, started) = match onto {
@@ -464,6 +441,57 @@ impl Hub {
             self.step_now((project, task), StepKind::Clone, worker, ended);
         }
         started
+    }
+
+    /// Whether a task's new worktree in `clone` on `worker`, starting from the work of `on`
+    /// or the target, needs that sent there first: a start that takes a while.
+    pub(super) fn sends_start(
+        &self,
+        project: &ProjectId,
+        (worker, clone): (WorkerId, String),
+        on: Option<TaskId>,
+    ) -> bool {
+        matches!(self.start_from(project, (worker, clone), on), Ok(StartFrom::Send(_)))
+    }
+
+    /// Where a task's new worktree in `clone` on `worker` starts ([`Self::send_start_to`]): a
+    /// branch there already, or a trip that brings it.
+    ///
+    /// # Errors
+    /// Why `on`'s work is in no clone the server knows, or the orchestrator's has no clone.
+    fn start_from(
+        &self,
+        project: &ProjectId,
+        (worker, clone): (WorkerId, String),
+        on: Option<TaskId>,
+    ) -> Result<StartFrom, String> {
+        let target = {
+            let state = self.inner.state.lock();
+            state.projects.project(project).ok().map(|record| record.target.clone())
+        };
+        let Some(target) = target else { return Err(format!("no project {project}")) };
+        let (from, branch, into) = if let Some(on) = on {
+            let Some(Landed { worker, clone, branch }) = self.landed(project, on)? else {
+                return Err(format!("task {on}'s work is in no clone the server knows"));
+            };
+            ((worker, clone), branch, Task::home_branch(project, on))
+        } else {
+            let from = {
+                let state = self.inner.state.lock();
+                state.projects.project(project).ok().map(|r| orchestrator_clone(&state, r))
+            };
+            match from {
+                Some(Ok(Some(from))) => (from, target.clone(), Task::target_branch(project)),
+                None | Some(Ok(None)) => return Ok(StartFrom::There(target)),
+                Some(Err((_, why))) => return Err(why),
+            }
+        };
+        let back = Trip { from, to: (worker, clone), branch, into, target };
+        Ok(if back.there() {
+            StartFrom::There(back.branch)
+        } else {
+            StartFrom::Send(Box::new(back))
+        })
     }
 
     /// Carry the target back along `back`, showing it on `task`'s step of `kind` on `worker`.
@@ -648,6 +676,15 @@ fn route_in(
     Ok(Some(trip))
 }
 
+/// The worker `task`'s branch is on, when it is not linked now: a Home trip taken up after a
+/// restart waits for it.
+fn away_from(state: &State, project: &ProjectId, task: TaskId) -> Option<WorkerId> {
+    let card = state.projects.task(project, task).ok()?;
+    let from = card.assignment.as_ref()?.term.worker;
+    let linked = state.workers.get(&from).is_some_and(|e| e.link.is_some());
+    (!linked).then_some(from)
+}
+
 /// The clone of `term`'s session when it is in the repository `id`.
 fn session_repo(state: &State, id: &RepoId, term: TermRef) -> Option<String> {
     let entry = state.workers.get(&term.worker)?;
@@ -708,6 +745,14 @@ impl Trip {
             && (self.from.1 == root
                 || self.from.1.strip_prefix(root).is_some_and(|rest| rest.starts_with('/')))
     }
+}
+
+/// Where a task's new worktree starts ([`Hub::start_from`]).
+enum StartFrom {
+    /// From this branch, in its clone already.
+    There(String),
+    /// From what this trip brings to its clone first.
+    Send(Box<Trip>),
 }
 
 /// A branch that arrived.

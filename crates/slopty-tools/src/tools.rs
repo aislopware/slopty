@@ -391,7 +391,9 @@ pub fn list() -> Vec<Tool> {
              work that runs side by side with the rest and needs no context only you hold. A start is refused while as many tasks wait on \
              the person as the project's review limit, saying how many and where. A new task \
              refused its start is kept: start it later by its number. Returns the task with its \
-             terminal's `term`.",
+             terminal's `term`; one whose clone is made or readied first returns at once with \
+             that step under way, its agent starts after, and a start that fails then reaches \
+             you as a report.",
             Kind::Write,
         ),
         tool::<TaskUpdateArgs>(

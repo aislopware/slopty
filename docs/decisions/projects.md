@@ -2924,3 +2924,36 @@ reordering and edited allows are gone" in `agents.md`.*
       `repo/verify/tests.rs`: the plain rebase conflicts, the `--onto` one picks the one
       commit, and an unrelated head takes the plain rebase);
     - the `task_start` test, the tool schema, and the `rebase`, `task_create` and task goldens.
+
+- ✅ **`task_start` answers once placed, and a task's worktree merges back into the target**
+  (2026-10-11, the orchestrator-first study, item 16; its first part, a report going at once,
+  landed with item 13's notice).
+  - **The answer.** A start that had to clone the repository onto its worker, or send that
+    clone the target or another task's work first, held the orchestrator's `task_start`, and
+    the person's Start, for as long as the clone and the trip took. That could be minutes.
+    The hub now reserves the start once the worker is chosen. That reservation is the place
+    counted against the bounds, and a second start of the task is refused. It answers with the
+    task, its clone step under way, and runs the rest in the background (`Hub::finish_start`):
+    the clone, the send, the agent's start, and its terminal put on the task.
+    - A start with nothing to send still answers once its agent has started, with its
+      terminal, as before (`start_sends`, `Hub::sends_start`).
+    - A start that fails after its answer says why on the card, through its step. It also
+      tells the orchestrator at once (`start_failed`, `Kind::Stuck`): "task N could not start:
+      …", to start it again once that is put right. Its reservation goes, so the next start
+      is not held up.
+  - **The merge base.** A task's worktree may start from another task's work
+    (`start_from`), and its pull request must still merge into the project's target.
+    `NewWorktree.merge_base` carries the target apart from `base`, and the worker sets
+    `branch.<b>.gh-merge-base` to it (`worktrees::make`). A worktree that names none merges
+    back into the branch it started from, as before.
+  - Tests:
+    - the failure half of `a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds`
+      (the answer at once with its step, the failed trip delivered to the orchestrator, and a
+      second start not held up);
+    - the clone failure in `a_task_on_a_worker_with_no_clone_gets_one_made_and_shown`;
+    - the merge base in `a_task_starts_on_its_dependency_s_checked_branch`;
+    - `a_new_worktree_starts_current_and_carries_the_ignored_files_it_names` (slopty-worker:
+      `gh-merge-base` is the target while the worktree starts from another branch);
+    - the CLI's `a_task_s_clone_is_made_where_it_runs_and_its_branch_comes_home`, which waits
+      for the agent after the early answer;
+    - the `start_thread` and `client_start_in_worktree` goldens.

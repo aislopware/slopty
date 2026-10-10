@@ -443,7 +443,8 @@ mod golden_project {
             args: Vec::new(),
             worktree: Some(NewWorktree {
                 name: "slopty-slopty-6".to_owned(),
-                base: Some("main".to_owned()),
+                base: Some("slopty/slopty/2".to_owned()),
+                merge_base: Some("main".to_owned()),
                 pull: None,
                 setup: true,
             }),

@@ -786,8 +786,16 @@ mod tests {
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
         let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
+        let placed = spawned.step.map(|s| s.kind);
+        assert_eq!(placed, Some(StepKind::Clone), "answered once placed, its clone to make");
         let cloned = linux_home.join("slopty/clones/example.com/o/demo");
-        let step = spawned.step.map(|s| (s.kind, s.state));
+        let seen: Value = until("the agent starts in the clone", async || {
+            std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok())
+        })
+        .await;
+        assert_eq!(seen["cwd"].as_str().map(PathBuf::from), Some(cloned.clone()));
+        let card = status(&hub, &project).await.tasks.into_iter().next().unwrap();
+        let step = card.step.map(|s| (s.kind, s.state));
         // The clone is made, and then the target is there as the forge has it: nothing was
         // merged in the orchestrator's clone that the forge lacks.
         let detail = "main from its origin".to_owned();
@@ -801,11 +809,6 @@ mod tests {
             Value::Bool(true),
             "the clone is trusted for its agent: {config}"
         );
-        let seen: Value = until("the agent starts in the clone", async || {
-            std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok())
-        })
-        .await;
-        assert_eq!(seen["cwd"].as_str().map(PathBuf::from), Some(cloned.clone()));
 
         // The agent's work: a commit on its branch in the worktree of the clone the worker made
         // for it, which Claude Code's `--worktree` reopens.
@@ -1019,8 +1022,12 @@ mod tests {
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
-        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
-        let agent = spawned.assignment.unwrap().term;
+        // Placed on the other machine, it answers before the target's trip there and its start.
+        assert!(matches!(spawned, Outcome::Task(_)), "{spawned:?}");
+        let agent = until("its agent started", async || {
+            status(&hub, &project).await.tasks.first()?.assignment.as_ref().map(|a| a.term)
+        })
+        .await;
         let cloned = linux_home.join("slopty/clones/example.com/o/demo");
         let tree = cloned.join(".claude/worktrees/slopty-demo-1");
         assert_eq!(git_out(&tree, &["branch", "--show-current"]), ACROSS_BRANCH, "made for it");

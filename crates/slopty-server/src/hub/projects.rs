@@ -31,8 +31,8 @@ use super::{
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Installed, Wanted};
 use crate::project::{
-    Assignee, Caller, Cleanup, Drove, Keep, NewProject, ProjectChange, Running, Starting, Teller,
-    Watched, clipped,
+    Assignee, Caller, Cleanup, Drove, Keep, KeptStart, NewProject, ProjectChange, Running,
+    Starting, Teller, Watched, clipped,
 };
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
@@ -85,8 +85,12 @@ pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
                     projects.working_on(s.term) == Some((p.clone(), Some(*t)))
                 })
         };
-        !(counted || (s.answered && now.duration_since(s.since) >= STARTED_GRACE))
+        // An answered start's grace runs only while its worker is here to show the terminal.
+        let lapsed =
+            s.answered && linked(s.term.worker) && now.duration_since(s.since) >= STARTED_GRACE;
+        !(counted || lapsed)
     });
+    keep_starts(state);
     // A watched terminal that is gone is forgotten once any start would be, but only by a
     // worker that is here to say it is gone: one a restart has not heard from yet keeps its.
     let here: HashSet<WorkerId> =
@@ -310,6 +314,28 @@ pub(super) fn keep(state: &mut State, keep: Keep) {
     }
 }
 
+/// The task starts under way, as the store keeps them.
+pub(super) fn starts_kept(state: &State) -> Vec<KeptStart> {
+    state
+        .starting
+        .iter()
+        .filter_map(|s| {
+            let task = s.task.clone()?;
+            Some(KeptStart { term: s.term, task, conversation: s.conversation.clone() })
+        })
+        .collect()
+}
+
+/// Tell the store of the task starts under way, when they changed since it was last told: a
+/// restart then puts a start it cut off on its task once the terminal shows.
+pub(super) fn keep_starts(state: &mut State) {
+    let now = starts_kept(state);
+    if now != state.kept_starts {
+        state.kept_starts.clone_from(&now);
+        keep(state, Keep::Starts(now));
+    }
+}
+
 /// The first thing in `args`, Claude Code's own arguments, that loosens its permissions
 /// ([`slopty_agent::loosening::args`]). The server reads no worker's disk and adds none of
 /// Slopty's own flags itself, so a settings file, a hook or a tools server an agent names
@@ -471,7 +497,7 @@ const fn os_word(os: Os) -> &'static str {
 }
 
 /// A worker's facts: its own, with what the server knows of it over them.
-fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts {
+fn facts_of(entry: &Entry, agents_here: u16) -> Facts {
     let (info, caps) = (&entry.info, &entry.info.caps);
     let mut facts = entry.facts.clone();
     let text = |t: &str| Fact::Text(t.to_owned());
@@ -499,7 +525,7 @@ fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts
         ("load", Fact::Float(f64::from(info.load))),
         ("online", Fact::Bool(info.liveness == Liveness::Online)),
         ("live_agents", Fact::Int(i64::from(agents_here))),
-        ("repos", repos_of(&entry.sessions, made)),
+        ("repos", repos_of(&entry.sessions, entry.facts.get(REPOS))),
     ];
     // What the server knows of a worker is its word over the worker's own.
     for (name, fact) in known {
@@ -540,8 +566,7 @@ fn clones_of(state: &State, project: &Project) -> Clones {
         .workers
         .values()
         .filter_map(|e| {
-            let made = made_on(state, e.info.worker);
-            let Fact::Map(repos) = repos_of(&e.sessions, made) else { return None };
+            let Fact::Map(repos) = repos_of(&e.sessions, e.facts.get(REPOS)) else { return None };
             let path = id.keys().find_map(|k| match repos.get(k) {
                 Some(Fact::Text(path)) => Some(path.clone()),
                 _ => None,
@@ -553,29 +578,46 @@ fn clones_of(state: &State, project: &Project) -> Clones {
     Clones { key: Some(key), on }
 }
 
-/// The clones the server had made on `worker` ([`super::steps::Steps::made_on`]).
-fn made_on(state: &State, worker: WorkerId) -> &[(String, RepoId)] {
-    state.steps.made_on(worker)
-}
-
 /// The repositories a worker has a shell in or the server had cloned there (`made`), by each
 /// key of their identity ([`RepoId`]: the normalized origin, the first commit), to where the
 /// clone is. One repository cloned on two workers has the same keys on both, so
 /// `"github.com/o/r" in repos` places a task beside a clone of it and `repos["github.com/o/r"]`
 /// says where; with several clones on one worker the first path in order is named.
-fn repos_of(sessions: &[SessionSummary], made: &[(String, RepoId)]) -> Fact {
+fn repos_of(sessions: &[SessionSummary], reported: Option<&Fact>) -> Fact {
+    let shells = sessions.iter().filter_map(|s| Some((s.repo.as_deref()?, s.repo_id.as_ref()?)));
+    let mut found: Vec<(&str, &str)> =
+        shells.flat_map(|(path, id)| id.keys().map(move |key| (key, path))).collect();
+    if let Some(Fact::Map(cloned)) = reported {
+        found.extend(cloned.iter().filter_map(|(key, path)| match path {
+            Fact::Text(path) => Some((key.as_str(), path.as_str())),
+            _ => None,
+        }));
+    }
     let mut repos: BTreeMap<String, &str> = BTreeMap::new();
-    let shells = sessions.iter().filter_map(|s| Some((s.repo.as_ref()?, s.repo_id.as_ref()?)));
-    let cloned = made.iter().map(|(path, id)| (path, id));
-    for (path, id) in shells.chain(cloned) {
-        for key in id.keys() {
-            let at = repos.entry(key.to_owned()).or_insert(path);
-            if path.as_str() < *at {
-                *at = path;
-            }
+    for (key, path) in found {
+        let at = repos.entry(key.to_owned()).or_insert(path);
+        if path < *at {
+            *at = path;
         }
     }
     Fact::Map(repos.into_iter().map(|(key, path)| (key, Fact::Text(path.to_owned()))).collect())
+}
+
+/// The fact a worker says the clones under its `~/slopty/clones` are in, and the server the
+/// repositories each worker has: each key of a repository's identity ([`RepoId::keys`]) to
+/// the clone's path.
+pub(super) const REPOS: &str = "repos";
+
+/// `worker` has a clone of `id` at `path`, which the server had made there: its `repos` fact
+/// holds it at once, before the worker's own facts say so again.
+pub(super) fn cloned(state: &mut State, worker: WorkerId, path: &str, id: &RepoId) {
+    let Some(entry) = state.workers.get_mut(&worker) else { return };
+    let repos = entry.facts.entry(REPOS.to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
+    if let Fact::Map(repos) = repos {
+        for key in id.keys() {
+            repos.insert(key.to_owned(), Fact::Text(path.to_owned()));
+        }
+    }
 }
 
 /// A rules text from a project's metadata (`agent_rules`, `orchestrator_rules`).
@@ -620,8 +662,8 @@ enum Worktree {
 /// Where `worker` has a clone of `project`'s repository.
 pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Option<String> {
     let id = project.repo_id.as_ref()?;
-    let sessions = &state.workers.get(&worker)?.sessions;
-    let Fact::Map(repos) = repos_of(sessions, made_on(state, worker)) else { return None };
+    let entry = state.workers.get(&worker)?;
+    let Fact::Map(repos) = repos_of(&entry.sessions, entry.facts.get(REPOS)) else { return None };
     id.keys().find_map(|key| match repos.get(key) {
         Some(Fact::Text(path)) => Some(path.clone()),
         _ => None,
@@ -822,7 +864,9 @@ impl InFlight<'_> {
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         if !self.settled {
-            self.hub.inner.state.lock().starting.retain(|s| s.id != self.id);
+            let mut state = self.hub.inner.state.lock();
+            state.starting.retain(|s| s.id != self.id);
+            keep_starts(&mut state);
         }
     }
 }
@@ -1248,7 +1292,7 @@ impl Hub {
             .filter(|e| only.is_none_or(|w| w == e.info.worker))
             .map(|e| {
                 let here = state.projects.live_on_worker(e.info.worker, &running);
-                let facts = facts_of(e, here, made_on(state, e.info.worker));
+                let facts = facts_of(e, here);
                 (e.info.name.clone(), WorkerFacts { worker: e.info.worker, facts })
             })
             .collect();
@@ -1274,7 +1318,7 @@ impl Hub {
                     name: e.info.name.clone(),
                     online: e.info.liveness == Liveness::Online && e.link.is_some(),
                     reported: !e.facts.is_empty(),
-                    facts: facts_of(e, fleet_live, made_on(state, worker)),
+                    facts: facts_of(e, fleet_live),
                     fleet_live,
                     clone: record.is_some_and(|r| clone_on(state, r, worker).is_some()),
                 }
@@ -1502,6 +1546,7 @@ impl Hub {
             answered: false,
             conversation,
         });
+        keep_starts(state);
         (id, term)
     }
 
@@ -1713,6 +1758,7 @@ impl Hub {
         let (task, updates) =
             state.projects.assign(project, task, who, &terminals, WallMs::now())?;
         state.starting.retain(|s| s.term != term);
+        keep_starts(state);
         self.projects_moved(state, updates);
         Ok(task)
     }
@@ -1775,14 +1821,107 @@ impl Hub {
             Err(refused) => return refused,
         };
         // A task with no directory on a worker with no clone of its repository gets one there.
-        if let Some(url) = self.clone_needed(project, &launch, worker)
+        let url = self.clone_needed(project, &launch, worker);
+        let reserved =
+            Self::reserve(&mut self.inner.state.lock(), (project, task), &launch, worker);
+        let placed = match reserved {
+            Ok((id, term)) => (worker, id, term),
+            Err(refused) => return refused,
+        };
+        if url.is_none() && !self.start_sends((project, task), worker, &launch) {
+            return self.finish_start(key, (project, task), launch, placed, None).await;
+        }
+        // A clone to make or a branch to send takes a while: the caller hears where the task
+        // goes now, and the rest runs as the task's steps. A start that fails then says why on
+        // its card and to the orchestrator.
+        let phase =
+            if url.is_some() { "Cloning the repository" } else { "Getting its clone ready" };
+        let running =
+            slopty_proto::project::StepState::Running { phase: phase.to_owned(), percent: None };
+        self.step_now((project, task), slopty_proto::project::StepKind::Clone, worker, running);
+        let card = self.inner.state.lock().projects.task(project, task).cloned();
+        let hub = self.clone();
+        let at = project.clone();
+        tokio::spawn(async move {
+            let ended = hub.finish_start(key, (&at, task), launch, placed, url).await;
+            if let Outcome::Error { code, message } = &ended
+                && *code != ErrorCode::Interrupted
+            {
+                hub.start_failed((&at, task), message);
+            }
+        });
+        match card {
+            Ok(card) => Outcome::Task(Box::new(card)),
+            Err(refused) => refused,
+        }
+    }
+
+    /// Whether a start of `task` on `worker` sends its clone what its worktree starts from,
+    /// which takes a while ([`Hub::sends_start`]).
+    fn start_sends(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        worker: WorkerId,
+        launch: &Launch,
+    ) -> bool {
+        if !launch.cwd.trim().is_empty() {
+            return false;
+        }
+        let at = {
+            let state = self.inner.state.lock();
+            let (Ok(record), Ok(card)) =
+                (state.projects.project(project), state.projects.task(project, task))
+            else {
+                return false;
+            };
+            let clone = (!card.read_only).then(|| clone_on(&state, record, worker)).flatten();
+            let at =
+                clone.map(|clone| (clone, state.projects.starts_on(project, task).map(|o| o.0)));
+            drop(state);
+            at
+        };
+        at.is_some_and(|(clone, on)| self.sends_start(project, (worker, clone), on))
+    }
+
+    /// A start answered before it was done failed: its card says so through its step, and the
+    /// orchestrator hears why.
+    fn start_failed(&self, (project, task): (&ProjectId, TaskId), why: &str) {
+        let words = format!(
+            "task {task} could not start: {why}. Start it again with task_start once that is put right."
+        );
+        let mut state = self.inner.state.lock();
+        let at = tokio::time::Instant::now();
+        state.deliveries.notice(
+            (project.clone(), None),
+            task,
+            crate::deliver::Kind::Stuck,
+            &words,
+            at,
+        );
+        drop(state);
+        self.inner.deliver.notify_one();
+    }
+
+    /// The rest of a start placed on `worker` and held as `id` for `term`: the clone from `url`
+    /// when the worker has none, what the worktree starts from sent there, the agent started,
+    /// and its terminal put on the task.
+    async fn finish_start(
+        &self,
+        key: Option<IdempotencyKey>,
+        (project, task): (&ProjectId, TaskId),
+        launch: Launch,
+        (worker, id, term): (WorkerId, u64, TermRef),
+        url: Option<String>,
+    ) -> Outcome {
+        let placed = InFlight { hub: self, id, settled: false };
+        if let Some(url) = url
             && let Err(why) = self.clone_for((project, task), worker, url).await
         {
             return error(ErrorCode::Failed, &format!("task {task} needed a clone: {why}"));
         }
-        let reserved = {
+        let prepared = {
             let mut state = self.inner.state.lock();
-            Self::reserve(&mut state, (project, task), &launch, worker).and_then(|placed| {
+            (|| {
                 let (record, card) =
                     (state.projects.project(project)?, state.projects.task(project, task)?);
                 let clone = launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
@@ -1804,18 +1943,20 @@ impl Hub {
                 // approval policy and sandbox, each as its own reports say them.
                 let held_by_server =
                     launch.agent.is(AgentId::CLAUDE_CODE) || launch.agent.is(AgentId::CODEX);
-                if held_by_server {
-                    watch(&mut state, placed.1, |w| w.held = Some(level));
-                }
                 let at = at.unwrap_or(Place { path: named, worktree: None });
-                Ok((placed, level, role, at, on))
+                Ok::<_, Outcome>((level, role, at, on, held_by_server))
+            })()
+            .map(|(level, role, at, on, held)| {
+                if held {
+                    watch(&mut state, term, |w| w.held = Some(level));
+                }
+                (level, role, at, on)
             })
         };
-        let ((id, term), level, role, at, on) = match reserved {
-            Ok(reserved) => reserved,
+        let (level, role, at, on) = match prepared {
+            Ok(prepared) => prepared,
             Err(refused) => return refused,
         };
-        let placed = InFlight { hub: self, id, settled: false };
         let Launch { agent, prompt, .. } = launch;
         let Place { path: cwd, worktree } = at;
         // Its worktree starts from the target as the orchestrator's clone has it, or from the
@@ -1843,6 +1984,9 @@ impl Hub {
             }
             None => None,
         };
+        // Its pull request merges back into the target, whichever work it starts on.
+        let target =
+            self.inner.state.lock().projects.project(project).ok().map(|r| r.target.clone());
         let env = vec![
             (PROJECT_ENV.to_owned(), project.to_string()),
             (TASK_ENV.to_owned(), task.to_string()),
@@ -1853,7 +1997,13 @@ impl Hub {
                 let mut args = Vec::new();
                 let worktree = worktree.map(|Worktree::Worker { name, base }| {
                     args.extend([WORKTREE_FLAGS[0].to_owned(), name.clone()]);
-                    NewWorktree { name, base: Some(base), pull: None, setup: true }
+                    NewWorktree {
+                        name,
+                        base: Some(base),
+                        merge_base: target.clone(),
+                        pull: None,
+                        setup: true,
+                    }
                 });
                 let (args, conversation) = started_args(args, Some(level), Some(role));
                 let spawn = Verb::SpawnAgent {
@@ -1882,6 +2032,7 @@ impl Hub {
                     worktree: worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                         name,
                         base: Some(base),
+                        merge_base: target.clone(),
                         pull: None,
                         setup: true,
                     }),
@@ -1893,6 +2044,7 @@ impl Hub {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                     name,
                     base: Some(base),
+                    merge_base: target.clone(),
                     pull: None,
                     setup: true,
                 });
@@ -1931,9 +2083,12 @@ impl Hub {
             Outcome::OpenedIn { term: opened, worktree } => (opened, None, Some(made(worktree))),
             Outcome::ThreadStarted { thread, worktree } => (term, Some(thread), worktree.map(made)),
             other if maybe_done(&other) => {
-                if let Some(s) = self.inner.state.lock().starting.iter_mut().find(|s| s.id == id) {
+                let mut state = self.inner.state.lock();
+                if let Some(s) = state.starting.iter_mut().find(|s| s.id == id) {
                     s.conversation = conversation;
                 }
+                keep_starts(&mut state);
+                drop(state);
                 placed.answered();
                 return other;
             }
@@ -1970,6 +2125,7 @@ impl Hub {
             Err(refused) => {
                 tracing::warn!(%project, %task, ?refused, "a lost start found and not taken");
                 state.starting.retain(|s| s.term != term);
+                keep_starts(state);
             }
         }
     }
@@ -2293,7 +2449,7 @@ mod tests {
             shell_in("/w/notes", None, None),
         ];
         let linux = [shell_in("/home/c/slopty", None, Some(root))];
-        let Fact::Map(on_studio) = repos_of(&studio, &[]) else { panic!("a map") };
+        let Fact::Map(on_studio) = repos_of(&studio, None) else { panic!("a map") };
         assert_eq!(
             on_studio.get(origin),
             Some(&Fact::Text("/w/slopty".to_owned())),
@@ -2302,10 +2458,20 @@ mod tests {
         assert_eq!(on_studio.get(root), on_studio.get(origin));
         assert_eq!(on_studio.len(), 2, "a shell in no known repository adds nothing");
 
-        let Fact::Map(on_linux) = repos_of(&linux, &[]) else { panic!("a map") };
+        let Fact::Map(on_linux) = repos_of(&linux, None) else { panic!("a map") };
         assert_eq!(on_linux.get(root), Some(&Fact::Text("/home/c/slopty".to_owned())));
         assert_eq!(on_linux.get(origin), None, "known there by its root alone");
-        assert_eq!(repos_of(&[], &[]), Fact::Map(BTreeMap::new()));
+        assert_eq!(repos_of(&[], None), Fact::Map(BTreeMap::new()));
+
+        // The clones the worker says it holds are there too, its shells' first in order.
+        let clone = "/home/c/slopty/clones/github.com/aislopware/slopty";
+        let said = Fact::Map(Facts::from([
+            (origin.to_owned(), Fact::Text(clone.to_owned())),
+            (root.to_owned(), Fact::Text(clone.to_owned())),
+        ]));
+        let Fact::Map(both) = repos_of(&linux, Some(&said)) else { panic!("a map") };
+        assert_eq!(both.get(origin), Some(&Fact::Text(clone.to_owned())), "by its origin");
+        assert_eq!(both.get(root), Some(&Fact::Text("/home/c/slopty".to_owned())));
     }
 
     #[test]
