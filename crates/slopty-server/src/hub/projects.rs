@@ -650,6 +650,11 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
         "- Do the whole task yourself: you start no other agents or tasks. Work you find that is \
          not yours goes in your report, for the orchestrator to plan."
             .to_owned(),
+        "- A scope or design question the brief does not settle goes to the orchestrator: ask it \
+         with task_report, which reaches it at once, then end your turn; its answer comes back \
+         marked as its own. Ask the person nothing yourself: only your own permission prompts \
+         reach them."
+            .to_owned(),
         "- Never type into another agent's terminal, and leave git remotes and git config as \
          they are."
             .to_owned(),
@@ -705,8 +710,10 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         "- `slopty --json workers` in your shell shows each worker's facts; name the worker \
          in task_start. Work that needs no Apple platform belongs on Linux."
             .to_owned(),
-        "- When the goal is met, end with its summary for the person: what was done, what was \
-         merged and what is left."
+        "- Say where the goal stands with project_update as tasks land: its summary is the first \
+         line the person reads on the board. When the goal is met, end with project_update and \
+         done, its summary saying what was done, what was merged and what is left; the person \
+         hears it once."
             .to_owned(),
     ];
     if let Some(key) = &clones.key {
@@ -977,6 +984,7 @@ impl Hub {
         let mut named = None;
         let mut kick = None;
         let mut told = None;
+        let mut goal_met = None;
         let answered = match verb.clone() {
             Verb::ProjectCreate {
                 project,
@@ -1026,10 +1034,22 @@ impl Hub {
                 }
                 Ok((status(set.0), set.1))
             }),
-            Verb::ProjectProgress { project, summary, next, done } => state
-                .projects
-                .progress(&project, (summary, next, done), &running, now)
-                .map(|(s, u)| (status(s), u)),
+            Verb::ProjectProgress { project, summary, next, done } => {
+                let was_done = state
+                    .projects
+                    .project(&project)
+                    .is_ok_and(|p| p.progress.as_ref().is_some_and(|p| p.done));
+                let said = state.projects.progress(&project, (summary, next, done), &running, now);
+                // The goal met is the person's news once, when it first is.
+                if let Ok((_, updates)) = &said
+                    && done
+                    && !was_done
+                {
+                    let entry = updates.iter().find_map(|u| u.kept.entry.as_ref().map(|e| e.seq));
+                    goal_met = entry.map(|entry| (project, entry));
+                }
+                said.map(|(s, u)| (status(s), u))
+            }
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
@@ -1098,6 +1118,9 @@ impl Hub {
         };
         if let Some(project) = kick {
             self.kick(state, &project);
+        }
+        if let Some((project, entry)) = goal_met {
+            super::ladder::tell_goal_met(state, &project, entry);
         }
         if let Some((project, task, words, by)) = told {
             let at = tokio::time::Instant::now();

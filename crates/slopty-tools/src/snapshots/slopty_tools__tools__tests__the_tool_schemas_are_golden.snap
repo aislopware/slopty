@@ -33,6 +33,44 @@ expression: tools
   },
   {
     "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "`project_update`.",
+      "properties": {
+        "done": {
+          "default": false,
+          "description": "The goal is met: the person hears it once.",
+          "type": "boolean"
+        },
+        "idempotency_key": {
+          "description": "A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next": {
+          "description": "What comes next.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "description": "Where the goal stands: what is done and what runs, in a few lines.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "ProjectUpdateArgs",
+      "type": "object"
+    },
+    "name": "project_update"
+  },
+  {
+    "input_schema": {
       "$defs": {
         "TaskArg": {
           "anyOf": [

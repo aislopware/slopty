@@ -1,12 +1,13 @@
 //! Reports on their way to the agent they are for (`docs/decisions/projects.md`, "Reports go
 //! up through hooks").
 //!
-//! A task's agent reports its finished work to the project's orchestrator. What goes to an
-//! agent waits here per node (the orchestrator, or a task for the person's and the
-//! orchestrator's words to it), and goes when its [`Kind`] says:
+//! A task's agent reports its finished work, or a question it cannot settle, to the project's
+//! orchestrator. What goes to an agent waits here per node (the orchestrator, or a task for the
+//! person's and the orchestrator's words to it), and goes:
 //!
-//! - a finish ([`Kind::Done`]) once it has settled for [`DONE_SETTLE`], so the agent hears the last
-//!   word and not a flurry: a later report of the task replaces it;
+//! - an agent's own report at once, so a question never waits on a clock;
+//! - the server's word on a turn nobody reported ([`Kind::Done`], it came to rest) once it has
+//!   settled for [`DONE_SETTLE`], so the agent hears the last word and not a flurry;
 //! - a need ([`Kind::NeedsInput`]) or a block ([`Kind::Stuck`]) at once.
 //!
 //! A task's later report replaces its earlier one still waiting, so what waits for a node is
@@ -61,7 +62,8 @@ pub(crate) type Node = (ProjectId, Option<TaskId>);
 /// What a word waiting for a node says of its task, which decides when it goes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub(crate) enum Kind {
-    /// The work is finished: it goes once it has settled.
+    /// The work is finished, or the turn came to rest: the server's word on it goes once it
+    /// has settled, an agent's own report at once.
     Done,
     /// An answer is wanted: at once, or for an agent waiting on the person once the wait
     /// lasted [`WAIT_SETTLE`].
@@ -108,6 +110,9 @@ impl Item {
         }
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
         match self.kind {
+            // The agent's own word, a finish or a question, is news at once: only what the
+            // server says of a turn nobody reported waits to settle.
+            _ if self.by == By::Agent => self.at,
             Kind::NeedsInput if self.by == By::Outcome => after(WAIT_SETTLE),
             Kind::NeedsInput | Kind::Stuck => self.at,
             Kind::Done => after(DONE_SETTLE),
@@ -686,7 +691,7 @@ fn block(item: &Item) -> String {
     let Some(task) = item.task.filter(|_| item.by == By::Agent) else {
         return r.note.trim().to_owned();
     };
-    let mut lines = vec![format!("task {task}: done")];
+    let mut lines = vec![format!("task {task} reports:")];
     lines.extend(r.note.trim().lines().map(|line| format!("  {}", plain(line))));
     lines.extend(r.branch.iter().map(|branch| format!("  branch: {}", plain(branch))));
     lines.extend(r.pr.iter().map(|pr| format!("  pull request: #{pr}")));

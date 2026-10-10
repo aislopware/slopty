@@ -1347,6 +1347,18 @@ impl Hub {
         }
         for change in changes {
             ladder::tell_project(state, &change.kept);
+            if let (Some(task), Some(entry)) = (&change.kept.task, &change.kept.entry)
+                && ladder::ready_to_merge(task)
+                && matches!(
+                    entry.what,
+                    slopty_proto::project::Moment::State {
+                        to: slopty_proto::project::TaskState::Done,
+                        ..
+                    }
+                )
+            {
+                self.ready_soon(state, &change.kept.project, entry.seq);
+            }
             self.happen(Happening::Project(Box::new(state.projects.pushed(&change.kept))));
             if change.durable {
                 projects::keep(state, Keep::Project(Box::new(change.kept)));
@@ -1356,6 +1368,26 @@ impl Hub {
             self.free_closed(state, worker);
         }
         self.unpark_deliveries(state);
+    }
+
+    /// A task of `project` turned ready to merge at the timeline's `entry`: the person hears how
+    /// many wait once [`ladder::READY_SETTLE`] has passed, in one notice for every task that
+    /// turned ready meanwhile.
+    fn ready_soon(&self, state: &mut State, project: &ProjectId, entry: u64) {
+        if !state.board.ready_due(project, entry) {
+            return;
+        }
+        let (hub, project) = (self.downgrade(), project.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(ladder::READY_SETTLE).await;
+            let Some(hub) = hub.upgrade() else { return };
+            let mut guard = hub.inner.state.lock();
+            let state = &mut *guard;
+            if let Some(entry) = state.board.ready_now(&project) {
+                ladder::tell_ready(state, &project, entry);
+            }
+            drop(guard);
+        });
     }
 
     /// A node may have a terminal now for reports that waited for one.

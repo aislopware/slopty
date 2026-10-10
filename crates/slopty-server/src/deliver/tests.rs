@@ -22,24 +22,33 @@ fn settled(t0: Instant) -> Instant {
     t0.checked_add(DONE_SETTLE).unwrap()
 }
 
-/// A report settles before it goes, and a later one of the task replaces it; a notice of a
-/// need goes at once and takes what waits along.
+/// What the server says of a turn nobody reported settles first: a rest for [`DONE_SETTLE`], a
+/// wait on the person for [`WAIT_SETTLE`]. An agent's own report, a question as much as a
+/// finish, goes at once and takes what waits along; a later one of the task still unsent
+/// replaces it. A notice of a need goes at once too.
 #[test]
-fn a_report_settles_and_a_need_goes_at_once() {
+fn an_agent_s_report_goes_at_once_and_an_unreported_turn_settles() {
     let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    d.outcome(orchestrator(), TaskId(4), Kind::Done, "task 4 rested", t0);
+    assert_eq!(d.next_due(), Some(settled(t0)), "a rest settles");
+    d.outcome(orchestrator(), TaskId(5), Kind::NeedsInput, "task 5 waits on Bash", t0);
+    let waited = t0.checked_add(WAIT_SETTLE).unwrap();
+    assert_eq!(d.next_due(), Some(waited), "a wait on the person settles a little");
+    assert!(d.take(t0, |_| Some(to)).is_empty(), "nothing due yet");
     d.add(orchestrator(), Some(TaskId(3)), report("first try"), t0);
-    d.add(orchestrator(), Some(TaskId(3)), report("merged it"), t0);
-    assert_eq!(d.len(), 1, "the task's last word");
-    assert_eq!(d.next_due(), Some(settled(t0)));
-    assert!(d.take(t0, |_| Some(to)).is_empty(), "a finish settles first");
+    d.add(orchestrator(), Some(TaskId(3)), report("Which store: files or SQLite?"), t0);
+    assert_eq!(d.len(), 3, "the task's last word, beside the others");
+    assert_eq!(d.next_due(), Some(t0), "the agent's own word is not paced");
+    let batches = d.take(t0, |_| Some(to));
+    let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+    assert_eq!((batch.term, batch.count), (to, 3), "everything waiting rides with it");
+    let text = batch.reports.text();
+    assert!(text.contains("task 3 reports:\n  Which store: files or SQLite?"), "{text}");
+    assert!(!text.contains("first try"), "{text}");
+    assert_eq!(d.next_due(), None);
     let later = t0.checked_add(Duration::from_secs(5)).unwrap();
     d.notice(orchestrator(), TaskId(4), Kind::NeedsInput, "task 4 does not rebase", later);
-    let batches = d.take(later, |_| Some(to));
-    let [batch] = batches.as_slice() else { panic!("{batches:?}") };
-    assert_eq!((batch.term, batch.count), (to, 2), "everything waiting rides with the need");
-    assert!(batch.reports.text().contains("task 3: done\n  merged it"), "{}", batch.reports.text());
-    assert!(!batch.reports.text().contains("first try"), "{}", batch.reports.text());
-    assert_eq!(d.next_due(), None);
+    assert_eq!(d.next_due(), Some(later), "a need goes at once");
 }
 
 /// A node with no live terminal keeps its reports until one may have come; a batch not handed over
@@ -142,7 +151,6 @@ fn the_person_s_words_go_at_once_beside_the_server_s() {
 fn the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own() {
     let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
     let (one, two) = (TaskId(1), TaskId(2));
-    let after = |wait: Duration| t0.checked_add(wait).unwrap();
     d.outcome(orchestrator(), one, Kind::Done, "task 1 rested", t0);
     d.notice(orchestrator(), one, Kind::Done, "task 1 merged", t0);
     assert_eq!(d.len(), 2, "beside the server's notice");
@@ -150,7 +158,7 @@ fn the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own() {
     assert_eq!(d.len(), 2, "the agent's own word replaced it");
 
     d.outcome(orchestrator(), two, Kind::NeedsInput, "task 2 waits on Bash", t0);
-    assert_eq!(d.next_due(), Some(after(WAIT_SETTLE)), "a wait settles first");
+    assert_eq!(d.len(), 3);
     d.outcome(orchestrator(), two, Kind::Done, "task 2 rested", t0);
     assert_eq!(d.len(), 3, "its next outcome replaced it");
     d.moved_on(&orchestrator(), two);
@@ -235,7 +243,7 @@ fn reports_on_their_way_outlive_a_restart() {
     assert!(changes.has_changed().unwrap(), "the store hears of it");
     let sent = d.take(t0, |_| Some(to));
     let later = t0.checked_add(Duration::from_secs(30)).unwrap();
-    d.add(orchestrator(), Some(TaskId(2)), report("done"), later);
+    d.outcome(orchestrator(), TaskId(2), Kind::Done, "task 2 rested", later);
     d.outcome((project(), Some(TaskId(3))), TaskId(3), Kind::Stuck, "it exited", t0);
     let _told = d.take(t0, |_| Some(to));
     let wall = WallMs::from_millis(1_000_000);
@@ -249,7 +257,7 @@ fn reports_on_their_way_outlive_a_restart() {
     assert_eq!(back.outstanding_on(to.worker), d.outstanding_on(to.worker), "goes again whole");
     let due = back.next_due().unwrap();
     let expected = t1.checked_add(DONE_SETTLE).unwrap().checked_sub(Duration::from_mins(1));
-    assert_eq!(Some(due), expected, "the finish settles from when it came");
+    assert_eq!(Some(due), expected, "the rest settles from when it came");
     back.outcome((project(), Some(TaskId(3))), TaskId(3), Kind::Stuck, "it exited", t1);
     let node = (project(), Some(TaskId(3)));
     assert!(back.take(t1, |n| (*n == node).then_some(to)).is_empty(), "told already");

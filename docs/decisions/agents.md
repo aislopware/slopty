@@ -2640,6 +2640,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`claude::start::Starter::trust`), from the opening it kept for that start. A second press
     finds nothing held. The intent is `Accepted` at once, and the request settles when the
     agent's first hook speaks.
+  - **Asked at once** (2026-10-11, the orchestrator-first study, item 24). A start whose folder
+    Claude Code keeps no trust for opens at the trust dialog, before any hook. So the request
+    is opened as the thread begins, not after `UNHEARD` of silence. Under managed settings
+    that keep Slopty's hooks off (`allowManagedHooksOnly`) no silence was ever read as a
+    dialog, so such a start used to ask nothing and wait unseen. It settles as before: on the
+    first hook, or on a turn the transcript shows. Test: the trust test above, now with the
+    hooks kept off and the request in before `UNHEARD`.
   - Tests: `trust::tests::a_named_folder_is_trusted_but_never_the_home_or_above_it`
     (slopty-agent: the home, its parent and `/` refused with the config untouched);
     `trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again` (slopty-worker

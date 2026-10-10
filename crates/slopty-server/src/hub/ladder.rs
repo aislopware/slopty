@@ -39,7 +39,8 @@ use slopty_agent::status::{AgentStatus, BlockReason};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{TermAgent, TermRef};
 use slopty_proto::project::{
-    AgentReport, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskStep, TimelineEntry,
+    AgentReport, Merge, Moment, SEAT_FACT, StepKind, StepState, Task, TaskId, TaskStep,
+    TimelineEntry,
 };
 use slopty_proto::push::{PushBody, PushDevice};
 use slopty_proto::server::FromServer;
@@ -90,6 +91,9 @@ pub(super) struct Board {
     awake: Awake,
     /// The phones notices are pushed to when the person is at no client.
     phones: Phones,
+    /// Each project whose work turned ready to merge and is still to be told, with the
+    /// timeline entry that made the latest ready ([`Hub::ready_soon`]).
+    ready_due: HashMap<slopty_proto::project::ProjectId, u64>,
 }
 
 /// A Codex thread's approval policy and sandbox, as its row says them.
@@ -193,23 +197,34 @@ impl Phones {
         ask: Option<&Ask>,
         unheard: &[u64],
     ) {
-        self.send(seats, notice, ask, (unheard, false));
+        self.send(seats, notice, ask, (unheard, false, None));
+    }
+
+    /// Push a ready-to-merge `notice` as [`Self::push`] does, its note's Merge merging `merges`.
+    fn push_merging(
+        &mut self,
+        seats: &BTreeMap<u64, Sitting>,
+        notice: &Notice,
+        unheard: &[u64],
+        merges: TaskId,
+    ) {
+        self.send(seats, notice, None, (unheard, false, Some(merges)));
     }
 
     /// Push `notice` as [`Self::push`] does, but only to the phones not already showing a note
     /// about its subject that needs the person.
     fn push_new(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&Ask>) {
-        self.send(seats, notice, ask, (&[], true));
+        self.send(seats, notice, ask, (&[], true, None));
     }
 
     /// [`Self::push`], skipping, when `new_only`, each phone already showing a note about the
-    /// notice's subject that needs the person.
+    /// notice's subject that needs the person; a ready-to-merge note's Merge merges `merges`.
     fn send(
         &mut self,
         seats: &BTreeMap<u64, Sitting>,
         notice: &Notice,
         ask: Option<&Ask>,
-        (unheard, new_only): (&[u64], bool),
+        (unheard, new_only, merges): (&[u64], bool, Option<TaskId>),
     ) {
         let Some(out) = &self.out else { return };
         let about = asked_about(&notice.about);
@@ -233,7 +248,7 @@ impl Phones {
                 ask: ask.map(|a| a.id.clone()),
                 choices: ask.map(|a| a.choices.clone()).unwrap_or_default(),
                 quiet: false,
-                merges: None,
+                merges,
             };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
@@ -396,6 +411,23 @@ fn noted(asked: &mut BTreeMap<ClientId, HashSet<Asked>>, client: ClientId, notic
         asked.insert(about);
     } else {
         asked.remove(&about);
+    }
+}
+
+impl Board {
+    /// `project`'s work turned ready at the timeline's `entry`: whether it is the first since
+    /// the person was last told, so a tell is to be set ([`Hub::ready_soon`]).
+    pub(super) fn ready_due(
+        &mut self,
+        project: &slopty_proto::project::ProjectId,
+        entry: u64,
+    ) -> bool {
+        self.ready_due.insert(project.clone(), entry).is_none()
+    }
+
+    /// The entry `project`'s ready work is to be told at, now, once.
+    pub(super) fn ready_now(&mut self, project: &slopty_proto::project::ProjectId) -> Option<u64> {
+        self.ready_due.remove(project)
     }
 }
 
@@ -1064,6 +1096,28 @@ pub(super) fn tell_project(state: &mut State, kept: &Kept) {
     }
 }
 
+/// A project's orchestrator said its goal is met, at the timeline's `entry`: the person hears
+/// it once, where they are, its summary's first line the words ([`NoticeKind::GoalDone`]).
+pub(super) fn tell_goal_met(
+    state: &mut State,
+    project: &slopty_proto::project::ProjectId,
+    entry: u64,
+) {
+    let Ok(record) = state.projects.project(project) else { return };
+    let summary = record.progress.as_ref().map_or("", |p| p.summary.as_str());
+    let first = summary.lines().next().unwrap_or_default().trim();
+    let notice = Notice {
+        kind: NoticeKind::GoalDone,
+        about: Subject::Project { project: project.clone(), entry },
+        tile: record.orchestrator,
+        title: record.title.clone(),
+        text: format!("Goal met: {first}"),
+        worked_ms: None,
+        via: None,
+    };
+    tell(&mut state.board, &notice, None);
+}
+
 /// The request a pushed note's buttons answer, and the answers it offers as buttons of their
 /// own: a small question's options; none for a yes or no, which Allow and Deny answer.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1078,6 +1132,11 @@ pub(super) struct Ask {
 /// phones when it finds the person at none of them, with `ask`, the request its note's buttons
 /// answer.
 fn tell(board: &mut Board, notice: &Notice, ask: Option<&Ask>) {
+    tell_merging(board, notice, ask, None);
+}
+
+/// [`tell`], a ready-to-merge note's Merge merging `merges` on the phones.
+fn tell_merging(board: &mut Board, notice: &Notice, ask: Option<&Ask>, merges: Option<TaskId>) {
     let reach = route(&board.seats, notice);
     let mut unheard = Vec::new();
     for link in &reach.links {
@@ -1090,8 +1149,52 @@ fn tell(board: &mut Board, notice: &Notice, ask: Option<&Ask>) {
     // A notice no link it went to could take is pushed, as though the person were away.
     let lost = !reach.links.is_empty() && unheard.len() == reach.links.len();
     if reach.away || lost {
-        board.phones.push(&board.seats, notice, ask, &unheard);
+        match merges {
+            Some(task) => board.phones.push_merging(&board.seats, notice, &unheard, task),
+            None => board.phones.push(&board.seats, notice, ask, &unheard),
+        }
     }
+}
+
+/// How long a project's work turning ready waits before the person hears of it, so tasks
+/// verified close together make one note ([`tell_ready`]).
+pub(super) const READY_SETTLE: Duration = Duration::from_secs(20);
+
+/// The person hears how many of `project`'s tasks wait on their merge, in one notice about the
+/// project at `entry`, the timeline entry that made the latest ready; its note's Merge merges
+/// the one ready longest ([`NoticeKind::ReadyToMerge`]). None ready, nothing is said.
+pub(super) fn tell_ready(
+    state: &mut State,
+    project: &slopty_proto::project::ProjectId,
+    entry: u64,
+) {
+    let Ok(record) = state.projects.project(project) else { return };
+    let (tile, title) = (record.orchestrator, record.title.clone());
+    let Ok(tasks) = state.projects.tasks(project) else { return };
+    let ready: Vec<&Task> = tasks.iter().filter(|t| ready_to_merge(t)).collect();
+    let Some(oldest) = ready.iter().min_by_key(|t| (t.updated_ms, t.id)).map(|t| t.id) else {
+        return;
+    };
+    let text = match ready.as_slice() {
+        [one] if one.title.trim().is_empty() => format!("#{} is ready to merge", one.id),
+        [one] => format!("#{} {} is ready to merge", one.id, one.title.trim()),
+        many => format!("{} ready to merge", many.len()),
+    };
+    let notice = Notice {
+        kind: NoticeKind::ReadyToMerge,
+        about: Subject::Project { project: project.clone(), entry },
+        tile,
+        title,
+        text,
+        worked_ms: None,
+        via: None,
+    };
+    tell_merging(&mut state.board, &notice, None, Some(oldest));
+}
+
+/// Whether `task`'s work waits on the person's merge: done, writing, and in no merge yet.
+pub(super) fn ready_to_merge(task: &Task) -> bool {
+    task.state == slopty_proto::project::TaskState::Done && !task.read_only && task.merge.is_none()
 }
 
 /// The notice `kept` makes: a timeline entry that holds a task's work up, named by the task, and

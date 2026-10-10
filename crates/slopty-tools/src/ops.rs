@@ -829,6 +829,25 @@ pub async fn project_status<D: Dispatch>(
     project_answer(dispatch, None, Verb::ProjectStatus { project, since, timeout_ms: 0 }).await
 }
 
+/// Say where the caller's own project's goal stands, as its orchestrator: `summary`, what
+/// comes `next`, and whether it is `done`, which tells the person once.
+///
+/// # Errors
+/// The caller works for no project, is not its orchestrator, or the summary is empty or long.
+pub async fn project_update<D: Dispatch>(
+    dispatch: &D,
+    summary: String,
+    next: Option<String>,
+    done: bool,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    let project = project_named(None, &own(dispatch).await?)?;
+    match dispatch.send(key, Verb::ProjectProgress { project, summary, next, done }).await {
+        Outcome::Project(_) => Ok(()),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
 /// Let a project go, as the person: its tasks, queue and timeline. Its terminals run on.
 ///
 /// # Errors

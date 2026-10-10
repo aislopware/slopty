@@ -1115,6 +1115,11 @@ impl Projects {
         }
     }
 
+    /// A project's tasks as they are.
+    pub(crate) fn tasks(&self, id: &ProjectId) -> Result<&[Task], Refused> {
+        Ok(&self.records.get(id).ok_or_else(|| unknown_project(id))?.tasks)
+    }
+
     /// A task as it is.
     pub(crate) fn task(&self, id: &ProjectId, task: TaskId) -> Result<&Task, Refused> {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.task(task)

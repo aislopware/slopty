@@ -26,7 +26,7 @@ use crate::{Dispatch, ToolError, view};
 pub const INSTRUCTIONS: &str = "\
 These tools are a Slopty project's: one goal that agents work on side by side across a fleet \
 of machines (workers). project_status shows the whole project, its tasks and its timeline; \
-task_get shows one task in full. The orchestrator starts work with task_start: each task is \
+task_get shows one task in full; project_update is the orchestrator saying where the goal stands. The orchestrator starts work with task_start: each task is \
 one agent (Claude Code, Codex, pi or an ACP agent), working from its brief in a worktree of \
 its own on the worker named or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
 more to a task's agent, task_restart starts its work again with a fresh or another agent, \
@@ -75,6 +75,21 @@ struct ProjectStatusArgs {
     /// Timeline cursor: the `next` of the previous call. The latest entries when omitted; 0
     /// for all the server keeps.
     since: Option<u64>,
+}
+
+/// `project_update`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectUpdateArgs {
+    /// Where the goal stands: what is done and what runs, in a few lines.
+    summary: String,
+    /// What comes next.
+    next: Option<String>,
+    /// The goal is met: the person hears it once.
+    #[serde(default)]
+    done: bool,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
 }
 
 /// `task_get`.
@@ -344,6 +359,15 @@ pub fn list() -> Vec<Tool> {
              task_wait waits for tasks' news.",
             Kind::Read,
         ),
+        tool::<ProjectUpdateArgs>(
+            "project_update",
+            "As the orchestrator, say where your project's goal stands: a `summary` of what is \
+             done and what runs, and what comes `next`. The latest is the first line the person \
+             reads on the board, so say it as tasks land. When the goal is met, say so with \
+             `done` and a summary of what was done, what was merged and what is left: the person \
+             hears it once.",
+            Kind::Write,
+        ),
         tool::<TaskGetArgs>(
             "task_get",
             "One node of a project's tree in full: the task's brief, pin, verifier, base \
@@ -375,11 +399,12 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<TaskReportArgs>(
             "task_report",
-            "Report your task done to the project's orchestrator, with a `note`, what you made \
-             (`artifacts`), your `branch` and `pr`. It reaches the orchestrator through its own \
-             hooks once your task settles, never typed into its terminal, and stays on the \
-             timeline. Done work is checked, then waits for the person to merge it. A question \
-             or a block needs no report: the orchestrator hears your turn end.",
+            "Report to the project's orchestrator: your task done, with a `note`, what you made \
+             (`artifacts`), your `branch` and `pr`; or, in the `note`, a scope or design \
+             question the brief does not settle, after which you end your turn. It reaches the \
+             orchestrator through its own hooks at once, never typed into its terminal, and \
+             stays on the timeline. Done work is checked, then waits for the person to merge \
+             it.",
             Kind::Write,
         ),
         tool::<TaskTellArgs>(
@@ -476,6 +501,12 @@ async fn run<D: Dispatch>(
             let a: ProjectStatusArgs = args(arguments)?;
             let status = ops::project_status(dispatch, a.project.as_deref(), a.since).await?;
             json(&view::projects::status(&status))
+        }
+        "project_update" => {
+            let a: ProjectUpdateArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            ops::project_update(dispatch, a.summary, a.next, a.done, key).await?;
+            json(&view::DONE)
         }
         "task_get" => {
             let a: TaskGetArgs = args(arguments)?;
@@ -758,6 +789,9 @@ mod tests {
                     }
                     Outcome::Project(Box::new(project_status(project)))
                 }
+                Verb::ProjectProgress { project, .. } => {
+                    Outcome::Project(Box::new(project_status(project)))
+                }
                 Verb::TaskTell { task: Some(TaskId(9)), .. } => Outcome::Error {
                     code: ErrorCode::UnknownTask,
                     message: "no task #9".to_owned(),
@@ -904,7 +938,7 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
-    /// The tools are the project's nine and nothing else: the rest is the `slopty` command.
+    /// The tools are the project's ten and nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -913,6 +947,7 @@ mod tests {
             names,
             [
                 "project_status",
+                "project_update",
                 "task_get",
                 "task_start",
                 "task_update",
@@ -1071,6 +1106,27 @@ mod tests {
         assert_eq!(fake.verbs().pop(), Some(told));
         let (failed, text) = call_json(&fake, "task_tell", json!({"text": "Hello."})).await;
         assert!(failed && text.contains("task"), "a task is named: {text}");
+    }
+
+    /// The orchestrator says where its own project's goal stands, and that it is met; a
+    /// summary is what it must say.
+    #[tokio::test]
+    async fn project_update_says_where_the_goal_stands_in_the_caller_s_project() {
+        let scope =
+            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
+        let fake = Fake { scope, ..Fake::default() };
+        let said = json!({ "summary": "Two of three merged.", "next": "The iPad.", "done": true });
+        let (failed, text) = call_json(&fake, "project_update", said).await;
+        assert!(!failed, "{text}");
+        let progress = Verb::ProjectProgress {
+            project: "slopty".parse().unwrap(),
+            summary: "Two of three merged.".to_owned(),
+            next: Some("The iPad.".to_owned()),
+            done: true,
+        };
+        assert_eq!(fake.verbs().pop(), Some(progress));
+        let (failed, text) = call_json(&fake, "project_update", json!({ "next": "x" })).await;
+        assert!(failed && text.contains("summary"), "{text}");
     }
 
     /// A project's timeline as a server answers it, read after read; with nothing left it

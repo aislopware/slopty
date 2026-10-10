@@ -1128,3 +1128,111 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     hub.rank_ladder();
     assert_eq!(pushes().len(), 1, "a need that finds the person away");
 }
+
+/// The orchestrator saying its goal is met is the person's news once, where they are, in the
+/// summary's first line, and it opens the orchestrator; progress short of it, and the goal
+/// said met again, tell nothing.
+#[tokio::test]
+async fn a_goal_met_is_told_once() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let _lease = hub
+        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let orchestrator = TermRef { worker, session: orchestrating };
+    create(&hub, Some(orchestrator)).await;
+    let mut desk = Client::sit(&hub, "mac");
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let say = |summary: &str, done| Verb::ProjectProgress {
+        project: project(),
+        summary: summary.to_owned(),
+        next: None,
+        done,
+    };
+    assert!(matches!(hub.dispatch(say("Two of three merged.", false)).await, Outcome::Project(_)));
+    assert!(desk.notices().is_empty(), "progress is the board's to show");
+    let met = say("All three merged.\nThe iPad layout is left.", true);
+    assert!(matches!(hub.dispatch(met).await, Outcome::Project(_)));
+    let heard = desk.notices();
+    let [notice] = heard.as_slice() else { panic!("one notice: {heard:?}") };
+    assert_eq!(notice.kind, NoticeKind::GoalDone);
+    assert_eq!(notice.text, "Goal met: All three merged.");
+    assert_eq!(notice.tile, Some(orchestrator), "it opens the orchestrator");
+    assert!(matches!(&notice.about, Subject::Project { project: p, .. } if *p == project()));
+    let again = say("All three merged, and pushed.", true);
+    assert!(matches!(hub.dispatch(again).await, Outcome::Project(_)));
+    assert!(desk.notices().is_empty(), "once");
+}
+
+/// Work turning ready to merge while the person is away is pushed once for the project, after
+/// it settles: one note saying how many wait, its Merge merging the one ready longest.
+#[tokio::test(start_paused = true)]
+async fn work_turning_ready_is_pushed_once_with_the_oldest_to_merge() {
+    use slopty_proto::project::{TaskChange, TaskState};
+    use slopty_proto::push::PushDevice;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let (orchestrating, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let _lease = hub
+        .register(registration(worker, vec![summary(orchestrating)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let orchestrator = TermRef { worker, session: orchestrating };
+    create(&hub, Some(orchestrator)).await;
+    let (phone, client) = (Client::sit(&hub, "phone"), ClientId::new());
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 60_000,
+    };
+    hub.push_device(phone.seated.link(), client, Some(device));
+    let away = Presence {
+        seat: Seat::Handheld,
+        active: false,
+        showing: Vec::new(),
+        focus: None,
+        listening: false,
+    };
+    hub.presence(phone.seated.link(), away);
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push);
+        }
+        out
+    };
+    let done = |task| Verb::TaskUpdate {
+        project: project(),
+        task,
+        change: Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() }),
+    };
+
+    let tasks = [task(&hub).await, task(&hub).await, task(&hub).await];
+    for t in tasks {
+        assert!(matches!(hub.dispatch(done(t)).await, Outcome::Task(_)));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(pushes().is_empty(), "it settles first");
+    tokio::time::sleep(READY_SETTLE).await;
+    let heard = pushes();
+    let [push] = heard.as_slice() else { panic!("one note: {heard:?}") };
+    let note = body(push);
+    assert_eq!(note.notice.kind, NoticeKind::ReadyToMerge);
+    assert_eq!(note.notice.text, "3 ready to merge");
+    assert_eq!(note.notice.tile, Some(orchestrator), "it opens the orchestrator");
+    assert_eq!(note.merges, Some(tasks[0]), "its Merge merges the one ready longest");
+    tokio::time::sleep(READY_SETTLE * 2).await;
+    assert!(pushes().is_empty(), "once");
+
+    let fourth = task(&hub).await;
+    assert!(matches!(hub.dispatch(done(fourth)).await, Outcome::Task(_)));
+    tokio::time::sleep(READY_SETTLE + Duration::from_secs(1)).await;
+    let heard = pushes();
+    let [push] = heard.as_slice() else { panic!("one note: {heard:?}") };
+    assert_eq!(body(push).notice.text, "4 ready to merge", "the count as it stands");
+}

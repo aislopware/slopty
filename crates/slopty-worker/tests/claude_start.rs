@@ -369,16 +369,20 @@ mod claude_start {
     }
 
     /// A start in a folder Claude Code keeps no trust for, held at its dialog, offers to trust
-    /// the folder. Pressed, the trust is kept in Claude Code's config as the person's own "yes"
+    /// the folder at once, with no silence waited out, and so with Slopty's hooks kept off too.
+    /// Pressed, the trust is kept in Claude Code's config as the person's own "yes"
     /// is, and Claude Code is opened again exactly as it was, on the same session, in place of
     /// the one held: the same thread, in its new terminal. A second press finds nothing held.
     #[tokio::test]
     async fn trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again() {
         let rig = Rig::new();
+        rig.sources.hooks_off.store(true, std::sync::atomic::Ordering::Relaxed);
         let prompt = first_message("edit");
+        let opened_at = std::time::Instant::now();
         let outcome = rig.starter.start(IntentId::new(), rig.start(Some(&prompt))).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
         let state = until(&rig.host, thread, |s| s.open_requests().next().is_some()).await;
+        assert!(opened_at.elapsed() < observed::UNHEARD, "at once, hooks kept off or not");
         let asked: Vec<_> = state.open_requests().collect();
         let [asked] = asked.as_slice() else { panic!("one request: {asked:?}") };
         let offered: Vec<_> = asked

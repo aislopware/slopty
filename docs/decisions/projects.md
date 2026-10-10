@@ -449,8 +449,10 @@ merging on the person's word since 2026-10-04
   the orchestrator as the turn end it already hears ("A task's outcome reaches the
   orchestrator without a report", below). The report lands on the task's timeline at once.
 - Reports wait per node on the server (`slopty-server::deliver`). A finish goes once it has
-  settled for 2 minutes, a later report of the task replacing it. A batch is at most 9000
-  bytes, and each node has one batch outstanding.
+  settled for 2 minutes, a later report of the task replacing it. *Since 2026-10-11 a report may
+  also ask, and an agent's own report goes at once; only an unreported turn settles ("A task's
+  questions go to its orchestrator, at once").* A batch is at most 9000 bytes, and each node has
+  one batch outstanding.
 - A batch goes to the worker of the node's live terminal (`FromServer::Deliver`), which keeps
   it in a file for that session beside its control socket. A node with no terminal waits,
   parked until its next terminal opens.
@@ -2825,3 +2827,61 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_held_run_locks_bypass_and_auto_mode_off_and_allows_slopty_s_tools` (`slopty-agent`
     hooks); `the_project_bounds_come_from_the_shared_settings` (`slopty-serverd`); the goldens
     `server_request_spawn` and `project_reply_status`.
+
+- ✅ **A task's questions go to its orchestrator, at once** (2026-10-11, the orchestrator-first
+  study, items 11 and 16's first half).
+  - **Why.** A task's agent with a scope or design question either asked the person through
+    its own question tool, which put an orchestrator's decision in the person's queue, or ended
+    its turn, which the orchestrator heard only once `DONE_SETTLE` (2 minutes) had passed.
+    A finished task's report waited the same two minutes.
+  - **The role.** A task's agent is told that a question the brief does not settle goes to the
+    orchestrator with `task_report`, after which it ends its turn, and that it asks the person
+    nothing itself: only its own permission prompts reach the person. The orchestrator's role
+    already answers with `task_tell` and asks the person, through its own question tool, only
+    what is theirs (item 4). Nothing answers a prompt for the person.
+  - **At once.** An agent's own report falls due as it comes (`deliver::Item::due`), a
+    question as much as a finish. A later report still unsent replaces it as before.
+    `DONE_SETTLE` now paces only what the server says of a turn nobody reported, and
+    `WAIT_SETTLE` a wait on the person. A report carries no branch when it asks, so it starts
+    no trip home and no verifier.
+  - **Its words.** A report's block opens `task N reports:` rather than `task N: done`, since a
+    report may ask. `task_report`'s description says both uses.
+  - Tests: `an_agent_s_report_goes_at_once_and_an_unreported_turn_settles` (`deliver`); the
+    role's words in `a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_shows`;
+    the label in `a_report_reaches_the_orchestrator_through_its_worker` and the outcome tests.
+
+- ✅ **The orchestrator says where the goal stands, and the person hears it met once**
+  (2026-10-11, the orchestrator-first study, item 12, the server's half).
+  - **The tool.** `project_update { summary, next, done }` is `Verb::ProjectProgress` for the
+    orchestrator's own project (`ops::project_update`), the tenth tool. Its latest summary is
+    the board's first line, which is the UI's half. The orchestrator's role tells it to say
+    where the goal stands as tasks land, and to end with `done` and a summary of what was done,
+    what was merged and what is left.
+  - **Goal met, once.** When a progress says `done` and the last one did not, the server
+    tells the person (`ladder::tell_goal_met`, `NoticeKind::GoalDone`), routed as every notice
+    is: to the client they are at, or pushed to their phone when they are at none. The words
+    are "Goal met:" and the summary's first line, about the project at the update's timeline
+    entry, opening the orchestrator. Saying `done` again tells nothing.
+  - Tests: `a_goal_met_is_told_once` (`hub/ladder/tests.rs`);
+    `project_update_says_where_the_goal_stands_in_the_caller_s_project` and the tool list and
+    schema goldens (slopty-tools); the role's words in
+    `a_report_reaches_the_orchestrator_through_its_worker`.
+
+- ✅ **Work ready to merge reaches the person, once per batch** (2026-10-11, the
+  orchestrator-first study, item 13, the server's notice).
+  - **Why.** Verified work waited on the board in silence: nothing told a person who was away
+    that a merge was theirs to make.
+  - **One note per project.** When a task turns ready (done, not read-only, in no merge yet),
+    the server waits `READY_SETTLE` (20 s), so tasks verified close together make one note.
+    Then it tells the person how many of the project's tasks wait on their merge
+    (`ladder::tell_ready`, `NoticeKind::ReadyToMerge`): "3 ready to merge", or "#4 Store is
+    ready to merge" for one alone. The note is about the project at the entry that made the
+    latest ready, opens the orchestrator, and goes where every notice goes. On a phone its
+    `PushBody.merges` names the task ready longest (earliest update, then lowest number), which
+    the note's Merge action merges with no round trip. Work turning ready later makes a new
+    note with the count as it stands.
+  - Each note keeps its own collapse id (one per timeline entry), so an older count stays on
+    the phone until read. A Merge from it on a task already merged is refused by the server.
+  - Test: `work_turning_ready_is_pushed_once_with_the_oldest_to_merge` (`hub/ladder/tests.rs`:
+    three ready while the person is away push once after the settle, the oldest is the Merge,
+    and a fourth later pushes the new count).

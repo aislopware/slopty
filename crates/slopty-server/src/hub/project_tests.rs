@@ -730,9 +730,15 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
     assert_eq!(words.get(..2), Some(&["--permission-mode", "default"][..]), "{words:?}");
     let conversation = words.get(3).copied().map(str::to_owned);
     assert_eq!(words.get(2), Some(&"--session-id"));
-    assert!(
-        words.iter().any(|w| w.starts_with("--append-system-prompt=You are the agent of task 1"))
-    );
+    let role = words
+        .iter()
+        .find_map(|w| w.strip_prefix("--append-system-prompt="))
+        .expect("the task's role");
+    assert!(role.starts_with("You are the agent of task 1"), "{role}");
+    // Its questions go to the orchestrator, at once; the person hears only its permissions.
+    assert!(role.contains("scope or design question the brief does not settle"), "{role}");
+    assert!(role.contains("task_report, which reaches it at once, then end your turn"));
+    assert!(role.contains("Ask the person nothing yourself"), "{role}");
 
     let lost = Outcome::Error { code: ErrorCode::Interrupted, message: "lost".to_owned() };
     lease.handle(ToServer::Reply { id: start.0, outcome: lost });
@@ -1336,7 +1342,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(context.contains("You orchestrate the Slopty project slopty"), "{context}");
     // It dispatches: the split goes to the person first, the goal ends with its summary, and
     // the agent choice is said once, in task_start's own description.
-    for said in ["you do not code", "plan mode", "with task_tell", "end with its summary"] {
+    for said in ["you do not code", "plan mode", "with task_tell", "end with project_update and"] {
         assert!(context.contains(said), "{said}: {context}");
     }
     assert!(!context.contains("runs Claude Code"), "{context}");
@@ -1377,7 +1383,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(matches!(said, Outcome::Task(_)), "{said:?}");
     let (session, batch, context) = next_batch(&mut rx).await;
     assert_eq!(session, orchestrator.session);
-    assert!(context.contains("task 1: done\n  The store keeps every project."), "{context}");
+    assert!(context.contains("task 1 reports:\n  The store keeps every project."), "{context}");
     assert!(context.contains("branch: task-1"), "{context}");
     lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
     assert!(deliver(&mut rx).is_none_or(|m| !matches!(m, FromServer::Deliver { .. })));

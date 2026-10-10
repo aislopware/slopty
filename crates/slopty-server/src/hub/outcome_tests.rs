@@ -122,7 +122,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     assert!(matches!(said, Outcome::Task(_)), "{said:?}");
     lease.handle(at(Phase::Idle));
     let own = next_batch(&mut rx).await;
-    assert!(own.2.contains("task 1: done\n  The store keeps every project."), "{}", own.2);
+    assert!(own.2.contains("task 1 reports:\n  The store keeps every project."), "{}", own.2);
     assert!(!own.2.contains("waits on the person"), "taken back: {}", own.2);
     ack(&own);
     assert_eq!(a_batch_within(&mut rx, Duration::from_mins(5)).await, None, "its own word");

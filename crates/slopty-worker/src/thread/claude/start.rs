@@ -18,7 +18,8 @@
 //!   project's `.mcp.json`), and its hooks run only once that is answered. A start no hook has
 //!   spoken for in [`slopty_agent::observed::UNHEARD`] asks the person to answer it in the terminal
 //!   ([`slopty_agent::observed::ASKING_IN_TERMINAL`]) until the first hook. The silence is the
-//!   sign; the screen is never read.
+//!   sign; the screen is never read. A start in a folder Claude Code keeps no trust for asks at
+//!   once, hooks kept off or not: the trust dialog comes before any hook.
 //! - **Trusted on the person's press.** A start in a folder Claude Code keeps no trust for, and
 //!   which the person may trust (not the home, nor above it), offers "Trust this folder" on that
 //!   request. Pressed ([`Starter::trust`]), the trust is written as the person's own "yes" is kept
