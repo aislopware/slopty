@@ -1798,6 +1798,7 @@ mod tests {
             crate::settings_form::RESET_KEYS,
             crate::workspace::COPY_COMMAND,
             crate::palette::NO_COMMAND_MATCHES,
+            crate::palette::COMMAND_HINT,
             crate::picker::FILTER_PLACEHOLDER,
             crate::picker::NOTHING_MATCHES,
             crate::picker::NOTHING_TO_JUMP_TO,

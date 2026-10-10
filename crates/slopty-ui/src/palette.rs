@@ -1402,6 +1402,10 @@ pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem>
     items.iter().filter(|item| fuzzy.rank(&item.label, &place(item)).is_some()).collect()
 }
 
+/// What an empty command field says, and what a field holding only the commands prompt (`>`)
+/// says after it, so the prompt alone never stands as a bare sign.
+pub const COMMAND_HINT: &str = "Type a command";
+
 /// The rest of a query that asks for commands only: what follows a leading `>`, as in VS Code's
 /// and T3 Code's palettes.
 #[must_use]
@@ -1524,7 +1528,7 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_field(items, "Type a command", theme, window, cx)
+        Self::with_field(items, COMMAND_HINT, theme, window, cx)
     }
 
     /// The palette over `items`, its empty field saying what it searches (`placeholder`): the
@@ -2153,6 +2157,35 @@ fn sheet_leaving() -> gpui::Animation {
     gpui::Animation::new(sheet_leaving_time()).with_easing(move |t| curve.at(t))
 }
 
+impl CommandPalette {
+    /// With the field holding only the commands prompt, what to type after it: muted, where
+    /// the typing goes, after an unseen copy of the field's text set in the field's own size,
+    /// so it starts past the prompt whatever its font draws. The field's placeholder shows only
+    /// while it is empty, which the prompt never is.
+    fn prompt_hint(&self, theme: &Theme, cx: &App) -> Option<gpui::Div> {
+        let typed = self.input.read(cx).value();
+        commands_only(&typed).filter(|rest| rest.trim().is_empty())?;
+        Some(
+            crate::kit::inset_x(div(), theme)
+                .absolute()
+                .inset_0()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .text_size(px(theme.roles().panel_title.size))
+                .child(div().flex_none().invisible().child(typed))
+                .child(
+                    div()
+                        .debug_selector(|| "palette-hint".to_owned())
+                        .pl(px(theme.spacing.xs))
+                        .text_color(hsla(theme.surfaces.text_muted))
+                        .whitespace_nowrap()
+                        .child(COMMAND_HINT),
+                ),
+        )
+    }
+}
+
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
@@ -2212,8 +2245,10 @@ impl Render for CommandPalette {
         // The typed text starts on the rows' text: the edge grid.
         let field = field_row(&theme, &self.input, "Command")
             .debug_selector(|| "palette-field".to_owned())
+            .relative()
             .gap(px(theme.spacing.md))
-            .children(cancel);
+            .children(cancel)
+            .children(self.prompt_hint(&theme, cx));
         let list = more_below(
             &theme,
             &self.list,
@@ -2592,6 +2627,28 @@ mod tests {
         assert_eq!(typed(">", &palette, cx).len(), 5, "every command, no tile");
         assert_eq!(files_query(">ma"), None, "a command query asks for no files");
         assert!(path_items(">/srv/a/").is_empty(), "nor spells a path");
+    }
+
+    /// A field holding only the commands prompt says what to type after it, past the prompt,
+    /// and says no more once a word follows; an empty field keeps its placeholder alone.
+    #[gpui::test]
+    fn the_commands_prompt_alone_says_what_to_type(cx: &mut TestAppContext) {
+        let (palette, cx) = palette_of(3, cx);
+        assert!(cx.debug_bounds("palette-hint").is_none(), "an empty field has its placeholder");
+        let typed = |text: &str, cx: &mut VisualTestContext| {
+            palette.update_in(cx, |p, window, cx| p.seed(text, window, cx));
+            cx.run_until_parked();
+            cx.debug_bounds("palette-hint")
+        };
+        let field = cx.debug_bounds("palette-field").expect("the field");
+        let hint = typed(">", cx).expect("the prompt alone says what to type");
+        let theme = Theme::default();
+        let text = f32::from(field.left()) + theme.spacing.inset();
+        assert!(f32::from(hint.left()) > text + theme.spacing.xs, "past the prompt: {hint:?}");
+        assert!(hint.top() >= field.top() && hint.bottom() <= field.bottom(), "in the field");
+        assert!(typed("> ", cx).is_some(), "a space after the prompt is still no word");
+        assert!(typed(">new", cx).is_none(), "a word follows the prompt");
+        assert!(typed("new", cx).is_none(), "a search has no prompt");
     }
 
     /// A list that runs past the sheet's foot fades there, per pixel, once it has laid out, and
