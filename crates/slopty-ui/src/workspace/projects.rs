@@ -25,6 +25,7 @@ use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
 use super::agents::{agent_ask_text, agent_mark_of};
+use super::rollup::META_SEPARATOR;
 use crate::icons::Status;
 use crate::project::create::{Filled, GoalSheet, NewGoal, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
@@ -1063,7 +1064,7 @@ impl WorkspaceView {
     /// What a goal starts with when the person says no more than the goal: the folder from the
     /// focus, else the last start, else the home; the agents and machines that can take it; the
     /// verifier guessed from the folder's repository. `None` while no machine can start one.
-    fn goal_filled(&self, cx: &gpui::App) -> Option<Filled> {
+    pub(super) fn goal_filled(&self, cx: &gpui::App) -> Option<Filled> {
         let starters = self.goal_starters();
         let worker = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)?;
         let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
@@ -1104,6 +1105,28 @@ impl WorkspaceView {
         true
     }
 
+    /// Where the empty workspace's composer sends a goal, in words: the machine, the folder and
+    /// the agent, as its foot shows them. `None` while no machine can start one.
+    pub(super) fn page_goal_place(&self, cx: &gpui::App) -> Option<String> {
+        let filled = self.goal_filled(cx)?;
+        let starter = filled.starters.first()?;
+        let (_, machine) = starter.machines.first()?;
+        Some(
+            [machine.as_str(), filled.folder.as_str(), starter.label.as_str()].join(META_SEPARATOR),
+        )
+    }
+
+    /// The empty workspace's composer's foot, pressed: "New goal…"'s sheet, holding what was
+    /// typed, to say where it goes. The words move into the sheet.
+    pub(super) fn goal_sheet_from_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.empty_goal.as_ref().map(|(g, _)| g.clone()) else { return };
+        let words = page.read(cx).value().to_string();
+        self.new_goal(&super::actions::NewGoal, window, cx);
+        let Some(sheet) = self.projects.sheet.as_ref().map(|s| s.view.clone()) else { return };
+        sheet.update(cx, |sheet, cx| sheet.set_goal(&words, window, cx));
+        page.update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
     /// Once a frame: the empty workspace's composer is made the first time the page shows with
     /// a machine to begin on, and takes the keyboard where nothing else holds it.
     pub(super) fn sync_empty_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1112,7 +1135,7 @@ impl WorkspaceView {
         }
         let goal = cx.new(|cx| {
             gpui_kit::component::input::TextareaState::new(window, cx)
-                .placeholder(crate::project::create::GOAL_HINT)
+                .placeholder(super::area::EMPTY_GOAL_HINT)
                 .auto_grow(2, crate::project::create::GOAL_ROWS)
                 .submit_on_enter(true)
         });

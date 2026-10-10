@@ -190,6 +190,11 @@ impl GoalSheet {
         }
     }
 
+    /// Put `words` in the goal, as written elsewhere before the sheet opened.
+    pub fn set_goal(&self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.fields.goal.update(cx, |input, cx| input.set_value(words.to_owned(), window, cx));
+    }
+
     /// The agent that starts, and its machines.
     fn starter(&self) -> Option<&Starter> {
         self.starters.get(self.agent)

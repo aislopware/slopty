@@ -199,8 +199,8 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
 
 /// The empty workspace asks what to work on over a composer, which takes the keyboard: what is
 /// written there and sent starts a goal's orchestrator at once, as "New goal…" does, in the
-/// machine's latest place. A shell and a window stay one press away under it, with their keys
-/// read from the bindings, and each does what its key does. Nothing else stands on the page.
+/// machine's latest place. A shell and a window stay one press away under it, with no keys
+/// on them, and each does what its key does. Nothing else stands on the page.
 #[gpui::test]
 fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     use slopty_proto::server::InstalledAgent;
@@ -232,7 +232,6 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     for gone in ["empty-agent", "empty-recent", "empty-workers", "empty-worker-0", "empty-mark"] {
         assert!(cx.debug_bounds(gone).is_none(), "{gone}: no launcher, lists or mark");
     }
-    assert_eq!(area::begin_keys(), ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
     let page = cx.debug_bounds("empty-workspace").expect("the page");
     let goal = cx.debug_bounds("empty-goal").expect("the composer");
     assert!((goal.center().y - page.center().y).abs() < page.size.height / 4.0, "centred");
@@ -272,6 +271,41 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
         "the worker is asked for its windows"
     );
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
+}
+
+/// The composer's foot says where ↵ sends the goal (the machine, the folder, the agent), so
+/// nothing starts somewhere unseen; pressed, it opens "New goal…"'s sheet holding what was
+/// typed, and the words move there.
+#[gpui::test]
+fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    view.update_in(cx, |v, _w, cx| v.threads_linked(fake.key, cx));
+    cx.run_until_parked();
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    cx.run_until_parked();
+    let place = "studio · ~ · Claude Code";
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Button", Some(place))), "where it goes: {tree:#?}");
+    let (foot, goal) = (cx.debug_bounds("empty-goal-foot"), cx.debug_bounds("empty-goal"));
+    let (Some(foot), Some(goal)) = (foot, goal) else { panic!("the foot in the composer") };
+    assert!(goal.contains(&foot.center()), "inside the box: {foot:?} {goal:?}");
+    for keys in ["⇧⌘T", "⌘O"] {
+        assert!(
+            !tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(keys))),
+            "{keys}"
+        );
+    }
+
+    cx.simulate_input("Fix the login redirect");
+    cx.simulate_click(foot.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("goal-sheet").is_some(), "the sheet, to change it");
+    let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
+    assert_eq!(typed.goal, "Fix the login redirect", "holding what was typed");
+    let left = view
+        .read_with(cx, |v, cx| v.empty_goal.as_ref().map(|(g, _)| g.read(cx).value().to_string()));
+    assert_eq!(left.as_deref(), Some(""), "the words moved");
 }
 
 fn listing(title: &str) -> ScreenEvent {

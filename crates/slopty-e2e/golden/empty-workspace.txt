@@ -1,10 +1,10 @@
-Window │ e2e-worker
+Window │ studio
 Group │ Workspace (focused)
 Button │ Navigator
 Button │ Back
 Button │ Forward
 Group │ Where
-Button │ e2e-worker
+Button │ studio
 TabList
 Button │ Scroll tabs forward
 Button │ Needs you
@@ -14,6 +14,7 @@ Button │ Search
 Button │ New agent
 Heading │ What should we work on?
 MultilineTextInput │ What should we work on?
+Button │ studio · ~ · Claude Code
 Button │ New terminal
 Button │ Add a window or display
 Group │ Status

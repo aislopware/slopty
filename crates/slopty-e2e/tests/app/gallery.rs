@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use slopty_e2e::harness::artifacts_dir;
+use slopty_e2e::harness::{ProjectStack, artifacts_dir};
 use slopty_e2e::snapshot::{
     MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_masked,
 };
@@ -733,18 +733,22 @@ async fn a_tile_kept_nowhere_says_its_worker_is_away() {
     stack.shutdown().await;
 }
 
-/// A worker with nothing open: the workspace asks what to work on, over its composer.
+/// A worker with nothing open: the workspace asks what to work on, over its composer, whose
+/// foot says where a goal written there goes. The worker has the stand-in Claude Code, so there
+/// is an orchestrator to name.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_empty_workspace_asks_what_to_work_on() {
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let mut stack = ProjectStack::launch("studio").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
     drv.keys("cmd-w").await.unwrap();
-    drv.wait_for("the take-back offer to pass", Duration::from_secs(30), |d| {
-        d.items.is_empty() && d.notice.is_none()
+    drv.wait_for("the composer saying where a goal goes", STEP, |d| {
+        d.items.is_empty()
+            && d.notice.is_none()
+            && labels(d, "Button").iter().any(|l| l.ends_with(" · Claude Code"))
     })
     .await
     .unwrap();

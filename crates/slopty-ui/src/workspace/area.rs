@@ -621,9 +621,9 @@ impl WorkspaceView {
     /// An empty workspace. With a machine to begin on it is the composer page: one question,
     /// "What should we work on?", over a boxed composer in the reading column, vertically
     /// centred, whose ↵ hands the goal to an orchestrator as "New goal…" would
-    /// ([`Self::goal_from_page`]); under it one quiet line keeps a terminal and a window one
-    /// press away. With no worker, or the server out of reach, the page says where machines
-    /// come from, a fifth of the way down, with its doors.
+    /// ([`Self::goal_from_page`]), its foot saying where the goal goes; under it one quiet line
+    /// keeps a terminal and a window one press away. With no worker, or the server out of reach,
+    /// the page says where machines come from, a fifth of the way down, with its doors.
     fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -720,24 +720,52 @@ impl WorkspaceView {
             .pb(px(spacing.md))
             .text_color(hsla(s.text))
             .child(EMPTY_QUESTION);
+        // Where ↵ sends the goal, said inside the box: nothing starts somewhere unseen, and a
+        // press opens the sheet that changes it.
+        let foot = self.page_goal_place(cx).map(|place| {
+            let el = kit::typed(div(), theme.roles().metadata)
+                .id("empty-goal-foot")
+                .debug_selector(|| "empty-goal-foot".to_owned())
+                .role(gpui::accesskit::Role::Button)
+                .aria_label(SharedString::from(place.clone()))
+                .aria_description(CHANGE_PLACE)
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(theme.density.chip))
+                .px(px(spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .cursor_pointer()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(hsla(s.text_secondary))
+                .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .child(SharedString::from(place));
+            crate::a11y::tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
+                this.goal_sheet_from_page(window, cx);
+            }))
+        });
         let composer = self.empty_goal.as_ref().map(|(goal, _)| {
             kit::field(div(), theme)
                 .debug_selector(|| "empty-goal".to_owned())
                 .w_full()
                 .rounded(px(theme.radii.md))
                 .px(px(kit::FIELD_INSET))
-                .py(px(spacing.xs))
+                .pt(px(spacing.xs))
+                .pb(px(spacing.xxs))
+                .flex()
+                .flex_col()
                 .child(
                     gpui_kit::component::input::Textarea::new(goal)
                         .appearance(false)
                         .aria_label(EMPTY_QUESTION),
                 )
+                // The foot's words start where the goal's text does: the field pads its text
+                // by the inset, and the chip pads its words by its own.
+                .child(div().w_full().flex().pl(px(kit::FIELD_INSET - spacing.xs)).children(foot))
         });
-        let [_, terminal, window] = &begin_keys();
-        let ghost = |id: &'static str, label: &'static str, keys: &str| {
-            let keys = self
-                .hardware_keyboard
-                .then(|| SharedString::from(crate::palette::drawn_keys(keys)));
+        let ghost = |id: &'static str, label: &'static str| {
             let el = kit::typed(div(), theme.roles().metadata)
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -753,8 +781,7 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .text_color(hsla(s.text_secondary))
                 .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .child(label)
-                .children(keys.map(|keys| div().text_color(hsla(s.text_muted)).child(keys)));
+                .child(label);
             crate::a11y::tab_stop(el, s.focus)
         };
         let line = div()
@@ -763,12 +790,12 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.sm))
-            .child(ghost("empty-terminal", NEW_TERMINAL, terminal).on_click(cx.listener(
+            .child(ghost("empty-terminal", NEW_TERMINAL).on_click(cx.listener(
                 |this, _ev, window, cx| {
                     this.new_terminal(&super::actions::NewTerminal, window, cx);
                 },
             )))
-            .child(ghost("empty-window", ADD_WINDOW, window).on_click(cx.listener(
+            .child(ghost("empty-window", ADD_WINDOW).on_click(cx.listener(
                 |this, _ev, window, cx| {
                     this.add_window(&super::actions::AddWindow, window, cx);
                 },
@@ -909,6 +936,13 @@ pub(super) const EMPTY_W: f32 = 400.0;
 /// The empty workspace's question over its composer.
 pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";
 
+/// What the empty workspace's composer takes, before anything is written in it.
+pub(crate) const EMPTY_GOAL_HINT: &str =
+    "Describe the goal. An orchestrator plans it and starts the agents";
+
+/// What the composer's foot says it does, to a screen reader, after where the goal goes.
+pub(crate) const CHANGE_PLACE: &str = "Change where it goes";
+
 /// A directory work stands or stood in on a worker: where a start's folder step offers to
 /// start one.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -931,17 +965,6 @@ pub(crate) const SERVER_DOWN_NEXT: &str =
 pub(crate) const ADD_WORKER: &str = "Add a machine";
 const NEW_TERMINAL: &str = "New terminal";
 const ADD_WINDOW: &str = "Add a window or display";
-
-/// The keys of the three ways to begin, read from the keymap in effect so a rebinding shows at
-/// once. The keymap words its chords as it is installed, so a frame only looks them up.
-pub(super) fn begin_keys() -> [String; 3] {
-    let keymap = crate::keymap::current();
-    [
-        keymap.label_of(&super::actions::StartAgent).to_owned(),
-        keymap.label_of(&super::actions::NewTerminal).to_owned(),
-        keymap.label_of(&super::actions::AddWindow).to_owned(),
-    ]
-}
 
 impl PaneHost for WorkspaceView {
     fn panes(&self) -> &Panes {
