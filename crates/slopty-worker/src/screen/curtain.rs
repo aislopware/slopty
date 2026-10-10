@@ -435,7 +435,7 @@ impl<D: Drapes> Curtain<D> {
     /// Lock the Mac now when the curtain is up, for a worker about to end: the shield and the
     /// input hold end with the process, so the desk must be locked before they go. Answered
     /// `true` once the Mac reads as locked or when the curtain was down, `false` when the lock
-    /// could not be asked for or did not land within [`LOCK_WAIT`]. Blocking on the answer is
+    /// could not be asked for or did not land within `LOCK_WAIT`. Blocking on the answer is
     /// for a thread off the main one with no runtime left, as a panicked daemon's is
     /// ([`EXIT_WAIT`] bounds it).
     #[must_use]
