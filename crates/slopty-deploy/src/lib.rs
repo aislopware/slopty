@@ -54,8 +54,8 @@ use std::time::Duration;
 
 pub use platform::{Arch, Os, Platform, Unsupported};
 pub use secrecy::{ExposeSecret, SecretString};
+pub use slopty_platform::service::{InstallPlan, Ptyd, Removed};
 use slopty_platform::service::{NOBODY_LOGGED_IN, Report, WORKER_BINARIES};
-pub use slopty_platform::service::{Ptyd, Removed};
 use slopty_proto::ctl::Health;
 pub use ssh::{ALIVE, Echo, Job, Local, OnEvent, PERSIST, Pending, Ran, Runner, Signed, Ssh};
 pub use target::{REMEMBERED, Remembered, Server, Target};
@@ -313,6 +313,17 @@ pub enum DeployError {
         /// How many sessions it would end, when they could be counted.
         sessions: Option<u32>,
     },
+    /// The machine runs a newer build than the one the update would put there: a deploy never
+    /// takes a machine back. Nothing was changed.
+    #[error("{target} runs {running}, newer than {build}; update this machine's Slopty instead")]
+    Older {
+        /// The machine.
+        target: String,
+        /// The build its worker runs.
+        running: String,
+        /// The build the update would have put there.
+        build: String,
+    },
     /// A step there did not end within its limit: the link stalled, or the script hung. The
     /// step was stopped.
     #[error("`{script}` on {target} did not end within {} s", limit.as_secs())]
@@ -547,6 +558,11 @@ impl DeployError {
                     Vec::new(),
                 )
             },
+            Self::Older { target, running, build } => Failure::new(
+                format!("{target} runs a newer Slopty"),
+                Some("Update Slopty on this Mac; a machine is never taken back.".to_owned()),
+                vec![format!("{target} runs {running}"), format!("This Mac has {build}")],
+            ),
             Self::Plan { said, .. } => {
                 plain("The new worker could not say what it changes".to_owned(), last_lines(said))
             }
@@ -884,7 +900,8 @@ fn named(runner: &dyn Runner) -> Result<(), DeployError> {
 }
 
 /// What the install there would do to `slopty-ptyd`; an error, before anything there changed,
-/// when that ends sessions the plan did not say to end.
+/// when it would take the machine back to an older build than the one running, or end
+/// sessions the plan did not say to end.
 async fn ptyd_plan(
     runner: &dyn Runner,
     bin: &str,
@@ -893,8 +910,16 @@ async fn ptyd_plan(
 ) -> Result<Ptyd, DeployError> {
     let script = format!("{bin}/slopty --json worker install --bin-dir {bin} --update --plan");
     let said = output(runner, &script, on).await?;
-    let ptyd: Ptyd =
+    let install: InstallPlan =
         serde_json::from_str(&said).map_err(|error| DeployError::Plan { said, error })?;
+    if install.older() {
+        return Err(DeployError::Older {
+            target: runner.target().to_owned(),
+            running: install.running.unwrap_or_default(),
+            build: install.build,
+        });
+    }
+    let ptyd = install.ptyd;
     on(Event::Ptyd(ptyd));
     if ptyd.ends_sessions() && !plan.end_sessions {
         let sessions = match ptyd {

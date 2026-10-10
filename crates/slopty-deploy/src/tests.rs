@@ -164,7 +164,7 @@ fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
 }
 
 /// What the machine says an update does to its ptyd: keeps it.
-const KEPT: &str = r#"{"ptyd":"kept"}"#;
+const KEPT: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d","running":null}"#;
 /// What it says its services are: both running, outliving the person's logout.
 const REPORT: &str = r#"{"ptyd":{"running":700},"worker":{"running":701},"stops_at_logout":null}"#;
 
@@ -911,7 +911,7 @@ async fn an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown(
 /// stops at logout.
 fn restarts(script: &str) -> (i32, &'static str, &'static str) {
     if script.contains("--plan") {
-        (0, r#"{"ptyd":"restarts","sessions":2}"#, "")
+        (0, r#"{"ptyd":"restarts","sessions":2,"build":"0.4.0","running":"0.4.0"}"#, "")
     } else if script.contains("worker service") {
         let report = r#"{"ptyd":{"running":700},"worker":{"running":701},
             "stops_at_logout":"it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps running"}"#;
@@ -979,7 +979,7 @@ async fn a_plan_that_is_not_one_fails_and_an_uncounted_restart_ends_every_sessio
     assert_eq!(failed.failure().title, "The new worker could not say what it changes");
     let uncounted = |script: &str| {
         if script.contains("--plan") {
-            (0, r#"{"ptyd":"restarts","sessions":null}"#, "")
+            (0, r#"{"ptyd":"restarts","sessions":null,"build":"0.4.0","running":null}"#, "")
         } else {
             healthy(script)
         }
@@ -988,6 +988,51 @@ async fn a_plan_that_is_not_one_fails_and_an_uncounted_restart_ends_every_sessio
     let failed = done.unwrap_err();
     assert_eq!(failed.ends_sessions(), Some(Ptyd::Restarts { sessions: None }));
     assert_eq!(failed.failure().title, "Updating ends every session on mini");
+}
+
+/// An older and a newer build of one version, as `this_build` spells them.
+const OLDER: &str = "0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z";
+const NEWER: &str = "0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z";
+
+/// A machine running [`NEWER`], to which the update would bring [`OLDER`].
+fn running_newer(script: &str) -> (i32, &'static str, &'static str) {
+    const BACK: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z"}"#;
+    if script.contains("--plan") { (0, BACK, "") } else { healthy(script) }
+}
+
+/// A machine running [`OLDER`], to which the update would bring [`NEWER`].
+fn running_older(script: &str) -> (i32, &'static str, &'static str) {
+    const FORWARD: &str = r#"{"ptyd":"kept","build":"0.4.0+wire.0badf00d.20261009T2307Z.commit.bbbb.20261011T0930Z","running":"0.4.0+wire.0badf00d.20261009T2307Z.commit.aaaa.20261010T0930Z"}"#;
+    if script.contains("--plan") { (0, FORWARD, "") } else { healthy(script) }
+}
+
+/// A machine whose worker runs a newer build than the update would put there is never taken
+/// back: the deploy stops before anything there changed, and says to update this Mac instead.
+/// One running an older build, or none ([`healthy`]), is updated.
+#[tokio::test]
+async fn an_update_never_takes_a_machine_back() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted::new(running_newer);
+    let (done, events) = run(&runner, &plan(&source, true)).await;
+    let refused = done.unwrap_err();
+    assert!(
+        matches!(&refused, DeployError::Older { running, build, .. }
+            if running == NEWER && build == OLDER),
+        "{refused}"
+    );
+    assert_eq!(install_script(&runner.ran()), "", "no install ran: {:?}", runner.ran());
+    assert!(!events.iter().any(|e| matches!(e, Event::Ptyd(_))), "{events:?}");
+    let failure = refused.failure();
+    assert_eq!(failure.title, "mini runs a newer Slopty");
+    assert!(failure.hint.as_deref().is_some_and(|h| h.contains("never taken back")), "{failure:?}");
+
+    let forward: [Answer; 2] = [running_older, healthy];
+    for forward in forward {
+        let (done, _) = run(&Scripted::new(forward), &plan(&source, true)).await;
+        assert_eq!(done.unwrap().ptyd, Some(Ptyd::Kept));
+    }
+    let plan: InstallPlan = serde_json::from_str(KEPT).unwrap();
+    assert_eq!((plan.ptyd, plan.running), (Ptyd::Kept, None), "the plan reads as it is printed");
 }
 
 /// A Mac at its login window with `FileVault` on says so after `uname`, and a Linux machine says

@@ -848,6 +848,35 @@ impl Ptyd {
     }
 }
 
+/// What `slopty --json worker install --plan` prints for a deploy to read first.
+///
+/// That is what the install does to the running ptyd, the build it installs, and the build of
+/// the worker running there, so a deploy never takes a machine back to an older build.
+///
+/// As JSON, the ptyd's plan with the two builds beside it:
+/// `{"ptyd": "kept", "build": "0.4.0+wire…", "running": "0.4.0+wire…"}`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct InstallPlan {
+    /// What it does to the running ptyd.
+    #[serde(flatten)]
+    pub ptyd: Ptyd,
+    /// The build it installs ([`slopty_proto::wire::this_build`] of the CLI that planned it).
+    pub build: String,
+    /// The build of the worker running there, as its doctor says; none when none answers.
+    pub running: Option<String>,
+}
+
+impl InstallPlan {
+    /// Whether carrying it out takes the machine back to an older build than the one running.
+    #[must_use]
+    pub fn older(&self) -> bool {
+        self.running.as_deref().is_some_and(|running| {
+            slopty_proto::wire::newer(&self.build, running)
+                == Some(slopty_proto::wire::Newer::There)
+        })
+    }
+}
+
 /// The plan as a sentence for the CLI.
 impl std::fmt::Display for Ptyd {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

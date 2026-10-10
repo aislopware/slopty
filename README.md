@@ -40,9 +40,11 @@ Then, in the app:
   machines with the server** in the palette.
 - **Add a machine** reaches one by address, without a server.
 
-A new build of the app brings this Mac's own machine and server along. Others show **Update** on
-their tiles, and **Update all machines** in the palette updates every one. An update keeps every
-shell and agent turn running, and asks first in the rare build that cannot.
+A new build of the app updates this Mac's own machine and server by itself. Any other machine or
+server on an older build shows **Update**. **Update all machines** in the palette updates the
+server first, then every machine, and a machine that was away is updated when it comes back. No
+machine is ever taken back to an older build. An update keeps every shell and agent turn running,
+and asks first in the rare build that cannot.
 
 A headless Mac runs Slopty in the session of whoever is logged in, so set it to log in
 automatically (with FileVault off), or unlock it over `ssh` and log in through Screen Sharing

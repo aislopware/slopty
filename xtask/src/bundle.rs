@@ -18,6 +18,11 @@
 //! `--ad-hoc`, it is signed ad hoc and every update asks again (`docs/decisions/tooling.md`,
 //! "Bundles are signed with a stable identity").
 //!
+//! Every binary in it knows the commit it was made from (`SLOPTY_COMMIT`,
+//! `slopty_proto::wire::COMMIT`), so two builds of one version tell which is the newer and an
+//! update never takes a machine back. A tree with changes not committed is stamped with when it
+//! was built, its hash marked `-dirty`.
+//!
 //! A shipping bundle is built with the `dist` profile, whose binaries are stripped of their debug
 //! info, and ships lean: the dSYMs go beside the bundle, under `dSYMs/<UUID>/<bin>.dSYM`, for a
 //! release to publish on their own. `cargo xtask symbolicate` finds them by a crash report's UUID
@@ -179,6 +184,9 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     let profile = if opts.debug { "debug" } else { "dist" };
     let flags: &[&str] = if opts.debug { &[] } else { &["--profile", "dist"] };
     let signing = signing(sh, opts);
+    let commit = commit(sh)?;
+    println!("  built from {commit}");
+    let _commit = sh.push_env("SLOPTY_COMMIT", &commit);
     step(
         &format!("cargo build ({profile})"),
         &cmd!(
@@ -274,6 +282,31 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     }
     println!("✔ {app}");
     Ok(Bundle { app, signing, linux, dsyms })
+}
+
+/// The commit this tree is, as `slopty_proto::wire::COMMIT` reads it: `<hash>.<YYYYMMDDTHHMMZ>`,
+/// twelve digits of the hash and the commit's time in UTC. A tree with changes not committed
+/// is `<hash>-dirty.<now>`, so it counts as newer than the commit it started from.
+fn commit(sh: &Shell) -> Result<String> {
+    let hash = cmd!(sh, "git rev-parse --short=12 HEAD").read()?;
+    let dirty = !cmd!(sh, "git status --porcelain --untracked-files=no").read()?.is_empty();
+    let _utc = sh.push_env("TZ", "UTC0");
+    let stamp = "--date=format-local:%Y%m%dT%H%MZ";
+    let made = if dirty {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        let (days, of_day) = (now.div_euclid(86_400), now.rem_euclid(86_400));
+        let date = crate::upstream::civil_from_days(i64::try_from(days)?).replace('-', "");
+        format!("{date}T{:02}{:02}Z", of_day / 3600, of_day % 3600 / 60)
+    } else {
+        cmd!(sh, "git log -1 --format=%cd {stamp} HEAD").read()?
+    };
+    let made = made.trim();
+    ensure!(made.len() == "20261010T0930Z".len(), "a commit time that is no stamp: {made}");
+    Ok(if dirty {
+        format!("{}-dirty.{made}", hash.trim())
+    } else {
+        format!("{}.{made}", hash.trim())
+    })
 }
 
 /// The File Provider extension's executable in the bundle `app`.
@@ -520,6 +553,18 @@ mod tests {
         assert!(stable(developer_id, id));
         assert!(!stable("designated => cdhash H\"0123abcd\"", id));
         assert!(!stable(developer_id, "dev.aislopware.slopty.ptyd"));
+    }
+
+    /// The commit stamped into a bundle reads as `slopty_proto::wire::COMMIT` does: a hash, a
+    /// dot, and a UTC minute that sorts as it reads.
+    #[test]
+    fn the_bundle_names_its_commit() {
+        let sh = Shell::new().unwrap();
+        let Ok(commit) = commit(&sh) else { return };
+        let (hash, made) = commit.split_once('.').unwrap();
+        let clean = hash.strip_suffix("-dirty").unwrap_or(hash);
+        assert!(clean.len() == 12 && clean.bytes().all(|b| b.is_ascii_hexdigit()), "{commit}");
+        assert!(made.len() == 14 && made.ends_with('Z') && made.as_bytes()[8] == b'T', "{commit}");
     }
 
     #[test]

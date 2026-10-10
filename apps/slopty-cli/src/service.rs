@@ -23,7 +23,7 @@ use clap::{Args, Subcommand};
 use slopty_net::HostAddr;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_platform::service::{
-    self as platform, Layout, Manager, PTYD, Ptyd, SERVER, Session, WORKER, WorkerOpts,
+    self as platform, InstallPlan, Layout, Manager, PTYD, Ptyd, SERVER, Session, WORKER, WorkerOpts,
 };
 use slopty_proto::ctl::{CtlReply, CtlRequest, Health};
 use slopty_proto::server::Role;
@@ -170,16 +170,42 @@ pub async fn install(
     let session = Session::native();
     if opts.plan {
         let source = binaries_source(opts.bin_dir.as_deref())?;
-        let plan = session.ptyd_plan(&source, data_dir);
+        let plan = InstallPlan {
+            ptyd: session.ptyd_plan(&source, data_dir),
+            build: slopty_proto::wire::this_build(),
+            running: running_build(data_dir).await,
+        };
         if json {
             println!("{}", serde_json::to_string(&plan)?);
         } else {
-            println!("{plan}");
+            println!("{}", plan.ptyd);
+            println!("installs {}", plan.build);
+            match &plan.running {
+                Some(running) if plan.older() => println!("runs {running}, which is newer"),
+                Some(running) => println!("runs {running}"),
+                None => println!("no worker answers here"),
+            }
         }
         return Ok(());
     }
     let registers = registers(server, data_dir).await?;
     install_in(&session, opts, &registers, data_dir, START_TIMEOUT).await
+}
+
+/// How long the plan waits for the running worker's doctor.
+const PLAN_ASK: Duration = Duration::from_secs(5);
+
+/// The build of the worker running with its data in `data_dir`, as its doctor says; none when
+/// none answers. The report is read loosely, for only its build, so an older worker's still
+/// names it.
+async fn running_build(data_dir: &Path) -> Option<String> {
+    let socket = Layout::new(data_dir).worker_socket();
+    let mut line = serde_json::to_vec(&CtlRequest::Doctor).ok()?;
+    line.push(b'\n');
+    let reply = tokio::time::timeout(PLAN_ASK, platform::ask(&socket, &line)).await.ok()?.ok()?;
+    let report: serde_json::Value = serde_json::from_str(&reply).ok()?;
+    let build = report.get("caps")?.get("build")?.as_str()?;
+    Some(build.to_owned()).filter(|b| !b.is_empty())
 }
 
 /// Why an install that would end `ptyd`'s sessions stopped, before it changed anything.

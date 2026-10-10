@@ -41,7 +41,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         "#!/bin/sh\nwhile [ \"$1\" = -o ]; do shift 2; done\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
          case $2 in\n\
          *'uname -sm'*) echo 'Darwin arm64' ;;\n\
-         *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2}}' ;;\n\
+         *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2,\"build\":\"0.4.0\",\"running\":null}}' ;;\n\
          *'worker service'*) echo '{{\"ptyd\":\"absent\",\"worker\":\"absent\",\
          \"stops_at_logout\":\"it stops when you log out\"}}' ;;\n\
          *'worker install'*) ;;\n\

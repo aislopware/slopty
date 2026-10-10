@@ -1312,3 +1312,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - `the_natives_reported_stand_for_the_next_link` (slopty-agent);
     - `a_note_a_full_queue_refused_is_owed_and_goes_once_there_is_room` (slopty-server
       `hub/ladder/tests.rs`).
+
+- ✅ **Every build knows its commit, and a deploy never takes a machine back** (2026-10-12,
+  readiness audit item 5's worker and deploy halves).
+  - **The commit.** `slopty_proto::wire::COMMIT` read `SLOPTY_COMMIT`, which nothing set, so
+    two builds of one version could be ordered only by when their wire last changed.
+    `cargo xtask bundle` (and so `dist`, and the Linux builds inside the bundle) now sets it
+    for every binary: twelve digits of the hash and the commit's time in UTC. A tree with
+    changes not committed is `<hash>-dirty` with the minute it was built, so it orders after
+    the commit it started from. Its own dev builds stay unstamped, so a commit rebuilds
+    nothing.
+  - **No downgrade.** `slopty --json worker install --plan` now prints the build it would
+    install beside the ptyd plan, with the build of the worker running there (`InstallPlan`,
+    read loosely from the running worker's doctor, so an older one's report still names it).
+    A deploy whose plan would take the machine back (`InstallPlan::older`) stops before
+    anything there changes (`DeployError::Older`). Its window says the machine runs a newer
+    Slopty and to update this Mac instead. Nothing overrides it. A machine whose worker does
+    not answer, or whose build cannot be ordered, is updated as before.
+  - Tests: `an_update_never_takes_a_machine_back` (slopty-deploy); `the_bundle_names_its_commit`
+    (xtask).
