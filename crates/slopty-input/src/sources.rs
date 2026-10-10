@@ -258,8 +258,6 @@ struct Inner {
     /// The platform reports every switch ([`Sources::hearing`]); without, a selection made here
     /// counts as heard at once.
     hearing: AtomicBool,
-    /// No source is selected for a client ([`Sources::follow_clients`]).
-    refusing: AtomicBool,
     /// Where the worker's own source is kept while a claim holds, and what was written there.
     kept: parking_lot::Mutex<(Option<PathBuf>, Option<Kept>)>,
     /// The layout a chord's character is looked up in, read again at each switch heard.
@@ -313,7 +311,6 @@ impl Sources {
             claims: parking_lot::Mutex::new(Claims::new()),
             heard: watch::Sender::new(None),
             hearing: AtomicBool::new(false),
-            refusing: AtomicBool::new(false),
             kept: parking_lot::Mutex::new((None, None)),
             layout: KeyLayout::system(),
         }))
@@ -349,19 +346,6 @@ impl Sources {
             }
             *inner.kept.lock() = (Some(path), None);
         }));
-    }
-
-    /// Whether a client's source is selected for it (`[worker] input_source_sync`, followed as
-    /// the file changes). Off, the person at the worker keeps theirs: a claim is answered as
-    /// typing under the client's source only while the worker is under it anyway, and every
-    /// other client composes. Turning it off lets go of every claim held, so the worker's own
-    /// source comes back at once and each stream hears the switch and tells its client.
-    pub fn follow_clients(&self, follow: bool) {
-        let was_refusing = self.0.refusing.swap(!follow, Ordering::Relaxed);
-        if !follow && !was_refusing {
-            let inner = Arc::clone(&self.0);
-            self.0.tis.on_main(Box::new(move || inner.release_all()));
-        }
     }
 
     /// The platform reports every switch through [`Self::heard`] from now on.
@@ -459,13 +443,6 @@ impl Inner {
     /// Run `who`'s ask, on the main queue.
     fn claim(&self, who: Claimant, source: String) -> Claimed {
         let current = self.tis.current();
-        if self.refusing.load(Ordering::Relaxed) {
-            return if current.as_deref() == Some(source.as_str()) {
-                Claimed::Current
-            } else {
-                Claimed::Refused
-            };
-        }
         let mut claims = self.claims.lock();
         let want = claims.claim(who, source, current.clone());
         if current.as_deref() == Some(want.as_str()) {

@@ -545,7 +545,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   every window on it to a physical display and left them there. A phone roaming between
   networks or a lid closing did that each time. Now the worker keeps a display its client let
   go of for `[worker] display_linger_mins` (10 min unless set; 0 to 1440, `0` lets it go at
-  once; it was the constant `sized::LINGER` until 2026-10-03, readiness C15), and an
+  once; it was the constant `sized::LINGER` until 2026-10-03, readiness C15, and is again since
+  2026-10-10, ten minutes, the setting cut by the orchestrator-first audit §C.5), and an
   `OpenDisplay` with the same key within that time
   takes the same display back, windows in place, resized to the new shape. Each linger is
   numbered, so a timer outlived by a take-back and a later let-go releases nothing. A display
@@ -1109,10 +1110,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The worker: `allow` sets admission's ranges, shared by every clone, from the next peer
     on. `server` drops its registration and joins the new one, and new shells get the new
     environment. `keep_awake` takes and releases the sleep holds at once (`Wake::set_policy`).
-    `input_source_sync` turned off lets go of every claim, so the worker's own source comes
-    back and every stream tells its client (`Sources::follow_clients`). `display_linger_mins`
-    lives with the displays on the main thread and counts from the next display let go
-    (`Displays::set_linger`). `[worker.acp]` is probed again into the capabilities at once,
+    (`input_source_sync` and `display_linger_mins` were cut on 2026-10-10.) `[worker.acp]` is probed again into the capabilities at once,
     and a thread's ACP start already read it per start.
   - The server applies `allow` and the project bounds.
   - Every key applying live left nothing to wait for a restart, so the `x-restarts` schema

@@ -528,3 +528,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `remote_keys` (slopty-settings), `a_theme_change_asks_nothing_of_a_live_stream`
     (slopty-ui `screen`), `a_search_finds_rows_by_their_words_and_their_key` (slopty-ui
     `settings_editor`, now on `live_agents`).
+
+- ✅ **The worker follows its client's input source and keeps a display ten minutes**
+  (2026-10-10, orchestrator-first audit §C.5). `[worker] input_source_sync` and
+  `display_linger_mins` are gone, along with their rows on the Network page.
+  - **The input source.** A remote window's keys always go by their place under the client's
+    source, which is right for the person driving it. The opt-out in `slopty-input`
+    (`Sources::follow_clients` and its refusing state) is gone with its two tests.
+  - **The display.** A display made for a client is kept for `sized::LINGER`, ten minutes,
+    which the worker sets at start.
+  - A file that still has either key loads, with an unknown-key warning for each.
+  - Tests: `worker_choices` (slopty-settings), `daemon::tests` (now on `keep_awake`),
+    `a_change_of_the_file_is_applied_as_it_is_read` (slopty-workerd), the `sized` tests.

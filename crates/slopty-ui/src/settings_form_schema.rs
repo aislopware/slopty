@@ -185,13 +185,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (
         Section::Network,
         "Share this Mac's shells and windows",
-        &[
-            "worker.server",
-            "worker.allow",
-            "worker.keep_awake",
-            "worker.display_linger_mins",
-            "worker.input_source_sync",
-        ],
+        &["worker.server", "worker.allow", "worker.keep_awake"],
     ),
     (Section::Network, "This Mac as a server", &["server.allow"]),
 ];

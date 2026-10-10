@@ -39,8 +39,6 @@ pub mod bounds {
     pub const LINE_HEIGHT: RangeInclusive<f32> = 0.5..=2.0;
     /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
     pub const CONTRAST: RangeInclusive<f32> = 1.0..=21.0;
-    /// Minutes a display made for a client waits for it: none, up to a day.
-    pub const DISPLAY_LINGER_MINS: RangeInclusive<u16> = 0..=1440;
 }
 
 /// File name inside the data directory.
@@ -550,14 +548,6 @@ pub struct WorkerSettings {
         example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
     )]
     pub acp: BTreeMap<String, Vec<String>>,
-    /// Use the client's input source there; off, the client composes.
-    ///
-    /// While a remote window has the keyboard, the worker selects the client's keyboard input
-    /// source, so keys go by their place and the remote app's own input methods compose. Off,
-    /// the worker keeps its own source for the person at it, and each client composes on its
-    /// side and sends the text. Turned off, the worker's own source comes back at once.
-    #[schemars(title = "Follow the client's input source")]
-    pub input_source_sync: bool,
     /// While working also counts an agent at work with nobody attached.
     ///
     /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
@@ -566,17 +556,6 @@ pub struct WorkerSettings {
     /// worker's agents. Applied at once.
     #[schemars(title = "Keep awake")]
     pub keep_awake: KeepAwake,
-    /// How long a client's display waits for it to return; 0 ends it.
-    ///
-    /// A display the worker made in a client's shape stays this many minutes after its last
-    /// stream ends, windows in place, for the same client to take back. A change counts from
-    /// the next display let go.
-    #[schemars(
-        title = "Keep a client's display",
-        range(min = *bounds::DISPLAY_LINGER_MINS.start(), max = *bounds::DISPLAY_LINGER_MINS.end()),
-        extend("x-step" = 5, "x-unit" = "min")
-    )]
-    pub display_linger_mins: u16,
 }
 
 impl Default for WorkerSettings {
@@ -585,24 +564,8 @@ impl Default for WorkerSettings {
             allow: Vec::new(),
             server: None,
             acp: BTreeMap::new(),
-            input_source_sync: true,
             keep_awake: KeepAwake::Working,
-            display_linger_mins: 10,
         }
-    }
-}
-
-impl WorkerSettings {
-    /// How long a client's display waits for it: [`Self::display_linger_mins`], or its
-    /// default outside [`bounds::DISPLAY_LINGER_MINS`].
-    #[must_use]
-    pub fn display_linger(&self) -> std::time::Duration {
-        let mins = if bounds::DISPLAY_LINGER_MINS.contains(&self.display_linger_mins) {
-            self.display_linger_mins
-        } else {
-            Self::default().display_linger_mins
-        };
-        std::time::Duration::from_secs(u64::from(mins) * 60)
     }
 }
 
@@ -1251,29 +1214,28 @@ mod tests {
         assert!(!gone.warnings.is_empty(), "the table is gone: {:?}", gone.warnings);
     }
 
-    /// `[worker]`'s own choices: syncing the input source, what keeps the Mac awake, how long a
-    /// client's display waits. A linger outside its bounds is the default's, and 0 is at once.
+    /// `[worker]`'s own choice of what keeps the Mac awake; the input source and the display's
+    /// linger are decided, so a file that still names them is only warned of.
     #[test]
     fn worker_choices() {
         let d = WorkerSettings::default();
-        assert!(d.input_source_sync, "on: keys go by their place");
         assert_eq!(d.keep_awake, KeepAwake::Working);
-        assert_eq!(d.display_linger(), std::time::Duration::from_mins(10));
         assert_eq!(Settings::default().terminal.secure_keyboard_entry, SecureEntry::Passwords);
 
         let loaded = Settings::parse(
-            "[worker]\ninput_source_sync = false\nkeep_awake = \"never\"\n\
-             display_linger_mins = 0\n[terminal]\nsecure_keyboard_entry = \"always\"\n",
+            "[worker]\nkeep_awake = \"never\"\n[terminal]\nsecure_keyboard_entry = \"always\"\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         let worker = &loaded.settings.worker;
-        assert!(!worker.input_source_sync);
         assert_eq!(worker.keep_awake, KeepAwake::Never);
-        assert_eq!(worker.display_linger(), std::time::Duration::ZERO, "let go at once");
         assert_eq!(loaded.settings.terminal.secure_keyboard_entry, SecureEntry::Always);
 
-        let far = WorkerSettings { display_linger_mins: 5000, ..WorkerSettings::default() };
-        assert_eq!(far.display_linger(), std::time::Duration::from_mins(10), "out of bounds");
+        let gone =
+            Settings::parse("[worker]\ninput_source_sync = false\ndisplay_linger_mins = 0\n");
+        assert_eq!(
+            gone.warnings,
+            ["unknown key `worker.display_linger_mins`", "unknown key `worker.input_source_sync`"],
+        );
     }
 
     /// `[keys]` holds a table per context of action names and their chords: one, a list, or

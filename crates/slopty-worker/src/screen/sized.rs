@@ -5,11 +5,10 @@
 //! [`DisplayKey`], and a stream's task hands its asks over as jobs ([`Main`]) and waits for the
 //! answer. One key has one display; a second stream with the same key shares it.
 //!
-//! The last stream letting go keeps the display for its linger ([`Displays::set_linger`],
-//! `[worker] display_linger_mins`, 10 minutes unless the person sets it), and the same key
-//! asking again within it takes the display back, windows where they were. A phone
-//! that roams between networks, or a laptop whose lid closes, would otherwise have macOS move
-//! every window on it to a physical display and leave them there.
+//! The last stream letting go keeps the display for its linger ([`LINGER`], ten minutes), and
+//! the same key asking again within it takes the display back, windows where they were. A
+//! phone that roams between networks, or a laptop whose lid closes, would otherwise have macOS
+//! move every window on it to a physical display and leave them there.
 //!
 //! macOS picks its own mode for a new display and may restore a saved one seconds later, so a
 //! display is enforced ([`Factory::enforce`]) every [`ENFORCE_EVERY`] until it settles, and again
@@ -41,6 +40,12 @@ pub const ENFORCE_EVERY: Duration = Duration::from_millis(100);
 
 /// How long a new or changed display has to settle in its mode before the stream gives up on it.
 pub const SETTLE_WITHIN: Duration = Duration::from_secs(5);
+
+/// How long a display made for a client is kept after its last stream ends: ten minutes.
+///
+/// The same client takes it back with its windows in place, after roaming between networks or
+/// with its lid closed for a while. The worker sets it at start ([`Displays::set_linger`]).
+pub const LINGER: Duration = Duration::from_mins(10);
 
 /// What makes, changes and checks displays: CoreGraphics on a worker ([`Cg`]), a fake in tests.
 /// Called on the main thread only.
@@ -210,9 +215,9 @@ impl<F: Factory> Displays<F> {
         Self { main, settle_within }
     }
 
-    /// Keep a display `linger` after its last lease from now on, for its key to take back: set
-    /// at the start and again as the person changes it. A linger already running keeps the
-    /// length it started with.
+    /// Keep a display `linger` after its last lease from now on, for its key to take back: the
+    /// worker sets [`LINGER`] at start. A linger already running keeps the length it started
+    /// with.
     pub fn set_linger(&self, linger: Duration) {
         self.main.run(Box::new(move |registry| registry.linger = linger));
     }

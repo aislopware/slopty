@@ -146,7 +146,7 @@ mod tests {
         let path = dir.path().join("settings.toml");
         std::fs::write(&path, "# mine\n[font]\nmono_size = 13.0\n").expect("written");
         let edits = [
-            edit("worker", "display_linger_mins", Some("30")),
+            edit("worker", "keep_awake", Some(r#""never""#)),
             Edit {
                 table: "worker",
                 key: "acp",
@@ -157,7 +157,7 @@ mod tests {
         let file = read_and_edit(&path, "worker", &edits).expect("edited");
         let read = Settings::load(&path);
         assert!(read.error.is_none());
-        assert_eq!(read.settings.worker.display_linger_mins, 30);
+        assert_eq!(read.settings.worker.keep_awake, crate::KeepAwake::Never);
         assert_eq!(
             read.settings.worker.acp.get("gemini"),
             Some(&vec!["gemini".to_owned(), "--acp".to_owned()])
@@ -180,13 +180,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp");
         let path = dir.path().join("settings.toml");
         std::fs::write(&path, "[worker]\nkeep_awake = \"never\"\n").expect("written");
-        let first = edit("worker", "display_linger_mins", Some("30"));
+        let first = edit("worker", "keep_awake", Some(r#""working""#));
         for wrong in [
             edit("server", "allow", Some(r#"["10.0.0.0/8"]"#)),
             edit("font", "mono_size", Some("12.0")),
             edit("worker", "no_such_key", Some("1")),
             edit("worker", "keep_awake", Some(r#""sometimes""#)),
-            edit("worker", "display_linger_mins", Some("\"thirty\"")),
             Edit { table: "worker", key: "keep_awake", entry: Some("x"), literal: Some("1") },
         ] {
             let refused = read_and_edit(&path, "worker", &[first, wrong]);

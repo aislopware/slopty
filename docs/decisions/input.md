@@ -1072,7 +1072,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `applied: false` and composes on its side, as for a source the worker cannot select. For a
   worker whose person types at it too and wants their source left alone. Applied as the file
   changes (2026-10-05): turned off, every claim is let go, so the worker's own source comes
-  back at once and each stream hears the switch and tells its client to compose. Tests:
+  back at once and each stream hears the switch and tells its client to compose. Cut on
+  2026-10-10 (orchestrator-first audit §C.5): the worker always follows its client's source,
+  `Sources::follow_clients` and its two tests are gone, and a key left in the file is only
+  warned of. Tests were:
   `sources::tests::a_worker_that_refuses_claims_keeps_its_own_source`,
   `syncing_turned_off_while_running_gives_the_worker_its_source_back`.
 
