@@ -2214,7 +2214,23 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     and one ready to merge is to review. While the agent works it stays working: it may be on
     it. The notice says the pull request's line ("#42: lint failed"). A project task's agent
     sends none: its pull request is the project's to tell of (`tell_project`), once.
-  - Tests: `thread::pulls::tests` (two), `hub::ladder::tests::a_resting_thread_s_pull_request_lifts_it`.
+  - *Read at once after a git op, and a merge clears To review* (2026-10-10, readiness 10-12
+    item 9). A pull request opened or merged from the sheet showed on the row only five or ten
+    minutes later, a merged thread stayed To review for good (its to-review mark compares
+    working-tree snapshots, which a merge never moves), and the sheet and the row ranked a
+    draft, a conflict and a failed check differently. Now a push, an open, a merge, a review
+    or a mark-ready that succeeds nudges the checkout (`pulls::nudge`), and every watcher reads
+    it again on the spot rather than on its clock. A pull request seen turning Merged keeps
+    its thread's whole tree as what the person kept (`Snapshots::merged`): the work went in,
+    so the thread stops being To review, and only what changes after the merge is reviewed.
+    One ladder, `PullStatus::standing` giving the wire's `PullStands`, ranks for every
+    surface: ended, then a conflict (a conflicted head's checks are stale), a failed check,
+    changes asked for, even on a draft (an agent's failing draft still needs fixing), then a
+    draft, checks running, waiting or ready.
+  - Tests: `thread::pulls::tests` (two), `hub::ladder::tests::a_resting_thread_s_pull_request_lifts_it`,
+    `review::a_pull_request_seen_merged_keeps_the_tree_and_a_nudge_reads_it_at_once`
+    (`slopty-worker`), `git::tests::a_pull_request_stands_on_its_most_pressing_fact`
+    (`slopty-proto`).
 
 - ✅ **A start carries its mode, effort and files, and a worker says what each agent offers**
   (2026-10-06, `.research/readiness-2026-10-07.md` rank 2). A new thread's first message is

@@ -314,11 +314,11 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     drop(Screens::new(threads.host.clone()).spawn());
-    let host = threads.host.clone();
+    let (host, snapshots) = (threads.host.clone(), threads.snapshots.clone());
     drop(tokio::spawn(async move {
         let programs = slopty_worker::repo::commit::Programs::here().await;
         if programs.has_forge() {
-            drop(slopty_worker::thread::pulls::spawn(host, programs));
+            drop(slopty_worker::thread::pulls::spawn(host, programs, snapshots));
         }
     }));
     threads.composer.resume();

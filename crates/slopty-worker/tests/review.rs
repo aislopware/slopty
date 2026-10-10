@@ -643,6 +643,74 @@ mod review {
         }
     }
 
+    /// A pull request the watcher sees merge keeps all of its thread's tree, so the thread no
+    /// longer stands To review, and a later turn that changes nothing leaves it so while one
+    /// that changes a file is to review again. Each read comes at once on a git op's nudge,
+    /// not on the watcher's clock. The forge is a stand-in gh answering from a file, so no
+    /// one's GitHub is reached.
+    #[tokio::test]
+    async fn a_pull_request_seen_merged_keeps_the_tree_and_a_nudge_reads_it_at_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use slopty_proto::thread::wire::PullStands;
+        use slopty_worker::repo::commit::Programs;
+        use slopty_worker::thread::pulls;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        run(&repo, &["checkout", "-q", "-b", "feature"]);
+        let gh = dir.path().join("gh");
+        let said = |state: &str| {
+            let view = format!(
+                r#"{{"number":7,"url":"https://github.com/o/demo/pull/7","title":"Keep it",
+                "state":"{state}","isDraft":false,"headRefName":"feature","headRefOid":"0123",
+                "baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE",
+                "mergeStateStatus":"CLEAN","statusCheckRollup":[]}}"#
+            );
+            std::fs::write(dir.path().join("view.json"), view).unwrap();
+        };
+        said("OPEN");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n'pr view') cat \"{}/view.json\" ;;\n\
+             *) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
+            dir.path().display()
+        );
+        std::fs::write(&gh, script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let rig = Rig::new(dir.path(), &repo);
+        let programs = Programs { git: Some(git()), gh: Some(gh), glab: None, path: None };
+        let _watch = pulls::spawn(rig.host.clone(), programs, rig.snapshots.clone());
+
+        rig.status(Phase::Working);
+        rig.begin(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        rig.end(1);
+        rig.until(|s| s.to_review).await;
+        rig.status(Phase::Idle);
+
+        let stands = |s: &ThreadState, want| s.pull.as_ref().is_some_and(|p| p.stands == want);
+        pulls::nudge(&repo);
+        let open = rig.until(|s| stands(s, PullStands::Ready)).await;
+        assert!(open.to_review, "an open pull request leaves the work to review");
+
+        said("MERGED");
+        pulls::nudge(&repo.join("new.txt"));
+        rig.until(|s| stands(s, PullStands::Merged) && !s.to_review).await;
+
+        let turn = |n: u32| {
+            rig.status(Phase::Working);
+            rig.begin(n);
+            rig.end(n);
+        };
+        turn(2);
+        let state = rig.until(|s| s.turns.iter().any(|t| t.id == TurnId(2) && t.after.is_some()));
+        assert!(!state.await.to_review, "nothing changed since the merge");
+        std::fs::write(repo.join("after.txt"), "after\n").unwrap();
+        turn(3);
+        rig.until(|s| s.to_review).await;
+    }
+
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one
     /// with nothing changed, and one after a file changed. A measurement for
     /// `docs/MEASUREMENTS.md`, not a pass or fail.

@@ -342,6 +342,29 @@ impl Snapshots {
         }
     }
 
+    /// `thread`'s pull request merged: everything in its tree now counts as kept, so it no
+    /// longer stands To review for that work, and what it changes later is reviewed from here.
+    /// A thread outside git, or with no git here, just stops standing To review.
+    pub async fn merged(&self, thread: ThreadId) {
+        let Some(repo) = self.repo(thread) else {
+            self.host.update(thread, |s| {
+                (if s.to_review { vec![Action::ToReview(false)] } else { vec![] }, ())
+            });
+            return;
+        };
+        let lock = self.lock(thread);
+        let held = lock.lock().await;
+        let kept = match repo.take().await {
+            Ok(now) => repo.keep_whole(thread, &now).await.map(|()| now),
+            Err(e) => Err(e),
+        };
+        drop(held);
+        match kept {
+            Ok(now) => self.judge(thread, &repo, &now).await,
+            Err(e) => tracing::warn!(%thread, "a merged thread's tree was not kept: {e}"),
+        }
+    }
+
     /// Let every ref `state`'s thread keeps in its repository go, before the thread is.
     pub async fn forget(&self, state: &ThreadState) {
         let thread = state.meta.id;

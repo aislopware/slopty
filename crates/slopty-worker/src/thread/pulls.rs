@@ -11,18 +11,26 @@
 //! forge's command line are never asked about. What the forge said is summed up in a
 //! [`PullSeen`] and put on the thread with [`Action::PullSeen`] when it changed, so its row
 //! carries it to every client and to the server's attention ladder.
+//!
+//! A git op that moves a pull request (opening, pushing to, merging or reviewing it) asks for its
+//! checkout to be read again at once ([`nudge`]), so the row does not lag the sheet by minutes.
+//! A pull request seen merging counts its thread's tree as kept ([`Snapshots::merged`]): the
+//! work went in, so the thread no longer stands To review for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use slopty_proto::git::{CheckBucket, PullStatus};
 use slopty_proto::thread::wire::{PullSeen, PullStands};
 use slopty_proto::thread::{Action, Liveness, Phase, ThreadId};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::Host;
+use super::review::Snapshots;
 use crate::repo::commit::Programs;
 
 /// How often the watcher looks for reads falling due.
@@ -40,15 +48,49 @@ const ENDED_FOR: Duration = Duration::from_hours(72);
 /// A checkout and the branch it has checked out: one read serves every thread in it.
 type Key = (PathBuf, String);
 
+/// Checkouts a git op just moved the pull request of, by root, to every watcher ([`nudge`]).
+static NUDGED: LazyLock<broadcast::Sender<PathBuf>> = LazyLock::new(|| broadcast::channel(64).0);
+
+/// Read the pull request of the checkout `repo` is in again at once, wherever it is watched:
+/// a git op just opened, pushed to, merged or reviewed it.
+pub fn nudge(repo: &Path) {
+    if let Some(root) = crate::repo::root_of(repo) {
+        // None watching: nothing to read again.
+        let _watching = NUDGED.send(root);
+    }
+}
+
 /// Watch the pull requests of `host`'s threads with the forges' `programs` until the host is
-/// gone.
+/// gone; a merge seen keeps its threads' trees in `snapshots`.
 #[must_use]
-pub fn spawn(host: Host, programs: Programs) -> JoinHandle<()> {
+pub fn spawn(host: Host, programs: Programs, snapshots: Snapshots) -> JoinHandle<()> {
+    let mut nudged = NUDGED.subscribe();
     tokio::spawn(async move {
         let mut due: HashMap<Key, Instant> = HashMap::new();
         loop {
-            tokio::time::sleep(TICK).await;
-            programs.scope(round(&host, &programs, &mut due)).await;
+            let mut again = HashSet::new();
+            tokio::select! {
+                () = tokio::time::sleep(TICK) => {}
+                heard = nudged.recv() => match heard {
+                    Ok(root) => {
+                        again.insert(root);
+                    }
+                    // More than the channel holds: read every one again.
+                    Err(broadcast::error::RecvError::Lagged(_)) => due.clear(),
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+            }
+            loop {
+                match nudged.try_recv() {
+                    Ok(root) => {
+                        again.insert(root);
+                    }
+                    Err(broadcast::error::TryRecvError::Lagged(_)) => due.clear(),
+                    Err(_) => break,
+                }
+            }
+            due.retain(|(root, _), _| !again.contains(root));
+            programs.scope(round(&host, &programs, &snapshots, &mut due)).await;
         }
     })
 }
@@ -63,7 +105,12 @@ struct Watched {
 
 /// One round: read every pull request that falls due, put what changed on its threads, and
 /// say when each is due again.
-async fn round(host: &Host, programs: &Programs, due: &mut HashMap<Key, Instant>) {
+async fn round(
+    host: &Host,
+    programs: &Programs,
+    snapshots: &Snapshots,
+    due: &mut HashMap<Key, Instant>,
+) {
     let now_ms = slopty_core::WallMs::now().as_millis();
     let watched = host.visit(|state| {
         let ended = match state.status.liveness {
@@ -107,8 +154,12 @@ async fn round(host: &Host, programs: &Programs, due: &mut HashMap<Key, Instant>
             Some(_) => SETTLED,
         };
         due.insert(key.clone(), now.checked_add(next).unwrap_or(now));
+        let merged = |pull: Option<&PullSeen>| pull.is_some_and(|p| p.stands == PullStands::Merged);
         for w in threads.iter().filter(|w| w.pull != seen) {
             host.apply(w.thread, vec![Action::PullSeen(seen.clone())]);
+            if merged(seen.as_ref()) && !merged(w.pull.as_ref()) {
+                snapshots.merged(w.thread).await;
+            }
         }
     }
 }
@@ -144,21 +195,7 @@ pub fn seen(status: &PullStatus) -> PullSeen {
     let running = count(CheckBucket::Running);
     let failed_first =
         status.checks.iter().find(|c| c.bucket() == CheckBucket::Failed).map(|c| c.name.clone());
-    let stands = match status.state.as_str() {
-        "MERGED" => PullStands::Merged,
-        "CLOSED" => PullStands::Closed,
-        _ if status.draft => PullStands::Draft,
-        _ if status.mergeable == "CONFLICTING" || status.merge_state == "DIRTY" => {
-            PullStands::Conflicted
-        }
-        _ if failed > 0 => PullStands::ChecksFailed,
-        _ if status.review == "CHANGES_REQUESTED" => PullStands::ChangesRequested,
-        _ if running > 0 => PullStands::Running,
-        _ if status.merge_state == "CLEAN" || status.merge_state == "HAS_HOOKS" => {
-            PullStands::Ready
-        }
-        _ => PullStands::Waiting,
-    };
+    let stands = status.standing();
     let n = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     PullSeen {
         forge: status.forge,
@@ -208,8 +245,8 @@ mod tests {
         status
     }
 
-    /// A pull request stands where the first thing that holds puts it: ended, a draft, a
-    /// conflict, a failed check, changes asked for, checks running, else ready or waiting.
+    /// A pull request stands where the first thing that holds puts it: ended, a conflict, a
+    /// failed check, changes asked for, a draft, checks running, else ready or waiting.
     #[test]
     fn a_pull_request_stands_where_the_first_thing_that_holds_puts_it() {
         let stands = |edit: fn(&mut PullStatus)| seen(&status(edit)).stands;

@@ -674,6 +674,15 @@ impl Repo {
         Ok(tree)
     }
 
+    /// Keep all of `tree` for `thread`'s person: what they keep from now is kept on top of it.
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn keep_whole(&self, thread: ThreadId, tree: &TreeRef) -> Result<(), Failed> {
+        self.pin(thread, "kept", tree).await
+    }
+
     /// `text` written as a blob of the repository.
     async fn hashed(&self, text: &str) -> Result<String, Failed> {
         self.line_with(&["hash-object", "-w", "--stdin"], text.as_bytes()).await

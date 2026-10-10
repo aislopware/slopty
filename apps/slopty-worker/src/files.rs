@@ -231,6 +231,15 @@ pub async fn git_op(
         GitOp::PullReview { .. } => "pull request review",
         GitOp::MarkReady => "mark ready",
     };
+    // An op that moves the pull request has its watch read it again once it is done.
+    let moves_pull = matches!(
+        op,
+        GitOp::Push
+            | GitOp::PullRequest { .. }
+            | GitOp::Merge { .. }
+            | GitOp::PullReview { .. }
+            | GitOp::MarkReady
+    );
     let terminals = if matches!(op, GitOp::RemoveWorktree | GitOp::Worktrees) {
         terminal_dirs(worker).await
     } else {
@@ -244,6 +253,9 @@ pub async fn git_op(
     )
     .await;
     let done = matches!(outcome, GitOutcome::Done(_));
+    if moves_pull && done {
+        slopty_worker::thread::pulls::nudge(std::path::Path::new(&repo));
+    }
     tracing::info!(%client, request, %repo, op = what, done, "git op");
     let _sent = out.send(WorkerMsg::GitDone { request, outcome }).await;
 }
