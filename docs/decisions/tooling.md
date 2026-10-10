@@ -1453,3 +1453,18 @@ more full-window layer.
   - **Upstream warnings.** `upstream::warn_if_stale` returns at once on a GitHub runner, where
     nobody acts on it; asking an unreachable gpui-kit held one gate step for 78 s
     (run 38019864850).
+
+- ✅ **land checks every package when a change reaches them all** (2026-10-10; amends "land
+  lints the changed packages first, by default").
+  - **Why.** A change outside every package (`Cargo.lock`, the root manifest, cargo's config)
+    made `land` print "left to CI" and check nothing. 13 of 44 lands were such batches, every
+    fork and dependency bump among them, and they brought 3 of the 4 red runs a static check
+    would have caught (`.research/dev-speed-2026-10-10.md` item 1). A red run cost a mean 66 min
+    to main against 23 for a green one.
+  - **The change.** Those batches now run the same net on every member: host clippy, rustdoc
+    and iOS clippy, under `nice`, in the lanes' warm target dirs, so after the first bump a day
+    it is incremental. Tests and Linux clippy stay CI's, as before.
+  - **Not taken.** Scoping a lockfile change to the members its diff reaches: every member
+    depends on the hakari workspace hack, whose manifest a bump rewrites, so the scope came out
+    as every member in nearly every such batch. Linux clippy by default: 2 reds in 44 do not pay
+    for compiling another triple here.

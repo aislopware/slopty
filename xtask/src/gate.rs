@@ -474,8 +474,10 @@ const NEXTEST_LAND_PROFILE: &str = "land";
 /// of 29 red CI runs in two days, each red holding every later land behind it
 /// (`docs/decisions/tooling.md`, "land lints the changed packages first, by default"). Tests
 /// stay CI's unless asked for: they are the costly part and the part a busy Mac makes flaky.
-/// A change outside every package (the manifests' root, the lockfile, cargo's config) leaves all
-/// of it to CI, since it reaches every package. Skipped when it last passed on the same inputs.
+/// A change outside every package (the manifests' root, the lockfile, cargo's config) reaches
+/// every package, so every package is checked: such batches went unchecked once, and brought 3
+/// of the 4 red runs a static check would have caught (`.research/dev-speed-2026-10-10.md`
+/// item 1). Skipped when it last passed on the same inputs.
 pub fn land_checks(base: &str, full: bool) -> Result<()> {
     let started = Instant::now();
     let root = repo_root()?;
@@ -497,14 +499,15 @@ pub fn land_checks(base: &str, full: bool) -> Result<()> {
     let _lock = lock(&gate_dir)?;
     crate::prune::ensure_room(&root.join("target"))?;
     let (tree, listing) = snapshot(&root, Source::Head)?;
-    let Some(packages) = pass::affected(&pass::workspace(&tree)?, &changed) else {
+    let members = pass::workspace(&tree)?;
+    let packages = pass::affected(&members, &changed).unwrap_or_else(|| {
         let outside: Vec<&str> = changed.iter().take(3).map(String::as_str).collect();
         println!(
-            "  checks before the push: left to CI, since a change reaches every package ({}…)",
+            "  checks before the push: every package, since a change reaches them all ({}…)",
             outside.join(", ")
         );
-        return Ok(());
-    };
+        members.iter().map(|m| m.name.clone()).collect()
+    });
     let inputs = Inputs::gather(&gate_dir, &tree, listing)?;
     let lane = Lane {
         name: "land",
