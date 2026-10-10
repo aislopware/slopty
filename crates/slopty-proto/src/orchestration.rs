@@ -758,6 +758,11 @@ pub enum Verb {
         head: String,
         /// The branch it goes on top of.
         onto: String,
+        /// The commit of another task's work `head` started on, which merged since as other
+        /// commits ([`crate::project::Task::started_on`]): when `head` holds it and `onto` does
+        /// not, only the commits after it are picked, so that work is not picked twice.
+        /// Otherwise the rebase is the plain one.
+        after: Option<String>,
         /// Each `(token, value)` to add to every commit rebased: the task and the thread its
         /// work came from. A token is letters, digits and `-`; a value has no line break.
         trailers: Vec<(String, String)>,

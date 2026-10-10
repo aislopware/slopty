@@ -92,6 +92,7 @@ mod golden_project {
     fn spec() -> TaskSpec {
         TaskSpec {
             depends_on: vec![TaskId(2)],
+            start_from: Some(TaskId(2)),
             kind: "build".to_owned(),
             title: "Server store".to_owned(),
             brief: "Keep projects beside workers.json.".to_owned(),
@@ -111,6 +112,8 @@ mod golden_project {
             },
             id: TaskId(3),
             depends_on: s.depends_on,
+            start_from: s.start_from,
+            started_on: Some(commit('d')),
             kind: s.kind,
             title: s.title,
             brief: s.brief,
@@ -524,6 +527,7 @@ mod golden_project {
                 worktree: "slopty".to_owned(),
                 head: commit('a'),
                 onto: "main".to_owned(),
+                after: Some("slopty/slopty/2".to_owned()),
                 trailers: vec![
                     ("Slopty-Task".to_owned(), "slopty#3".to_owned()),
                     ("Slopty-Thread".to_owned(), "0199a000-0000-7000-8000-000000000006".to_owned()),

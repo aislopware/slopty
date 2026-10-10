@@ -2153,11 +2153,95 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
     let message = "fatal: bad object refs/heads/main".to_owned();
     answer(&studio_lease, id, Outcome::Error { code: ErrorCode::Failed, message });
     let said = refused(&asked.await.unwrap(), ErrorCode::Failed).to_owned();
-    assert!(said.contains("could not start from its target"), "{said}");
+    assert!(said.contains("main could not be sent to the task's clone"), "{said}");
     assert!(said.contains("bad object"), "{said}");
     let failed = step_of(&hub, next).await.map(|s| s.state);
     assert!(matches!(failed, Some(StepState::Failed { .. })), "the card says so too: {failed:?}");
     assert!(linux_rx.try_recv().is_err(), "nothing started");
+}
+
+/// A task that starts from its dependency's work starts on that work's branch once it is done
+/// and its verifier passed, before it merges: the branch goes from the orchestrator's clone to
+/// the task's on another machine as `slopty/<p>/<n>`, the worktree starts from it, the agent is
+/// told, and the task keeps the commit it started on for the merge queue.
+#[tokio::test]
+async fn a_task_starts_on_its_dependency_s_checked_branch() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio = vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+
+    let builds = new_task(&hub, Some(studio)).await;
+    let verb = Verb::TaskSpawn { project: project(), task: builds, launch: claude() };
+    let asked = spawn(&hub, verb);
+    let start = request(&mut studio_rx).await;
+    opened(&studio_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let head = "b".repeat(40);
+    let checked = TaskChange {
+        state: Some(TaskState::Done),
+        branch: Some("worktree-slopty-slopty-1".to_owned()),
+        verified: Some(slopty_proto::project::VerifierRun {
+            passed: true,
+            summary: "ok".to_owned(),
+            head: head.clone(),
+            base: "a".repeat(40),
+            exit: Some(0),
+            took_ms: 0,
+        }),
+        ..TaskChange::default()
+    };
+    let change = Box::new(checked);
+    let done = hub.dispatch(Verb::TaskUpdate { project: project(), task: builds, change }).await;
+    assert!(matches!(done, Outcome::Task(_)), "{done:?}");
+
+    let spec = TaskSpec {
+        title: "Use it".to_owned(),
+        depends_on: vec![builds],
+        start_from: Some(builds),
+        pin: Some(linux),
+        ..TaskSpec::default()
+    };
+    let made = hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await;
+    let Outcome::Task(after) = made else { panic!("{made:?}") };
+    let verb = Verb::TaskSpawn { project: project(), task: after.id, launch: claude() };
+    let asked = spawn(&hub, verb);
+    let (id, verb) = request(&mut studio_rx).await;
+    let Verb::BundleBranch { repo, branch, target, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(
+        (repo.as_str(), branch.as_str(), target.as_deref()),
+        ("/w/demo", "worktree-slopty-slopty-1", Some("main"))
+    );
+    let name = "worktree-slopty-slopty-1-bbbbbbbbbbbb.bundle".to_owned();
+    let path = format!("/Users/c/.cache/slopty/bundles/{name}");
+    let made =
+        BranchBundle { path, name, size: 6, digest: [5; 32], head: head.clone(), base: None };
+    answer(&studio_lease, id, Outcome::Bundle(Box::new(made)));
+    let (id, verb) = request(&mut studio_rx).await;
+    assert!(matches!(verb, Verb::ReadFile { offset: 0, .. }), "{verb:?}");
+    answer(&studio_lease, id, Outcome::File { bytes: b"bundle".to_vec(), offset: 0, size: 6 });
+    for _part in 0..2 {
+        let (id, verb) = request(&mut linux_rx).await;
+        assert!(matches!(verb, Verb::Upload { .. }), "{verb:?}");
+        answer(&linux_lease, id, Outcome::Done);
+    }
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::FetchBundle { repo, into, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!((repo.as_str(), into.as_str()), ("/home/c/demo", "slopty/slopty/1"));
+    answer(&linux_lease, id, Outcome::Fetched { branch: into, head: head.clone() });
+    let start = request(&mut linux_rx).await;
+    let Verb::SpawnAgent { worktree, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    let base = worktree.and_then(|w| w.base);
+    assert_eq!(base.as_deref(), Some("slopty/slopty/1"), "from task 1's work");
+    assert!(args.iter().any(|a| a.contains("starts on task 1's work")), "told: {args:?}");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let kept =
+        hub.inner.state.lock().projects.task(&project(), after.id).unwrap().started_on.clone();
+    assert_eq!(kept, Some(head), "the commit it started on");
 }
 
 /// A shell in the clone at `path` of the repository `origin`, cloned from `url`.

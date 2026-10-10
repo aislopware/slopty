@@ -135,6 +135,11 @@ pub async fn checkout(
 /// `head` rebased onto the branch `onto` in the project's checkout at `place`, as the merge
 /// queue takes it.
 ///
+/// `after` is the commit of another task's work `head` started on, merged since as other
+/// commits: when `head` holds it and `onto` does not, only `head`'s commits after it are picked
+/// (`git rebase --onto`), so that work is not picked twice. Otherwise the rebase is the plain
+/// one.
+///
 /// Every commit it adds to `onto` carries each of `trailers` (a token and its value) once, and
 /// the answer says whether what it made has the tree of the commit `verified`.
 ///
@@ -149,7 +154,7 @@ pub async fn rebase(
     git: &Path,
     repo: &Path,
     place: &Path,
-    (head, onto): (&str, &str),
+    (head, onto, after): (&str, &str, Option<&str>),
     trailers: &[(String, String)],
     verified: Option<&str>,
 ) -> Result<Rebased, Failed> {
@@ -161,6 +166,10 @@ pub async fn rebase(
         let verified = same_tree(git, repo, &head, verified).await;
         return Ok(Rebased { from: head.clone(), head, onto, verified });
     }
+    let left = match after.filter(|_| !holds) {
+        Some(after) => started_on(git, repo, (&head, &onto), after).await,
+        None => None,
+    };
     prepare(git, repo, place, &head).await?;
     let mut args = identity(git, place).await;
     args.extend(["rebase", "--no-autosquash", "--no-update-refs", "--quiet"].map(str::to_owned));
@@ -168,7 +177,12 @@ pub async fn rebase(
         // Every commit picked again, those already on top of `onto` too, so each takes them.
         args.extend(["--force-rebase".to_owned(), "--exec".to_owned(), amend]);
     }
-    args.extend(["--end-of-options".to_owned(), onto.clone()]);
+    match left {
+        Some(left) => {
+            args.extend(["--onto".to_owned(), onto.clone(), "--end-of-options".to_owned(), left]);
+        }
+        None => args.extend(["--end-of-options".to_owned(), onto.clone()]),
+    }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Err(stopped) = bundle::run(git, place, &args).await {
         let listed = bundle::run(git, place, &["diff", "--name-only", "--diff-filter=U"]).await;
@@ -530,6 +544,21 @@ async fn commit_of(git: &Path, repo: &Path, what: &str) -> Result<String, Failed
         Ok(found) => Ok(found.trim().to_owned()),
         Err(_) => Err(Failed::Other(format!("{what} is not a commit in {}", repo.display()))),
     }
+}
+
+/// `after` as a commit, when `head` holds it and `onto` does not: the other task's work `head`
+/// started on, which reached `onto` as other commits. `None` for anything else, a commit this
+/// clone lacks too.
+async fn started_on(
+    git: &Path,
+    repo: &Path,
+    (head, onto): (&str, &str),
+    after: &str,
+) -> Option<String> {
+    let after = commit_of(git, repo, after).await.ok()?;
+    let held =
+        is_ancestor(git, repo, &after, head).await && !is_ancestor(git, repo, &after, onto).await;
+    held.then_some(after)
 }
 
 /// Whether `ancestor` is `of` or comes before it.

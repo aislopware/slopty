@@ -278,7 +278,7 @@ pub struct StartTask {
     project: Option<String>,
     /// A task the project has, by its number, in place of a new one.
     #[arg(long, conflicts_with_all = [
-        "title", "brief", "kind", "depends_on", "read_only", "verifier", "metadata",
+        "title", "brief", "kind", "depends_on", "start_from", "read_only", "verifier", "metadata",
     ])]
     task: Option<String>,
     /// A new task: what it is, in a line.
@@ -293,6 +293,10 @@ pub struct StartTask {
     /// A new task: a task it needs first; repeatable.
     #[arg(long = "depends-on", value_name = "TASK")]
     depends_on: Vec<String>,
+    /// A new task: the one of its dependencies whose work it starts from once that is done and
+    /// verified, before it merges; it merges after that task.
+    #[arg(long, value_name = "TASK")]
+    start_from: Option<String>,
     /// A new task: it only reads, and has nothing to merge.
     #[arg(long)]
     read_only: bool,
@@ -319,6 +323,7 @@ impl StartTask {
             (Some(task), _) => Which::Made(task),
             (None, title) => Which::New(Box::new(NewTask {
                 depends_on: self.depends_on,
+                start_from: self.start_from,
                 kind: self.kind,
                 title: title.unwrap_or_default(),
                 brief: self.brief,

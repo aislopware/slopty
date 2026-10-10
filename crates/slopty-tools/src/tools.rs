@@ -119,6 +119,9 @@ struct TaskStartArgs {
     /// dependency never leads back to it.
     #[serde(default)]
     depends_on: Vec<TaskArg>,
+    /// A new task: the one of `depends_on` whose work it starts from once that is done and its
+    /// verifier passed, before it merges: it works on top of that branch, and merges after it.
+    start_from: Option<TaskArg>,
     /// A new task: it only reads.
     #[serde(default)]
     read_only: bool,
@@ -140,17 +143,19 @@ impl TaskStartArgs {
         let new_fields = self.title.is_some()
             || !self.brief.is_empty()
             || !self.depends_on.is_empty()
+            || self.start_from.is_some()
             || self.read_only;
         let which = match (self.task, self.title) {
             (Some(task), None) if !new_fields => Which::Made(task.text()),
             (Some(_), _) => {
                 return Err(ToolError::invalid(
                     "`task` starts one the project has; a new task's fields (title, brief, \
-                     depends_on, read_only) go without it",
+                     depends_on, start_from, read_only) go without it",
                 ));
             }
             (None, Some(title)) => Which::New(Box::new(NewTask {
                 depends_on: self.depends_on.iter().map(TaskArg::text).collect(),
+                start_from: self.start_from.as_ref().map(TaskArg::text),
                 kind: String::new(),
                 title,
                 brief: self.brief,
@@ -631,6 +636,8 @@ mod tests {
             spent: slopty_proto::project::Spent::default(),
             id: TaskId(id),
             depends_on: Vec::new(),
+            start_from: None,
+            started_on: None,
             kind: String::new(),
             title: title.to_owned(),
             brief: String::new(),
@@ -813,10 +820,10 @@ mod tests {
     }
 
     /// The orchestrator's own project is what the project tools default to: `task_start` makes a
-    /// task with the dependencies it gave and starts it in one call on the worker named, Claude
-    /// Code when it names no agent; and it starts a task made before with any agent. What the
-    /// server decides (the folder, the prompt, the agent's arguments) is no argument. A caller
-    /// that runs for no project is told to name one.
+    /// task with the dependencies it gave, and the one it starts from, and starts it in one call on
+    /// the worker named, Claude Code when it names no agent; and it starts a task made before
+    /// with any agent. What the server decides (the folder, the prompt, the agent's arguments)
+    /// is no argument. A caller that runs for no project is told to name one.
     #[tokio::test]
     async fn task_start_makes_and_starts_a_task_in_the_caller_s_own_project() {
         let scope =
@@ -826,6 +833,7 @@ mod tests {
             "title": "Hub",
             "brief": "Fix the hub\nThen test it",
             "depends_on": [2],
+            "start_from": 2,
             "read_only": true,
             "worker": studio().to_string(),
         });
@@ -839,6 +847,7 @@ mod tests {
         };
         assert_eq!(project.as_str(), "slopty");
         assert_eq!(spec.depends_on.as_slice(), &[TaskId(2)][..]);
+        assert_eq!(spec.start_from, Some(TaskId(2)), "on that task's work");
         assert_eq!((spec.brief.as_str(), spec.read_only), ("Fix the hub\nThen test it", true));
         let claude =
             TaskLaunch { pin: Some(studio()), agent: AgentId::named(AgentId::CLAUDE_CODE) };

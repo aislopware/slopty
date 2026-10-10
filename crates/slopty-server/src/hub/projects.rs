@@ -24,7 +24,6 @@ use slopty_proto::terminal::{RepoId, SessionSummary};
 use slopty_proto::thread::wire::{NewWorktree, Start};
 use slopty_proto::thread::{AgentId, ThreadId};
 
-use super::steps::Onto;
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, codex, digest, error, keep_start, keyed,
     known_term, remember, start_again, start_answered, term_of,
@@ -630,7 +629,7 @@ pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Op
 }
 
 /// What an agent started for `task` is told of its role, beside Claude Code's own prompt.
-fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
+fn agent_role(project: &Project, task: &Task, at: Option<&Place>, on: Option<TaskId>) -> String {
     let mut lines = vec![
         format!(
             "You are the agent of task {} (\"{}\") of the Slopty project {} ({}, work lands \
@@ -673,6 +672,12 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
             None => format!("- You work in the clone at {}.", plain(path)),
         });
     }
+    if let Some(on) = on {
+        lines.push(format!(
+            "- Your worktree starts on task {on}'s work, done and checked but not merged yet: \
+             build on it and leave its commits as they are. Yours merges after it."
+        ));
+    }
     lines.extend(rules(project, "agent_rules"));
     lines.join("\n")
 }
@@ -691,7 +696,9 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         "- You dispatch; you do not code. Split the goal into tasks that run side by side, and \
          put the split to the person in plan mode before you start any. task_start makes a \
          task and starts its agent in one call, and project_status follows them all. Tasks \
-         are one level: their agents start nothing themselves."
+         are one level: their agents start nothing themselves. A task that builds on another's \
+         work names it in depends_on and as start_from: it starts on that work once its \
+         verifier passes, without waiting for the merge."
             .to_owned(),
         "- Reports come to you in <slopty-reports> blocks like this one, and so does what a \
          task's agent came to when it ended a turn, exited or waits on the person without \
@@ -1787,7 +1794,11 @@ impl Hub {
                     Place { path, worktree }
                 });
                 let named = named_dir(&launch.cwd, record);
-                let role = agent_role(record, card, at.as_ref());
+                let on = at
+                    .as_ref()
+                    .filter(|at| at.worktree.is_some())
+                    .and_then(|_| state.projects.starts_on(project, task));
+                let role = agent_role(record, card, at.as_ref(), on.as_ref().map(|o| o.0));
                 let level = record.autonomy;
                 // Held to its project's level: Claude Code by its permission mode, Codex by its
                 // approval policy and sandbox, each as its own reports say them.
@@ -1797,26 +1808,35 @@ impl Hub {
                     watch(&mut state, placed.1, |w| w.held = Some(level));
                 }
                 let at = at.unwrap_or(Place { path: named, worktree: None });
-                Ok((placed, level, role, at))
+                Ok((placed, level, role, at, on))
             })
         };
-        let ((id, term), level, role, at) = match reserved {
+        let ((id, term), level, role, at, on) = match reserved {
             Ok(reserved) => reserved,
             Err(refused) => return refused,
         };
         let placed = InFlight { hub: self, id, settled: false };
         let Launch { agent, prompt, .. } = launch;
         let Place { path: cwd, worktree } = at;
-        // Its worktree starts from the target as the orchestrator's clone has it, sent there
-        // first when that is another clone: with pushing off, only that clone holds what the
-        // merge queue merged.
+        // Its worktree starts from the target as the orchestrator's clone has it, or from the
+        // checked work of the task it starts from, sent there first when that is another
+        // clone: with pushing off, only that clone holds what the merge queue merged.
         let worktree = match worktree {
-            Some(Worktree::Worker { name, base }) => {
-                match self.send_target_to((project, task), (worker, cwd.clone())).await {
-                    Onto::Sent { branch, .. } => Some(Worktree::Worker { name, base: branch }),
-                    Onto::Here | Onto::Forge => Some(Worktree::Worker { name, base }),
-                    Onto::Failed(why) => {
-                        let why = format!("task {task} could not start from its target: {why}");
+            Some(Worktree::Worker { name, .. }) => {
+                let at = (worker, cwd.clone());
+                match self.send_start_to((project, task), at, on.as_ref().map(|o| o.0)).await {
+                    Ok(base) => {
+                        if let Some((_, commit)) = &on {
+                            let mut state = self.inner.state.lock();
+                            let updates = state.projects.started_on(project, task, commit);
+                            self.projects_moved(&mut state, updates);
+                            drop(state);
+                        }
+                        Some(Worktree::Worker { name, base })
+                    }
+                    Err(why) => {
+                        let why =
+                            format!("task {task} could not start where its work begins: {why}");
                         return error(ErrorCode::Failed, &why);
                     }
                 }

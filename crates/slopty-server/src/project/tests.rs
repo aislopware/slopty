@@ -929,3 +929,63 @@ fn a_dependent_starts_once_its_dependency_is_merged() {
     p.update_task(&id(), reads, to(TaskState::Done), Caller::Person, now()).unwrap();
     p.may_start(&id(), after, false, &fleet.running()).unwrap();
 }
+
+/// A task may start from one dependency's work before it merges: once that work is done on a
+/// branch and its verifier passed, at the commit it passed, which the task's worktree starts on
+/// and keeps from its first start. It waits in the merge queue until that work is merged, and
+/// the person dropping the dependency drops the start with it. It starts only from one of its
+/// own dependencies.
+#[test]
+fn a_task_starts_from_its_dependency_s_checked_work_and_merges_after_it() {
+    let fleet = Fleet::default();
+    let mut p = project(None);
+    let builds = task(&mut p, "Build it");
+    let stray = TaskSpec { start_from: Some(builds), ..spec("Stray") };
+    let refused = p.create_task(&id(), stray, now()).unwrap_err();
+    assert!(message(&refused).contains("not among them"), "{}", message(&refused));
+    let after = TaskSpec { depends_on: vec![builds], start_from: Some(builds), ..spec("Use it") };
+    let after = p.create_task(&id(), after, now()).unwrap().0.id;
+    assert_eq!(get(&p, after).start_from, Some(builds));
+    let waits = |p: &Projects| {
+        let refused = p.may_start(&id(), after, false, &fleet.running()).unwrap_err();
+        message(&refused).to_owned()
+    };
+    assert!(waits(&p).contains("Planned; start it once its checks pass"), "{}", waits(&p));
+
+    let done = TaskChange {
+        state: Some(TaskState::Done),
+        branch: Some("worktree-build".to_owned()),
+        ..TaskChange::default()
+    };
+    p.update_task(&id(), builds, done, Caller::Person, now()).unwrap();
+    assert!(waits(&p).contains("Done; start it once its checks pass"), "no pass, no commit");
+    assert_eq!(p.starts_on(&id(), after), None);
+    let run = VerifierRun {
+        passed: true,
+        summary: "ok".to_owned(),
+        head: "b".repeat(40),
+        base: "a".repeat(40),
+        exit: Some(0),
+        took_ms: 1,
+    };
+    let passed = TaskChange { verified: Some(run), ..TaskChange::default() };
+    p.update_task(&id(), builds, passed.clone(), Caller::Person, now()).unwrap();
+    p.may_start(&id(), after, false, &fleet.running()).unwrap();
+    assert_eq!(p.starts_on(&id(), after), Some((builds, "b".repeat(40))));
+    let noted = p.started_on(&id(), after, &"b".repeat(40));
+    assert!(noted.iter().all(|c| c.durable) && !noted.is_empty(), "kept across a restart");
+    assert!(p.started_on(&id(), after, &"c".repeat(40)).is_empty(), "the first start's");
+    assert_eq!(get(&p, after).started_on, Some("b".repeat(40)));
+
+    p.update_task(&id(), after, to(TaskState::Done), Caller::Person, now()).unwrap();
+    p.update_task(&id(), after, passed, Caller::Person, now()).unwrap();
+    p.ask_merge(&id(), after, now()).unwrap();
+    assert_eq!(p.queue(&id()), Vec::<TaskId>::new(), "not before the work it holds");
+    p.update_task(&id(), builds, to(TaskState::Merged), Caller::Person, now()).unwrap();
+    assert_eq!(p.queue(&id()), [after], "its turn once that is merged");
+    assert_eq!(p.starts_on(&id(), after), None, "merged work is the target's");
+
+    let freed = TaskChange { depends_on: Some(Vec::new()), ..TaskChange::default() };
+    p.update_task(&id(), after, freed, Caller::Person, now()).unwrap();
+    assert_eq!(get(&p, after).start_from, None);
+}

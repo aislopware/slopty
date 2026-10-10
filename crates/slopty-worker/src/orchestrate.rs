@@ -1044,7 +1044,7 @@ impl Orchestrator {
                 let term = TermRef { worker: self.inner.id, session: handle.id() };
                 Ok(Outcome::Verifying { term, head: made.head, base: made.base })
             }
-            Verb::Rebase { worker, repo, worktree, head, onto, trailers, verified } => {
+            Verb::Rebase { worker, repo, worktree, head, onto, after, trailers, verified } => {
                 self.mine(worker)?;
                 let git = crate::changes::git().ok_or_else(|| {
                     Failure::new(ErrorCode::Unsupported, "this worker has no git")
@@ -1053,7 +1053,7 @@ impl Orchestrator {
                 let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
                 let place = crate::repo::verify::place(&places, &worktree)
                     .map_err(|f| verify_failure(&f))?;
-                let commits = (head.as_str(), onto.as_str());
+                let commits = (head.as_str(), onto.as_str(), after.as_deref());
                 let made = crate::repo::verify::rebase(
                     git,
                     &repo,

@@ -869,6 +869,8 @@ pub async fn project_delete<D: Dispatch>(
 pub struct NewTask {
     /// Tasks it needs first.
     pub depends_on: Vec<String>,
+    /// The one of them whose done work it starts from before that merges.
+    pub start_from: Option<String>,
     /// What sort of work it is.
     pub kind: String,
     /// What it is.
@@ -891,8 +893,10 @@ async fn task_create<D: Dispatch>(
     key: Option<IdempotencyKey>,
 ) -> Result<Task, ToolError> {
     let depends_on = new.depends_on.iter().map(|d| task_number(d)).collect::<Result<_, _>>()?;
+    let start_from = new.start_from.as_deref().map(task_number).transpose()?;
     let spec = TaskSpec {
         depends_on,
+        start_from,
         kind: new.kind,
         title: new.title,
         brief: new.brief,

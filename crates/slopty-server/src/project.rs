@@ -673,6 +673,15 @@ impl Record {
         t.assignment.as_ref().filter(|a| a.open() && terminals.contains(&a.term))
     }
 
+    /// The task whose work `t` starts on, not merged yet but done and checked
+    /// ([`checked`]), with the commit its verifier passed: `t`'s worktree's base is that
+    /// task's branch rather than the target.
+    fn starts_on(&self, t: &Task) -> Option<(TaskId, String)> {
+        let on = self.task(t.start_from?).ok()?;
+        let head = on.verified.as_ref().filter(|r| r.passed)?.head.clone();
+        (on.state != TaskState::Merged && checked(on)).then_some((on.id, head))
+    }
+
     /// Whether `task` depends, directly or not, on `on`.
     fn depends(&self, task: TaskId, on: TaskId) -> bool {
         let mut seen = HashSet::new();
@@ -1125,6 +1134,27 @@ impl Projects {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.task(task)
     }
 
+    /// The task whose done, checked and unmerged work `task` starts on, if it starts from one
+    /// ([`Task::start_from`]), with the commit its verifier passed; `None` when it starts from
+    /// the target.
+    pub(crate) fn starts_on(&self, id: &ProjectId, task: TaskId) -> Option<(TaskId, String)> {
+        let record = self.records.get(id)?;
+        record.starts_on(record.task(task).ok()?)
+    }
+
+    /// `task`'s worktree started on `commit` of another task's work ([`Task::started_on`]):
+    /// kept from its first start, since a worktree started again keeps its work.
+    pub(crate) fn started_on(&mut self, id: &ProjectId, task: TaskId, commit: &str) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let Ok(t) = record.task_mut(task) else { return Vec::new() };
+        if t.started_on.is_some() {
+            return Vec::new();
+        }
+        t.started_on = Some(clipped(commit, REF_MAX));
+        let task_now = t.clone();
+        vec![Change { durable: true, ..record.task_update(&task_now, None) }]
+    }
+
     /// Make a project.
     pub(crate) fn create(
         &mut self,
@@ -1272,11 +1302,19 @@ impl Projects {
                 depends_on.push(on);
             }
         }
+        if let Some(on) = spec.start_from.filter(|on| !depends_on.contains(on)) {
+            return Err(invalid(format!(
+                "a task starts only from the work of one of its dependencies, and task {on} is not \
+                 among them"
+            )));
+        }
         let number = u32::try_from(record.tasks.len()).unwrap_or(u32::MAX).saturating_add(1);
         let task = Task {
             spent: Spent::default(),
             id: TaskId(number),
             depends_on,
+            start_from: spec.start_from,
+            started_on: None,
             kind,
             title,
             brief: spec.brief,
@@ -1382,6 +1420,8 @@ impl Projects {
                 }
             }
             quiet |= t.depends_on != deduped;
+            // The person's word that it no longer needs that task: it merges with what it holds.
+            t.start_from = t.start_from.filter(|on| deduped.contains(on));
             t.depends_on = deduped;
         }
         if let Some(run_on) = change.run_on {
@@ -1540,14 +1580,19 @@ impl Projects {
     ) -> Result<(), Refused> {
         let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
         let t = record.task(task)?;
+        let waits = |d: &&Task| !delivered(d) && (t.start_from != Some(d.id) || !checked(d));
         if !ignore_dependencies
-            && let Some(dep) =
-                t.depends_on.iter().find_map(|d| record.task(*d).ok().filter(|d| !delivered(d)))
+            && let Some(dep) = t.depends_on.iter().find_map(|d| record.task(*d).ok().filter(waits))
         {
+            let once = if t.start_from == Some(dep.id) {
+                "once its checks pass"
+            } else {
+                "once that is merged"
+            };
             return Err(refuse(
                 ErrorCode::Conflict,
                 format!(
-                    "task {task} depends on task {}, which is {:?}; start it once that is merged",
+                    "task {task} depends on task {}, which is {:?}; start it {once}",
                     dep.id, dep.state
                 ),
             ));
@@ -2316,6 +2361,17 @@ enum Took {
 /// agent done. A task done and not merged has work no other clone holds yet.
 const fn delivered(t: &Task) -> bool {
     matches!(t.state, TaskState::Merged) || t.read_only && matches!(t.state, TaskState::Done)
+}
+
+/// Whether `t`'s work is done and its checks passed, on a branch: what a task that starts from
+/// it ([`Task::start_from`]) needs before it starts.
+///
+/// Only a verifier's pass names the commit it is checked at, so with no verifier a task starts
+/// from that work once it merges.
+fn checked(t: &Task) -> bool {
+    t.state == TaskState::Done
+        && t.branch.is_some()
+        && t.verified.as_ref().is_some_and(|r| r.passed)
 }
 
 /// Take a status line's worktree into `t`; a new branch is worth the timeline.

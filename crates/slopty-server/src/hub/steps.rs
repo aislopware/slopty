@@ -399,54 +399,71 @@ impl Hub {
         self.send_back((project, task), back, (StepKind::Merge, worker)).await
     }
 
-    /// Send the project's target, as the orchestrator's clone has it, to `clone` on `worker`,
-    /// where `task` is about to start in a worktree, as [`Task::target_branch`]: with pushing
-    /// off the forge never saw what the merge queue merged, and a task elsewhere would start
-    /// from the worker's stale copy of the target. Shown on `task`'s clone step as it goes, and
-    /// settled there once it ends.
-    pub(super) async fn send_target_to(
+    /// Send what `task`'s new worktree starts from to `clone` on `worker`, where it is about to
+    /// start, and answer the branch it starts from there. That is the project's target as the
+    /// orchestrator's clone has it, as [`Task::target_branch`]: with pushing off the forge never
+    /// saw what the merge queue merged, and a task elsewhere would start from the worker's stale
+    /// copy of the target. For a task that starts from the done, checked work of `on`
+    /// ([`Task::start_from`]), it is that work's branch as the orchestrator's clone holds it, as
+    /// [`Task::home_branch`] of `on`. Shown on `task`'s clone step as it goes, and settled there
+    /// once it ends.
+    ///
+    /// # Errors
+    /// Why it could not be sent, or why `on`'s work is in no clone the server knows.
+    pub(super) async fn send_start_to(
         &self,
         (project, task): (&ProjectId, TaskId),
         (worker, clone): (WorkerId, String),
-    ) -> Onto {
-        let from = {
+        on: Option<TaskId>,
+    ) -> Result<String, String> {
+        let target = {
             let state = self.inner.state.lock();
-            state
-                .projects
-                .project(project)
-                .ok()
-                .map(|record| (orchestrator_clone(&state, record), record.target.clone()))
+            state.projects.project(project).ok().map(|record| record.target.clone())
         };
-        let back = match from {
-            Some((Ok(Some(from)), target)) => Trip {
-                from,
-                to: (worker, clone),
-                branch: target.clone(),
-                into: Task::target_branch(project),
-                target,
-            },
-            None | Some((Ok(None), _)) => return Onto::Here,
-            Some((Err((_, why)), _)) => return Onto::Failed(why),
+        let Some(target) = target else { return Err(format!("no project {project}")) };
+        let (from, branch, into) = if let Some(on) = on {
+            let Some(Landed { worker, clone, branch }) = self.landed(project, on)? else {
+                return Err(format!("task {on}'s work is in no clone the server knows"));
+            };
+            ((worker, clone), branch, Task::home_branch(project, on))
+        } else {
+            let from = {
+                let state = self.inner.state.lock();
+                state.projects.project(project).ok().map(|r| orchestrator_clone(&state, r))
+            };
+            match from {
+                Some(Ok(Some(from))) => (from, target.clone(), Task::target_branch(project)),
+                None | Some(Ok(None)) => return Ok(target),
+                Some(Err((_, why))) => return Err(why),
+            }
         };
+        let back = Trip { from, to: (worker, clone), branch, into, target: target.clone() };
         if back.there() {
-            return Onto::Here;
+            return Ok(back.branch);
         }
-        let target = back.target.clone();
+        let what = on.map_or_else(|| target.clone(), |on| format!("task {on}'s work"));
         let onto = self.send_back((project, task), back, (StepKind::Clone, worker)).await;
-        let ended = match &onto {
-            Onto::Here => None,
-            Onto::Sent { head, .. } => Some(StepState::Done {
-                detail: format!("{target} as the orchestrator's clone has it, at {}", short(head)),
-            }),
-            Onto::Forge => Some(StepState::Done { detail: format!("{target} from its origin") }),
-            Onto::Failed(why) => Some(StepState::Failed {
-                why: format!("{target} could not be sent to the task's clone: {why}"),
-            }),
+        let (ended, started) = match onto {
+            Onto::Here => (None, Ok(target)),
+            Onto::Sent { head, branch } => {
+                let detail =
+                    format!("{what} as the orchestrator's clone has it, at {}", short(&head));
+                (Some(StepState::Done { detail }), Ok(branch))
+            }
+            // Nothing the clone lacks: the target is all there is to start from.
+            Onto::Forge => {
+                let detail = format!("{target} from its origin");
+                (Some(StepState::Done { detail }), Ok(target))
+            }
+            Onto::Failed(why) => {
+                let why = format!("{what} could not be sent to the task's clone: {why}");
+                (Some(StepState::Failed { why: why.clone() }), Err(why))
+            }
         };
         if let Some(ended) = ended {
             self.step_now((project, task), StepKind::Clone, worker, ended);
         }
-        onto
+        started
     }
 
     /// Carry the target back along `back`, showing it on `task`'s step of `kind` on `worker`.

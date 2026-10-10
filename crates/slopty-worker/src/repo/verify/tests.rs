@@ -79,13 +79,14 @@ async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
     let (repo, _first, task) = clone_with_a_task(&root);
     let place = place(&root.join("verify"), "demo").expect("a name");
 
-    let up_to_date = rebase(git, &repo, &place, (&task, "main"), &[], Some(&task)).await;
+    let up_to_date = rebase(git, &repo, &place, (&task, "main", None), &[], Some(&task)).await;
     let up_to_date = up_to_date.expect("as it is");
     assert_eq!((&up_to_date.head, &up_to_date.from), (&task, &task), "main is where it left it");
     assert!(up_to_date.verified, "the very commit verified");
 
     let moved = commit(&repo, "c.txt", "main moved on\n");
-    let rebased = rebase(git, &repo, &place, ("slopty/demo/1", "main"), &[], Some(&task)).await;
+    let rebased =
+        rebase(git, &repo, &place, ("slopty/demo/1", "main", None), &[], Some(&task)).await;
     let rebased = rebased.expect("rebased");
     assert_eq!(rebased.from, task, "the branch given, as its commit");
     assert!(!rebased.verified, "main's change is in its tree");
@@ -99,12 +100,46 @@ async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
     let clashing = commit(&repo, "a.txt", "the other task's\n");
     git_in(&repo, &["switch", "-q", "main"]);
     commit(&repo, "a.txt", "main's own\n");
-    let conflict = rebase(git, &repo, &place, (&clashing, "main"), &[], None).await;
+    let conflict = rebase(git, &repo, &place, (&clashing, "main", None), &[], None).await;
     assert_eq!(conflict, Err(Failed::Conflict(vec!["a.txt".to_owned()])));
     let stopped = git_in(&place, &["status", "--porcelain=v2", "--branch"]);
     assert!(!stopped.contains("rebase"), "{stopped}");
-    let again = rebase(git, &repo, &place, (&rebased.head, "main"), &[], None).await;
+    let again = rebase(git, &repo, &place, (&rebased.head, "main", None), &[], None).await;
     assert!(again.is_ok(), "the checkout serves the next rebase: {again:?}");
+}
+
+/// A task that started on another's work, which reached the target as other commits (its
+/// agent resolved a conflict), is rebased from the commit it started on: only its own commits
+/// are picked, where the plain rebase would pick that work again and conflict. A head that does
+/// not hold that commit takes the plain rebase.
+#[tokio::test]
+async fn work_started_on_another_s_is_rebased_from_where_it_started() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, _) = clone_with_a_task(&root);
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/2", &first]);
+    let started_on = commit(&repo, "a.txt", "the first task's\n");
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/3"]);
+    let own = commit(&repo, "c.txt", "the second task's\n");
+    git_in(&repo, &["switch", "-q", "main"]);
+    commit(&repo, "a.txt", "main's own\n");
+    let merged = commit(&repo, "a.txt", "main's own and the first task's\n");
+    let place = place(&root.join("verify"), "demo").expect("a name");
+
+    let plain = rebase(git, &repo, &place, (&own, "main", None), &[], None).await;
+    assert_eq!(plain, Err(Failed::Conflict(vec!["a.txt".to_owned()])), "that work picked again");
+
+    let after = Some(started_on.as_str());
+    let made = rebase(git, &repo, &place, (&own, "main", after), &[], None).await.expect("rebased");
+    assert_eq!(git_in(&repo, &["rev-parse", &format!("{}^", made.head)]), merged, "its one commit");
+    let tree = git_in(&repo, &["show", &format!("{}:a.txt", made.head)]);
+    assert_eq!(tree, "main's own and the first task's", "the work as it merged");
+
+    let task = git_in(&repo, &["rev-parse", "slopty/demo/1"]);
+    let unrelated = rebase(git, &repo, &place, (&task, "main", after), &[], None).await;
+    let unrelated = unrelated.expect("the plain rebase");
+    assert_eq!(git_in(&repo, &["rev-parse", &format!("{}^", unrelated.head)]), merged);
 }
 
 /// Every commit the queue rebases carries the task and the thread it came from as trailers,
@@ -127,7 +162,7 @@ async fn rebased_commits_carry_where_they_came_from() {
         ("Slopty-Thread".to_owned(), "0190d6f2-7c1a-7e00-8000-000000000001".to_owned()),
     ];
 
-    let made = rebase(git, &repo, &place, (&task, "main"), &trailers, Some(&task)).await;
+    let made = rebase(git, &repo, &place, (&task, "main", None), &trailers, Some(&task)).await;
     let made = made.expect("rebased with its trailers");
     assert_ne!(made.head, task, "its messages changed");
     assert!(made.verified, "its tree is the one verified");
@@ -139,13 +174,13 @@ async fn rebased_commits_carry_where_they_came_from() {
     let want = "Slopty-Task: demo#1\nSlopty-Thread: 0190d6f2-7c1a-7e00-8000-000000000001";
     assert_eq!(each, [want, want], "both commits, each once");
 
-    let again = rebase(git, &repo, &place, (&made.head, "main"), &trailers, None).await;
+    let again = rebase(git, &repo, &place, (&made.head, "main", None), &trailers, None).await;
     let again = again.expect("rebased again");
     let log = git_in(&repo, &["log", "-1", "--format=%(trailers:only,unfold)", &again.head]);
     assert_eq!(log.trim(), want, "not added twice");
 
     let quoted = [("Slopty-Task".to_owned(), "it's".to_owned())];
-    let refused = rebase(git, &repo, &place, (&task, "main"), &quoted, None).await;
+    let refused = rebase(git, &repo, &place, (&task, "main", None), &quoted, None).await;
     assert!(matches!(refused, Err(Failed::Other(why)) if why.contains("not a trailer")));
 }
 

@@ -243,11 +243,17 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
     assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");
     answer(&studio.lease, id, Outcome::Done);
     ready_to_merge(&hub, &mut studio, task).await;
+    // As if it started on another task's work: the rebase picks only its commits after that.
+    let noted = hub.inner.state.lock().projects.started_on(&project(), task, &commit('c'));
+    assert_eq!(noted.len(), 1);
     merge(&hub, task).await;
 
     let (id, verb) = studio.request().await;
-    let Verb::Rebase { head, onto, trailers, verified, .. } = &verb else { panic!("{verb:?}") };
+    let Verb::Rebase { head, onto, after, trailers, verified, .. } = &verb else {
+        panic!("{verb:?}")
+    };
     assert_eq!((head.as_str(), onto.as_str()), (commit('a').as_str(), "main"), "what was verified");
+    assert_eq!(after.as_deref(), Some(commit('c').as_str()), "the commit it started on");
     let provenance = [("Slopty-Task".to_owned(), format!("slopty#{task}"))];
     assert_eq!(trailers.as_slice(), provenance, "no thread is known for a terminal's agent");
     assert_eq!(verified.as_deref(), Some(commit('a').as_str()));

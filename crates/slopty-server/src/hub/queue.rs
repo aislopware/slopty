@@ -631,9 +631,13 @@ impl Hub {
         let mut own = held.filter(|(made, _)| *made == candidate).map(|(_, own)| own);
         for _ in 0..MERGE_TRIES {
             self.progress(at, running(format!("Rebasing onto {}", place.target)));
-            let judged = {
+            let (judged, after) = {
                 let state = self.inner.state.lock();
-                state.projects.task(project, task).ok().and_then(|t| t.verified.clone())
+                let t = state.projects.task(project, task).ok();
+                let read =
+                    (t.and_then(|t| t.verified.clone()), t.and_then(|t| t.started_on.clone()));
+                drop(state);
+                read
             };
             let passed = judged.filter(|r| r.passed).map(|r| r.head);
             let rebase = Verb::Rebase {
@@ -642,6 +646,7 @@ impl Hub {
                 worktree: place.worktree.clone(),
                 head: candidate.clone(),
                 onto: place.target.clone(),
+                after,
                 trailers: trailers.clone(),
                 verified: passed.clone(),
             };

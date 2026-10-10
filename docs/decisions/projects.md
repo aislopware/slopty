@@ -2885,3 +2885,42 @@ reordering and edited allows are gone" in `agents.md`.*
   - Test: `work_turning_ready_is_pushed_once_with_the_oldest_to_merge` (`hub/ladder/tests.rs`:
     three ready while the person is away push once after the settle, the oldest is the Merge,
     and a fourth later pushes the new count).
+
+- ✅ **A dependent may start from its dependency's verified work, before that work merges**
+  (2026-10-11, the orchestrator-first study, item 13, the dependency opt-in).
+  - **Why.** A dependent waited for its dependency's merge, and the merge waits on the person.
+    A chain of tasks therefore ran one merge at a time, even when each link was done and its
+    verifier had passed.
+  - **The opt-in.** A new task may name one of its `depends_on` as `start_from`
+    (`TaskSpec::start_from`, `task_start`'s `start_from`, the CLI's `--start-from`). A
+    `start_from` outside `depends_on` is refused. `may_start` counts that dependency once it is
+    Done on a branch with a verifier pass (`Record::checked`). Only a pass names the commit the
+    work is checked at, so in a project with no verifier the task waits for the merge as any
+    dependent does. The other dependencies are still merged first.
+  - **Its worktree.** The base is that work's branch as the orchestrator's clone holds it
+    (`Record::starts_on`). A worktree in that clone starts from the branch directly. A clone on
+    another machine is first sent it as `slopty/<project>/<n>` (`Hub::send_start_to`, which
+    replaced `send_target_to` and sends the target the same way). The agent's role says it
+    builds on that work and leaves its commits alone. The task keeps the commit it started on,
+    which is the dependency's verified head (`Task::started_on`), from its first start; a
+    restart reuses the worktree.
+  - **Its merge.** The task waits in the queue until that work is merged (`queue_of`). Its
+    branch then still holds the dependency's original commits, while the target holds them
+    rebased, or resolved by that agent after a give-back. The plain rebase would pick them
+    again and conflict, so `Verb::Rebase` carries `after`, the commit it started on. When the
+    head holds `after` and the target does not, the worker rebases with `--onto <target>
+    <after>`, picking only the task's own commits. Anything else gets the plain rebase, which
+    covers a restart that began on the target, or a retry already on top of it.
+  - **The person's word.** Dropping the dependency from `depends_on` drops `start_from` with
+    it. The task then merges with what its branch holds.
+  - Tests:
+    - `a_task_starts_from_its_dependency_s_checked_work_and_merges_after_it`
+      (`project/tests.rs`);
+    - `a_task_starts_on_its_dependency_s_checked_branch` (`hub/project_tests.rs`);
+    - the `after` assertion in
+      `a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_forward`
+      (`hub/queue/tests.rs`);
+    - `work_started_on_another_s_is_rebased_from_where_it_started` (slopty-worker
+      `repo/verify/tests.rs`: the plain rebase conflicts, the `--onto` one picks the one
+      commit, and an unrelated head takes the plain rebase);
+    - the `task_start` test, the tool schema, and the `rebase`, `task_create` and task goldens.

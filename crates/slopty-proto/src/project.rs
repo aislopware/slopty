@@ -733,6 +733,11 @@ pub struct NativeChange {
 pub struct TaskSpec {
     /// Tasks whose work it needs first. They and their own never lead back to it.
     pub depends_on: Vec<TaskId>,
+    /// One of `depends_on` whose work it starts from once that is done and its verifier
+    /// passed, before it merges: that work's branch, as the orchestrator's clone holds it, is
+    /// the worktree's base, and it merges only after that task. The rest of `depends_on` are
+    /// merged first.
+    pub start_from: Option<TaskId>,
     /// What sort of work it is, in the orchestrator's own words (`build`, `review`, `bench`).
     pub kind: String,
     /// What it is, in a line.
@@ -756,6 +761,12 @@ pub struct Task {
     pub id: TaskId,
     /// Tasks whose work it needs first.
     pub depends_on: Vec<TaskId>,
+    /// The one of `depends_on` whose done work it starts from before that merges
+    /// ([`TaskSpec::start_from`]).
+    pub start_from: Option<TaskId>,
+    /// The commit of `start_from`'s verified work its worktree started on, in hex, once it
+    /// started there: the merge queue picks only its commits after this one.
+    pub started_on: Option<String>,
     /// What sort of work it is.
     pub kind: String,
     /// What it is, in a line.

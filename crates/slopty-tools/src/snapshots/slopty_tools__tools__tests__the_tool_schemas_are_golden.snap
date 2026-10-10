@@ -163,6 +163,17 @@ expression: tools
           "description": "A new task: it only reads.",
           "type": "boolean"
         },
+        "start_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskArg"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A new task: the one of `depends_on` whose work it starts from once that is done and its\nverifier passed, before it merges: it works on top of that branch, and merges after it."
+        },
         "task": {
           "anyOf": [
             {

@@ -58,12 +58,16 @@ pub(crate) enum Queue {
     Set(Merge),
 }
 
-/// The tasks waiting in `record`'s queue, the longest waiting first.
+/// The tasks waiting in `record`'s queue, the longest waiting first. A task that started from
+/// another's work ([`Task::start_from`]) waits there until that work is merged, since its
+/// branch holds it.
 fn queue_of(record: &Record) -> Vec<TaskId> {
+    let merged = |on: TaskId| record.task(on).is_ok_and(|on| on.state == TaskState::Merged);
     let mut queued: Vec<(WallMs, TaskId)> = record
         .tasks
         .iter()
         .filter(|t| t.state == TaskState::Done)
+        .filter(|t| t.start_from.is_none_or(merged))
         .filter_map(|t| Some((t.merge.as_ref()?.queued()?, t.id)))
         .collect();
     queued.sort_unstable();
