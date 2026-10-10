@@ -1832,7 +1832,7 @@ impl WorkspaceView {
                 );
                 let close = tab_look::close(theme, close, shown, TAB_GROUP);
                 let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
-                let el = tab_look::tab(theme, el, shown, true);
+                let el = tab_look::pane_tab(theme, el, shown, true);
                 Some(
                     Self::tile_menu_press(el, tab, Pressed::Tab, cx)
                         .debug_selector(move || format!("tab-{}", id.as_uuid()))

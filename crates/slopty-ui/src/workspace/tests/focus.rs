@@ -141,3 +141,54 @@ fn a_pane_of_tabs_leads_with_its_dot_on_the_lone_panes_edge(cx: &mut TestAppCont
     let off = f32::from(dot.y - header.center().y).abs();
     assert!(off < 0.5, "centred on the row: {off} pt off");
 }
+
+/// A tab of several tiles reads as two levels, never its focused tile's pill twice: its title
+/// tab says what else it holds on a second line (the other's title, then how many once there
+/// are more), and the pane's tab on show takes the hover's wash where the title tab wears
+/// `selected`. A tab of one tile has no second line.
+#[gpui::test]
+fn a_tab_of_several_tiles_reads_as_two_levels(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let shown_tab = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.layout().shown_tab().map(|t| t.id().get())).expect("a tab")
+    };
+    let meta = |cx: &mut VisualTestContext| {
+        let n = shown_tab(cx);
+        cx.debug_bounds(Box::leak(format!("title-tab-meta-{n}").into_boxed_str()))
+    };
+    assert!(meta(cx).is_none(), "one tile: one line");
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    one_pane(&view, cx, &[first, second]);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
+    cx.run_until_parked();
+    let n = shown_tab(cx);
+    let title = cx.debug_bounds(Box::leak(format!("title-tab-text-{n}").into_boxed_str()));
+    let (title, under) = (title.expect("its title"), meta(cx).expect("what else it holds"));
+    assert!(under.top() >= title.bottom() - px(0.5), "under the title: {title:?} {under:?}");
+    let bar = cx.debug_bounds("titlebar").expect("the bar").bottom();
+    let said: Vec<String> = tree(cx)
+        .into_iter()
+        .filter(|n| n.role == "Tab" && n.bounds[1] < f32::from(bar))
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(said.iter().any(|l| l.contains(", ")), "the other tile is said: {said:?}");
+
+    let theme = Theme::default();
+    let pane_tab = cx.debug_bounds(selector("tab", second.item)).expect("the pane's tab on show");
+    let fills = fills_at(cx, pane_tab);
+    assert!(fills.contains(&crate::colors::hsla(theme.surfaces.hover)), "the lighter wash");
+    assert!(!fills.contains(&crate::colors::hsla(theme.surfaces.selected)), "{fills:?}");
+
+    let third = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    one_pane(&view, cx, &[first, third]);
+    cx.run_until_parked();
+    let said: Vec<String> = tree(cx)
+        .into_iter()
+        .filter(|n| n.role == "Tab" && n.bounds[1] < f32::from(bar))
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(said.iter().any(|l| l.ends_with(", 3 tiles")), "then how many: {said:?}");
+}

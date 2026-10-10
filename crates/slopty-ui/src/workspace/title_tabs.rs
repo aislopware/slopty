@@ -53,6 +53,9 @@ const SCROLL_LEAST: f32 = tab_look::TAB_FLOOR;
 /// The share of the row's width a chevron scrolls it by.
 const SCROLL_SHARE: f32 = 0.6;
 
+/// The leading of a two-line tab's lines, over their size: `MonoCode`'s `leading-tight`.
+const TWO_LINE_LEADING: f32 = 1.25;
+
 /// How much faster a tab's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
 
@@ -78,6 +81,10 @@ pub(super) struct TitleTab {
     /// Its one tile is a file with an edit not yet on disk, a dot after the title, when the bar
     /// is the tile's header.
     pub edited: bool,
+    /// What else it holds, when it holds more than its focused tile: the other's title, or how
+    /// many tiles it holds. The tab then says it on a second line under its title
+    /// (`MonoCode`'s `tabCopy`), so it never reads as its focused tile's pane tab again.
+    pub meta: Option<SharedString>,
     /// One mark for each agent in it that works or has finished, in pane order.
     pub marks: Vec<Status>,
     /// It is the one on show.
@@ -389,11 +396,15 @@ pub(super) fn render<V: TitleTabsHost>(
                     .text_color(hsla(s.text_muted))
                     .child(place)
             });
+            let label = match &tab.meta {
+                Some(meta) => SharedString::from(format!("{}, {meta}", tab.title)),
+                None => tab.title.clone(),
+            };
             let el = tab_look::tab(theme, el, tab.shown, true)
                 .debug_selector(move || format!("title-tab-{n}"))
                 .group(TAB_GROUP)
                 .role(Role::Tab)
-                .aria_label(tab.title.clone())
+                .aria_label(label)
                 .aria_selected(tab.shown)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -408,9 +419,10 @@ pub(super) fn render<V: TitleTabsHost>(
                     }),
                 )
                 .child(tab_lead(theme, tab))
-                .map(|el| match named {
-                    Some(field) => el.child(field),
-                    None => el.child(title).children(edited).children(place),
+                .map(|el| match (named, tab.meta.clone()) {
+                    (Some(field), _) => el.child(field),
+                    (None, Some(meta)) => el.child(two_lines(theme, title, meta, n)),
+                    (None, None) => el.child(title).children(edited).children(place),
                 })
                 .child(close)
                 .child(spot)
@@ -545,4 +557,35 @@ impl gpui::Element for PastEnd {
             child.paint(window, cx);
         }
     }
+}
+
+/// A tab's title over what else it holds, `MonoCode`'s two-line tab: both lines at the caption's
+/// size on a tight line so the two fit the pill, the title at the medium weight in the tab's
+/// tone and the rest in the muted one.
+fn two_lines(theme: &Theme, title: gpui::Div, meta: SharedString, n: u64) -> gpui::Div {
+    let size = theme.typography.caption();
+    let line = px(size * TWO_LINE_LEADING);
+    let meta = div()
+        .debug_selector(move || format!("title-tab-meta-{n}"))
+        .min_w_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .text_size(px(size))
+        .line_height(line)
+        .text_color(hsla(theme.surfaces.text_muted))
+        .child(meta);
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .child(
+            title
+                .text_size(px(size))
+                .line_height(line)
+                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT)),
+        )
+        .child(meta)
 }
