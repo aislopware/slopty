@@ -89,7 +89,12 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         "the tile and the ask"
     );
     assert_eq!(
-        Route::of_tap(&Tap { id: note.id.clone(), info: note.info.clone(), action: None }),
+        Route::of_tap(&Tap {
+            id: note.id.clone(),
+            info: note.info.clone(),
+            action: None,
+            text: None
+        }),
         Some(b),
         "a tap carries the route"
     );
@@ -171,7 +176,11 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
     attention.notice(&heard);
     let posted = memory.posted();
     assert_eq!(posted.len(), 1);
-    assert_eq!((posted[0].title.as_str(), posted[0].category), ("Fix the build", None));
+    assert_eq!(
+        (posted[0].title.as_str(), posted[0].category),
+        ("Fix the build", Some(REPLYING)),
+        "a reply until a yes or no is there"
+    );
 
     let held = Asking { approval: Some("7".into()), ..asking(a, "Run cargo test") };
     attention.look(&Look {
@@ -524,7 +533,7 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     let posted = memory.posted();
     let [note] = posted.as_slice() else { panic!("one note: {posted:?}") };
     assert_eq!(note.id, About::Thread(thread).note_id(), "not a session's");
-    let tap = Tap { id: note.id.clone(), info: note.info.clone(), action: None };
+    let tap = Tap { id: note.id.clone(), info: note.info.clone(), action: None, text: None };
     assert_eq!(Route::of_tap(&tap), Some(heard.route), "the tap leads back to it");
 }
 
@@ -574,8 +583,9 @@ fn a_pushed_note_is_the_note_the_app_would_post(cx: &mut TestAppContext) {
         let what = |n: &Note| (n.id.clone(), n.title.clone(), n.body.clone(), n.urgent, n.category);
         assert_eq!(what(&pushed), what(posted), "{notice:?}");
         assert_eq!(pushed.info, info, "all but the tile, {notice:?}");
-        let tap =
-            |n: &Note| Route::of_tap(&Tap { id: n.id.clone(), info: n.info.clone(), action: None });
+        let tap = |n: &Note| {
+            Route::of_tap(&Tap { id: n.id.clone(), info: n.info.clone(), action: None, text: None })
+        };
         let routed = tap(&pushed).expect("a pushed note routes");
         assert_eq!((routed.worker, routed.about), (heard.route.worker, heard.route.about));
 
@@ -595,7 +605,7 @@ fn a_tapped_note_focuses_its_tile(cx: &mut TestAppContext) {
     let tap = view.update(cx, |v, _| {
         assert_eq!(v.focused(), Some(tiles[1]), "on the second tile");
         let (route, _title) = v.attention_route(first).expect("the first shell has a tile");
-        Tap { id: first.to_string(), info: route.info(), action: None }
+        Tap { id: first.to_string(), info: route.info(), action: None, text: None }
     });
     view.update_in(cx, |v, _window, cx| {
         v.open_notification(&tap, cx);
@@ -619,7 +629,7 @@ fn a_note_tapped_before_its_machine_links_goes_there_once_it_does(cx: &mut TestA
     };
     let tap_on = |key: WorkerKey, session: SessionId| {
         let route = Route { worker: key, item: None, about: About::Session(session) };
-        Tap { id: session.to_string(), info: route.info(), action: None }
+        Tap { id: session.to_string(), info: route.info(), action: None, text: None }
     };
 
     let (studio, session) = (WorkerKey::new(9), SessionId::new());
@@ -833,7 +843,7 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
         assert_eq!(asks.approval.as_deref(), Some("ask-8"), "the note answers the request");
         let note = asks.note(false);
-        Tap { id: note.id, info: note.info, action: Some(notify::ALLOW.to_owned()) }
+        Tap { id: note.id, info: note.info, action: Some(notify::ALLOW.to_owned()), text: None }
     });
     view.update_in(cx, |v, _window, cx| v.open_notification(&tap, cx));
     assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-8")], "allowed once");
@@ -968,7 +978,7 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
     let tap = |route: Route, ask: &str, action: &str| {
         let mut info = route.info();
         info.insert(ASK.to_owned(), ask.to_owned());
-        Tap { id: route.about.note_id(), info, action: Some(action.to_owned()) }
+        Tap { id: route.about.note_id(), info, action: Some(action.to_owned()), text: None }
     };
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
     let heard = Rc::clone(&events);
@@ -1034,8 +1044,12 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
     // A button on a note that names no request answers nothing, and settles at once: the
     // system waits on the app's word that it is done with the tap.
     events.borrow_mut().clear();
-    let bare =
-        Tap { id: "stray".to_owned(), info: route.info(), action: Some(notify::DENY.into()) };
+    let bare = Tap {
+        id: "stray".to_owned(),
+        info: route.info(),
+        action: Some(notify::DENY.into()),
+        text: None,
+    };
     view.update_in(cx, |v, _window, cx| v.open_notification(&bare, cx));
     cx.run_until_parked();
     assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled]);

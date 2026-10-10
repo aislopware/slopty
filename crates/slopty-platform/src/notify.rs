@@ -18,10 +18,12 @@
 //!
 //! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
 //! held permission prompt where the note is, without bringing the app forward, and "Show" opens
-//! the tile. A press that finds nothing listening for taps (an iOS app the press launched in the
-//! background, with no window) goes to the answer the app installed for it ([`answer_unheard`]).
-//! The categories are registered with the centre when [`System`] is made, which does not prompt
-//! either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
+//! the tile. An agent's other notes ([`REPLYING`]) take a reply typed where the note is, sent to
+//! the agent as a message ([`Tap::text`]). A press that finds nothing listening for taps (an iOS
+//! app the press launched in the background, with no window) goes to the answer the app installed
+//! for it ([`answer_unheard`]). The categories are registered with the centre when [`System`] is
+//! made, which does not prompt either. A pressed button comes back as a [`Tap`] with its
+//! [`Tap::action`].
 //!
 //! A button answered in the background ([`Tap::finished_later`]) may have woken a suspended
 //! app, and the system lets it run until the delegate says it is done with the response. So
@@ -106,6 +108,8 @@ pub struct Tap {
     pub info: BTreeMap<String, String>,
     /// The button pressed ([`Action::id`]); `None` for the note itself.
     pub action: Option<String>,
+    /// What the person typed, for a button that takes words ([`ActionKind::Text`]).
+    pub text: Option<String>,
 }
 
 impl Tap {
@@ -144,6 +148,14 @@ pub enum ActionKind {
     Destructive,
     /// Brings the app forward.
     Foreground,
+    /// Takes words typed where the note is, then answered there as [`Self::Unlocked`] is: the
+    /// field's button and the words it shows while empty.
+    Text {
+        /// The field's button.
+        send: &'static str,
+        /// What the empty field shows.
+        placeholder: &'static str,
+    },
 }
 
 /// A kind of note and the buttons it carries, registered with the centre once.
@@ -167,8 +179,10 @@ impl Category {
 pub const ALLOW: &str = "allow";
 /// [`APPROVAL`]'s button that refuses it.
 pub const DENY: &str = "deny";
-/// [`APPROVAL`]'s button that opens the app at the agent.
+/// [`APPROVAL`]'s and [`REPLYING`]'s button that opens the app at the agent.
 pub const SHOW: &str = "show";
+/// [`REPLYING`]'s button that takes a reply to the agent.
+pub const REPLY: &str = "reply";
 
 /// How "Allow" and "Deny" are pressed: where the note is, the app left in the background. On
 /// iOS a press may launch an app the system ended, with no scene and so no GPUI and no links;
@@ -185,26 +199,41 @@ pub const APPROVAL: Category = Category {
     ],
 };
 
+/// An agent's note with nothing to allow or deny: it asks something, finished, or failed. The
+/// reply goes to it as a message, where the note is.
+pub const REPLYING: Category = Category {
+    id: "slopty.reply",
+    actions: &[
+        Action {
+            id: REPLY,
+            title: "Reply",
+            kind: ActionKind::Text { send: "Send", placeholder: "Message the agent" },
+        },
+        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
+    ],
+};
+
 /// Every category a note may name: what [`System`] registers.
-pub const CATEGORIES: [Category; 1] = [APPROVAL];
+pub const CATEGORIES: [Category; 2] = [APPROVAL, REPLYING];
 
 /// The tap a response to note `id` makes, as the delegate hands it on.
 ///
 /// `action` is the response's action identifier: `default` (the system's for the note itself)
 /// is a tap on the note, `dismiss` (the system's for a note swept away) is no tap at all, and
-/// anything else is a button.
+/// anything else is a button. `text` is what the person typed into a button that takes words.
 #[must_use]
 pub fn tap_of(
     id: String,
     info: BTreeMap<String, String>,
-    action: &str,
+    (action, text): (&str, Option<String>),
     (default, dismiss): (&str, &str),
 ) -> Option<Tap> {
     if action == dismiss {
         return None;
     }
     let action = (action != default).then(|| action.to_owned());
-    Some(Tap { id, info, action })
+    let text = text.filter(|_| action.is_some());
+    Some(Tap { id, info, action, text })
 }
 
 /// Whether notes reach the person.
@@ -349,7 +378,8 @@ mod apple {
         UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
         UNNotificationDismissActionIdentifier, UNNotificationInterruptionLevel,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
+        UNNotificationSettings, UNNotificationSound, UNTextInputNotificationAction,
+        UNTextInputNotificationResponse, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
     use parking_lot::Mutex;
@@ -954,16 +984,24 @@ mod apple {
             .actions
             .iter()
             .map(|action| {
+                let (id, title) = (NSString::from_str(action.id), NSString::from_str(action.title));
                 let options = match action.kind {
                     ActionKind::Unlocked => UNNotificationActionOptions::AuthenticationRequired,
                     ActionKind::Destructive => UNNotificationActionOptions::Destructive,
                     ActionKind::Foreground => UNNotificationActionOptions::Foreground,
+                    ActionKind::Text { send, placeholder } => {
+                        return Retained::into_super(
+                            UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
+                                &id,
+                                &title,
+                                UNNotificationActionOptions::AuthenticationRequired,
+                                &NSString::from_str(send),
+                                &NSString::from_str(placeholder),
+                            ),
+                        );
+                    }
                 };
-                UNNotificationAction::actionWithIdentifier_title_options(
-                    &NSString::from_str(action.id),
-                    &NSString::from_str(action.title),
-                    options,
-                )
+                UNNotificationAction::actionWithIdentifier_title_options(&id, &title, options)
             })
             .collect();
         UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
@@ -1105,10 +1143,13 @@ mod apple {
                 if id != shown {
                     SHOWN_AS.lock().insert(id.clone(), shown);
                 }
+                let typed = response
+                    .downcast_ref::<UNTextInputNotificationResponse>()
+                    .map(|typed| typed.userText().to_string());
                 let tap = super::tap_of(
                     id,
                     strings(&request.content().userInfo()),
-                    &response.actionIdentifier().to_string(),
+                    (&response.actionIdentifier().to_string(), typed),
                     (&system.0, &system.1),
                 );
                 if let Some(tap) = tap {
@@ -1282,17 +1323,29 @@ mod tests {
         assert_eq!(ids.len(), CATEGORIES.len(), "category identifiers are unique");
     }
 
+    /// An agent's other notes take a reply where the note is, unlocked, and "Show" opens it.
+    #[test]
+    fn the_reply_note_takes_words_where_it_is() {
+        assert!(CATEGORIES.contains(&REPLYING));
+        let reply = REPLYING.action(REPLY).expect("a reply button");
+        assert_eq!(reply.title, "Reply");
+        assert!(matches!(reply.kind, ActionKind::Text { send: "Send", .. }));
+        assert_eq!(REPLYING.action(SHOW).map(|a| a.kind), Some(ActionKind::Foreground));
+        assert_eq!(REPLYING.action(ALLOW), None, "nothing to allow");
+    }
+
     /// Only a button answered in the background keeps the system waiting on the app: the note
     /// itself, "Show", and a button no category has are done once handed on.
     #[test]
     fn only_an_answer_in_the_background_is_finished_later() {
         let tap = |action: Option<&str>| Tap {
             id: "n".into(),
-            info: BTreeMap::new(),
             action: action.map(str::to_owned),
+            ..Tap::default()
         };
         assert!(tap(Some(ALLOW)).finished_later());
         assert!(tap(Some(DENY)).finished_later());
+        assert!(tap(Some(REPLY)).finished_later(), "a reply is sent where the note is");
         assert!(!tap(Some(SHOW)).finished_later());
         assert!(!tap(None).finished_later());
         assert!(!tap(Some("maybe")).finished_later());
@@ -1326,11 +1379,20 @@ mod tests {
     fn a_response_becomes_a_tap_or_a_button_press() {
         let system = ("com.apple.UNNotificationDefaultActionIdentifier", "dismissed");
         let info = BTreeMap::from([("session".to_owned(), "s".to_owned())]);
-        let open = tap_of("n".to_owned(), info.clone(), system.0, system);
-        assert_eq!(open, Some(Tap { id: "n".to_owned(), info: info.clone(), action: None }));
-        let allow = tap_of("n".to_owned(), info.clone(), ALLOW, system);
+        let open = tap_of("n".to_owned(), info.clone(), (system.0, None), system);
+        assert_eq!(
+            open,
+            Some(Tap { id: "n".to_owned(), info: info.clone(), action: None, text: None })
+        );
+        let allow = tap_of("n".to_owned(), info.clone(), (ALLOW, None), system);
         assert_eq!(allow.and_then(|t| t.action), Some(ALLOW.to_owned()));
-        assert_eq!(tap_of("n".to_owned(), info, system.1, system), None, "swept away");
+        let reply = tap_of("n".to_owned(), info.clone(), (REPLY, Some("go on".into())), system);
+        assert_eq!(
+            reply.map(|t| (t.action, t.text)),
+            Some((Some(REPLY.to_owned()), Some("go on".to_owned()))),
+            "the words come with the press"
+        );
+        assert_eq!(tap_of("n".to_owned(), info, (system.1, None), system), None, "swept away");
     }
 
     #[cfg(target_vendor = "apple")]

@@ -536,8 +536,12 @@ fn open_push(payload: &str) -> Reply {
 /// [`Command::PressNote`]: the press answered as one nobody in the app listens to, on a thread
 /// of its own since it blocks ([`crate::verdict::answer_alone`]).
 async fn press_note(action: String, info: std::collections::BTreeMap<String, String>) -> Reply {
-    let tap =
-        slopty_platform::notify::Tap { id: "e2e-press".to_owned(), info, action: Some(action) };
+    let tap = slopty_platform::notify::Tap {
+        id: "e2e-press".to_owned(),
+        info,
+        action: Some(action),
+        text: None,
+    };
     let (done_tx, done_rx) = oneshot::channel();
     let spawned =
         std::thread::Builder::new().name("slopty-e2e-press".to_owned()).spawn(move || {

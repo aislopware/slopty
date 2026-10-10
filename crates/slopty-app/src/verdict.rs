@@ -1,5 +1,8 @@
-//! "Allow" and "Deny" on an approval note, answered with no window: the iOS app launched in the
-//! background for the press, or woken from suspension before anything listens for taps.
+//! "Allow" and "Deny" on an approval note, and a reply typed on an agent's other notes,
+//! answered with no window.
+//!
+//! The press may have launched the iOS app in the background, or woken it from suspension
+//! before anything listens for taps.
 //!
 //! iOS starts GPUI, and with it the links to the workers, only once a window scene connects,
 //! which a press in the background never brings. So a press that finds nobody listening
@@ -36,6 +39,31 @@ pub struct Verdict {
     pub allow: bool,
 }
 
+/// What a press with no window does.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Press {
+    /// "Allow" or "Deny".
+    Verdict(Verdict),
+    /// A reply typed on the note, sent to the thread as a message (`Verb::SendMessage`).
+    Reply {
+        /// The thread.
+        of: ThreadOf,
+        /// What the person typed.
+        text: String,
+    },
+}
+
+/// What `tap` does: a verdict ([`verdict_of`]), or a reply with words in it to the thread
+/// the note names.
+#[must_use]
+pub fn press_of(tap: &Tap) -> Option<Press> {
+    if tap.action.as_deref() == Some(notify::REPLY) {
+        let text = tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())?;
+        return Some(Press::Reply { of: thread_of(tap)?, text: text.to_owned() });
+    }
+    verdict_of(tap).map(Press::Verdict)
+}
+
 /// What `tap` answers, when it is a press of "Allow" or "Deny" on a note that names its
 /// request and where it was asked.
 #[must_use]
@@ -46,6 +74,11 @@ pub fn verdict_of(tap: &Tap) -> Option<Verdict> {
         _ => return None,
     };
     let ask = AskId(tap.info.get(info::ASK)?.clone());
+    Some(Verdict { of: thread_of(tap)?, ask, allow })
+}
+
+/// The thread a note is about: by its id, or by the terminal its agent runs in.
+fn thread_of(tap: &Tap) -> Option<ThreadOf> {
     let of = match tap.info.get(info::SESSION) {
         Some(session) => {
             // The app keys a worker by its id's 128 bits, in decimal; the id reads them in hex.
@@ -56,7 +89,7 @@ pub fn verdict_of(tap: &Tap) -> Option<Verdict> {
         }
         None => ThreadOf::Thread(tap.info.get(info::THREAD)?.parse::<ThreadId>().ok()?),
     };
-    Some(Verdict { of, ask, allow })
+    Some(of)
 }
 
 /// How a background answer went.
@@ -68,6 +101,18 @@ pub enum Answered {
     Gone,
     /// The server could not be asked, in its words.
     Failed(String),
+}
+
+/// Do `press` through the server `caller` reaches: a verdict as [`answer`] does, a reply sent
+/// to its thread.
+pub async fn answer_press(caller: &ServerCaller, press: Press) -> Answered {
+    match press {
+        Press::Verdict(verdict) => answer(caller, verdict).await,
+        Press::Reply { of, text } => match caller.call(Verb::SendMessage { of, text }).await {
+            Outcome::Error { message, .. } => Answered::Failed(message),
+            _ => Answered::Sent,
+        },
+    }
 }
 
 /// Answer `verdict` through the server `caller` reaches: read the thread's open requests for
@@ -106,7 +151,8 @@ pub const ANSWERED_ELSEWHERE: &str = "It was answered elsewhere, or it ended.";
 ///
 /// `None` once it was sent. `machine` is the name of the machine the agent runs on, where this
 /// device knows it. The note carries the pressed one's way to the agent, without its request,
-/// so a tap on it shows the agent and no button answers twice.
+/// so a tap on it shows the agent and no button answers twice. A reply that did not go keeps
+/// its field, to be sent again.
 #[must_use]
 pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Option<Note> {
     let mut info = tap.info.clone();
@@ -121,8 +167,11 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
             ..note
         }),
         Answered::Failed(why) => {
-            let pressed =
-                if tap.action.as_deref() == Some(notify::DENY) { "Deny" } else { "Allow" };
+            let (pressed, category) = match tap.action.as_deref() {
+                Some(notify::REPLY) => ("Your reply", Some(notify::REPLYING)),
+                Some(notify::DENY) => ("Deny", None),
+                _ => ("Allow", None),
+            };
             let title = machine.map_or_else(
                 || "Couldn't reach your server".to_owned(),
                 |name| format!("Couldn't reach {name}"),
@@ -130,8 +179,13 @@ pub fn missed_note(tap: &Tap, answered: &Answered, machine: Option<&str>) -> Opt
             tracing::info!(why, "a background answer failed");
             Some(Note {
                 title,
-                body: format!("{pressed} was not sent. The agent is still waiting."),
-                urgent: true,
+                body: if category.is_some() {
+                    format!("{pressed} was not sent.")
+                } else {
+                    format!("{pressed} was not sent. The agent is still waiting.")
+                },
+                category,
+                urgent: category.is_none(),
                 ..note
             })
         }
@@ -177,8 +231,10 @@ pub fn answer_unheard(tap: Tap) {
 /// at once.
 #[must_use]
 pub fn answer_alone(tap: &Tap) -> Answered {
-    let Some(verdict) = verdict_of(tap) else {
-        return Answered::Failed("not an Allow or a Deny that names its request".to_owned());
+    let Some(press) = press_of(tap) else {
+        return Answered::Failed(
+            "not an Allow, a Deny or a reply that names its thread".to_owned(),
+        );
     };
     let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server;
     let Some(server) = server else {
@@ -194,7 +250,7 @@ pub fn answer_alone(tap: &Tap) -> Answered {
             Err(why) => return Answered::Failed(why),
         };
         let caller = task.caller();
-        let answered = tokio::time::timeout(ANSWER_WITHIN, answer(&caller, verdict)).await;
+        let answered = tokio::time::timeout(ANSWER_WITHIN, answer_press(&caller, press)).await;
         answered.unwrap_or_else(|_late| Answered::Failed("no answer in time".to_owned()))
     })
 }
@@ -216,6 +272,7 @@ mod tests {
                 .map(|(k, v)| ((*k).to_owned(), v.clone()))
                 .collect::<BTreeMap<_, _>>(),
             action: Some(action.to_owned()),
+            text: None,
         }
     }
 
@@ -276,6 +333,36 @@ mod tests {
 
         let gone = missed_note(&pressed, &Answered::Gone, Some("studio")).expect("said");
         assert_eq!((gone.title.as_str(), gone.silent), (NO_LONGER_WAITING, true));
+    }
+
+    /// A reply carries its words to the thread the note names, and goes as one message; a
+    /// refusal is said, with the field kept to send it again. An empty reply is no press.
+    #[tokio::test]
+    async fn a_reply_goes_to_its_thread_as_a_message() {
+        let thread = ThreadId::new();
+        let mut typed = tap(notify::REPLY, &[(info::THREAD, thread.to_string())]);
+        assert_eq!(press_of(&typed), None, "no words");
+        typed.text = Some("  run the tests too ".to_owned());
+        let press = press_of(&typed).expect("a reply");
+        let of = ThreadOf::Thread(thread);
+        assert_eq!(press, Press::Reply { of: of.clone(), text: "run the tests too".to_owned() });
+        let (caller, mut queue) = ServerCaller::queued();
+        let sending = tokio::spawn(async move { answer_press(&caller, press).await });
+        let sent = loop {
+            if let Some(next) = queue.try_next() {
+                break next;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(sent.0, Verb::SendMessage { of, text: "run the tests too".to_owned() });
+        let _sent = sent.1.send(Outcome::Done);
+        assert_eq!(sending.await.ok(), Some(Answered::Sent));
+
+        let failed = Answered::Failed("no answer in time".to_owned());
+        let note = missed_note(&typed, &failed, Some("studio")).expect("said");
+        assert_eq!(note.body, "Your reply was not sent.");
+        assert_eq!(note.category, Some(notify::REPLYING), "to send again");
+        assert!(!note.urgent, "nothing waits on it");
     }
 
     fn choice(id: &str, effect: Effect) -> Choice {

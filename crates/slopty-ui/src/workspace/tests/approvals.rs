@@ -23,7 +23,7 @@ fn tapped(worker: WorkerKey, thread: ThreadId, ask: &str, action: &str) -> Tap {
         (THREAD.to_owned(), thread.to_string()),
         (ASK.to_owned(), ask.to_owned()),
     ]);
-    Tap { id: format!("thread-{thread}"), info, action: Some(action.to_owned()) }
+    Tap { id: format!("thread-{thread}"), info, action: Some(action.to_owned()), text: None }
 }
 
 /// `thread` on `worker` read through the server, its request `ask` open with a plain allow
@@ -144,5 +144,72 @@ fn a_notes_answer_goes_through_the_server_while_its_worker_is_away(cx: &mut Test
     assert_eq!(
         events.borrow().as_slice(),
         [WorkspaceEvent::Unanswered { route, why: NO_LONGER_WAITING }, WorkspaceEvent::TapsSettled]
+    );
+}
+
+/// A note's reply to a thread whose worker this client has no link to goes through the server
+/// as one message, and the app may sleep once it is out; a refused one is said, and a reply
+/// with no words sends nothing.
+#[gpui::test]
+fn a_notes_reply_goes_through_the_server_while_its_worker_is_away(cx: &mut TestAppContext) {
+    use crate::workspace::approvals::REPLY_NOT_SENT;
+    let (view, cx) = workspace(cx);
+    let laptop = worker_key(WorkerId::new());
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let thread = ThreadId::new();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.add_worker(laptop, "laptop".into(), cx);
+        v.set_app_active(false, cx);
+    });
+    cx.run_until_parked();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&events);
+    cx.update(|_window, cx| {
+        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
+            heard.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+    let reply = |text: &str| Tap {
+        text: Some(text.to_owned()),
+        ..tapped(laptop, thread, "unused", notify::REPLY)
+    };
+
+    view.update_in(cx, |v, _w, cx| v.open_notification(&reply("  "), cx));
+    cx.run_until_parked();
+    assert!(queue.try_next().is_none(), "no words, nothing sent");
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled]);
+
+    events.borrow_mut().clear();
+    view.update_in(cx, |v, _w, cx| v.open_notification(&reply("also bump the lockfile"), cx));
+    cx.run_until_parked();
+    let (verb, answer) = queue.try_next().expect("sent through the server");
+    assert_eq!(
+        verb,
+        Verb::SendMessage {
+            of: ThreadOf::Thread(thread),
+            text: "also bump the lockfile".to_owned()
+        }
+    );
+    assert!(events.borrow().is_empty(), "not out yet");
+    let _gone = answer.send(Outcome::Done);
+    cx.run_until_parked();
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "out: it may sleep");
+
+    events.borrow_mut().clear();
+    view.update_in(cx, |v, _w, cx| v.open_notification(&reply("again"), cx));
+    cx.run_until_parked();
+    let (_, answer) = queue.try_next().expect("sent");
+    let refused = Outcome::Error {
+        code: slopty_proto::orchestration::ErrorCode::WorkerUnreachable,
+        message: "no such thread".to_owned(),
+    };
+    let _gone = answer.send(refused);
+    cx.run_until_parked();
+    let route = Route { worker: laptop, item: None, about: About::Thread(thread) };
+    assert_eq!(
+        events.borrow().as_slice(),
+        [WorkspaceEvent::Unanswered { route, why: REPLY_NOT_SENT }, WorkspaceEvent::TapsSettled]
     );
 }

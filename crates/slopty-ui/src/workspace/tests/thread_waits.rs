@@ -371,6 +371,7 @@ fn a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note(cx: &mut TestAppCo
         ]
         .into(),
         action: Some(slopty_platform::notify::DENY.to_owned()),
+        text: None,
     };
     view.update_in(cx, |v, _w, cx| v.open_notification(&tap, cx));
     cx.run_until_parked();

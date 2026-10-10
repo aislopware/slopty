@@ -26,10 +26,10 @@ use std::time::{Duration, Instant};
 use gpui::Context;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
-use slopty_proto::orchestration::{Outcome, ThreadOf, ThreadView, Verb};
+use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, RequestCard};
-use slopty_proto::thread::{AskId, ThreadId};
+use slopty_proto::thread::{AskId, Delivery, ThreadId};
 
 use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 use crate::workspace::{WorkspaceEvent, WorkspaceView};
@@ -44,6 +44,9 @@ pub(in crate::workspace) const HOLD_VERDICT: Duration = Duration::from_secs(15);
 
 /// What a note's answer says when its worker was not reached in time.
 pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's machine";
+
+/// What a note's reply says when it did not reach the agent.
+pub(in crate::workspace) const REPLY_NOT_SENT: &str = "Your reply was not sent";
 
 /// A note's "Allow" or "Deny" whose request is not here yet.
 #[derive(Debug)]
@@ -151,6 +154,63 @@ impl WorkspaceView {
         let at = cx.background_executor().now();
         self.approvals.tapped.push(Tapped { route, ask, allow, at });
         self.settle_taps(cx);
+    }
+
+    /// A note's reply, `text`, to `route`'s agent: sent as its own composer sends a message
+    /// where its worker is linked here, else through the server, which finds the thread
+    /// wherever it runs. One that cannot go is said as a note's answer that found nothing.
+    pub(in crate::workspace) fn reply_tapped(
+        &mut self,
+        route: Route,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let thread = match route.about {
+            About::Session(session) => self.session_thread(session),
+            About::Thread(thread) => Some(thread),
+        };
+        let linked = self.workers.get(&route.worker).is_some_and(|w| w.link.is_some());
+        if let Some(thread) = thread.filter(|_| linked) {
+            tracing::info!(%thread, "a note's reply sent");
+            let hub = self.thread_hub(route.worker, cx);
+            // Sent now, as the thread's own composer sends (`ThreadMeta::delivery_now`).
+            let delivery = hub
+                .read(cx)
+                .threads()
+                .mirror(thread)
+                .and_then(slopty_client::threads::Mirror::state)
+                .map_or(Delivery::Steer, |s| s.meta.delivery_now());
+            let send = Intent::Send { text, delivery, attachments: Vec::new() };
+            let _id = hub.update(cx, |hub, cx| hub.intent(thread, send, cx));
+            self.settle_taps(cx);
+            return;
+        }
+        let of = match (thread, route.about) {
+            (Some(thread), _) | (None, About::Thread(thread)) => Some(ThreadOf::Thread(thread)),
+            (None, About::Session(session)) => super::projects::worker_id(route.worker)
+                .map(|worker| ThreadOf::Term(TermRef { worker, session })),
+        };
+        let (Some(caller), Some(of)) = (self.projects.caller.clone(), of) else {
+            self.unanswered(route, REPLY_NOT_SENT, cx);
+            self.settle_taps(cx);
+            return;
+        };
+        tracing::info!(?of, "a note's reply sent through the server");
+        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
+        cx.spawn(async move |this, cx| {
+            let sent = caller.call(Verb::SendMessage { of, text }).await;
+            let _gone = this.update(cx, |this, cx| {
+                if let Outcome::Error { message, .. } = sent {
+                    tracing::info!(message, "a note's reply was refused");
+                    this.unanswered(route, REPLY_NOT_SENT, cx);
+                }
+                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
+                if !this.approvals.taps_waiting() {
+                    cx.emit(WorkspaceEvent::TapsSettled);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Answer each waiting verdict whose request is here now; let go of one whose worker's

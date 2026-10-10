@@ -54,7 +54,7 @@ use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
-use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, Tap};
+use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, Tap};
 use slopty_proto::items::ItemKind;
 use slopty_proto::project::ProjectId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
@@ -75,11 +75,11 @@ pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 /// sound with each flip.
 pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
-/// Whether `tap` is a note's "Allow" or "Deny", which answers where the note is and may have
-/// woken the app in the background to do it.
+/// Whether `tap` is a note's "Allow", "Deny" or reply, which answers where the note is and may
+/// have woken the app in the background to do it.
 #[must_use]
 pub fn answers(tap: &Tap) -> bool {
-    matches!(tap.action.as_deref(), Some(notify::ALLOW | notify::DENY))
+    matches!(tap.action.as_deref(), Some(notify::ALLOW | notify::DENY | notify::REPLY))
 }
 
 /// What a note is about: a terminal, whose agent or shell it speaks of, or a thread driven
@@ -183,7 +183,12 @@ impl Asking {
             title: self.title.clone(),
             body: self.body.clone(),
             info,
-            category: self.approval.as_ref().map(|_| APPROVAL),
+            // A program's own wait has no agent to reply to.
+            category: if self.approval.is_some() {
+                Some(APPROVAL)
+            } else {
+                (!self.own).then_some(REPLYING)
+            },
             silent,
             urgent: true,
             thread: None,
@@ -465,6 +470,7 @@ impl Attention {
             title: heard.title.clone(),
             body: heard.body.clone(),
             info: heard.route.info(),
+            category: Some(REPLYING),
             ..Note::default()
         };
         let why = match heard.kind {
@@ -557,6 +563,7 @@ impl Attention {
                     title: turn.title.clone(),
                     body: turn.body.clone(),
                     info: turn.route.info(),
+                    category: Some(REPLYING),
                     ..Note::default()
                 };
                 self.post(turn.route.about, Why::Finished, note);
@@ -839,10 +846,18 @@ impl WorkspaceView {
     /// The human tapped a note: focus the tile it names and give it the keyboard. A note without
     /// a route (one another part of the app posted, tagged by its session) reveals that session.
     /// An agent with no tile here gets one. An approval note's "Allow" or "Deny" answers its
-    /// prompt and leaves the workspace where it is; "Show" is a tap.
+    /// prompt and a reply goes to its agent, each leaving the workspace where it is; "Show" is a
+    /// tap.
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
         tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
+        if tap.action.as_deref() == Some(notify::REPLY) {
+            match (route, tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())) {
+                (Some(route), Some(text)) => self.reply_tapped(route, text.to_owned(), cx),
+                _ => self.settle_taps(cx),
+            }
+            return;
+        }
         let allow = match tap.action.as_deref() {
             Some(notify::ALLOW) => Some(true),
             Some(notify::DENY) => Some(false),

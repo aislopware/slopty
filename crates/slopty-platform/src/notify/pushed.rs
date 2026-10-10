@@ -54,8 +54,11 @@ pub fn note_id(notice: &Notice) -> String {
     }
 }
 
-/// The note `body` makes on the phone: what the app would have posted for its notice, with the
-/// approval's buttons when it carries a yes or no they answer.
+/// The note `body` makes on the phone: what the app would have posted for its notice.
+///
+/// It has the approval's buttons when it carries a yes or no they answer, else, for an agent's
+/// thread, a reply ([`super::REPLYING`]). A quiet push only moves what its buttons answer under
+/// a note already up, so it sounds no second time.
 ///
 /// It knows no tile, so it carries no [`info::ITEM`]; the app finds the tile by the session or
 /// the thread. A thread's note with no title says the app's name, which stands in for the tile
@@ -100,10 +103,25 @@ pub fn note_of(body: &PushBody) -> Note {
         body: notice_body(notice),
         info: keys,
         thread,
-        category: body.ask.as_ref().map(|_| APPROVAL),
-        silent: false,
+        category: category_of(body),
+        silent: body.quiet,
         urgent: notice.kind == NoticeKind::NeedsYou,
     }
+}
+
+/// The buttons a pushed note carries: Allow and Deny on a yes or no, else a reply on an agent's
+/// own moment (one that needs the person, failed or finished). A program's record and a
+/// project's notice have none.
+fn category_of(body: &PushBody) -> Option<super::Category> {
+    if body.ask.is_some() {
+        return Some(APPROVAL);
+    }
+    let agent = matches!(body.notice.about, Subject::Thread(_));
+    let moment = matches!(
+        body.notice.kind,
+        NoticeKind::NeedsYou | NoticeKind::Failed | NoticeKind::Finished
+    );
+    (agent && moment).then_some(super::REPLYING)
 }
 
 /// The notes a background push takes back, from the ids under its
@@ -437,6 +455,11 @@ mod tests {
             ])
         );
         assert_eq!((note.category, note.urgent, note.thread), (Some(APPROVAL), true, None));
+        assert!(!note.silent, "the first push sounds");
+        let moved = note_of(&PushBody { ask: None, quiet: true, ..body });
+        assert_eq!(moved.id, note.id, "in place of the note up");
+        assert!(moved.silent, "a quiet push only moves its buttons");
+        assert_eq!(moved.category, Some(super::super::REPLYING), "the yes or no went: a reply");
 
         let mut done = notice(NoticeKind::Finished, at, None);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
@@ -451,7 +474,7 @@ mod tests {
             (note.title.as_str(), note.body.as_str()),
             ("Slopty", "Explore: Run cargo test?")
         );
-        assert_eq!((note.category, note.urgent), (None, false));
+        assert_eq!((note.category, note.urgent), (Some(super::super::REPLYING), false));
 
         let project = ProjectId::new("ladder").unwrap();
         let about = Subject::Project { project: project.clone(), entry: 7 };
@@ -462,6 +485,7 @@ mod tests {
         });
         assert_eq!(note.id, format!("project-{project}-7"));
         assert_eq!(note.thread.as_deref(), Some("ladder"));
+        assert_eq!(note.category, None, "a project's notice takes no reply");
         assert_eq!(note.info.get(info::SESSION), Some(&session.to_string()));
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
