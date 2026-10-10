@@ -7,7 +7,7 @@ expression: "decode(\"permission\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791562905488
+      at_ms: 1791610993853
       body:
         Prompt:
           text:
@@ -18,7 +18,7 @@ expression: "decode(\"permission\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1791562906774
+      at_ms: 1791610994888
       body:
         Tool:
           name: Bash
@@ -45,10 +45,10 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1791562906838
+            at_ms: 1791610994945
             images: []
     - id: toolu_02
-      at_ms: 1791562907722
+      at_ms: 1791610995802
       body:
         Tool:
           name: Bash
@@ -71,10 +71,10 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562908296
+            at_ms: 1791610996031
             images: []
     - id: toolu_03
-      at_ms: 1791562909145
+      at_ms: 1791610996992
       body:
         Tool:
           name: Bash
@@ -97,30 +97,30 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562909323
+            at_ms: 1791610997064
             images: []
     - id: "00000000-0000-4000-8000-000000000030:0"
-      at_ms: 1791562910721
+      at_ms: 1791610998640
       body:
         Text:
-          text: "done\n\nThe first command (`touch refused.txt`) was refused by the fixture, so that file was not created. `allowed.txt` and `always.txt` were created."
+          text: "done\n\n`touch refused.txt` was refused by the fixture, so that file was not created. `touch allowed.txt` and `touch always.txt` both completed."
           lines: 3
-          chars: 148
+          chars: 142
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791562905488
-      ended_ms: 1791562910746
+      started_ms: 1791610993853
+      ended_ms: 1791610998670
       models:
         - claude-haiku-5-5
       requests: 4
       usage:
         input: 8
-        cache_read: 68541
-        cache_write: 4797
-        output: 415
-        thinking: 120
-      context_tokens: 18545
+        cache_read: 66086
+        cache_write: 7668
+        output: 414
+        thinking: 119
+      context_tokens: 18649
       mode: default
       stop: end_turn

@@ -7,7 +7,7 @@ expression: "decode(\"compact\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791562894895
+      at_ms: 1791610986111
       body:
         Prompt:
           text:
@@ -18,7 +18,7 @@ expression: "decode(\"compact\").snapshot()"
           images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000015:0"
-      at_ms: 1791562895827
+      at_ms: 1791610987289
       body:
         Text:
           text: ready
@@ -26,19 +26,19 @@ expression: "decode(\"compact\").snapshot()"
           chars: 5
           full: ~
     - id: 00000000-0000-4000-8000-000000000019
-      at_ms: 1791562901698
+      at_ms: 1791610992283
       body:
         Compact:
           trigger: manual
-          pre_tokens: 18087
-          post_tokens: 1392
+          pre_tokens: 18191
+          post_tokens: 1310
           summary:
-            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready\", and I did; no other task has been requested.\n\n2. Key Technical Concepts:\n   - None beyond the environment: a non-git directory at /work on darwin/zsh.\n   - Standing attribution rules from system reminders for future work: commit messages end with `Co-Authored-By: Claude Haiku 5.5 <user@example.com>`, and PR descriptions end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.\n\n3. Files and Code Sections:\n   - None read, created, or modified.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - Nothing to solve yet.\n\n6. All user messages:\n   - \"Reply with the single word \"ready\".\"\n   - The compaction request to produce a text-only summary, which asked for a one-sentence summary of the user's requests.\n\n7. Pending Tasks:\n   - None.\n\n8. Current Work:\n   - None. The last action was replying \"ready\", and the summary request has been answered in this turn.\n\n9. Optional Next Step:\n   - None. Wait for the user's next request.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
-            lines: 34
-            chars: 1718
+            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready,\" and I did; there are no other requests so far.\n\n2. Key Technical Concepts:\n   - None yet.\n\n3. Files and Code Sections:\n   - None read, modified, or created.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - Nothing to solve yet.\n\n6. All user messages:\n   - \"Reply with the single word \"ready\".\"\n   - \"CRITICAL: Respond with TEXT ONLY...\" (summary request, with the instruction to summarize only the user's requests in one sentence).\n\n7. Pending Tasks:\n   - None.\n\n8. Current Work:\n   - Nothing in progress. The last action was replying \"ready,\" and the summary was then requested.\n\n9. Optional Next Step:\n   - None. Wait for the user's next instruction.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
+            lines: 33
+            chars: 1425
             full: ~
     - id: 00000000-0000-4000-8000-000000000023
-      at_ms: 1791562895871
+      at_ms: 1791610987350
       body:
         Prompt:
           text:
@@ -49,7 +49,7 @@ expression: "decode(\"compact\").snapshot()"
           images: []
           command: /compact
     - id: 00000000-0000-4000-8000-000000000024
-      at_ms: 1791562901935
+      at_ms: 1791610992403
       body:
         Note:
           kind: Command
@@ -63,22 +63,22 @@ expression: "decode(\"compact\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791562894895
-      ended_ms: 1791562895858
+      started_ms: 1791610986111
+      ended_ms: 1791610987336
       models:
         - claude-haiku-5-5
       requests: 1
       usage:
         input: 2
-        cache_read: 13746
-        cache_write: 4335
+        cache_read: 10979
+        cache_write: 7206
         output: 4
         thinking: 0
-      context_tokens: 18083
+      context_tokens: 18187
       mode: default
       stop: end_turn
     - prompt: 00000000-0000-4000-8000-000000000023
-      started_ms: 1791562895871
+      started_ms: 1791610987350
       ended_ms: ~
       models: []
       requests: 0

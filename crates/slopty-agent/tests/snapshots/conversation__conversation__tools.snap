@@ -7,7 +7,7 @@ expression: "decode(\"tools\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791562873371
+      at_ms: 1791610962515
       body:
         Prompt:
           text:
@@ -18,7 +18,7 @@ expression: "decode(\"tools\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1791562875353
+      at_ms: 1791610964401
       body:
         Tool:
           name: ToolSearch
@@ -36,10 +36,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 0
               chars: 0
               full: ~
-            at_ms: 1791562875388
+            at_ms: 1791610964438
             images: []
     - id: toolu_02
-      at_ms: 1791562876684
+      at_ms: 1791610965999
       body:
         Tool:
           name: TaskCreate
@@ -47,14 +47,14 @@ expression: "decode(\"tools\").snapshot()"
             TaskCreate:
               task_id: "1"
               subject: Survey files
-              description: Find *.rs files and locate println usages in the project
+              description: "Glob for *.rs files, grep for println, and run the printf and ls checks."
           result:
             status: Ok
             text: ~
-            at_ms: 1791562876707
+            at_ms: 1791610966060
             images: []
     - id: toolu_03
-      at_ms: 1791562876952
+      at_ms: 1791610966257
       body:
         Tool:
           name: TaskCreate
@@ -62,14 +62,14 @@ expression: "decode(\"tools\").snapshot()"
             TaskCreate:
               task_id: "2"
               subject: Write notes
-              description: Write notes.md with the two notes lines and verify main.rs line count
+              description: "Write notes.md with the heading and the main.rs line, then count main.rs lines via a subagent."
           result:
             status: Ok
             text: ~
-            at_ms: 1791562876970
+            at_ms: 1791610966302
             images: []
     - id: toolu_04
-      at_ms: 1791562877722
+      at_ms: 1791610967203
       body:
         Tool:
           name: TaskUpdate
@@ -84,10 +84,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562877735
+            at_ms: 1791610967251
             images: []
     - id: toolu_05
-      at_ms: 1791562878453
+      at_ms: 1791610968735
       body:
         Tool:
           name: Glob
@@ -104,10 +104,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 1
               chars: 7
               full: ~
-            at_ms: 1791562878474
+            at_ms: 1791610968775
             images: []
     - id: toolu_06
-      at_ms: 1791562879211
+      at_ms: 1791610969612
       body:
         Tool:
           name: Grep
@@ -126,10 +126,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 1
               chars: 32
               full: ~
-            at_ms: 1791562879234
+            at_ms: 1791610969673
             images: []
     - id: toolu_07
-      at_ms: 1791562880078
+      at_ms: 1791610970635
       body:
         Tool:
           name: Bash
@@ -140,7 +140,7 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 19
                 full: ~
-              description: Print two lines of test output
+              description: Print two lines with printf
               background: false
               task_id: ~
               status: Done
@@ -156,10 +156,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562880500
+            at_ms: 1791610971030
             images: []
     - id: toolu_08
-      at_ms: 1791562881333
+      at_ms: 1791610970811
       body:
         Tool:
           name: Bash
@@ -186,10 +186,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 2
               chars: 66
               full: ~
-            at_ms: 1791562881404
+            at_ms: 1791610971036
             images: []
     - id: toolu_09
-      at_ms: 1791562882736
+      at_ms: 1791610972343
       body:
         Tool:
           name: Bash
@@ -200,7 +200,7 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 25
                 full: ~
-              description: Run a short background echo command
+              description: Run a short background echo after a one-second sleep
               background: true
               task_id: b00000001
               status: Done
@@ -208,14 +208,14 @@ expression: "decode(\"tools\").snapshot()"
               stdout: ~
               stderr: ~
               output_file: /private/tmp/claude-uid/-work/00000000-0000-4000-8000-000000000001/tasks/b00000001.output
-              finished_ms: 1791562883772
+              finished_ms: 1791610973449
           result:
             status: Ok
             text: ~
-            at_ms: 1791562882760
+            at_ms: 1791610972404
             images: []
     - id: toolu_10
-      at_ms: 1791562884319
+      at_ms: 1791610974996
       body:
         Tool:
           name: Write
@@ -233,10 +233,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562884338
+            at_ms: 1791610975046
             images: []
     - id: toolu_11
-      at_ms: 1791562886088
+      at_ms: 1791610976600
       body:
         Tool:
           name: Agent
@@ -246,9 +246,9 @@ expression: "decode(\"tools\").snapshot()"
               agent_type: general-purpose
               description: Count lines
               prompt:
-                text: "Use the Read tool to read the file /work/main.rs and count its lines. Reply with just the number, nothing else."
+                text: Use the Read tool on /work/main.rs and count how many lines the file has. Reply with just the number and nothing else.
                 lines: 1
-                chars: 111
+                chars: 118
                 full: ~
               background: false
               status: Completed
@@ -257,16 +257,16 @@ expression: "decode(\"tools\").snapshot()"
                 lines: 1
                 chars: 1
                 full: ~
-              tokens: 13734
+              tokens: 13810
               tool_uses: 1
-              duration_ms: 2408
+              duration_ms: 2442
           result:
             status: Ok
             text: ~
-            at_ms: 1791562888508
+            at_ms: 1791610979095
             images: []
     - id: toolu_12
-      at_ms: 1791562889573
+      at_ms: 1791610980766
       body:
         Tool:
           name: TaskUpdate
@@ -281,10 +281,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562889591
+            at_ms: 1791610980793
             images: []
     - id: toolu_13
-      at_ms: 1791562889714
+      at_ms: 1791610980906
       body:
         Tool:
           name: TaskUpdate
@@ -299,10 +299,10 @@ expression: "decode(\"tools\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562889737
+            at_ms: 1791610980941
             images: []
-    - id: "00000000-0000-4000-8000-000000000062:0"
-      at_ms: 1791562890349
+    - id: "00000000-0000-4000-8000-000000000063:0"
+      at_ms: 1791610981630
       body:
         Text:
           text: done
@@ -318,18 +318,18 @@ expression: "decode(\"tools\").snapshot()"
       status: completed
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791562873371
-      ended_ms: 1791562890373
+      started_ms: 1791610962515
+      ended_ms: 1791610981662
       models:
         - claude-haiku-5-5
-      requests: 14
+      requests: 13
       usage:
-        input: 28
-        cache_read: 313050
-        cache_write: 12918
-        output: 2108
-        thinking: 585
-      context_tokens: 25150
+        input: 26
+        cache_read: 289997
+        cache_write: 16112
+        output: 2694
+        thinking: 1123
+      context_tokens: 25688
       mode: default
       stop: end_turn
 - id:
@@ -339,19 +339,19 @@ expression: "decode(\"tools\").snapshot()"
     agent_type: general-purpose
     description: Count lines
   entries:
-    - id: 00000000-0000-4000-8000-000000000065
-      at_ms: 1791562886094
+    - id: 00000000-0000-4000-8000-000000000066
+      at_ms: 1791610976648
       body:
         Prompt:
           text:
-            text: "Use the Read tool to read the file /work/main.rs and count its lines. Reply with just the number, nothing else."
+            text: Use the Read tool on /work/main.rs and count how many lines the file has. Reply with just the number and nothing else.
             lines: 1
-            chars: 111
+            chars: 118
             full: ~
           images: []
           command: ~
     - id: toolu_14
-      at_ms: 1791562887034
+      at_ms: 1791610978279
       body:
         Tool:
           name: Read
@@ -370,10 +370,10 @@ expression: "decode(\"tools\").snapshot()"
               lines: 4
               chars: 44
               full: ~
-            at_ms: 1791562887052
+            at_ms: 1791610978326
             images: []
-    - id: "00000000-0000-4000-8000-000000000081:0"
-      at_ms: 1791562888455
+    - id: "00000000-0000-4000-8000-000000000082:0"
+      at_ms: 1791610979033
       body:
         Text:
           text: "3"
@@ -382,18 +382,18 @@ expression: "decode(\"tools\").snapshot()"
           full: ~
   tasks: []
   turns:
-    - prompt: 00000000-0000-4000-8000-000000000065
-      started_ms: 1791562886094
+    - prompt: 00000000-0000-4000-8000-000000000066
+      started_ms: 1791610976648
       ended_ms: ~
       models:
         - claude-haiku-5-5
       requests: 2
       usage:
         input: 4
-        cache_read: 12514
-        cache_write: 13580
-        output: 221
-        thinking: 149
-      context_tokens: 13582
+        cache_read: 12619
+        cache_write: 13805
+        output: 192
+        thinking: 119
+      context_tokens: 13807
       mode: ~
       stop: end_turn

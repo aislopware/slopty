@@ -7,7 +7,7 @@ expression: "decode(\"edit\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1791562864278
+      at_ms: 1791610951108
       body:
         Prompt:
           text:
@@ -18,7 +18,7 @@ expression: "decode(\"edit\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1791562866160
+      at_ms: 1791610953548
       body:
         Tool:
           name: Read
@@ -33,10 +33,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562866207
+            at_ms: 1791610953602
             images: []
     - id: toolu_02
-      at_ms: 1791562867122
+      at_ms: 1791610955417
       body:
         Tool:
           name: Edit
@@ -64,10 +64,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562867143
+            at_ms: 1791610955481
             images: []
     - id: toolu_03
-      at_ms: 1791562868506
+      at_ms: 1791610957616
       body:
         Tool:
           name: Write
@@ -95,10 +95,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562868537
+            at_ms: 1791610957666
             images: []
     - id: toolu_04
-      at_ms: 1791562869372
+      at_ms: 1791610958896
       body:
         Tool:
           name: Read
@@ -113,10 +113,10 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1791562869385
+            at_ms: 1791610958920
             images: []
-    - id: "00000000-0000-4000-8000-000000000031:0"
-      at_ms: 1791562871899
+    - id: "00000000-0000-4000-8000-000000000030:0"
+      at_ms: 1791610960932
       body:
         Text:
           text: done
@@ -126,17 +126,17 @@ expression: "decode(\"edit\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1791562864278
-      ended_ms: 1791562871925
+      started_ms: 1791610951108
+      ended_ms: 1791610960966
       models:
         - claude-haiku-5-5
       requests: 5
       usage:
         input: 10
-        cache_read: 87968
-        cache_write: 5376
-        output: 692
-        thinking: 278
-      context_tokens: 19124
+        cache_read: 85484
+        cache_write: 8102
+        output: 547
+        thinking: 134
+      context_tokens: 19083
       mode: default
       stop: end_turn
