@@ -568,11 +568,10 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
             let font = [0.0, 0.0, -1.5, 2.0][rng.below(4)];
             let ligatures = rng.chance(70);
             let contrast = [100, 100, 450][rng.below(3)];
-            let bright = rng.chance(50);
             (
                 format!(
                     "theme {variant:?}, short lines {short}, font {font:+}, ligatures \
-                     {ligatures}, contrast {contrast}, bold bright {bright}"
+                     {ligatures}, contrast {contrast}"
                 ),
                 Box::new(move |view, _window, cx| {
                     let mut theme = Theme::new(variant);
@@ -582,7 +581,6 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
                     theme.typography.mono_size += font;
                     theme.typography.ligatures = ligatures;
                     theme.terminal.minimum_contrast = contrast;
-                    theme.terminal.bold_is_bright = bright;
                     view.set_theme(theme, cx);
                 }),
             )

@@ -56,7 +56,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   theme push. `bell_alert` (default on) is the one setting the theme does not carry: the app's
   bell handler reads it directly (`settings::bell_alerts`), since sounding the alert and
   bouncing the Dock is an app act, not a view's. A bell in front of an active window still
-  only flashes the card, whatever the flag. `cursor_blink` is ghostty's `cursor-style-blink`
+  only flashes the card, whatever the flag. `cursor_blink` (cut on 2026-10-10, "The cursor, bold and the wheel are not settings",
+  below) was ghostty's `cursor-style-blink`
   (`Behaviour::cursor_blink`: `program` leaves DECSCUSR alone, `always`/`never` override it
   either way); the element applies it where it decides whether the cursor ticks the blink
   clock, so an unfocused card stays steady as before. `paste_protection` (default on) was
@@ -504,3 +505,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `terminal_keys` (slopty-settings), `terminal_settings_ride_on_the_theme`
     (slopty-app), and in the terminal view `a_paste_the_worker_holds_back_waits_for_a_confirmation`,
     `closing_a_busy_shell_asks_first` and `the_macs_editing_keys_edit_the_line`.
+
+- ✅ **The cursor, bold and the wheel are not settings** (2026-10-10, orchestrator-first audit
+  §C.5). `[terminal] cursor_blink`, `cursor_style`, `bold_is_bright` and `scroll_multiplier`
+  are gone, along with their form rows (the Terminal page's Cursor group and the Input page's
+  Pointer group). The program decides the cursor, bold is a weight, and a wheel line is one
+  grid line. They are ruled in decisions/terminal.md ("The cursor, bold and the wheel are the
+  program's and the system's"). A file that still has one loads, with an unknown-key warning
+  for it. Test: `terminal_keys`.

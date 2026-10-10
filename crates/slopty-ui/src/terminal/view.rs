@@ -3043,7 +3043,8 @@ impl TerminalView {
     }
 
     /// Half a blink passed: flip the phase, unless a keystroke pinned it on less than a half
-    /// ago (typing keeps the cursor solid). False ends the loop, phase on.
+    /// ago (typing keeps the cursor solid) or Reduce Motion holds it. False ends the loop, phase
+    /// on.
     fn blink_tick(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.blink_wanted {
             self.blink_task = None;
@@ -3054,6 +3055,15 @@ impl TerminalView {
             return false;
         }
         if self.blink_pinned.take().is_some_and(|at| at.elapsed() < BLINK_HALF) {
+            return true;
+        }
+        // Reduce Motion holds what blinks steady and shown; the clock goes on, so it blinks
+        // again once the setting is off.
+        if cx.reduce_motion() {
+            if !self.blink_on {
+                self.blink_on = true;
+                cx.notify();
+            }
             return true;
         }
         self.blink_on = !self.blink_on;
@@ -3309,7 +3319,6 @@ impl TerminalView {
                 f32::from(p.y) / line_height
             }
         };
-        let lines = lines * f32::from(self.theme.behaviour.scroll_multiplier) / 100.0;
         // A program that asked for the mouse gets the wheel (⇧ keeps it for scrolling, as
         // in every terminal); so does anything on the alternate screen, which has no
         // history here to scroll — the worker turns it into cursor keys (alternate scroll).
@@ -5358,24 +5367,15 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(phase(cx), (true, false), "nothing blinks: the clock stops, phase on");
 
-        // The theme overrides the program either way.
-        let blink_theme = |cursor_blink| {
-            let mut theme = Theme::new(slopty_theme::Variant::Dark);
-            theme.behaviour.cursor_blink = cursor_blink;
-            theme
-        };
-        view.update_in(cx, |view, _window, cx| {
-            view.set_theme(blink_theme(slopty_theme::CursorBlink::Never), cx);
-            view.apply(frame(4, false, true), cx);
-        });
+        // Under Reduce Motion what blinks holds steady, shown.
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        view.update_in(cx, |view, _window, cx| view.apply(frame(4, true, true), cx));
         cx.run_until_parked();
-        assert_eq!(phase(cx), (true, false), "never: a program's blink is steady");
-        view.update_in(cx, |view, _window, cx| {
-            view.set_theme(blink_theme(slopty_theme::CursorBlink::Always), cx);
-            view.apply(frame(5, false, false), cx);
-        });
-        cx.run_until_parked();
-        assert!(phase(cx).1, "always: a steady program's cursor blinks");
+        for _ in 0..3 {
+            cx.background_executor.advance_clock(BLINK_HALF);
+            cx.run_until_parked();
+            assert!(phase(cx).0, "Reduce Motion: shown and steady");
+        }
     }
 
     /// Paste protection is the worker's to judge, by the program's mode when the paste
@@ -6881,15 +6881,12 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
     }
 
-    /// The scroll multiplier: three grid lines per wheel line when the theme says so.
+    /// A wheel line scrolls one grid line, as the system's scrolling speed already sets.
     #[gpui::test]
-    fn the_wheel_scrolls_by_the_multiplier(cx: &mut TestAppContext) {
+    fn a_wheel_line_scrolls_one_grid_line(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(history_frame(100, &["hello wor", "second", "third row"]), cx);
-            let mut theme = Theme::new(slopty_theme::Variant::Dark);
-            theme.behaviour.scroll_multiplier = 300;
-            view.set_theme(theme, cx);
         });
         cx.run_until_parked();
         let at = cell_center(&view, cx, 2.0, 1.0);
@@ -6901,7 +6898,7 @@ mod tests {
             momentum_phase: None,
         });
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 3);
+        assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
     }
 
     /// ⇧⇞ / ⇧⇟ page through history, ⇧⇱ / ⌘⇱ go to the oldest line and ⇧⇲ / ⌘⇲ back to the

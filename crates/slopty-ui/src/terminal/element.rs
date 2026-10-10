@@ -1290,17 +1290,6 @@ fn place(
     glyphs
 }
 
-/// The shape a focused cursor is drawn in: the program's (DECSCUSR), unless the theme fixes
-/// one (ghostty's `cursor-style`).
-const fn cursor_shape_for(style: slopty_theme::CursorStyle, program: CursorShape) -> CursorShape {
-    match style {
-        slopty_theme::CursorStyle::Program => program,
-        slopty_theme::CursorStyle::Block => CursorShape::Block,
-        slopty_theme::CursorStyle::Bar => CursorShape::Bar,
-        slopty_theme::CursorStyle::Underline => CursorShape::Underline,
-    }
-}
-
 /// The colour a cell's glyphs take, with inverse, faint and invisible applied, held to the
 /// theme's minimum contrast against the cell's background. In the off phase of the blink
 /// clock (`blink_off`) an SGR 5 cell's glyphs are hidden the same way.
@@ -1311,8 +1300,7 @@ fn cell_color(
     contrast: &mut Contrast,
 ) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
-    let fg = palette.bold_slot(style.fg, style.flags.contains(StyleFlags::BOLD));
-    let (fg_slot, bg_slot) = if inverse { (style.bg, fg) } else { (fg, style.bg) };
+    let (fg_slot, bg_slot) = if inverse { (style.bg, style.fg) } else { (style.fg, style.bg) };
     let fg = palette.resolve(fg_slot, inverse);
     let bg = palette.resolve(bg_slot, !inverse);
     let mut color = hsla(contrast.text_over(palette, fg, bg));
@@ -1486,14 +1474,12 @@ impl Element for TerminalElement {
             self.view.update(cx, |view, cx| view.set_font_family(picked.clone(), cx));
             picked
         });
-        let (base_size, height_mult, base_pad, cursor_blink, cursor_style, ligatures) = {
+        let (base_size, height_mult, base_pad, ligatures) = {
             let theme = self.view.read(cx).theme();
             (
                 px(theme.typography.mono_size),
                 theme.typography.mono_line_height,
                 px(theme.spacing.inset()),
-                theme.behaviour.cursor_blink,
-                theme.behaviour.cursor_style,
                 theme.typography.ligatures,
             )
         };
@@ -1919,9 +1905,8 @@ impl Element for TerminalElement {
                 && !view.in_copy_mode()
                 && !modes.contains(slopty_grid::TermModes::CURSOR_HIDDEN);
             // A blinking cursor blinks only while focused; unfocused it is a steady hollow
-            // block (what ghostty does), so a background terminal never ticks for it. The
-            // theme may override the program's choice either way.
-            let cursor_blinks = cursor_visible && cursor_blink.blinks(cursor.blink) && focused;
+            // block (what ghostty does), so a background terminal never ticks for it.
+            let cursor_blinks = cursor_visible && cursor.blink && focused;
             blinking |= cursor_blinks;
             let cursor_shown = cursor_visible && !(cursor_blinks && blink_off);
             let (cursor_row, cursor_col) = copy_at.unwrap_or((cursor.row, cursor.col));
@@ -1938,7 +1923,7 @@ impl Element for TerminalElement {
                     } else if copy_at.is_some() {
                         CursorShape::Block
                     } else {
-                        cursor_shape_for(cursor_style, cursor.shape)
+                        cursor.shape
                     };
                     let width = cell_width * f32::from(span);
                     // An unfocused pane's hollow block is a place marker, not the caret: muted,
@@ -3118,44 +3103,6 @@ mod tests {
 
     /// A cell whose text would not read against its background is painted black or white
     /// once the theme sets a minimum contrast; inverse video is judged the painted way round.
-    #[test]
-    fn the_cursor_style_fixes_the_shape_or_leaves_it() {
-        use slopty_theme::CursorStyle;
-        assert_eq!(cursor_shape_for(CursorStyle::Program, CursorShape::Bar), CursorShape::Bar);
-        assert_eq!(cursor_shape_for(CursorStyle::Block, CursorShape::Bar), CursorShape::Block);
-        assert_eq!(cursor_shape_for(CursorStyle::Bar, CursorShape::Block), CursorShape::Bar);
-        assert_eq!(
-            cursor_shape_for(CursorStyle::Underline, CursorShape::Block),
-            CursorShape::Underline
-        );
-    }
-
-    #[test]
-    fn bold_text_is_painted_bright_when_asked() {
-        let mut theme = Theme::default().terminal;
-        let bold_red = CellStyle {
-            fg: slopty_grid::Color::Palette(1),
-            flags: StyleFlags::BOLD,
-            ..CellStyle::default()
-        };
-        assert_eq!(
-            cell_color(&bold_red, &Colors::from(&theme), false, &mut Contrast::default()),
-            hsla(theme.ansi[1])
-        );
-        theme.bold_is_bright = true;
-        let colors = Colors::from(&theme);
-        assert_eq!(
-            cell_color(&bold_red, &colors, false, &mut Contrast::default()),
-            hsla(theme.ansi[9])
-        );
-        let inverse = CellStyle { flags: StyleFlags::BOLD | StyleFlags::INVERSE, ..bold_red };
-        assert_eq!(
-            cell_color(&inverse, &colors, false, &mut Contrast::default()),
-            hsla(theme.bg),
-            "inverse: the bg slot"
-        );
-    }
-
     #[test]
     fn text_is_held_to_the_minimum_contrast() {
         let mut theme = Theme::default().terminal;

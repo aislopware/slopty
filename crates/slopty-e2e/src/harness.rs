@@ -864,7 +864,7 @@ fn follow(app_dir: &Path, server: &ServerDaemon) -> Result<()> {
 /// The settings an app under test runs with, in `appearance`.
 #[must_use]
 pub fn pinned_settings(appearance: &str) -> String {
-    format!("[theme]\nappearance = \"{appearance}\"\n\n[terminal]\ncursor_blink = \"never\"\n")
+    format!("[theme]\nappearance = \"{appearance}\"\n")
 }
 
 /// Connect to `sock`, retrying for a few seconds: under heavy load the listener may not accept
@@ -2662,8 +2662,25 @@ impl ProjectStack {
         more_programs: &[(&str, &Path)],
         more_env: &[(&str, &str)],
     ) -> Result<Self> {
+        let more: Vec<(String, String)> =
+            more_env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        Self::launch_rooted(worker_name, more_programs, |_root| more).await
+    }
+
+    /// [`Self::launch_with`], the worker's added environment made from the run's root: a stand-in
+    /// agent's script that names paths under it (`STUB_HOOKS` with a worktree's `cwd`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_rooted(
+        worker_name: &str,
+        more_programs: &[(&str, &Path)],
+        more_env: impl FnOnce(&Path) -> Vec<(String, String)>,
+    ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-projects-")?;
         let root = dir.path();
+        let more_env = more_env(root);
         let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
@@ -2687,7 +2704,7 @@ impl ProjectStack {
             ("SLOPTY_BIND", "127.0.0.1"),
             ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
         ];
-        env.extend_from_slice(more_env);
+        env.extend(more_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let worker =
             Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
                 .await?;

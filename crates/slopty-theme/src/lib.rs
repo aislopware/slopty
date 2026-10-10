@@ -270,9 +270,6 @@ pub struct TerminalPalette {
     /// (`100` = 1.0, off; `300` = 3.0). Text under it is painted black or white, whichever
     /// contrasts more with the background: ghostty's `minimum-contrast`.
     pub minimum_contrast: u16,
-    /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (xterm's `boldColors`, ghostty's
-    /// `bold-is-bright`), for the many schemes that make the bright half a lighter tint.
-    pub bold_is_bright: bool,
 }
 
 /// The dark ground: the window, every pane and the terminal's grid, one plane. `MonoCode`'s
@@ -319,7 +316,6 @@ impl TerminalPalette {
             Rgb::hex(0xffffff),
         ],
         minimum_contrast: 100,
-        bold_is_bright: false,
     };
     /// The default light palette, generated from the dark one's hues: each colour keeps its
     /// slot's hue (green moves to the brand's, since at One Dark's 133° and this lightness it
@@ -355,7 +351,6 @@ impl TerminalPalette {
             Rgb::hex(0x949494),
         ],
         minimum_contrast: 100,
-        bold_is_bright: false,
     };
 
     /// The palette as the worker hears it: what colour queries answer while this client drives.
@@ -451,17 +446,6 @@ impl Colors {
                 self.cube.get(&n).copied().unwrap_or_else(|| self.theme.palette(n))
             }
             other => self.theme.resolve(other, slot_is_bg),
-        }
-    }
-
-    /// The slot bold text takes: ANSI 0–7 becomes 8–15 when the theme says bold is bright.
-    #[must_use]
-    pub const fn bold_slot(&self, color: Color, bold: bool) -> Color {
-        match color {
-            Color::Palette(n) if bold && self.theme.bold_is_bright && n < 8 => {
-                Color::Palette(n.saturating_add(8))
-            }
-            other => other,
         }
     }
 
@@ -1745,30 +1729,18 @@ pub enum Variant {
 pub struct Behaviour {
     /// A selection goes to the clipboard as soon as it is made.
     pub copy_on_select: bool,
-    /// Whether the cursor blinks: the program's choice (DECSCUSR), or overridden either way.
-    pub cursor_blink: CursorBlink,
-    /// The cursor's shape: the program's, or one fixed.
-    pub cursor_style: CursorStyle,
-    /// What a wheel or trackpad line is worth in grid lines, in hundredths (`100` = one).
-    pub scroll_multiplier: u16,
     /// ⌥ as Alt: sent with every key, since the encoder is the worker's.
     pub option_as_alt: OptionAsAlt,
     /// When typing is kept from other programs on this Mac (secure event input).
     pub secure_entry: SecureEntry,
-    /// What a remote window or display stream asks the worker for.
-    pub stream: StreamPrefs,
 }
 
 impl Default for Behaviour {
     fn default() -> Self {
         Self {
             copy_on_select: false,
-            cursor_blink: CursorBlink::Program,
-            cursor_style: CursorStyle::Program,
-            scroll_multiplier: 100,
             option_as_alt: OptionAsAlt::False,
             secure_entry: SecureEntry::Passwords,
-            stream: StreamPrefs::default(),
         }
     }
 }
@@ -1812,59 +1784,6 @@ pub enum SecureEntry {
     Always,
     /// Never.
     Never,
-}
-
-/// Whether the cursor blinks (ghostty's `cursor-style-blink`: unset, true, false).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum CursorBlink {
-    /// The program decides (DECSCUSR); shells default to steady, editors often ask to blink.
-    #[default]
-    Program,
-    /// Always blinks.
-    Always,
-    /// Never blinks.
-    Never,
-}
-
-/// The cursor's shape (ghostty's `cursor-style`): the program's (DECSCUSR), or one of the
-/// three fixed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum CursorStyle {
-    /// The program decides.
-    #[default]
-    Program,
-    /// A filled block.
-    Block,
-    /// A bar at the left edge.
-    Bar,
-    /// An underline.
-    Underline,
-}
-
-impl CursorBlink {
-    /// Whether the cursor blinks, given what the program asked for.
-    #[must_use]
-    pub const fn blinks(self, program: bool) -> bool {
-        match self {
-            Self::Program => program,
-            Self::Always => true,
-            Self::Never => false,
-        }
-    }
-}
-
-/// The quality a remote stream is opened at (the scale follows the width the tile is drawn at,
-/// not this).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct StreamPrefs {
-    /// The bitrate ceiling, bits per second.
-    pub max_bitrate_bps: u32,
-}
-
-impl Default for StreamPrefs {
-    fn default() -> Self {
-        Self { max_bitrate_bps: 30_000_000 }
-    }
 }
 
 /// The whole theme.
@@ -2195,20 +2114,6 @@ mod tests {
     }
 
     #[test]
-    fn bold_is_bright_lifts_only_the_named_eight() {
-        let mut theme = TerminalPalette::DARK;
-        let colors = Colors::from(&theme);
-        assert_eq!(colors.bold_slot(Color::Palette(1), true), Color::Palette(1), "off");
-        theme.bold_is_bright = true;
-        let colors = Colors::from(&theme);
-        assert_eq!(colors.bold_slot(Color::Palette(1), true), Color::Palette(9));
-        assert_eq!(colors.bold_slot(Color::Palette(1), false), Color::Palette(1), "not bold");
-        assert_eq!(colors.bold_slot(Color::Palette(9), true), Color::Palette(9), "already bright");
-        assert_eq!(colors.bold_slot(Color::Palette(196), true), Color::Palette(196), "the cube");
-        assert_eq!(colors.bold_slot(Color::Default, true), Color::Default);
-    }
-
-    #[test]
     fn option_as_alt_applies_to_the_side_held() {
         for (setting, left, right) in [
             (OptionAsAlt::False, false, false),
@@ -2222,22 +2127,6 @@ mod tests {
                 "{setting:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_cursor_blink_override_beats_the_program() {
-        assert_eq!(
-            (CursorBlink::Program.blinks(true), CursorBlink::Program.blinks(false)),
-            (true, false)
-        );
-        assert_eq!(
-            (CursorBlink::Always.blinks(true), CursorBlink::Always.blinks(false)),
-            (true, true)
-        );
-        assert_eq!(
-            (CursorBlink::Never.blinks(true), CursorBlink::Never.blinks(false)),
-            (false, false)
-        );
     }
 
     /// The keyboard's outline is the green word, `MonoCode`'s `outline-accent`, drawn whole at

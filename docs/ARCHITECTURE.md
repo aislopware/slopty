@@ -1609,11 +1609,9 @@ applies it, a parse error stays under the field).
 `slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
 ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
-`[terminal] minimum_contrast | copy_on_select | alert = never | hidden | always | cursor_blink = program | always |
-never | cursor_style = program | block | bar | underline | bold_is_bright | scroll_multiplier |
-option_as_alt = false | true | left | right` (the ratio and bold-is-bright ride on
-`TerminalPalette`, copy-on-select, the blink override, the multiplier and option-as-alt on
-`Theme::behaviour`,
+`[terminal] minimum_contrast | copy_on_select | alert = never | hidden | always |
+option_as_alt = false | true | left | right` (the ratio rides on `TerminalPalette`,
+copy-on-select and option-as-alt on `Theme::behaviour`,
 the last travelling on every `KeyEvent` to the worker's encoder, the alert is
 read by the app's bell and agent handlers, see decisions/terminal.md), `[remote] max_bitrate_mbps` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change, see decisions/video.md and decisions/settings.md), `[colors.light]` and `[colors.dark]`

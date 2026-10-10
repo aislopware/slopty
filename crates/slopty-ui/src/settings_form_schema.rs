@@ -31,8 +31,6 @@ pub enum Section {
     Input,
     /// The agents beyond those Slopty knows, what projects may run, and notes to the phone.
     Agents,
-    /// Remote windows and desktops.
-    Streams,
     /// The server and the workers, and who may connect.
     Network,
     /// The keymap: every command's chords, recorded into `[keys]`.
@@ -44,12 +42,11 @@ pub enum Section {
 impl Section {
     /// Every section, in order. An iPhone or an iPad runs no worker or server of its own; its
     /// Agents page edits the server's or a worker's ([`super::remote`]).
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Appearance,
         Self::Terminal,
         Self::Input,
         Self::Agents,
-        Self::Streams,
         Self::Network,
         Self::Keyboard,
         Self::About,
@@ -63,7 +60,6 @@ impl Section {
             Self::Terminal => "Terminal",
             Self::Input => "Input",
             Self::Agents => "Agents",
-            Self::Streams => "Streams",
             Self::Network => "Network",
             Self::Keyboard => "Keyboard",
             Self::About => "About",
@@ -81,7 +77,7 @@ impl Section {
     pub const fn group(self) -> Group {
         match self {
             Self::Appearance | Self::Terminal | Self::Input => Group::App,
-            Self::Agents | Self::Streams | Self::Network => Group::Machines,
+            Self::Agents | Self::Network => Group::Machines,
             Self::Keyboard | Self::About => Group::Help,
         }
     }
@@ -95,7 +91,6 @@ impl Section {
             Self::Terminal => Symbol::Terminal,
             Self::Input => Symbol::Cursorarrow,
             Self::Agents => crate::icons::AGENT,
-            Self::Streams => Symbol::Display,
             Self::Network => Symbol::ServerRack,
             Self::Keyboard => Symbol::Keyboard,
             Self::About => Symbol::InfoCircle,
@@ -109,7 +104,7 @@ impl Section {
 pub enum Group {
     /// The theme, the terminal and the input.
     App,
-    /// The agents the machines run, remote windows and desktops, the server and the workers.
+    /// The agents the machines run, the server and the workers.
     Machines,
     /// The keymap and the build: the Help menu's Keyboard Shortcuts and About.
     Help,
@@ -167,8 +162,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Font",
         &["font.mono_family", "font.mono_size", "font.mono_line_height", "font.ligatures"],
     ),
-    (Section::Terminal, "Cursor", &["terminal.cursor_style", "terminal.cursor_blink"]),
-    (Section::Terminal, "Text", &["terminal.minimum_contrast", "terminal.bold_is_bright"]),
+    (Section::Terminal, "Text", &["terminal.minimum_contrast"]),
     (Section::Terminal, "Behaviour", &["terminal.alert"]),
     (Section::Input, "Keys", &["terminal.option_as_alt", "terminal.secure_keyboard_entry"]),
     (
@@ -176,7 +170,6 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Clipboard",
         &["clipboard.sync", "clipboard.workers", "terminal.copy_on_select"],
     ),
-    (Section::Input, "Pointer", &["terminal.scroll_multiplier"]),
     (Section::Agents, "ACP agents", &["worker.acp"]),
     (
         Section::Agents,
@@ -188,7 +181,6 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Notes on your phone",
         &["server.push.apns_key", "server.push.key_id", "server.push.team_id"],
     ),
-    (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps"]),
     (Section::Network, THIS_APP, &["client.server", "client.editor"]),
     (
         Section::Network,
@@ -219,7 +211,6 @@ const FOOTERS: &[(&str, &str)] = &[
         "An empty colour keeps the theme's own; the chrome follows the background",
     ),
     ("Font", "JetBrains Mono is built in. Zooming a tile changes its size for that tile only"),
-    ("Cursor", "Auto lets the shell or the editor choose"),
     ("Text", "Text under the minimum contrast moves toward black or white; 1 keeps every colour"),
     ("Behaviour", "When hidden, the alert sounds only while Slopty is behind other windows"),
     ("Keys", "Secure keyboard entry keeps passwords typed here from other apps, as Terminal does"),
@@ -228,7 +219,6 @@ const FOOTERS: &[(&str, &str)] = &[
         "ACP agents",
         "Each serves the Agent Client Protocol on stdio; an empty command hides a known one",
     ),
-    ("Remote windows and desktops", "A stream grows toward its ceiling as the link allows"),
     (THIS_APP, "The server lists your machines; it is empty until this app is set up"),
     ("Share this Mac's shells and windows", "Loopback and the tailnet are always let in"),
     ("This Mac as a server", "Loopback and the tailnet are always let in"),
@@ -257,7 +247,6 @@ fn home(table: &str) -> Section {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
     match root {
         "theme" | "colors" => Section::Appearance,
-        "remote" => Section::Streams,
         "clipboard" => Section::Input,
         "client" | "worker" | "server" => Section::Network,
         _ => Section::Terminal,
@@ -697,7 +686,6 @@ mod tests {
         assert_eq!(home("server.projects"), Section::Agents);
         assert_eq!(home("server.push"), Section::Agents);
         assert_eq!(home("server"), Section::Network);
-        assert_eq!(home("remote"), Section::Streams);
     }
 
     /// Every key of the file is one row, every key the layout names is one of the file's, and
@@ -795,15 +783,18 @@ mod tests {
         );
 
         let mut fields = schema::fields().to_vec();
-        let mut extra =
-            fields.iter().find(|f| f.key == "max_bitrate_mbps").cloned().expect("a [remote] key");
+        let mut extra = fields
+            .iter()
+            .find(|f| f.key == "live_agents")
+            .cloned()
+            .expect("a [server.projects] key");
         "sound_on_connect".clone_into(&mut extra.key);
         "Sound on connect".clone_into(&mut extra.title);
         fields.push(extra);
         let fields: &'static [Field] = fields.leak();
         let rows = rows_of(&fields.iter().collect::<Vec<_>>());
         let row = rows.iter().find(|r| r.key() == "sound_on_connect").expect("its row");
-        assert_eq!((row.section, row.group), (Section::Streams, "Remote windows and desktops"));
+        assert_eq!((row.section, row.group), (Section::Agents, "Projects"));
         let last = rows.iter().rposition(|r| r.group == row.group);
         let last = last.and_then(|at| rows.get(at)).map(Row::key);
         assert_eq!(last, Some("sound_on_connect"), "last in its group, after the group's own keys");

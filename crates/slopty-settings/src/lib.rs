@@ -37,12 +37,8 @@ pub mod bounds {
     pub const PROSE_SIZE: RangeInclusive<f32> = 10.0..=32.0;
     /// Half the font's line height packs rows past reading; twice it is a list, not a grid.
     pub const LINE_HEIGHT: RangeInclusive<f32> = 0.5..=2.0;
-    /// A tenth of a line per wheel line is glacial; ten is a page.
-    pub const SCROLL: RangeInclusive<f32> = 0.1..=10.0;
     /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
     pub const CONTRAST: RangeInclusive<f32> = 1.0..=21.0;
-    /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
-    pub const MBPS: RangeInclusive<u16> = 1..=200;
     /// Minutes a display made for a client waits for it: none, up to a day.
     pub const DISPLAY_LINGER_MINS: RangeInclusive<u16> = 0..=1440;
 }
@@ -105,41 +101,6 @@ impl Alert {
             Self::Always => true,
         }
     }
-}
-
-/// Whether the terminal cursor blinks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum CursorBlink {
-    /// The program decides (DECSCUSR): shells are steady, editors often blink.
-    #[default]
-    #[schemars(title = "Auto")]
-    Program,
-    /// Always.
-    #[schemars(title = "Always")]
-    Always,
-    /// Never.
-    #[schemars(title = "Never")]
-    Never,
-}
-
-/// The terminal cursor's shape.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum CursorStyle {
-    /// The program decides (DECSCUSR).
-    #[default]
-    #[schemars(title = "Auto")]
-    Program,
-    /// A filled block.
-    #[schemars(title = "Block")]
-    Block,
-    /// A bar at the left edge.
-    #[schemars(title = "Bar")]
-    Bar,
-    /// An underline.
-    #[schemars(title = "Underline")]
-    Underline,
 }
 
 /// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
@@ -402,33 +363,6 @@ pub struct TerminalSettings {
     /// is in front (in front, the tile says it), or always.
     #[schemars(title = "Alert")]
     pub alert: Alert,
-    /// Auto blinks when the shell or the editor asks.
-    ///
-    /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
-    /// always, or never.
-    #[schemars(title = "Blink")]
-    pub cursor_blink: CursorBlink,
-    /// Auto lets the shell or the editor choose.
-    ///
-    /// The cursor's shape (ghostty's `cursor-style`): the program's choice, or block, bar
-    /// or underline.
-    #[schemars(title = "Shape")]
-    pub cursor_style: CursorStyle,
-    /// Bold text in the first eight colours takes their bright forms.
-    ///
-    /// Bold text in ANSI 0–7 is painted in ANSI 8–15 (ghostty's `bold-is-bright`).
-    #[schemars(title = "Bold is bright")]
-    pub bold_is_bright: bool,
-    /// Grid lines per wheel or trackpad line.
-    ///
-    /// What a wheel or trackpad line scrolls, in grid lines (ghostty's
-    /// `mouse-scroll-multiplier`): `1.0` one for one, `3.0` fast.
-    #[schemars(
-        title = "Scroll speed",
-        range(min = *bounds::SCROLL.start(), max = *bounds::SCROLL.end()),
-        extend("x-step" = 0.5, "x-unit" = "\u{d7}")
-    )]
-    pub scroll_multiplier: f32,
     /// Send the escape prefix readline wants instead of the layout's symbol.
     ///
     /// ⌥ as Alt (ghostty's `macos-option-as-alt`): `false` types the layout's symbol,
@@ -451,36 +385,9 @@ impl Default for TerminalSettings {
             minimum_contrast: 3.0,
             copy_on_select: false,
             alert: Alert::Hidden,
-            cursor_blink: CursorBlink::Program,
-            cursor_style: CursorStyle::Program,
-            bold_is_bright: false,
-            scroll_multiplier: 1.0,
             option_as_alt: OptionAsAlt::False,
             secure_keyboard_entry: SecureEntry::Passwords,
         }
-    }
-}
-
-/// `[remote]`: what a remote window or display stream asks the worker for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Remote windows and desktops")]
-pub struct RemoteSettings {
-    /// The most one stream may take; it grows toward it as the link allows.
-    ///
-    /// The most the worker may send per stream, in megabits per second: the ceiling its
-    /// bitrate controller grows towards, never the rate it starts at.
-    #[schemars(
-        title = "Bitrate ceiling",
-        range(min = *bounds::MBPS.start(), max = *bounds::MBPS.end()),
-        extend("x-step" = 5, "x-unit" = "Mb/s")
-    )]
-    pub max_bitrate_mbps: u16,
-}
-
-impl Default for RemoteSettings {
-    fn default() -> Self {
-        Self { max_bitrate_mbps: 30 }
     }
 }
 
@@ -911,8 +818,6 @@ pub struct Settings {
     pub theme: ThemeSettings,
     /// Terminal behaviour.
     pub terminal: TerminalSettings,
-    /// Remote window and display streams.
-    pub remote: RemoteSettings,
     /// The clipboard shared with the workers.
     pub clipboard: ClipboardSettings,
     /// Terminal colours, per appearance.
@@ -1042,22 +947,9 @@ copy_on_select = {copy_on_select}
 # bounces the Dock: \"never\" (the tile flashes), \"hidden\" (only while no
 # Slopty window is in front) or \"always\".
 alert = {alert}
-# \"program\" (the shell or editor decides), \"always\" or \"never\".
-cursor_blink = {cursor_blink}
-# \"program\" (the shell or editor decides), \"block\", \"bar\" or \"underline\".
-cursor_style = {cursor_style}
-# Paint bold text in ANSI colours 0-7 with the bright 8-15.
-bold_is_bright = {bold_is_bright}
-# Grid lines per wheel or trackpad line (0.1 to 10).
-scroll_multiplier = {scroll_multiplier}
 # Option as Alt: false types the layout's symbol (⌥b is ∫); true sends the
 # escape prefix readline's ⌥b/⌥f want; \"left\" or \"right\" keep one side each.
 option_as_alt = {option_as_alt}
-
-[remote]
-# Ceiling for one stream in megabits per second (1 to 200); the machine grows
-# towards it as the link allows.
-max_bitrate_mbps = {max_bitrate_mbps}
 
 [clipboard]
 # Share the clipboard with the machines: copy on one, paste here or on another.
@@ -1141,12 +1033,7 @@ editor = \"\"
             copy_on_select = d.terminal.copy_on_select,
             alert = toml_string(alert_name(d.terminal.alert)),
             clipboard_sync = d.clipboard.sync,
-            cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
-            cursor_style = toml_string(cursor_style_name(d.terminal.cursor_style)),
-            bold_is_bright = d.terminal.bold_is_bright,
-            scroll_multiplier = toml_float(d.terminal.scroll_multiplier),
             option_as_alt = toml_string(option_as_alt_name(d.terminal.option_as_alt)),
-            max_bitrate_mbps = d.remote.max_bitrate_mbps,
         )
     }
 
@@ -1299,15 +1186,6 @@ const fn appearance_name(a: Appearance) -> &'static str {
     }
 }
 
-const fn cursor_style_name(c: CursorStyle) -> &'static str {
-    match c {
-        CursorStyle::Program => "program",
-        CursorStyle::Block => "block",
-        CursorStyle::Bar => "bar",
-        CursorStyle::Underline => "underline",
-    }
-}
-
 const fn option_as_alt_name(o: OptionAsAlt) -> &'static str {
     match o {
         OptionAsAlt::False => "false",
@@ -1322,14 +1200,6 @@ const fn alert_name(a: Alert) -> &'static str {
         Alert::Never => "never",
         Alert::Hidden => "hidden",
         Alert::Always => "always",
-    }
-}
-
-const fn cursor_blink_name(c: CursorBlink) -> &'static str {
-    match c {
-        CursorBlink::Program => "program",
-        CursorBlink::Always => "always",
-        CursorBlink::Never => "never",
     }
 }
 
@@ -1370,25 +1240,15 @@ mod tests {
         assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
         assert_eq!(d.terminal.alert, Alert::Hidden, "heard while Slopty is hidden");
-        assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
-        assert_eq!(d.terminal.cursor_style, CursorStyle::Program, "and its shape");
-        assert!(!d.terminal.bold_is_bright, "bold is a weight, as in ghostty");
-        assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
         assert!(d.font.ligatures, "the font's own");
-        assert_eq!(d.remote.max_bitrate_mbps, 30);
     }
 
     #[test]
     fn remote_keys() {
-        let loaded = Settings::parse("[remote]\nmax_bitrate_mbps = 8\n");
-        assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        assert_eq!(loaded.settings.remote, RemoteSettings { max_bitrate_mbps: 8 });
-        let gone = Settings::parse("[remote]\nmuted = true\nsharp_text = true\n");
-        assert_eq!(
-            gone.warnings,
-            ["unknown key `remote.muted`", "unknown key `remote.sharp_text`"],
-            "the pill mutes and the rate picks the chroma"
-        );
+        let gone = Settings::parse("[remote]\nmax_bitrate_mbps = 8\nmuted = true\n");
+        assert!(gone.error.is_none(), "{:?}", gone.error);
+        assert_eq!(gone.settings, Settings::default());
+        assert!(!gone.warnings.is_empty(), "the table is gone: {:?}", gone.warnings);
     }
 
     /// `[worker]`'s own choices: syncing the input source, what keeps the Mac awake, how long a
@@ -1512,34 +1372,22 @@ mod tests {
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\ncursor_blink = \"never\"\nbold_is_bright = true\nscroll_multiplier = 3\n",
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);
         assert_eq!(loaded.settings.terminal.alert, Alert::Always);
-        assert_eq!(loaded.settings.terminal.cursor_blink, CursorBlink::Never);
-        assert!(loaded.settings.terminal.bold_is_bright);
-        assert_eq!(loaded.settings.terminal.scroll_multiplier, 3.0);
-        let gone = Settings::parse("[terminal]\nconfirm_close = false\nnatural_editing = false\n");
+        let gone = Settings::parse("[terminal]\nconfirm_close = false\ncursor_blink = \"never\"\n");
         assert!(gone.error.is_none(), "{:?}", gone.error);
         assert_eq!(
             gone.warnings,
-            ["unknown key `terminal.confirm_close`", "unknown key `terminal.natural_editing`"],
-            "decided on: a switch left in the file is only warned of"
+            ["unknown key `terminal.confirm_close`", "unknown key `terminal.cursor_blink`"],
+            "decided: a key left in the file is only warned of"
         );
         let loaded = Settings::parse("[font]\nligatures = false\n");
         assert!(!loaded.settings.font.ligatures);
-        for (text, want) in [
-            ("program", CursorStyle::Program),
-            ("block", CursorStyle::Block),
-            ("bar", CursorStyle::Bar),
-            ("underline", CursorStyle::Underline),
-        ] {
-            let loaded = Settings::parse(&format!("[terminal]\ncursor_style = \"{text}\"\n"));
-            assert_eq!(loaded.settings.terminal.cursor_style, want, "{text}");
-        }
         for (text, want) in [
             ("false", OptionAsAlt::False),
             ("true", OptionAsAlt::True),
@@ -1549,12 +1397,8 @@ mod tests {
             let loaded = Settings::parse(&format!("[terminal]\noption_as_alt = \"{text}\"\n"));
             assert_eq!(loaded.settings.terminal.option_as_alt, want, "{text}");
         }
-        for (text, want) in [("program", CursorBlink::Program), ("always", CursorBlink::Always)] {
-            let loaded = Settings::parse(&format!("[terminal]\ncursor_blink = \"{text}\"\n"));
-            assert_eq!(loaded.settings.terminal.cursor_blink, want, "{text}");
-        }
         assert!(
-            Settings::parse("[terminal]\ncursor_blink = \"sometimes\"\n").error.is_some(),
+            Settings::parse("[terminal]\noption_as_alt = \"sometimes\"\n").error.is_some(),
             "an unknown variant is an error"
         );
         assert_eq!(loaded.settings.font.mono_family, Font::default().mono_family);
@@ -1657,7 +1501,7 @@ mod tests {
         assert!(text.contains("appearance = \"system\""), "{text}");
         assert!(text.contains("minimum_contrast = 3.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
-        assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
+        assert!(!text.contains("[remote]"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
         assert!(text.contains("editor = \"\""), "{text}");

@@ -7,8 +7,7 @@ use std::path::Path;
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Palette, SecureEntry,
-    Settings, SettingsError, bounds,
+    Appearance, Color, Loaded, OptionAsAlt, Palette, SecureEntry, Settings, SettingsError, bounds,
 };
 use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -128,12 +127,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.derive_chrome();
     theme.density = density(crate::TOUCH);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
-    theme.behaviour.cursor_style = match settings.terminal.cursor_style {
-        CursorStyle::Program => slopty_theme::CursorStyle::Program,
-        CursorStyle::Block => slopty_theme::CursorStyle::Block,
-        CursorStyle::Bar => slopty_theme::CursorStyle::Bar,
-        CursorStyle::Underline => slopty_theme::CursorStyle::Underline,
-    };
     theme.behaviour.option_as_alt = match settings.terminal.option_as_alt {
         OptionAsAlt::False => slopty_theme::OptionAsAlt::False,
         OptionAsAlt::True => slopty_theme::OptionAsAlt::True,
@@ -144,23 +137,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
         SecureEntry::Passwords => slopty_theme::SecureEntry::Passwords,
         SecureEntry::Always => slopty_theme::SecureEntry::Always,
         SecureEntry::Never => slopty_theme::SecureEntry::Never,
-    };
-    theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
-    theme.behaviour.scroll_multiplier =
-        hundredths(sized(settings.terminal.scroll_multiplier, &bounds::SCROLL, 1.0));
-    theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
-        CursorBlink::Program => slopty_theme::CursorBlink::Program,
-        CursorBlink::Always => slopty_theme::CursorBlink::Always,
-        CursorBlink::Never => slopty_theme::CursorBlink::Never,
-    };
-    let remote = &settings.remote;
-    let defaults = slopty_theme::StreamPrefs::default();
-    theme.behaviour.stream = slopty_theme::StreamPrefs {
-        max_bitrate_bps: if bounds::MBPS.contains(&remote.max_bitrate_mbps) {
-            u32::from(remote.max_bitrate_mbps).saturating_mul(1_000_000)
-        } else {
-            defaults.max_bitrate_bps
-        },
     };
     theme
 }
@@ -378,22 +354,9 @@ mod tests {
         s.terminal.secure_keyboard_entry = SecureEntry::Always;
         let secure = theme_for(&s, true).behaviour.secure_entry;
         assert_eq!(secure, slopty_theme::SecureEntry::Always);
-        assert!(!t.terminal.bold_is_bright);
-        s.terminal.bold_is_bright = true;
-        let t = theme_for(&s, true);
-        assert!(t.terminal.bold_is_bright);
         assert!(t.typography.ligatures);
         s.font.ligatures = false;
         assert!(!theme_for(&s, true).typography.ligatures);
-        assert_eq!(t.behaviour.scroll_multiplier, 100);
-        s.terminal.scroll_multiplier = 2.5;
-        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 250);
-        s.terminal.scroll_multiplier = 0.0;
-        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 100, "a typo: one for one");
-        s.terminal.cursor_style = CursorStyle::Bar;
-        assert_eq!(theme_for(&s, true).behaviour.cursor_style, slopty_theme::CursorStyle::Bar);
-        s.terminal.cursor_blink = CursorBlink::Never;
-        assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
         s.terminal.option_as_alt = OptionAsAlt::Left;
         assert_eq!(theme_for(&s, true).behaviour.option_as_alt, slopty_theme::OptionAsAlt::Left);
         s.terminal.minimum_contrast = 0.0;
@@ -413,19 +376,6 @@ mod tests {
         assert_eq!((typography.prose(), typography.ui_size), (20.0, 13.0), "the chrome stays");
         s.font.prose_size = 2.0;
         assert_eq!(theme_for(&s, true).typography.prose(), 14.0);
-    }
-
-    #[test]
-    fn remote_settings_ride_on_the_theme() {
-        let mut s = Settings::default();
-        let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!(stream.max_bitrate_bps, 30_000_000);
-        s.remote.max_bitrate_mbps = 8;
-        let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!(stream.max_bitrate_bps, 8_000_000);
-        s.remote.max_bitrate_mbps = 500;
-        let stream = theme_for(&s, true).behaviour.stream;
-        assert_eq!(stream.max_bitrate_bps, 30_000_000, "typos read as default");
     }
 
     /// The app's own save is not a change for the watcher, so its warnings are not shown twice;

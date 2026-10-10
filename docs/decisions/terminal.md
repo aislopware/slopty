@@ -884,8 +884,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   guard was found) and `[terminal] scroll_multiplier` (ghostty's `mouse-scroll-multiplier`,
   `Behaviour::scroll_multiplier` in hundredths; applied to the wheel's lines before the
   fraction carry, so a program on the alternate screen sees the multiplied rows too).
-  Tests: `bold_is_bright_lifts_only_the_named_eight`, `bold_text_is_painted_bright_when_asked`,
-  `the_wheel_scrolls_by_the_multiplier`; the pointer hide is a platform call with no
+  Bold-is-bright and the multiplier were cut on 2026-10-10 ("The cursor, bold and the wheel
+  are the program's and the system's", below). The pointer hide is a platform call with no
   headless observer, so only its plumbing is tested (`terminal_settings_ride_on_the_theme`).
 
 - ✅ **The cursor's blink can be overridden** (2026-09-15, ghostty's `cursor-style-blink`).
@@ -896,7 +896,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   hollow block as before. Test: the blink-clock test's last two frames. Its companion
   `cursor_style = program | block | bar | underline` (ghostty's `cursor-style`,
   `Behaviour::cursor_style`, `element::cursor_shape_for`) fixes the focused shape the same
-  way; unfocused stays the hollow block. Test: `the_cursor_style_fixes_the_shape_or_leaves_it`.
+  way; unfocused stays the hollow block. Both were cut on 2026-10-10 (below).
+
+- ✅ **The cursor, bold and the wheel are the program's and the system's** (2026-10-10,
+  orchestrator-first audit §C.5). `[terminal] cursor_blink`, `cursor_style`, `bold_is_bright`
+  and `scroll_multiplier` are gone, with their `Theme` fields, `Colors::bold_slot` and
+  `element::cursor_shape_for`.
+  - **The cursor** blinks and takes its shape as the program asks (DECSCUSR); shells are
+    steady, editors often blink. Unfocused it stays the steady hollow block.
+  - **Under Reduce Motion** a blinking cursor and SGR 5 text hold steady and shown, as every
+    other motion in the app does. The clock keeps running, so they blink again once the
+    setting is off. The e2e app runs under Reduce Motion, so its goldens no longer need the
+    `cursor_blink = "never"` pin they had.
+  - **Bold** is a weight, as in ghostty's default.
+  - **A wheel line** scrolls one grid line; the system's own scrolling speed sets how far a
+    gesture goes.
+  - Tests: `the_blink_clock_ticks_only_while_something_blinks` (its tail: Reduce Motion
+    holds the phase) and `a_wheel_line_scrolls_one_grid_line`.
 
 - ✅ **A click on the input line moves the shell's cursor** (2026-09-15, ghostty's
   `cursor-click-to-move`, on by default there and here). A plain left click released without
