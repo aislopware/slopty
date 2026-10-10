@@ -188,8 +188,31 @@ impl Phones {
         ask: Option<&AskId>,
         unheard: &[u64],
     ) {
+        self.send(seats, notice, ask, (unheard, false));
+    }
+
+    /// Push `notice` as [`Self::push`] does, but only to the phones not already showing a note
+    /// about its subject that needs the person.
+    fn push_new(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, ask: Option<&AskId>) {
+        self.send(seats, notice, ask, (&[], true));
+    }
+
+    /// [`Self::push`], skipping, when `new_only`, each phone already showing a note about the
+    /// notice's subject that needs the person.
+    fn send(
+        &mut self,
+        seats: &BTreeMap<u64, Sitting>,
+        notice: &Notice,
+        ask: Option<&AskId>,
+        (unheard, new_only): (&[u64], bool),
+    ) {
         let Some(out) = &self.out else { return };
+        let about = asked_about(&notice.about);
         for (client, device) in &self.devices {
+            let shown = |about: Asked| self.asked.get(client).is_some_and(|a| a.contains(&about));
+            if new_only && about.is_some_and(shown) {
+                continue;
+            }
             let listening = seats.iter().any(|(link, s)| {
                 s.client == Some(*client)
                     && s.presence.as_ref().is_none_or(|p| p.listening)
@@ -731,7 +754,12 @@ impl Drop for Seated {
     fn drop(&mut self) {
         let Some(hub) = self.hub.upgrade() else { return };
         let mut state = hub.inner.state.lock();
-        if state.board.seats.remove(&self.link).is_some_and(|s| s.presence.is_some()) {
+        let gone = state.board.seats.remove(&self.link);
+        if gone.as_ref().is_some_and(|s| at_desk(s.presence.as_ref())) {
+            let state = &mut *state;
+            left(&mut state.board, &state.projects);
+        }
+        if gone.is_some_and(|s| s.presence.is_some()) {
             hub.announce(FromServer::Present(state.board.present()));
         }
         state.board.settle_awake();
@@ -761,7 +789,8 @@ impl Hub {
 
     /// Where the person is on the client of `link`.
     pub fn presence(&self, link: u64, presence: Presence) {
-        let mut state = self.inner.state.lock();
+        let mut guard = self.inner.state.lock();
+        let state = &mut *guard;
         let board = &mut state.board;
         let Some(seat) = board.seats.get_mut(&link) else { return };
         if seat.presence.as_ref() == Some(&presence) {
@@ -770,9 +799,13 @@ impl Hub {
         if let Some(client) = seat.client.filter(|_| presence.listening) {
             board.phones.listening(client);
         }
+        let leaves = at_desk(seat.presence.as_ref()) && !presence.active;
         seat.presence = Some(presence);
-        self.announce(FromServer::Present(state.board.present()));
-        drop(state);
+        if leaves {
+            left(board, &state.projects);
+        }
+        self.announce(FromServer::Present(board.present()));
+        drop(guard);
     }
 
     /// The phone the client `client` is, as it said on `link`: one the server may push to,
@@ -1271,42 +1304,80 @@ fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<(Notice
             None
         };
         let Some(kind) = kind else { continue };
-        let Some(table) = board.tables.get(&now.at.worker) else { continue };
-        let Some(row) = table.get(&now.at.thread) else { continue };
-        let task_agent = || {
-            let term = seat_of(row).map(|session| TermRef { worker: now.at.worker, session });
-            term.and_then(|t| projects.working_on(t)).is_some_and(|(_, task)| task.is_some())
-        };
-        // A task's pull request is the project's to tell of ([`tell_project`]), once.
-        let by_pull = kind == NoticeKind::NeedsYou
-            && row.requests.is_empty()
-            && row.status.phase != Phase::NeedsYou;
-        if (kind == NoticeKind::Finished || by_pull) && task_agent() {
-            continue;
-        }
-        let family: Vec<&ThreadRow> =
-            table.values().filter(|r| r.id != row.id && root_of(table, r) == row.id).collect();
-        let (_, from) = source(row, &family);
-        let via = (from.id != row.id).then(|| Via { thread: from.id, title: from.title.clone() });
-        let ask = row
-            .requests
-            .first()
-            .filter(|r| kind == NoticeKind::NeedsYou && via.is_none() && r.answerable());
-        let ask = ask.map(|r| r.id.clone());
-        let notice = Notice {
-            kind,
-            about: Subject::Thread(now.at),
-            tile: row.terminal.map(|session| TermRef { worker: now.at.worker, session }),
-            title: row.title.clone(),
-            text: text(kind, from),
-            worked_ms: (kind == NoticeKind::Finished).then_some(worked_ms).flatten(),
-            via,
-        };
-        notices.push((notice, ask));
+        let worked_ms = (kind == NoticeKind::Finished).then_some(worked_ms).flatten();
+        notices.extend(notice_of(board, projects, now.at, (kind, worked_ms)));
     }
     let standing: Vec<ThreadAt> = ladder.threads.iter().map(|r| r.at).collect();
     board.busy.retain(|at, _| standing.binary_search(at).is_ok());
     notices
+}
+
+/// The notice of `kind` about the thread at `at`, with how long it worked when it finished,
+/// and the request its note's buttons answer; `None` for a thread no table holds, and for
+/// what a project task's agent says through its project instead.
+fn notice_of(
+    board: &Board,
+    projects: &Projects,
+    at: ThreadAt,
+    (kind, worked_ms): (NoticeKind, Option<u64>),
+) -> Option<(Notice, Option<AskId>)> {
+    let table = board.tables.get(&at.worker)?;
+    let row = table.get(&at.thread)?;
+    let task_agent = || {
+        let term = seat_of(row).map(|session| TermRef { worker: at.worker, session });
+        term.and_then(|t| projects.working_on(t)).is_some_and(|(_, task)| task.is_some())
+    };
+    // A task's pull request is the project's to tell of ([`tell_project`]), once.
+    let by_pull = kind == NoticeKind::NeedsYou
+        && row.requests.is_empty()
+        && row.status.phase != Phase::NeedsYou;
+    if (kind == NoticeKind::Finished || by_pull) && task_agent() {
+        return None;
+    }
+    let family: Vec<&ThreadRow> =
+        table.values().filter(|r| r.id != row.id && root_of(table, r) == row.id).collect();
+    let (_, from) = source(row, &family);
+    let via = (from.id != row.id).then(|| Via { thread: from.id, title: from.title.clone() });
+    let ask = row
+        .requests
+        .first()
+        .filter(|r| kind == NoticeKind::NeedsYou && via.is_none() && r.answerable());
+    let ask = ask.map(|r| r.id.clone());
+    let notice = Notice {
+        kind,
+        about: Subject::Thread(at),
+        tile: row.terminal.map(|session| TermRef { worker: at.worker, session }),
+        title: row.title.clone(),
+        text: text(kind, from),
+        worked_ms,
+        via,
+    };
+    Some((notice, ask))
+}
+
+/// Whether `presence` has the person at a desk: one whose notices stay there when they leave.
+fn at_desk(presence: Option<&Presence>) -> bool {
+    presence.is_some_and(|p| p.active && p.seat == Seat::Desk)
+}
+
+/// The person left the desk they were at ([`at_desk`]): each thread that still needs them is
+/// pushed now, when they are at no client, to each phone that does not show it yet, as it would
+/// have been had they been away when it came. A notice told at the desk stays on it; one told
+/// on the phone in their hand goes with them, so leaving that pushes nothing. The clients
+/// already hold it, so no link is told it again, and a phone already showing it, by the kept
+/// push state, is not pushed twice.
+fn left(board: &mut Board, projects: &Projects) {
+    let waiting: Vec<ThreadAt> =
+        board.published.threads.iter().filter(|r| r.rung == Rung::NeedsYou).map(|r| r.at).collect();
+    for at in waiting {
+        let Some((notice, ask)) = notice_of(board, projects, at, (NoticeKind::NeedsYou, None))
+        else {
+            continue;
+        };
+        if route(&board.seats, &notice).away {
+            board.phones.push_new(&board.seats, &notice, ask.as_ref());
+        }
+    }
 }
 
 /// What a notice of `kind` says of `row`, in a line.

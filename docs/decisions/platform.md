@@ -1139,3 +1139,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (owed, tried again on the timer, and kept across a restart from the store),
     `hub::ladder::tests::a_notice_no_link_could_take_is_pushed`, and
     `push::tests::a_note_older_than_its_take_back_is_not_sent_again`.
+
+- ✅ **A need told at the desk reaches the phone once the person leaves it** (2026-10-12,
+  readiness 10-12 rank 1). A need that came while the person sat at their desk was routed
+  there alone and never pushed. If they then walked away, their phone stayed silent until
+  the next need came, however long this one waited.
+  - Now, when a desk goes from active to not, or its link drops while active, the server
+    reroutes each thread still at Needs you (`ladder::left`). If the person is now at no
+    client, it pushes each one to every phone not already showing it, as though they had
+    been away when it came.
+  - The kept push state (`Phones::asked`, stored in `push.json`) is what keeps this to once
+    per wait. A phone already showing the thread is skipped (`Phones::push_new`), so leaving
+    the desk again, or its link going, pushes nothing more. The links are not told again,
+    because every client already holds the notice.
+  - Leaving a phone pushes nothing. A notice the person saw on the phone in their hand goes
+    with them; only a desk stays behind.
+  - Test: `slopty-server`
+    `hub::ladder::tests::a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it`; the
+    existing `needs_you_pushes_once_per_ask` now expects the push when the desk is left.

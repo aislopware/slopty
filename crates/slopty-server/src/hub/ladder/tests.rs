@@ -689,8 +689,10 @@ async fn needs_you_pushes_once_per_ask() {
     rank(vec![needs.clone()]);
     assert!(pushes().is_empty(), "the person at a desk hears it there");
     mac.at(&hub, Seat::Desk, false, Vec::new());
+    assert_eq!(pushes().len(), 1, "and the phone, once they leave it with the ask waiting");
 
     rank(vec![moved(&thread, Phase::Working, 5_000)]);
+    assert_eq!(pushes().len(), 1, "taken back");
     rank(vec![moved(&thread, Phase::Done, 30_000)]);
     assert!(pushes().is_empty(), "a turn under the phone's quiet time");
     rank(vec![moved(&thread, Phase::Working, 31_000)]);
@@ -1052,4 +1054,61 @@ async fn a_notice_no_link_could_take_is_pushed() {
     assert!(matches!(note.what, Sending::Note(_)), "{:?}", note.what);
     assert!(matches!(desk_rx.try_recv(), Ok(FromServer::Directory(_))));
     assert!(desk_rx.try_recv().is_err(), "the desk's link took nothing");
+}
+
+/// A need that came while the person sat at their desk went only there. Once they leave it
+/// for no client, the pocketed phone is pushed it, once: leaving again, or the desk's link
+/// going, pushes nothing more, while a new need that finds them away is pushed as before. A
+/// thread that stopped needing them before they left is not pushed at all.
+#[tokio::test]
+async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let _kept = hub.keep_phones(PushKept::default());
+    let (out, mut pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    let worker = WorkerId::new();
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
+    let mut pushes = || {
+        let mut out = Vec::new();
+        while let Ok(push) = pushed.try_recv() {
+            out.push(push.what);
+        }
+        out
+    };
+    let mut desk = Client::sit(&hub, "mac");
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let phone = Client::sit(&hub, "phone");
+    pocketed_phone(&hub, phone.seated.link(), ClientId::new());
+    let (one, answered) = (row(Phase::Working, 1_000, None), row(Phase::Working, 1_000, None));
+    lease.handle(snapshot(vec![one.clone(), answered.clone()]));
+    hub.rank_ladder();
+    let ask = |row: &ThreadRow, since| asking(moved(row, Phase::NeedsYou, since), "Allow?");
+    lease.handle(delta(vec![ask(&one, 2_000), ask(&answered, 2_000)]));
+    hub.rank_ladder();
+    assert_eq!(desk.notices().len(), 2, "the desk is told");
+    assert_eq!(pushes(), [], "the phone is not, while the person sits there");
+    lease.handle(delta(vec![moved(&answered, Phase::Working, 3_000)]));
+    hub.rank_ladder();
+
+    desk.at(&hub, Seat::Desk, false, Vec::new());
+    let left = pushes();
+    let [Sending::Note(note)] = left.as_slice() else { panic!("{left:?}") };
+    assert_eq!(note.notice.about, Subject::Thread(ThreadAt { worker, thread: one.id }));
+    assert_eq!(note.notice.kind, NoticeKind::NeedsYou);
+    assert_eq!(note.ask, None, "an ask with no choices is answered on the phone's app");
+    assert_eq!(desk.notices(), [], "the desk holds it already");
+
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    desk.at(&hub, Seat::Desk, false, Vec::new());
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    drop(desk);
+    assert_eq!(pushes(), [], "the phone shows it already");
+
+    let two = row(Phase::Working, 4_000, None);
+    lease.handle(delta(vec![two.clone()]));
+    hub.rank_ladder();
+    lease.handle(delta(vec![ask(&two, 5_000)]));
+    hub.rank_ladder();
+    assert_eq!(pushes().len(), 1, "a need that finds the person away");
 }
