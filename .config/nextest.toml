@@ -96,11 +96,13 @@ slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }
 # Echo latency is measured against the frame pace; the rest of the suite competing for the
 # cores is noise in that measurement. The keyframe test counts datagrams a socket holds, and the
 # rest of the suite's loopback traffic shares the kernel's buffers: on a loaded runner it held
-# 1162 of 1217 (run 38084916102).
+# 1162 of 1217 (run 38084916102). The beat's cadence is a deadline beside a spinning blocking
+# thread: with the suite on every core a beat waited 116 ms for one (run 38094953679).
 [[profile.default.overrides]]
 filter = '''
 (package(slopty-worker) & (test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
-    | test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)))
+    | test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)
+    | test(a_slow_geometry_call_does_not_make_the_beat_late)))
 | (package(slopty-workerd) & test(echo_is_not_held_behind_slow_requests))
 | (package(slopty-shape) & test(a_short_wait_ends_when_it_was_asked_to))
 | (package(slopty-net) & test(the_socket_holds_a_large_keyframe_while_nobody_reads))
