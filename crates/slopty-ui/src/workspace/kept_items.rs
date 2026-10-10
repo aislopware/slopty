@@ -111,23 +111,13 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size))
                 .text_color(ink)
                 .font_family(theme.typography.ui_family.clone())
-                .map(|el| {
-                    let look = super::tab_look::Look {
-                        shown: true,
-                        first: true,
-                        marked: placed.focused && placed.shared,
-                    };
-                    let glyph = self.machine_glyph(tile.worker);
-                    el.child(
-                        super::tab_look::tab(theme, div().id("lone-tab"), look)
-                            .min_w_0()
-                            .gap(px(theme.spacing.sm))
-                            .pl(px(theme.spacing.inset()))
-                            .pr(px(theme.spacing.md))
-                            .child(crate::palette::lead_slot(theme, glyph, ink))
-                            .child(name.clone()),
-                    )
-                })
+                .child(super::tab_look::lone(
+                    theme,
+                    self.machine_glyph(tile.worker),
+                    name.clone(),
+                    placed.focused,
+                    placed.shared,
+                ))
         });
         let pill = Some(self.render_state_pill(tile, &state, true, cx));
         Some(

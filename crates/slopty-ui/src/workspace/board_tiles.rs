@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, ElementId, InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
@@ -128,22 +127,13 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size))
                 .text_color(ink)
                 .font_family(theme.typography.ui_family.clone())
-                .map(|el| {
-                    let look = super::tab_look::Look {
-                        shown: true,
-                        first: true,
-                        marked: placed.focused && placed.shared,
-                    };
-                    el.child(
-                        super::tab_look::tab(theme, div().id("lone-tab"), look)
-                            .min_w_0()
-                            .gap(px(theme.spacing.sm))
-                            .pl(px(theme.spacing.inset()))
-                            .pr(px(theme.spacing.md))
-                            .child(crate::palette::lead_slot(theme, Symbol::Checklist, ink))
-                            .child(div().min_w_0().overflow_hidden().child(title.clone())),
-                    )
-                })
+                .child(super::tab_look::lone(
+                    theme,
+                    Symbol::Checklist,
+                    title.clone(),
+                    placed.focused,
+                    placed.shared,
+                ))
         });
         let body = div().flex_1().min_h_0().w_full();
         let body = if let Some(view) = board.and_then(|_| self.projects.views.get(project)) {

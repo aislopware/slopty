@@ -19,9 +19,7 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{
-    AskId, BackgroundTask, Cap, Delivery, Drive, ItemBody, ItemId, Request,
-};
+use slopty_proto::thread::{AskId, BackgroundTask, Cap, Drive, ItemBody, ItemId, Request};
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, tail};

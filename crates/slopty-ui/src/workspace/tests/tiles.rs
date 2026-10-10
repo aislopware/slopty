@@ -168,9 +168,8 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 
 /// Every tile fills its pane: square, with no ring and no shadow of its own, the focused one
 /// included, the sashes between panes the only lines round it. Every header is its pane's tab
-/// row at the tile's top, a remote window's too: the chrome step with a sash line along its foot,
-/// its one tab on the pane's ground over that line, so it opens into the pane
-/// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_weight` for the focus).
+/// row at the tile's top, a remote window's too: on the pane's ground with the one line along its
+/// foot (`focus::the_focused_tile_is_said_by_its_titles_tone_and_its_dot` for the focus).
 #[gpui::test]
 fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -203,22 +202,20 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the tile's top");
         let theme = Theme::default();
         let fill = |q: &gpui::Quad| q.background.as_solid();
-        let chrome = crate::colors::hsla(theme.surfaces.chrome);
         let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
-        assert_eq!(row, [chrome], "{tile:?}: the row is the chrome step");
+        assert!(row.is_empty(), "{tile:?}: the row lies on the pane's ground: {row:?}");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let sash = crate::colors::hsla(theme.surfaces.sash);
+        let line = crate::colors::hsla(theme.surfaces.stroke);
         let foot = quads.iter().any(|q| {
-            fill(q) == Some(sash)
+            fill(q) == Some(line)
                 && (q.bounds.bottom().0 / scale - f32::from(header.bottom())).abs() < 0.5
                 && (q.bounds.size.width.0 / scale - f32::from(header.size.width)).abs() < 0.5
         });
-        assert!(foot, "{tile:?}: a sash line along its foot");
-        let tab = cx.debug_bounds(selector("lone-tab", tile.item)).expect("its tab");
-        assert_eq!(tab.bottom(), header.bottom(), "{tile:?}: the tab reaches the foot");
-        let ground = crate::colors::hsla(theme.content());
-        let opens = quads_at(cx, tab).iter().any(|q| fill(q) == Some(ground));
-        assert!(opens, "{tile:?}: the tab is on the pane's ground");
+        assert!(foot, "{tile:?}: the one line along its foot");
+        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
+        let pill = crate::colors::hsla(theme.surfaces.selected);
+        let boxed = quads_at(cx, title).iter().any(|q| fill(q) == Some(pill));
+        assert!(!boxed, "{tile:?}: the title stands in no pill");
     }
 }
 
@@ -247,8 +244,13 @@ fn panes_meet_edge_to_edge_at_their_sash(cx: &mut TestAppContext) {
     near(above.top(), area.top(), "on its top");
     near(below.bottom(), area.bottom(), "on its bottom");
     let border = crate::colors::hsla(Theme::default().surfaces.border);
-    let lines = cx.update(|w, _| w.painted_quads());
-    assert!(!lines.iter().any(|q| q.border_color == border), "no hairline parts them");
+    let (scale, lines) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
+    let inside = |q: &gpui::Quad| {
+        let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
+        area.contains(&at)
+    };
+    let ringed = lines.iter().any(|q| inside(q) && q.border_color == border);
+    assert!(!ringed, "no hairline parts them");
 }
 
 /// A phone's tile is full-bleed: it meets the screen's edges and its neighbours, square, with
@@ -315,7 +317,9 @@ fn the_header_leads_with_its_kind_and_ends_with_its_state(cx: &mut TestAppContex
     };
     let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
     let rest = slot_at(cx);
-    let inset = Theme::default().spacing.inset();
+    // In a split the focus dot and its gap lead the mark.
+    let look = (tab_look::FOCUS_DOT, tab_look::TAB_GAP);
+    let inset = tab_look::lone_inset(&Theme::default()) + look.0 + look.1;
     assert!((f32::from(rest.left() - header.left()) - inset).abs() < 0.5, "on the inset");
     assert!(marks(cx).iter().all(|m| m != "Failed"), "at rest: the kind");
     view.update_in(cx, |v, _w, cx| {
@@ -425,8 +429,8 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
         let theme = Theme::default();
         let s = theme.surfaces;
         let fill = q.background.as_solid();
-        [theme.content(), s.ground, s.chrome].iter().any(|c| fill == Some(crate::colors::hsla(*c)))
-            || fill == Some(crate::colors::hsla(s.sash))
+        [theme.content(), s.ground].iter().any(|c| fill == Some(crate::colors::hsla(*c)))
+            || fill == Some(crate::colors::hsla(s.stroke))
     };
     let fills: Vec<&gpui::Quad> = quads
         .iter()
@@ -868,7 +872,9 @@ fn a_pane_of_tabs_draws_a_tab_per_tile(cx: &mut TestAppContext) {
         cx.debug_bounds(selector("kind", first.item)).expect("the slot").left()
             - cx.debug_bounds(selector("title", first.item)).expect("the header").left(),
     );
-    let inset = Theme::default().spacing.inset();
+    // In a split the focus dot and its gap lead the mark.
+    let look = (tab_look::FOCUS_DOT, tab_look::TAB_GAP);
+    let inset = tab_look::lone_inset(&Theme::default()) + look.0 + look.1;
     assert!((single - inset).abs() < 0.5, "a single header's slot on the grid: {single}");
     one_pane(&view, cx, &[first, second]);
     view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
@@ -883,7 +889,9 @@ fn a_pane_of_tabs_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let slot = cx.debug_bounds(selector("tab-slot", first.item)).expect("the tab's slot");
     let row = cx.debug_bounds(selector("title", second.item)).expect("the pane's header");
     let tabbed = f32::from(slot.left() - row.left());
-    assert!((tabbed - single).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
+    // One pane now, so no focus dot leads it: the lone header's inset alone.
+    let lone = tab_look::lone_inset(&Theme::default());
+    assert!((tabbed - lone).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
     assert!(a.right() <= b.left(), "in the pane's order");
     // The pane's tabs, below the title bar's own.
     let bar = cx.debug_bounds("titlebar").expect("the title bar").bottom();
@@ -958,12 +966,10 @@ fn a_narrow_tab_row_keeps_its_shown_tab_in_view(cx: &mut TestAppContext) {
     assert!(tab_in_view(&view, cx, last), "and the last again, once shown");
 }
 
-/// A tab row fades, per pixel, only at an edge past which tabs lie hidden: nowhere while every
-/// tab fits, its leading edge once the shown last tab has scrolled the first ones out, and its
-/// trailing edge once the shown first tab leaves the last ones past it. The panel under the
-/// row never fades.
+/// A tab row never fades, whatever lies past its edges (`MonoCode`'s strips have no fade): a
+/// strip too narrow for its tabs scrolls, bare, to the tab on show.
 #[gpui::test]
-fn a_tab_row_fades_only_where_tabs_lie_hidden(cx: &mut TestAppContext) {
+fn a_tab_row_never_fades(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let tabs = four_tabs(&view, cx);
     let (first, last) = (tabs[0], tabs[3]);
@@ -973,50 +979,40 @@ fn a_tab_row_fades_only_where_tabs_lie_hidden(cx: &mut TestAppContext) {
         cx.update(|window, _| crate::retained::faded_edges(window, at))
     };
     pane_at(&view, cx, last, 720.0);
-    assert_eq!(faded(cx), gpui::Edges::default(), "every tab fits: no fade");
+    assert_eq!(faded(cx), gpui::Edges::default(), "every tab fits");
     pane_at(&view, cx, last, 312.0);
-    let edges = faded(cx);
-    assert!(edges.left && !edges.right, "the first tabs hidden before it: {edges:?}");
+    assert_eq!(faded(cx), gpui::Edges::default(), "the first tabs hidden before it");
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let edges = faded(cx);
-    assert!(!edges.left && edges.right, "the last tabs hidden past it: {edges:?}");
-    let panel = view.read_with(cx, |v, _| v.tile_bounds(first)).expect("the pane");
-    let under = cx.update(|window, _| crate::retained::faded_edges(window, panel));
-    assert_eq!(under, gpui::Edges::default(), "the panel does not fade");
+    assert_eq!(faded(cx), gpui::Edges::default(), "the last tabs hidden past it");
 }
 
-/// A tab not shown keeps its close out of its row at rest, so a narrow tab keeps its mark and
-/// its four letters' room: its name runs to the tab's end. Its close is still drawn, over the
-/// tab's end, for the pointer and the keyboard. The shown tab keeps its close in its row and
-/// its letters' room beside it.
+/// Every tab keeps the room its close takes at its end, so a tab's words never move as the
+/// close comes and goes: a tab not shown shows its close only under the pointer, laid over its
+/// end, and the shown tab shows it at rest, its name ending before it.
 #[gpui::test]
-fn a_tab_not_shown_keeps_its_close_out_of_its_room(cx: &mut TestAppContext) {
+fn a_tab_shows_its_close_over_its_end(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let tabs = four_tabs(&view, cx);
     let last = tabs[3];
-    pane_at(&view, cx, last, 312.0);
+    pane_at(&view, cx, last, 720.0);
     let theme = Theme::default();
     for tab in tabs.iter().take(3) {
         let at = cx.debug_bounds(selector("tab", tab.item)).expect("the tab is drawn");
         let name = cx.debug_bounds(selector("name", tab.item)).expect("its name is drawn");
-        let pad = theme.spacing.xs + 0.5;
-        assert!(name.right() >= at.right() - px(pad), "the name runs to the end: {name:?} {at:?}");
-        let letters = f32::from(name.size.width);
-        assert!(letters >= theme.typography.ui_size * 2.0, "room for its letters: {letters}");
-        // Under the pointer its close shows, over the tab's end.
         cx.simulate_mouse_move(at.center(), None, Modifiers::none());
         cx.run_until_parked();
         let close = cx.debug_bounds(selector("tab-close", tab.item)).expect("its close is drawn");
         assert!(close.left() >= at.left() && close.right() <= at.right(), "over the tab's end");
+        assert!(name.right() <= close.left(), "its words clear of it: {name:?} {close:?}");
     }
     let shown = cx.debug_bounds(selector("name", last.item)).expect("drawn");
     let close = cx.debug_bounds(selector("tab-close", last.item)).expect("drawn");
-    assert!(shown.right() <= close.left(), "the shown tab keeps its close in its row");
+    assert!(shown.right() <= close.left(), "the shown tab's name ends before its close");
     let letters = f32::from(shown.size.width);
-    assert!(letters >= theme.typography.ui_size * 2.0, "and its letters' room: {letters}");
+    assert!(letters >= theme.typography.ui_size * 2.0, "and keeps its letters' room: {letters}");
 }
 
 /// On a phone a tile is the screen's width already and has no header: its rows are the bar's

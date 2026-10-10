@@ -1,14 +1,17 @@
 //! The title bar's tabs: the tabs of the project on show, each a tiling layout
 //! ([`slopty_client::layout::tiling`]).
 //!
-//! A tab says the title of its focused work, then a mark for each agent in it that works or
-//! has finished (`MonoCode`'s `TabHarnesses`), then its close. They are drawn as every tab is
-//! ([`super::tab_look`]): the one on show opens into the layout under the bar, the rest are
-//! bare words that take the hover wash. Tabs that do not fit scroll, and an end past which tabs
-//! lie fades out as deep as they run past it.
+//! A tab leads with one mark: a mark for each agent in it that works or has finished
+//! (`MonoCode`'s `TabHarnesses`, up to three, then a count), else what its focused work is. Then
+//! the title of its focused work, and its close under the pointer. They are drawn as every tab
+//! is ([`super::tab_look`]): pills of one width on the bar's ground, the one on show on the
+//! selected wash. Tabs that do not fit scroll, sideways under a vertical wheel too, and a
+//! chevron floats over each end past which tabs lie, a press on it scrolling the row by most of
+//! its width (`MonoCode`'s title strip).
 //!
-//! A tab that closes folds its width away over 200 ms (`MonoCode`'s tab close, [`Pace::Sheet`])
-//! while the tabs after it close the gap ([`Closing`]); under Reduce Motion it is gone at once.
+//! A tab that closes folds its width away over 200 ms (`MonoCode`'s tab close, on
+//! [`Curve::TAB`]) while the tabs after it close the gap ([`Closing`]); under Reduce Motion it
+//! is gone at once.
 //!
 //! A right click or a long press on a tab opens its menu: close it, the others, those to its
 //! right or to its left.
@@ -29,21 +32,26 @@ use gpui::{
     Styled as _, Window, div, px,
 };
 use slopty_client::layout::tiling::TabId;
-use slopty_theme::{Theme, stroke};
+use slopty_theme::{Curve, Theme, stroke};
 
 use super::area::{self, DropSpots};
-use super::tab_look::{self, Look};
+use super::tab_look;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::Status;
+use crate::icons::{Mark, Status, Symbol};
 use crate::kit::{self, Pace};
 
-/// A tab's width bounds, in points: room for a short title, and no more than a long one needs.
-const TAB_MIN: f32 = 96.0;
-const TAB_MAX: f32 = 220.0;
+/// The most agents' marks a tab's lead shows before it counts the rest: `MonoCode`'s three.
+const MARKS_SHOWN: usize = 3;
 
-/// The widest the tab on show grows while it says where its one tile is too, or names it.
-const TAB_WIDE: f32 = 340.0;
+/// How far a tab's agents' marks overlap each other, in points: `MonoCode`'s `-space-x-0.5`.
+const MARK_OVERLAP: f32 = 2.0;
+
+/// The least a chevron scrolls the row by, in points: a tab's floor.
+const SCROLL_LEAST: f32 = tab_look::TAB_FLOOR;
+
+/// The share of the row's width a chevron scrolls it by.
+const SCROLL_SHARE: f32 = 0.6;
 
 /// How much faster a tab's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
@@ -61,11 +69,14 @@ pub(super) struct TitleTab {
     pub id: TabId,
     /// The title of its focused work.
     pub title: SharedString,
+    /// What its focused work is: its kind's glyph or its agent's mark, its lead while no agent
+    /// in it works or has finished.
+    pub lead: Mark,
     /// Where its one tile is, when it holds one alone and the bar is its header
     /// ([`super::tile_strip`]): a file's folder, beside the title, giving way first.
     pub place: Option<SharedString>,
-    /// Its one tile is a file with an edit not yet on disk, said after the title as a
-    /// document's title bar says it, when the bar is the tile's header.
+    /// Its one tile is a file with an edit not yet on disk, a dot after the title, when the bar
+    /// is the tile's header.
     pub edited: bool,
     /// One mark for each agent in it that works or has finished, in pane order.
     pub marks: Vec<Status>,
@@ -168,7 +179,7 @@ impl Folding {
         self.project = Some(clock.project);
         self.last = now;
         let length = Pace::Sheet.duration();
-        let curve = Pace::Sheet.curve();
+        let curve = Curve::TAB;
         self.ghosts
             .retain(|g| clock.moves && clock.now.saturating_duration_since(g.start) < length);
         self.ghosts
@@ -189,7 +200,7 @@ fn ghost(theme: &Theme, title: SharedString, width: Pixels) -> gpui::AnyElement 
         .debug_selector(|| "title-tab-closing".to_owned())
         .flex_none()
         .w(width)
-        .h_full()
+        .h(px(theme.density.tab))
         .overflow_hidden()
         .flex()
         .items_center()
@@ -197,6 +208,99 @@ fn ghost(theme: &Theme, title: SharedString, width: Pixels) -> gpui::AnyElement 
         .text_color(hsla(s.text_secondary))
         .child(div().flex_none().whitespace_nowrap().child(title))
         .into_any_element()
+}
+
+/// A tab's lead: up to [`MARKS_SHOWN`] marks of its agents that work or have finished,
+/// overlapping, then how many more; else what its focused work is.
+fn tab_lead(theme: &Theme, tab: &TitleTab) -> gpui::AnyElement {
+    let n = tab.id.get();
+    if tab.marks.is_empty() {
+        return tab_look::lead(theme, tab.lead, tab.shown)
+            .debug_selector(move || format!("title-tab-lead-{n}"))
+            .into_any_element();
+    }
+    let slot = crate::icons::IconSize::Inline.slot(theme);
+    // Each mark under an id of its own: every one is a "status" image to the a11y tree.
+    let marks = tab.marks.iter().take(MARKS_SHOWN).enumerate().map(|(i, st)| {
+        div()
+            .id(("title-tab-mark", i))
+            .flex_none()
+            .size(px(slot))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(i > 0, |el| el.ml(px(-MARK_OVERLAP)))
+            .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
+            .child(crate::icons::status_mark(theme, Some(*st)))
+            .into_any_element()
+    });
+    let more = tab.marks.len().saturating_sub(MARKS_SHOWN);
+    let more = (more > 0).then(|| {
+        kit::typed(div(), theme.roles().caption)
+            .flex_none()
+            .pl(px(theme.spacing.xxs))
+            .text_color(hsla(theme.surfaces.text_muted))
+            .child(format!("+{more}"))
+    });
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .when(!tab.shown, |el| el.opacity(slopty_theme::alpha::STRONG))
+        .children(marks)
+        .children(more)
+        .into_any_element()
+}
+
+/// The chevron over the strip's `end` while tabs lie past it: a 26 pt square on the strong
+/// hover's wash that scrolls the row by [`SCROLL_SHARE`] of its width, never less than
+/// [`SCROLL_LEAST`].
+fn chevron<V: TitleTabsHost>(
+    theme: &Theme,
+    scroll: &ScrollHandle,
+    forward: bool,
+    cx: &Draw<'_, V>,
+) -> gpui::AnyElement {
+    let s = theme.surfaces;
+    let (id, icon, label) = if forward {
+        ("title-tabs-forward", Symbol::ChevronRight, "Scroll tabs forward")
+    } else {
+        ("title-tabs-back", Symbol::ChevronLeft, "Scroll tabs back")
+    };
+    let side = px(kit::icon_button_side(theme));
+    let glyph = crate::icons::IconSize::Inline;
+    let handle = scroll.clone();
+    let button = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(Role::Button)
+        .aria_label(label)
+        .size(side)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.radii.sm))
+        .bg(hsla(s.hover_strong))
+        .text_color(hsla(s.text_secondary))
+        .cursor_pointer()
+        .child(
+            crate::icons::Drawn::new(theme, icon, glyph)
+                .slot(px(glyph.slot(theme)), hsla(s.text_secondary)),
+        )
+        .hover(move |el| el.bg(hsla(s.pressed)).text_color(hsla(s.text)))
+        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |_this: &mut V, _ev, _window, cx| {
+            let width = f32::from(handle.bounds().size.width);
+            let step = (width * SCROLL_SHARE).max(SCROLL_LEAST);
+            let (at, max) = (handle.offset(), handle.max_offset());
+            let x = if forward { f32::from(at.x) - step } else { f32::from(at.x) + step };
+            let x = x.clamp(-f32::from(max.x), 0.0);
+            handle.set_offset(gpui::point(px(x), at.y));
+            cx.notify();
+        }));
+    let at = div().absolute().top_0().bottom_0().flex().items_center();
+    let at = if forward { at.right(px(theme.spacing.xs)) } else { at.left(px(theme.spacing.xs)) };
+    at.child(kit::eased(button)).into_any_element()
 }
 
 /// The row of `tabs`, scrolled by `scroll`, writing where it and each tab lie to `drops`.
@@ -226,124 +330,98 @@ pub(super) fn render<V: TitleTabsHost>(
     };
     drops.spots.tabs.borrow_mut().clear();
     let last = tabs.len().saturating_sub(1);
-    let mut items: Vec<gpui::AnyElement> =
-        tabs.iter()
-            .enumerate()
-            .flat_map(|(i, tab)| {
-                let id = tab.id;
-                let spots = Rc::clone(drops.spots);
-                let spot = area::spot(move |b| spots.put_tab(id, b));
-                // The mark of a drop: at the tab's leading edge, or the last one's trailing.
-                let mark = (drops.at == Some(i) || (i == last && drops.at == Some(tabs.len())))
-                    .then(|| {
-                        let bar = div()
-                            .debug_selector(|| "title-tabs-drop".to_owned())
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .w(px(stroke::MARK))
-                            .bg(hsla(s.focus));
-                        if drops.at == Some(i) { bar.left_0() } else { bar.right_0() }
-                    });
-                let n = id.get();
-                let ink = if tab.shown { s.text } else { s.text_secondary };
-                // Each mark under an id of its own: every one is a "status" image to the a11y tree.
-                let marks = tab.marks.iter().enumerate().map(|(i, st)| {
-                    div()
-                        .id(("title-tab-mark", i))
-                        .flex_none()
-                        .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
-                        .child(crate::icons::status_mark(theme, Some(*st)))
-                        .into_any_element()
+    let mut items: Vec<gpui::AnyElement> = tabs
+        .iter()
+        .enumerate()
+        .flat_map(|(i, tab)| {
+            let id = tab.id;
+            let spots = Rc::clone(drops.spots);
+            let spot = area::spot(move |b| spots.put_tab(id, b));
+            // The mark of a drop: at the tab's leading edge, or the last one's trailing.
+            let mark =
+                (drops.at == Some(i) || (i == last && drops.at == Some(tabs.len()))).then(|| {
+                    let bar = div()
+                        .debug_selector(|| "title-tabs-drop".to_owned())
+                        .absolute()
+                        .top(px(theme.spacing.xs))
+                        .bottom(px(theme.spacing.xs))
+                        .w(px(stroke::FOCUS))
+                        .rounded(px(theme.radii.full))
+                        .bg(hsla(s.accent_fill));
+                    if drops.at == Some(i) { bar.left_0() } else { bar.right_0() }
                 });
-                let id_close = format!("title-tab-close-{n}");
-                let close = tab_look::close(theme, id_close, CLOSE_TAB, tab.shown, TAB_GROUP)
-                    .on_click(cx.listener(move |this: &mut V, _ev, window, cx| {
-                        this.close_title_tab(id, window, cx);
-                    }));
-                let look = Look { shown: tab.shown, ..Look::default() };
-                let host = cx.weak_entity();
-                let el = kit::menu_press(div().id(("title-tab", n)), move |at, window, cx| {
-                    let _gone = host.update(cx, |this, cx| this.title_tab_menu(id, at, window, cx));
-                });
-                // The chrome's own size, its words at the action role while it is on show: the
-                // tab is a control's words, as the breadcrumb beside it is.
-                let roles = theme.roles();
-                let role = if tab.shown { roles.action } else { roles.chrome };
-                let named = if tab.shown { field.take() } else { None };
-                let widened = named.is_some() || tab.place.is_some() || tab.edited;
-                let edited = tab.edited.then(|| {
-                    kit::typed(div(), roles.metadata)
-                        .id(("title-tab-edited", n))
-                        .debug_selector(move || format!("title-tab-edited-{n}"))
-                        .role(Role::Label)
-                        .aria_label(super::tile::EDITED)
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(hsla(s.text_muted))
-                        .child(super::tile::EDITED)
-                });
-                let title = div()
-                    .debug_selector(move || format!("title-tab-text-{n}"))
-                    .flex_auto()
+            let n = id.get();
+            let id_close = format!("title-tab-close-{n}");
+            let close = kit::close_box(theme, id_close, CLOSE_TAB).on_click(cx.listener(
+                move |this: &mut V, _ev, window, cx| {
+                    this.close_title_tab(id, window, cx);
+                },
+            ));
+            let close = tab_look::close(theme, close, false, TAB_GROUP);
+            let host = cx.weak_entity();
+            let el = kit::menu_press(div().id(("title-tab", n)), move |at, window, cx| {
+                let _gone = host.update(cx, |this, cx| this.title_tab_menu(id, at, window, cx));
+            });
+            let roles = theme.roles();
+            let named = if tab.shown { field.take() } else { None };
+            let edited = tab.edited.then(|| {
+                tab_look::edited(theme, ("title-tab-edited", n))
+                    .debug_selector(move || format!("title-tab-edited-{n}"))
+            });
+            let title = div()
+                .debug_selector(move || format!("title-tab-text-{n}"))
+                .flex_initial()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(tab.title.clone());
+            let place = tab.place.clone().map(|place| {
+                let mut el = div();
+                // Gives way long before the title does.
+                el.style().flex_shrink = Some(PLACE_SHRINK);
+                kit::typed(el, roles.metadata)
+                    .debug_selector(move || format!("title-tab-place-{n}"))
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(tab.title.clone());
-                let place = tab.place.clone().map(|place| {
-                    let mut el = div();
-                    // Gives way long before the title does.
-                    el.style().flex_shrink = Some(PLACE_SHRINK);
-                    kit::typed(el, roles.metadata)
-                        .debug_selector(move || format!("title-tab-place-{n}"))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_color(hsla(s.text_muted))
-                        .child(place)
-                });
-                let el = kit::typed(tab_look::tab(theme, el, look), role)
-                    .debug_selector(move || format!("title-tab-{n}"))
-                    .group(TAB_GROUP)
-                    .role(Role::Tab)
-                    .aria_label(tab.title.clone())
-                    .aria_selected(tab.shown)
-                    .flex_initial()
-                    .min_w(px(TAB_MIN))
-                    .max_w(px(if widened { TAB_WIDE } else { TAB_MAX }))
-                    .gap(px(theme.spacing.xs))
-                    .pl(px(theme.spacing.sm))
-                    .pr(px(theme.spacing.xs))
-                    .text_color(hsla(ink))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this: &mut V, ev: &MouseDownEvent, window, cx| {
-                            if ev.click_count == 2 {
-                                this.name_title_tab(id, window, cx);
-                            } else {
-                                this.show_title_tab(id, cx);
-                                this.carry_title_tab(id, ev);
-                            }
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .map(|el| match named {
-                        Some(field) => el.child(field),
-                        None => el.child(title).children(edited).children(place),
-                    })
-                    .children(marks)
-                    .child(close)
-                    .child(spot)
-                    .children(mark)
-                    .into_any_element();
-                // A tab closed just before this one folds away in its place.
-                let mut here = ghosts_before(Some(id));
-                here.push(el);
-                here
-            })
-            .collect();
+                    .text_color(hsla(s.text_muted))
+                    .child(place)
+            });
+            let el = tab_look::tab(theme, el, tab.shown, true)
+                .debug_selector(move || format!("title-tab-{n}"))
+                .group(TAB_GROUP)
+                .role(Role::Tab)
+                .aria_label(tab.title.clone())
+                .aria_selected(tab.shown)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut V, ev: &MouseDownEvent, window, cx| {
+                        if ev.click_count == 2 {
+                            this.name_title_tab(id, window, cx);
+                        } else {
+                            this.show_title_tab(id, cx);
+                            this.carry_title_tab(id, ev);
+                        }
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(tab_lead(theme, tab))
+                .map(|el| match named {
+                    Some(field) => el.child(field),
+                    None => el.child(title).children(edited).children(place),
+                })
+                .child(close)
+                .child(spot)
+                .children(mark)
+                .into_any_element();
+            // A tab closed just before this one folds away in its place.
+            let mut here = ghosts_before(Some(id));
+            here.push(el);
+            here
+        })
+        .collect();
     items.extend(ghosts_before(None));
     let strip = div()
         .id("title-tabs")
@@ -352,15 +430,25 @@ pub(super) fn render<V: TitleTabsHost>(
         .flex_initial()
         .min_w_0()
         .h_full()
-        .flex()
         .overflow_x_scroll()
         .track_scroll(scroll)
+        .on_scroll_wheel(cx.listener(|_this: &mut V, _ev, _window, cx| cx.notify()))
         .children(items);
-    // An end past which tabs lie fades out per pixel, as deep as they run past it, as a pane's
-    // tabs do (`tile::render_tabs`). How far they run is known only once the strip is laid
-    // out, so the fade reads it as the strip prepaints, in the frame that lays it out.
-    let strip =
-        gpui::edge_fade(strip, gpui::EdgeFade::x(px(theme.spacing.xl))).hidden_by_scroll(scroll);
+    let strip = tab_look::strip(theme, strip);
+    // A chevron floats over an end while tabs lie past it, as the row is laid out in this
+    // frame ([`PastEnd`]); the wheel draws the row again, so it follows the row as it scrolls.
+    let back = PastEnd {
+        child: Some(chevron(theme, scroll, false, cx)),
+        scroll: scroll.clone(),
+        forward: false,
+        shown: false,
+    };
+    let forward = PastEnd {
+        child: Some(chevron(theme, scroll, true, cx)),
+        scroll: scroll.clone(),
+        forward: true,
+        shown: false,
+    };
     let spots = Rc::clone(drops.spots);
     let spot = area::spot(move |b| spots.strip.set(Some(b)));
     // As wide as its tabs and no wider, so what is left of the bar stays its empty span.
@@ -373,5 +461,88 @@ pub(super) fn render<V: TitleTabsHost>(
         .items_center()
         .child(strip)
         .child(spot)
+        .child(back)
+        .child(forward)
         .into_any_element()
+}
+
+/// A chevron over the strip's `forward` end (else its start) that is drawn, and takes the
+/// pointer, only while tabs lie past that end as the strip is laid out in the same frame: the
+/// strip is prepainted before it, so its scroll reads this frame's room, never last frame's.
+struct PastEnd {
+    child: Option<gpui::AnyElement>,
+    scroll: ScrollHandle,
+    forward: bool,
+    shown: bool,
+}
+
+impl gpui::IntoElement for PastEnd {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for PastEnd {
+    type PrepaintState = ();
+    type RequestLayoutState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        let layout = match &mut self.child {
+            Some(child) => child.request_layout(window, cx),
+            None => window.request_layout(gpui::Style::default(), [], cx),
+        };
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> Self::PrepaintState {
+        let (at, max) = (self.scroll.offset().x, self.scroll.max_offset().x);
+        let past = px(0.5);
+        self.shown = if self.forward { at > -max + past } else { at < -past };
+        if self.shown
+            && let Some(child) = &mut self.child
+        {
+            child.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        if self.shown
+            && let Some(child) = &mut self.child
+        {
+            child.paint(window, cx);
+        }
+    }
 }

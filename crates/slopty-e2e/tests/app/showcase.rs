@@ -1849,7 +1849,7 @@ async fn showcase_three_workers() {
 }
 
 /// The chrome over a working studio: the palette with results, the "…" menu, the
-/// breadcrumb's menu, and every page of the settings.
+/// breadcrumb's menu (in the bar while the navigator is hidden), and every page of the settings.
 #[tokio::test]
 #[ignore = "showcase: cargo xtask e2e showcase"]
 async fn showcase_the_palette_menus_and_settings() {
@@ -1875,7 +1875,9 @@ async fn showcase_the_palette_menus_and_settings() {
         wait(drv, "the menu closed", |d| d.a11y_node("Menu", None).is_none()).await;
     }
 
-    let dump = look(drv).await;
+    // The breadcrumb stands in the bar only while the navigator is hidden.
+    drv.keys("cmd-b").await.unwrap();
+    let dump = wait(drv, "the breadcrumb", |d| d.a11y_node("Group", Some("Where")).is_some()).await;
     let crumb =
         dump.a11y_node("Group", Some("Where")).map(|g| g.bounds).and_then(|[gx, gy, gw, gh]| {
             dump.a11y
@@ -1897,6 +1899,9 @@ async fn showcase_the_palette_menus_and_settings() {
     } else {
         println!("showcase: no breadcrumb button");
     }
+    let drv = &mut stack.driver;
+    drv.keys("cmd-b").await.unwrap();
+    wait(drv, "the navigator back", |d| d.a11y_node("Group", Some("Where")).is_none()).await;
 
     settings(stack).await;
     day.stack.shutdown().await;

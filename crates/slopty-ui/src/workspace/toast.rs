@@ -507,6 +507,9 @@ impl WorkspaceView {
             }
         };
         let line = SharedString::from(line);
+        // In the title bar a notice is a ghost item, `MonoCode`'s bar holds nothing boxed; over
+        // a tile it stands raised, a thing on the tile rather than one more of its words.
+        let in_bar = self.beside_tile(shown).is_none();
         let notice = div()
             .id(("toast", shown.seq))
             .debug_selector(move || part.to_owned())
@@ -522,17 +525,22 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
-            .h(px(theme.density.hit))
+            .h(px(if in_bar { crate::kit::icon_button_side(theme) } else { theme.density.hit }))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
             .pl(px(theme.spacing.sm))
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
-            // Raised in both variants: a notice is a thing on the bar or the tile, not one
-            // more of its words.
-            .map(|el| crate::kit::raised(el, theme))
             .rounded(px(theme.radii.sm))
-            .text_color(hsla(s.text))
+            .map(|el| {
+                if in_bar {
+                    crate::kit::typed(el, theme.roles().metadata)
+                        .text_color(hsla(s.text_secondary))
+                        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+                } else {
+                    crate::kit::raised(el, theme).text_color(hsla(s.text))
+                }
+            })
             .children(icon.map(|icon| {
                 crate::icons::symbol(
                     theme,
@@ -692,11 +700,16 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label(aria)
                 .aria_expanded(open)
-                .h(px(theme.density.hit))
+                .h(px(if place.is_none() {
+                    crate::kit::icon_button_side(theme)
+                } else {
+                    theme.density.hit
+                }))
                 .flex()
                 .items_center()
                 .px(px(theme.spacing.sm))
-                .map(|el| crate::kit::raised(el, theme))
+                .when(place.is_some(), |el| crate::kit::raised(el, theme))
+                .when(place.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover_strong))))
                 .rounded(px(theme.radii.sm))
                 .text_color(hsla(s.text_secondary))
                 .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))

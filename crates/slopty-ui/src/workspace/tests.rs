@@ -1445,6 +1445,9 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1);
     assert!(events.borrow().contains(&WorkspaceEvent::NeedsYou(1)), "{:?}", events.borrow());
+    assert!(cx.debug_bounds("bell-count").is_none(), "no bell while the navigator stands");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell says so");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
@@ -1511,6 +1514,9 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
         view.read_with(cx, |v, _| (v.needs_you_count(), v.needs_you_on(studio.key))),
         (1, 1)
     );
+    assert!(cx.debug_bounds("bell-count").is_none(), "no bell while the navigator stands");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts it");
     studio.drain();
 

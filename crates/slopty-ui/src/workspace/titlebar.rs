@@ -1,23 +1,22 @@
-//! The bar across the top, from the navigator's right edge to the window's (from past the
-//! traffic lights when the navigator is hidden): the navigator's toggle, back and forward
-//! through the tabs visited (`MonoCode`'s `TabVisitNav`), the breadcrumb of
-//! where the focused work is (`project ▾ / checkout ▾ / branch`, `breadcrumb.rs`, whose
-//! project menu is how the bar goes between projects), the project's tabs (`title_tabs.rs`)
-//! and "+" after them (a menu of what to open: a terminal, an agent, a window or a note); the
-//! bell and "…" on the right. The bell counts what needs the person and the agents' turns left
-//! to review, and opens the navigator at them. Between them, only while there is something to say:
-//! the notices that are about no one tile's work (`toast`), and before the bell the readouts
-//! (`readouts`): the server while it does not answer, a plan far used, the ports forwarded, the
-//! transfers, a newer Slopty, the frame time with the stats. Every other action is a key, the
-//! palette, or a tile's own header. There is no bar along the bottom.
+//! The bar across the top, `MonoCode`'s title bar: 40 pt on the window's ground, the one line
+//! along its foot, from the navigator's right edge to the window's.
 //!
-//! It takes the content's tone ([`slopty_theme::Theme::content`]) with no rule under it, so the
-//! content runs up to the window's top edge and the navigator is the one panel beside it, as
-//! macOS 26 draws a sidebar beside edge-to-edge content and Linear and the Codex app draw a grey
-//! sidebar beside a white main area. It used to take the navigator's tone, and with the bar
-//! along the bottom the chrome read as a grey frame round the content, an older Electron
-//! window's look. A
-//! menu fades in as it drops 4 pt from its button, at once under Reduce Motion.
+//! While the navigator is docked it holds the project's tabs (`title_tabs.rs`), then, only while
+//! there is something to say, the tab's one tile's header (`tile_strip`), the notices that are
+//! about no one tile's work (`toast`) and the readouts (`readouts`: the server while it does not
+//! answer, a plan far used, the ports forwarded, the transfers, a newer Slopty, the frame time
+//! with the stats), and "…" at its end. Back, forward and the navigator's toggle stand in the
+//! navigator's own top row, where the project on show is its selected group and *Needs you*
+//! its own section.
+//!
+//! With the navigator hidden it starts past the traffic lights with the toggle, back and
+//! forward, and the breadcrumb of where the focused work is (`project ▾ / checkout ▾ / branch`,
+//! `breadcrumb.rs`, whose project menu is how the bar goes between projects), then the tabs,
+//! and ends in the bell and "…". The bell counts what needs the person and the agents' turns
+//! left to review, and opens the navigator at them. Search and New agent stand in the bar only
+//! while neither the navigator nor its rail is drawn. Every other action is a key, the
+//! palette, or a tile's own header. A menu fades in as it drops 4 pt from its button, at once
+//! under Reduce Motion.
 //!
 //! On a phone the bar is a navigation bar: the focused tile's title (else the project's name),
 //! which opens the tab's other panes and the project's tabs while there are some
@@ -51,7 +50,7 @@ use super::title_tabs::TitleTab;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Status, Symbol};
+use crate::icons::{Mark, Status, Symbol};
 use crate::kit;
 
 /// The bar's height under `theme`'s density: a finger's target and a hairline's room round
@@ -237,6 +236,10 @@ impl WorkspaceView {
             .iter()
             .map(|tab| {
                 let title = tab.focused().map(|t| self.tab_title(t)).unwrap_or_default();
+                let lead = tab
+                    .focused()
+                    .and_then(|t| self.item(t))
+                    .map_or(Mark::Symbol(Symbol::Terminal), |item| self.kind_glyph(item));
                 let marks = tab
                     .tiles()
                     .filter_map(|t| {
@@ -259,6 +262,7 @@ impl WorkspaceView {
                 TitleTab {
                     id: tab.id(),
                     title: title.into(),
+                    lead,
                     place: place.map(SharedString::from),
                     edited,
                     marks,
@@ -326,7 +330,7 @@ impl WorkspaceView {
 
     /// Back and forward through the tabs visited (⌘[ ⌘]), a pair that always stands so the
     /// tabs after it never move; a way with nowhere to go is drawn faint and takes no press.
-    fn visit_arrows(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    pub(super) fn visit_arrows(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let ways: [(bool, &'static str, Symbol, &'static str, &'static dyn gpui::Action); 2] = [
             (false, "go-back", Symbol::ChevronLeft, BACK, &GoBack),
@@ -393,25 +397,23 @@ impl WorkspaceView {
         // A docked navigator holds the traffic lights and the safe area's left edge; the bar
         // starts at its right edge.
         let docked = self.nav.drawn == Some(Mode::Docked);
-        let leading = if docked { spacing.sm } else { LEADING_INSET + f32::from(safe.left) };
+        // Docked, the tab strip's own pad starts the bar.
+        let leading = if docked { 0.0 } else { LEADING_INSET + f32::from(safe.left) };
         let trailing = spacing.md + f32::from(safe.right);
         let phone = self.phone;
         let phone_title = (has_workers && phone).then(|| self.render_phone_switch(cx));
         let theme = &self.theme;
         let s = &theme.surfaces;
 
-        // Left: the navigator's toggle (a docked navigator holds it in its own top row, at the
-        // same place beside the lights), "Search" and "New agent" while the navigator is
-        // hidden (a navigator holds them at its top row's end), then where the focused work is.
+        // Left, with the navigator hidden: its toggle, "Search" and "New agent" while the rail
+        // is not drawn either (the rail leads with them), back and forward through the tabs
+        // visited, and where the focused work is. A docked navigator holds all of it.
         let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
-        let hidden = has_workers && !phone && self.nav.drawn.is_none();
-        let search = hidden.then(|| self.search_button(false, cx));
-        let new_agent = hidden.then(|| self.new_agent_button("bar-new-agent", cx));
-
-        // Back and forward through the tabs visited, then where the focused work is, then
-        // the project's tabs, "+" after the last.
-        let visits = (has_workers && !phone).then(|| self.visit_arrows(cx));
-        let where_ = (has_workers && !phone).then(|| self.render_breadcrumb(cx));
+        let bare = has_workers && !phone && self.nav.drawn.is_none() && !self.nav.rail;
+        let search = bare.then(|| self.search_button(false, cx));
+        let new_agent = bare.then(|| self.new_agent_button("bar-new-agent", cx));
+        let visits = (has_workers && !phone && !docked).then(|| self.visit_arrows(cx));
+        let where_ = (has_workers && !phone && !docked).then(|| self.render_breadcrumb(cx));
         let tabs =
             (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
         // A tab's one tile's header, but for its title, which its tab says; empty while the tab
@@ -427,7 +429,7 @@ impl WorkspaceView {
         // left to review; it opens the navigator at them.
         let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
         let unread = total.saturating_add(self.to_review().len());
-        let bell = has_workers.then(|| {
+        let bell = (has_workers && !docked).then(|| {
             // No count disc, the one web badge the app had: the glyph itself says it, as the
             // Mac's own monochrome `bell.badge` does, in its words' tier, and in the warn fill
             // only while something needs the person. The count is said, not drawn.

@@ -135,7 +135,7 @@ impl ThreadView {
             .debug_selector(move || id.to_owned())
             .aria_label(SharedString::from(label))
             .flex_none()
-            .h(px(theme.density.control))
+            .h(px(kit::icon_button_side(theme)))
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
@@ -293,15 +293,16 @@ impl ThreadView {
         };
         // The model by its name alone: the agent's mark leads the tile's header, and beside
         // "Opus 5.5" it only said again whose model it is.
-        // The model is the foot's one outlined pill, beside the outlined "+": the two things
-        // the person sets before writing, drawn as controls; the rest are quiet words.
-        let chip = outlined(self.chip("thread-model", format!("Model, {name}")), theme)
+        // The model, the mode and the "+" are the foot's controls, squares on the selected
+        // wash, `MonoCode`'s composer controls; what is only read is quiet words.
+        let chip = self
+            .chip("thread-model", format!("Model, {name}"))
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(
-                chip.role(Role::Button)
+                squared(chip, theme, false)
+                    .role(Role::Button)
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
                         crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
                             .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
@@ -349,9 +350,9 @@ impl ThreadView {
         if switch {
             return Some(
                 crate::a11y::tab_stop(
-                    chip.role(Role::Button)
+                    squared(chip, theme, false)
+                        .role(Role::Button)
                         .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                         .child(
                             crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
                                 .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
@@ -581,10 +582,44 @@ impl ThreadView {
     }
 }
 
-/// `el` outlined as a pill or a disc: the ordinary hairline round it at the full radius, as the
-/// "+" and the model chip stand at the composer's foot.
-fn outlined<E: Styled>(el: E, theme: &Theme) -> E {
-    el.rounded(px(theme.radii.full)).border(kit::HAIR).border_color(hsla(theme.surfaces.border))
+impl ThreadView {
+    /// A square of the composer foot's around one 14 pt glyph, before [`squared`] gives it its
+    /// wash: a button named `label`.
+    fn control_square(
+        &self,
+        id: &'static str,
+        icon: Symbol,
+        label: &'static str,
+    ) -> gpui::Stateful<Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        crate::a11y::tab_stop(
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .size(px(kit::icon_button_side(theme)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))),
+            s.focus,
+        )
+    }
+}
+
+/// `el` as one of the composer foot's controls, `MonoCode`'s: a square at the small radius on
+/// the selected wash, its words and glyph in the secondary tone, a step firmer under the
+/// pointer and the pressed wash while its menu is `open`.
+fn squared(el: gpui::Stateful<Div>, theme: &Theme, open: bool) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    el.rounded(px(theme.radii.sm))
+        .bg(hsla(if open { s.pressed } else { s.selected }))
+        .text_color(hsla(s.text_secondary))
+        .hover(move |el| el.bg(hsla(s.keyed)).text_color(hsla(s.text)))
 }
 
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
@@ -609,15 +644,19 @@ impl ThreadView {
             .relative()
             .flex_none()
             .child(
-                outlined(self.icon_button(ADD_BUTTON, Symbol::Plus, ADD_LABEL), &self.theme)
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.add_open = !this.add_open;
-                        // Closed by its button as by Esc: the keyboard goes back to the field.
-                        if !this.add_open {
-                            this.focus(window, cx);
-                        }
-                        cx.notify();
-                    })),
+                squared(
+                    self.control_square(ADD_BUTTON, Symbol::Plus, ADD_LABEL),
+                    &self.theme,
+                    self.add_open,
+                )
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.add_open = !this.add_open;
+                    // Closed by its button as by Esc: the keyboard goes back to the field.
+                    if !this.add_open {
+                        this.focus(window, cx);
+                    }
+                    cx.notify();
+                })),
             )
             .children(menu)
             .into_any_element()

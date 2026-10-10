@@ -277,6 +277,10 @@ fn the_frame_says_where_the_focused_tile_is_once(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("readouts").is_none(), "the title bar says none of it again");
     assert!(!names.iter().any(|l| l.contains("1 working")), "no agent counts: {names:#?}");
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
+    // The bell stands in the bar while the navigator is hidden.
+    assert!(cx.debug_bounds("bell").is_none(), "the navigator's Needs you says it");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     let count = cx.debug_bounds("bell-count").expect("the bell counts the one waiting");
     assert_eq!(count.size, size(px(0.0), px(0.0)), "said, not drawn: no disc on the bell");
     let tree = tree(cx);
@@ -330,7 +334,11 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
     });
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 2);
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(labels(&view, cx).iter().any(|l| l == "2 new"), "the badge says how many");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
 
     assert!(
         cx.debug_bounds("nav-needs-you").is_some() && cx.debug_bounds("nav-to-review").is_some()
@@ -340,9 +348,9 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
     assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge: the breadcrumb clear of the bell,
-/// however long the workspace's name. The toggle stays in the
-/// navigator's top row, clear of the bar.
+/// The bar runs from the docked navigator's right edge, and holds no breadcrumb or bell while the
+/// navigator stands; the toggle stays in the navigator's top row, clear of the bar. With the
+/// navigator hidden the breadcrumb returns, clear of the bell however long the project's name.
 #[gpui::test]
 fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -358,14 +366,16 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
         cx.notify();
     });
     cx.run_until_parked();
-    let (navigator, toggle, crumbs, bell) = (
-        bounds(cx, "navigator"),
-        bounds(cx, "navigator-toggle"),
-        bounds(cx, "crumb-project"),
-        bounds(cx, "bell"),
-    );
+    let (navigator, toggle, titlebar) =
+        (bounds(cx, "navigator"), bounds(cx, "navigator-toggle"), bounds(cx, "titlebar"));
     assert!(toggle.right() <= navigator.right(), "the toggle is the navigator's: {toggle:?}");
-    assert!(navigator.right() <= crumbs.left(), "the bar starts at the navigator's edge");
+    assert!(navigator.right() <= titlebar.left() + px(0.5), "the bar starts at its edge");
+    for absent in ["crumb-project", "bell"] {
+        assert!(cx.debug_bounds(absent).is_none(), "{absent}: the navigator says it");
+    }
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let (crumbs, bell) = (bounds(cx, "crumb-project"), bounds(cx, "bell"));
     assert!(crumbs.right() <= bell.left(), "{crumbs:?} {bell:?}");
 }
 

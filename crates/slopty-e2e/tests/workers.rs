@@ -80,7 +80,8 @@ mod tests {
     }
 
     /// The bell's badge ("1 new") and the bell's centre, if the top bar shows a count: the one
-    /// count of what waits on the human.
+    /// count of what waits on the human. The bell is in the bar only while the navigator is
+    /// hidden.
     fn pill(d: &Dump) -> Option<(String, (f32, f32))> {
         let count = d
             .a11y
@@ -195,13 +196,16 @@ mod tests {
             .hold_hook(&session_b, "PermissionRequest", r#","tool_name":"Bash""#)
             .await
             .unwrap();
+        // B's waiting session's row under the navigator's *Needs you*.
+        let waiting = |l: &str| l != "Needs you" && l.ends_with("Needs you");
         let badged = Instant::now();
         let d = stack
             .driver
             .wait_for("the pill to show B's one waiting agent", STEP, |d| {
                 focused_worker(d) == Some(A)
                     && worker(d, B).is_some_and(|w| w.needs_you == 1)
-                    && pill(d).is_some_and(|(l, _)| l == "1 new")
+                    && (pill(d).is_some_and(|(l, _)| l == "1 new")
+                        || centre(d, "Button", waiting).is_some())
             })
             .await
             .unwrap();
@@ -212,11 +216,12 @@ mod tests {
         // The count is the sum across workers: worker A contributes nothing.
         assert_eq!(worker(&d, A).unwrap().needs_you, 0, "{d:#?}");
 
-        // The bell shows the navigator at *Needs you*, which lists B's waiting session, and its
-        // row focuses it, in the same layout.
-        let (_, (px, py)) = pill(&d).unwrap();
-        stack.driver.click(px, py).await.unwrap();
-        let waiting = |l: &str| l != "Needs you" && l.ends_with("Needs you");
+        // The navigator's *Needs you* lists B's waiting session, and its row focuses it, in the
+        // same layout. While the navigator is docked it is on screen and the bar has no bell;
+        // hidden, the bell shows it.
+        if let Some((_, (px, py))) = pill(&d) {
+            stack.driver.click(px, py).await.unwrap();
+        }
         let listed = stack
             .driver
             .wait_for("Needs you", STEP, |d| centre(d, "Button", waiting).is_some())

@@ -1883,12 +1883,10 @@ impl SettingsForm {
             .child(dot)
     }
 
-    /// A segmented choice: the options side by side in a track, the chosen one on a raised
-    /// thumb that slides to the next one chosen. ← and → move it.
-    ///
-    /// The chosen label is set at the medium weight in the room the medium weight takes, which
-    /// every label keeps, so choosing one reflows nothing. A hairline parts two options that
-    /// are not chosen, and goes beside the thumb.
+    /// A segmented choice, `MonoCode`'s: the options side by side in a ringed track, the chosen
+    /// one in the text's tone on the selected wash, which slides to the next one chosen; the
+    /// rest in the secondary tone. ← and → move it. A hairline parts two options that are not
+    /// chosen, and goes beside the wash.
     fn segmented(
         &self,
         ix: usize,
@@ -1918,23 +1916,7 @@ impl SettingsForm {
                 );
             }
             let (value, label) = (choice.value.as_str(), choice.title.as_str());
-            let words = div()
-                .relative()
-                .child(
-                    div()
-                        .invisible()
-                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .justify_center()
-                        .when(chosen, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
-                        .child(label),
-                );
+            let words = div().child(label);
             let el = div()
                 .id(("option", n))
                 .debug_selector(move || format!("settings-option-{ix}-{n}"))
@@ -1963,13 +1945,13 @@ impl SettingsForm {
                 .child(words);
             segments.push(el.into_any_element());
         }
-        let el = well(theme)
+        let el = crate::kit::track(theme)
+            .flex_none()
+            .h(px(theme.density.row))
             .id(("settings-choice", ix))
             .debug_selector(move || format!("settings-choice-{ix}"))
             .role(gpui::accesskit::Role::RadioGroup)
             .aria_value(current_label)
-            .relative()
-            .p(px(crate::kit::TRACK_PAD))
             .child(thumb.under_thumb(theme, true, None))
             .children(segments);
         self.stop(ix, row, el, cx).into_any_element()
@@ -2248,7 +2230,7 @@ fn row_height(theme: &Theme) -> f32 {
 }
 
 /// The page's children with each run of rows set in one card, as System Settings groups them:
-/// the line that bounds a region (`border`) round the group at `radii.md`, a card's, filled with
+/// the line that bounds a region (`border`) round the group at `radii.lg`, filled with
 /// the card's wash (`MonoCode`'s settings cards), the rows the content itself, each parted from the
 /// one before by the quieter hairline inside a region (`stroke`), inset to start where the titles
 /// do. On near-black the quieter one alone left the group's edge all but gone. Each
@@ -2258,7 +2240,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
     let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
-    let (r, inset) = (px(theme.radii.md), px(theme.spacing.inset()));
+    let (r, inset) = (px(theme.radii.lg), px(theme.spacing.lg));
     let wash = hsla(theme.surfaces.card);
     parts
         .into_iter()
@@ -2493,16 +2475,16 @@ impl Render for SettingsForm {
         if self.narrow || self.aside {
             root.child(column)
         } else {
-            // No navigator beside it: the list is the form's own sidebar, on the chrome step
-            // as the navigator is, parted from the page by the sash.
+            // No navigator beside it: the list is the form's own sidebar, on the sidebar's
+            // plane as the navigator is, parted from the page by the line.
             let sidebar = div()
                 .flex_none()
                 .w(px(NAV_WIDTH))
                 .h_full()
                 .flex()
-                .bg(hsla(self.theme.surfaces.chrome))
+                .bg(hsla(self.theme.surfaces.sidebar))
                 .border_r(crate::kit::HAIR)
-                .border_color(hsla(self.theme.surfaces.sash))
+                .border_color(hsla(self.theme.surfaces.stroke))
                 .child(self.sections(window, &draw));
             root.child(sidebar).child(column)
         }
@@ -2543,7 +2525,7 @@ mod tests {
         assert!(at(cx, "rule", 1).is_none(), "no rule over the first row");
         let rule = at(cx, "rule", 2).expect("a rule over the second");
         // The rule starts where the titles do: inside the ring's line, then the inset.
-        let inset = crate::kit::HAIR + px(theme.spacing.inset());
+        let inset = crate::kit::HAIR + px(theme.spacing.lg);
         assert!((rule.left() - first.left() - inset).abs() < px(0.5), "inset to the titles");
         let footer = at(cx, "footer", parts.len().saturating_add(1)).expect("the group's footer");
         let last = parts.last().copied().expect("a part");

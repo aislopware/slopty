@@ -168,10 +168,10 @@ fn what_a_key_opens_arrives_without_a_fade(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    // The bar's Search, with the navigator hidden, opens it by the pointer.
+    // The rail's Search, with the navigator hidden, opens it by the pointer.
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    click(cx, "bar-search");
+    click(cx, "nav-rail-search");
     let fades = view.read_with(cx, |v, cx| v.palette.as_ref().map(|p| p.read(cx).fades_in()));
     assert_eq!(fades, Some(true), "the palette, by the pointer, fades in");
 }

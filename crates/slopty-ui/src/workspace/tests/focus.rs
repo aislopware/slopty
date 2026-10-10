@@ -53,13 +53,14 @@ fn title_leads(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: T
     focused && tile::title_ink(&theme, focused) == theme.surfaces.text
 }
 
-/// With two tiles in view each header is its pane's tab row on the chrome step, its one tab on
-/// the pane's ground. The focused one's title leads in the primary tone at the medium weight
-/// and the other's steps back a tier to the secondary tone at the regular weight, and the
-/// focused pane's tab alone wears the focus green along its top, all going with the focus. No
-/// ring or frame says it: neither pane draws an edge round itself.
+/// With two tiles in view each header lies on the ground with the one line along its foot, the
+/// pane's title with no pill. The focused one's title leads in the primary tone and the
+/// other's steps back to the secondary tone, never a weight apart, and a dot leads each: the
+/// accent's on the focused pane, empty on the other, all going with the focus (`MonoCode`'s
+/// split header). No ring or frame says it: neither pane draws an edge round itself, and no
+/// tab wears a coloured edge.
 #[gpui::test]
-fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContext) {
+fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
@@ -69,33 +70,26 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContex
     assert!(!title_leads(&view, cx, first), "the other is muted");
 
     let theme = Theme::default();
-    let (chrome, content) =
-        (crate::colors::hsla(theme.surfaces.chrome), crate::colors::hsla(theme.content()));
-    // The green along the tab's top, inside its sash lines.
-    let marked = |cx: &mut VisualTestContext, tile: TileRef| {
-        let tab = cx.debug_bounds(selector("lone-tab", tile.item)).expect("its tab");
-        let green = crate::colors::hsla(theme.surfaces.focus);
+    let accent = crate::colors::hsla(theme.surfaces.accent_fill);
+    // The accent's dot inside the pane's title, the dot's side square.
+    let dotted = |cx: &mut VisualTestContext, tile: TileRef| {
+        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         quads.iter().any(|q| {
             let b = q.bounds;
-            q.background.as_solid() == Some(green)
-                && (b.origin.y.0 / scale - f32::from(tab.top())).abs() < 0.5
-                && (b.size.height.0 / scale - slopty_theme::stroke::MARK).abs() < 0.6
-                && b.origin.x.0 / scale >= f32::from(tab.left()) - 0.5
-                && b.right().0 / scale <= f32::from(tab.right()) + 0.5
-                && b.size.width.0 / scale >= f32::from(tab.size.width) - 2.0
+            q.background.as_solid() == Some(accent)
+                && (b.size.width.0 / scale - tab_look::FOCUS_DOT).abs() < 0.6
+                && title.contains(&point(px(b.center().x.0 / scale), px(b.center().y.0 / scale)))
         })
     };
+    let pill = crate::colors::hsla(theme.surfaces.selected);
     for tile in [first, second] {
-        let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
-        let fills = fills_at(cx, header);
-        assert!(fills.contains(&chrome), "{tile:?} is on the chrome: {fills:?}");
-        let tab = cx.debug_bounds(selector("lone-tab", tile.item)).expect("its tab");
-        let fills = fills_at(cx, tab);
-        assert!(fills.contains(&content), "{tile:?}'s tab opens into its pane: {fills:?}");
+        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
+        let fills = fills_at(cx, title);
+        assert!(!fills.contains(&pill), "{tile:?}: no pill: {fills:?}");
     }
-    assert!(marked(cx, second), "the focused pane's tab wears the green");
-    assert!(!marked(cx, first), "the other's does not");
+    assert!(dotted(cx, second), "the focused pane's dot");
+    assert!(!dotted(cx, first), "the other's is empty");
     let edges = |cx: &mut VisualTestContext, tile: TileRef| {
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         edges_at(cx, bounds)
@@ -110,5 +104,5 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_weight(cx: &mut TestAppContex
     cx.run_until_parked();
     assert!(title_leads(&view, cx, first), "the tone goes with the focus");
     assert!(!title_leads(&view, cx, second), "and leaves the other");
-    assert!(marked(cx, first) && !marked(cx, second), "and the green with it");
+    assert!(dotted(cx, first) && !dotted(cx, second), "and the dot with it");
 }

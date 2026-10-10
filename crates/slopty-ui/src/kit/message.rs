@@ -34,7 +34,7 @@ pub struct Frame {
     pub capped: bool,
     /// The keyboard is in it: the card's wash over the raised step.
     pub focused: bool,
-    /// The pane is narrow: edge to edge with no ring and no radius, a sash line along its top.
+    /// The pane is narrow: edge to edge with no ring and no radius, the line along its top.
     pub bleeds: bool,
 }
 
@@ -44,7 +44,7 @@ pub fn shell<E: Styled>(el: E, theme: &Theme, frame: Frame) -> E {
     let fill = if frame.focused { s.card.over(s.elevated) } else { s.elevated };
     let el = el.bg(hsla(fill));
     if frame.bleeds {
-        return el.border_t(super::HAIR).border_color(hsla(s.sash));
+        return el.border_t(super::HAIR).border_color(hsla(s.stroke));
     }
     let r = px(theme.radii.md);
     let el = if frame.capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
@@ -117,7 +117,7 @@ mod tests {
             assert!(bled.corner_radii.top_left.is_none(), "{variant:?}: square");
             assert!(bled.border_widths.left.is_none(), "{variant:?}: edge to edge");
             assert!(bled.border_widths.top.is_some(), "{variant:?}: a line on top");
-            assert_eq!(bled.border_color, Some(hsla(s.sash)), "{variant:?}: the sash");
+            assert_eq!(bled.border_color, Some(hsla(s.stroke)), "{variant:?}: the line");
         }
     }
 

@@ -191,6 +191,9 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     let row = cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the row's changes");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
     assert!(row.left() >= meta.right(), "after the words: {row:?} {meta:?}");
+    // The breadcrumb stands in the bar while the navigator is hidden.
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     let bar = cx.debug_bounds("crumb-changes").expect("the breadcrumb's changes");
     let branch = cx.debug_bounds("crumb-branch").expect("the branch");
     assert!(branch.contains(&bar.center()), "with the branch");

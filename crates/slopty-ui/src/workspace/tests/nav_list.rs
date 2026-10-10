@@ -237,14 +237,16 @@ fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
     };
     let theme = Theme::default();
     for one in [bare, home, root] {
-        assert!((height(cx, one) - crate::kit::Row::One.height(&theme)).abs() < 0.5, "{one:?}");
+        let want = navigator::row_height(&theme, crate::kit::Row::One);
+        assert!((height(cx, one) - want).abs() < 0.5, "{one:?}");
     }
-    assert!((height(cx, work) - crate::kit::Row::Two.height(&theme)).abs() < 0.5);
+    let two = navigator::row_height(&theme, crate::kit::Row::Two);
+    assert!((height(cx, work) - two).abs() < 0.5);
     let meta = |id: ItemId| format!("nav-meta-{}", id.as_uuid());
     assert!(cx.debug_bounds(Box::leak(meta(bare.item).into_boxed_str())).is_none());
 }
 
-/// A tile's kind glyph sits under its worker's name, the list reading as a tree.
+/// A tile's kind glyph's slot starts under its worker's name, the list reading as a tree.
 #[gpui::test]
 fn a_tiles_glyph_sits_under_its_workers_name(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -254,8 +256,7 @@ fn a_tiles_glyph_sits_under_its_workers_name(cx: &mut TestAppContext) {
     let kind = format!("nav-kind-{}", shell.item.as_uuid());
     let name = cx.debug_bounds(Box::leak(name.into_boxed_str())).expect("the name");
     let kind = cx.debug_bounds(Box::leak(kind.into_boxed_str())).expect("the glyph's slot");
-    let glyph = f32::from(kind.left()) + navigator::glyph_margin(&Theme::default());
-    assert!((glyph - f32::from(name.left())).abs() < 0.5, "{kind:?} under {name:?}");
+    assert!(f32::from(kind.left() - name.left()).abs() < 0.5, "{kind:?} under {name:?}");
 }
 
 /// The home indicator's band under the workspace, as the app lays it out on a phone.

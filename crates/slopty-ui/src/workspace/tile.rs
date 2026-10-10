@@ -8,10 +8,9 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, Div, ElementId, Entity, ExternalPaths, FontWeight,
-    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Window, div, px,
+    App, AppContext as _, Context, Div, ElementId, Entity, ExternalPaths, InteractiveElement as _,
+    IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _, Render, SharedString,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{TileRef, WorkerKey};
@@ -22,7 +21,7 @@ use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
-use slopty_theme::{Theme, Typography};
+use slopty_theme::Theme;
 
 use super::actions::{AddWindow, CloseItem};
 use super::area::{Handed, Placed};
@@ -30,8 +29,7 @@ use super::attention::About;
 use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
-use super::tab_look::{self, Look};
-use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
+use super::{Field, MenuRun, WorkerStatus, WorkspaceView, tab_look};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
@@ -65,7 +63,8 @@ const PR_PRIORITY: kit::Priority = kit::Priority(kit::Priority::MEDIUM.0 + 16);
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
 
-/// What a file's header says after its name while it holds an edit not yet on disk.
+/// What the dot after a file's name says to a screen reader while it holds an edit not yet on
+/// disk.
 pub(crate) const EDITED: &str = "Edited";
 
 /// The width of a program's progress bar (`OSC 9;4`) in its terminal's header, beside its
@@ -77,14 +76,6 @@ const TILE_GROUP: &str = "tile";
 
 /// The group a tab's close button hovers with.
 const TAB_GROUP: &str = "tab";
-
-/// The widest a tab grows in a tabbed column's tab row, in points: past it the tabs
-/// read as one long bar rather than as tabs.
-const TAB_MAX: f32 = 200.0;
-
-/// The narrowest a tab is, in points: a four-letter title still makes a tab a
-/// pointer can find, not a sliver.
-const TAB_MIN: f32 = 120.0;
 
 /// The group a header's controls (its actions and close) hover with: they show while the
 /// pointer is on the header itself, not anywhere over the body.
@@ -1157,10 +1148,9 @@ impl WorkspaceView {
         let kind = self.spoken_kind(item);
         let ink = title_ink(theme, focused);
         let heading = SharedString::from(spoken_heading(&kind, &title));
-        // A pane's header is its tab row, as Zed's is: a cap on the chrome step over the pane,
-        // its foot a sash line, and the shown tab on the pane's own ground with the foot broken
-        // under it, so the tab opens into what it shows. A lone tile's header is a row of one
-        // tab. The foot is drawn first, under the tabs, so the shown tab's ground covers it.
+        // A pane's header is its tab row (`tab_look`): on the pane's own ground with the one
+        // line along its foot, its tabs pills standing in it. A lone tile's header is its title
+        // with no pill. The foot is drawn first, so what follows paints over it.
         let fills = !self.phone;
         let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx);
         let header = tab_look::row(theme, header)
@@ -1465,20 +1455,13 @@ impl WorkspaceView {
                 )
                 .child(ChromeText::new(name, px(theme.typography.small())).fill())
         });
-        // A file with an edit not yet on disk says so in a word after its name, as macOS's
-        // "Edited" follows a document's title; saving keeps it until the worker has written it.
-        // In the bar, the tab says it after the title.
+        // A file with an edit not yet on disk says so in a dot after its name, as `MonoCode`'s
+        // dirty dot; saving keeps it until the worker has written it. In the bar, the tab says
+        // it after the title.
         let unsaved = self.file_facts(id).unsaved && !bar;
         let unsaved = unsaved.then(|| {
-            div()
-                .id("unsaved")
+            tab_look::edited(theme, "unsaved")
                 .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
-                .role(Role::Label)
-                .aria_label(EDITED)
-                .flex_none()
-                .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
-                .text_color(hsla(s.text_muted))
-                .child(ChromeText::new(EDITED, px(theme.typography.small())))
         });
         HeaderBits {
             place,
@@ -1552,7 +1535,19 @@ impl WorkspaceView {
                 .children(states)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
-            header.border_b_0().child(tabs).child(rest)
+            // In a split, a dot leads the row: the accent's on the pane with the keyboard. It
+            // stands where a lone header's does, so the first tab's mark lands on the same
+            // edge as a lone tile's beside it.
+            let dot = placed.shared.then(|| {
+                div()
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .pl(px(theme.spacing.xs + theme.spacing.xxs))
+                    .child(tab_look::focus_dot(theme, placed.focused))
+            });
+            header.border_b_0().children(dot).child(tabs).child(rest)
         } else {
             self.header_row(
                 HeaderParts {
@@ -1595,7 +1590,8 @@ impl WorkspaceView {
         // weight, any other's secondary tone at the regular.
         let ink = title_ink(&self.theme, focused);
         let glyph = self.kind_glyph(item);
-        let slot = crate::palette::lead_slot(&self.theme, glyph, hsla(ink))
+        let side = IconSize::Inline.slot(&self.theme);
+        let slot = crate::palette::lead_mark(&self.theme, glyph, hsla(ink), side)
             .debug_selector(move || format!("kind-{}", id.as_uuid()))
             .into_any_element();
         self.file_proxy(item, tile, slot, cx)
@@ -1755,35 +1751,14 @@ impl WorkspaceView {
         )
     }
 
-    /// A tabbed column's tab row: a tab per tile in the column, each with its leading slot,
-    /// its title and a close button that shows on the tab's hover (always on the one shown).
-    ///
-    /// The row lies on the panel as a single header does, and fades at an edge while tabs lie
-    /// hidden past it. A tab is a row's height and radius: the shown one rests on the hover
-    /// step's fill, the rest are quiet words that take it under the pointer, so the tabs read
-    /// as objects on the header, not as boxes in a band.
+    /// A tabbed column's tab row: a tab per tile in the column, each a pill of one width
+    /// ([`tab_look`]) leading with its mark (how it is doing while it works or has finished),
+    /// then its title and its close, at rest on the one shown and under the pointer on the
+    /// rest. Tabs that do not fit scroll bare, sideways under a vertical wheel too.
     fn render_tabs(&self, placed: &Placed, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let column = self.pane_tiles(placed.tile);
-        // In a narrow pane a tab gives way to its mark and four letters' room before the
-        // row scrolls.
-        let narrow = kit::Room::of(placed.rect.w, theme).is_narrow();
-        let tab_min = if narrow {
-            theme
-                .spacing
-                .xs
-                .mul_add(2.0, theme.typography.ui_size.mul_add(4.0, theme.typography.icon_large()))
-        } else {
-            TAB_MIN
-        };
-        // The shown tab keeps its close in its row, so in a narrow column its floor is the same
-        // four letters' room past the close and its gap.
-        let shown_min = if narrow {
-            tab_min + theme.spacing.xs + kit::icon_button_side(theme)
-        } else {
-            tab_min
-        };
         // Files of the column that share a name show their folders, dimmed after the name, as
         // Zed's tabs do: the folder tells them apart where a number would not.
         let files: Vec<(TileRef, String, Option<String>)> = column
@@ -1807,18 +1782,26 @@ impl WorkspaceView {
                 let item = self.item(tab)?;
                 let id = item.id;
                 let shown = tab == placed.tile;
-                let floor = if shown { shown_min } else { tab_min };
-                let on = shown && placed.focused;
-                let ink = title_ink(theme, on);
-                let glyph = self.kind_glyph(item);
-                let slot = crate::palette::lead_slot(theme, glyph, hsla(ink))
-                    .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
-                // How it is doing ends the tab, before its close button.
-                let state =
-                    self.tile_status(tab, item).filter(|st| *st != Status::Idle).map(|st| {
-                        crate::icons::status_mark(theme, Some(st))
-                            .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
-                    });
+                // How it is doing leads the tab while it works or has finished, else its kind.
+                let state = self.tile_status(tab, item).filter(|st| {
+                    matches!(st, Status::Working | Status::NeedsYou | Status::Done | Status::Failed)
+                });
+                let lead = match state {
+                    Some(st) => div()
+                        .id("tab-status")
+                        .flex_none()
+                        .size(px(IconSize::Inline.slot(theme)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(!shown, |el| el.opacity(slopty_theme::alpha::STRONG))
+                        .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
+                        .child(crate::icons::status_mark(theme, Some(st)))
+                        .into_any_element(),
+                    None => tab_look::lead(theme, self.kind_glyph(item), shown)
+                        .debug_selector(move || format!("tab-slot-{}", id.as_uuid()))
+                        .into_any_element(),
+                };
                 let alike = folder_of(tab);
                 let title =
                     alike.as_ref().map_or_else(|| self.tile_title(item), |(n, _)| n.clone());
@@ -1833,73 +1816,30 @@ impl WorkspaceView {
                         .debug_selector(move || format!("tab-folder-{}", id.as_uuid()))
                         .min_w_0()
                         .overflow_hidden()
-                        .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
                         .text_color(hsla(s.text_muted))
                         .child(ChromeText::new(dir, px(theme.typography.small())).fill_from_start())
                 });
                 let name = self.header_name(tab, id, title);
-                // A file with an edit not yet on disk says so after its name, in its tab as in a
-                // lone tile's header.
+                // A file with an edit not yet on disk says so in a dot after its name, in its
+                // tab as in a lone tile's header.
                 let unsaved = self.file_facts(id).unsaved.then(|| {
-                    div()
-                        .id("unsaved")
+                    tab_look::edited(theme, "unsaved")
                         .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
-                        .role(Role::Label)
-                        .aria_label(EDITED)
-                        .flex_none()
-                        .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
-                        .text_color(hsla(s.text_muted))
-                        .child(ChromeText::new(EDITED, px(theme.typography.small())))
                 });
                 let close_id = format!("tab-close-{}", id.as_uuid());
-                let close = tab_look::close(theme, close_id, CLOSE_TILE, true, TAB_GROUP).on_click(
+                let close = kit::close_box(theme, close_id, CLOSE_TILE).on_click(
                     cx.listener(move |this, _ev, window, cx| this.close_tile(tab, window, cx)),
                 );
-                // The shown tab keeps its close in the row. Any other's takes no room at rest, so
-                // a narrow tab keeps its four letters: it shows over the tab's end while the
-                // pointer is on the tab, on the tab's hover fill made solid, so the name it covers
-                // gives way under it.
-                let close = if shown {
-                    close.into_any_element()
-                } else {
-                    let under = hsla(s.hover.over(s.chrome));
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom(kit::HAIR)
-                        .right_0()
-                        .pl(px(theme.spacing.xxs))
-                        .pr(px(theme.spacing.xs))
-                        .flex()
-                        .items_center()
-                        .group_hover(TAB_GROUP, move |el| el.bg(under))
-                        .child(close.invisible().group_hover(TAB_GROUP, gpui::Styled::visible))
-                        .into_any_element()
-                };
+                let close = tab_look::close(theme, close, shown, TAB_GROUP);
                 let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
-                let first = column.first() == Some(&tab);
-                let el =
-                    tab_look::tab(theme, el, Look { shown, first, marked: on && placed.shared });
+                let el = tab_look::tab(theme, el, shown, true);
                 Some(
                     Self::tile_menu_press(el, tab, Pressed::Tab, cx)
                         .debug_selector(move || format!("tab-{}", id.as_uuid()))
                         .group(TAB_GROUP)
-                        .relative()
                         .role(Role::Tab)
                         .aria_label(label)
                         .aria_selected(shown)
-                        // As wide as its title, between the two bounds; tabs that do not fit give
-                        // way alike down to the narrower one.
-                        .flex_initial()
-                        .min_w(px(floor))
-                        .max_w(px(TAB_MAX))
-                        .gap(px(theme.spacing.xs))
-                        .pl(px(if first { theme.spacing.inset() } else { theme.spacing.md }))
-                        .pr(px(theme.spacing.xs))
-                        .text_color(hsla(ink))
-                        .when(shown && placed.focused, |el| {
-                            el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1911,18 +1851,15 @@ impl WorkspaceView {
                                 cx.stop_propagation();
                             }),
                         )
-                        .child(slot)
-                        .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
-                        .children(folder)
+                        .child(lead)
+                        .child(div().flex_initial().min_w_0().overflow_hidden().child(name))
                         .children(unsaved)
-                        .children(state)
+                        .children(folder)
                         .child(close)
                         .into_any_element(),
                 )
             })
             .collect();
-        // The tabs take their titles' widths and the header after them the rest. The first
-        // tab's kind sits on the edge grid, where a single header's does: its pad round it.
         // Tabs that do not fit scroll, as Zed's tab bar does, and the shown one is brought
         // into view whenever it changes and whenever the column's width does, so a column that
         // narrows never leaves its shown tab past its edge. Between those the row stays where
@@ -1939,7 +1876,7 @@ impl WorkspaceView {
                 *last = placed.tile.item;
                 *wide = width;
                 // The first tab is brought in as far as the row's start, its pad with it: a
-                // reveal stops at the tab's own edge, and would leave the pad hidden and faded.
+                // reveal stops at the tab's own edge, and would leave the pad hidden.
                 if shown_ix == 0 {
                     handle.set_offset(gpui::point(px(0.0), px(0.0)));
                 } else {
@@ -1954,16 +1891,9 @@ impl WorkspaceView {
             .flex_1()
             .min_w_0()
             .h_full()
-            .flex()
-            .items_center()
             .overflow_x_scroll()
             .track_scroll(&handle);
-        // An edge past which tabs lie hidden fades out per pixel, as deep as they run past it,
-        // so a row cut at its end reads as more tabs, not as a tab cut in half; a row that fits
-        // fades nowhere. The fade is the tabs' own, over the panel's surface and the shown tab's
-        // fill alike, never a wash in a colour of its own.
-        let fade = gpui::EdgeFade::x(px(theme.spacing.xl));
-        gpui::edge_fade(row.children(tabs), fade).hidden_by_scroll(&handle).into_any_element()
+        tab_look::strip(theme, row).children(tabs).into_any_element()
     }
 
     /// How the tile is doing, in the one status vocabulary: its agent's state (as its thread
@@ -2555,9 +2485,9 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .pl(px(theme.spacing.xs))
-            // Not a ground: the backing that hides the facts under the controls, on the chrome
-            // they stand on.
-            .bg(hsla(theme.surfaces.chrome))
+            // The backing that hides the facts under the controls: the ground the header lies
+            // on.
+            .bg(hsla(theme.surfaces.ground))
             .invisible()
             .group_hover(HEADER_GROUP, gpui::Styled::visible)
             .children(actions)
@@ -2615,13 +2545,12 @@ impl WorkspaceView {
         let touch = theme.density == slopty_theme::Density::TOUCH;
         let name = self.header_name(tile, id, title);
         let renaming = self.rename.as_ref().is_some_and(|r| r.tile == tile);
-        // "Edited" follows the title it qualifies, as a document's title bar has it.
+        // The edited dot follows the title it qualifies.
         let named = div()
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
-            .when(focused, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
+            .gap(px(theme.spacing.xs + theme.spacing.xxs))
             .map(|el| {
                 if address_title {
                     el.cursor_text().on_mouse_down(
@@ -2657,14 +2586,19 @@ impl WorkspaceView {
             .children(place);
         let inset = theme.spacing.inset();
         let floor = (inset.mul_add(-2.0, placed.rect.w) / 3.0).max(0.0);
-        // The lone tab: the lead and the title, from the pane's edge to past the title.
-        let look = Look { shown: true, first: true, marked: focused && placed.shared };
-        let tab = tab_look::tab(theme, div().id("lone-tab"), look)
-            .debug_selector(move || format!("lone-tab-{}", id.as_uuid()))
+        // No pill for a pane's one tile: in a split the focus dot, then its lead and its title,
+        // as `MonoCode`'s split header has them.
+        let dot = placed.shared.then(|| tab_look::focus_dot(theme, focused));
+        let tab = div()
+            .id("lone-title")
+            .debug_selector(move || format!("lone-title-{}", id.as_uuid()))
             .min_w_0()
-            .gap(px(theme.spacing.sm))
-            .pl(px(inset))
-            .pr(px(theme.spacing.md))
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(tab_look::TAB_GAP))
+            .pl(px(tab_look::lone_inset(theme)))
+            .children(dot)
             .child(lead)
             .child(titled);
         let mut row = kit::priority_row(SharedString::from(format!("header-row-{}", id.as_uuid())))
@@ -3249,9 +3183,9 @@ impl WorkspaceView {
             .gap(px(theme.spacing.xs))
             .px(px(theme.spacing.inset()))
             .py(px(theme.spacing.xxs))
-            .bg(hsla(s.chrome))
+            .bg(hsla(s.ground))
             .border_b(kit::HAIR)
-            .border_color(hsla(s.sash))
+            .border_color(hsla(s.stroke))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(

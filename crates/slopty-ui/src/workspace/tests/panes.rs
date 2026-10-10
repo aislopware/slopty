@@ -91,6 +91,7 @@ fn title_tabs(tiling: &Tiling) -> Vec<TitleTab> {
         .map(|(i, tab)| TitleTab {
             id: tab.id(),
             title: format!("Tab {i}").into(),
+            lead: crate::icons::Mark::Symbol(crate::icons::Symbol::Terminal),
             place: None,
             edited: false,
             marks: vec![crate::icons::Status::Working; tab.panes().count().min(2)],

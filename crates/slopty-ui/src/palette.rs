@@ -29,13 +29,6 @@ use crate::kit::Pace;
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
 
-/// The keys the palette's foot names beside ↩, each with what it does. What ↩ does is the
-/// selected line's own verb ([`PaletteRun::verb`]).
-pub(crate) const LEGEND: [(&str, &str); 2] = [("↑↓", "Move"), ("Esc", "Close")];
-
-/// What the palette's foot says ↩ does with nothing selected.
-const RETURN_VERB: &str = "Open";
-
 /// The heading over the commands an empty field lists because they were run last.
 const RECENT: &str = "Recent";
 
@@ -128,18 +121,19 @@ pub(crate) fn quiet_line(
         .child(text)
 }
 
-/// The height of a line in a list that floats (the palette's, a picker's): a row, 28 on the
-/// Mac as Warp's palette rows are (`palette_styles.rs`), and its foot takes the same height.
+/// The height of a line in a list that floats (the palette's, a picker's): the density's item,
+/// 32 on the Mac, `MonoCode`'s quick-open rows.
 pub(crate) const fn line_height(theme: &Theme) -> f32 {
-    theme.density.row
+    theme.density.item
 }
 
-/// How wide a list typed at grows on a desktop (the palette, a picker): Warp's palette is 640,
-/// Zed's 608.
-pub(crate) const LIST_WIDTH: f32 = 640.0;
+/// How wide a list typed at grows on a desktop (the palette, a picker): `MonoCode`'s quick open,
+/// 560.
+pub(crate) const LIST_WIDTH: f32 = 560.0;
 
-/// How far down the window a list typed at opens on a desktop: near the top, as Warp's (117 pt)
-/// and Zed's (80 pt) do, so the eye drops a short way to it and the rows have room under it.
+/// How far down the window a list typed at opens on a desktop: 12 % of its height, as
+/// `MonoCode`'s quick open does, so the eye drops a short way to it and the rows have room
+/// under it.
 pub(crate) const LIST_ANCHOR: f32 = 0.12;
 
 /// The layer a list typed at is laid out on: [`crate::kit::anchor`]'s, the list
@@ -150,15 +144,22 @@ pub(crate) fn list_anchor(theme: &Theme, window: &Window) -> gpui::Div {
     crate::kit::anchor(theme, window).pt(px(height * LIST_ANCHOR) + safe_top)
 }
 
-/// The height of a floating list's query row: 36 on the Mac, Zed's picker head (`h_9`).
+/// The height of a floating list's query row: 40 on the Mac, `MonoCode`'s quick-open input.
 pub(crate) const fn query_height(theme: &Theme) -> f32 {
-    theme.density.row + theme.spacing.sm
+    theme.density.title
 }
 
-/// The pad round a floating list's rows: their fills sit this far in from the sheet's edges, so
-/// a row's radius and the pad make the sheet's (6 + 6 = 12).
-pub(crate) fn list_pad(theme: &Theme) -> f32 {
-    crate::kit::sheet_pad(theme)
+/// How far in from the sheet's edge a field row's text starts: its pad, the magnifier and the
+/// gap after it ([`field_row`]).
+fn field_text_start(theme: &Theme) -> f32 {
+    let spacing = theme.spacing;
+    spacing.sm + spacing.xxs + IconSize::Inline.slot(theme) + spacing.sm
+}
+
+/// The pad round a floating list's rows: their fills sit this far in from the sheet's sides
+/// and foot, `MonoCode`'s `px-1.5 pb-1.5`.
+pub(crate) const fn list_pad(theme: &Theme) -> f32 {
+    theme.spacing.xs + theme.spacing.xxs
 }
 
 /// The ink of the dot between the facts of a meta line: the muted tone at the pressed step,
@@ -184,26 +185,37 @@ pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::Styl
     gpui::StyledText::new(text).with_highlights(dots)
 }
 
-/// A floating list's field row: the query bare at the title size, the text on the rows' edge,
-/// in a [`query_height`] row over a hairline that parts it from the rows, as Zed's picker head
-/// and Warp's palette draw it. The field wears no frame and no fill: the sheet is its frame.
+/// A floating list's field row, `MonoCode`'s quick-open input: a 14 pt magnifier in the
+/// secondary tone, then the query bare at the chrome role, in a [`query_height`] row over the
+/// one line that parts it from the rows. The field wears no frame and no fill: the sheet is its
+/// frame.
 pub(crate) fn field_row(
     theme: &Theme,
     input: &Entity<InputState>,
     label: &'static str,
 ) -> gpui::Div {
-    crate::kit::inset_x(div(), theme)
+    let s = theme.surfaces;
+    div()
         .flex_none()
         .h(px(query_height(theme)))
+        .pl(px(theme.spacing.sm + theme.spacing.xxs))
+        .pr(px(theme.spacing.md))
         .border_b(crate::kit::HAIR)
-        .border_color(hsla(theme.surfaces.border))
+        .border_color(hsla(s.stroke))
         .flex()
         .items_center()
+        .gap(px(theme.spacing.sm))
+        .child(icons::icon(
+            theme,
+            Symbol::Magnifyingglass,
+            IconSize::Inline,
+            hsla(s.text_secondary),
+        ))
         .child(
             Input::new(input)
                 .appearance(false)
                 .px_0()
-                .text_size(px(theme.roles().panel_title.size))
+                .text_size(px(theme.roles().chrome.size))
                 .aria_label(label),
         )
 }
@@ -491,16 +503,6 @@ fn sides(from: Bounds<Pixels>, to: Bounds<Pixels>) -> [f32; 4] {
     ]
 }
 
-/// One key of a foot: its cap, then what it does.
-fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(theme.spacing.xs + theme.spacing.xxs))
-        .child(crate::kit::key_cap(theme, key))
-        .child(what)
-}
-
 /// `rows` (the list and the plate under it) fading out at their foot while more runs on below:
 /// a touch list has no scrollbar, and on a desktop the row the list's height cuts would
 /// otherwise end on the foot's band, read as a row that lost its bottom. The rows fade per
@@ -510,37 +512,6 @@ fn more_below(theme: &Theme, list: &ListState, rows: gpui::Div) -> gpui::EdgeFad
     let foot = gpui::Edges { bottom: px(theme.spacing.lg), ..gpui::Edges::default() };
     gpui::edge_fade(rows.debug_selector(|| "palette-rows".to_owned()), gpui::EdgeFade::new(foot))
         .hidden_by_list(list)
-}
-
-/// The palette's foot: a quiet band across the sheet's bottom, what ↩ does with the selected
-/// line on its right (where the eye ends), the other keys on its left. Its caps are plates
-/// with no ring, and it needs no hairline: the band is a step off the sheet.
-fn legend(theme: &Theme, verb: &'static str) -> gpui::Stateful<gpui::Div> {
-    let s = &theme.surfaces;
-    let said = LEGEND
-        .iter()
-        .chain(&[("↩", verb)])
-        .map(|(key, what)| format!("{key} {what}"))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let inner = theme.radii.lg - 1.0;
-    crate::kit::inset_x(div(), theme)
-        .id("palette-legend")
-        .debug_selector(|| "palette-legend".to_owned())
-        .role(gpui::accesskit::Role::Label)
-        .aria_label(SharedString::from(said))
-        .flex_none()
-        .h(px(line_height(theme)))
-        .flex()
-        .items_center()
-        .gap(px(theme.spacing.md))
-        .map(|el| crate::kit::inset(el, theme))
-        .rounded_b(px(inner))
-        .text_size(px(theme.typography.small()))
-        .text_color(hsla(s.text_muted))
-        .children(LEGEND.map(|(key, what)| foot_key(theme, key, what)))
-        .child(div().flex_1())
-        .child(foot_key(theme, "↩", verb).text_color(hsla(s.text_secondary)))
 }
 
 /// What a line does when it is chosen.
@@ -598,29 +569,6 @@ pub enum PaletteRun {
         /// The turn the words were said in; none for a thread gone to as it stands.
         turn: Option<slopty_proto::thread::TurnId>,
     },
-}
-
-impl PaletteRun {
-    /// What ↩ does with a line that runs this, as the palette's foot says it.
-    #[must_use]
-    pub const fn verb(&self) -> &'static str {
-        match self {
-            Self::Action(_) | Self::Wake(_) => "Run",
-            Self::Session(_)
-            | Self::Item(_)
-            | Self::Worker(_)
-            | Self::Project(_)
-            | Self::Group(_)
-            | Self::Thread { .. } => "Go to",
-            Self::OpenFile { .. }
-            | Self::OpenFolder { .. }
-            | Self::OpenShell { .. }
-            | Self::OpenAgent { .. }
-            | Self::OpenUrl(_)
-            | Self::OpenInTile(_) => "Open",
-            Self::Reopen(_) => "Reopen",
-        }
-    }
 }
 
 impl Clone for PaletteRun {
@@ -1210,13 +1158,38 @@ pub(crate) fn lead_slot(
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    let mark = mark.into();
-    let large = px(IconSize::Lead.slot(theme));
-    let drawn = icons::Drawn::new(theme, mark, IconSize::Lead).slot(large, ink);
+    let large = IconSize::Lead.slot(theme);
+    lead_drawn(theme, mark.into(), ink, large, large)
+}
+
+/// A chrome row's or a tab's lead: `mark` at the inline size (14 pt), as `MonoCode` draws a
+/// tab's mark and a folder's glyph, centred in a slot `side` square (the tab's own 14, a
+/// navigator row's 16), so a tile's mark is one size in its row and in its tab.
+pub(crate) fn lead_mark(
+    theme: &Theme,
+    mark: impl Into<Mark>,
+    ink: gpui::Hsla,
+    side: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let inline = IconSize::Inline.slot(theme);
+    lead_drawn(theme, mark.into(), ink, inline, side)
+}
+
+/// `mark` drawn across a slot `drawn` square, centred in a slot `side` square, named to a
+/// screen reader when it is an agent's.
+fn lead_drawn(
+    theme: &Theme,
+    mark: Mark,
+    ink: gpui::Hsla,
+    drawn: f32,
+    side: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let size = if drawn > IconSize::Inline.slot(theme) { IconSize::Lead } else { IconSize::Inline };
+    let drawn = icons::Drawn::new(theme, mark, size).slot(px(drawn), ink);
     div()
         .id("lead")
         .flex_none()
-        .size(large)
+        .size(px(side))
         .flex()
         .items_center()
         .justify_center()
@@ -2019,9 +1992,12 @@ impl CommandPalette {
             .aria_label(SharedString::from(item.a11y_label()))
             .aria_selected(chosen)
             .h(px(line_height(theme)))
-            // The fill sits the sheet's pad in from its edges, nested in its corners; the text
-            // on the edge grid.
+            // `MonoCode`'s quick-open row: a pill at the small radius the list's pad in from
+            // the sheet's sides, padded a base unit.
             .mx(px(pad))
+            .pl(px(spacing.sm))
+            .gap(px(spacing.sm))
+            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .active(move |st| st.bg(hsla(pressed)))
             .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))
@@ -2166,13 +2142,14 @@ impl CommandPalette {
         let typed = self.input.read(cx).value();
         commands_only(&typed).filter(|rest| rest.trim().is_empty())?;
         Some(
-            crate::kit::inset_x(div(), theme)
+            div()
                 .absolute()
                 .inset_0()
+                .pl(px(field_text_start(theme)))
                 .overflow_hidden()
                 .flex()
                 .items_center()
-                .text_size(px(theme.roles().panel_title.size))
+                .text_size(px(theme.roles().chrome.size))
                 .child(div().flex_none().invisible().child(typed))
                 .child(
                     div()
@@ -2197,11 +2174,6 @@ impl Render for CommandPalette {
         {
             self.list.scroll_to_reveal_item(line);
         }
-        let verb = self
-            .matched
-            .get(chosen)
-            .and_then(|at| self.at(*at))
-            .map_or(RETURN_VERB, |item| item.run.verb());
         let nothing = self.lines.is_empty();
 
         let viewport = window.viewport_size();
@@ -2290,19 +2262,16 @@ impl Render for CommandPalette {
                         }),
                 ),
         );
-        let foot = self.chords.then(|| legend(&theme, verb));
         let panel = dialog
             .id("palette")
             .debug_selector(|| "palette".to_owned())
             .role(gpui::accesskit::Role::Dialog)
             .aria_label("Commands")
-            .map(|el| {
-                if sheet {
-                    el.child(list).children(foot).child(field)
-                } else {
-                    el.child(field).child(list).children(foot)
-                }
-            });
+            .map(
+                |el| {
+                    if sheet { el.child(list).child(field) } else { el.child(field).child(list) }
+                },
+            );
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
         // finger taps to close it, where a desktop's Esc would.
         let scrim = (sheet || !self.chords).then(|| {
@@ -3079,9 +3048,6 @@ mod tests {
         assert_eq!(group(&command("New note"), &[]), ("Commands", "commands"), "a typed query");
         let tile = PaletteItem::session("New note", SessionId::new());
         assert_eq!(group(&tile, &recent), ("Tiles", "tiles"));
-        assert_eq!(command("New note").run.verb(), "Run");
-        assert_eq!(tile.run.verb(), "Go to");
-        assert_eq!(PaletteItem::open_file("/w/a.rs", None).run.verb(), "Open");
     }
 
     /// A line that goes somewhere carries its kind in the leading slot; a command carries

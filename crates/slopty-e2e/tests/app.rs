@@ -136,9 +136,13 @@ mod tests {
         let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
         assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
-        // The breadcrumb names the workspace.
-        assert!(dump.a11y_node("Button", Some("e2e-worker")).is_some(), "{:#?}", dump.a11y);
-        for label in ["Navigator", "Needs you", "More"] {
+        // The navigator names the project (the breadcrumb and the bell leave the bar while it
+        // is docked).
+        let named = dump.a11y.iter().any(|n| {
+            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("e2e-worker"))
+        });
+        assert!(named, "{:#?}", dump.a11y);
+        for label in ["Navigator", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 

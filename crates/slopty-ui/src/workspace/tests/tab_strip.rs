@@ -16,9 +16,9 @@ fn shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<usize> 
 }
 
 /// Docked, the navigator runs from the window's top and the title bar starts at its right
-/// edge. The navigator's top row holds only the lights and the toggle, and the filter is the
-/// first row under it. Hidden, the bar takes the whole width and starts past the traffic
-/// lights, with the toggle where it stood.
+/// edge. The navigator's top row holds the lights and, at its end, back, forward and the toggle
+/// (`MonoCode`'s rail header), and the filter is the first row under it. Hidden, the bar takes
+/// the whole width and starts past the traffic lights, with the toggle first in it.
 #[gpui::test]
 fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -35,6 +35,7 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert_eq!(lights.bottom(), bar.bottom(), "the lights row is the bar's height");
     let docked = bounds(cx, "navigator-toggle");
     assert!(lights.contains(&docked.center()), "the toggle is in the lights row: {docked:?}");
+    assert!(nav.right() - docked.right() < px(16.0), "at the row's end: {docked:?}");
     click(cx, "nav-search");
     let field = bounds(cx, "nav-filter-field");
     assert!(field.top() >= lights.bottom(), "the filter is under the lights row: {field:?}");
@@ -47,10 +48,8 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert!(f32::from(bar.left()).abs() < 0.5, "the whole width: {bar:?}");
     let toggle = bounds(cx, "navigator-toggle");
     assert!(f32::from(toggle.left()) >= titlebar::LEADING_INSET, "past the traffic lights");
-    assert!(
-        (f32::from(toggle.left()) - f32::from(docked.left())).abs() < 0.5,
-        "the toggle never moves: {docked:?} then {toggle:?}"
-    );
+    let back = bounds(cx, "go-back");
+    assert!(toggle.right() <= back.left(), "the toggle leads the bar: {toggle:?} {back:?}");
 }
 
 /// The breadcrumb's project segment is how the bar goes between projects: its menu lists each
@@ -67,6 +66,10 @@ fn the_breadcrumb_goes_between_projects(cx: &mut TestAppContext) {
     let theirs = opens(&view, cx, &laptop, session, ClientId::new(), 1);
     let here = shown(&view, cx);
     assert_eq!(focused(&view, cx), Some(mine));
+    // The breadcrumb stands in the bar while the navigator is hidden.
+    assert!(cx.debug_bounds("crumb-project").is_none(), "the navigator names the project");
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(cx.debug_bounds("crumb-project").is_some());
     assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "at rest, no mark");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
@@ -151,11 +154,11 @@ fn the_title_bar_shows_the_projects_tabs_and_their_agents(cx: &mut TestAppContex
     assert_eq!(focused(&view, cx), Some(first));
 }
 
-/// The title bar lies on the chrome step, and the tab on show opens into the layout under it:
-/// it reaches the bar's foot, on the content's ground, square. A tab not on show draws no
-/// fill at rest.
+/// The title bar lies on the ground with nothing of its own but the line along its foot. The tab
+/// on show is a selected pill the density's tab tall at radius 6, with air above and below it;
+/// a tab not on show draws no fill at rest.
 #[gpui::test]
-fn the_shown_title_tab_opens_into_the_layout(cx: &mut TestAppContext) {
+fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -178,28 +181,34 @@ fn the_shown_title_tab_opens_into_the_layout(cx: &mut TestAppContext) {
     };
     let bar = bounds(cx, "titlebar".to_owned());
     let tab = bounds(cx, format!("title-tab-{on}"));
-    assert_eq!(tab.bottom(), bar.bottom(), "the shown tab reaches the bar's foot: {tab:?} {bar:?}");
+    let theme_tab = px(Theme::default().density.tab);
+    assert_eq!(tab.size.height, theme_tab, "a pill the density's tab tall: {tab:?}");
+    assert!(tab.top() > bar.top() && tab.bottom() < bar.bottom(), "air round it: {tab:?} {bar:?}");
     let theme = Theme::default();
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let at = |b: Bounds<Pixels>, q: &gpui::Quad| {
         let near = |a: f32, p: Pixels| f32::from(p).mul_add(-scale, a).abs() < 1.0;
         near(q.bounds.origin.x.0, b.origin.x) && near(q.bounds.size.width.0, b.size.width)
     };
-    let ground = crate::colors::hsla(theme.content());
+    let selected = crate::colors::hsla(theme.surfaces.selected);
     let fill = |q: &gpui::Quad| {
         (!q.background.is_transparent()).then(|| q.background.as_solid()).flatten()
     };
     assert!(
-        quads.iter().any(|q| at(tab, q) && fill(q) == Some(ground)),
-        "the shown tab on the content's ground"
+        quads.iter().any(|q| at(tab, q)
+            && fill(q) == Some(selected)
+            && q.corner_radii.top_left.0 / scale - theme.radii.sm < 0.5),
+        "the shown tab a selected pill"
     );
     let rest = bounds(cx, format!("title-tab-{off}"));
     assert!(!quads.iter().any(|q| at(rest, q) && fill(q).is_some()), "a tab not shown is bare");
-    let chrome = crate::colors::hsla(theme.surfaces.chrome);
-    assert!(
-        quads.iter().any(|q| at(bar, q) && fill(q) == Some(chrome)),
-        "the bar on the chrome step"
-    );
+    // The bar paints nothing of its own over the ground but the one line along its foot.
+    let band = |q: &gpui::Quad| {
+        let top = q.bounds.origin.y.0 / scale;
+        top < f32::from(bar.bottom()) - 0.5
+            && q.bounds.size.height.0 / scale > f32::from(crate::kit::HAIR)
+    };
+    assert!(!quads.iter().any(|q| at(bar, q) && band(q) && fill(q).is_some()), "on the ground");
     // Each tab's words are set on the chrome's line, not the window's 16 pt one.
     let line = px(theme.roles().chrome.line);
     for n in [on, off] {

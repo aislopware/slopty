@@ -2364,16 +2364,16 @@ impl WorkspaceView {
             Some(navigator::Mode::Docked) => {
                 let width = px(self.navigator_width());
                 let handle = Self::render_handle(width, cx);
-                // Not cached, as in `navigator_over`. Its trailing edge is a sash line, as
-                // every edge between the chrome and the panes is, laid over its last point so
-                // it takes no room; the handle lies over it.
+                // Not cached, as in `navigator_over`. Its trailing edge is the one line, as
+                // every edge in the window is, laid over its last point so it takes no room;
+                // the handle lies over it.
                 let edge = gpui::div()
                     .absolute()
                     .top_0()
                     .bottom_0()
                     .right_0()
                     .w(crate::kit::HAIR)
-                    .bg(crate::colors::hsla(self.theme.surfaces.sash));
+                    .bg(crate::colors::hsla(self.theme.surfaces.stroke));
                 let column = gpui::div()
                     .relative()
                     .flex_none()

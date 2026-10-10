@@ -665,40 +665,36 @@ pub fn sunk<E: Styled>(el: E, theme: &Theme, border: f32) -> E {
     }])
 }
 
-/// A segmented control's track: a well ([`inset`]), sunk, its options held [`TRACK_PAD`] in, at
-/// `radii.sm`. The thumb ([`paint_thumb`]) rides in it.
+/// A segmented control's track, `MonoCode`'s: the `border` ring at `radii.sm` on its plane, its
+/// options held [`TRACK_PAD`] in. The thumb ([`paint_thumb`]) rides in it.
 #[must_use]
 pub fn track(theme: &Theme) -> Div {
-    inset(sunk(div(), theme, 0.0), theme)
+    div()
         .relative()
         .flex()
         .items_center()
         .p(px(TRACK_PAD))
+        .border(HAIR)
+        .border_color(hsla(theme.surfaces.border))
         .rounded(px(theme.radii.sm))
 }
 
 /// How far a segmented control's track holds its options in from its edge.
 pub const TRACK_PAD: f32 = 2.0;
 
-/// A segmented control's thumb at `bounds`: the floating surface inside the `border` line.
+/// A segmented control's thumb at `bounds`: the selected wash, `MonoCode`'s chosen segment,
+/// with no ring and nothing raised.
 ///
-/// At the radius nested in the track's `radii.sm` past [`TRACK_PAD`]. The selection plate paints
-/// it as it slides from option to option.
+/// At [`thumb_radius`]. The selection plate paints it as it slides from option to option.
 pub fn paint_thumb(theme: &Theme, bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window) {
     let radius = gpui::Corners::all(px(thumb_radius(theme)));
-    let line = hair_painted(window.scale_factor());
-    window.paint_quad(
-        gpui::fill(bounds, hsla(theme.surfaces.elevated))
-            .corner_radii(radius)
-            .border_widths(line)
-            .border_color(hsla(theme.surfaces.border)),
-    );
+    window.paint_quad(gpui::fill(bounds, hsla(theme.surfaces.selected)).corner_radii(radius));
 }
 
-/// A segmented thumb's radius: concentric with its track's.
+/// A segmented thumb's radius: the least, 4, inside its track's 6 (`MonoCode`'s 5).
 #[must_use]
-pub fn thumb_radius(theme: &Theme) -> f32 {
-    slopty_theme::Radii::nested(theme.radii.sm, 0.0, TRACK_PAD)
+pub const fn thumb_radius(theme: &Theme) -> f32 {
+    theme.radii.xs
 }
 
 /// `el` lifted off the chrome: the `elevated` surface, the `border` line and the float's shadow.
@@ -766,15 +762,15 @@ pub fn backdrop(theme: &Theme, window: &Window) -> Div {
 }
 
 /// `el` as a modal's sheet: [`elevate`]d with the dialog's own shadow ([`dialog_elevation`]),
-/// at `radii.lg`, every float's radius. [`dialog`] wears it, and so does a modal that lays itself
+/// at `radii.xl`, a dialog's radius. [`dialog`] wears it, and so does a modal that lays itself
 /// out (adding a worker).
 #[must_use]
 pub fn modal<E: Styled>(el: E, theme: &Theme) -> E {
-    elevate(el, theme).shadow(dialog_elevation(theme)).rounded(px(theme.radii.lg))
+    elevate(el, theme).shadow(dialog_elevation(theme)).rounded(px(theme.radii.xl))
 }
 
-/// The shell every overlay wears: [`elevate`]d with the dialog's own shadow, at `radii.lg`, the
-/// UI font.
+/// The shell every overlay wears: [`elevate`]d with the dialog's own shadow, the UI font, at
+/// `radii.lg` for a list typed at (every float's radius) and `radii.xl` for a page.
 ///
 /// `min_w_0` so an unwrapped title cannot hold the box wider than a phone, and `min_h_0` so it
 /// gives up height to what is under the [`backdrop`] (a phone's keyboard and key bar) rather
@@ -784,7 +780,12 @@ pub fn modal<E: Styled>(el: E, theme: &Theme) -> E {
 #[must_use]
 pub fn dialog(theme: &Theme, size: Overlay) -> Div {
     let (w, h) = size.bounds();
+    let radius = match size {
+        Overlay::List => theme.radii.lg,
+        Overlay::Editor => theme.radii.xl,
+    };
     modal(div(), theme)
+        .rounded(px(radius))
         .w_full()
         .min_w_0()
         .max_w(px(w))
@@ -983,13 +984,14 @@ pub fn button(
     crate::a11y::tab_stop(el, s.focus)
 }
 
-/// The side of an [`icon_button`]: the large icon size and a small pad round it.
+/// The side of an [`icon_button`]: the density's button, `MonoCode`'s 26 pt square round a
+/// 14 pt glyph.
 ///
 /// It is never under the density's hit target, so a finger gets 44 pt round the same icon.
 /// A strip that holds icon buttons in turn with something else sizes itself from it.
 #[must_use]
-pub fn icon_button_side(theme: &Theme) -> f32 {
-    2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large()).max(theme.density.hit)
+pub const fn icon_button_side(theme: &Theme) -> f32 {
+    theme.density.button.max(theme.density.hit)
 }
 
 /// How many lines a list row holds.
@@ -1084,28 +1086,22 @@ pub fn rule_v(tint: slopty_theme::Tint) -> Div {
     div().flex_none().h_full().border_l(HAIR).border_color(hsla(tint))
 }
 
-/// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox).
-///
-/// Inside its hairline: the sheet's radius less its rows' and the hairline, so a row's corner
-/// shares the sheet's centre (6 inside 12).
+/// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox):
+/// `MonoCode`'s `p-1`, 4.
 #[must_use]
-pub fn sheet_pad(theme: &Theme) -> f32 {
-    theme.radii.lg - theme.radii.sm - stroke::LINE
+pub const fn sheet_pad(theme: &Theme) -> f32 {
+    theme.spacing.xs
 }
 
 /// A row inside a floating sheet padded by [`sheet_pad`].
 ///
-/// A [`row`] whose fill (hover, selection) is rounded to nest in the sheet's corners, its
-/// leading words still on the edge grid measured from the sheet's own edge, and its trailing
-/// end a row's trailing inset in.
+/// A [`row`] whose fill (hover, selection) is rounded at [`slopty_theme::Radii::md`], 8 inside
+/// the sheet's 12, as `MonoCode`'s menu rows are; its leading words still on the edge grid
+/// measured from the sheet's own edge, and its trailing end a row's trailing inset in.
 #[must_use]
 pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
     let pad = sheet_pad(theme);
-    row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(slopty_theme::Radii::nested(
-        theme.radii.lg,
-        stroke::LINE,
-        pad,
-    )))
+    row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(theme.radii.md))
 }
 
 /// `el` padded in to the one edge grid on both sides: [`slopty_theme::Spacing::inset`]. A
@@ -1146,8 +1142,9 @@ pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
 
 /// A square button around one icon: a bar's actions, a tile's close and split.
 ///
-/// Ghost like a bar's text buttons, with `label` as its accessible name and its hint, since the
-/// icon alone names nothing to a screen reader.
+/// `MonoCode`'s icon button: a 26 pt square at [`slopty_theme::Radii::sm`] round a 14 pt glyph
+/// in `text_secondary`, lifting to `text` over the strong hover. `label` is its accessible
+/// name and its hint, since the icon alone names nothing to a screen reader.
 #[must_use]
 pub fn icon_button(
     theme: &Theme,
@@ -1157,11 +1154,11 @@ pub fn icon_button(
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     eased(square_icon(theme, id.into(), icon, label, s.text_secondary))
-        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
 }
 
-/// A tab's close: Zed's small square, 16 pt at [`slopty_theme::Radii::xs`], its cross at the
-/// inline size, so it sits inside a 32 pt tab with room round it. A finger's is its hit square.
+/// A tab's close: `MonoCode`'s 20 pt box at [`slopty_theme::Radii::xs`], its cross drawn on a
+/// 12 pt grid, so it sits inside a 30 pt tab with room round it. A finger's is its hit square.
 #[must_use]
 pub fn close_box(
     theme: &Theme,
@@ -1186,7 +1183,6 @@ pub fn small_box(
     let selector = id.to_string();
     let side =
         if theme.density == slopty_theme::Density::TOUCH { theme.density.hit } else { CLOSE_BOX };
-    let icon = crate::icons::IconSize::Inline;
     let el = div()
         .id(gpui::ElementId::Name(id))
         .debug_selector(move || selector)
@@ -1202,15 +1198,15 @@ pub fn small_box(
         .text_color(hsla(s.text_secondary))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
-            crate::icons::Drawn::new(theme, glyph, icon)
-                .slot(px(icon.slot(theme)), hsla(s.text_secondary)),
+            crate::icons::Drawn::disclosure(theme, glyph)
+                .slot(px(crate::icons::IconSize::Inline.slot(theme)), hsla(s.text_secondary)),
         );
     eased(crate::a11y::tab_stop(el, s.focus))
-        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
 }
 
-/// The side of [`close_box`] at a pointer's density.
-pub const CLOSE_BOX: f32 = 16.0;
+/// The side of [`close_box`] at a pointer's density: `MonoCode`'s `size-5`.
+pub const CLOSE_BOX: f32 = 20.0;
 
 /// [`icon_button`] with its icon in `ink`, not its words' tier: the bell while something needs
 /// the person, in the warn fill.
@@ -1223,7 +1219,8 @@ pub fn icon_button_inked(
     ink: Rgb,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, ink)).hover(move |el| el.bg(hsla(s.hover)))
+    eased(square_icon(theme, id.into(), icon, label, ink))
+        .hover(move |el| el.bg(hsla(s.hover_strong)))
 }
 
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
@@ -1252,8 +1249,8 @@ fn square_icon(
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
-            crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Lead)
-                .slot(px(crate::icons::IconSize::Lead.slot(theme)), hsla(ink)),
+            crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Inline)
+                .slot(px(crate::icons::IconSize::Inline.slot(theme)), hsla(ink)),
         );
     crate::a11y::tab_stop(el, s.focus)
 }
@@ -1689,19 +1686,19 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.link_active = hsla(s.accent);
     c.popover = hsla(s.elevated);
     c.popover_foreground = hsla(s.text);
-    // The bars, the side panel and the tab rows on the chrome step, edged by the sash; the
-    // shown tab on the content's ground, as `workspace::tab_look` draws them.
-    c.title_bar = hsla(s.chrome);
-    c.title_bar_border = hsla(s.sash);
-    c.status_bar = hsla(s.chrome);
-    c.status_bar_border = hsla(s.sash);
-    c.sidebar = hsla(s.chrome);
+    // The bars and the tab rows on the ground, the side panel on the sidebar's plane, every
+    // edge the one line; the shown tab a selected pill, as `workspace::tab_look` draws them.
+    c.title_bar = hsla(s.ground);
+    c.title_bar_border = hsla(s.stroke);
+    c.status_bar = hsla(s.ground);
+    c.status_bar_border = hsla(s.stroke);
+    c.sidebar = hsla(s.sidebar);
     c.sidebar_foreground = hsla(s.text);
-    c.sidebar_border = hsla(s.sash);
-    c.tab_bar = hsla(s.chrome);
-    c.tab = hsla(s.chrome);
-    c.tab_foreground = hsla(s.text_muted);
-    c.tab_active = hsla(theme.content());
+    c.sidebar_border = hsla(s.stroke);
+    c.tab_bar = hsla(s.ground);
+    c.tab = hsla(s.ground);
+    c.tab_foreground = hsla(s.text_secondary);
+    c.tab_active = hsla(s.selected.over(s.ground));
     c.tab_active_foreground = hsla(s.text);
     c.table_row_border = hsla(s.stroke);
     c.list = hsla(s.ground);
@@ -1842,11 +1839,13 @@ mod tests {
                 assert_eq!(kit.colors.caret, hsla(theme.surfaces.text), "a neutral caret");
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
-                for bar in [kit.colors.title_bar, kit.colors.sidebar, kit.colors.tab_bar] {
-                    assert_eq!(bar, hsla(theme.surfaces.chrome), "bars on the chrome step");
+                for bar in [kit.colors.title_bar, kit.colors.tab_bar, kit.colors.status_bar] {
+                    assert_eq!(bar, hsla(theme.surfaces.ground), "bars on the ground");
                 }
-                assert_eq!(kit.colors.title_bar_border, hsla(theme.surfaces.sash));
-                assert_eq!(kit.colors.tab_active, hsla(theme.content()));
+                assert_eq!(kit.colors.sidebar, hsla(theme.surfaces.sidebar), "the side panel");
+                assert_eq!(kit.colors.title_bar_border, hsla(theme.surfaces.stroke), "one line");
+                let shown = theme.surfaces.selected.over(theme.surfaces.ground);
+                assert_eq!(kit.colors.tab_active, hsla(shown), "the shown tab a selected pill");
                 assert_eq!(kit.colors.table_row_border, hsla(theme.surfaces.stroke));
                 assert_eq!(kit.colors.popover, hsla(theme.surfaces.elevated), "popovers float");
                 assert!(!kit.focus_ring, "a focused field is one hairline, not a halo");
@@ -2887,13 +2886,12 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// What floats as a sheet (a menu, a popover, a toast) is rounded at `radii.lg`, and a modal
-    /// (a dialog, the add-worker panel, through [`modal`]) too. A hint and a chip keep
-    /// their control's radius: at 12 a 20 pt hint is a lozenge.
+    /// What floats as a sheet (a menu, a popover, a toast) is rounded at `radii.lg`; a modal (a
+    /// dialog, the add-worker panel, through [`modal`]) is larger and rounds at `radii.xl`. A hint
+    /// and a chip keep their control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
-        const SHEETS: [(&str, &str); 4] = [
-            ("slopty-ui/src/kit.rs", "pub fn modal<"),
+        const SHEETS: [(&str, &str); 3] = [
             ("slopty-ui/src/kit/find.rs", "super::elevate(div(), &theme)"),
             ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
             ("slopty-ui/src/kit/menu.rs", "super::elevate(div(), &theme)"),
@@ -3055,7 +3053,7 @@ mod tests {
     #[test]
     fn density_sizes_the_targets_not_the_icons() {
         let mut theme = Theme::default();
-        assert!((icon_button_side(&theme) - 24.0).abs() < f32::EPSILON, "compact: 16 + 2 × 4");
+        assert!((icon_button_side(&theme) - 26.0).abs() < f32::EPSILON, "compact: MonoCode's 26");
         assert!((Row::One.height(&theme) - 28.0).abs() < f32::EPSILON);
         assert!((Row::Two.height(&theme) - 40.0).abs() < f32::EPSILON);
         theme.density = slopty_theme::Density::TOUCH;
@@ -3114,7 +3112,7 @@ mod tests {
     }
 
     /// What is sunk holds shade inside its top edge, a point past any border; the segmented
-    /// track is sunk.
+    /// track is not sunk but ringed, `MonoCode`'s, on its plane.
     #[test]
     fn a_field_sinks_where_a_card_rises() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -3124,8 +3122,10 @@ mod tests {
             assert!(shade.inset, "{variant:?}: inside");
             assert_eq!(shade.offset.y, px(1.0 + SUNK_DEPTH), "{variant:?}: past the border");
             assert!((shade.color.a - theme.elevation.sunk.shade).abs() < 1e-3, "{variant:?}");
-            let tracked = track(&theme).style().box_shadow.clone().unwrap_or_default();
-            assert_eq!(tracked.len(), 1, "{variant:?}: the track is sunk");
+            let tracked = track(&theme).style().clone();
+            assert!(tracked.box_shadow.is_none(), "{variant:?}: the track is not sunk");
+            assert!(tracked.background.is_none(), "{variant:?}: nor washed");
+            assert_eq!(tracked.border_color, Some(hsla(theme.surfaces.border)), "{variant:?}");
         }
     }
 

@@ -552,6 +552,9 @@ fn the_project_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     let [(asking, _), ..] = three_shells(&view, cx, &studio);
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(asking), cx));
     cx.run_until_parked();
+    // The breadcrumb and the bell stand in the bar while the navigator is hidden.
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
     assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "no second mark");
     cx.update(|window, _cx| window.set_a11y_active(true));
@@ -602,8 +605,8 @@ fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppCon
     cx.run_until_parked();
     let server = bounds(cx, "readout-server").expect("the server's word");
     assert!(titlebar.contains(&server.center()), "at the title bar's end: {server:?}");
-    let bell = bounds(cx, "bell").expect("the bell");
-    assert!(server.right() <= bell.left(), "before the bell: {server:?} {bell:?}");
+    let more = bounds(cx, "more").expect("the bar's \u{2026}");
+    assert!(server.right() <= more.left(), "before \u{2026}: {server:?} {more:?}");
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
     cx.run_until_parked();
     assert!(bounds(cx, "readouts").is_none(), "gone once it answers");

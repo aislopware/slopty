@@ -799,19 +799,21 @@ fn readout(selector: &'static str, text: SharedString) -> Stateful<Div> {
         .whitespace_nowrap()
 }
 
-/// A readout that does something when clicked: washed under the pointer.
-fn button(selector: &'static str, text: SharedString, theme: &Theme) -> Stateful<Div> {
+/// A readout that does something when clicked, `MonoCode`'s footer chip: the density's chip
+/// tall at the least radius, the strong hover's wash under the pointer.
+pub(super) fn button(selector: &'static str, text: SharedString, theme: &Theme) -> Stateful<Div> {
     let s = theme.surfaces;
     readout(selector, text)
         .role(Role::Button)
+        .h(px(theme.density.chip))
         .flex()
         .items_center()
         .gap(px(theme.spacing.xs))
-        .px(px(theme.spacing.xs))
+        .px(px(theme.spacing.xs + theme.spacing.xxs))
         .rounded(px(theme.radii.xs))
         .cursor_pointer()
         .map(kit::eased)
-        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
 }
 
 #[cfg(test)]

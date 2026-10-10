@@ -782,18 +782,13 @@ impl WorkspaceView {
                 .font_family(theme.typography.ui_family.clone())
                 .map(|el| {
                     let lead = crate::icons::Mark::agent(&starting.agent.0);
-                    let look = super::tab_look::Look {
-                        shown: true,
-                        first: true,
-                        marked: placed.focused && placed.shared,
-                    };
-                    let tab = super::tab_look::tab(theme, div().id("lone-tab"), look)
-                        .min_w_0()
-                        .gap(px(theme.spacing.sm))
-                        .pl(px(theme.spacing.inset()))
-                        .pr(px(theme.spacing.md))
-                        .child(crate::palette::lead_slot(theme, lead, ink))
-                        .child(div().min_w_0().overflow_hidden().child(title.clone()));
+                    let tab = super::tab_look::lone(
+                        theme,
+                        lead,
+                        title.clone(),
+                        placed.focused,
+                        placed.shared,
+                    );
                     el.child(tab).children(status.map(|st| {
                         div().ml_auto().child(crate::icons::status_mark(theme, Some(st)))
                     }))

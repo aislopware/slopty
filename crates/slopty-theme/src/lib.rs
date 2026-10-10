@@ -596,9 +596,9 @@ pub struct TypeRoles {
     /// What a piece of work is called where it is the thing to act on: a task, a request
     /// put to the person. 14/20 at the medium weight.
     pub task_title: TypeRole,
-    /// A section's heading in a list or a panel: 12/16 at the medium weight, drawn a tier under
-    /// the words it heads, as a list's label is in t3code and zeron. It leads its group by its
-    /// place and its tone, not by bold.
+    /// A section's heading in a list or a panel: 12/20 at the regular weight, a tier under the
+    /// words it heads in tone, `MonoCode`'s `text-xs leading-5`. It leads its group by its place
+    /// and its tone, not by weight.
     pub section: TypeRole,
     /// A panel's or a dialog's title: 15/20 at the strong weight.
     pub panel_title: TypeRole,
@@ -608,6 +608,9 @@ pub struct TypeRoles {
     pub composer: TypeRole,
     /// A page's heading inside the window: 20/26 at the strong weight.
     pub page_heading: TypeRole,
+    /// The question an empty tab asks over its composer: 18/24 at the regular weight,
+    /// `MonoCode`'s `text-lg`.
+    pub empty_heading: TypeRole,
     /// The heading of a page that is the whole window, the first run: 26/32 at the medium
     /// weight, SF's Display cut. Without letter spacing the strong weight read loose.
     pub first_run: TypeRole,
@@ -636,7 +639,7 @@ impl Typography {
             chrome: role((0.0, 6.0), (4.0, 5.0), regular),
             action: role((0.0, 6.0), (4.0, 5.0), medium),
             task_title: role((1.0, 6.0), (4.0, 5.0), medium),
-            section: role((-1.0, 4.0), (0.0, 5.0), medium),
+            section: role((-1.0, 8.0), (0.0, 7.0), regular),
             panel_title: role((2.0, 5.0), (6.0, 5.0), strong),
             prose: TypeRole {
                 size: prose,
@@ -649,6 +652,7 @@ impl Typography {
                 weight: regular,
             },
             page_heading: role((7.0, 6.0), (9.0, 6.0), strong),
+            empty_heading: role((5.0, 6.0), (7.0, 6.0), regular),
             first_run: role((13.0, 6.0), (15.0, 6.0), medium),
         }
     }
@@ -676,24 +680,27 @@ impl Default for Typography {
     }
 }
 
-/// Corner radii, in points: Zed's and Warp's compact ladder, which grows with the size of the
-/// thing but stays square in spirit.
+/// Corner radii, in points: `MonoCode`'s ladder, 4, 6, 8, 12 and 16, which grows with the size
+/// of the thing.
 ///
-/// Panes, bars, tabs and a pane's own list rows (a tree's, a diff's) are square: no token, they
-/// meet edge to edge along a line. A floating shell is its rows' radius plus the pad round them
-/// (4 + 4), so the corners nest ([`Radii::nested`]).
+/// Every pill on a plane (a tab, a navigator row, a button, a palette row) is [`Self::sm`]; a
+/// menu's rows inside their 12 pt float are [`Self::md`]. Panes, bars and a pane's own
+/// edge-to-edge rows (a tree's, a diff's) are square: no token, they meet along a line.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Radii {
-    /// Tiny boxes: a tab's close box, a key cap's inner mark, a staged box.
+    /// Tiny boxes: a tab's close box, a status bar chip, a segment inside its control, a key
+    /// cap's inner mark, a staged box.
     pub xs: f32,
-    /// What is pressed, chosen or written in: buttons, icon buttons, segments, navigator rows,
-    /// chips, fields, a menu's rows, a key cap, a code block's or a diff's shell.
+    /// Every pill on its plane: a tab, a navigator or palette row, a button, an icon button, a
+    /// segmented control, a chip, a code block's or a diff's shell.
     pub sm: f32,
-    /// What rests as a card: a settings section, a question's card, the composer boxed in its
-    /// column.
+    /// What is written in or rests: a field, the composer boxed in its column, a question's
+    /// card, a menu's rows inside their float.
     pub md: f32,
-    /// Everything that floats: menus, popovers, the palette, dialogs, toasts.
+    /// Everything that floats, and a settings card: menus, popovers, the palette, toasts.
     pub lg: f32,
+    /// A dialog: the one float that holds a page of its own.
+    pub xl: f32,
     /// A capsule, for a switch, a count badge, a dot, a scrollbar's thumb and a one-line
     /// message bubble only. Larger than any side it rounds, so the ends are half circles.
     pub full: f32,
@@ -711,7 +718,7 @@ impl Radii {
 
 impl Default for Radii {
     fn default() -> Self {
-        Self { xs: 2.0, sm: 4.0, md: 6.0, lg: 8.0, full: 9_999.0 }
+        Self { xs: 4.0, sm: 6.0, md: 8.0, lg: 12.0, xl: 16.0, full: 9_999.0 }
     }
 }
 
@@ -781,11 +788,9 @@ pub mod stroke {
     pub const LINE: f32 = 1.0;
     /// The keyboard's focus outline: `MonoCode`'s `outline-2`.
     pub const FOCUS: f32 = 2.0;
-    /// A line that marks one thing among its peers.
-    ///
-    /// The focused tile's header, the shown tab of the focused column. At 2 pt in the text's tone
-    /// it was the loudest stroke on screen; every reference's "current" marker is the quietest
-    /// that still reads.
+    /// A line that marks one place in the terminal's grid: a prompt's mark, the find match's
+    /// underline. No tab or pane carries a coloured edge; a split's focused pane leads its row
+    /// with a dot.
     pub const MARK: f32 = 1.5;
     /// A terminal block's state down its left edge (a failed command's): Warp's 3 pt bar.
     pub const BAR: f32 = 3.0;
@@ -794,13 +799,13 @@ pub mod stroke {
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
 /// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
-    /// A divider inside a pane's share of the ink: `MonoCode`'s `stroke`, 7 %.
+    /// Every structural line's share of the ink, `MonoCode`'s `stroke`, 7 %: the sash between
+    /// panes, the navigator's edge, a bar's foot, a divider inside a pane.
     pub const STROKE: f32 = 0.07;
-    /// The sash between panes, and a bar's edge against a pane, in dark: Zed's and Warp's firmer
-    /// 12 % (about 1.35:1 on the ground).
-    pub const SASH: f32 = 0.12;
-    /// The sash on paper, where the same share reads lighter: 14 %.
-    pub const SASH_ON_PAPER: f32 = 0.14;
+    /// The firmer wash under the pointer on an icon button, a close box, a rail button or a
+    /// status bar chip: the ink at `MonoCode`'s `content/10`. Tabs, rows and menu items keep
+    /// the 5 % hover.
+    pub const HOVER_STRONG: f32 = 0.10;
     /// A control's or a card's ring: the ink at `MonoCode`'s `content/10`.
     pub const BORDER: f32 = 0.10;
     /// What rests on its plane as a card: the ink at `MonoCode`'s `content/3`, inside its ring.
@@ -875,14 +880,15 @@ const LEVEL: f32 = 1.25;
 
 /// Surface colours for chrome (not the terminal grid), derived from the content they frame.
 ///
-/// Two opaque planes, Zed's and Warp's: the panes and the terminal's grid lie on the ground, the
-/// content ([`Theme::content`]) and the deepest plane; the title bar, the tab rows, the
-/// navigator and the status bar lie on [`Self::chrome`], a step toward the ink. Panes meet at
-/// the 1 pt [`Self::sash`]; a divider inside a pane is the quieter [`Self::stroke`]. What rests
-/// as a card is the ink at [`alpha::CARD`] inside its [`Self::border`]; what floats (menus,
-/// popovers, the palette, dialogs, toasts) is [`Self::elevated`], opaque, with its border and
-/// [`Elevation::float`]. The states ride on whichever plane they land on: `hover`, `selected`,
-/// `keyed` and `pressed` are washes of the chrome's text, each a step past the last.
+/// `MonoCode`'s planes: the panes, the terminal's grid, the title bar, the tab rows and the
+/// status bar all lie on the ground, the content ([`Theme::content`]); the navigator and its
+/// rail lie on [`Self::sidebar`], a step toward black in dark and the ground itself in light.
+/// Every structural line is the one 7 % [`Self::stroke`]. What rests as a card is the ink at
+/// [`alpha::CARD`] inside its [`Self::border`]; what floats (menus, popovers, the palette,
+/// dialogs, toasts) is [`Self::elevated`], opaque, with its border and [`Elevation::float`].
+/// The states ride on whichever plane they land on: `hover`, `selected`, `keyed` and `pressed`
+/// are washes of the chrome's text, each a step past the last; `hover_strong` is the firmer
+/// hover of an icon button.
 ///
 /// Nothing here is picked by hand: [`Surfaces::derive`] computes the fills and lines from the
 /// content and the chrome's text at fixed shares, and lifts each text tone until it clears WCAG
@@ -893,10 +899,9 @@ pub struct Surfaces {
     /// The one ground: the window, every pane, the bars and the terminal's grid, `MonoCode`'s
     /// `background-base`. It is the content ([`Theme::content`]) the rest is derived from.
     pub ground: Rgb,
-    /// The chrome's plane: the title bar, the tab rows, the navigator and the status bar, the
-    /// ground a step toward the ink ([`alpha::CARD`]: #1e1e1e in dark, #f0f0f0 in light), so
-    /// the work stays the deepest plane, as Zed's and Warp's do.
-    pub chrome: Rgb,
+    /// The navigator's and the rail's plane, `MonoCode`'s `sidebar-glass` made opaque: the
+    /// ground mixed 10 % toward black in dark (#151515 on #171717), the ground itself in light.
+    pub sidebar: Rgb,
     /// What floats (the palette, menus, popovers, dialogs, toasts, hints): opaque, the ink at
     /// 5 % over the ground in dark and white in light, standing off what it covers by its border
     /// and its shadow, as Zed's elevated surface does.
@@ -915,11 +920,12 @@ pub struct Surfaces {
     pub keyed: Tint,
     /// What is held down: a step past `keyed`, so a press reads apart from a hover.
     pub pressed: Tint,
-    /// The sash, at 1 pt: the line between two panes and a bar's edge against a pane. The ink
-    /// at [`alpha::SASH`] in dark and [`alpha::SASH_ON_PAPER`] in light.
-    pub sash: Tint,
-    /// A divider inside a pane, at 1 pt: between rows, under a pane's own head, between a
-    /// terminal's blocks. The ink at [`alpha::STROKE`], `MonoCode`'s 7 %.
+    /// The pointer over an icon button, a close box, a rail button or a status bar chip: the
+    /// ink at [`alpha::HOVER_STRONG`], firmer than `hover`, since a bare glyph has less of
+    /// itself to light than a row's words.
+    pub hover_strong: Tint,
+    /// The one line, at 1 pt: the sash between panes, the navigator's edge, a bar's foot, a
+    /// divider inside a pane. The ink at [`alpha::STROKE`], `MonoCode`'s 7 %.
     pub stroke: Tint,
     /// The ring of a control or a card (a secondary button, a field, a settings card, a menu):
     /// the ink at [`alpha::BORDER`], `MonoCode`'s `content/10`.
@@ -1026,15 +1032,13 @@ const fn ink(share: f32) -> Step {
 /// The inputs of one variant: its steps, its tones before they are lifted, and its fills.
 #[derive(Clone, Copy, Debug)]
 struct Tones {
-    chrome: Step,
+    sidebar: Step,
     elevated: Step,
     /// The state washes: shares of the text laid over whatever plane they land on.
     hover: f32,
     selected: f32,
     keyed: f32,
     pressed: f32,
-    /// The sash's share of the text.
-    sash: f32,
     /// Where text moves when it has to read better: the pole away from the surfaces.
     pole: Rgb,
     text: Rgb,
@@ -1115,21 +1119,20 @@ const fn identity(light: f32, chroma: f32) -> [Oklch; IDENTITY_HUES] {
 const WORKING_HUE: f32 = 250.0;
 const MERGED_HUE: f32 = 300.0;
 
-/// Dark: the work on the ground, the chrome a step toward the ink, what floats a step past it.
+/// Dark: the work and the bars on the ground, the navigator a step toward black, what floats a
+/// step toward the ink.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const DARK_TONES: Tones = Tones {
-    // The ink at 3.5 % over the ground: #1e1e1e on #171717, Zed's and Warp's chrome step (3 %
-    // rounds to #1d1d1d here).
-    chrome: ink(0.035),
-    // Zed's elevated surface, the ink at 5 %: opaque, a step past the chrome.
+    // `MonoCode`'s `sidebar-glass`: the ground at 90 % over black, #151515 on #171717.
+    sidebar: Step { toward: Toward::Black, share: 0.10 },
+    // Zed's elevated surface, the ink at 5 %: opaque, a step toward the ink.
     elevated: ink(0.05),
-    // `MonoCode`'s ladder: hover at 5 % of the text, selection at 8.5 %; the keyboard's row at
+    // `MonoCode`'s ladder: hover at 5 % of the text, selection at 10 %; the keyboard's row at
     // Zed's 14 %, and pressed a step past it, so a press reads apart from a hover.
     hover: 0.05,
-    selected: 0.085,
+    selected: 0.10,
     keyed: 0.14,
     pressed: 0.18,
-    sash: alpha::SASH,
     pole: Rgb::hex(0xffffff),
     text: Rgb::hex(0xececec),
     // `content/78.9` and `content/69`: the least shares at which secondary text reads APCA
@@ -1164,26 +1167,28 @@ const DARK_TONES: Tones = Tones {
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
 
-/// Light: the work on the ground, the chrome a step toward the ink, what floats white.
+/// Light: the work, the bars and the navigator on the ground, what floats white.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const LIGHT_TONES: Tones = Tones {
-    // The ink at 3 % over the ground: #f0f0f0 on #f7f7f7.
-    chrome: ink(alpha::CARD),
+    // `MonoCode`'s light sidebar is the ground itself; its edge is the line.
+    sidebar: ink(0.0),
     elevated: Step { toward: Toward::White, share: 1.0 },
+    // `MonoCode`'s light selection is 6 %; at 6.5 % it still reads a step past the 5 % hover on
+    // white (half a point of L*), where 6 % rounds to a third of one, and a hovered row beside
+    // the chosen one looked chosen too.
     hover: 0.05,
-    selected: 0.08,
+    selected: 0.065,
     keyed: 0.12,
     pressed: 0.16,
-    sash: alpha::SASH_ON_PAPER,
     pole: Rgb::hex(0x000000),
     text: Rgb::hex(0x1c1c1c),
     // Where the lift would put them on paper: secondary at the level gap under the text, muted
-    // AA on the keyboard's row over the chrome. Light's tiers are pinned there, so its
+    // AA on the keyboard's row over the ground. Light's tiers are pinned there, so its
     // hierarchy comes from weight and placement too.
     text_secondary: 0.772,
     text_muted: 0.703,
     // The brand's hue at the lightness that reads AA as text on the keyboard's row over the
-    // chrome, with as much chroma as sRGB holds there, and 3:1 as a mark on the paper: a word
+    // ground, with as much chroma as sRGB holds there, and 3:1 as a mark on the paper: a word
     // is darkened only to its floor, never greyed.
     accent: Oklch { l: 0.465, c: 0.127, h: BRAND_OKLCH.h },
     // L 0.62 holds 3:1 as a mark on `MonoCode`'s ground, a step under the old paper; chroma
@@ -1199,7 +1204,7 @@ const LIGHT_TONES: Tones = Tones {
     // from waiting and from added for every dichromacy (`vision`), and the chroma keeps it red
     // rather than the oxblood `8f1d1d` it replaced. The colour-blind test set its lightness,
     // `oklch(0.37 0.15 25)`: the green word went down to L 0.465 to read on the keyboard's row
-    // over the chrome, and the crimson at 0.41 (`8f0214`) met a deuteranope's floor against it
+    // over the ground, and the crimson at 0.41 (`8f0214`) met a deuteranope's floor against it
     // only at 0.049.
     error: Rgb::hex(0x7c000f),
     warn_fill: Rgb::hex(0xf0a000),
@@ -1323,7 +1328,7 @@ impl Surfaces {
             };
             content.mix(toward, step.share)
         };
-        let (chrome, elevated) = (at(t.chrome), at(t.elevated));
+        let (sidebar, elevated) = (at(t.sidebar), at(t.elevated));
         let card = Tint::of(t.text, alpha::CARD);
         let (hover, selected, keyed, pressed) = (
             Tint::of(t.text, t.hover),
@@ -1331,17 +1336,17 @@ impl Surfaces {
             Tint::of(t.text, t.keyed),
             Tint::of(t.text, t.pressed),
         );
-        let planes = [content, chrome, elevated, card.over(content), card.over(elevated)];
+        let planes = [content, sidebar, elevated, card.over(content), card.over(elevated)];
         // Text lands on a plane or on a resting state over one: the selected wash over any
         // plane, and the keyboard's row over the three planes a list lies on (a pane, the
-        // chrome, a float), the deepest that stay (a press lasts as long as a click). The hover
+        // navigator, a float), the deepest that stay (a press lasts as long as a click). The hover
         // is nearer the plane than either.
         let grounds = |wash: Tint| -> Vec<Rgb> {
             planes.into_iter().chain(planes.map(|plane| wash.over(plane))).collect()
         };
         let under: Vec<Rgb> = grounds(selected)
             .into_iter()
-            .chain([content, chrome, elevated].map(|plane| keyed.over(plane)))
+            .chain([content, sidebar, elevated].map(|plane| keyed.over(plane)))
             .collect();
         // A line is the ink laid over the surface. It crosses planes and the wells on them,
         // never a selected fill.
@@ -1375,14 +1380,14 @@ impl Surfaces {
             .collect();
         Self {
             ground: content,
-            chrome,
+            sidebar,
             elevated,
             card,
             hover,
             selected,
             keyed,
             pressed,
-            sash: Tint::of(t.text, t.sash),
+            hover_strong: Tint::of(t.text, alpha::HOVER_STRONG),
             stroke: Tint::of(t.text, alpha::STROKE),
             border: Tint::of(t.text, alpha::BORDER),
             control: thicken(Tint::of(t.text, alpha::BORDER), &crossed, NON_TEXT),
@@ -1524,6 +1529,10 @@ pub struct Curve {
 }
 
 impl Curve {
+    /// A tab opening or closing: `MonoCode`'s `--motion-tab-ease-out`, nearly linear, so the
+    /// strip's other tabs slide with the slot as it grows or folds.
+    pub const TAB: Self = Self { p1: (0.3333, 0.6667), p2: (0.6667, 1.0) };
+
     /// How far along the motion is at `t` (0 to 1) of its time.
     ///
     /// Solves the curve's x for `t` by Newton's method, falling back to bisection where the
@@ -1586,7 +1595,8 @@ pub struct Motion {
     /// Overlays, menus and hints leaving: shorter than their entrance, since what is dismissed
     /// is no longer looked at (Radix, `HeroUI`: 100 ms out against 150 to 200 in).
     pub exit: std::time::Duration,
-    /// A selected row's fill moving, a tab resizing, a fold opening.
+    /// A selected row's fill moving, a tab resizing or sliding to its new place as tabs are
+    /// reordered (`MonoCode`'s 160 ms `--motion-reorder-duration`), a fold opening.
     pub settle: std::time::Duration,
     /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval, a
     /// tab closing: `MonoCode`'s 200 ms.
@@ -1663,14 +1673,23 @@ pub struct Density {
     pub row: f32,
     /// A row of two lines: a title over its meta line.
     pub row_two_line: f32,
-    /// The window's title bar on the chrome: 36 on the Mac, Zed's and Warp's tighter bar.
+    /// The window's title bar: 40 on the Mac, `MonoCode`'s `h-10`, so a 30 pt tab has air above
+    /// and below it and never fills the bar.
     pub title: f32,
-    /// A pane's tab row, its header: 32 on the Mac, a step under the title bar.
+    /// A pane's tab row, its header: 36 on the Mac, a step under the title bar.
     pub header: f32,
-    /// A pane's own toolbar, apart from its tab row: 32 on the Mac.
+    /// A pane's own toolbar, apart from its tab row: 36 on the Mac.
     pub bar: f32,
-    /// The status bar along the window's foot, on the chrome: 28.
+    /// The status bar along the window's foot: 28.
     pub status: f32,
+    /// A tab's pill inside its bar: 30 on the Mac, `MonoCode`'s `h-7.5`.
+    pub tab: f32,
+    /// A navigator or palette row, a rail button: 32 on the Mac, `MonoCode`'s `h-8`.
+    pub item: f32,
+    /// An icon button's side: 26 on the Mac, `MonoCode`'s `size-6.5`.
+    pub button: f32,
+    /// A status bar chip's height: 20 on the Mac, `MonoCode`'s `h-5`.
+    pub chip: f32,
     /// A button's or a field's height: a row's, so a button in a row fills it.
     pub control: f32,
     /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
@@ -1685,10 +1704,14 @@ impl Density {
     pub const COMPACT: Self = Self {
         row: 28.0,
         row_two_line: 40.0,
-        title: 36.0,
-        header: 32.0,
-        bar: 32.0,
+        title: 40.0,
+        header: 36.0,
+        bar: 36.0,
         status: 28.0,
+        tab: 30.0,
+        item: 32.0,
+        button: 26.0,
+        chip: 20.0,
         control: 28.0,
         hit: 24.0,
         sash: 12.0,
@@ -1701,6 +1724,10 @@ impl Density {
         header: 44.0,
         bar: 44.0,
         status: 32.0,
+        tab: 36.0,
+        item: 44.0,
+        button: 44.0,
+        chip: 32.0,
         control: 44.0,
         hit: 44.0,
         sash: 24.0,
@@ -1915,14 +1942,14 @@ mod tests {
         );
 
         let r = Radii::default();
-        assert!(r.xs < r.sm && r.sm < r.md && r.md < r.lg && r.lg < r.full);
-        assert_eq!((r.xs, r.sm, r.md, r.lg), (2.0, 4.0, 6.0, 8.0), "Zed's and Warp's ladder");
-        assert!((Radii::nested(r.lg, 0.0, 4.0) - r.sm).abs() < f32::EPSILON, "a menu's rows nest");
-        assert!(
-            (Radii::nested(r.lg, 0.0, r.sm) - r.sm).abs() < f32::EPSILON,
-            "a sheet is its rows' radius and pad"
+        assert!(r.xs < r.sm && r.sm < r.md && r.md < r.lg && r.lg < r.xl && r.xl < r.full);
+        assert_eq!(
+            (r.xs, r.sm, r.md, r.lg, r.xl),
+            (4.0, 6.0, 8.0, 12.0, 16.0),
+            "MonoCode's ladder"
         );
-        assert!((Radii::nested(r.lg, 1.0, r.xs) - 5.0).abs() < f32::EPSILON, "inside a border");
+        assert!((Radii::nested(r.lg, 0.0, 4.0) - r.md).abs() < f32::EPSILON, "a float's rows nest");
+        assert!((Radii::nested(r.lg, 1.0, r.xs) - 7.0).abs() < f32::EPSILON, "inside a border");
         assert!(Radii::nested(r.xs, 1.0, r.md).abs() < f32::EPSILON, "never under zero");
 
         // `MonoCode`'s chrome sizes: 13, 12 (the most used), 11; prose 14; then the titles and
@@ -1955,42 +1982,39 @@ mod tests {
         assert!(2.0_f32.mul_add(-s.inset_trailing(), s.inset()).abs() < f32::EPSILON, "12 and 6");
     }
 
-    /// Two opaque planes (Zed's and Warp's): the panes and the grid are the content, a true
-    /// neutral and the deepest plane; the chrome is the ink at 3 % over it (#1e1e1e on #171717,
-    /// #f0f0f0 on #f7f7f7); what floats is a step past the chrome in dark and white in light.
-    /// Inside a pane the divider is quieter than a control's border; the sash between panes is
-    /// firmer than both and still under the 1.5:1 a line would shout at.
+    /// `MonoCode`'s planes: the panes, the grid and the bars are the content, a true neutral; the
+    /// navigator is a step toward black in dark (#151515 on #171717) and the ground itself in
+    /// light; what floats is a step toward the ink in dark and white in light. Every structural
+    /// line is the one 7 % stroke, quieter than a control's ring and still seen on both planes.
     #[test]
-    fn the_work_lies_deepest_under_the_chrome() {
+    fn the_navigator_lies_on_the_ground_or_a_step_under_it() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             let content = theme.content();
             assert_eq!(content, theme.terminal.bg, "{variant:?}: the content is the grid's");
-            let (ground, chrome, float) =
-                (content.oklch().l, s.chrome.oklch().l, s.elevated.oklch().l);
+            let (ground, sidebar, float) =
+                (content.oklch().l, s.sidebar.oklch().l, s.elevated.oklch().l);
             match variant {
                 Variant::Dark => {
                     assert_eq!(content, Rgb::hex(0x17_1717), "dark ground");
-                    assert_eq!(s.chrome, Rgb::hex(0x1e_1e1e), "dark chrome");
-                    assert!(chrome > ground && float > chrome, "dark: ground, chrome, float");
+                    assert_eq!(s.sidebar, Rgb::hex(0x15_1515), "dark sidebar");
+                    assert!(sidebar < ground && float > ground, "dark: sidebar, ground, float");
                 }
                 Variant::Light => {
                     assert_eq!(content, Rgb::hex(0xf7_f7f7), "light ground");
-                    assert_eq!(s.chrome, Rgb::hex(0xf0_f0f0), "light chrome");
-                    assert!(chrome < ground, "light: the chrome a step toward the ink");
+                    assert_eq!(s.sidebar, content, "light: the sidebar is the ground");
+                    assert!((sidebar - ground).abs() < f32::EPSILON);
                     assert_eq!(s.elevated, Rgb::hex(0xff_ffff), "light: what floats is white");
                 }
             }
-            for (name, surface) in [("content", content), ("chrome", s.chrome)] {
-                let (sash, loud, quiet) = (
-                    s.sash.over(surface).contrast(surface),
+            for (name, surface) in [("content", content), ("sidebar", s.sidebar)] {
+                let (loud, quiet) = (
                     s.border.over(surface).contrast(surface),
                     s.stroke.over(surface).contrast(surface),
                 );
-                assert!(quiet < loud && loud < sash, "{variant:?} on {name}: divider, ring, sash");
-                assert!(quiet >= 1.05, "{variant:?}: the divider shows on {name}: {quiet:.3}");
-                assert!(sash < 1.5, "{variant:?}: the sash stays a line on {name}: {sash:.3}");
+                assert!(quiet < loud, "{variant:?} on {name}: the line under the ring");
+                assert!(quiet >= 1.05, "{variant:?}: the line shows on {name}: {quiet:.3}");
             }
         }
     }
@@ -2000,44 +2024,32 @@ mod tests {
     /// as at 2x: at 1x a full point wide. Weighed as the eye takes a thin line, its width in
     /// points times how far it sits off its ground in CIE L*, each 1 pt line is one weight at 1x
     /// and 2x; half a point at twice the share matches it at 2x and weighs twice it at 1x. The
-    /// divider at 7 % and the sash at 12 % (dark) and 14 % (light) are measured on the ground and
-    /// on the chrome (`docs/MEASUREMENTS.md`, "The structural line at 1x and 2x"); the sash
-    /// weighs one and a half to two dividers, a line that parts and never a rule.
+    /// one line at 7 % is measured on the ground and on the navigator (`docs/MEASUREMENTS.md`,
+    /// "The structural line at 1x and 2x").
     #[test]
     fn the_line_weighs_the_same_at_every_scale() {
         let drawn = |width: f32, scale: f32| (width * scale).round().max(1.0) / scale;
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
-            let sash = if variant == Variant::Dark { alpha::SASH } else { alpha::SASH_ON_PAPER };
-            for (plane, ground) in [("ground", theme.content()), ("chrome", s.chrome)] {
+            for (plane, ground) in [("ground", theme.content()), ("sidebar", s.sidebar)] {
                 let weigh = |width: f32, share: f32, scale: f32| {
                     let line = Tint::of(s.text, share).over(ground);
                     drawn(width, scale) * (lightness(ground) - lightness(line)).abs()
                 };
-                for share in [alpha::STROKE, alpha::SASH, alpha::SASH_ON_PAPER] {
-                    let ours = (weigh(stroke::LINE, share, 1.0), weigh(stroke::LINE, share, 2.0));
-                    let half = (weigh(0.5, 2.0 * share, 1.0), weigh(0.5, 2.0 * share, 2.0));
-                    eprintln!(
-                        "{variant:?} on the {plane}: 1 pt at {share:.2} weighs {:.2} at 1x, {:.2} at 2x; 0.5 pt at {:.2} weighs {:.2} at 1x, {:.2} at 2x",
-                        ours.0,
-                        ours.1,
-                        2.0 * share,
-                        half.0,
-                        half.1
-                    );
-                    assert!(
-                        (ours.0 - ours.1).abs() < 1e-3,
-                        "{variant:?}: one weight at both scales"
-                    );
-                    assert!(half.0 > 1.8 * half.1, "{variant:?}: half a point doubles at 1x");
-                }
-                let ratio =
-                    weigh(stroke::LINE, sash, 1.0) / weigh(stroke::LINE, alpha::STROKE, 1.0);
-                assert!(
-                    (1.5..=2.2).contains(&ratio),
-                    "{variant:?} on the {plane}: the sash {ratio:.2}"
+                let share = alpha::STROKE;
+                let ours = (weigh(stroke::LINE, share, 1.0), weigh(stroke::LINE, share, 2.0));
+                let half = (weigh(0.5, 2.0 * share, 1.0), weigh(0.5, 2.0 * share, 2.0));
+                eprintln!(
+                    "{variant:?} on the {plane}: 1 pt at {share:.2} weighs {:.2} at 1x, {:.2} at 2x; 0.5 pt at {:.2} weighs {:.2} at 1x, {:.2} at 2x",
+                    ours.0,
+                    ours.1,
+                    2.0 * share,
+                    half.0,
+                    half.1
                 );
+                assert!((ours.0 - ours.1).abs() < 1e-3, "{variant:?}: one weight at both scales");
+                assert!(half.0 > 1.8 * half.1, "{variant:?}: half a point doubles at 1x");
             }
         }
     }
@@ -2151,7 +2163,8 @@ mod tests {
         assert_eq!(at(desk.chrome), (13.0, 19.0, 400.0));
         assert_eq!(at(desk.action), (13.0, 19.0, 500.0));
         assert_eq!(at(desk.task_title), (14.0, 20.0, 500.0));
-        assert_eq!(at(desk.section), (12.0, 16.0, 500.0));
+        assert_eq!(at(desk.section), (12.0, 20.0, 400.0), "MonoCode's text-xs leading-5");
+        assert_eq!(at(desk.empty_heading), (18.0, 24.0, 400.0), "MonoCode's text-lg");
         assert_eq!(at(desk.panel_title), (15.0, 20.0, 600.0));
         assert_eq!(at(desk.prose), (14.0, 24.0, 400.0));
         assert_eq!(at(desk.composer), (14.0, 22.0, 400.0));
@@ -2161,7 +2174,7 @@ mod tests {
         assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
         assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
         assert_eq!(at(touch.task_title), (17.0, 22.0, 500.0));
-        assert_eq!(at(touch.section), (13.0, 18.0, 500.0));
+        assert_eq!(at(touch.section), (13.0, 20.0, 400.0));
         assert_eq!(at(touch.panel_title), (19.0, 24.0, 600.0));
         assert_eq!(at(touch.prose), (16.0, 27.0, 400.0));
         assert_eq!(at(touch.composer), (16.0, 25.0, 400.0));
@@ -2216,12 +2229,12 @@ mod tests {
         ("light end", 0xcc_cccc),
     ];
 
-    /// The planes chrome sits on: the ground, the chrome, what floats, and a card on the
+    /// The planes chrome sits on: the ground, the navigator, what floats, and a card on the
     /// ground and on a float.
     fn planes(s: &Surfaces, content: Rgb) -> [(&'static str, Rgb); 5] {
         [
             ("content", content),
-            ("chrome", s.chrome),
+            ("sidebar", s.sidebar),
             ("elevated", s.elevated),
             ("card", s.card.over(content)),
             ("card on a float", s.card.over(s.elevated)),
@@ -2235,7 +2248,7 @@ mod tests {
         let named = planes.map(|(name, c)| (name.to_owned(), c));
         let selected = planes.map(|(name, c)| (format!("selected on {name}"), s.selected.over(c)));
         // The keyboard's row, over the planes a list lies on.
-        let keyed = [("content", content), ("chrome", s.chrome), ("elevated", s.elevated)]
+        let keyed = [("content", content), ("sidebar", s.sidebar), ("elevated", s.elevated)]
             .map(|(name, c)| (format!("keyed on {name}"), s.keyed.over(c)));
         named.into_iter().chain(selected).chain(keyed).collect()
     }
@@ -2412,10 +2425,10 @@ mod tests {
         assert_eq!(s.text, DARK_TONES.pole, "as far as it goes");
     }
 
-    /// The ladder climbs in order for every supported background: the chrome a step from the
-    /// ground toward the text, what floats past the ground, the divider quieter than a ring and
-    /// the ring quieter than the sash on every plane, and each state a step past the last on
-    /// every plane, toward the text.
+    /// The ladder climbs in order for every supported background: the navigator the ground or a
+    /// step under it, away from the text, what floats past the ground, the line quieter than a
+    /// ring on every plane, and each state a step past the last on every plane, toward the
+    /// text, the strong hover between the selection and the keyboard's row.
     #[test]
     fn the_ladder_is_monotonic() {
         for (name, bg) in BACKGROUNDS {
@@ -2424,7 +2437,7 @@ mod tests {
             let l = Rgb::luminance;
             let ink = lightness(s.text);
             let off = |c: Rgb| (lightness(c) - lightness(content)) * (ink - lightness(content));
-            assert!(off(s.chrome) > 0.0, "{name}: the chrome is a step toward the text");
+            assert!(off(s.sidebar) <= 0.0, "{name}: the navigator is never toward the text");
             assert!(l(s.elevated) >= l(content), "{name}: what floats is not below the ground");
             for (plane, under) in planes(&s, content) {
                 let steps = [
@@ -2439,12 +2452,14 @@ mod tests {
                     steps.windows(2).all(|w| w[1] > w[0] + 0.5),
                     "{name}: the states climb on {plane}: {steps:?}"
                 );
-                let (sash, loud, quiet) = (
-                    s.sash.over(under).contrast(under),
-                    s.border.over(under).contrast(under),
-                    s.stroke.over(under).contrast(under),
+                let strong = (lightness(s.hover_strong.over(under)) - lightness(under)).abs();
+                assert!(
+                    strong >= steps[2] && strong < steps[3],
+                    "{name}: the strong hover on {plane}: {strong:.2} in {steps:?}"
                 );
-                assert!(quiet < loud && loud < sash, "{name}: divider, ring, sash on {plane}");
+                let (loud, quiet) =
+                    (s.border.over(under).contrast(under), s.stroke.over(under).contrast(under));
+                assert!(quiet < loud, "{name}: the line under the ring on {plane}");
             }
         }
     }
@@ -2516,7 +2531,7 @@ mod tests {
     const NEUTRAL_CHROMA: f32 = 0.002;
 
     /// Every grey of the chrome in both modes is a true neutral, `MonoCode`'s `hsl(240 0% L)`:
-    /// the ground, the chrome, what floats, the washes, the lines, the text and the
+    /// the ground, the navigator, what floats, the washes, the line, the text and the
     /// terminal's selection.
     #[test]
     fn every_grey_is_a_true_neutral() {
@@ -2526,14 +2541,14 @@ mod tests {
             let content = theme.content();
             let greys = [
                 ("content", content),
-                ("chrome", s.chrome),
+                ("sidebar", s.sidebar),
                 ("elevated", s.elevated),
                 ("card", s.card.over(content)),
                 ("hover", s.hover.over(content)),
                 ("selected", s.selected.over(content)),
                 ("keyed", s.keyed.over(content)),
                 ("pressed", s.pressed.over(content)),
-                ("sash", s.sash.over(content)),
+                ("hover_strong", s.hover_strong.over(content)),
                 ("stroke", s.stroke.over(content)),
                 ("border", s.border.over(content)),
                 ("text", s.text),
@@ -2660,14 +2675,14 @@ mod tests {
     }
 
     /// Working's and merged's marks read as marks (C3): 3:1 and more on the content and on the
-    /// chrome in both modes.
+    /// navigator in both modes.
     #[test]
     fn a_status_fill_reads_as_a_mark() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             for (name, fill) in [("working_fill", s.working_fill), ("merged_fill", s.merged_fill)] {
-                for (ground, under) in [("content", theme.content()), ("chrome", s.chrome)] {
+                for (ground, under) in [("content", theme.content()), ("sidebar", s.sidebar)] {
                     let seen = fill.contrast(under);
                     assert!(seen >= NON_TEXT, "{variant:?}: {name} on {ground} is {seen:.2}");
                 }
@@ -2678,7 +2693,8 @@ mod tests {
     /// Only what floats wears a shadow, in black: menus, popovers, the palette and toasts Zed's
     /// two crisp layers, tightest first, and a dialog its modal four, none blurred past 12 pt.
     /// The scrim under a modal is black at 0.40 in both. A finger gets Apple's 44 pt, a pointer
-    /// 28 pt rows, a 36 pt title bar, 32 pt pane tab rows and toolbars, and a 28 pt status bar.
+    /// 28 pt rows, `MonoCode`'s 40 pt title bar, 36 pt pane tab rows and toolbars, 30 pt tabs,
+    /// 32 pt items, 26 pt icon buttons, 20 pt chips and a 28 pt status bar.
     #[test]
     fn elevation_and_density() {
         let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
@@ -2703,9 +2719,16 @@ mod tests {
         assert!(touch.control >= 44.0 && touch.bar >= 44.0, "a finger's button and bar");
         assert_eq!(
             (compact.row, compact.control, compact.title, compact.header, compact.bar),
-            (28.0, 28.0, 36.0, 32.0, 32.0),
-            "Zed's and Warp's"
+            (28.0, 28.0, 40.0, 36.0, 36.0),
+            "MonoCode's bars"
         );
+        assert_eq!(
+            (compact.tab, compact.item, compact.button, compact.chip),
+            (30.0, 32.0, 26.0, 20.0),
+            "MonoCode's pills"
+        );
+        assert!(compact.tab < compact.header && compact.item < compact.title, "air round a pill");
+        assert!(touch.tab >= 36.0 && touch.item >= 44.0 && touch.button >= 44.0);
         assert_eq!(compact.status, 28.0, "the status bar");
         assert_eq!(compact.sash, 12.0, "MonoCode's sash");
         assert!(touch.sash >= touch.hit / 2.0, "a finger finds the sash");
@@ -2817,7 +2840,7 @@ mod tests {
         }
     }
 
-    /// The hover and selected washes sit at `MonoCode`'s 5 % and 8 to 10 %, and pressed a
+    /// The hover and selected washes sit at `MonoCode`'s 5 % and 6 to 10 %, and pressed a
     /// like step past them.
     #[test]
     fn the_washes_are_monocode_s_shares() {
@@ -2825,30 +2848,30 @@ mod tests {
         for variant in [Variant::Dark, Variant::Light] {
             let s = Theme::new(variant).surfaces;
             assert!((0.045..=0.06).contains(&share(s.hover)), "hover {:?}", s.hover);
-            assert!((0.075..=0.10).contains(&share(s.selected)), "selection {:?}", s.selected);
+            assert!((0.06..=0.105).contains(&share(s.selected)), "selection {:?}", s.selected);
             let (step, next) =
                 (share(s.selected) - share(s.hover), share(s.pressed) - share(s.selected));
             assert!(next >= step - 0.005, "pressed is a step past selected: {step:.3} {next:.3}");
         }
     }
 
-    /// A selected row and a row's hover stand off the chrome in both variants, and the
+    /// A selected row and a row's hover stand off the navigator in both variants, and the
     /// keyboard's row stands clear of a plain selection: the washes ride on the plane under
     /// them.
     #[test]
-    fn the_washes_stand_off_the_chrome() {
+    fn the_washes_stand_off_the_navigator() {
         for variant in [Variant::Dark, Variant::Light] {
             let s = Theme::new(variant).surfaces;
-            let off = |wash: Tint| wash.over(s.chrome).contrast(s.chrome);
+            let off = |wash: Tint| wash.over(s.sidebar).contrast(s.sidebar);
             let (hover, well, keyed) = (off(s.hover), off(s.selected), off(s.keyed));
-            assert!(well >= 1.07, "{variant:?}: the selection is {well:.3} off the chrome");
-            assert!(hover >= 1.04, "{variant:?}: the hover is {hover:.3} off the chrome");
+            assert!(well >= 1.07, "{variant:?}: the selection is {well:.3} off the navigator");
+            assert!(hover >= 1.04, "{variant:?}: the hover is {hover:.3} off the navigator");
             assert!(keyed >= well * 1.05, "{variant:?}: the keyboard's row {keyed:.3} leads");
         }
     }
 
     /// What floats sits a step over the ground in dark (Zed's elevated surface, the ink at 5 %:
-    /// 3 to 5 points of lightness), over the chrome too, standing off both by its ring and
+    /// 3 to 5 points of lightness), over the navigator too, standing off both by its ring and
     /// shadow, and a row's hover still shows on it.
     #[test]
     fn a_float_rises_and_its_rows_still_answer_the_pointer() {
@@ -2856,7 +2879,7 @@ mod tests {
         let s = theme.surfaces;
         let (content, float) = (oklab_l(theme.content()), oklab_l(s.elevated));
         assert!((3.0..=5.0).contains(&(float - content)), "+{:.2} L", float - content);
-        assert!(float > oklab_l(s.chrome), "over the chrome too");
+        assert!(float > oklab_l(s.sidebar), "over the navigator too");
         let hover = oklab_l(s.hover.over(s.elevated)) - float;
         assert!(hover >= 3.5, "the hover on a float is +{hover:.2} L");
     }

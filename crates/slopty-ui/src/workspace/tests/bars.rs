@@ -194,6 +194,9 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let at = |cx: &mut VisualTestContext, selector: &'static str| {
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
     };
+    // The breadcrumb stands in the bar while the navigator is hidden.
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
     assert!(cx.debug_bounds("crumb-checkout").is_none(), "the project already says slopty");
     assert!(cx.debug_bounds("crumb-worker").is_none(), "one machine: no worker to name");
     let (ws, branch, changes, bell) =

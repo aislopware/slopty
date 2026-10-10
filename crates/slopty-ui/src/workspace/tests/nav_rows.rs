@@ -81,11 +81,12 @@ fn focus_a_navigator_row(view: &Entity<WorkspaceView>, cx: &mut VisualTestContex
     panic!("no row of the navigator took the keyboard");
 }
 
-/// The navigator's top row ends in "Search" then "New agent", inside the panel, and its filter
-/// is hidden at rest. "Search" shows it with the keyboard in it, Esc hides it, and so does the
-/// keyboard leaving it empty. ⌘F with a row holding the keyboard shows it, and so does typing
-/// there, the key going on after what it holds. With the navigator hidden the bar's leading cluster
-/// takes the two, its "Search" opening the palette.
+/// Under the navigator's top row stand "Search" then "New agent", rows across the panel
+/// (`MonoCode`'s rail actions), and its filter is hidden at rest. "Search" shows it in its place
+/// with the keyboard in it, Esc hides it, and so does the keyboard leaving it empty. ⌘F with a
+/// row holding the keyboard shows it, and so does typing there, the key going on after what it
+/// holds. With the navigator hidden the rail leads with the two, its "Search" opening the
+/// palette.
 #[gpui::test]
 fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -97,14 +98,12 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
     };
     let (nav, lights) = (bounds(cx, "navigator"), bounds(cx, "nav-lights-row"));
-    let (toggle, search, new) =
-        (bounds(cx, "navigator-toggle"), bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
+    let (search, new) = (bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
     for b in [search, new] {
-        assert!(lights.contains(&b.center()), "in the lights row: {b:?}");
-        assert!(b.right() <= nav.right(), "inside the panel: {b:?}");
-        assert_eq!(b.size, toggle.size, "the toggle's size and target");
+        assert!(b.top() >= lights.bottom(), "under the lights row: {b:?}");
+        assert!(b.left() > nav.left() && b.right() < nav.right(), "across the panel: {b:?}");
     }
-    assert!(toggle.right() < search.left() && search.right() <= new.left(), "in order");
+    assert!(search.bottom() <= new.top(), "in order: {search:?} {new:?}");
     assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
 
     click(cx, "nav-search");
@@ -151,11 +150,11 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    let bar_toggle = bounds(cx, "navigator-toggle");
-    let (search, new) = (bounds(cx, "bar-search"), bounds(cx, "bar-new-agent"));
-    assert!(bar_toggle.right() < search.left() && search.right() <= new.left(), "in order");
-    click(cx, "bar-search");
-    assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the bar's Search opens the palette");
+    let (search, new) = (bounds(cx, "nav-rail-search"), bounds(cx, "nav-rail-new-agent"));
+    assert!(search.bottom() <= new.top(), "the rail leads with them: {search:?} {new:?}");
+    assert!(cx.debug_bounds("bar-search").is_none(), "and the bar holds neither");
+    click(cx, "nav-rail-search");
+    assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the rail's Search opens the palette");
 }
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every
@@ -1284,7 +1283,7 @@ fn a_files_row_says_its_folder_only_beside_a_namesake(cx: &mut TestAppContext) {
     };
     assert_eq!(meta(cx, "notes.md"), [""], "one line: the header names its folder");
     let row = cx.debug_bounds(selector("nav-tile", notes.item)).expect("drawn");
-    let one = Theme::default().density.row;
+    let one = navigator::row_height(&Theme::default(), crate::kit::Row::One);
     assert!((f32::from(row.size.height) - one).abs() < 0.5, "a one-line row: {row:?}");
 
     let _other = arrives(&view, cx, &studio, ItemKind::File { path: "/w/b/notes.md".into() }, 2);

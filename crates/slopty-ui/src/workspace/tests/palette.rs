@@ -114,38 +114,8 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     assert!(!view.read_with(cx, |v, _| v.palette_open()));
 }
 
-/// The palette's foot names its keys in sentence case, as the key bar does: ↑↓ move and Esc
-/// closes, and ↩ says what it does with the line selected (goes to a worker, runs a command). It
-/// sits under the list, across the dialog, and reads as one line.
-#[gpui::test]
-fn the_palette_foot_names_its_keys(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let _studio = connect(&view, cx, 1, "studio");
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    open_palette(cx);
-    let legend = |cx: &mut VisualTestContext| {
-        view.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        tree.into_iter()
-            .filter(|n| n.role == "Label")
-            .filter_map(|n| n.label)
-            .find(|l| l.starts_with("↑↓"))
-    };
-    assert_eq!(legend(cx).as_deref(), Some("↑↓ Move · Esc Close · ↩ Go to"), "on the worker");
-    cx.simulate_keystrokes("down");
-    assert_eq!(legend(cx).as_deref(), Some("↑↓ Move · Esc Close · ↩ Run"), "on a command");
-    let (dialog, legend, list) = (
-        cx.debug_bounds("palette").expect("the dialog"),
-        cx.debug_bounds("palette-legend").expect("the foot"),
-        cx.debug_bounds("palette-item-0").expect("a line"),
-    );
-    assert!(legend.top() > list.bottom(), "under the list: {legend:?} {list:?}");
-    assert!((f32::from(dialog.bottom()) - f32::from(legend.bottom())).abs() < 2.0, "at the foot");
-}
-
 /// With no keyboard attached, as on a phone, the palette prints no chord that cannot be
-/// pressed: the commands lose their keys and the foot its legend. A worker's line keeps its
+/// pressed: the commands lose their keys. A worker's line keeps its
 /// readout, which is not a chord. Esc is gone with the keys, so the field ends in Cancel on the
 /// field's row and a scrim dims the work, and Cancel closes it.
 #[gpui::test]
@@ -157,14 +127,12 @@ fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     };
     open_palette(cx);
     assert!(chords(cx) > 0, "a Mac prints its chords");
-    assert!(cx.debug_bounds("palette-legend").is_some(), "and the legend");
     assert!(cx.debug_bounds("palette-cancel").is_none(), "Esc closes it: no Cancel");
     assert!(cx.debug_bounds("palette-scrim").is_none(), "and it floats undimmed");
     cx.simulate_keystrokes("escape");
     view.update(cx, |v, cx| v.set_hardware_keyboard(false, cx));
     open_palette(cx);
     assert_eq!(chords(cx), 0, "no keyboard, no chords");
-    assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
     assert!(cx.debug_bounds("palette-scrim").is_some(), "a scrim to tap");
     let field = cx.debug_bounds("palette").expect("the palette");
     let cancel = cx.debug_bounds("palette-cancel").expect("Cancel on glass");
@@ -408,7 +376,7 @@ fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
 /// [`crate::palette::LIST_WIDTH`] wide, and takes at most three fifths of the window's height
 /// under its ceiling, shorter still when it lists less. On a phone it is a sheet from the bottom,
 /// the window's width, from under the status bar down to the keyboard, its field at its foot above
-/// the keyboard and its foot in view. On both a fade covers the list's end while more runs on below
+/// the keyboard. On both a fade covers the list's end while more runs on below
 /// it.
 #[gpui::test]
 fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
@@ -448,7 +416,6 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     cx.run_until_parked();
     next_frame(cx);
     let palette = cx.debug_bounds("palette").expect("drawn");
-    let foot = cx.debug_bounds("palette-legend").expect("the foot is drawn");
     let gap = Theme::default().spacing.sm;
     assert!((f32::from(palette.top()) - gap).abs() < 0.5, "a gap under the top: {palette:?}");
     assert!((f32::from(palette.bottom()) - short).abs() < 0.5, "to the keyboard: {palette:?}");
@@ -459,10 +426,6 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     assert!(
         f32::from(palette.left()).abs() < 0.5 && (f32::from(palette.right()) - phone_w).abs() < 0.5,
         "the window's width: {palette:?}"
-    );
-    assert!(
-        foot.bottom() <= palette.bottom() && foot.top() >= palette.top(),
-        "the foot is inside: {foot:?} in {palette:?}"
     );
     assert!(more_below(cx), "more below: the fade says so");
     // ↑ from the first line wraps to the last, and the list scrolls to its end.

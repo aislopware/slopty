@@ -493,9 +493,6 @@ pub struct Workspace {
     /// Where the key bar sends its keys, while it can show: followed from the view's changes
     /// so the build reads no view.
     key_target: Option<KeyTarget>,
-    /// The view draws its foot bar, which the band under the view continues: followed from the
-    /// view's changes as the key target is.
-    foot_drawn: bool,
     /// Times it was built, for the tests.
     #[cfg(test)]
     renders: usize,
@@ -678,9 +675,7 @@ impl Workspace {
         let changes = cx.observe(&view, |ws, _view, cx| {
             ws.look(cx);
             ws.presence_changed(cx);
-            let foot = ws.view.read(cx).foot_drawn();
-            let foot_moved = std::mem::replace(&mut ws.foot_drawn, foot) != foot;
-            if ws.follow_key_target(cx) || foot_moved {
+            if ws.follow_key_target(cx) {
                 cx.notify();
             }
         });
@@ -694,7 +689,6 @@ impl Workspace {
         let mut this = Self {
             workers: Vec::new(),
             key_target: None,
-            foot_drawn: false,
             #[cfg(test)]
             renders: 0,
             directory: slopty_client::directory::Directory::default(),
@@ -3574,14 +3568,8 @@ impl Render for Workspace {
         self.ready_paste_key(window, cx);
         let key_bar = self.key_target.clone().map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
-        // Under the key bar, its surface; under the workspace's foot bar, the chrome it is on.
-        let band = if key_bar.is_some() {
-            self.theme.content()
-        } else if self.foot_drawn {
-            surfaces.chrome
-        } else {
-            surfaces.ground
-        };
+        // Under the key bar, its surface; else the ground the foot bar lies on too.
+        let band = if key_bar.is_some() { self.theme.content() } else { surfaces.ground };
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {

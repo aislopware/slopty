@@ -175,7 +175,7 @@ fn a_stream_the_worker_ends_reopens_once_then_offers_to_reopen(cx: &mut TestAppC
     assert!(cx.debug_bounds(selector("stopped", tile.item)).is_none(), "and waits for it");
 }
 
-/// A file with an unsaved edit says "Edited" right after its title's text, a half unit on,
+/// A file with an unsaved edit says so by a dot right after its title's text, a tab's gap on,
 /// before the directory the file is in, and not at the far end of the header.
 #[gpui::test]
 fn edited_follows_the_title(cx: &mut TestAppContext) {
@@ -202,12 +202,12 @@ fn edited_follows_the_title(cx: &mut TestAppContext) {
     let name = bounds(cx, selector("name", tile.item));
     let edited = bounds(cx, selector("unsaved", tile.item));
     let place = bounds(cx, selector("place", tile.item));
-    near(f32::from(edited.left() - name.right()), Theme::default().spacing.xs);
+    near(f32::from(edited.left() - name.right()), tab_look::TAB_GAP);
     assert!(place.left() > edited.right(), "the directory after them: {place:?} {edited:?}");
 }
 
-/// A file in a pane of tabs says "Edited" in its tab, after its name, as a lone tile's header
-/// does.
+/// A file in a pane of tabs says it is edited in its tab, a dot after its name named "Edited" to
+/// a screen reader, as a lone tile's header does.
 #[gpui::test]
 fn a_files_tab_says_edited(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);

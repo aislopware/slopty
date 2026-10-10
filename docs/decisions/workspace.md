@@ -2070,7 +2070,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `smooth::a_sash_drag_beside_five_flooding_shells_on_the_mac` (numbers in
     `MEASUREMENTS.md`, 2026-10-07), with the app suite's tests above.
 - ✅ **The title bar goes back and forward, and a title tab has its own menu** (2026-10-07,
-  items 15 and 23 of `.research/ui-audit-monocode-2026-10-06.md`).
+  items 15 and 23 of `.research/ui-audit-monocode-2026-10-06.md`; amended 2026-10-10 by
+  ui.md, "The MonoCode port: one pill, one line, bars on the ground": while the navigator is docked the arrows and the toggle sit in
+  its top row, and the breadcrumb and the bell leave the bar).
   - **Back and forward.** Two arrows after the navigator's toggle step through the tabs visited
     (⌘[ ⌘]), as `MonoCode`'s `TabVisitNav` does. The pair always stands, so the tabs after it
     never move. A way with nowhere to go is drawn in the muted ink and takes no press. The
@@ -2162,8 +2164,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     tile is already here moves that tile. The title strip and the projects' rows take no thread.
   - A tile's row already carried its tile onto a pane's edge (step 5).
   - Tests: `workspace::tests::drag::a_threads_row_warms_on_its_press_and_drops_on_a_panes_edge`.
-- ✅ **The title tabs fade where they run past the bar, and are set at the chrome's size**
-  (2026-10-07, after the goldens retake).
+- ❌ **The title tabs fade where they run past the bar, and are set at the chrome's size**
+  (2026-10-07, after the goldens retake; superseded 2026-10-10 by ui.md, "The MonoCode port: one pill, one line, bars on the ground":
+  chevrons, decided at prepaint, and no fade).
   - **Why.** The gallery's transfers frame was stale: the title strip drew its "Later tabs"
     chevron only from what the last frame laid out (`ScrollHandle::max_offset`, read in
     render). The frame in which the tabs first ran past the bar laid them out without it, and

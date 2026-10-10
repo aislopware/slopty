@@ -266,7 +266,6 @@ pub(super) fn render<V: PaneHost>(
         .sashes
         .iter()
         .map(|s| {
-            let held = dragging.as_ref() == Some(s);
             let line = match s.axis {
                 SplitAxis::Row => Rect {
                     x: s.line.x - f32::from(kit::HAIR) / 2.0,
@@ -285,7 +284,7 @@ pub(super) fn render<V: PaneHost>(
             };
             let key = sash_key(s);
             let pressed = s.clone();
-            kit::sash(gpui::SharedString::from(key.clone()), theme, axis, bounds(line), held)
+            kit::sash(gpui::SharedString::from(key.clone()), theme, axis, bounds(line))
                 .debug_selector(move || key)
                 .on_mouse_down(
                     MouseButton::Left,

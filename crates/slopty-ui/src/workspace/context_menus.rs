@@ -1,6 +1,7 @@
 //! A thing's own menu, opened by a right click or a long press on it (`kit::menu_press`) and hung
 //! where the press landed: a tile's, from its navigator row or its header; a project's, from its
-//! navigator header; a machine's, from its navigator row (its "…" menu, at the press); a title
+//! navigator header, with the checkouts of its repository while it is the one in view; a
+//! machine's, from its navigator row (its "…" menu, at the press); a title
 //! tab's, from the tab (`MonoCode`'s `TitleBar` menu).
 //!
 //! The bar's menu machinery draws it ([`MenuKind::Context`]), so it closes, takes the keyboard
@@ -381,6 +382,15 @@ impl WorkspaceView {
         let run: Run = Rc::new(move |this, _w, cx| this.toggle_muted(&mute, cx));
         let label = if muted { UNMUTE_NOTES } else { MUTE_NOTES };
         entries.push(Self::entry(MenuGroup::Navigation, label, String::new(), run, cx));
+        // The project in view also goes between its repository's checkouts, the breadcrumb's
+        // menu, which leaves the bar while the navigator stands (`MonoCode`'s worktree switcher
+        // sits in the sidebar).
+        let in_view = self.focused().is_some_and(|focused| {
+            self.project_groups().group_of(focused).is_some_and(|g| &g.key == key)
+        });
+        if in_view && self.crumbs().checkouts.len() > 1 {
+            entries.extend(self.checkout_entries(&cx.entity().downgrade()));
+        }
         entries
     }
 

@@ -1,7 +1,7 @@
 //! Tiling's two pieces: a pane's surface and the sash between two panes.
 //!
-//! Panes meet edge to edge on the window's one ground, parted by a 1 pt line
-//! (`docs/decisions/workspace.md`, tiling). A pane is square and wears nothing of its own: no
+//! Panes meet edge to edge on the window's one ground, parted by the one 1 pt line, 7 % of the
+//! ink (`docs/decisions/workspace.md`, tiling). A pane is square and wears nothing of its own: no
 //! stand, no ring, no shadow. The line between two is the sash, which the pointer finds across
 //! a hit area wider than the line and drags to resize the two.
 
@@ -12,9 +12,6 @@ use gpui::{
 use slopty_theme::{Theme, stroke};
 
 use crate::colors::hsla;
-
-/// The group a sash's hit area names, so its line answers the pointer anywhere in the area.
-const SASH: &str = "kit-sash";
 
 /// A pane's surface: square, on the window's one ground, clipped to itself.
 ///
@@ -32,25 +29,21 @@ pub fn pane_surface(theme: &Theme) -> Div {
 /// dragged up and down under the row-resize cursor.
 ///
 /// What comes back is the hit area, laid absolute and centred on the line,
-/// [`slopty_theme::Density::sash`] across; the caller adds the mouse handlers. At rest it paints
-/// the sash's line ([`slopty_theme::Surfaces::sash`], firmer than a divider inside a pane); under
-/// the pointer and while `dragging` the line steps to the focus green at [`stroke::FOCUS`], which
-/// the theme holds to 3:1 on every ground, where a brightened neutral would stay under it.
+/// [`slopty_theme::Density::sash`] across; the caller adds the mouse handlers. It paints the one
+/// line ([`slopty_theme::Surfaces::stroke`]) at rest, under the pointer and while dragged alike,
+/// as `MonoCode`'s does: the resize cursor says it can be dragged.
 #[must_use]
 pub fn sash(
     id: impl Into<ElementId>,
     theme: &Theme,
     axis: Axis,
     line: Bounds<Pixels>,
-    dragging: bool,
 ) -> Stateful<Div> {
-    let s = theme.surfaces;
-    let (rest, lit) = (hsla(s.sash), hsla(s.focus));
-    let (thin, wide) = (px(stroke::LINE), px(stroke::FOCUS));
+    let thin = px(stroke::LINE);
     let across = px(theme.density.sash);
     let centre = line.center();
-    let area = div().id(id).group(SASH).absolute().flex().justify_center().items_center();
-    let mark = div().flex_none().bg(if dragging { lit } else { rest });
+    let area = div().id(id).absolute().flex().justify_center().items_center();
+    let mark = div().flex_none().bg(hsla(theme.surfaces.stroke));
     match axis {
         Axis::Vertical => area
             .left(centre.x - across / 2.0)
@@ -58,22 +51,14 @@ pub fn sash(
             .w(across)
             .h(line.size.height)
             .cursor_col_resize()
-            .child(
-                mark.h_full()
-                    .w(if dragging { wide } else { thin })
-                    .group_hover(SASH, move |m| m.bg(lit).w(wide)),
-            ),
+            .child(mark.h_full().w(thin)),
         Axis::Horizontal => area
             .top(centre.y - across / 2.0)
             .left(line.origin.x)
             .h(across)
             .w(line.size.width)
             .cursor_row_resize()
-            .child(
-                mark.w_full()
-                    .h(if dragging { wide } else { thin })
-                    .group_hover(SASH, move |m| m.bg(lit).h(wide)),
-            ),
+            .child(mark.w_full().h(thin)),
     }
 }
 
@@ -106,7 +91,6 @@ mod tests {
     struct Split {
         theme: Theme,
         axis: Axis,
-        dragging: bool,
     }
 
     impl Render for Split {
@@ -117,39 +101,28 @@ mod tests {
                     Bounds::new(point(px(0.0), px(150.0)), size(px(400.0), px(1.0)))
                 }
             };
-            div().relative().size_full().child(sash(
-                "s",
-                &self.theme,
-                self.axis,
-                line,
-                self.dragging,
-            ))
+            div().relative().size_full().child(sash("s", &self.theme, self.axis, line))
         }
     }
 
-    fn drawn(
-        cx: &mut TestAppContext,
-        variant: Variant,
-        axis: Axis,
-        dragging: bool,
-    ) -> (f32, Vec<gpui::Quad>) {
+    fn drawn(cx: &mut TestAppContext, variant: Variant, axis: Axis) -> (f32, Vec<gpui::Quad>) {
         let theme = Theme::new(variant);
-        let (_view, cx) = cx.add_window_view(|_, _| Split { theme, axis, dragging });
+        let (_view, cx) = cx.add_window_view(|_, _| Split { theme, axis });
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         cx.update(|w, _| (w.scale_factor(), w.painted_quads()))
     }
 
-    /// The sash paints its 1 pt line on its own line's place at rest, and the 2 pt
-    /// focus green centred on it while dragged, in both variants and along both axes.
+    /// The sash paints the one 1 pt line on its own line's place, in both variants and along
+    /// both axes, and nothing else: no green, no wider line.
     #[gpui::test]
-    fn a_sash_is_the_line_and_lights_green_while_dragged(cx: &mut TestAppContext) {
+    fn a_sash_is_the_one_line(cx: &mut TestAppContext) {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
-            let (stroke, focus) = (hsla(theme.surfaces.sash), hsla(theme.surfaces.focus));
+            let stroke = hsla(theme.surfaces.stroke);
             for axis in [Axis::Vertical, Axis::Horizontal] {
-                let (scale, at_rest) = drawn(cx, variant, axis, false);
-                let line = at_rest
+                let (scale, quads) = drawn(cx, variant, axis);
+                let line = quads
                     .iter()
                     .find(|q| q.background.as_solid() == Some(stroke))
                     .unwrap_or_else(|| panic!("{variant:?} {axis:?}: the line"));
@@ -163,16 +136,11 @@ mod tests {
                     "{variant:?} {axis:?}: 1 pt, {across}"
                 );
                 assert!((start / scale - at).abs() < 0.01, "{variant:?} {axis:?}: on its line");
-                let (_, held) = drawn(cx, variant, axis, true);
-                let lit = held
-                    .iter()
-                    .find(|q| q.background.as_solid() == Some(focus))
-                    .unwrap_or_else(|| panic!("{variant:?} {axis:?}: the green line"));
-                let across = match axis {
-                    Axis::Vertical => lit.bounds.size.width.0,
-                    Axis::Horizontal => lit.bounds.size.height.0,
-                };
-                assert!((across / scale - 2.0).abs() < 0.01, "{variant:?} {axis:?}: 2 pt");
+                let focus = hsla(theme.surfaces.focus);
+                assert!(
+                    quads.iter().all(|q| q.background.as_solid() != Some(focus)),
+                    "{variant:?} {axis:?}: no green"
+                );
             }
         }
     }
@@ -183,7 +151,7 @@ mod tests {
     fn a_sash_is_found_across_its_hit_area() {
         let theme = Theme::default();
         let line = Bounds::new(point(px(200.0), px(10.0)), size(px(1.0), px(300.0)));
-        let mut area = sash("s", &theme, Axis::Vertical, line, false);
+        let mut area = sash("s", &theme, Axis::Vertical, line);
         let style = area.style();
         let across = theme.density.sash;
         assert_eq!(style.size.width, Some(px(across).into()), "the density's sash");

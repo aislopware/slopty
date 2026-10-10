@@ -123,19 +123,18 @@ fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette").is_none(), "gone in the same frame");
 }
 
-/// What floats as a sheet nests its rows: a menu's and the palette's rows sit the
-/// sheet's hairline and pad in from its edge, so a row's 6 pt corner shares the 12 pt sheet's
-/// centre.
+/// What floats as a sheet holds its rows in from its edge: a menu's rows sit the sheet's
+/// hairline and its 4 pt pad in, `MonoCode`'s `p-1`, and the palette's its hairline and 6 pt
+/// list pad, `MonoCode`'s `px-1.5`.
 #[gpui::test]
 fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let theme = Theme::default();
-    // From the sheet's outer edge: its hairline and its pad, which with a row's radius make
-    // the sheet's.
+    // From the sheet's outer edge: its hairline and its pad.
     let pad = crate::kit::sheet_pad(&theme) + slopty_theme::stroke::LINE;
-    assert!((pad + theme.radii.sm - theme.radii.lg).abs() < f32::EPSILON, "concentric");
+    let list = crate::palette::list_pad(&theme) + slopty_theme::stroke::LINE;
     let inset = |cx: &mut VisualTestContext, sheet: &'static str, row: &'static str| {
         let (sheet, row) = (
             cx.debug_bounds(sheet).unwrap_or_else(|| panic!("{sheet}")),
@@ -156,7 +155,7 @@ fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
     let at = inset(cx, "palette", "palette-item-0");
-    assert!((at - pad).abs() < 0.5, "the palette's row: {at}");
+    assert!((at - list).abs() < 0.5, "the palette's row: {at}");
 }
 
 /// A bar menu closes on Esc, which the shell under it never gets, and on a second press of

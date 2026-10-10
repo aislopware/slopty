@@ -382,7 +382,8 @@ impl RenderOnce for MenuPanel {
                         div()
                             .debug_selector(move || selector)
                             .flex_none()
-                            .child(super::list_rule(&theme))
+                            .py(px(theme.spacing.xs))
+                            .child(super::rule(theme.surfaces.border))
                             .into_any_element(),
                     );
                 }
@@ -534,7 +535,7 @@ fn row(
         })
         .gap(px(theme.spacing.md))
         .when(!disabled, gpui::Styled::cursor_pointer)
-        .when(marked, |el| el.bg(hsla(s.hover)).aria_active_descendant())
+        .when(marked, |el| el.bg(hsla(s.selected)).aria_active_descendant())
         .on_mouse_move(move |_ev, _window, cx| {
             if !disabled && hover_cursor.read(cx).at != Some(n) {
                 hover_cursor.update(cx, |c, cx| {

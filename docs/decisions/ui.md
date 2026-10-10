@@ -1510,7 +1510,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Headless at a simulated 120 Hz with one agent
     working, the workspace rendered 12 frames a second against 120 for a per-frame animation,
     and 0 at rest (MEASUREMENTS, "a working mark that steps").
-  - **Palette and first run.** The palette gains a foot legend in key caps, and `kit::key_cap`
+  - **Palette and first run.** The palette gains a foot legend in key caps (superseded
+    2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": the legend is deleted), and `kit::key_cap`
     is now the one key-cap element. The first-run page shows a large muted Server icon above
     its heading.
 
@@ -8596,7 +8597,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `Surfaces::on_glass`), and the window is always opaque.
     - Floats are their solid ground with a border and a shadow. Only the washes (hover,
       selection, the card's 3 %) are translucent, and only over a solid plane.
-  - **Two opaque planes, all neutral** (Zed and Warp amend MonoCode's one ground).
+  - **Two opaque planes, all neutral** (Zed and Warp amend MonoCode's one ground; superseded
+    2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": the bars lie on the ground, the navigator on `sidebar`).
     - The work lies deepest: panes and the terminal are on the ground, #171717 in dark and
       #f7f7f7 in light.
     - `chrome` is a step toward the ink, #1e1e1e and #f0f0f0. It holds the title bar, the tab
@@ -8605,7 +8607,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       lifted on the chrome too.
     - `every_grey_is_a_true_neutral` holds every grey under 0.002 OKLCH chroma. Ink keeps our
       ladder, made neutral.
-  - **Two lines, both 1 pt and snapped to device pixels.**
+  - **Two lines, both 1 pt and snapped to device pixels** (superseded 2026-10-10 by
+    "The MonoCode port: one pill, one line, bars on the ground": one 7 % line, `sash` deleted).
     - `sash` is 12 % of the ink in dark and 14 % in light. It runs between panes and along a
       bar's edge against a pane.
     - `stroke` is 7 %, for dividers inside a pane. `border` is 10 %, for a control's or a
@@ -8633,7 +8636,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       blurred past 12 pt.
   - **Destructive is tinted.** The error's wash at 0.20 (0.30 under the pointer) carries the
     error's word, held to AA over the ground and over a float. `error_solid` is gone.
-  - **Radii** (Zed's and Warp's compact ladder, which replaces MonoCode's 4 to 16).
+  - **Radii** (Zed's and Warp's compact ladder, which replaces MonoCode's 4 to 16; superseded
+    2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": MonoCode's 4 / 6 / 8 / 12 / 16).
     - 0: panes, bars, tabs, pane lists, tree and diff rows.
     - 2: tiny boxes such as a tab's close box.
     - 4: buttons, chips (a state's pill is now a chip, glyph and word), fields, icon buttons,
@@ -8646,18 +8650,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The keyboard's outline is 2 pt of the accent green, whole, 2 pt clear of its control,
       and held to 3:1 on every ground.
     - The focused pane is told by its labels' tone. A tab of two or more panes adds a 1.5 pt
-      green top edge to its active tab.
+      green top edge to its active tab (superseded 2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": an 8 pt
+      accent dot leads the focused pane's row).
   - **Motion.**
     - Feedback (hover and press) takes 120 ms, eased out (`Motion::feedback`).
     - Menus, popovers and the palette open on their first frame, as Zed's do: latency comes
       first.
     - Only toasts move, 150 ms and 8 pt (`Pace::Toast`).
-  - **Type and heights.**
+  - **Type and heights** (the heights superseded 2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": title 40,
+    header and bar 36).
     - Prose is 14/24 and the composer 14/22.
     - The title bar is 36 (`density.title`), a pane's tab row and its toolbar 32
       (`density.header`, `density.bar`), and the status bar 28 on the chrome. Rows and controls
       stay 28.
-  - **Tiling's pieces** for the panes (`kit::pane`).
+  - **Tiling's pieces** for the panes (`kit::pane`; the sash's state superseded 2026-10-10 by
+    "The MonoCode port: one pill, one line, bars on the ground": it is the one line, with no state).
     - `pane_surface` is square on the ground, with nothing of its own.
     - `sash` is a 1 pt line, found across `density.sash` (12 pt), under the resize cursor
       along its axis.
@@ -8665,15 +8672,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       green clears 3:1 on the ground; a brightened neutral stays near 1.3:1.
   - The AA floors stand everywhere.
   - **Landed after the tiling's wiring (2026-10-07):**
-    - **Every pane's header is a tab row,** as Zed's is. The row is on the chrome step with a
-      sash line along its foot. The shown tab stands on the pane's ground, square, a sash line
+    - **Every pane's header is a tab row,** as Zed's is (its look superseded 2026-10-10 by
+      "The MonoCode port: one pill, one line, bars on the ground": MonoCode's pill). The row
+      is on the chrome step with a sash line along its foot. The shown tab stands on the pane's ground, square, a sash line
       on each side (none at the pane's own edge), over the foot line, so it opens into what it
       shows. A tile alone in its pane has a row of one tab: its lead and its title, the facts
       and the controls after it on the chrome. The starting and the out-of-reach tiles' headers
       are the same row. A tab's one tile has none since 2026-10-09: the title bar is its
       header ("A tab's one tile says its title once", below). The look is one, `workspace::tab_look`, shared with the title bar's
       tabs.
-    - **Focus** is the title's tone and weight, and, while the tab on show holds two panes or
+    - **Focus** (superseded 2026-10-10 by "The MonoCode port: one pill, one line, bars on the
+      ground") is the title's tone and weight, and, while the tab on show holds two panes or
       more, a `stroke::MARK` (1.5 pt) focus-green edge along the top of the focused pane's shown
       tab. With one pane there is nothing to tell it from, and no edge.
     - **A keyboard's selection is keyed.** `kit::selected` where the keyboard is: the keyed
@@ -9055,7 +9064,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_settings_change_applies_with_the_page_still_up`.
 
 - ✅ **A window too narrow to dock the navigator folds it to the rail** (2026-10-09, MonoCode
-  audit row 30, M6 `CompactProjectRail`; the rail was only the hidden navigator's before).
+  audit row 30, M6 `CompactProjectRail`; the rail was only the hidden navigator's before;
+  amended 2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": the rail is MonoCode's compact rail).
   - Where the navigator would leave the panes less than a phone's width, so it cannot dock,
     the rail of project glyphs keeps its column. Before, nothing stood there until the panel
     was opened over the panes. The panel still opens over the panes, and the rail stays under
@@ -9083,7 +9093,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `settings_form::schema::tests::the_agents_page_holds_the_agents_projects_and_notes`,
     `settings_form::tests::the_agents_page_writes_the_projects_and_the_notes_tables`.
 
-- ✅ **A tab's one tile says its title once** (2026-10-09, readiness item 9).
+- ✅ **A tab's one tile says its title once** (2026-10-09, readiness item 9; the "Edited" word
+  and the growing tab superseded 2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground", the main rule stands).
   - **What.** A tab holding one tile, with no other pane zoomed away, draws no pane header.
     Its title bar tab already said the title, and the row of one tab under it said it again
     32 pt lower and took that height from the body. The body now starts at the area's top,
@@ -10045,3 +10056,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `project::tests::a_merge_whose_push_failed_says_so` (a merged card offers nothing),
     `workspace::tests::projects::{a_task_stood_on_can_be_cancelled,
     every_card_says_where_it_runs, the_boards_actions_reach_the_server}`.
+
+- ✅ **The MonoCode port: one pill, one line, bars on the ground** (2026-10-10,
+  `.research/monocode-anatomy-2026-10-10.md`). The person still found the window dated and
+  named the tabs: a tab read as a cell cut out of a chrome band. The study read MonoCode's own
+  components and took them whole. It supersedes, by name, the planes, lines, radii, focus edge
+  and heights of the MonoCode-to-Zed restart, the look of "Every pane's header is a tab row",
+  the palette's key-cap legend, the "Edited" word and growing tab of "A tab's one tile says its
+  title once", and workspace.md's title-tab fade; it amends the rail and the title bar's arrows.
+  - **Planes.** The title bar, the pane tab rows and the foot bar lie on the ground with the
+    panes; `chrome` is deleted. The navigator, the rail and the settings' list stand on
+    `Surfaces::sidebar`, a step under the ground in dark (#151515) and the ground itself in
+    light.
+  - **One line.** Every structural line is `stroke`, 7 %: between panes, along the navigator's
+    edge, under a bar, over the foot bar. `sash`, `alpha::SASH` and `SASH_ON_PAPER` are deleted,
+    and a sash has no hover or drag state (`kit::pane::sash`). `border`, 10 %, stays for a
+    control's or a card's ring.
+  - **States.** Tabs, rows and menu items take the 5 % hover; icon buttons, close boxes, rail
+    squares and foot chips take the new `hover_strong`, 10 %. One fill says "this one":
+    `selected`, 10 % in dark and 6.5 % in light. Light is a half point over MonoCode's 6 %
+    because at 6 the ladder's monotonic check fails on the elevated plane. No state changes a
+    word's weight.
+  - **Radii** are MonoCode's ladder: xs 4 (close boxes, foot chips, a scrollbar's thumb), sm 6
+    (every pill, button and row), md 8 (fields, the composer, menu rows, cards), lg 12 (every
+    float and settings card), and the new xl 16 (modals).
+  - **Heights.** Title bar 40, pane header and toolbar 36, a tab 30, a navigator or palette row
+    32 (`density.item`), an icon button 26 (`density.button`), a foot chip 20 (`density.chip`).
+    Touch keeps its 44 targets.
+  - **Tabs** (`workspace::tab_look`), the title bar's and a pane's alike: a 30 pt pill at radius
+    6 standing in its bar with air round it, in equal 224 pt slots that give way alike down to
+    112. It leads with one 14 pt mark and ends in a 20 pt close at radius 4 with a 12 pt cross,
+    laid over its end: shown at rest on the tab on show, under the pointer on the rest. The tab
+    on show is `selected` in the text's tone, the rest bare in `text_secondary`. A file's
+    unsaved edit is a 6 pt dot after its name, named "Edited" to a screen reader. A title tab
+    leads with up to three status marks overlapping. The title strip scrolls behind chevrons
+    at its ends, decided at prepaint from the strip's own scroll extent, which cures the stale
+    frame that once moved it to a fade; a pane strip scrolls bare. Nothing fades.
+  - **Focus in a split** is an 8 pt accent dot leading the focused pane's row, an empty slot on
+    the rest so nothing moves. A pane with no tab to stand in (a split's lone tile, a starting
+    tile) starts its mark where a first tab's would stand.
+  - **The title bar.** While the navigator is docked, back, forward and the toggle sit at the
+    end of its top row beside the lights, and the bar starts with the tabs. The breadcrumb and
+    the bell leave the bar: the navigator's selected group says the project, its *Needs you*
+    section is on screen, and a project's own menu now offers the checkouts of its repository
+    while it is the one in view. With the navigator hidden the toggle, the arrows, the
+    breadcrumb and the bell return to the bar. Search and New agent are rows under the
+    navigator's top row, or the rail's first two squares; they stay in the bar only where
+    neither stands.
+  - **The navigator.** Rows are 32 pt pills at radius 6 inset 8 from the panel, words in
+    `text_secondary` that rise to the text's tone under the pointer or when chosen, a 14 pt
+    mark in a 16 pt slot. A nested row steps in by one slot and its gap, with no guide line.
+    A group's glyph gives way to its chevron under the pointer.
+  - **The rail** is MonoCode's compact rail, 48 wide on `sidebar`: Search and New agent on top,
+    a short rule, then a square per project and per machine that wants the person. The project
+    on show wears `selected`; the rest rest dimmed and rise under the pointer.
+  - **Menus and the palette.** A menu's frame pads its rows by 4; rows are radius 8, the
+    keyboard's row `selected`, separators a `border` line with 4 above and below. The palette is
+    560 wide, its field 40 tall with a 14 pt glyph and the chrome's words over a `stroke` foot,
+    its rows 32 at radius 6 in a list padded 6. Its key-cap foot is deleted: the rows already
+    show their keys.
+  - **Small controls.** The composer's "+" and its model and mode pickers are 26 pt squares at
+    radius 6 that take the selected wash while open. A segmented choice is a `border` ring with
+    the `selected` wash under the chosen word, no longer sunk and no longer heavier.
+  - **The foot bar** stays, 28 tall on the ground under the one line, its words at 11 pt in
+    `text_secondary`, its chips 20 tall at radius 4, and "Terminal" a word where an icon button
+    was.
+  - **Not taken, with reasons.** Every float keeps radius 12, where MonoCode splits 8 and 12.
+    The title's end fade is not drawn: a title ends in an ellipsis. Tabs neither slide on
+    reorder nor grow in on open yet. The empty workspace's composer page is a separate item.
+  - Tests: `slopty_theme` (the ladder with `hover_strong`, line weight, density, the washes
+    off the navigator, type roles), `workspace::tab_look::tests`, `kit::tests` (the track is
+    ringed, a modal is rounded xl, density sizes the targets), `workspace::tests::{tab_strip,
+    tiles, frame, foot, focus, nav_list, nav_rows, overlays, palette}`.

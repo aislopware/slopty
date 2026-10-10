@@ -38,8 +38,8 @@ fn window(name: &str, used_bp: u32) -> Limit {
     Limit { name: name.to_owned(), used_bp, resets_ms: None }
 }
 
-/// The bar runs along the window's foot under the panes, the status step tall, on the chrome
-/// with a hairline over it, beside the navigator rather than under it. A phone has none.
+/// The bar runs along the window's foot under the panes, the status step tall, on the ground
+/// with the one line over it, beside the navigator rather than under it. A phone has none.
 #[gpui::test]
 fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -60,13 +60,20 @@ fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
         assert!(area.bottom() <= foot.top() + px(0.5), "the panes end over it");
     }
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let chrome = crate::colors::hsla(theme.surfaces.chrome);
+    let ground = crate::colors::hsla(theme.surfaces.ground);
     let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+    // A translucent line is painted as a quad of its own over the fill.
+    let over = |q: &&gpui::Quad| {
+        near(q.bounds.origin.y.0, foot.top()) && near(q.bounds.size.height.0, foot.size.height)
+    };
     assert!(
-        quads.iter().any(|q| near(q.bounds.origin.y.0, foot.top())
-            && near(q.bounds.size.height.0, foot.size.height)
-            && q.background.as_solid() == Some(chrome)),
-        "on the chrome"
+        quads.iter().filter(over).any(|q| q.background.as_solid() == Some(ground)),
+        "on the ground"
+    );
+    let stroke = crate::colors::hsla(theme.surfaces.stroke);
+    assert!(
+        quads.iter().filter(over).any(|q| q.border_color == stroke && q.border_widths.top.0 > 0.0),
+        "the one line along its top"
     );
 
     cx.simulate_resize(size(px(390.0), px(844.0)));
