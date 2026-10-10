@@ -6,7 +6,7 @@
 //! - fmt;
 //! - clippy on the host triple with every target, on both iOS triples unless the crate is
 //!   host-only, and on Linux for the crates that build there (`tools::lint_linux`);
-//! - nextest and doctests;
+//! - nextest (the workspace has no doctest: `gate::runnable_doctests`);
 //! - rustdoc with warnings denied;
 //! - shear;
 //! - typos over the crates' directories.
@@ -66,11 +66,6 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         "nextest",
         cmd!(sh, "cargo nextest run {b...} --no-tests=pass").env(crate::runner::RUNNER_VAR, runner),
     )?;
-    let libs: Vec<&str> = owned.iter().filter(|p| p.lib).map(|p| p.name.as_str()).collect();
-    if !libs.is_empty() {
-        let l = selected(libs.into_iter().chain([WORKSPACE_HACK]));
-        quiet_step("doctests", cmd!(sh, "cargo test {l...} --doc"))?;
-    }
     rustdoc(sh, &names().collect::<Vec<_>>())?;
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();

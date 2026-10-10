@@ -37,7 +37,7 @@ use xshell::{Shell, cmd};
 
 use crate::tools::{
     LINUX_CRATES, LINUX_UNRUN, LINUX_UNTESTED, TRIPLES, WORKSPACE_HACK, has, host_only_present,
-    quiet_step, repo_root, workspace_packages,
+    quiet_step, repo_root,
 };
 
 /// Gate options.
@@ -394,8 +394,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
                         since_pass: opts.since_pass,
                     };
                     cached(inputs, &tree, &tests, |packages| {
-                        let (sh, doc_sh) = (lane(tests_name)?, lane(tests_name)?);
-                        test_lane(&sh, doc_sh, profile, packages, only.shard)
+                        test_lane(&lane(tests_name)?, profile, packages, only.shard)
                     })
                 }),
             ));
@@ -418,10 +417,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
                         extra: pass::tool_id("cargo-nextest"),
                         since_pass: false,
                     };
-                    cached(inputs, &tree, &linux, |_| {
-                        let (sh, doc_sh) = (lane("linux")?, lane("linux")?);
-                        linux_lane(&sh, doc_sh, profile)
-                    })
+                    cached(inputs, &tree, &linux, |_| linux_lane(&lane("linux")?, profile))
                 }),
             ));
         }
@@ -823,6 +819,21 @@ fn repo_invariants(root: &Utf8Path) -> Result<()> {
             spawning.insert(package.name.as_str());
         }
     }
+    for package in &members {
+        let mut sources = Vec::new();
+        rust_sources(package.dir.join("src").as_std_path(), &mut sources);
+        for file in sources {
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            for line in runnable_doctests(&text) {
+                errors.push(format!(
+                    "{}:{line} opens a doctest, and the gate runs none: mark the fence `text` or \
+                     `ignore`, or bring back a doctest step with the shard's own packages and \
+                     features, so cargo reuses nextest's build",
+                    file.display()
+                ));
+            }
+        }
+    }
     let listed: std::collections::BTreeSet<&str> = SPAWNING.into_iter().collect();
     if spawning != listed {
         errors.push(format!(
@@ -831,6 +842,38 @@ fn repo_invariants(root: &Utf8Path) -> Result<()> {
         ));
     }
     if errors.is_empty() { Ok(()) } else { bail!("repository invariants: {}", errors.join("; ")) }
+}
+
+/// The lines (from 1) of `source` that open a code fence in a `///` or `//!` comment rustdoc
+/// would compile as a doctest: a fence with no language, or one whose every word is a Rust
+/// attribute other than `ignore` (`no_run` and `compile_fail` compile too). Another language
+/// (`text`, `sh`, `toml`) is no doctest.
+fn runnable_doctests(source: &str) -> Vec<usize> {
+    const RUST: [&str; 6] =
+        ["rust", "no_run", "compile_fail", "should_panic", "test_harness", "standalone_crate"];
+    let mut open = false;
+    let mut found = Vec::new();
+    for (at, line) in source.lines().enumerate() {
+        let doc = line.trim_start();
+        let Some(doc) = doc.strip_prefix("///").or_else(|| doc.strip_prefix("//!")) else {
+            continue;
+        };
+        let doc = doc.trim();
+        let Some(info) = doc.strip_prefix("```").or_else(|| doc.strip_prefix("~~~")) else {
+            continue;
+        };
+        if open {
+            open = false;
+            continue;
+        }
+        open = true;
+        let words: Vec<&str> =
+            info.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()).collect();
+        if words.iter().all(|w| RUST.contains(w) || w.starts_with("edition")) {
+            found.push(at.saturating_add(1));
+        }
+    }
+    found
 }
 
 /// Every `.rs` file under `dir`, into `out`.
@@ -893,13 +936,12 @@ pub fn spawned_bins(sh: &Shell) -> Result<()> {
 }
 
 /// The gate's tests: build every test binary (of the workspace, or of `shard`'s packages), then
-/// run nextest's `profile` (on `only`'s packages when given) and the doctests side by side. Cargo
-/// holds the target dir's lock only while it builds, and the build is done, so neither waits for
-/// the other. Meanwhile [`crate::ptys`] counts the pseudo-terminals they hold: the lane fails on
-/// a leak, on more than its budget at once, or on the system running out, naming the tests.
+/// run nextest's `profile` (on `only`'s packages when given). The workspace has no doctest, and
+/// [`runnable_doctests`] keeps it so, so none run. Meanwhile [`crate::ptys`] counts the
+/// pseudo-terminals they hold: the lane fails on a leak, on more than its budget at once, or on
+/// the system running out, naming the tests.
 fn test_lane(
     sh: &Shell,
-    doc_sh: Shell,
     profile: &str,
     only: Option<&[String]>,
     shard: Option<Shard>,
@@ -947,17 +989,11 @@ fn test_lane(
     // Beside the JUnit report, which CI keeps.
     let log = tree.join("target").join("nextest").join(profile).join("ptys.log");
     let ptys = crate::ptys::Sampler::start(std::process::id(), &tree, Some(log));
-    let libs = shard.map_or_else(|| Ok(packages.clone()), shard_libs)?;
-    let (tests, doctests) = std::thread::scope(|scope| {
-        let doctests =
-            scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
-        let tests = nextest_step(
-            profile,
-            cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
-                .env(crate::runner::RUNNER_VAR, &runner),
-        );
-        (tests, join(doctests))
-    });
+    let tests = nextest_step(
+        profile,
+        cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
+            .env(crate::runner::RUNNER_VAR, &runner),
+    );
     let videotoolbox = if apart {
         // nextest writes its report to one path a profile, so the second run's would replace the
         // first's, and the summary and CI's timings would lose every test but the encoder's.
@@ -978,7 +1014,7 @@ fn test_lane(
     };
     let ptys = ptys.finish();
     print!("{}", ptys.report());
-    both(both(both(tests, doctests), videotoolbox), ptys.verdict())
+    both(both(tests, videotoolbox), ptys.verdict())
 }
 
 /// The nextest test group of the tests that code through VideoToolbox (`.config/nextest.toml`).
@@ -1100,8 +1136,7 @@ const NEXTEST_HANG_AFTER: Duration = Duration::from_mins(15);
 /// The tests lane's nextest run. On a runner it prints as it goes, so the profile's SLOW and
 /// TERMINATING lines are in the log while it runs, and the watchdog names what a run that
 /// outlives [`NEXTEST_HANG_AFTER`] waits on: a hung run once ended with the job's cancel and
-/// not a line about the test (run 37173900555). Here its output comes as one block, as the
-/// doctests' beside it does.
+/// not a line about the test (run 37173900555). Here its output comes as one block.
 fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
     if profile != NEXTEST_CI_PROFILE {
         return quiet_step("nextest", command);
@@ -1125,9 +1160,9 @@ fn linux_tested() -> Vec<&'static str> {
 
 /// The Linux lane, on a Linux host: the worker, its ptyd, the CLI and the server built as a
 /// Linux box runs them (with the binaries the tests spawn), then the tests of every crate of
-/// theirs whose tests build there, and their doctests. Without the workspace hack, whose
+/// theirs whose tests build there. Without the workspace hack, whose
 /// features pull in the client's GPUI, which no Linux build takes.
-fn linux_lane(sh: &Shell, doc_sh: Shell, profile: &str) -> Result<()> {
+fn linux_lane(sh: &Shell, profile: &str) -> Result<()> {
     let tested = linux_tested();
     let p = &selected(tested.iter().copied());
     let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
@@ -1146,19 +1181,7 @@ fn linux_lane(sh: &Shell, doc_sh: Shell, profile: &str) -> Result<()> {
         cmd!(sh, "cargo build --profile test {spawned...} --examples {bins...}"),
     )?;
     let _fresh = sh.push_env(BINS_FRESH, "1");
-    let libs: Vec<String> = workspace_packages()?
-        .into_iter()
-        .filter(|package| package.lib && tested.contains(&package.name.as_str()))
-        .map(|package| package.name)
-        .collect();
-    let libs = selected(libs.iter().map(String::as_str));
-    let (tests, doctests) = std::thread::scope(|scope| {
-        let doctests =
-            scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
-        let tests = nextest_step(profile, cmd!(sh, "cargo nextest run {p...} --profile {profile}"));
-        (tests, join(doctests))
-    });
-    both(tests, doctests)
+    nextest_step(profile, cmd!(sh, "cargo nextest run {p...} --profile {profile}"))
 }
 
 /// The packages whose tests spawn [`SPAWNED_BINS`] (`slopty_testkit::bins::bin`), as
@@ -1189,17 +1212,6 @@ fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
     let mut args = selected(names);
     args.push("--examples".to_owned());
     Some(args)
-}
-
-/// `-p <name>` for `shard`'s packages that have a library, and so doctests, and for
-/// [`WORKSPACE_HACK`].
-fn shard_libs(shard: Shard) -> Result<Vec<String>> {
-    let libs: Vec<String> = workspace_packages()?
-        .into_iter()
-        .filter(|p| p.lib && shard.packages().contains(&p.name.as_str()))
-        .map(|p| p.name)
-        .collect();
-    Ok(selected(libs.iter().map(String::as_str).chain([WORKSPACE_HACK])))
 }
 
 /// What [`snapshot`] copies.
@@ -1533,8 +1545,7 @@ pub fn lint_ios(sh: &Shell) -> Result<()> {
 }
 
 pub fn test(sh: &Shell, extra: &[String]) -> Result<()> {
-    quiet_step("nextest", cmd!(sh, "cargo nextest run --workspace {extra...}"))?;
-    quiet_step("doctests", cmd!(sh, "cargo test --workspace --doc"))
+    quiet_step("nextest", cmd!(sh, "cargo nextest run --workspace {extra...}"))
 }
 
 pub fn doc(sh: &Shell, open: bool) -> Result<()> {
@@ -1653,9 +1664,36 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 mod tests {
     use super::{
         BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests, list,
-        next_step, one_gpui, spawned_selection, summary_of, within,
+        next_step, one_gpui, runnable_doctests, spawned_selection, summary_of, within,
     };
     use crate::tools::repo_root;
+
+    /// A doc fence rustdoc would compile is found, including `no_run` and `compile_fail`, and its
+    /// closing fence is not taken for an opening one; fences in another language, `ignore`d
+    /// ones and fences outside doc comments are not.
+    #[test]
+    fn a_doc_fence_rustdoc_would_compile_is_found() {
+        let source = [
+            "//! ```text",
+            "//! a picture",
+            "//! ```",
+            "/// ```",
+            "/// let a = 1;",
+            "/// ```",
+            "    /// ```rust,no_run",
+            "    /// ```",
+            "/// ```ignore",
+            "/// ```",
+            "/// ```compile_fail,edition2024",
+            "/// ```",
+            "/// ```sh",
+            "/// ```",
+            "// ```",
+            "let s = \"```\";",
+        ]
+        .join("\n");
+        assert_eq!(runnable_doctests(&source), [4, 7, 11]);
+    }
 
     /// A command run within a deadline says whether it passed, and one that outlives it is
     /// killed with every process it started: a hung encoder test leaves nothing behind.

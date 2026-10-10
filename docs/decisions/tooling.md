@@ -1037,7 +1037,7 @@ more full-window layer.
     leaves it out, and naming it there says to use `cargo xtask linux e2e`): the tests of every
     `LINUX_CRATES` crate but `LINUX_UNTESTED`'s built, then the worker, its ptyd, the CLI, the
     server and the stand-ins the tests spawn, built natively in the tests' profile, then nextest
-    and the doctests. No workspace hack, whose features pull in GPUI.
+    (the doctests were deleted on 2026-10-10, see below). No workspace hack, whose features pull in GPUI.
   - **The job.** `linux` in `.github/workflows/ci.yml`, on `ubuntu-24.04` (x86_64), beside the
     gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
     minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
@@ -1404,3 +1404,19 @@ more full-window layer.
     on both Linux triples, and the Linux lane does not run them yet (`linux_tested`). Their
     Mac-only tests are gated to the Mac. Whether the rest pass on a Linux host is untried.
     Running them there is the next step, after which they leave `LINUX_UNRUN`.
+
+- ✅ **No doctest step: the workspace has no doctest, and the tools lane keeps it so**
+  (2026-10-10).
+  - **Why.** Every crate printed `running 0 tests` in ten green runs read
+    (`.research/dev-speed-2026-10-10.md` item 3). The step's `cargo test --doc` still resolved
+    its own feature set and compiled another set of crates while it held the build directory's
+    lock, so nextest's run waited behind it: a median of about 57 s on the worker shard, the
+    run's critical path in 16 of 27 green runs, and about 50 s on the rest shard.
+  - **What replaces it.** `repo_invariants`, in the tools lane, scans every member's `src` for a
+    `///` or `//!` fence rustdoc would compile: no language, or only Rust attributes other than
+    `ignore` (`no_run` and `compile_fail` compile too). One fails the gate and says to mark the
+    fence `text` or `ignore`, or to bring a doctest step back with the shard's own packages and
+    features, so cargo reuses the nextest build's units.
+  - **Deleted.** The doctest spawns in the tests and Linux lanes, `cargo xtask test`'s and
+    `xtask check`'s doctest steps, `shard_libs`, and `Package::lib`.
+  - Test: `gate::tests::a_doc_fence_rustdoc_would_compile_is_found` (xtask).

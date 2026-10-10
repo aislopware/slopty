@@ -166,7 +166,7 @@ and what the agent was sent. Claude Code is played through its hooks (`CtlReques
 such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
 
 ## Where the gate runs
-Layers 1 and 2, the doctests and every lint make up `cargo gate`, split between this Mac and
+Layers 1 and 2 and every lint make up `cargo gate`, split between this Mac and
 GitHub Actions. Before a commit, `cargo gate` runs the cheap lanes on the staged tree: fmt,
 taplo, deny, hakari, shear, typos, `committed` (on the history, and on the pending message given
 with `-m`) and host clippy. It takes about a minute with a warm build. `cargo xtask land` then

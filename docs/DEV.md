@@ -195,7 +195,7 @@ The full gate is fmt, clippy `-D warnings` on all targets and all three Apple tr
 Linux (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on the server's crates and
 the worker's that build there, `xtask/src/tools.rs` `LINUX_CRATES`, and
 `x86_64-unknown-linux-musl` on the server's), nextest,
-doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
+rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
 - Here, `cargo gate` runs only the lane that compiles nothing, in seconds: the tools lane (fmt
   with nightly rustfmt, taplo, deny, hakari, shear, typos, both lockfiles `--locked`, and
   `committed` on the history since the last tag). `-m '<message>'` has `committed` check the message of the commit
@@ -234,8 +234,8 @@ built natively and its crates' tests) runs only on a Linux host, CI's Linux runn
 
 fmt and the tool checks (deny, hakari, shear, typos, taplo, `committed`) take seconds, so they
 run first, side by side, and a failure among them ends the gate before any compile. Then the
-compile lanes run. In the tests lane, nextest and the doctests run side by side once the test
-binaries are built, since cargo holds its lock only while it builds.
+compile lanes run. The workspace has no doctest, so no lane runs `cargo test --doc`; the tools
+lane fails on a doc fence rustdoc would compile (`gate::runnable_doctests`).
 
 A lane that passed leaves a record of its inputs under `target/gate/pass/`: the index entries it
 reads (`mode sha path`, submodules at their pinned commit), the toolchain (`rustc -vV`), the
@@ -343,8 +343,8 @@ two macOS guests at once. To look at a guest's screen, run `tart run <name> --vn
 command of the lane does.
 
 ## Deep checks (on a schedule, not per commit)
-The `Deep` workflow (`.github/workflows/deep.yml`) runs these every night at 02:00 Bangkok time,
-a job per check, and mutation testing on Saturdays; `gh workflow run deep.yml` starts it now
+The `Deep` workflow (`.github/workflows/deep.yml`) runs these every day at 04:37 UTC (11:37
+Bangkok), in the gate's calmest hours and off the top of the hour, a job per check, and mutation testing on Saturdays; `gh workflow run deep.yml` starts it now
 (`-f mutants=true` adds mutation testing). Each job's report is an artifact of the run
 (`gh run download <id>`), and a failure opens or comments on the "Deep checks failing" issue.
 Here, run one check at a time, and only the smallest that proves a change: one fuzz target for

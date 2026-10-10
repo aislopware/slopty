@@ -160,8 +160,6 @@ pub fn host_only_present() -> Result<Vec<&'static str>> {
 pub struct Package {
     pub name: String,
     pub dir: Utf8PathBuf,
-    /// It has a library target, so it has doctests.
-    pub lib: bool,
 }
 
 /// Every package under `crates/`, `apps/` and `xtask`. A package's name need not match its
@@ -175,7 +173,6 @@ pub fn packages_in(root: &Utf8Path) -> Result<Vec<Package>> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         package: Named,
-        lib: Option<toml::Table>,
     }
     #[derive(serde::Deserialize)]
     struct Named {
@@ -193,8 +190,7 @@ pub fn packages_in(root: &Utf8Path) -> Result<Vec<Package>> {
         let Ok(text) = std::fs::read_to_string(&manifest) else { continue };
         let parsed: Manifest =
             toml::from_str(&text).with_context(|| format!("parsing {manifest}"))?;
-        let lib = parsed.lib.is_some() || dir.join("src").join("lib.rs").exists();
-        packages.push(Package { name: parsed.package.name, dir, lib });
+        packages.push(Package { name: parsed.package.name, dir });
     }
     Ok(packages)
 }
