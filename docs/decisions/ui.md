@@ -9709,3 +9709,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::an_update_never_takes_a_machine_back_and_goes_when_it_cannot_tell` (slopty-app);
     `workspace::tests::tiles::a_linked_worker_on_an_older_build_is_offered_update_on_its_row`
     (slopty-ui).
+
+- ✅ **The commit sheet's merge follows the forge's own summary** (2026-10-12, readiness audit
+  item 18's A half).
+  - **The defect.** Merge was offered only while no check had failed, so a check the base
+    branch does not require kept the button away though the forge would merge. A draft or a
+    branch that waits on running checks or a review sent the person to the web.
+  - **The gate.** `merge_gate` reads `PullStatus::merge_state`, the forge's own sum of what
+    stands between the pull request and a merge, not the checks alone. `CLEAN`, `HAS_HOOKS` and
+    `UNSTABLE` merge now. What is not green but not required (failing checks, checks still
+    running, changes asked for without a required review) is a warning line beside the button,
+    never a refusal. `BLOCKED` on running checks, or on a review not given yet, offers "Merge
+    when ready", which sends `GitOp::Merge { auto: true }`: gh's `--auto`, which joins a merge
+    queue where the branch has one, and glab's auto-merge. Once gh has taken it, its words stand
+    in the outcome and the row stops offering it. A draft offers "Ready for review"
+    (`GitOp::MarkReady`).
+  - **What still waits.** A required check that failed, changes asked for under a required
+    review, a conflict and a branch behind its base offer nothing to press: auto-merge would
+    only hide work someone must do, and the next steps above the row (fix the checks, address
+    the review, bring up to date) are the way on. `UNKNOWN` says the forge is still checking.
+  - **Kept as is.** The standing chip still ranks a failing check first, because it says what
+    needs attention. The gate says what the forge allows. `PullStatus` carries no auto-merge
+    state, so a sheet opened later offers "Merge when ready" again; a second press is harmless.
+  - Tests: `conversation::thread::tests::commit::the_merge_gate_reads_the_forge_s_summary`,
+    `…::a_merge_goes_now_where_the_forge_allows_it_for_the_head_on_show`,
+    `…::a_merge_blocked_on_running_checks_is_offered_when_ready`,
+    `…::a_required_failure_leaves_the_merge_waiting`, `…::a_draft_is_marked_ready_from_the_sheet`
+    (slopty-ui).

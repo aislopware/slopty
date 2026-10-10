@@ -1,6 +1,6 @@
 //! The commit sheet over a thread's tile: the files ticked go in the commit with the person's
 //! words, a push follows the commit only once it is made, the pull request stands over the
-//! files with a merge offered only while it is ready, and git's refusals read in its words.
+//! files with its merge as the forge's own summary allows it, and git's refusals read in its words.
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 use slopty_proto::git::{GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus};
@@ -219,37 +219,120 @@ fn the_files_ticked_are_committed_and_pushed_after(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-pull").is_none(), "the tile's header says it, not the foot");
 }
 
-/// The merge is offered only while the pull request is ready, for the head on show, by the
-/// method chosen; otherwise the sheet says what it waits on.
+/// The merge follows the forge's own summary, for the head on show, by the method chosen: a
+/// failing check the base does not require (`UNSTABLE`) warns and still merges now.
 #[gpui::test]
-fn a_merge_is_offered_only_while_ready_for_the_head_on_show(cx: &mut TestAppContext) {
+fn a_merge_goes_now_where_the_forge_allows_it_for_the_head_on_show(cx: &mut TestAppContext) {
     let (hub, sent, cx) = opened(cx);
     let read = last(&sent, &GitOp::PullStatus);
-    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(pull("CLEAN", &["IN_PROGRESS"])))));
-    assert!(cx.debug_bounds("commit-merge").is_none(), "no merge while checks run");
-    assert!(cx.debug_bounds("commit-merge-waits").is_some());
-    hub.update(cx, |hub, cx| {
-        let _asked = hub.git_op("/w", GitOp::PullStatus, cx);
-    });
-    let read = last(&sent, &GitOp::PullStatus);
-    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(pull("CLEAN", &["SUCCESS"])))));
+    let unstable = pull("UNSTABLE", &["SUCCESS", "FAILURE"]);
+    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(unstable))));
+    assert!(cx.debug_bounds("commit-merge-warn").is_some(), "the optional failure, warned");
     click(cx, "commit-merge-methods");
     click(cx, "commit-method-rebase");
     click(cx, "commit-delete-branch");
     click(cx, "commit-merge");
-    let merge = asks(&sent).into_iter().rev().find_map(|(_, op)| match op {
-        GitOp::Merge { .. } => Some(op),
-        _ => None,
-    });
     assert_eq!(
-        merge,
-        Some(GitOp::Merge {
+        merges(&sent).last(),
+        Some(&GitOp::Merge {
             method: "rebase".to_owned(),
             head: Some("c0ffee".to_owned()),
             delete_branch: false,
             auto: false,
         })
     );
+}
+
+/// The merges asked so far, in order.
+fn merges(sent: &Sent) -> Vec<GitOp> {
+    asks(sent)
+        .into_iter()
+        .map(|(_, op)| op)
+        .filter(|op| matches!(op, GitOp::Merge { .. }))
+        .collect()
+}
+
+/// A merge the forge blocks only on checks still running is offered as "Merge when ready"
+/// (auto-merge); once gh took it, the row says what it waits on and offers it no more.
+#[gpui::test]
+fn a_merge_blocked_on_running_checks_is_offered_when_ready(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let read = last(&sent, &GitOp::PullStatus);
+    let blocked = pull("BLOCKED", &["IN_PROGRESS"]);
+    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(blocked.clone()))));
+    assert!(cx.debug_bounds("commit-merge-waits").is_some(), "what it waits on, said");
+    click(cx, "commit-merge");
+    let auto = GitOp::Merge {
+        method: "squash".to_owned(),
+        head: Some("c0ffee".to_owned()),
+        delete_branch: true,
+        auto: true,
+    };
+    assert_eq!(merges(&sent), std::slice::from_ref(&auto));
+    let said = "Pull request #7 will be automatically merged via squash when all requirements \
+                are met"
+        .to_owned();
+    let merged = GitDone::Merged { said, pull: Some(Box::new(blocked)) };
+    answer(&hub, cx, last(&sent, &auto), merged);
+    assert!(cx.debug_bounds("commit-merged").is_some(), "gh's words");
+    assert!(cx.debug_bounds("commit-merge").is_none(), "not offered twice");
+}
+
+/// A required check that failed, or a conflict, leaves nothing to press: the sheet says what
+/// the merge waits on, and the next steps above offer the fix.
+#[gpui::test]
+fn a_required_failure_leaves_the_merge_waiting(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let read = last(&sent, &GitOp::PullStatus);
+    let blocked = pull("BLOCKED", &["FAILURE"]);
+    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(blocked))));
+    assert!(cx.debug_bounds("commit-merge").is_none(), "no merge past a required failure");
+    assert!(cx.debug_bounds("commit-merge-waits").is_some());
+}
+
+/// A draft offers "Ready for review", which asks the worker to mark it ready, and no merge.
+#[gpui::test]
+fn a_draft_is_marked_ready_from_the_sheet(cx: &mut TestAppContext) {
+    let (hub, sent, cx) = opened(cx);
+    let read = last(&sent, &GitOp::PullStatus);
+    let draft = PullStatus { draft: true, ..pull("DRAFT", &["SUCCESS"]) };
+    answer(&hub, cx, read, GitDone::PullStatus(Some(Box::new(draft))));
+    assert!(cx.debug_bounds("commit-merge").is_none(), "no merge of a draft");
+    click(cx, "commit-mark-ready");
+    assert!(asks(&sent).iter().any(|(_, op)| *op == GitOp::MarkReady), "{:?}", asks(&sent));
+}
+
+/// The gate over the forge's summaries: what merges now and with which warning, what waits on
+/// something that clears by itself, and what waits on someone.
+#[test]
+fn the_merge_gate_reads_the_forge_s_summary() {
+    use crate::conversation::thread::commit::{MergeGate, merge_gate};
+
+    let now = |warn: Option<&str>| MergeGate::Now { warn: warn.map(str::to_owned) };
+    let when = |waits: &str| MergeGate::WhenReady { waits: waits.to_owned() };
+    let waits = |why: &str| MergeGate::Waits(why.to_owned());
+    assert_eq!(merge_gate(&pull("CLEAN", &["SUCCESS"])), now(None));
+    assert_eq!(merge_gate(&pull("HAS_HOOKS", &[])), now(None));
+    let two = pull("UNSTABLE", &["FAILURE", "TIMED_OUT", "IN_PROGRESS"]);
+    assert_eq!(merge_gate(&two), now(Some("Merges with 2 checks failing")));
+    let one = pull("UNSTABLE", &["SUCCESS", "IN_PROGRESS"]);
+    assert_eq!(merge_gate(&one), now(Some("Merges while 1 check still runs")));
+    let asked = PullStatus { review: "CHANGES_REQUESTED".to_owned(), ..pull("CLEAN", &[]) };
+    assert_eq!(merge_gate(&asked), now(Some("Merges with changes requested")));
+    assert_eq!(merge_gate(&pull("BLOCKED", &["IN_PROGRESS"])), when("checks running"));
+    let review = PullStatus { review: "REVIEW_REQUIRED".to_owned(), ..pull("BLOCKED", &[]) };
+    assert_eq!(merge_gate(&review), when("a review"));
+    assert_eq!(merge_gate(&pull("BLOCKED", &["FAILURE"])), waits("checks failing"));
+    let blocked_asked =
+        PullStatus { review: "CHANGES_REQUESTED".to_owned(), ..pull("BLOCKED", &[]) };
+    assert_eq!(merge_gate(&blocked_asked), waits("changes requested"));
+    assert_eq!(merge_gate(&pull("BEHIND", &[])), waits("behind main"));
+    assert_eq!(merge_gate(&pull("DIRTY", &[])), waits("conflicts with main"));
+    let conflicting = PullStatus { mergeable: "CONFLICTING".to_owned(), ..pull("CLEAN", &[]) };
+    assert_eq!(merge_gate(&conflicting), waits("conflicts with main"));
+    assert_eq!(merge_gate(&pull("UNKNOWN", &[])), waits("GitHub to finish checking it"));
+    let draft = PullStatus { draft: true, ..pull("CLEAN", &[]) };
+    assert_eq!(merge_gate(&draft), MergeGate::Draft);
 }
 
 /// A repository whose `origin` is on GitLab speaks of merge requests: before one is open the

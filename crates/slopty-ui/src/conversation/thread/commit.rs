@@ -9,9 +9,12 @@
 //! instead ("Ask `<agent>` to commit"): it knows why it changed what it did. The ask is one
 //! message through its own door, after its turn, and the sheet reads the repository again once
 //! the turn it went into ends. Slopty writes no message itself and calls no model. Over the files
-//! stands the branch's pull request, its checks most pressing first, and a merge that is offered
-//! only while the forge says it is ready, always for the head the person is looking at. What git or
-//! gh said when it refused is shown in its own words, in the code face, under the buttons.
+//! stands the branch's pull request, its checks most pressing first, and its merge as the forge's
+//! own summary allows it, always for the head the person is looking at: now, with a warning for a
+//! failing check the base does not require; once checks or a review it waits on clear
+//! (auto-merge, a merge queue where the branch has one); or, for a draft, after "Ready for
+//! review". What git or gh said when it refused is shown in its own words, in the code face, under
+//! the buttons.
 //!
 //! It is drawn over its tile on a scrim of the tile alone, so the rest of the workspace stays
 //! in reach. What the person writes in it (the message, a pull request's title and description)
@@ -54,6 +57,12 @@ const FILES_SHOWN: usize = 8;
 
 /// Checks shown, the most pressing first, before "+N more checks".
 const CHECKS_SHOWN: usize = 6;
+
+/// The merge button while the forge waits on something that clears by itself: auto-merge.
+pub const MERGE_WHEN_READY: &str = "Merge when ready";
+
+/// The button that takes a draft pull request out of draft.
+pub const MARK_READY: &str = "Ready for review";
 
 /// The merged sheet's button while its agent still runs in the worktree.
 #[must_use]
@@ -508,17 +517,22 @@ impl CommitSheet {
         );
     }
 
-    /// Merge the pull request the person is looking at, on their press alone.
+    /// Merge the pull request the person is looking at, on their press alone: now while the
+    /// forge would, or once what it waits on clears ([`MergeGate::WhenReady`]).
     fn merge(&mut self, cx: &mut Context<Self>) {
-        let Some(pull) = self.state(cx).and_then(|r| r.pull.status()) else { return };
-        if pull.standing() != PullStanding::Ready {
+        let Some(pull) = self.state(cx).and_then(|r| r.pull.status()).filter(|p| open(p)) else {
             return;
-        }
+        };
+        let auto = match merge_gate(pull) {
+            MergeGate::Now { .. } => false,
+            MergeGate::WhenReady { .. } => true,
+            MergeGate::Draft | MergeGate::Waits(_) => return,
+        };
         let op = GitOp::Merge {
             method: self.method.wire().to_owned(),
             head: Some(pull.head_commit.clone()),
             delete_branch: self.delete_branch,
-            auto: false,
+            auto,
         };
         self.methods_open = false;
         self.op(op, cx);
@@ -944,31 +958,76 @@ impl CommitSheet {
         )
     }
 
-    /// The merge, while the pull request is open: offered only while it is ready, else the
-    /// reason it is not, in its standing's words.
+    /// The merge, while the pull request is open, as the forge's own summary allows it
+    /// ([`merge_gate`]): now, with a warning for what is not green and not required; once what
+    /// it waits on clears; after a draft is marked ready; or not, with the reason.
     fn merge_row(&self, pull: &PullStatus, repo: &Repo, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let standing = pull.standing();
-        if matches!(standing, PullStanding::Merged | PullStanding::Closed) {
+        if !open(pull) {
             return None;
         }
         if let Some(why) = &repo.no_gh {
             return Some(self.said_block("commit-no-gh", why, s.text_secondary).into_any_element());
         }
-        if standing != PullStanding::Ready {
-            let words = format!("Merge waits: {}", git::standing_words(pull).to_lowercase());
-            return Some(self.quiet("commit-merge-waits", words).into_any_element());
-        }
         let busy = self.busy(cx).is_some();
-        let method = self.method;
+        let (label, note): (SharedString, Option<AnyElement>) = match merge_gate(pull) {
+            MergeGate::Now { warn } => {
+                let note = warn.map(|warn| {
+                    div()
+                        .debug_selector(|| "commit-merge-warn".to_owned())
+                        .flex()
+                        .items_center()
+                        .gap(px(theme.spacing.xs))
+                        .text_size(px(theme.typography.small()))
+                        .text_color(hsla(s.text_secondary))
+                        .child(self.icon(Symbol::ExclamationmarkTriangle, s.warn))
+                        .child(SharedString::from(warn))
+                        .into_any_element()
+                });
+                (self.method.verb().into(), note)
+            }
+            MergeGate::WhenReady { waits } => {
+                // gh's words for an auto-merge it took stand in the outcome below; the row says
+                // so rather than offer it twice.
+                let taken = matches!(repo.said, Some((_, Said::Merged { .. })));
+                let words = format!("Merge waits: {waits}");
+                if taken {
+                    return Some(self.quiet("commit-merge-waits", words).into_any_element());
+                }
+                (
+                    MERGE_WHEN_READY.into(),
+                    Some(self.quiet("commit-merge-waits", words).into_any_element()),
+                )
+            }
+            MergeGate::Draft => {
+                let ready = self
+                    .button("commit-mark-ready", MARK_READY, ButtonKind::Secondary, busy)
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.op(GitOp::MarkReady, cx)));
+                return Some(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(theme.spacing.md))
+                        .pt(px(theme.spacing.xs))
+                        .child(ready)
+                        .child(self.quiet("commit-merge-waits", "Merge waits: still a draft"))
+                        .into_any_element(),
+                );
+            }
+            MergeGate::Waits(why) => {
+                let words = format!("Merge waits: {why}");
+                return Some(self.quiet("commit-merge-waits", words).into_any_element());
+            }
+        };
         let split = div()
             .flex_none()
             .flex()
             .items_center()
             .gap(kit::HAIR)
             .child(
-                self.button("commit-merge", method.verb(), ButtonKind::Primary, busy)
+                self.button("commit-merge", label, ButtonKind::Primary, busy)
                     .rounded_r(px(0.0))
                     .on_click(cx.listener(|this, _ev, _w, cx| this.merge(cx))),
             )
@@ -1012,6 +1071,7 @@ impl CommitSheet {
                 .flex_col()
                 .gap(px(theme.spacing.xs))
                 .pt(px(theme.spacing.xs))
+                .children(note)
                 .child(
                     div()
                         .flex()
@@ -1645,4 +1705,84 @@ pub fn up_to_date_words(pull: &PullStatus) -> Option<String> {
          branch is kept (merge, or rebase if it is rebased), resolve any conflicts so both \
          sides' intent holds, run the tests, then commit and push."
     ))
+}
+
+/// What the sheet offers for an open pull request's merge.
+///
+/// It is read from the forge's own summary ([`PullStatus::merge_state`]) rather than from the
+/// checks alone: a check the base branch does not require fails without blocking the forge's
+/// merge, so it warns and does not refuse.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum MergeGate {
+    /// The forge merges it now (`CLEAN`, `HAS_HOOKS`, `UNSTABLE`); `warn` says what is not
+    /// green that the forge does not require.
+    Now {
+        /// "Merges with 1 failing check", and kin.
+        warn: Option<String>,
+    },
+    /// The forge takes it once what it waits on clears by itself (checks still running, a
+    /// review not yet given, a merge queue): offered as auto-merge, with what it waits on.
+    WhenReady {
+        /// What it waits on, to follow "Merge waits: ": "checks running".
+        waits: String,
+    },
+    /// Still a draft: marked ready first.
+    Draft,
+    /// Nothing to press until someone acts: why, to follow "Merge waits: ".
+    Waits(String),
+}
+
+/// What the sheet offers for `pull`'s merge while it is open.
+#[must_use]
+pub fn merge_gate(pull: &PullStatus) -> MergeGate {
+    let state = |s: &str| pull.merge_state.eq_ignore_ascii_case(s);
+    let count = |bucket: CheckBucket| pull.checks.iter().filter(|c| c.bucket() == bucket).count();
+    let (failing, running) = (count(CheckBucket::Failed), count(CheckBucket::Running));
+    let changes = pull.review.eq_ignore_ascii_case("CHANGES_REQUESTED");
+    if pull.draft || state("DRAFT") {
+        return MergeGate::Draft;
+    }
+    if pull.mergeable.eq_ignore_ascii_case("CONFLICTING") || state("DIRTY") {
+        return MergeGate::Waits(format!("conflicts with {}", pull.base));
+    }
+    if state("CLEAN") || state("HAS_HOOKS") || state("UNSTABLE") {
+        let checks = |n: usize| kit::count(n as u64, "check", "checks");
+        let warn = if failing > 0 {
+            Some(format!("Merges with {} failing", checks(failing)))
+        } else if changes {
+            Some("Merges with changes requested".to_owned())
+        } else if running > 0 {
+            let verb = if running == 1 { "runs" } else { "run" };
+            Some(format!("Merges while {} still {verb}", checks(running)))
+        } else {
+            None
+        };
+        return MergeGate::Now { warn };
+    }
+    if state("BLOCKED") {
+        // A failure the base requires, or changes asked for, waits on someone's work, so
+        // auto-merge would only hide it: the next steps above say what to do.
+        if failing > 0 {
+            return MergeGate::Waits("checks failing".to_owned());
+        }
+        if changes {
+            return MergeGate::Waits("changes requested".to_owned());
+        }
+        let waits = if running > 0 {
+            "checks running"
+        } else if pull.review.eq_ignore_ascii_case("REVIEW_REQUIRED") {
+            "a review"
+        } else {
+            "the branch's rules"
+        };
+        return MergeGate::WhenReady { waits: waits.to_owned() };
+    }
+    if state("BEHIND") {
+        return MergeGate::Waits(format!("behind {}", pull.base));
+    }
+    let forge = match pull.forge {
+        Forge::GitHub => "GitHub",
+        Forge::GitLab => "GitLab",
+    };
+    MergeGate::Waits(format!("{forge} to finish checking it"))
 }
