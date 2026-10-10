@@ -76,8 +76,7 @@ For Claude Code started elsewhere, add the tools yourself:
 claude mcp add slopty -- slopty mcp
 ```
 
-and `slopty hook install` registers the hooks that report whether it is working, waiting or
-blocked.
+Its status shows from what its process and terminal say.
 
 ## The CLI
 

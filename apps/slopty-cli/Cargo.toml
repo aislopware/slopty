@@ -20,6 +20,14 @@ path = "src/main.rs"
 doc = false
 test = false
 
+# The developer's measurements against a worker (`cargo xtask probe`): built beside `slopty`,
+# shipped in no bundle.
+[[bin]]
+name = "slopty-probe"
+path = "src/probe_main.rs"
+doc = false
+test = false
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

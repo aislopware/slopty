@@ -1,12 +1,12 @@
-//! `slopty hook`: the Claude Code hook relay and its installer.
+//! `slopty hook`: the Claude Code hook relay.
 //!
 //! Claude Code runs `slopty hook` for every registered event with a JSON payload on stdin. The
 //! relay reads `SLOPTY_SESSION` (set by the worker for every session it spawns), forwards the
 //! payload to `slopty-worker` over the control socket and exits 0 whatever happens: it must never
-//! slow down or block the agent. `slopty hook install` registers it in `~/.claude/settings.json`
-//! as an asynchronous exec-form command hook; `uninstall` removes exactly those entries.
-//! `slopty hook report <status> [message]` is the same relay for any program: a wrapper around
-//! another agent reports `working|blocked|done|idle|gone` and gets Claude Code's treatment.
+//! slow down or block the agent. It is registered per launch, on the `claude` a Slopty session
+//! starts (`slopty hook wire`), never in the person's own settings. `slopty hook report <status>
+//! [message]` is the same relay for any program: a wrapper around another agent reports
+//! `working|blocked|done|idle|gone` and gets Claude Code's treatment.
 //!
 //! A `PermissionRequest` and auto mode's `PermissionDenied` are the hooks Claude Code waits on
 //! (they are registered without `async`). The relay sends each as the question itself, which the
@@ -21,9 +21,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
-use slopty_agent::hooks::{self, Outcome};
 use slopty_agent::permission::{self, hook_output};
-use slopty_agent::{HOOK_EVENTS, HookEvent, reports};
+use slopty_agent::{HookEvent, hooks, reports};
 use slopty_core::SessionId;
 use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAsk, SESSION_ENV};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -36,24 +35,6 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Subcommand, Debug)]
 pub enum HookCmd {
-    /// Register the relay in Claude Code's user settings.
-    Install {
-        /// Settings file (default: `~/.claude/settings.json`).
-        #[arg(long)]
-        settings: Option<PathBuf>,
-    },
-    /// Remove the relay from Claude Code's user settings.
-    Uninstall {
-        /// Settings file (default: `~/.claude/settings.json`).
-        #[arg(long)]
-        settings: Option<PathBuf>,
-    },
-    /// Show whether the relay is registered.
-    Status {
-        /// Settings file (default: `~/.claude/settings.json`).
-        #[arg(long)]
-        settings: Option<PathBuf>,
-    },
     /// Claude Code's status line: forwards its meters to the worker, then runs your own
     /// status-line command and prints what it prints.
     Statusline {
@@ -301,45 +282,6 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
             std::io::Write::write_all(&mut std::io::stdout().lock(), &out)
                 .context("write the words")
         }
-        HookCmd::Install { settings } => {
-            let path = settings.unwrap_or_else(default_settings);
-            let outcome = hooks::install_at(&path, &relay_command()?)
-                .with_context(|| format!("install into {}", path.display()))?;
-            println!(
-                "{} in {} ({} events)",
-                match outcome {
-                    Outcome::Changed => "installed",
-                    Outcome::Unchanged => "already installed",
-                },
-                path.display(),
-                HOOK_EVENTS.len()
-            );
-            Ok(())
-        }
-        HookCmd::Uninstall { settings } => {
-            let path = settings.unwrap_or_else(default_settings);
-            let outcome = hooks::uninstall_at(&path)
-                .with_context(|| format!("uninstall from {}", path.display()))?;
-            println!(
-                "{}",
-                match outcome {
-                    Outcome::Changed => "removed",
-                    Outcome::Unchanged => "not installed",
-                }
-            );
-            Ok(())
-        }
-        HookCmd::Status { settings } => {
-            let path = settings.unwrap_or_else(default_settings);
-            let registered =
-                hooks::registered(&path).with_context(|| format!("read {}", path.display()))?;
-            if registered.is_empty() {
-                println!("not installed in {}", path.display());
-            } else {
-                println!("{}/{} events in {}", registered.len(), HOOK_EVENTS.len(), path.display());
-            }
-            Ok(())
-        }
     }
 }
 
@@ -391,10 +333,6 @@ fn wire(
         return (Vec::new(), args);
     }
     (vec![(claude_mod::FUNCTION_HOOKS_ENV.to_owned(), "1".to_owned())], with_mod)
-}
-
-fn default_settings() -> PathBuf {
-    hooks::settings_path(&slopty_platform::dirs::home())
 }
 
 /// The exec-form command for this binary.

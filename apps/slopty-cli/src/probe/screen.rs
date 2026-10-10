@@ -1,4 +1,4 @@
-//! `slopty bench screen`: open a screen stream and report what arrives.
+//! `slopty-probe screen`: open a screen stream and report what arrives.
 //!
 //! Frame latency is capture timestamp → decoded frame available, and → painted on a 60 Hz timer
 //! through the app's pacer, on the host time clock, so both are only meaningful when client and
@@ -32,7 +32,7 @@ const LONG_GAP: Duration = Duration::from_millis(40);
 /// What to stream and for how long.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenBench {
-    /// Window id on the worker (`slopty bench screen --list` prints them).
+    /// Window id on the worker (`slopty-probe screen --list` prints them).
     pub window: Option<u32>,
     /// Display id on the worker; the main display when neither is given.
     pub display: Option<u32>,

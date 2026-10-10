@@ -1435,7 +1435,7 @@ fn the_key_is_the_agent_s_first_else_the_newest_id_pub() {
 }
 
 /// What the purge there says it removed.
-const REMOVED: &str = r#"{"services":["slopty-worker","slopty-ptyd"],"paths":["/Users/me/Library/Application Support/Slopty/worker-id"],"hooks":true}"#;
+const REMOVED: &str = r#"{"services":["slopty-worker","slopty-ptyd"],"paths":["/Users/me/Library/Application Support/Slopty/worker-id"]}"#;
 
 /// A machine whose purge goes as it should.
 fn purges(script: &str) -> (i32, &'static str, &'static str) {
@@ -1464,7 +1464,6 @@ async fn a_removal_uploads_the_cli_and_runs_its_purge() {
     let (done, events) = removing(&runner, &source, None).await;
     let removed = done.unwrap();
     assert_eq!(removed.services, ["slopty-worker", "slopty-ptyd"]);
-    assert!(removed.hooks);
     let part = format!("{STAGE}/slopty.part");
     assert_eq!(
         runner.ran(),

@@ -16,9 +16,9 @@
 //! - `deploy` proves an install the way a person makes one: it starts a container whose init is
 //!   systemd, with lingering on for its user, and runs this Mac's own `slopty worker deploy` and
 //!   `slopty server deploy` into it, with this binary standing in for `ssh` (`docker exec` as that
-//!   user). The worker and the server run as systemd user units there; the worker answers `slopty
-//!   ping` from this Mac, a second deploy updates it in place, and the server answers `slopty
-//!   workers`.
+//!   user). The worker and the server run as systemd user units there; the worker answers
+//!   `slopty-probe ping` from this Mac, a second deploy updates it in place, and the server answers
+//!   `slopty workers`.
 //! - `dist` cross-builds what ships, in the `dist` profile ([`build_shipped`]): the worker's three
 //!   binaries for both CPUs a Linux box runs ([`SHIPPED`]), linked against glibc [`GLIBC`] so one
 //!   build runs on every distribution of the last several years, and the server for both, static on
@@ -120,8 +120,9 @@ const MANAGER_READY: Duration = Duration::from_secs(60);
 /// the worker registered with it, and check each answers from here and the server lists the
 /// worker.
 fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
-    step("cargo build -p slopty-cli", &cmd!(sh, "cargo build -p slopty-cli --bin slopty"))?;
+    step("cargo build -p slopty-cli", &cmd!(sh, "cargo build -p slopty-cli --bins"))?;
     let cli = Utf8PathBuf::try_from(sh.current_dir().join("target/debug/slopty"))?;
+    let probe = Utf8PathBuf::try_from(sh.current_dir().join("target/debug/slopty-probe"))?;
     step(
         "the systemd image",
         &cmd!(sh, "docker --context {CONTEXT} build --quiet --tag {SYSTEMD_IMAGE} -")
@@ -159,8 +160,8 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
 
     let xtask = std::env::current_exe().context("this binary")?;
     let here = tempfile_dir(sh)?;
-    let slopty = |args: &[&str]| -> Result<String> {
-        let mut command = Command::new(&cli);
+    let run = |program: &Utf8Path, args: &[&str]| -> Result<String> {
+        let mut command = Command::new(program);
         command.arg("--data-dir").arg(&here).args(args);
         command.env(SSH_CONTAINER_VAR, &c.name).env(SSH_UID_VAR, &uid).stdin(Stdio::null());
         let out = command.output().context("run slopty")?;
@@ -169,9 +170,11 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        ensure!(out.status.success(), "slopty {}: {}\n{said}", args.join(" "), out.status);
+        ensure!(out.status.success(), "{program} {}: {}\n{said}", args.join(" "), out.status);
         Ok(said)
     };
+    let slopty = |args: &[&str]| run(&cli, args);
+    let ping = |args: &[&str]| run(&probe, &[["ping"].as_slice(), args].concat());
     let user_unit = |unit: &str| -> Result<String> {
         let runtime = format!("XDG_RUNTIME_DIR=/run/user/{uid}");
         let out = c.exec(&[&runtime], &["systemctl", "--user", "is-active", unit]).output()?;
@@ -200,11 +203,11 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
         ensure!(user_unit(unit)? == "active", "{unit} is not an active user unit");
     }
     let worker = published(&c, WORKER_PORT)?;
-    slopty(&["ping", "--worker", &worker, "--count", "3"])?;
+    ping(&["--worker", &worker, "--count", "3"])?;
     println!("  ✓ the worker runs as systemd user units and answers at {worker}");
 
     slopty(&[deploy.as_slice(), &["--update"]].concat())?;
-    slopty(&["ping", "--worker", &worker, "--count", "1"])?;
+    ping(&["--worker", &worker, "--count", "1"])?;
     println!("  ✓ a second deploy updates it in place");
 
     let listed = slopty(&["--server", &server, "--json", "workers"])?;
@@ -406,7 +409,7 @@ pub fn run(sh: &Shell, cmd: LinuxCmd) -> Result<()> {
         LinuxCmd::Run => {
             let stack = Stack::start(sh, &bins, "infinity")?;
             println!(
-                "▶ Linux worker in {} at {}: `slopty ping --worker {}`; Ctrl-C stops it",
+                "▶ Linux worker in {} at {}: `cargo xtask probe ping --worker {}`; Ctrl-C stops it",
                 stack.container.name, stack.addr, stack.addr
             );
             // Attached, `docker` hands Ctrl-C to the container's init, which ends `sleep`; the

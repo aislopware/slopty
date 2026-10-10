@@ -1247,8 +1247,6 @@ pub struct Removed {
     pub services: Vec<String>,
     /// The files and directories removed, as paths there.
     pub paths: Vec<String>,
-    /// Whether Slopty's hook entries were taken out of the agent's settings.
-    pub hooks: bool,
 }
 
 /// Remove what the worker keeps on this machine, its services gone already

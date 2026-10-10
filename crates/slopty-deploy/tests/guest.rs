@@ -2,7 +2,7 @@
 //! `Ssh::unattended` over the system `ssh`, which never asks, against a machine whose host key
 //! this Mac does not know yet. The key is offered by its fingerprint, which must be the one the
 //! guest's own key file has (read by `cargo xtask` through the guest agent, not over SSH), then
-//! trusted; the deploy then installs this build's worker, which answers there and from this Mac.
+//! trusted; the deploy then installs this build's worker, which answers from this Mac.
 //!
 //! Live (`#[ignore]`), run by `cargo xtask vm deploy --app`, which clones and boots the guest,
 //! admits this Mac's address in its `[network] allow` and says where everything is:
@@ -17,9 +17,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use slopty_deploy::{
-        DeployError, Deployed, Event, Job, Plan, Runner as _, STAGE, Ssh, Step, Target,
-    };
+    use slopty_deploy::{DeployError, Deployed, Event, Plan, Ssh, Step, Target};
 
     fn var(name: &str) -> String {
         std::env::var(name)
@@ -118,19 +116,9 @@ mod tests {
             deployed_worker.health
         );
 
-        // 4. It answers over QUIC: there, through its own CLI the deploy staged.
-        let job = Job {
-            script: &format!("{STAGE}/slopty ping --worker 127.0.0.1:45550 --count 3"),
-            input: None,
-            watch: false,
-        };
-        let there = ssh.run(job, &mut |_| {}).await.unwrap();
-        assert!(there.status.success(), "ping there: {}{}", there.stdout, there.stderr);
-        eprintln!("ping there: {}", there.stdout.trim());
-
-        // 5. And from this Mac, at the address ssh reached. macOS lets a process reach the local
-        //    network only once the app it runs under has the Local Network grant; `ssh` is exempt
-        //    as a system binary, so the deploy itself never needed it.
+        // 4. It answers over QUIC from this Mac, at the address ssh reached. macOS lets a process
+        //    reach the local network only once the app it runs under has the Local Network grant;
+        //    `ssh` is exempt as a system binary, so the deploy itself never needed it.
         let guest = var("SLOPTY_VM_GUEST");
         let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
         if let Err(e) = probe.send_to(b"probe", (guest.as_str(), 9)) {
@@ -141,7 +129,7 @@ mod tests {
         }
         let worker = format!("{guest}:45550");
         let started = Instant::now();
-        let ping = std::process::Command::new(bins.join("slopty"))
+        let ping = std::process::Command::new(bins.join("slopty-probe"))
             .args(["ping", "--worker", &worker, "--count", "3"])
             .output()
             .unwrap();

@@ -10,20 +10,21 @@
 //! * `slopty wake <worker>` wakes a sleeping worker from its own LAN.
 //! * `slopty worker …` talks to the local `slopty-worker` over its control socket.
 //! * `slopty worker deploy <ssh target>` puts a worker on another machine over `ssh`.
-//! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
+//! * `slopty hook` is the Claude Code hook relay, wired into each `claude` a Slopty session starts.
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
-//! * `slopty sessions|attach` are a real client over QUIC straight to a worker the server lists, or
-//!   any `host:port`: a raw-mode terminal that renders frames locally. It is the reference client
-//!   for latency measurements and works without the GPUI apps.
+//! * `slopty attach` is a real client over QUIC straight to a worker the server lists, or any
+//!   `host:port`: a raw-mode terminal that renders frames locally, without the GPUI apps.
+//!
+//! `slopty-probe` ([`probe_main`]) is the developer's measurements against a worker (`ping`,
+//! `echo`, `screen`), run through `cargo xtask probe`; no person's verb.
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "a CLI; stdout is its UI")]
 #![forbid(unsafe_code)]
 
 mod askpass;
 mod attach;
-mod bench;
 mod client;
 mod clipboard;
 mod deploy;
@@ -31,6 +32,7 @@ mod handoff;
 mod hook;
 mod link;
 mod mcp;
+mod probe;
 mod projects;
 mod relay;
 mod service;
@@ -52,7 +54,7 @@ struct Cli {
     /// `$XDG_DATA_HOME/slopty`).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[client]` in
+    /// The server, `host[:port]` (default: `$SLOPTY_SERVER`, else `server` under `[network]` in
     /// settings.toml, else the first that answers on the tailnet). `worker install` saves it as
     /// the server this Mac registers with.
     #[arg(long, global = true)]
@@ -133,27 +135,6 @@ enum Cmd {
         #[arg(long)]
         all_frames: bool,
     },
-    /// List sessions on a worker.
-    Sessions {
-        /// Worker name or id prefix, as the server lists it, or any `host:port` (the only
-        /// worker online when omitted).
-        #[arg(long)]
-        worker: Option<String>,
-    },
-    /// Measure application round-trip time to a worker (control-stream ping).
-    Ping {
-        /// Worker name or id prefix, as the server lists it, or any `host:port`.
-        #[arg(long)]
-        worker: Option<String>,
-        /// Number of probes.
-        #[arg(long, default_value_t = 20)]
-        count: u32,
-    },
-    /// Measure a screen stream (fps, latency on loopback, loss/FEC/NACK counters).
-    Bench {
-        #[command(subcommand)]
-        cmd: BenchCmd,
-    },
     /// Attach to a session straight on its worker, or open one and attach when no session is
     /// given. Detach with `^]`.
     Attach {
@@ -180,9 +161,32 @@ enum SettingsCmd {
     Init,
 }
 
-/// Benchmarks.
+/// `slopty-probe`: measurements against one worker, for `cargo xtask probe`.
+#[derive(Parser, Debug)]
+#[command(name = "slopty-probe", version)]
+struct Probe {
+    /// Data directory, as `slopty` takes it.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    /// The server that names the workers, as `slopty` takes it.
+    #[arg(long, global = true)]
+    server: Option<String>,
+    #[command(subcommand)]
+    cmd: ProbeCmd,
+}
+
+/// What `slopty-probe` measures.
 #[derive(Subcommand, Debug)]
-enum BenchCmd {
+enum ProbeCmd {
+    /// Application round trips to a worker (`Ping` on the control stream).
+    Ping {
+        /// Worker name or id prefix, as the server lists it, or any `host:port`.
+        #[arg(long)]
+        worker: Option<String>,
+        /// Number of probes.
+        #[arg(long, default_value_t = 20)]
+        count: u32,
+    },
     /// Keystroke round trip: a byte to a `cat` session on the worker, timed to the first frame
     /// back.
     Echo {
@@ -234,18 +238,68 @@ pub fn main() -> Result<ExitCode> {
         return Ok(answered);
     }
     slopty_crash::install(slopty_crash::Process::Cli, &slopty_platform::dirs::data_dir());
-    // `attach` and the benches carry keys and echoes through every runtime thread; unclassed,
-    // a loaded Mac held one for hundreds of milliseconds (MEASUREMENTS.md, "the keystroke path
-    // under an all-core spin").
-    slopty_platform::user_interactive_thread();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .on_thread_start(slopty_platform::user_interactive_thread)
-        .build()?
-        .block_on(run())
+    runtime()?.block_on(run())
 }
 
-async fn run() -> Result<ExitCode> {
+/// `slopty-probe`: `src/probe_main.rs` is this and nothing else.
+pub fn probe_main() -> Result<ExitCode> {
+    runtime()?.block_on(async {
+        trace();
+        let probe = Probe::parse();
+        let data_dir = probe.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
+        let server = probe.server.as_deref();
+        match probe.cmd {
+            ProbeCmd::Ping { worker, count } => {
+                probe::ping(&data_dir, server, worker.as_deref(), count).await?;
+            }
+            ProbeCmd::Echo { worker, count } => {
+                probe::echo(&data_dir, server, worker.as_deref(), count).await?;
+            }
+            #[cfg(target_vendor = "apple")]
+            ProbeCmd::Screen { worker, list: true, .. } => {
+                probe::screen::list(&data_dir, server, worker.as_deref()).await?;
+            }
+            #[cfg(target_vendor = "apple")]
+            ProbeCmd::Screen {
+                worker,
+                window,
+                display,
+                seconds,
+                scale,
+                fps,
+                mbit,
+                max_stalls,
+                ..
+            } => {
+                let spec = probe::screen::ScreenBench {
+                    window,
+                    display,
+                    seconds,
+                    scale,
+                    fps,
+                    mbit,
+                    max_stalls,
+                };
+                probe::screen::screen(&data_dir, server, worker.as_deref(), spec).await?;
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    })
+}
+
+/// The runtime both binaries run on. `attach` and the probes carry keys and echoes through
+/// every runtime thread; unclassed, a loaded Mac held one for hundreds of milliseconds
+/// (MEASUREMENTS.md, "the keystroke path under an all-core spin").
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    slopty_platform::user_interactive_thread();
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(slopty_platform::user_interactive_thread)
+        .build()?)
+}
+
+/// Log to stderr, at `warn` unless `RUST_LOG` says otherwise.
+fn trace() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -253,6 +307,10 @@ async fn run() -> Result<ExitCode> {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+async fn run() -> Result<ExitCode> {
+    trace();
     if let Some(done) = handoff::by_name().await {
         return done;
     }
@@ -300,40 +358,11 @@ async fn run() -> Result<ExitCode> {
         }
         Cmd::Mcp => Box::pin(mcp::run(cli.server.as_deref(), &data_dir)).await,
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
-        Cmd::Sessions { worker } => client::sessions(&data_dir, server, worker.as_deref()).await,
         Cmd::Attach { worker, session: Some(session), .. } => {
             return attach::attach(&data_dir, server, worker.as_deref(), &session).await;
         }
         Cmd::Attach { worker, session: None, cwd, command } => {
             return attach::open(&data_dir, server, worker.as_deref(), cwd, command).await;
-        }
-        Cmd::Ping { worker, count } => {
-            client::ping(&data_dir, server, worker.as_deref(), count).await
-        }
-        Cmd::Bench { cmd: BenchCmd::Echo { worker, count } } => {
-            bench::echo(&data_dir, server, worker.as_deref(), count).await
-        }
-        #[cfg(target_vendor = "apple")]
-        Cmd::Bench { cmd: BenchCmd::Screen { worker, list, .. } } if list => {
-            bench::screen::list(&data_dir, server, worker.as_deref()).await
-        }
-        #[cfg(target_vendor = "apple")]
-        Cmd::Bench {
-            cmd:
-                BenchCmd::Screen {
-                    worker, window, display, seconds, scale, fps, mbit, max_stalls, ..
-                },
-        } => {
-            let spec = bench::screen::ScreenBench {
-                window,
-                display,
-                seconds,
-                scale,
-                fps,
-                mbit,
-                max_stalls,
-            };
-            bench::screen::screen(&data_dir, server, worker.as_deref(), spec).await
         }
     };
     done.map(|()| ExitCode::SUCCESS)

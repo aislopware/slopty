@@ -43,7 +43,7 @@ pub enum CtlRequest {
     /// Health: permissions, listen address, admitted ranges, connected clients
     /// (`slopty worker doctor`).
     Doctor,
-    /// Live screen streams and their worker-side counters (`slopty bench screen` reads the
+    /// Live screen streams and their worker-side counters (`slopty-probe screen` reads the
     /// capture and encode latency through this on loopback).
     Screens,
     /// A coding-agent hook fired inside a session (relayed by `slopty hook`).

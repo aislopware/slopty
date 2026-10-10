@@ -188,12 +188,9 @@ async fn sample(
 async fn recover(daemon: Daemon, home: PathBuf) {
     let read = tokio::task::spawn_blocking(move || {
         let sessions = slopty_agent::roster::sessions_dir(&home);
-        let listed = slopty_agent::roster::registered(&sessions, slopty_worker::ports::alive);
-        let settings = slopty_agent::hooks::settings_path(&home);
-        let hooked = slopty_agent::hooks::registered(&settings).is_ok_and(|e| !e.is_empty());
-        (listed, hooked)
+        slopty_agent::roster::registered(&sessions, slopty_worker::ports::alive)
     });
-    let Ok((listed, hooked)) = read.await else { return };
+    let Ok(listed) = read.await else { return };
     if listed.is_empty() {
         tracing::debug!(
             "Claude Code registers no live session; agents recover from their next hook"
@@ -201,7 +198,7 @@ async fn recover(daemon: Daemon, home: PathBuf) {
         return;
     }
     let mut agents = daemon.agents.lock();
-    let events = agents.recover(&listed, hooked, slopty_worker::ports::child_pids);
+    let events = agents.recover(&listed, slopty_worker::ports::child_pids);
     tracing::info!(
         listed = listed.len(),
         recovered = events.len(),

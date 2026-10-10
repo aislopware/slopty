@@ -951,3 +951,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_worker_registers_with_the_server_as_the_machine_reaches_it` (the route wins over
     `$SSH_CONNECTION`), `a_tailnet_peer_reaches_this_machine_at_its_tailnet_address` and
     `a_tailnet_route_follows_the_ssh_config` (a real `ssh -G` over a config file).
+
+- ✅ **The CLI keeps a person's verbs; the measurements and the hook installer go** (2026-10-11,
+  orchestrator-first audit, deletions).
+  - **`slopty hook install`, `uninstall` and `status` are gone**, with
+    `slopty_agent::hooks::{install_at, uninstall_at, registered, settings_path, write,
+    uninstall}`. Every `claude` a Slopty shell or Slopty starts is wired per launch, and the
+    installer was the one path that edited the person's own `~/.claude/settings.json`. This
+    amends `claude-code.md`, where it stayed "the person's own act". With it go two pieces
+    that read that file: a purge's clean-up of the relay entries, which now leaves the file
+    alone, and `Removed.hooks`; and the restart recovery's "the relay is in the user's
+    settings". An agent's status is recovered only when its own command line carries the
+    relay. Tests: `a_purge_takes_the_worker_off_and_leaves_the_persons_own` (the file comes
+    back byte for byte, our relay's entry in it too) and
+    `claude_codes_own_list_restores_what_the_hooks_had_said` (wired processes).
+  - **`slopty sessions` is gone.** `terminals` lists the same through the server.
+  - **`ping` and `bench echo|screen` moved to `slopty-probe`**, a second binary of
+    `slopty-cli` that ships in no bundle, run as `cargo xtask probe ping|echo|screen …`. They
+    are developer measurements, not a person's verbs. The probe takes `--data-dir` and
+    `--server` as `slopty` does. The soak streams through it, `cargo xtask linux deploy` and
+    the VM deploy test ping through it, and `docs/MEASUREMENTS.md`'s commands name it. The VM
+    test's ping from inside the guest went with it, since its ping from this Mac proves the
+    same worker answers over QUIC. It is not in `xtask` itself because xtask builds on every
+    gate, and the probe's decoder and client would make that build heavy.
+  - **`slopty worker wake` is `slopty worker awake`**, so it no longer reads as `slopty wake`,
+    which wakes a sleeping machine. It still asks `CtlRequest::Wake`.
+

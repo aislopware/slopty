@@ -633,7 +633,7 @@ the list. `SLOPTY_WINDOW_CAPTURE=window|crop` on the worker forces a path. Every
 (`SCStreamFrameInfoDisplayTime`, equal to the sample's pts) and the worker keeps two latency
 rings per stream — display time → SCK callback (`ScreenStats::capture`) and encoder submit →
 VideoToolbox callback (`ScreenStats::encode`), p50/p95/max over the last 600 frames — read
-locally over the control socket (`slopty worker screens`; `slopty bench screen` appends them on
+locally over the control socket (`slopty worker screens`; `slopty-probe screen` appends them on
 loopback). Nothing of this crosses the wire.
 
 **Several streams, one Mac's encode engines.** Every stream has its own capture, session, encode
@@ -886,7 +886,7 @@ arrival, and the stream worker drains what is queued before running the reassemb
 and pushes whatever the timers released straight into the decoder (a frame freed by a loss can
 otherwise wait for the next datagram, which on a still screen is a heartbeat away);
 `ScreenStats` carries hold, jitter and the start-up instants for the ⌘⇧I overlay
-(`hud_lines`) and `slopty bench screen`, and `slopty-client::pacing` carries the arrival →
+(`hud_lines`) and `slopty-probe screen`, and `slopty-client::pacing` carries the arrival →
 present numbers beside them. Transport: ACKs within 2 ms and a 32-packet initial
 window (`slopty-net::endpoint`).
 
@@ -1279,8 +1279,7 @@ does the same for a directory typed in. Four signals, in precedence order: hooks
 runs for each event) → JSONL transcript tail → terminal title/OSC → foreground-process
 presence. All four are built, and `AgentEvent.source` (`AgentSource::{Process, Title,
 Transcript, Hook}`) says which one a status came from, so a `claude` the human started by
-hand — or one running before `slopty hook install` — gets the same pill, badges and
-attention as a hooked one.
+hand gets the same pill, badges and attention as a hooked one.
 
 **The three signals below the hooks** are read by `slopty-worker`'s own tick (`agents::watch`,
 every 750 ms) and merged by `slopty_agent::Tracker::observe`, which never lets a weaker signal
@@ -1313,8 +1312,8 @@ agent only when a `claude` the worker actually watched in the foreground has bee
 probes, which is how a killed agent loses its pill without a `SessionEnd`. The app offers no
 install for a session attributed without hooks: a `claude` typed into a Slopty shell is wired by
 the shell integration and an agent Slopty starts gets the relay on its command line, so only a
-`claude` reached by path or through a wrapper goes unhooked, and `slopty hook install` (which
-edits the person's own `~/.claude/settings.json`) stays the person's to run.
+`claude` reached by path or through a wrapper goes unhooked. Slopty never writes the person's
+own `~/.claude/settings.json`.
 
 The worker spawns every session with `SLOPTY_SESSION=<id>` and `SLOPTY_WORKER_SOCKET=<path>`;
 the relay forwards its stdin plus those two to the daemon as `CtlRequest::Hook` and always
@@ -1341,7 +1340,6 @@ next rung of the attention ladder on any worker, cycling from the active item: a
 then a finish not yet looked at, failed ones first; the bell's badge counts
 the agents that wait and the turns left to review, and the bell (⌘⇧U) shows the navigator at
 them, under *Needs you* and *To review* (the phone's way in).
-`slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`;
 `slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any
 program (a wrapper around another agent), is the same relay with the agent's own word, and
 gets the same pill, badge, attention and banner.

@@ -1,10 +1,8 @@
-//! Registering the `slopty hook` relay in Claude Code's user settings.
+//! Wiring the `slopty hook` relay into the `claude` a Slopty session starts.
 //!
-//! `slopty hook install` writes an entry per event in `~/.claude/settings.json`, when the
-//! person runs it: the app never offers to, since a typed or started `claude` is wired without
-//! it. The document is edited in place — other people's hooks and every other setting are
-//! kept — and written through a sibling temporary file, so a crash never leaves half a
-//! settings file behind.
+//! The relay rides on that launch's own `--settings` ([`wired_under`]), an entry per event,
+//! merged into whatever settings the caller passed. The person's `~/.claude/settings.json` is
+//! never written.
 //!
 //! Every entry is asynchronous, so the agent never waits on the relay, except
 //! `PermissionRequest` and `PermissionDenied` ([`permission::HELD`]): those run synchronously so
@@ -31,26 +29,6 @@ pub enum Outcome {
     Changed,
     /// It already said what we wanted.
     Unchanged,
-}
-
-/// Claude Code's user settings file under `home`.
-#[must_use]
-pub fn settings_path(home: &Path) -> PathBuf {
-    home.join(".claude").join("settings.json")
-}
-
-/// Register the relay at `command` for every event in the settings at `path`.
-///
-/// # Errors
-///
-/// When the file exists and is not a JSON object, or cannot be read or replaced.
-pub fn install_at(path: &Path, command: &str) -> std::io::Result<Outcome> {
-    let mut doc = read(path)?;
-    if !install(&mut doc, command) {
-        return Ok(Outcome::Unchanged);
-    }
-    write(path, &doc)?;
-    Ok(Outcome::Changed)
 }
 
 /// The `slopty` relay shipped beside the running binary: in a bundle every binary lives in
@@ -359,75 +337,6 @@ fn settings_value(value: &str, cwd: &Path) -> Option<Value> {
     serde_json::from_str::<Value>(&text).ok().filter(Value::is_object)
 }
 
-/// Remove the relay from the settings at `path`.
-///
-/// # Errors
-///
-/// As [`install_at`].
-pub fn uninstall_at(path: &Path) -> std::io::Result<Outcome> {
-    let mut doc = read(path)?;
-    if !uninstall(&mut doc) {
-        return Ok(Outcome::Unchanged);
-    }
-    write(path, &doc)?;
-    Ok(Outcome::Changed)
-}
-
-/// The events of [`HOOK_EVENTS`] the settings at `path` register the relay for.
-///
-/// # Errors
-///
-/// As [`install_at`].
-pub fn registered(path: &Path) -> std::io::Result<Vec<HookEvent>> {
-    let doc = read(path)?;
-    Ok(HOOK_EVENTS.into_iter().filter(|event| has_relay(&doc, *event)).collect())
-}
-
-/// Read the settings document; a missing or empty file is an empty object.
-///
-/// # Errors
-///
-/// When the file cannot be read or is not a JSON object.
-pub fn read(path: &Path) -> std::io::Result<Value> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
-        Err(e) => return Err(e),
-    };
-    if text.trim().is_empty() {
-        return Ok(json!({}));
-    }
-    let doc: Value = serde_json::from_str(&text).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("parse {}: {e}", path.display()),
-        )
-    })?;
-    if !doc.is_object() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{} is not a JSON object", path.display()),
-        ));
-    }
-    Ok(doc)
-}
-
-/// Replace the settings file whole (`slopty_platform::fs::replace`), so a crash never leaves
-/// half of one, and a settings file that is a link into a dotfiles repository stays one.
-///
-/// # Errors
-///
-/// When the directory cannot be created or the file cannot be replaced.
-pub fn write(path: &Path, doc: &Value) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut text = serde_json::to_string_pretty(doc)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    text.push('\n');
-    slopty_platform::fs::replace(path, text.as_bytes())
-}
-
 /// Is a hook entry ours? Any `slopty` binary as `command` with `args: ["hook"]`.
 ///
 /// That is the form [`install`] writes. The program is the whole `command`, spaces and all:
@@ -543,40 +452,6 @@ fn ensure(groups: &mut Vec<Value>, wanted: Value, ours: fn(&Value) -> bool) -> b
     }
 }
 
-/// Remove the relay everywhere, pruning empty groups, events and the `hooks` key.
-pub fn uninstall(doc: &mut Value) -> bool {
-    let mut changed = false;
-    let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return false;
-    };
-    let mut empty_events = Vec::new();
-    for (event, groups) in hooks.iter_mut() {
-        let Some(groups) = groups.as_array_mut() else { continue };
-        for group in groups.iter_mut() {
-            if let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) {
-                let before = entries.len();
-                entries.retain(|e| !is_relay(e) && !is_reports(e));
-                changed |= entries.len() != before;
-            }
-        }
-        let before = groups.len();
-        groups.retain(|g| g.get("hooks").and_then(Value::as_array).is_none_or(|hs| !hs.is_empty()));
-        changed |= groups.len() != before;
-        if groups.is_empty() {
-            empty_events.push(event.clone());
-        }
-    }
-    for event in empty_events {
-        hooks.remove(&event);
-    }
-    if hooks.is_empty()
-        && let Some(root) = doc.as_object_mut()
-    {
-        root.remove("hooks");
-    }
-    changed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn install_is_idempotent_and_uninstall_restores() {
+    fn install_is_idempotent_and_keeps_the_user_s_own() {
         let mut doc = json!({
             "permissions": { "allow": ["Bash(git *)"] },
             "hooks": {
@@ -716,9 +591,8 @@ mod tests {
         assert!(install(&mut doc, "/usr/local/bin/slopty"));
         let pre = doc["hooks"]["PreToolUse"].as_array().expect("array");
         assert_eq!(pre.len(), 2, "existing user hook kept alongside ours");
-        assert!(uninstall(&mut doc));
-        assert_eq!(doc, original);
-        assert!(!uninstall(&mut doc));
+        assert_eq!(pre[0], original["hooks"]["PreToolUse"][0], "and as it was");
+        assert_eq!(doc["permissions"], original["permissions"]);
     }
 
     /// The relay rides along on `--settings`: added when the caller passes none, merged into
@@ -889,17 +763,14 @@ mod tests {
     }
 
     /// The standard install lives under `~/Library/Application Support`: a space in the path
-    /// is still our relay, so installing twice adds nothing and uninstalling finds it.
+    /// is still our relay, so installing twice adds nothing.
     #[test]
-    fn a_relay_under_a_path_with_spaces_is_recognised_installed_once_and_removed() {
+    fn a_relay_under_a_path_with_spaces_is_recognised_and_installed_once() {
         let spaced = "/Users/me/Library/Application Support/Slopty/bin/slopty";
         assert!(is_relay(&json!({"type":"command","command":spaced,"args":["hook"]})));
-
-        let home = tempfile::tempdir().expect("tempdir");
-        let path = settings_path(home.path());
-        assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Changed);
-        assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Unchanged);
-        let doc = read(&path).expect("read");
+        let mut doc = json!({});
+        assert!(install(&mut doc, spaced));
+        assert!(!install(&mut doc, spaced));
         for event in HOOK_EVENTS {
             let groups = if reports::EVENTS.contains(&event) { 2 } else { 1 };
             let got = doc["hooks"][event.as_str()].as_array().map(Vec::len);
@@ -911,46 +782,6 @@ mod tests {
         }
         let stop = &doc["hooks"]["Stop"][1]["hooks"][0];
         assert!(is_reports(stop) && stop.get("async").is_none(), "synchronous: {stop}");
-        assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
-        assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
-        assert_eq!(registered(&path).expect("read"), Vec::<HookEvent>::new());
-        assert_eq!(read(&path).expect("read"), json!({}));
-    }
-
-    #[test]
-    fn uninstall_reports_a_change_whether_a_group_shrank_or_went() {
-        // Our relay shares a group with a user hook: the entry goes, the group stays.
-        let mut doc = json!({
-            "hooks": {
-                "PreToolUse": [
-                    { "matcher": "Bash", "hooks": [
-                        { "type": "command", "command": "echo hi" },
-                        { "type": "command", "command": "/opt/slopty", "args": ["hook"] }
-                    ] }
-                ]
-            }
-        });
-        assert!(uninstall(&mut doc));
-        assert_eq!(
-            doc,
-            json!({ "hooks": { "PreToolUse": [
-                { "matcher": "Bash", "hooks": [ { "type": "command", "command": "echo hi" } ] }
-            ] } })
-        );
-        // A group that was only ours goes with its event and the `hooks` key.
-        let mut doc = json!({ "hooks": { "Stop": [ { "hooks": [
-            { "type": "command", "command": "/opt/slopty", "args": ["hook"] }
-        ] } ] }, "other": 1 });
-        assert!(uninstall(&mut doc));
-        assert_eq!(doc, json!({ "other": 1 }));
-    }
-
-    #[test]
-    fn a_directory_is_not_a_settings_file() {
-        // Only a missing file reads as empty settings; any other error is reported.
-        let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(read(&dir.path().join("none.json")).expect("missing"), json!({}));
-        assert!(read(dir.path()).is_err(), "a directory is not settings");
     }
 
     #[test]
@@ -958,31 +789,6 @@ mod tests {
         let mut doc = json!({});
         assert!(install(&mut doc, "/opt/slopty"));
         assert_eq!(doc["hooks"]["Stop"][0]["hooks"][0]["args"], json!(["hook"]));
-        assert!(uninstall(&mut doc));
-        assert_eq!(doc, json!({}));
-    }
-
-    #[test]
-    fn installing_into_a_home_creates_and_then_leaves_the_file_alone() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let path = settings_path(home.path());
-        assert!(registered(&path).expect("read").is_empty(), "no file yet");
-        assert_eq!(install_at(&path, "/opt/slopty").expect("install"), Outcome::Changed);
-        assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
-        assert_eq!(install_at(&path, "/opt/slopty").expect("install"), Outcome::Unchanged);
-        assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
-        assert_eq!(registered(&path).expect("read"), Vec::<HookEvent>::new());
-        assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Unchanged);
-    }
-
-    #[test]
-    fn a_settings_file_that_is_not_an_object_is_an_error() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let path = settings_path(home.path());
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        std::fs::write(&path, "[1, 2]").expect("write");
-        read(&path).unwrap_err();
-        std::fs::write(&path, "   ").expect("write");
-        assert_eq!(read(&path).expect("empty is an object"), json!({}));
+        assert_eq!(doc.as_object().map(Map::len), Some(1), "hooks alone: {doc}");
     }
 }

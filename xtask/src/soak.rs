@@ -27,7 +27,7 @@
 //! Beside the terminals, `--stream-lanes` lanes (one by default) stream the worker's drawn screen
 //! (`SLOPTY_SYNTHETIC_SCREEN`: one display and two windows, drawn and encoded by VideoToolbox as
 //! a captured one would be, with no Screen Recording grant) through the fill and the load. Each
-//! stream is a `slopty bench screen` run straight to the worker for [`STREAM_SECONDS`]: open,
+//! stream is a `slopty-probe screen` run straight to the worker for [`STREAM_SECONDS`]: open,
 //! decode, close. They take the display and the windows in turn, at each of [`STREAM_SCALES`] in
 //! turn, so every open builds the worker's capture and encoder and the client's decoder at
 //! another size, and the fill's sessions and the load's streams overlap. The soak also fails when
@@ -166,7 +166,8 @@ pub struct SoakOpts {
 }
 
 /// The binaries, as the build names them.
-const BINARIES: [&str; 4] = ["slopty-server", "slopty-ptyd", "slopty-worker", "slopty"];
+const BINARIES: [&str; 5] =
+    ["slopty-server", "slopty-ptyd", "slopty-worker", "slopty", "slopty-probe"];
 
 pub fn run(sh: &Shell, opts: &SoakOpts) -> Result<()> {
     let root = repo_root()?;
@@ -260,6 +261,8 @@ struct Stack {
     /// Numbers the streams, so the lanes take the targets and scales in turn.
     streams: AtomicUsize,
     slopty_bin: PathBuf,
+    /// `slopty-probe`, which streams.
+    probe_bin: PathBuf,
     cli: PathBuf,
     server: String,
     /// The worker's own address, which a stream dials without the server.
@@ -303,6 +306,7 @@ impl Stack {
         }
         let mut stack = Self {
             slopty_bin: bin.join("slopty").into_std_path_buf(),
+            probe_bin: bin.join("slopty-probe").into_std_path_buf(),
             cli: root.join("cli"),
             root,
             calls: AtomicU64::new(0),
@@ -396,25 +400,33 @@ impl Stack {
     /// failed sent no verb, so nothing is done twice; the miss is counted as a finding, and the
     /// load is still worth watching.
     fn call(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
-        match self.call_once(args, env) {
+        match self.call_once(&self.slopty_bin, args, env) {
             Err(e) if format!("{e:#}").contains(UNREACHED) => {
                 self.unreached.fetch_add(1, Ordering::Relaxed);
                 let _first = self.first_unreached.set(format!("{e:#}"));
-                self.call_once(args, env)
+                self.call_once(&self.slopty_bin, args, env)
             }
             answered => answered,
         }
     }
 
-    /// `slopty` with `args` and `env`, its stdout; fails on an exit status or after [`CALL`].
-    fn call_once(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
+    /// `slopty-probe` with `args` and `env`, its stdout, as [`Self::call_once`].
+    fn probe(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
+        self.call_once(&self.probe_bin, args, env)
+    }
+
+    /// `program` (`slopty`, `--json`, or `slopty-probe`) with `args` and `env`, its stdout;
+    /// fails on an exit status or after [`CALL`].
+    fn call_once(&self, program: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);
         let stdout = self.root.join(format!("call-{call}.out"));
         let stderr = self.root.join(format!("call-{call}.err"));
-        let mut child = Command::new(&self.slopty_bin)
+        let json: &[&str] = if program == self.slopty_bin { &["--json"] } else { &[] };
+        let mut child = Command::new(program)
             .arg("--data-dir")
             .arg(&self.cli)
-            .args(["--server", &self.server, "--json"])
+            .args(["--server", &self.server])
+            .args(json)
             .args(args)
             .envs(env.iter().copied())
             .stdin(Stdio::null())
@@ -547,19 +559,19 @@ fn cycle(stack: &Stack, n: u32, missed: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// A stream's target as `slopty bench screen` takes it: `--display <id>` or `--window <id>`.
+/// A stream's target as `slopty-probe screen` takes it: `--display <id>` or `--window <id>`.
 type Target = [String; 2];
 
 /// What the worker's drawn screen offers to stream.
 fn stream_targets(stack: &Stack) -> Result<Vec<Target>> {
-    let listed = stack.call(&["bench", "screen", "--worker", &stack.worker, "--list"], &[])?;
+    let listed = stack.probe(&["screen", "--worker", &stack.worker, "--list"], &[])?;
     let listed = String::from_utf8_lossy(&listed);
     let targets = parse_targets(&listed);
     ensure!(!targets.is_empty(), "the worker listed nothing to stream:\n{listed}");
     Ok(targets)
 }
 
-/// The targets in `slopty bench screen --list`'s lines: `display display#<id> …` (a `DisplayId`
+/// The targets in `slopty-probe screen --list`'s lines: `display display#<id> …` (a `DisplayId`
 /// prints itself so) and `window <id> …`.
 fn parse_targets(listed: &str) -> Vec<Target> {
     listed
@@ -578,7 +590,7 @@ fn parse_targets(listed: &str) -> Vec<Target> {
         .collect()
 }
 
-/// One stream as `slopty bench screen` reports it, with the worker's own counters for it.
+/// One stream as `slopty-probe screen` reports it, with the worker's own counters for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StreamRun {
     target: String,
@@ -592,7 +604,7 @@ struct StreamRun {
 }
 
 impl StreamRun {
-    /// Read the bench's report (`apps/slopty-cli/src/bench/screen.rs`). A line it no longer
+    /// Read the probe's report (`apps/slopty-cli/src/probe/screen.rs`). A line it no longer
     /// prints is an error, so a changed report cannot pass as a clean stream.
     fn parse(report: &str) -> Result<Self> {
         let line = |start: &str| {
@@ -636,23 +648,13 @@ fn stream(stack: &Stack, targets: &[Target]) -> Result<StreamRun> {
         STREAM_SCALES.get(turn.checked_rem(STREAM_SCALES.len()).unwrap_or(0)).context("a scale")?;
     let seconds = STREAM_SECONDS.to_string();
     let socket = stack.root.join("worker.sock").to_string_lossy().into_owned();
-    let args = [
-        "bench",
-        "screen",
-        "--worker",
-        &stack.worker,
-        flag,
-        id,
-        "--seconds",
-        &seconds,
-        "--scale",
-        scale,
-    ];
+    let args =
+        ["screen", "--worker", &stack.worker, flag, id, "--seconds", &seconds, "--scale", scale];
     // The worker's counters for the stream come from its control socket.
-    let out = stack.call(&args, &[("SLOPTY_WORKER_SOCKET", &socket)])?;
+    let out = stack.probe(&args, &[("SLOPTY_WORKER_SOCKET", &socket)])?;
     let report = String::from_utf8_lossy(&out);
     let mut run = StreamRun::parse(&report)
-        .with_context(|| format!("`slopty bench screen` printed:\n{report}"))?;
+        .with_context(|| format!("`slopty-probe screen` printed:\n{report}"))?;
     run.target = format!("{flag} {id} at {scale}");
     Ok(run)
 }
@@ -1361,7 +1363,7 @@ mod tests {
         assert_eq!(slope_kib_per_min(&rising[..2]), None, "two points fit anything");
     }
 
-    /// The lines of `slopty bench screen` the soak reads, as `bench/screen.rs` prints them.
+    /// The lines of `slopty-probe screen` the soak reads, as `probe/screen.rs` prints them.
     const REPORT: &str = "\
 soak: Display(DisplayId(1)) → 1920×1080 Hevc 60 fps 30 Mbit/s scale 0.75
   first frame after 142 ms; 171 frames decoded in 2.86 s = 59.8 fps

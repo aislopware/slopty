@@ -1,7 +1,10 @@
-//! `slopty bench echo`: keystroke → first frame back on a `cat` session (transport + worker
-//! engine + frame coalescing, no terminal emulation on this side).
+//! `slopty-probe`: the developer's measurements against one worker, run through `cargo xtask
+//! probe`. They are no person's verbs, so `slopty` carries none of them.
 //!
-//! `slopty bench screen` ([`screen`]): open a screen stream and report what arrives.
+//! - `ping`: application round trips on the control stream.
+//! - `echo`: keystroke → first frame back on a `cat` session (transport + worker engine + frame
+//!   coalescing, no terminal emulation on this side).
+//! - `screen` ([`screen`]): open a screen stream and report what arrives.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -128,4 +131,56 @@ fn quantiles(samples: &mut [u64]) -> String {
         ms(max),
         samples.len()
     )
+}
+
+/// Application-level round trips: `Ping` on the control stream, `Pong` back. Prints the time to
+/// the first `HelloAck`, per-probe and summary numbers, and QUIC's own view of the path, so
+/// transport and app latency can be compared.
+pub async fn ping(
+    data_dir: &Path,
+    server: Option<&str>,
+    needle: Option<&str>,
+    count: u32,
+) -> Result<()> {
+    use slopty_core::MonoTime;
+    use slopty_proto::{ClientMsg, WorkerMsg};
+
+    let mut session = connect_to(data_dir, server, needle).await?;
+    println!(
+        "{}  connected in {:.1} ms",
+        session.conn.ack.name,
+        session.connect_time.as_secs_f64() * 1e3
+    );
+    let mut samples = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let sent = MonoTime::now();
+        session.conn.tx.send(&ClientMsg::Ping { sent_at: sent }).await?;
+        let rtt = loop {
+            match session.conn.rx.recv().await? {
+                WorkerMsg::Pong { sent_at } if sent_at == sent => {
+                    break Duration::from_nanos(MonoTime::now().since(sent).as_nanos());
+                }
+                _other => {}
+            }
+        };
+        println!("  #{i:<3} app rtt {:>8.3} ms", rtt.as_secs_f64() * 1e3);
+        samples.push(rtt);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    samples.sort();
+    if let (Some(min), Some(max)) = (samples.first(), samples.last()) {
+        let total: Duration = samples.iter().sum();
+        let avg = total.checked_div(u32::try_from(samples.len()).unwrap_or(1)).unwrap_or_default();
+        let median = samples.get(samples.len() / 2).copied().unwrap_or_default();
+        println!(
+            "  app rtt min {:.3} ms  median {:.3} ms  avg {:.3} ms  max {:.3} ms",
+            min.as_secs_f64() * 1e3,
+            median.as_secs_f64() * 1e3,
+            avg.as_secs_f64() * 1e3,
+            max.as_secs_f64() * 1e3,
+        );
+    }
+    println!("  quic path: {}", slopty_net::endpoint::describe_path(&session.conn.conn));
+    session.close().await;
+    Ok(())
 }

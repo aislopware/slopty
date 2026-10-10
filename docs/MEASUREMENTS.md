@@ -21,8 +21,8 @@ side.
 
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
-Setup: mac-studio, `slopty-ptyd` + `slopty-worker` + `slopty ping` on the same machine, debug
-build, direct path selected. `slopty ping` sends `ClientMsg::Ping` on the control stream and
+Setup: mac-studio, `slopty-ptyd` + `slopty-worker` + `slopty-probe ping` on the same machine, debug
+build, direct path selected. `slopty-probe ping` sends `ClientMsg::Ping` on the control stream and
 times the `Pong` (application level, includes both daemons' channel hops).
 
 | build of worker + cli                    | app rtt min | median | max   | QUIC rtt (direct path) |
@@ -33,7 +33,7 @@ times the `Pong` (application level, includes both daemons' channel hops).
 Command:
 
 ```sh
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client target/debug/slopty ping --count 15
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client target/debug/slopty-probe ping --count 15
 ```
 
 Ruling: the feature is removed from the workspace (DECISIONS.md, Transport).
@@ -83,7 +83,7 @@ PY
 
 Takeaways: the transport adds well under a frame at 120 Hz; the budget is dominated by the
 coalescing window. Next: the same probe over Wi-Fi from macbook-pro and from a phone on LTE, and a
-release build. This ad-hoc Python driver is a stopgap; the harness is `slopty bench echo`
+release build. This ad-hoc Python driver is a stopgap; the harness is `slopty-probe echo`
 (`apps/slopty-cli/src/bench.rs`), a CLI subcommand, not an xtask.
 
 ## 2026-09-04 — client connect setup time
@@ -123,7 +123,7 @@ SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-workerd --no-capture screen_stre
 
 ## 2026-09-04 — screen stream end to end, native scale, loopback, debug build
 
-Setup: mac-studio, `slopty-worker --direct-only` and `slopty bench screen` on the same machine
+Setup: mac-studio, `slopty-worker --direct-only` and `slopty-probe screen` on the same machine
 (`SLOPTY_DIRECT_ONLY=1`), iroh direct path (QUIC rtt 1–6 ms as reported by the client while
 streaming). Latency is ScreenCaptureKit's frame timestamp (host clock) → decoded frame handed to
 the client, i.e. capture queue + HEVC encode + packetize + QUIC + reassembly + VideoToolbox
@@ -142,10 +142,10 @@ Commands:
 
 ```sh
 # iroh era: see "Reading old entries" at the top for today's flags
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --list
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --display 6 --seconds 5
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --window 927 --seconds 5
-SLOPTY_DROP_PERMILLE=20 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen --window 927 --seconds 5
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe screen --list
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe screen --display 6 --seconds 5
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe screen --window 927 --seconds 5
+SLOPTY_DROP_PERMILLE=20 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe screen --window 927 --seconds 5
 ```
 
 Takeaways: ~10 ms from capture to a decoded frame on the client at native scale, one frame of
@@ -202,7 +202,7 @@ corners: the window filter leaves them transparent, the crop shows what is behin
 (`moving_the_crop_is_one_configuration_update`): `updateConfiguration` with a shifted
 `sourceRect` completes in 17.8–22.5 ms (5 moves), the next frame arrives with the completion.
 
-### End to end on loopback (`slopty bench screen`, 5 s, 60 fps cap, 30 Mbit/s ceiling)
+### End to end on loopback (`slopty-probe screen`, 5 s, 60 fps cap, 30 Mbit/s ceiling)
 
 | build   | target                     | capture→decoded p50 / p90 | host capture p50 / p95 | host encode p50 / p95 | fps  |
 | ------- | -------------------------- | ------------------------- | ---------------------- | --------------------- | ---- |
@@ -229,9 +229,9 @@ SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --test latency --no-capt
 SLOPTY_WINDOW_CAPTURE=crop target/debug/slopty-worker --direct-only --ptyd-socket /tmp/slopty-glass/ptyd.sock \
   --ctl-socket /tmp/slopty-glass/worker.sock --data-dir /tmp/slopty-glass/data --port 45599
 SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_WORKER_SOCKET=/tmp/slopty-glass/worker.sock \
-  target/debug/slopty bench screen --window 3411 --seconds 5
+  target/debug/slopty-probe screen --window 3411 --seconds 5
 SLOPTY_DATA_DIR=/tmp/slopty-glass/client SLOPTY_DIRECT_ONLY=1 SLOPTY_WORKER_SOCKET=/tmp/slopty-glass/worker.sock \
-  target/debug/slopty bench screen --display 6 --seconds 5
+  target/debug/slopty-probe screen --display 6 --seconds 5
 ```
 
 ## 2026-09-05 — encoder rate control: low-latency vs VBV keys, and three variants (debug build)
@@ -286,9 +286,9 @@ history per keystroke. Same run found the 10 KB byte cap on scrollback (60k rows
 
 ## 2026-09-05 — screen stream over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
 
-Setup: `slopty-worker --direct-only` on mac-studio (Ethernet LAN), `slopty bench screen` on
+Setup: `slopty-worker --direct-only` on mac-studio (Ethernet LAN), `slopty-probe screen` on
 macbook-pro over Wi-Fi. The LAN is not reachable from the MacBook, so iroh picked the direct path
-over the WireGuard mesh (`100.107.14.250`, `SLOPTY_DIRECT_ONLY=1`); idle `slopty ping` on that
+over the WireGuard mesh (`100.107.14.250`, `SLOPTY_DIRECT_ONLY=1`); idle `slopty-probe ping` on that
 path: app rtt min/median/max 6.4 / 9.1 / 12.5 ms, QUIC rtt 10.9 ms, `ping` 0 % loss. Same
 targets as the loopback run above (main display 1920×1080, Ghostty window 900×500 scrolling
 `seq`). The capture→decoded column is meaningless here — two clocks ~903 s apart — so only
@@ -307,10 +307,10 @@ Commands (on macbook-pro, binary copied with `gzip -1 -c target/debug/slopty | s
 ```sh
 # iroh era: see "Reading old entries" at the top for today's flags
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1
-/tmp/slopty-bench/slopty ping --count 15
-/tmp/slopty-bench/slopty bench screen --list
-/tmp/slopty-bench/slopty bench screen --display 6 --seconds 10
-/tmp/slopty-bench/slopty bench screen --window 927 --seconds 10   # seq 1 20000000 running in it
+/tmp/slopty-bench/slopty-probe ping --count 15
+/tmp/slopty-bench/slopty-probe screen --list
+/tmp/slopty-bench/slopty-probe screen --display 6 --seconds 10
+/tmp/slopty-bench/slopty-probe screen --window 927 --seconds 10   # seq 1 20000000 running in it
 ```
 
 Takeaways:
@@ -383,7 +383,7 @@ Commands (as in the previous section; the bench loop was
 ```sh
 # iroh era: see "Reading old entries" at the top for today's flags
 RUST_LOG=warn,slopty_media=debug,slopty_client=debug SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 \
-  /tmp/slopty-bench/slopty bench screen --window 927 --seconds 15
+  /tmp/slopty-bench/slopty-probe screen --window 927 --seconds 15
 grep 'frame lost\|nack' <client log>
 grep 'nack\|screen closing' <worker log>      # path=rtt … cwnd … congestion … lost … space …
 ```
@@ -420,7 +420,7 @@ round on a better-behaved link (or a wired client). An outage longer than `max_h
 one refresh per frame in flight — the 25–32 refreshes in the bad runs — which is the intended
 floor: the stream restarts from a keyframe the moment the link is back.
 
-## 2026-09-05 — `slopty bench echo` (pure-Rust keystroke round trip), debug build
+## 2026-09-05 — `slopty-probe echo` (pure-Rust keystroke round trip), debug build
 
 Replaces the Python `pty.fork()` driver above. The CLI opens a `/bin/cat` session over the
 normal client link, sends one byte at a time and times it to the first `TermEvent::Frame`
@@ -435,7 +435,7 @@ terminal emulation or repaint on the measuring side.
 
 ```sh
 # iroh era: see "Reading old entries" at the top for today's flags
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench echo --count 30
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe echo --count 30
 ```
 
 On a quiet link the round trip is one QUIC rtt plus ~2 ms (engine + coalescing); the bad-phase
@@ -523,7 +523,7 @@ instead of cutting it (protocol change; not done here).
 The follow-up above: `ReceiverReport` now carries `stalled_ms` / `stalls`, a window with a
 stall freezes the controller (`RateVerdict::Stall`), the policy's value is separate from the
 cwnd-capped target, and every decision comes back to the client as `ScreenEvent::Rate`, so
-the trajectory below is what `slopty bench screen` printed, not a grep of worker's log on the
+the trajectory below is what `slopty-probe screen` printed, not a grep of worker's log on the
 other machine. Display 6 (1920×1080, a Ghostty window scrolling `seq` on it), 20 s, two runs
 per build, private daemons on port 45560 with their own data dir.
 
@@ -589,7 +589,7 @@ open -na Ghostty --args -e seq 1 300000000          # motion on display 6, no sy
 # on macbook-pro (binary copied with gzip -1 -c target/debug/slopty | ssh macbook-pro 'gunzip -c > /tmp/slopty-bench/stall/slopty')
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/stall/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/stall/slopty pair <ticket>
-/tmp/slopty-bench/stall/slopty bench screen --display 6 --seconds 20   # prints stalls and the target trajectory
+/tmp/slopty-bench/stall/slopty-probe screen --display 6 --seconds 20   # prints stalls and the target trajectory
 # worker side: grep 'rate decision\|screen closing' $SLOPTY_DATA_DIR/worker.log
 # loopback control: the same bench on mac-studio with SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client
 ```
@@ -602,7 +602,7 @@ the client reports as refresh requests. Not a regression; bench a moving window 
 # iroh era: see "Reading old entries" at the top for today's flags
 # on macbook-pro, paired with the Mac Studio's manual worker (SLOPTY_PORT 45550)
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
-/tmp/slopty-bench/slopty bench screen --display 6 --seconds 20
+/tmp/slopty-bench/slopty-probe screen --display 6 --seconds 20
 # on the worker: RUST_LOG=info,slopty_worker=debug slopty-worker → grep 'bitrate\|stream closed'
 ```
 
@@ -651,7 +651,7 @@ RUST_LOG=info,slopty_worker=trace SLOPTY_PORT=45560 target/debug/slopty-worker -
   --ptyd-socket $SLOPTY_DATA_DIR/ptyd.sock --ctl-socket $SLOPTY_DATA_DIR/worker.sock > $SLOPTY_DATA_DIR/worker6.log 2>&1 &
 open -na Ghostty --args -e seq 1 300000000
 SLOPTY_DATA_DIR=$SLOPTY_DATA_DIR/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug \
-  target/debug/slopty bench screen --display 6 --seconds 20
+  target/debug/slopty-probe screen --display 6 --seconds 20
 grep -E 'heartbeat|rate decision|stream closed' $SLOPTY_DATA_DIR/worker6.log   # beats, verdicts, ScreenStats { heartbeats }
 ```
 
@@ -728,9 +728,9 @@ SLOPTY_CC=cubic … / SLOPTY_QUIC_IW=10 …                     # controller / i
 ## 2026-09-05 — start-up over the mesh (Wi-Fi MacBook Pro → Mac Studio), debug build
 
 Same private worker on mac-studio (port 45560, own data dir under `target/e2e-data/startup`),
-`slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, a
+`slopty-probe screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, a
 Ghostty window scrolling `seq` on the display. The link was in its worst state yet: idle
-`slopty ping` 7.7 / 9.2 / 32 ms before the first run, 24 / 41 / 107 ms before the third; the
+`slopty-probe ping` 7.7 / 9.2 / 32 ms before the first run, 24 / 41 / 107 ms before the third; the
 host's QUIC path lost 640–1571 packets per 20 s (25–30 % of what it sent) with 248–1205
 congestion events and the window pinned at its 4800-byte floor. Every run cut to the 1 Mbit/s
 floor within 5 s. The numbers describe that link; no start-up before/after can be read from
@@ -774,7 +774,7 @@ gzip -1 -c target/debug/slopty | ssh macbook-pro 'mkdir -p /tmp/slopty-bench/sta
 # macbook-pro
 export SLOPTY_DATA_DIR=/tmp/slopty-bench/startup/data SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug,slopty_client=debug
 /tmp/slopty-bench/startup/slopty pair <ticket>
-/tmp/slopty-bench/startup/slopty bench screen --display 6 --seconds 20   # "after Open: …", "keyframe spread", stalls, trajectory
+/tmp/slopty-bench/startup/slopty-probe screen --display 6 --seconds 20   # "after Open: …", "keyframe spread", stalls, trajectory
 # worker side: grep -E 'keyframe encoded|held_ms=[0-9]{3,}|screen closing|stream closed' $SLOPTY_DATA_DIR/worker.log
 ```
 
@@ -1651,7 +1651,7 @@ RUST_LOG=info,slopty_worker=debug SLOPTY_PORT=45571 target/debug/slopty-worker -
 TICKET=$(SLOPTY_WORKER_SOCKET=$D/worker.sock target/debug/slopty worker ticket | tail -1)
 SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
 SLOPTY_DATA_DIR=$D/client SLOPTY_DIRECT_ONLY=1 RUST_LOG=warn,slopty_media=debug \
-  target/debug/slopty bench screen --display 6 --seconds 90 --max-stalls 0
+  target/debug/slopty-probe screen --display 6 --seconds 90 --max-stalls 0
 ```
 
 `--max-stalls` is the self-check the guard lives in: the run exits non-zero if the receiver
@@ -1878,14 +1878,14 @@ RUST_LOG=info,slopty_net=debug,slopty_worker=debug \
 TICKET=$(SLOPTY_WORKER_SOCKET=$D/worker.sock target/debug/slopty worker ticket | tail -1)
 SLOPTY_DIRECT_ONLY=1 target/debug/slopty --data-dir $D/client pair "$TICKET"
 SLOPTY_CC=bbr3 SLOPTY_WORKER_SOCKET=$D/worker.sock SLOPTY_DATA_DIR=$D/client \
-  SLOPTY_DIRECT_ONLY=1 target/debug/slopty bench screen \
+  SLOPTY_DIRECT_ONLY=1 target/debug/slopty-probe screen \
   --display 6 --seconds 90 --mbit 30 --max-stalls 0
 ```
 
 ### First, a correction
 
 The 2026-09-06 stalls section above blames the remaining stalls on `cwnd 5808` "on the host's
-send side". The number is real but it was read off the wrong connection. `slopty bench screen`
+send side". The number is real but it was read off the wrong connection. `slopty-probe screen`
 prints `quic path (client side)`: the **client→host** connection, which carries receiver reports
 and NACKs and nothing else. BBR never gets a delivery-rate sample worth the name on it, so it
 parks that window at `min_pipe_cwnd` (4 × 1452 = 5808 B) for the whole run, every run, whatever
@@ -1982,13 +1982,13 @@ mechanism, not the size of the effect.
 
 ### Echo round trip — unchanged
 
-`slopty bench echo` (30 bytes into `/bin/cat`, timed to the first frame back), BBR3, same host:
+`slopty-probe echo` (30 bytes into `/bin/cat`, timed to the first frame back), BBR3, same host:
 min 4.1 / p50 5.1 / p90 8.1 / max 10.0 ms, 0 timeouts, quic rtt 2.7 ms. Nothing here touches the
 keystroke path, and nothing was traded for throughput.
 
 ### The self-check, tightened
 
-`slopty bench screen --max-stalls` counted only stalls that *released*. A stall still on when the
+`slopty-probe screen --max-stalls` counted only stalls that *released*. A stall still on when the
 run ends never releases, so it never reaches the counter — `stalled_ms` is its only trace, and the
 worst case there is, a link that stops and stays stopped, passed. Cubic run 1 above reports
 `stalls 0 (66 ms stalled)` and passed a `--max-stalls 0` run on the old check. It now counts an
@@ -2012,7 +2012,7 @@ side does when there is actually 30 Mbit/s to send.
 
 The comparison the cadence ruling left open, now that macbook-pro is on. Path: MacBook Pro over
 Wi-Fi → WireGuard mesh (`100.107.14.250`) → mac-studio, `--direct-only` both ends, idle
-`slopty ping` before the first run app rtt 8.3 / 10.3 / 38.3 ms and QUIC rtt 12.4 ms. Debug build
+`slopty-probe ping` before the first run app rtt 8.3 / 10.3 / 38.3 ms and QUIC rtt 12.4 ms. Debug build
 both ends, the same profile as every mesh row above. Target display 6 (1920×1080), default
 30 Mbit/s target, 90 s per run, **interleaved** BBR3/Cubic so the link's drift is shared. The
 link did drift: QUIC lost packets per run climbed 23 → 240 across the twelve still-desktop runs,
@@ -2122,7 +2122,7 @@ open -na Ghostty --args -e sh -c 'seq 1 400000000'          # busy rows only
 # macbook-pro, once per run (the worker restarted between runs so SLOPTY_CC takes)
 ssh macbook-pro 'export SLOPTY_DATA_DIR=/tmp/slopty-bench/mesh/data SLOPTY_DIRECT_ONLY=1 \
   RUST_LOG=warn,slopty_media=debug,slopty_client=debug; \
-  /tmp/slopty-bench/mesh/slopty bench screen --display 6 --seconds 90 --max-stalls 0'
+  /tmp/slopty-bench/mesh/slopty-probe screen --display 6 --seconds 90 --max-stalls 0'
 # worker-side series, per run
 grep 'path health' $D/worker-<tag>.log   | grep -o 'cwnd=[0-9]*'     # the window as a series
 grep 'quic released' $D/worker-<tag>.log | grep -o 'held_ms=[0-9]* max_bytes=[0-9]* cwnd=[0-9]*'
@@ -2131,7 +2131,7 @@ grep -c 'nack not answered' $D/worker-<tag>.log
 
 ### QUIC initial window 32 vs 10 over the mesh (the measurement the IW ruling was owed)
 
-`slopty bench screen --display 6 --seconds 20`, five starts per window, interleaved, BBR3, the
+`slopty-probe screen --display 6 --seconds 20`, five starts per window, interleaved, BBR3, the
 same scrolling window on the display. The keyframe was 58.6–58.8 kB in all ten runs (49 packets
 of 1200 B) and encode took 37–44 ms.
 
@@ -2291,7 +2291,7 @@ overhead over the raw write (3.6 ms vs 1.6 ms for 10k lines: the OSC 133 scan, t
 follow, the alternate-screen scan) is now the larger half and is where the next write-path
 measurement goes.
 
-## 2026-09-06 — `slopty bench echo` after the ReleaseFast pin: the keystroke path was never parser-bound
+## 2026-09-06 — `slopty-probe echo` after the ReleaseFast pin: the keystroke path was never parser-bound
 
 Release daemons (13b95f0) on the paired `/tmp/slopty-manual` dirs, direct-only, mac-studio to its
 own worker (the client dialled the LAN address, not loopback), three runs of 30 bytes into
@@ -2302,7 +2302,7 @@ own worker (the client dialled the LAN address, not loopback), three runs of 30 
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-ptyd --socket /tmp/slopty-manual/ptyd.sock &
 SLOPTY_DIRECT_ONLY=1 target/release/slopty-worker --ptyd-socket /tmp/slopty-manual/ptyd.sock \
   --ctl-socket /tmp/slopty-manual/worker.sock --data-dir /tmp/slopty-manual/data &
-SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/release/slopty bench echo --count 30
+SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 target/release/slopty-probe echo --count 30
 ```
 
 | run | min | p50 | p90 | max | QUIC rtt |
@@ -2407,7 +2407,7 @@ SLOPTY_DIRECT_ONLY=1 RUST_LOG="info,slopty_worker::session=trace,slopty_worker::
   --ctl-socket /tmp/slopty-manual/worker.sock --data-dir /tmp/slopty-manual/data > worker.log 2>&1 &
 SLOPTY_DATA_DIR=/tmp/slopty-manual/client SLOPTY_DIRECT_ONLY=1 \
   RUST_LOG="warn,slopty=trace,slopty_cli=trace,slopty_client::link=trace" \
-  target/release/slopty bench echo --count 30 > bench.log 2>&1
+  target/release/slopty-probe echo --count 30 > bench.log 2>&1
 # both logs carry microsecond timestamps from one clock; match each "bench send" to the first
 # line of each later stage after it: term input received → pty input written → echo read →
 # frame flushed → frame sent (worker) → frame received → bench frame (client)
@@ -2892,7 +2892,7 @@ prediction path still answers a key in under 5 ms at p90.
 ## 2026-09-14 — the capture guard on a healthy mesh link: the change is a no-op, as predicted
 
 Setup: mac-studio hosting `display 6` (1920×1080 @1x 60 Hz) with a Ghostty window scrolling `seq`,
-`slopty bench screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, debug
+`slopty-probe screen --display 6 --seconds 20` from macbook-pro over the WireGuard mesh, debug
 build, direct path, MTU 1230. **The host ran under launchd** (`slopty worker install`), not from a
 shell: a shell-spawned daemon is attributed to whatever launched it for TCC purposes, so it never
 gets Screen Recording however the binary is signed. The link was in its best state yet — rtt 9.5 ms,
@@ -2943,7 +2943,7 @@ launchctl kickstart -k gui/$(id -u)/dev.aislopware.slopty.worker
 slopty worker doctor          # must show two ticks before the arm counts
 open -na Ghostty --args -e sh -c 'seq 1 400000000'          # motion on display 6
 # macbook-pro
-slopty bench screen --worker <id> --display 6 --seconds 20
+slopty-probe screen --worker <id> --display 6 --seconds 20
 # worker side
 grep -E 'held_ms|keyframe encoded' ~/Library/Logs/Slopty/slopty-worker.log
 ```
@@ -3308,9 +3308,9 @@ inline. The pointer itself is now asked for only when the counters moved.
 ## 2026-09-24 — plaintext QUIC on noq against iroh: connect time and control-stream round trip
 
 Setup: mac-studio, debug builds, `slopty-ptyd` + `slopty-worker` on port 45597 with private
-sockets and data dirs, `slopty ping --count 20` five times per row. The machine was busy (load
+sockets and data dirs, `slopty-probe ping --count 20` five times per row. The machine was busy (load
 average ~20: other sessions compiling) for both builds alike, so the tails are noisy; the
-medians are the claim. "Connected in" is new in `slopty ping`: from before the client endpoint
+medians are the claim. "Connected in" is new in `slopty-probe ping`: from before the client endpoint
 is bound to the host's `HelloAck`, so it includes the bind. The iroh rows dialled the ticket's
 addresses, which iroh resolved to the LAN address (`192.168.100.240`); the noq rows dial the
 address given.
@@ -3335,10 +3335,10 @@ ticket's direct address waited); nothing in the noq path can wait on a third par
 # before (main a88e2e3 plus the "connected in" line; add SLOPTY_DIRECT_ONLY=1 for that row):
 SLOPTY_DATA_DIR=$R/worker slopty-worker --print-ticket > $R/ticket &
 SLOPTY_DATA_DIR=$R/client slopty pair "$(head -1 $R/ticket)"
-SLOPTY_DATA_DIR=$R/client slopty ping --count 20          # ×5
+SLOPTY_DATA_DIR=$R/client slopty-probe ping --count 20          # ×5
 # after (this branch):
 SLOPTY_DATA_DIR=$R/worker slopty-worker --print-addr &
-SLOPTY_DATA_DIR=$R/client slopty ping --worker 127.0.0.1:45597 --count 20   # ×5, then the LAN and tailnet IPs
+SLOPTY_DATA_DIR=$R/client slopty-probe ping --worker 127.0.0.1:45597 --count 20   # ×5, then the LAN and tailnet IPs
 ```
 
 Not measured: the shaped screen ladder (`screen_over_a_shaped_link`). It runs only against a
@@ -3815,7 +3815,7 @@ SLOPTY_E2E_WORKER_SOCKET="$HOME/Library/Application Support/Slopty/run/worker.so
   SLOPTY_E2E_SECONDS=8 RUST_LOG=info,slopty_client=debug,slopty_codec=debug \
   cargo nextest run -p slopty-workerd --test e2e -E 'test(screen_over_a_shaped_link)' --no-capture
 # capture floor at queueDepth 3 with a held surface and the user-interactive video queue
-slopty bench screen --worker <lan-ip>:45560 --window <id> --seconds 20   # host capture / encode p50 / p95 against the 2026-09-05 table
+slopty-probe screen --worker <lan-ip>:45560 --window <id> --seconds 20   # host capture / encode p50 / p95 against the 2026-09-05 table
 ```
 
 The ladder should also run once with audio playing in the target, to read the lane on a real
@@ -4480,9 +4480,9 @@ MacBook, ptyd, a worker (port 45650) and a server (port 45660) ran from `/tmp/sl
 with a private `HOME`, release builds of main `79fb113`. Each arm-run started the worker and
 server fresh with its `SLOPTY_CC` and then ran two things from the Studio.
 
-* **Idle.** `slopty bench echo`, 100 keys, with nothing else flowing.
+* **Idle.** `slopty-probe echo`, 100 keys, with nothing else flowing.
 * **Loaded.** `slopty cat` pulled a 1 GiB file of random bytes on the MacBook through its
-  server, restarting when it ended. After 3 s, `slopty bench echo` sent 300 keys, and then
+  server, restarting when it ended. After 3 s, `slopty-probe echo` sent 300 keys, and then
   the script stopped the pull.
 
 Eight rounds, the two arms interleaved, alternating which went first. Studio load average
@@ -4574,7 +4574,7 @@ Logs, per arm-run (`.idle.log`, `.load.log`, `.load.meta`, `.worker.log`, `.upti
 ## 2026-09-25 — datagram copies of a keystroke and its echo
 
 The mesh run above left the idle tail unexplained: one key in eight over 50 ms against a 10 ms
-median, with the worker counting no lost packets. `slopty bench echo` now also prints the
+median, with the worker counting no lost packets. `slopty-probe echo` now also prints the
 client's own counters (`keys: … lost N pkts`), and they answer it. On the way to the MacBook
 the Studio lost 20 to 93 packets per 100 idle keys, and 60 to 250 per 300 loaded keys, while
 the worker lost at most 4 in any run on the way back. The lossy direction is the one into the
@@ -5162,9 +5162,9 @@ The installed launchd worker is the only process here with Screen Recording, so 
 is it, driven by the release CLI on loopback, 10 s a run:
 
 ```sh
-target/release/slopty bench screen --worker 127.0.0.1:45550 --list          # display 3, the window
-target/release/slopty bench screen --worker 127.0.0.1:45550 --window <id> --seconds 10 [--fps 75|120]
-target/release/slopty bench screen --worker 127.0.0.1:45550 --display 3 --seconds 10 [--fps 75|120]
+target/release/slopty-probe screen --worker 127.0.0.1:45550 --list          # display 3, the window
+target/release/slopty-probe screen --worker 127.0.0.1:45550 --window <id> --seconds 10 [--fps 75|120]
+target/release/slopty-probe screen --worker 127.0.0.1:45550 --display 3 --seconds 10 [--fps 75|120]
 ```
 
 | target | ceiling | captured / s | encoded / s | decoded fps | arrival gap p50 | capture→decoded p50 / p90 |
@@ -5315,7 +5315,7 @@ once scrolled off, so each run could be sub-millisecond, but that is a change to
 
 ## 2026-09-26 — the keystroke path under an all-core spin
 
-mac-studio (10 cores), release daemons on a private port, data dir and sockets, `slopty bench
+mac-studio (10 cores), release daemons on a private port, data dir and sockets, `slopty-probe
 echo` from this Mac over loopback, 150 bytes into `/bin/cat` a run. Load: every core spun at
 `QOS_CLASS_USER_INITIATED` (the class a build's threads ask for) by `tests/load.rs`, on top of
 other sessions' builds (load average 110 before the spin, 270–300 by the end). The worker arm was
@@ -5337,7 +5337,7 @@ RUST_LOG="info,slopty_worker::session=trace,slopty_worker::conn=trace" \
   --port 45613 --bind 127.0.0.1 --pasteboard slopty-qos-bench > $R/worker.log 2>&1 &
 SLOPTY_LOAD_SECS=18 target/debug/deps/load-<hash> --ignored --exact spin::every_core_at_user_initiated &
 RUST_LOG="warn,slopty=trace,slopty_cli=trace,slopty_client::link=trace" SLOPTY_DATA_DIR=$R/c \
-  target/release/slopty bench echo --worker 127.0.0.1:45613 --count 150 2> $R/bench.log
+  target/release/slopty-probe echo --worker 127.0.0.1:45613 --count 150 2> $R/bench.log
 ```
 
 Inside the worker, `term input received` → `frame sent` (the connection's task, the session
@@ -5368,7 +5368,7 @@ The client side, the same day: one release worker (classed) and ptyd from one bu
 builds of the CLI, `before` unclassed and `after` with `slopty_platform::user_interactive_thread`
 on its main thread, every runtime thread (`on_thread_start`) and its stdin thread. Four
 interleaved pairs, each under a fresh 25 s all-core `USER_INITIATED` spin at load average
-100–150, 150 keys a run through `slopty bench echo`. Per pair, a throwaway `run.sh` started a
+100–150, 150 keys a run through `slopty-probe echo`. Per pair, a throwaway `run.sh` started a
 fresh worker on port 45631, the spin, then the bench from each build:
 
 ```sh
@@ -5376,7 +5376,7 @@ fresh worker on port 45631, the spin, then the bench from each build:
 cargo test -p slopty-worker --test load --no-run
 SLOPTY_LOAD_SECS=25 target/debug/deps/load-<hash> --ignored --exact spin::every_core_at_user_initiated &
 RUST_LOG="warn,slopty_cli=trace,slopty_client::link=trace" SLOPTY_DATA_DIR=$R/c \
-  $R/$arm/slopty bench echo --worker 127.0.0.1:45631 --count 150
+  $R/$arm/slopty-probe echo --worker 127.0.0.1:45631 --count 150
 ```
 
 | pair | unclassed p50 / p90 / max | user-interactive p50 / p90 / max |
@@ -7117,7 +7117,7 @@ What these numbers leave out:
 This is also the moving source at the panel's rate that the 75 Hz row above was owed. At the
 default 60 ceiling on a 75 Hz beat, 59.3–60.0 frames/s were encoded, four beats in five.
 
-`slopty bench screen` now runs the same pacer on a 60 Hz timer and prints capture → painted and
+`slopty-probe screen` now runs the same pacer on a 60 Hz timer and prints capture → painted and
 arrival → painted, loopback only, for a worker that can capture. It was not run: the only such
 worker here is the installed one, and it would capture this Mac's screen.
 
@@ -13858,7 +13858,7 @@ ran live into a fresh macOS guest"). Guest macOS 26.6.2, 4 cores, 8 GB, on the e
 | first step stopped on the unknown host key | — | 59 ms | 103 ms |
 | the key read again and fingerprinted (`Ssh::explain`) | — | 69 ms | 66 ms |
 | the deploy once trusted: 76.8 MB up, install, doctor | 1.62 s | 1.82 s | 1.61 s |
-| `slopty ping` ×3 in the guest, its own worker over QUIC | — | — | rtt 1.98, 0.59, 0.69 ms |
+| `slopty-probe ping` ×3 in the guest, its own worker over QUIC | — | — | rtt 1.98, 0.59, 0.69 ms |
 
 Run 1 failed at the dial from this Mac (it had no guest-side ping yet), which found the Local
 Network denial of this session's process tree (`EHOSTUNREACH` on every UDP send to the guest,
@@ -14146,7 +14146,7 @@ cargo test -p slopty-worker --lib -- engines:: stripes:: a_new_stream_codes_its_
 ```
 
 **Through the real path.** The same question end to end: a fresh `slopty-worker` (release) on
-the drawn screen with its own `slopty-ptyd`, and `slopty bench screen` streaming the drawn
+the drawn screen with its own `slopty-ptyd`, and `slopty-probe screen` streaming the drawn
 editor window at its own 2560 × 1600 over QUIC on loopback, decoding with VideoToolbox and
 painting through the app's pacer on a 60 Hz timer. "Before" sets `SLOPTY_TIME_AT_OPEN=1` on the
 worker, which times the stripes at the open as the open did (the worker's log says "stripes
@@ -14182,7 +14182,7 @@ target/release/slopty-ptyd --socket $root/ptyd.sock --shell-dir $root/shell &
 SLOPTY_SYNTHETIC_SCREEN=1 [SLOPTY_TIME_AT_OPEN=1] target/release/slopty-worker \
   --ptyd-socket $root/ptyd.sock --ctl-socket $root/worker.sock --data-dir $root/worker \
   --drop-dir $root/drops --print-addr --port 0 > $root/addr &
-SLOPTY_WORKER_SOCKET=$root/worker.sock target/release/slopty bench screen --data-dir $root/cli \
+SLOPTY_WORKER_SOCKET=$root/worker.sock target/release/slopty-probe screen --data-dir $root/cli \
   --worker 127.0.0.1:<port from $root/addr> --window 7001 --scale 1 --seconds 6
 # then kill the worker and ptyd
 ```

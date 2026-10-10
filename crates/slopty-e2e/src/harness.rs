@@ -2061,12 +2061,11 @@ pub struct ShapedLink {
 /// A second worker on this Mac, reached the way a worker on another Mac would be.
 ///
 /// ptyd and the worker run from this build under a [`StackDir`] of their own, beside a
-/// [`Stack`]'s, with a private `HOME` there, so they never read the real `~/.claude` and
-/// `slopty hook install` is never run. It registers with a server, whose directory lists a
-/// [`slopty_shape::relay::Relay`] in this process in front of it: the app dials the relay,
-/// which carries every packet over a shaped link ([`TAILNET`]), so the connection sees a mesh's
-/// round trip, jitter and loss. The worker keeps its port across [`Self::restart_worker`] and
-/// the relay outlives it, so the app redials the address listed.
+/// [`Stack`]'s, with a private `HOME` there, so they never read the real `~/.claude`. It registers
+/// with a server, whose directory lists a [`slopty_shape::relay::Relay`] in this process in front
+/// of it: the app dials the relay, which carries every packet over a shaped link ([`TAILNET`]), so
+/// the connection sees a mesh's round trip, jitter and loss. The worker keeps its port across
+/// [`Self::restart_worker`] and the relay outlives it, so the app redials the address listed.
 #[derive(Debug)]
 pub struct SecondWorker {
     worker: Worker,

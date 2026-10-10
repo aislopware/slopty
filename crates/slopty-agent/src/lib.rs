@@ -17,7 +17,7 @@
 //! the detail in.
 //!
 //! Hooks are only the strongest of four signals. A `claude` the human started by hand in any
-//! Slopty terminal — or one running before `slopty hook install` — is attributed from what the
+//! Slopty terminal, unwired, is attributed from what the
 //! worker can see anyway: its [`detect`]ed foreground process, the [`title`] it paints, and the
 //! JSONL transcript [`discover`]ed from its working directory. [`Tracker::observe`] merges
 //! them in [`AgentSource`] order, so a weaker signal never overwrites what a stronger one
@@ -83,7 +83,7 @@ use crate::status::{AgentEvent, AgentSource, AgentStatus, BlockReason, HeardMode
 use crate::title::TitleSignal;
 use crate::transcript::Progress;
 
-/// Hook events `slopty hook install` registers. The relay ignores everything else.
+/// Hook events the relay is wired for. It ignores everything else.
 ///
 /// The status events come first; the rest feed the conversation face: subagents starting and
 /// stopping (with their transcripts), the task list, compaction, and a turn that ended on an
@@ -1073,23 +1073,17 @@ impl Tracker {
 
     /// Take what Claude Code itself lists for the agent this tracker follows
     /// ([`roster::Listed`]): its conversation, and when hooks will keep the status from here
-    /// on (`hooked`: the relay is in the user's settings, or its own command line carries it),
-    /// its status as a hook would have said it.
+    /// on (its own command line carries the relay), its status as a hook would have said it.
     ///
     /// Nothing once a hook has spoken since the worker started: that is newer.
-    fn recover(
-        &mut self,
-        session: SessionId,
-        listed: &roster::Listed,
-        hooked: bool,
-    ) -> Option<AgentEvent> {
+    fn recover(&mut self, session: SessionId, listed: &roster::Listed) -> Option<AgentEvent> {
         if self.hooked || self.status == AgentStatus::None {
             return None;
         }
         if listed.session_id.is_some() {
             self.agent_session.clone_from(&listed.session_id);
         }
-        let hooked = hooked || resume::invocation(detect::agent_args(&self.argv)).relay;
+        let hooked = resume::invocation(detect::agent_args(&self.argv)).relay;
         let status = listed.status().filter(|_| hooked)?;
         self.hooked = true;
         if status == self.status && self.source == AgentSource::Hook {
@@ -1547,7 +1541,7 @@ impl AgentTable {
 
     /// Fold in Claude Code's own registry of its live sessions ([`roster::registered`]), read
     /// once after the worker started: each agent whose process it lists gets its conversation
-    /// back, and when `hooked` (the relay is registered), the status the hooks it sent before
+    /// back, and when its command line carries the relay, the status the hooks it sent before
     /// the restart had said. The events to broadcast, all quiet.
     ///
     /// An agent's process is the one the registry names, or its parent: a managed launcher
@@ -1556,7 +1550,6 @@ impl AgentTable {
     pub fn recover(
         &mut self,
         listed: &[roster::Listed],
-        hooked: bool,
         children: impl Fn(i32) -> Vec<i32>,
     ) -> Vec<AgentEvent> {
         let mut events = Vec::new();
@@ -1567,7 +1560,7 @@ impl AgentTable {
             else {
                 continue;
             };
-            events.extend(tracker.recover(*session, entry, hooked));
+            events.extend(tracker.recover(*session, entry));
         }
         events
     }
@@ -2214,6 +2207,15 @@ mod tests {
             pid: Some(pid),
             started: Some(now()),
         }
+    }
+
+    /// A `claude` at `pid` started wired to Slopty: its `--settings` carry the relay.
+    fn wired(pid: i32) -> Observation {
+        let mut doc = serde_json::json!({});
+        hooks::install(&mut doc, "/opt/slopty");
+        let argv = ["claude".to_owned(), "--settings".to_owned(), doc.to_string()];
+        let program = Program { name: "claude".to_owned(), argv: argv.to_vec() };
+        Observation { program: Some(program), ..process("claude", None, pid) }
     }
 
     fn now() -> SystemTime {
@@ -2972,14 +2974,15 @@ mod tests {
 
     /// After a restart, Claude Code's own list puts back what only hooks had said (a
     /// permission prompt) for the agent it names by pid, quietly; not over a hook heard since,
-    /// and not where no relay is registered to keep the status from there on.
+    /// and not for an agent whose command line carries no relay to keep the status from there
+    /// on.
     #[test]
     fn claude_codes_own_list_restores_what_the_hooks_had_said() {
         let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
         let mut table = AgentTable::default();
-        table.observe(a, &process("claude", None, 11));
-        table.observe(b, &process("claude", None, 22));
-        table.observe(c, &process("claude", None, 33));
+        table.observe(a, &wired(11));
+        table.observe(b, &wired(22));
+        table.observe(c, &wired(33));
         table.apply(b, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#));
         let listed: Vec<roster::Listed> = serde_json::from_str(
             r#"[{"pid":11,"sessionId":"s-a","status":"waiting","waitingFor":"permission prompt"},
@@ -2987,7 +2990,7 @@ mod tests {
                {"pid":99,"sessionId":"s-x","status":"busy"}]"#,
         )
         .expect("json");
-        let events = table.recover(&listed, true, |_| Vec::new());
+        let events = table.recover(&listed, |_| Vec::new());
         assert_eq!(events.len(), 1, "{events:?}");
         let event = &events[0];
         assert_eq!(event.session, a);
@@ -3004,7 +3007,7 @@ mod tests {
 
         let mut unhooked = AgentTable::default();
         unhooked.observe(a, &process("claude", None, 11));
-        assert_eq!(unhooked.recover(&listed, false, |_| Vec::new()), Vec::<AgentEvent>::new());
+        assert_eq!(unhooked.recover(&listed, |_| Vec::new()), Vec::<AgentEvent>::new());
         let kept = unhooked.snapshot();
         assert_eq!(kept[0].status, AgentStatus::Idle, "the process's word stands");
         assert_eq!(kept[0].agent_session.as_deref(), Some("s-a"), "the conversation is known");
@@ -3017,9 +3020,9 @@ mod tests {
     fn a_launchers_agent_is_found_by_its_child() {
         let (launched, other, deep) = (SessionId::new(), SessionId::new(), SessionId::new());
         let mut table = AgentTable::default();
-        table.observe(launched, &process("claude", None, 100));
-        table.observe(other, &process("claude", None, 200));
-        table.observe(deep, &process("claude", None, 300));
+        table.observe(launched, &wired(100));
+        table.observe(other, &wired(200));
+        table.observe(deep, &wired(300));
         let listed: Vec<roster::Listed> = serde_json::from_str(
             r#"[{"pid":101,"sessionId":"s-launched","status":"waiting","waitingFor":"input needed"},
                {"pid":302,"sessionId":"s-grandchild","status":"busy"}]"#,
@@ -3031,7 +3034,7 @@ mod tests {
             301 => vec![302],
             _ => Vec::new(),
         };
-        let events = table.recover(&listed, true, processes);
+        let events = table.recover(&listed, processes);
         let found: Vec<_> =
             events.iter().map(|e| (e.session, e.agent_session.as_deref())).collect();
         assert_eq!(found, [(launched, Some("s-launched"))]);

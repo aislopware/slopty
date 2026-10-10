@@ -213,7 +213,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - **A ceiling for paused turns.** `PAUSED_CEILING` = 2 hours from the pause, whatever the
       commands do, since a watcher that polls never ends.
     - Blocked and idle agents do not count: they wait on the person, and the person is not
-      there. `slopty worker wake` (`CtlRequest::Wake` → `ctl::Awake`) prints what holds the
+      there. `slopty worker awake` (`CtlRequest::Wake` → `ctl::Awake`) prints what holds the
       host now.
     - Tests:
       - `wake::tests`: `a_working_agent_holds_the_machine_with_nobody_attached`,
@@ -1241,8 +1241,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       shell integration, the ssh terminfo cache, its copied binaries and its sockets;
     - its two daemons' crash reports, their launchd logs, and the deploy's stage
       `~/.slopty/deploy`;
-    - Slopty's relay entries in `~/.claude/settings.json`, matched as `slopty hook install`
-      writes them and nothing else. An install then purge gives the file back byte for byte;
     - `[worker] server`, so a reinstall cannot inherit the old server.
   - **Why a list, not the directory.** The data directory is shared. On a Mac the app keeps its
     layout, caches and settings there, and a server installed beside the worker keeps its own

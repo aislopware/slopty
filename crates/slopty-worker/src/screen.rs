@@ -1323,7 +1323,7 @@ impl<P: Platform> Counted for Shared<P> {
 }
 
 /// A handle on one stream's counters that outlives the [`ScreenStream`]'s owner borrow, for
-/// the daemon's control socket (`slopty bench screen` reads the worker side through it).
+/// the daemon's control socket (`slopty-probe screen` reads the worker side through it).
 #[derive(Clone)]
 pub struct StatsHandle(Arc<dyn Counted>);
 

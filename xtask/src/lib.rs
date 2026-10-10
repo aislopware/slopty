@@ -168,6 +168,17 @@ enum Cmd {
     /// `xtask/budgets.toml` (`--update-budgets` records a run; `--wall` keeps the wall-time
     /// trend, as the nightly run does).
     Bench(bench::BenchOpts),
+    /// Measure one worker with `slopty-probe` (built first): `ping` (control-stream round
+    /// trips), `echo` (a keystroke to its first frame back) or `screen` (a stream's frames,
+    /// latency and losses); the arguments after the probe's name are its own.
+    Probe {
+        /// Build it in release.
+        #[arg(long)]
+        release: bool,
+        /// `ping|echo|screen` and their arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<String>,
+    },
     /// The daemons under a synthetic load from a temporary HOME, watched for footprint growth,
     /// descriptors and threads left behind, and leaks (`leaks`) at the end.
     Soak(soak::SoakOpts),
@@ -371,6 +382,12 @@ pub fn main() -> Result<()> {
         Cmd::Fuzz(opts) => fuzz::run(&sh, &opts),
         Cmd::Bench(opts) => bench::run(&sh, &opts),
         Cmd::Soak(opts) => soak::run(&sh, &opts),
+        Cmd::Probe { release, args } => {
+            let profile: &[&str] = if release { &["--release"] } else { &[] };
+            cmd!(sh, "cargo run -q {profile...} -p slopty-cli --bin slopty-probe -- {args...}")
+                .run()?;
+            Ok(())
+        }
         Cmd::Nightly { cmd } => nightly::run(&sh, cmd.as_ref()),
         Cmd::Profile { cmd } => {
             sh.create_dir("target/profile")?;

@@ -18,8 +18,9 @@ pub enum WorkerCmd {
     /// Screen streams open right now (and the last few closed) with the worker-side counters:
     /// capture and encode latency, capture path, drops.
     Screens,
-    /// What keeps this machine awake: connected clients, working agents, live streams.
-    Wake,
+    /// What keeps this machine awake: connected clients, working agents, live streams. (Waking
+    /// a sleeping machine is `slopty wake`.)
+    Awake,
     /// Run `slopty-ptyd` and `slopty-worker` as services of this session (`LaunchAgents` on macOS,
     /// systemd user units on Linux): they start now and at every login.
     Install(service::InstallOpts),
@@ -58,7 +59,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         WorkerCmd::Status => CtlRequest::Status,
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
-        WorkerCmd::Wake => CtlRequest::Wake,
+        WorkerCmd::Awake => CtlRequest::Wake,
         WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir, json).await,
         WorkerCmd::Uninstall(opts) => return service::uninstall(opts, data_dir, json).await,
         WorkerCmd::Service => return service::status(json),
