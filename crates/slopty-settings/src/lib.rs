@@ -19,6 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use slopty_net::HostAddr;
 
+pub mod daemon;
 pub mod edit;
 pub mod follow;
 pub mod schema;

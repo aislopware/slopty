@@ -244,6 +244,38 @@ fn bundle_failure(failed: crate::repo::bundle::Failed) -> Failure {
     }
 }
 
+/// The settings file at `path` after `edits` under `root`, as the wire says it; an edit that
+/// does not hold is [`ErrorCode::Invalid`] and writes nothing.
+///
+/// # Errors
+/// An edit does not hold, or the file does not read or write.
+pub fn settings_file(
+    path: &Path,
+    root: &str,
+    edits: &[slopty_proto::settings::SettingEdit],
+) -> Result<slopty_proto::settings::DaemonSettings, Failure> {
+    use slopty_settings::daemon::{Edit, File, Refused, read_and_edit};
+    let edits: Vec<Edit<'_>> = edits
+        .iter()
+        .map(|e| Edit {
+            table: &e.table,
+            key: &e.key,
+            entry: e.entry.as_deref(),
+            literal: e.literal.as_deref(),
+        })
+        .collect();
+    match read_and_edit(path, root, &edits) {
+        Ok(File { path, text, problems }) => Ok(slopty_proto::settings::DaemonSettings {
+            path: path.to_string_lossy().into_owned(),
+            text,
+            tables: vec![root.to_owned()],
+            problems,
+        }),
+        Err(Refused::Edit(why)) => Err(Failure::new(ErrorCode::Invalid, why)),
+        Err(Refused::Io(why)) => Err(Failure::new(ErrorCode::Failed, why)),
+    }
+}
+
 /// Answers the verbs the server forwards to this worker. Cheap to clone.
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -274,6 +306,9 @@ struct Inner {
     task_threads: std::sync::OnceLock<Arc<dyn TaskThreads>>,
     /// The threads orchestration reads and answers, once the daemon gave them.
     thread_reads: std::sync::OnceLock<Arc<dyn ThreadReads>>,
+    /// The `settings.toml` the daemon follows, whose `[worker]` another device reads and edits
+    /// ([`Verb::Settings`]), once the daemon gave it.
+    settings_file: std::sync::OnceLock<PathBuf>,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -321,6 +356,7 @@ impl Orchestrator {
             clone_progress: broadcast::channel(CLONE_PROGRESS).0,
             task_threads: std::sync::OnceLock::new(),
             thread_reads: std::sync::OnceLock::new(),
+            settings_file: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
     }
@@ -338,6 +374,36 @@ impl Orchestrator {
         if self.inner.thread_reads.set(reads).is_err() {
             tracing::warn!("the thread reads were given twice; the first stay");
         }
+    }
+
+    /// Read and edit `[worker]` of the settings file at `path` for another device from now on
+    /// ([`Verb::Settings`]). The first one given stays.
+    pub fn set_settings_file(&self, path: PathBuf) {
+        if self.inner.settings_file.set(path).is_err() {
+            tracing::warn!("the settings file was given twice; the first stays");
+        }
+    }
+
+    /// `[worker]` of this worker's settings file after `edits`.
+    async fn settings(
+        &self,
+        of: Option<WorkerId>,
+        edits: Vec<slopty_proto::settings::SettingEdit>,
+    ) -> Result<Outcome, Failure> {
+        let Some(worker) = of else {
+            return Err(Failure::new(
+                ErrorCode::Invalid,
+                "the server answers for its own settings",
+            ));
+        };
+        self.mine(worker)?;
+        let path = self.inner.settings_file.get().cloned().ok_or_else(|| {
+            Failure::new(ErrorCode::Unsupported, "this worker follows no settings file")
+        })?;
+        let read = tokio::task::spawn_blocking(move || settings_file(&path, "worker", &edits))
+            .await
+            .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))??;
+        Ok(Outcome::Settings(Box::new(read)))
     }
 
     /// The thread `of` names on this worker, and the threads to reach it through.
@@ -398,10 +464,7 @@ impl Orchestrator {
             | Verb::WorkingOn { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
-            Verb::Settings { .. } => Err(Failure::new(
-                ErrorCode::Unsupported,
-                "this worker does not share its settings yet",
-            )),
+            Verb::Settings { of, edits } => self.settings(of, edits).await,
             Verb::OpenTerminal { worker, cwd, command, env, name, size, session, worktree } => {
                 self.mine(worker)?;
                 let _choosing = self.choosing(session).await;

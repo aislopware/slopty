@@ -456,3 +456,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     which need none, and one-line rows do.
   - Tests: `settings_form::tests::a_groups_rows_are_one_ring_under_its_label`,
     `settings_editor::tests::every_row_is_one_line_at_the_narrowest_sheet`.
+
+- ✅ **A worker and the server read and edit their own tables for another device**
+  (2026-10-11, readiness 10-11 rank 24, the daemons' half; the picker is lane A's).
+  - **What was wrong.** The Agents page wrote `worker.acp`, `server.projects.*` and
+    `server.push.*` into this device's own file. That changes nothing when the worker or the
+    server runs on another machine, and a phone has no such page at all.
+  - **The verb.** `Verb::Settings { of, edits }` answers `Outcome::Settings`. It carries the
+    file's path and text, the tables the daemon reads, and what in those tables does not read.
+    - `of: None` is the server's own `[server]`.
+    - `of: Some(worker)` is that worker's `[worker]`, forwarded to it.
+    - No edits is a read.
+    - An agent is refused, through MCP and through the CLI in an agent's terminal alike.
+  - **One edit path, `slopty_settings::daemon::read_and_edit`.** Each edit is the one the form
+    makes to its own file (`edit::write`, `remove`, `write_entry`, `remove_entry`). It must hold
+    in three ways, or nothing is written and the reply is `ErrorCode::Invalid` naming the edit:
+    - it is under the daemon's own table;
+    - it names a key of the file's schema, an entry only for a map;
+    - its value passes the same `Field::check` the form uses.
+  - **The whole file must still read** after the edits, or nothing is written.
+  - **How the file is written.** It is replaced whole through a file beside it. The daemon
+    already follows its file (`follow_settings`), so an edit takes effect the way a hand edit
+    does. On a worker, an ACP agent added is probed and told to the server in its capabilities.
+  - Tests:
+    - `an_acp_agent_added_from_afar_lands_in_the_file_and_is_probed` (slopty-workerd
+      `tests/server_link.rs`, a real worker with a stub ACP program);
+    - `the_person_edits_the_server_s_own_settings` (slopty-server);
+    - `daemon::tests` (slopty-settings): edits in place, refusals that write nothing, a missing
+      file made, problems said.

@@ -234,6 +234,7 @@ async fn main() -> Result<()> {
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
     server.hub().set_policy(policy(&settings.server.projects));
+    server.hub().set_settings_file(settings_path.clone());
     server.hub().keep_awake(Box::new(Assertion::default()), keep_awake(settings.keep_awake));
     let hub = server.hub().clone();
     let every = slopty_settings::follow::POLL;

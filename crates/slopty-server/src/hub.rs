@@ -161,6 +161,9 @@ struct Inner {
     head: watch::Sender<u64>,
     /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
+    /// The `settings.toml` the server follows, whose `[server]` another device reads and edits
+    /// ([`Verb::Settings`]), once the daemon gave it.
+    settings_file: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 /// The newest [`HubEvent`]s, oldest first.
@@ -363,8 +366,52 @@ impl Hub {
         let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
         let deliver = Arc::new(Notify::new());
-        let inner = Inner { name, lan, state, events, persist, log, head, deliver };
+        let settings_file = std::sync::OnceLock::new();
+        let inner = Inner { name, lan, state, events, persist, log, head, deliver, settings_file };
         Self { inner: Arc::new(inner) }
+    }
+
+    /// Read and edit `[server]` of the settings file at `path` for another device from now on
+    /// ([`Verb::Settings`] with no worker). The first one given stays.
+    pub fn set_settings_file(&self, path: std::path::PathBuf) {
+        if self.inner.settings_file.set(path).is_err() {
+            tracing::warn!("the settings file was given twice; the first stays");
+        }
+    }
+
+    /// `[server]` of the server's own settings file after `edits`; an edit that does not hold
+    /// is [`ErrorCode::Invalid`] and writes nothing.
+    async fn own_settings(&self, edits: Vec<slopty_proto::settings::SettingEdit>) -> Outcome {
+        use slopty_settings::daemon::{Edit, File, Refused, read_and_edit};
+        let Some(path) = self.inner.settings_file.get().cloned() else {
+            return error(ErrorCode::Unsupported, "this server follows no settings file");
+        };
+        let read = tokio::task::spawn_blocking(move || {
+            let edits: Vec<Edit<'_>> = edits
+                .iter()
+                .map(|e| Edit {
+                    table: &e.table,
+                    key: &e.key,
+                    entry: e.entry.as_deref(),
+                    literal: e.literal.as_deref(),
+                })
+                .collect();
+            read_and_edit(&path, "server", &edits)
+        })
+        .await;
+        match read {
+            Ok(Ok(File { path, text, problems })) => {
+                Outcome::Settings(Box::new(slopty_proto::settings::DaemonSettings {
+                    path: path.to_string_lossy().into_owned(),
+                    text,
+                    tables: vec!["server".to_owned()],
+                    problems,
+                }))
+            }
+            Ok(Err(Refused::Edit(why))) => error(ErrorCode::Invalid, &why),
+            Ok(Err(Refused::Io(why))) => error(ErrorCode::Failed, &why),
+            Err(gone) => error(ErrorCode::Failed, &gone.to_string()),
+        }
     }
 
     /// Whether `token` proves a link speaks from the terminal `session`: the token its worker
@@ -928,9 +975,7 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "a machine's settings are the person's to read and change, never an agent's",
             ),
-            Verb::Settings { of: None, .. } => {
-                error(ErrorCode::Unsupported, "this server does not share its settings yet")
-            }
+            Verb::Settings { of: None, edits } => self.own_settings(edits).await,
             Verb::StartThread { .. } => error(
                 ErrorCode::Forbidden,
                 "the server starts a task's thread itself; task_start with an agent asks for it",

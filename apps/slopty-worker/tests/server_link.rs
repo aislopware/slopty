@@ -292,6 +292,64 @@ mod tests {
         );
     }
 
+    /// Another device edits this worker's `[worker]` through the server: an ACP agent added to
+    /// `worker.acp` lands in the worker's own settings file, and the worker takes the file up
+    /// again and probes its agents, so the server hears the new agent in its capabilities. An
+    /// edit outside `[worker]` is refused and writes nothing.
+    #[tokio::test]
+    async fn an_acp_agent_added_from_afar_lands_in_the_file_and_is_probed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use slopty_proto::settings::SettingEdit;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("stub-acp");
+        std::fs::write(&stub, "#!/bin/sh\necho 'stub-acp 4.5.6'\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let file = dir.path().join("data").join("settings.toml");
+
+        let outside = SettingEdit {
+            table: "server".to_owned(),
+            key: "allow".to_owned(),
+            entry: None,
+            literal: Some(r#"["0.0.0.0/0"]"#.to_owned()),
+        };
+        let refused = peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![outside] }).await;
+        assert!(matches!(&refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
+        assert!(!file.exists(), "nothing written");
+
+        let literal = format!("[{:?}]", stub.to_string_lossy());
+        let add = SettingEdit {
+            table: "worker".to_owned(),
+            key: "acp".to_owned(),
+            entry: Some("stub".to_owned()),
+            literal: Some(literal),
+        };
+        let Outcome::Settings(read) =
+            peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![add] }).await
+        else {
+            panic!("the settings are answered");
+        };
+        assert_eq!(read.path, file.to_string_lossy());
+        assert_eq!(read.tables, ["worker"]);
+        assert!(read.problems.is_empty(), "{:?}", read.problems);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), read.text);
+        let own = slopty_settings::Settings::load(&file).settings.worker.acp;
+        assert_eq!(own.get("stub"), Some(&vec![stub.to_string_lossy().into_owned()]));
+
+        peer.heard(|m| {
+            matches!(m, ToServer::Caps(caps) if caps.agents.iter().any(|a| {
+                a.agent.0 == "acp:stub" && a.version == "4.5.6"
+            }))
+        })
+        .await;
+    }
+
     /// The doctor names the worker as the server lists it and says how its server answers:
     /// not linked while the server has not welcomed it, linked once it has, and dialling again,
     /// with why, once the server drops it.

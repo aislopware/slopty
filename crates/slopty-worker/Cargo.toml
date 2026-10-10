@@ -42,6 +42,7 @@ slopty-media.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
+slopty-settings.workspace = true
 # This machine's LAN ports for its caps, and the magic packet it sends for a sleeping peer.
 slopty-tailnet.workspace = true
 slopty-vdisplay.workspace = true
