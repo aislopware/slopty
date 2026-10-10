@@ -27,12 +27,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# This device's display key (`screen::display`), and a changing verb's idempotency key
+# (`server`), on every platform.
+uuid.workspace = true
 
 # The decoders behind remote windows and displays, which only Apple clients show.
 [target.'cfg(target_vendor = "apple")'.dependencies]
 slopty-codec.workspace = true
-# This device's display key (`screen::display`).
-uuid.workspace = true
 # A dragged file's URL read as its path (`dnd`).
 url.workspace = true
 
