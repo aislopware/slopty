@@ -902,20 +902,28 @@ mod tests {
         false
     }
 
-    /// A command that hangs past the wait is killed with everything it started.
+    /// A command that hangs past the wait is killed with everything it started. A machine so
+    /// loaded that the program was killed before it could name its child is tried again with
+    /// twice the wait, since that run shows nothing of the child.
     #[tokio::test]
     async fn a_hung_command_dies_with_its_children_after_the_wait() {
         let dir = tempfile::tempdir().unwrap();
         let (program, pidfile) = hung(dir.path());
-        let waited = Instant::now();
-        let command = tokio::process::Command::new(&program);
-        let ran = tokio::join!(
-            run(command, Duration::from_millis(1500), VERSION_OUTPUT_MAX),
-            child_of(&pidfile)
-        );
-        assert!(ran.0.is_none(), "no answer past the wait");
-        assert!(waited.elapsed() < Duration::from_secs(10));
-        assert!(gone(ran.1).await, "its child outlived the wait");
+        let mut wait = Duration::from_millis(1500);
+        let child = loop {
+            let waited = Instant::now();
+            let command = tokio::process::Command::new(&program);
+            let ran = run(command, wait, VERSION_OUTPUT_MAX).await;
+            assert!(ran.is_none(), "no answer past the wait");
+            assert!(waited.elapsed() < wait.saturating_add(Duration::from_secs(8)));
+            let named = std::fs::read_to_string(&pidfile).unwrap_or_default();
+            if let Ok(pid) = named.trim().parse::<i32>() {
+                break rustix::process::Pid::from_raw(pid).unwrap();
+            }
+            assert!(wait < Duration::from_secs(20), "the program never named its child");
+            wait = wait.saturating_mul(2);
+        };
+        assert!(gone(child).await, "its child outlived the wait");
     }
 
     /// A command the worker stops waiting on (it shuts down, the task is aborted) takes its
