@@ -153,12 +153,22 @@ mod codex {
     }
 
     impl Stub {
-        /// The next frame the worker sends; `None` once it goes.
+        /// The next frame the worker sends; `None` once it goes. The skills and background
+        /// terminals it asks for whenever it likes are answered here with none.
         async fn next(&mut self) -> Option<Value> {
-            let Some(Ok(Message::Text(text))) = self.ws.next().await else { return None };
-            let msg: Value = serde_json::from_str(&text).unwrap();
-            self.heard.send(msg.clone()).unwrap();
-            Some(msg)
+            loop {
+                let Some(Ok(Message::Text(text))) = self.ws.next().await else { return None };
+                let msg: Value = serde_json::from_str(&text).unwrap();
+                if let Some("skills/list" | "thread/backgroundTerminals/list") =
+                    msg["method"].as_str()
+                {
+                    let none = json!({ "data": [], "nextCursor": null });
+                    self.say(&json!({ "id": msg["id"], "result": none })).await;
+                    continue;
+                }
+                self.heard.send(msg.clone()).unwrap();
+                return Some(msg);
+            }
         }
 
         async fn say(&mut self, msg: &Value) {
