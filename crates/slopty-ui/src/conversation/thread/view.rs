@@ -907,8 +907,23 @@ impl ThreadView {
         }
     }
 
+    /// Whether a time on show moves on its own: the turn under way's, or a running background
+    /// task's.
+    fn ticking(&self, cx: &App) -> bool {
+        self.working(cx)
+            || self.state(cx).is_some_and(|st| {
+                st.tasks.iter().any(slopty_proto::thread::BackgroundTask::is_running)
+            })
+    }
+
+    /// Whether the clock that draws the times on show again runs.
+    #[cfg(test)]
+    pub(crate) const fn clock_runs(&self) -> bool {
+        self.clock.is_some()
+    }
+
     fn run_clock(&mut self, cx: &Context<Self>) {
-        if !self.working(cx) {
+        if !self.ticking(cx) {
             self.clock = None;
             return;
         }
@@ -917,14 +932,14 @@ impl ThreadView {
         }
         self.clock = Some(cx.spawn(async move |this, cx| {
             loop {
-                // On the turn's own second, so the time the working row says is never a
+                // On the turn's own second and each running task's, so no time on show is ever a
                 // second behind a frame drawn from scratch.
                 let Ok(wait) = this.update(cx, |this, cx| this.until_tick(cx)) else { return };
                 cx.background_executor().timer(wait).await;
                 let going = this
                     .update(cx, |this, cx| {
                         cx.notify();
-                        this.working(cx)
+                        this.ticking(cx)
                     })
                     .unwrap_or(false);
                 if !going {
@@ -935,12 +950,19 @@ impl ThreadView {
         }));
     }
 
-    /// How long until the turn under way has run another whole second.
+    /// How long until the turn under way, or a running background task, has run another whole
+    /// second: the soonest of them.
     fn until_tick(&self, cx: &App) -> Duration {
-        let started = self.state(cx).and_then(rows::under_way).map(|t| t.started_ms);
+        let Some(state) = self.state(cx) else { return Duration::from_secs(1) };
         let now = crate::clock::now(cx);
-        let ran = started.filter(|t| !t.is_zero()).map_or(0, |t| now.millis_since(t));
-        crate::icons::until_next_second(Duration::from_millis(ran))
+        let turn = rows::under_way(state).map(|t| t.started_ms);
+        let tasks = state.tasks.iter().filter(|t| t.is_running()).map(|t| t.started_ms);
+        turn.into_iter()
+            .chain(tasks)
+            .filter(|t| !t.is_zero())
+            .map(|t| crate::icons::until_next_second(Duration::from_millis(now.millis_since(t))))
+            .min()
+            .unwrap_or(Duration::from_secs(1))
     }
 
     fn older(&self, cx: &mut Context<Self>) {

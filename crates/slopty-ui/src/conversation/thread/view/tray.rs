@@ -1159,7 +1159,7 @@ impl ThreadView {
             .map(|l| l.trim().to_owned());
         let shown = child.is_none() && printed.is_some() && self.tasks_shown.contains(&task.id);
         let took = (!task.started_ms.is_zero()).then(|| {
-            let end = task.ended_ms.unwrap_or_else(slopty_core::WallMs::now);
+            let end = task.ended_ms.unwrap_or_else(|| crate::clock::now(cx));
             kit::duration(Duration::from_secs(end.millis_since(task.started_ms) / 1_000))
         });
         let state_words = sentence(&task.state);

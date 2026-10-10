@@ -207,6 +207,46 @@ fn a_background_task_opens_from_its_line(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-trail").is_some(), "with the way back");
 }
 
+/// A background task running while the turn is at rest keeps the clock going, so its time on
+/// show moves and is never a second behind a frame drawn from scratch; once it ends, the clock
+/// stops. Its time is read from the readouts' clock, which the self-test pins.
+#[gpui::test]
+fn a_running_background_task_keeps_its_time_moving(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Complete)];
+    state.items = vec![user("u", 1)];
+    let mut build = BackgroundTask {
+        id: "b1".to_owned(),
+        kind: BackgroundTask::SHELL.to_owned(),
+        title: "cargo build".to_owned(),
+        state: BackgroundTask::RUNNING.to_owned(),
+        item: None,
+        output: None,
+        started_ms: WallMs::from_millis(1_000),
+        ended_ms: None,
+    };
+    state.tasks = vec![build.clone()];
+    hub.update(cx, ThreadHub::connected);
+    hub.update(cx, |hub, cx| {
+        let rows = vec![state.row(WallMs::ZERO)];
+        hub.table(&TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows }, cx);
+    });
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.clock_runs()), "the turn rests, the task runs");
+
+    build.state = "completed".to_owned();
+    build.ended_ms = Some(WallMs::from_millis(5_000));
+    state.tasks = vec![build];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
+    cx.executor().advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.clock_runs()), "nothing on show moves");
+}
+
 /// ⌃O opens every settled turn and each of its steps; again, they fold.
 #[gpui::test]
 fn control_o_opens_every_step_and_folds_them_again(cx: &mut TestAppContext) {
