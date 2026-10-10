@@ -104,7 +104,7 @@ mod tests {
             Event::Sent { total, .. } => Some(*total),
             _ => None,
         });
-        assert_eq!(deployed_worker.health.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(deployed_worker.health.caps.build, slopty_proto::wire::this_build());
         assert!(
             deployed_worker.health.exe.ends_with("/bin/slopty-worker"),
             "{:?}",

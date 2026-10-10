@@ -125,7 +125,8 @@ pub async fn run(
             }
             // It changes only when someone updates it or this worker: asked again after a while.
             Err(Ended::WrongBuild(wrong)) => {
-                let (server_build, this) = (wrong.peer_build(), slopty_proto::wire::BUILD);
+                let this = slopty_proto::wire::this_build();
+                let server_build = wrong.peer_build();
                 let update = match wrong.newer() {
                     Some(slopty_net::Newer::Here) => "update the server",
                     Some(slopty_net::Newer::There) => "update this worker",

@@ -260,6 +260,47 @@ fn a_row_says_what_runs_now() {
     assert_eq!(done.row(WallMs::ZERO).doing, None);
 }
 
+/// A row says the latest turn once it ended, how long it ran and whether the agent answered
+/// it; the person's seen mark only moves up, and their draft is kept until cleared.
+#[test]
+fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
+    let ended = |n: u32, state: TurnState| Action::TurnEnded {
+        turn: TurnId(n),
+        state,
+        usage: Usage::default(),
+        ended_ms: WallMs::from_millis(u64::from(n) + 90_000),
+    };
+    let under_way = run(&[Action::TurnStarted(turn(1))]);
+    assert_eq!(under_way.row(WallMs::ZERO).ended, None, "a turn under way has not ended");
+    let mut state = run(&[Action::TurnStarted(turn(1)), ended(1, TurnState::Complete)]);
+    let row = state.row(WallMs::ZERO);
+    assert_eq!(
+        row.ended,
+        Some(wire::TurnEnded {
+            turn: TurnId(1),
+            at_ms: WallMs::from_millis(90_001),
+            ran_ms: 90_000,
+            answered: true,
+        })
+    );
+    assert_eq!((row.seen, row.draft), (TurnId::BEFORE, None));
+    state.apply(&Action::TurnStarted(turn(2)));
+    state.apply(&ended(2, TurnState::Interrupted));
+    assert_eq!(
+        state.row(WallMs::ZERO).ended.map(|e| (e.turn, e.answered)),
+        Some((TurnId(2), false))
+    );
+
+    state.apply(&Action::Seen(TurnId(2)));
+    state.apply(&Action::Seen(TurnId(1)));
+    assert_eq!(state.row(WallMs::ZERO).seen, TurnId(2), "a seen mark never moves back");
+    let draft = wire::Draft { text: "and the README".to_owned(), at_ms: WallMs::from_millis(5) };
+    state.apply(&Action::DraftSet(Some(draft.clone())));
+    assert_eq!(state.row(WallMs::ZERO).draft, Some(draft));
+    state.apply(&Action::DraftSet(None));
+    assert_eq!(state.row(WallMs::ZERO).draft, None);
+}
+
 /// Appends split one text at chosen char boundaries.
 fn chunked(id: &str, words: &str, cuts: &[usize]) -> Vec<Action> {
     let chars: Vec<char> = words.chars().collect();

@@ -332,12 +332,12 @@ async fn come_up(
     }
 }
 
-/// Whether `health` is the worker just installed as `expected`: this build's version, run from
+/// Whether `health` is the worker just installed as `expected`: this very build, run from
 /// there, started since `installed`.
 fn is_the_new_one(health: &Health, expected: &Path, installed: Instant) -> Result<()> {
-    let version = env!("CARGO_PKG_VERSION");
-    if health.version != version {
-        bail!("it answers as version {}, not {version}", health.version);
+    let build = slopty_proto::wire::this_build();
+    if health.caps.build != build {
+        bail!("it answers as build {}, not {build}", health.caps.build);
     }
     let resolved = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     if resolved(Path::new(&health.exe)) != resolved(expected) {
@@ -770,9 +770,11 @@ mod tests {
             Health {
                 worker: slopty_core::WorkerId::nil(),
                 server: None,
-                version: env!("CARGO_PKG_VERSION").to_owned(),
                 exe: exe.to_owned(),
-                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                caps: slopty_proto::server::WorkerCaps {
+                    build: slopty_proto::wire::this_build(),
+                    ..slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs)
+                },
                 listen: "[::]:45550".to_owned(),
                 allow: Vec::new(),
                 tailscale: slopty_proto::ctl::Tailscale::Absent,
@@ -864,12 +866,13 @@ mod tests {
         let _earlier = stage.bootstraps();
 
         let exe = stage.data().join("bin").join(WORKER.program).to_string_lossy().into_owned();
-        let broken = Health { version: "0.0.0-broken".to_owned(), ..Stage::health(&exe, 0) };
+        let mut broken = Stage::health(&exe, 0);
+        broken.caps.build = "0.0.0-broken".to_owned();
         stage.health.send_replace(broken);
         let new = stage.binaries("new");
         let failed = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
         let said = format!("{failed:#}");
-        assert!(said.contains("answers as version 0.0.0-broken"), "{said}");
+        assert!(said.contains("answers as build 0.0.0-broken"), "{said}");
         assert!(said.contains("the previous one is back"), "{said}");
         assert_eq!(stage.installed("slopty-worker"), "slopty-worker old");
         assert_eq!(stage.installed("slopty"), "slopty old");

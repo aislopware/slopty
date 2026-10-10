@@ -2,11 +2,11 @@
 //! speaks.
 //!
 //! A [`Prefix`] opens the control stream both ways, ahead of any postcard: [`MAGIC`], the wire
-//! [`FINGERPRINT`] and the [`BUILD`] a person reads. Its layout never changes, so two builds
-//! whose messages no longer decode alike still read each other's prefix. The two ends compare
-//! fingerprints before anything else. On a mismatch the one that sees it closes the connection
-//! with a code of its own, and a person is told which side to update. No message ever fails
-//! to decode over it.
+//! [`FINGERPRINT`] and the build a person reads ([`this_build`]). Its layout never changes, so two
+//! builds whose messages no longer decode alike still read each other's prefix. The two ends
+//! compare fingerprints before anything else. On a mismatch the one that sees it closes the
+//! connection with a code of its own, and a person is told which side to update. No message ever
+//! fails to decode over it.
 //!
 //! Nobody bumps the fingerprint. The build script hashes the goldens that pin the wire
 //! (`tests/snapshots`, all but the control socket's), so it moves exactly when a golden does
@@ -29,12 +29,101 @@ pub const HEAD_BYTES: usize = MAGIC.len() + size_of::<u64>() + 1;
 /// Longest build text a prefix carries; a longer one is cut at a character boundary.
 pub const BUILD_MAX: usize = u8::MAX as usize;
 
+/// The commit this binary was made from, when the build was told it.
+///
+/// It is `<hash>.<YYYYMMDDTHHMMZ>` (its commit time, UTC): `cargo xtask bundle` and `dist` set
+/// `SLOPTY_COMMIT`. A plain `cargo build` has none, and is told apart from another build of its
+/// version only by its wire.
+///
+/// It is read here and not by a build script, so a commit rebuilds nothing: only a build given
+/// another commit compiles this crate again.
+pub const COMMIT: Option<&str> = option_env!("SLOPTY_COMMIT");
+
+/// This build in full, as a daemon tells its clients.
+///
+/// [`BUILD`], then `.commit.` and [`COMMIT`] when it has one
+/// (`0.4.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z`), as the wire
+/// prefix, [`crate::server::WorkerCaps::build`] and [`crate::server::FromServer::Welcome`]
+/// carry it.
+#[must_use]
+pub fn this_build() -> String {
+    COMMIT.map_or_else(|| BUILD.to_owned(), |commit| format!("{BUILD}.commit.{commit}"))
+}
+
+/// Which of two builds is the newer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Newer {
+    /// This build: the other end is the one to update.
+    Here,
+    /// The other end's: this machine is the one to update, and putting this build there would
+    /// take it back.
+    There,
+}
+
+/// Which of `here` and `there`, two builds as [`this_build`] spells them, is the newer.
+///
+/// By version first; on one version, by the commit each was made from when both say one, and
+/// else by when each one's wire last changed (the stamp [`BUILD`] ends with). A build that says
+/// nothing (`there` empty: older than the wire prefix) is older than any. `None` when the two
+/// cannot be told apart: the same commit, a version that does not parse (a pre-release), or two
+/// on one version with no commit whose wires changed in the same minute or say no date.
+#[must_use]
+pub fn newer(here: &str, there: &str) -> Option<Newer> {
+    use std::cmp::Ordering;
+    if there.is_empty() {
+        return Some(Newer::Here);
+    }
+    let (here, there) = (Parts::of(here), Parts::of(there));
+    let same_length = |a: &str, b: &str| (a.len() == b.len()).then(|| a.cmp(b));
+    let order = match here.version?.cmp(&there.version?) {
+        Ordering::Equal => match (here.commit, there.commit) {
+            (Some((here_hash, _)), Some((there_hash, _))) if here_hash == there_hash => {
+                Ordering::Equal
+            }
+            (Some((_, here_made)), Some((_, there_made))) => same_length(here_made, there_made)?,
+            _ => same_length(here.wire_changed?, there.wire_changed?)?,
+        },
+        order => order,
+    };
+    match order {
+        Ordering::Greater => Some(Newer::Here),
+        Ordering::Less => Some(Newer::There),
+        Ordering::Equal => None,
+    }
+}
+
+/// A build's text read back ([`this_build`]).
+struct Parts<'a> {
+    /// `major.minor.patch` as numbers; `None` for anything else, a pre-release among them.
+    version: Option<[u64; 3]>,
+    /// When its wire last changed, when it says.
+    wire_changed: Option<&'a str>,
+    /// The commit it was made from and that commit's time, when it says.
+    commit: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> Parts<'a> {
+    fn of(build: &'a str) -> Self {
+        let (version, metadata) = build.split_once('+').unwrap_or((build, ""));
+        let (wire, commit) = metadata.split_once(".commit.").unwrap_or((metadata, ""));
+        let wire_changed = wire.strip_prefix("wire.").and_then(|wire| wire.split('.').nth(1));
+        let commit =
+            commit.split_once('.').filter(|(hash, made)| !hash.is_empty() && !made.is_empty());
+        let mut parts = version.split('.').map(|part| part.parse::<u64>().ok());
+        let version = (|| {
+            let numbers = [parts.next()??, parts.next()??, parts.next()??];
+            parts.next().is_none().then_some(numbers)
+        })();
+        Self { version, wire_changed: wire_changed.filter(|s| !s.is_empty()), commit }
+    }
+}
+
 /// One end's word on its wire.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Prefix {
     /// Its [`FINGERPRINT`].
     pub fingerprint: u64,
-    /// Its [`BUILD`], for a person.
+    /// Its build ([`this_build`]), for a person and for telling which side is the newer.
     pub build: String,
 }
 
@@ -47,7 +136,7 @@ impl Prefix {
     /// This build's.
     #[must_use]
     pub fn this() -> Self {
-        Self { fingerprint: FINGERPRINT, build: BUILD.to_owned() }
+        Self { fingerprint: FINGERPRINT, build: this_build() }
     }
 
     /// Whether it speaks this build's wire.
@@ -173,6 +262,66 @@ mod tests {
         assert_eq!(Prefix::decode(&[0x15, 0, 0, 0]), Err(NotSlopty));
         assert_eq!(Prefix::decode(b"SLX"), Err(NotSlopty));
         assert_eq!(Prefix::decode(b"SLO"), Ok(None));
+    }
+
+    /// The newer build is told by version first, then by its commit, then by when its wire
+    /// last changed; a build older than the prefix is older than any, and two that cannot be
+    /// told apart are neither.
+    #[test]
+    fn the_newer_build_is_told_by_version_then_commit_then_wire_date() {
+        let order = [
+            ("0.2.0+wire.0badf00d.20261009T2307Z", "0.1.9+wire.feedface.20261101T0000Z"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface.20261009T2307Z"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", ""),
+            ("0.10.0+wire.0badf00d", "0.9.0+wire.feedface"),
+            // One wire, two commits: the later commit is the newer, whatever the wire says.
+            (
+                "0.1.0+wire.0badf00d.20261009T2307Z.commit.bbbbbbbbbbbb.20261012T1000Z",
+                "0.1.0+wire.0badf00d.20261009T2307Z.commit.aaaaaaaaaaaa.20261011T0900Z",
+            ),
+            (
+                "0.1.0+wire.0badf00d.commit.bbbbbbbbbbbb.20261012T1000Z",
+                "0.1.0+wire.0badf00d.commit.aaaaaaaaaaaa.20261011T0900Z",
+            ),
+            // One side without a commit falls back to the wire's date.
+            (
+                "0.1.0+wire.0badf00d.20261011T0812Z.commit.aaaaaaaaaaaa.20261011T0900Z",
+                "0.1.0+wire.feedface.20261009T2307Z",
+            ),
+        ];
+        for (new, old) in order {
+            assert_eq!(newer(new, old), Some(Newer::Here), "{new} over {old}");
+            if !old.is_empty() {
+                assert_eq!(newer(old, new), Some(Newer::There), "{old} under {new}");
+            }
+        }
+        let same = "0.1.0+wire.0badf00d.20261009T2307Z.commit.aaaaaaaaaaaa.20261011T0900Z";
+        let unknown = [
+            ("0.1.0+wire.0badf00d", "0.1.0+wire.feedface"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface"),
+            ("0.1.0+wire.0badf00d.20261011T0812Z", "0.1.0+wire.feedface.20261011T0812Z"),
+            ("0.1.0+wire.0badf00d", "not a build"),
+            ("0.1.0-rc.1+wire.0badf00d", "0.1.0+wire.feedface"),
+            (same, same),
+            (
+                "0.1.0+wire.0badf00d.commit.aaaaaaaaaaaa.20261011T0900Z",
+                "0.1.0+wire.0badf00d.commit.bbbbbbbbbbbb.20261011T0900Z",
+            ),
+        ];
+        for (a, b) in unknown {
+            assert_eq!(newer(a, b), None, "{a} beside {b}");
+        }
+    }
+
+    #[test]
+    fn this_build_is_the_wire_build_and_its_commit() {
+        let build = this_build();
+        assert!(build.starts_with(BUILD), "{build}");
+        match COMMIT {
+            Some(commit) => assert_eq!(build, format!("{BUILD}.commit.{commit}")),
+            None => assert_eq!(build, BUILD),
+        }
+        assert_eq!(newer(&build, &build), None, "a build is not newer than itself");
     }
 
     #[test]

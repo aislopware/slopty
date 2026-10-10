@@ -1276,6 +1276,12 @@ pub enum Action {
     /// The pull request of the branch its folder has checked out, as the worker last read it
     /// from the forge; `None` once that branch has none.
     PullSeen(Option<wire::PullSeen>),
+    /// The person saw the thread's turns through this one ([`wire::Intent::Seen`]); a mark
+    /// below the one held changes nothing.
+    Seen(TurnId),
+    /// What the person was writing to it and has not sent ([`wire::Intent::Draft`]); `None`
+    /// once it went or was cleared.
+    DraftSet(Option<wire::Draft>),
 }
 
 /// A window or display on the thread's worker that its agent drives.

@@ -89,7 +89,7 @@ async fn admit<S, R, H>(
                 Ok(None) => tracing::debug!(%peer, "{who} probe"),
                 Err(NetError::WrongBuild(wrong)) => {
                     let peer_build = wrong.peer_build();
-                    let this = slopty_proto::wire::BUILD;
+                    let this = slopty_proto::wire::this_build();
                     tracing::warn!(%peer, peer_build, this, "{who} runs a different build; closed");
                 }
                 Err(e) => tracing::info!(%peer, error = %e, "{who} dropped"),

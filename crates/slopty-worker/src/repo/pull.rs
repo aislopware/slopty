@@ -265,6 +265,10 @@ pub async fn land(
 
 /// Merge the branch's pull request by `method`, only while it ends at `head` when given.
 ///
+/// With `auto` it merges once the forge's requirements are met (gh's `--auto`, which joins a
+/// merge queue where the branch has one; glab's `--auto-merge`), answered as soon as the forge
+/// took it.
+///
 /// What the forge reads afterwards decides: a command line that fails once the merge went,
 /// in the local clean-up `--delete-branch` asks of it, reads as merged, in its own words. gh
 /// before 2.99 did so from an agent's worktree, switching the checkout to the base to delete
@@ -279,7 +283,7 @@ pub async fn merge(
     root: &Path,
     method: &str,
     head: Option<&str>,
-    delete_branch: bool,
+    (delete_branch, auto): (bool, bool),
 ) -> Result<GitDone, GitOutcome> {
     let method = method.trim().to_ascii_lowercase();
     if !METHODS.contains(&method.as_str()) {
@@ -300,9 +304,12 @@ pub async fn merge(
             if delete_branch {
                 args.push("--delete-branch".to_owned());
             }
+            if auto {
+                args.push("--auto".to_owned());
+            }
             args
         }
-        Forge::GitLab => gitlab::merge_args(&method, head, delete_branch),
+        Forge::GitLab => gitlab::merge_args(&method, head, delete_branch, auto),
     };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let ran = run(program, root, &args, None, REMOTE).await;
@@ -315,6 +322,23 @@ pub async fn merge(
         Err(failed) => return Err(failed),
     };
     Ok(GitDone::Merged { said: said.trim().to_owned(), pull })
+}
+
+/// Mark the branch's draft pull request ready for review (`gh pr ready`; `glab mr update
+/// --ready`), and read it again.
+///
+/// # Errors
+/// The forge's command line is missing, or it refused, in its words: no pull request, or one
+/// that is no draft.
+pub async fn ready(programs: &Programs, root: &Path) -> Result<GitDone, GitOutcome> {
+    let forge = forge(root);
+    let program = program(programs, forge)?;
+    let args: &[&str] = match forge {
+        Forge::GitHub => &["pr", "ready"],
+        Forge::GitLab => &["mr", "update", "--ready"],
+    };
+    run(program, root, args, None, REMOTE).await?;
+    status_done(programs, root).await
 }
 
 /// `gh pr view --json` read.

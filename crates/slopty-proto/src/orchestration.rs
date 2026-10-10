@@ -950,6 +950,25 @@ pub enum Verb {
         /// What to change first; none only reads.
         edits: Vec<crate::settings::SettingEdit>,
     },
+    /// Send a thread a message as its composer would, to go when the agent next takes one
+    /// (what a phone's note replies with, with no window open). The person's alone; an agent
+    /// is [`ErrorCode::Forbidden`] (an orchestrator speaks to its tasks with
+    /// [`Verb::TaskTell`]). Answered with [`Outcome::Done`] once the thread took it.
+    SendMessage {
+        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
+        of: ThreadOf,
+        /// What it says.
+        text: String,
+    },
+    /// Have a worker's daemon exit for its service manager to start it again (launchd's
+    /// `KeepAlive`, systemd's `Restart=always`), so a grant made at its desk (Screen Recording)
+    /// is seen. Its terminals stay with ptyd and come back; its agents' turns that run in the
+    /// worker itself end as an update ends them. The person's alone; an agent is
+    /// [`ErrorCode::Forbidden`]. Answered with [`Outcome::Done`] just before it exits.
+    RestartWorker {
+        /// Which.
+        worker: WorkerId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1017,6 +1036,8 @@ impl Verb {
             | Self::RenameItem { .. }
             | Self::RemoveItem { .. }
             | Self::AnswerRequest { .. }
+            | Self::SendMessage { .. }
+            | Self::RestartWorker { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
             | Self::TaskCreate { .. }
@@ -1532,7 +1553,8 @@ pub enum Outcome {
     Settings(Box<crate::settings::DaemonSettings>),
 }
 
-/// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.
+/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`] or a [`Verb::SendMessage`]
+/// is about.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ThreadOf {
     /// The thread working on a task now: its assignment's.

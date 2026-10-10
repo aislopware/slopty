@@ -41,7 +41,7 @@ mod tests {
                 can_inject: false,
                 virtual_displays: false,
                 curtain: false,
-                version: "0".to_owned(),
+                build: "0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,
@@ -59,7 +59,10 @@ mod tests {
     async fn welcome(listener: &ServerListener, directory: Vec<WorkerInfo>) -> AcceptedLink {
         let mut link = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
         assert!(matches!(link.role, Role::Client { .. }), "{:?}", link.role);
-        link.tx.send(&FromServer::Welcome { name: "hub".to_owned(), link: 1 }).await.unwrap();
+        link.tx
+            .send(&FromServer::Welcome { name: "hub".to_owned(), link: 1, build: String::new() })
+            .await
+            .unwrap();
         link.tx.send(&FromServer::Directory(directory)).await.unwrap();
         link
     }
@@ -251,7 +254,6 @@ mod tests {
         let at = |active| Presence {
             seat: Seat::Desk,
             active,
-            workspace: None,
             showing: Vec::new(),
             focus: None,
             listening: true,

@@ -57,7 +57,7 @@ use slopty_proto::terminal::{
     CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
 };
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
-use slopty_proto::thread::{IntentId, ThreadId, ThreadState};
+use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -110,6 +110,10 @@ pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
 /// Between a pasted prompt and the Enter that submits it. Ink-based TUIs (Claude Code) read
 /// a paste and an Enter that arrive in one read as one paste, and the Enter is swallowed.
 const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
+
+/// How long after answering [`Verb::RestartWorker`] the daemon exits: time for the answer to
+/// leave on the server's link, which goes with the process.
+const RESTART_AFTER: Duration = Duration::from_millis(500);
 
 /// Size of a terminal opened by a verb, until a client attaches and drives it.
 const ORCHESTRATED_SIZE: TermSize = TermSize {
@@ -309,6 +313,10 @@ struct Inner {
     /// The `settings.toml` the daemon follows, whose `[worker]` another device reads and edits
     /// ([`Verb::Settings`]), once the daemon gave it.
     settings_file: std::sync::OnceLock<PathBuf>,
+    /// What has the daemon exit for its service manager to start it again
+    /// ([`Verb::RestartWorker`]), once the daemon gave it: only a daemon a service manager
+    /// keeps alive gives one.
+    restart: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -357,6 +365,7 @@ impl Orchestrator {
             task_threads: std::sync::OnceLock::new(),
             thread_reads: std::sync::OnceLock::new(),
             settings_file: std::sync::OnceLock::new(),
+            restart: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
     }
@@ -381,6 +390,15 @@ impl Orchestrator {
     pub fn set_settings_file(&self, path: PathBuf) {
         if self.inner.settings_file.set(path).is_err() {
             tracing::warn!("the settings file was given twice; the first stays");
+        }
+    }
+
+    /// Have the daemon exit through `restart` when a client asks it to start again
+    /// ([`Verb::RestartWorker`]), from now on: given only by a daemon that launchd or systemd
+    /// keeps alive, which starts it again. The first one given stays.
+    pub fn set_restart(&self, restart: Arc<tokio::sync::Notify>) {
+        if self.inner.restart.set(restart).is_err() {
+            tracing::warn!("the restart was given twice; the first stays");
         }
     }
 
@@ -701,6 +719,40 @@ impl Orchestrator {
                 }
                 let read = thread_read::read(&state, inner.id, view, after);
                 Ok(Outcome::Thread(Box::new(read)))
+            }
+            Verb::SendMessage { of, text } => {
+                let (thread, reads) = self.thread_of(&of)?;
+                let intent = Intent::Send { text, delivery: Delivery::Queue, attachments: vec![] };
+                match reads.intent(thread, IntentId::new(), intent) {
+                    wire::Outcome::Done | wire::Outcome::Accepted => Ok(Outcome::Done),
+                    wire::Outcome::Refused { reason } => {
+                        Err(Failure::new(ErrorCode::Failed, reason))
+                    }
+                    wire::Outcome::Unsupported { cap } => Err(Failure::new(
+                        ErrorCode::Unsupported,
+                        format!("this thread's agent takes no message from here ({})", cap.0),
+                    )),
+                    wire::Outcome::Started { .. } | wire::Outcome::SetupFailed { .. } => {
+                        Err(unexpected())
+                    }
+                }
+            }
+            Verb::RestartWorker { worker } => {
+                self.mine(worker)?;
+                let restart = inner.restart.get().cloned().ok_or_else(|| {
+                    Failure::new(
+                        ErrorCode::Unsupported,
+                        "this worker runs under no service manager that would start it again; \
+                         start it again where it runs",
+                    )
+                })?;
+                tracing::info!("restarting at a client's word");
+                // The answer goes out first: the daemon exits a moment after it.
+                tokio::spawn(async move {
+                    tokio::time::sleep(RESTART_AFTER).await;
+                    restart.notify_one();
+                });
+                Ok(Outcome::Done)
             }
             Verb::AnswerRequest { of, ask, choice, message } => {
                 let (thread, reads) = self.thread_of(&of)?;

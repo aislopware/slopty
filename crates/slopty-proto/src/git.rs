@@ -83,6 +83,10 @@ pub enum GitOp {
         head: Option<String>,
         /// Delete the branch once merged, here and on the remote.
         delete_branch: bool,
+        /// Merge once the forge's requirements are met rather than now: gh's `--auto`, which
+        /// also joins a merge queue where the branch has one, and glab's
+        /// `--when-pipeline-succeeds`. Answered as soon as the forge took it.
+        auto: bool,
     },
     /// The working tree's changes, new files and all, against `HEAD` or the branch's base
     /// ([`GitDone::Changes`]): a review of a folder that needs no thread. Nothing in the
@@ -156,6 +160,10 @@ pub enum GitOp {
         /// forge refuses them when the pull request has moved past it.
         head: Option<String>,
     },
+    /// Mark the branch's draft pull request ready for review through the person's own gh
+    /// (`gh pr ready`; `glab mr update --ready` on a GitLab), answered with the pull request as
+    /// it stands after ([`GitDone::PullStatus`]).
+    MarkReady,
 }
 
 /// What a person's review of a pull request says of the whole ([`GitOp::PullReview`]).

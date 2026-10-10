@@ -313,6 +313,11 @@ mod golden_project {
             message: Some("Not on main.".to_owned()),
         };
         snap("answer_request", &request(answer));
+        let reply = Verb::SendMessage {
+            of: ThreadOf::Thread(thread),
+            text: "Use the staging database.".to_owned(),
+        };
+        snap("send_message", &request(reply));
     }
 
     fn launch(run: Runner) -> TaskLaunch {

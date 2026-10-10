@@ -36,4 +36,8 @@ pub struct PushBody {
     pub notice: Notice,
     /// The request a note's buttons answer, on the notice's thread.
     pub ask: Option<AskId>,
+    /// The note is already on the phone and only what its buttons answer moved (a request
+    /// opened after the thread came to need the person, or the one it showed went): it
+    /// replaces that note under the same collapse id without a sound or a banner.
+    pub quiet: bool,
 }

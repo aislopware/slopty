@@ -298,8 +298,6 @@ pub struct Presence {
     pub seat: Seat,
     /// Whether the person is at it: the app in front, and used lately by its own measure.
     pub active: bool,
-    /// The workspace in front, by the client's name for it.
-    pub workspace: Option<String>,
     /// The tiles on screen.
     pub showing: Vec<TermRef>,
     /// The tile with the keyboard.

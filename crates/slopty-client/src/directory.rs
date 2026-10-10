@@ -298,7 +298,7 @@ mod tests {
                 can_inject: true,
                 virtual_displays: false,
                 curtain: false,
-                version: "0".to_owned(),
+                build: "0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,

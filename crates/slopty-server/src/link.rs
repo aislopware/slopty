@@ -72,7 +72,11 @@ async fn worker(
     tailscale: Option<&LocalApi>,
 ) {
     let (out, queue) = mpsc::channel(LINK_QUEUE);
-    let welcome = FromServer::Welcome { name: hub.name().to_owned(), link: hub.number_link() };
+    let welcome = FromServer::Welcome {
+        name: hub.name().to_owned(),
+        link: hub.number_link(),
+        build: slopty_proto::wire::this_build(),
+    };
     // First in the queue before the worker is reachable, so no request can overtake it.
     if out.try_send(welcome).is_err() {
         return;
@@ -232,7 +236,11 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     // Only a person's client is where a person is, and gets notices.
     let seated = (speaker == Speaker::Person).then(|| hub.seat(number, name.clone(), out.clone()));
     let seat = seated.as_ref().map(crate::hub::Seated::link);
-    let welcome = FromServer::Welcome { name: hub.name().to_owned(), link: number };
+    let welcome = FromServer::Welcome {
+        name: hub.name().to_owned(),
+        link: number,
+        build: slopty_proto::wire::this_build(),
+    };
     if tx.send(&welcome).await.is_err() {
         return;
     }
@@ -504,8 +512,13 @@ mod tests {
         let (out, mut queue) = mpsc::channel(LINK_QUEUE);
         let (said, mut pushes) = watch::channel(false);
         pushes.mark_changed();
-        let numbered = |n: usize| FromServer::Welcome { name: format!("queued {n}"), link: 1 };
-        let welcome = FromServer::Welcome { name: "server".to_owned(), link: 1 };
+        let numbered = |n: usize| FromServer::Welcome {
+            name: format!("queued {n}"),
+            link: 1,
+            build: String::new(),
+        };
+        let welcome =
+            FromServer::Welcome { name: "server".to_owned(), link: 1, build: String::new() };
         out.try_send(welcome.clone()).unwrap();
         let mut queued = Vec::new();
         while out.try_send(numbered(queued.len())).is_ok() {

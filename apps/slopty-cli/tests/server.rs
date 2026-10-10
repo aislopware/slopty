@@ -57,7 +57,7 @@ mod tests {
                 can_inject: true,
                 virtual_displays: false,
                 curtain: false,
-                version: "0.1.0".to_owned(),
+                build: "0.1.0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,
@@ -156,7 +156,11 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(mut link) = listener.accept().await {
                     role_tx.send(link.role.clone()).unwrap();
-                    let welcome = FromServer::Welcome { name: "fake".to_owned(), link: 1 };
+                    let welcome = FromServer::Welcome {
+                        name: "fake".to_owned(),
+                        link: 1,
+                        build: String::new(),
+                    };
                     link.tx.send(&welcome).await.unwrap();
                     link.tx.send(&FromServer::Directory(directory())).await.unwrap();
                     let verb_tx = verb_tx.clone();
@@ -260,7 +264,7 @@ mod tests {
                 "cpus": 24,
                 "memory": 64_u64 << 30,
                 "load": 0.5,
-                "version": "0.1.0",
+                "build": "0.1.0",
                 "can_capture": true,
                 "can_inject": true,
                 "last_seen_ms": 1,

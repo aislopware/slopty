@@ -160,8 +160,10 @@ pub struct WorkerCaps {
     /// It can draw the curtain over its Mac's own screens and input
     /// ([`crate::screen::ScreenRequest::Curtain`]).
     pub curtain: bool,
-    /// Worker software version.
-    pub version: String,
+    /// The build it runs, as [`crate::wire::this_build`] spells it: the version, the wire, and
+    /// the commit it was made from when it says one. A client compares it with its own
+    /// ([`crate::wire::newer`]) to offer an update on a wire that has not changed.
+    pub build: String,
     /// Its interfaces on a LAN, by which a machine beside it wakes it when it sleeps.
     pub lan: Vec<crate::lan::LanPort>,
     /// Whether it wakes for a magic packet (macOS "Wake for network access"), `None` where it
@@ -195,7 +197,7 @@ impl WorkerCaps {
             can_inject: false,
             virtual_displays: false,
             curtain: false,
-            version: String::new(),
+            build: String::new(),
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
@@ -315,6 +317,10 @@ pub enum FromServer {
         /// The server's number for this link, the one it lists a person's client under
         /// ([`crate::thread::attention::Present::link`]).
         link: u64,
+        /// The build the server runs, as [`crate::wire::this_build`] spells it, so a client
+        /// on the same wire still tells an older server from a newer one
+        /// ([`crate::wire::newer`]).
+        build: String,
     },
     /// The hello was refused; the connection closes after this.
     Refused(Refusal),

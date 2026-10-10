@@ -463,6 +463,8 @@ mod golden_thread {
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
         snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(3), files: true }));
+        snap("intent_seen", &send(Intent::Seen { turn: TurnId(3) }));
+        snap("intent_draft", &send(Intent::Draft { text: "and the README".to_owned() }));
     }
 
     #[test]
@@ -667,6 +669,12 @@ mod golden_thread {
             Action::ScreensSet(Vec::new()),
             Action::PullSeen(Some(pull_seen())),
             Action::PullSeen(None),
+            Action::Seen(TurnId(3)),
+            Action::DraftSet(Some(slopty_proto::thread::wire::Draft {
+                text: "and the README".to_owned(),
+                at_ms: ms(1_727_000_000_900),
+            })),
+            Action::DraftSet(None),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }
@@ -1026,6 +1034,17 @@ mod golden_thread {
                 root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
                 url: None,
             }),
+            ended: Some(slopty_proto::thread::wire::TurnEnded {
+                turn: TurnId(1),
+                at_ms: ms(2_300),
+                ran_ms: 93_000,
+                answered: true,
+            }),
+            seen: TurnId(1),
+            draft: Some(slopty_proto::thread::wire::Draft {
+                text: "then the README".to_owned(),
+                at_ms: ms(2_400),
+            }),
             ..state().row(ms(2_500))
         };
         snap(
@@ -1088,13 +1107,20 @@ mod golden_thread {
         let presence = Presence {
             seat: Seat::Desk,
             active: true,
-            workspace: Some("slopty".to_owned()),
             showing: vec![tile],
             focus: Some(tile),
             listening: true,
         };
         snap("attention_presence", &ToServer::Presence(presence.clone()));
-        snap("attention_welcome", &FromServer::Welcome { name: "studio".to_owned(), link: 7 });
+        snap(
+            "attention_welcome",
+            &FromServer::Welcome {
+                name: "studio".to_owned(),
+                link: 7,
+                build: "0.4.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z"
+                    .to_owned(),
+            },
+        );
         let handheld =
             Presence { seat: Seat::Handheld, active: false, listening: false, ..presence.clone() };
         snap(
@@ -1173,7 +1199,9 @@ mod golden_thread {
             worked_ms: None,
             via: None,
         };
-        snap("push_body", &PushBody { notice, ask: Some(AskId("toolu_01".to_owned())) });
+        let ask = Some(AskId("toolu_01".to_owned()));
+        snap("push_body", &PushBody { notice: notice.clone(), ask: ask.clone(), quiet: false });
+        snap("push_body_quiet", &PushBody { notice, ask, quiet: true });
         let program = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Terminal(TermRef { worker, session }),
@@ -1183,7 +1211,7 @@ mod golden_thread {
             worked_ms: None,
             via: None,
         };
-        snap("push_body_program", &PushBody { notice: program, ask: None });
+        snap("push_body_program", &PushBody { notice: program, ask: None, quiet: false });
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
     }
 }

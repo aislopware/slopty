@@ -31,6 +31,7 @@ pub mod history;
 pub mod host;
 pub mod intents;
 pub mod log;
+pub mod marks;
 pub mod offers;
 pub mod pi;
 pub mod pulls;

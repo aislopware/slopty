@@ -98,9 +98,11 @@ pub async fn apply(
             pull_request((git, programs), &root, text, base.as_deref(), draft).await
         }
         GitOp::PullStatus => super::pull::status_done(programs, &root).await,
-        GitOp::Merge { method, head, delete_branch } => {
-            super::pull::merge(programs, &root, &method, head.as_deref(), delete_branch).await
+        GitOp::Merge { method, head, delete_branch, auto } => {
+            let flags = (delete_branch, auto);
+            super::pull::merge(programs, &root, &method, head.as_deref(), flags).await
         }
+        GitOp::MarkReady => super::pull::ready(programs, &root).await,
         GitOp::Changes { against } => super::snapshot::working_tree(git, &root, against)
             .await
             .map(|review| GitDone::Changes(Box::new(review)))

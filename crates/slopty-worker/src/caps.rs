@@ -207,7 +207,7 @@ pub fn probe(agents: &[InstalledAgent], seldom: &Seldom) -> WorkerCaps {
         can_inject: desktop.can_inject,
         virtual_displays: desktop.virtual_displays,
         curtain: desktop.curtain,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        build: slopty_proto::wire::this_build(),
         lan: slopty_tailnet::lan::ports(),
         wake_on_lan: seldom.wake_on_lan,
         writes_failing: writes_failing(),

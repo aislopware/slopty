@@ -155,7 +155,6 @@ async fn doctor(daemon: &Daemon) -> Health {
     Health {
         worker: daemon.id,
         server,
-        version: env!("CARGO_PKG_VERSION").to_owned(),
         exe: std::env::current_exe().map_or_else(|_| "?".to_owned(), |p| p.display().to_string()),
         caps,
         listen: daemon.listen.to_string(),

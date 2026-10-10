@@ -11,7 +11,7 @@ use std::time::Duration;
 use noq::Connection;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use slopty_proto::wire::{BUILD, Prefix};
+use slopty_proto::wire::{Prefix, this_build};
 
 use crate::framed::{FramedRecv, FramedSend};
 use crate::worker::close_code;
@@ -38,6 +38,6 @@ pub(crate) async fn check<T: DeserializeOwned>(
         Ok(prefix) => prefix.build,
         Err(_not_slopty) => String::new(),
     };
-    conn.close(close_code::WRONG_BUILD.into(), BUILD.as_bytes());
+    conn.close(close_code::WRONG_BUILD.into(), this_build().as_bytes());
     Err(WrongBuild { peer }.into())
 }

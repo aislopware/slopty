@@ -104,7 +104,8 @@ async fn any_agent_runs_a_task_as_a_thread() {
 /// The thread of `task` (its assignment's, seated at `term`) is read where it is: by the task,
 /// its seat or its id, each sent to its worker as the thread there, holding prompts for the
 /// person's read alone. A thread no table holds is no read, and answering a request is the
-/// person's, as is the commit sheet: an agent commits with its own git.
+/// person's, as is the commit sheet (an agent commits with its own git), a message sent from
+/// a note and a worker's restart.
 async fn read_where_it_is(
     hub: &Hub,
     (lease, rx): (&Lease, &mut mpsc::Receiver<FromServer>),
@@ -141,6 +142,32 @@ async fn read_where_it_is(
     };
     let by_agent = hub.dispatch_as(Speaker::Proven(term.session), None, answering).await;
     assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to answer"));
+
+    // A message sent from a phone's note goes to the thread where it is; an agent sends none
+    // this way, and restarts no worker.
+    let words = "Use the staging database.".to_owned();
+    let message = |of| Verb::SendMessage { of, text: words.clone() };
+    let sent = tokio::spawn({
+        let (hub, verb) = (hub.clone(), message(ThreadOf::Thread(thread)));
+        async move { hub.dispatch_as(Speaker::Person, None, verb).await }
+    });
+    let (id, forwarded) = request(rx).await;
+    assert_eq!(forwarded, message(on.clone()), "found where it is");
+    answer(lease, id, Outcome::Done);
+    assert_eq!(sent.await.unwrap(), Outcome::Done);
+    let by_agent = hub.dispatch_as(Speaker::Agent, None, message(ThreadOf::Thread(thread))).await;
+    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("task_tell"));
+    let restart = Verb::RestartWorker { worker: term.worker };
+    let by_agent = hub.dispatch_as(Speaker::Agent, None, restart.clone()).await;
+    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to restart"));
+    let asked = tokio::spawn({
+        let hub = hub.clone();
+        async move { hub.dispatch_as(Speaker::Person, None, restart).await }
+    });
+    let (id, forwarded) = request(rx).await;
+    assert_eq!(forwarded, Verb::RestartWorker { worker: term.worker });
+    answer(lease, id, Outcome::Done);
+    assert_eq!(asked.await.unwrap(), Outcome::Done);
 }
 
 /// The subagents of a task's thread with no hooks are its node's natives, from the rows that

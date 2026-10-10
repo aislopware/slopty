@@ -5112,7 +5112,7 @@ mod tests {
         assert_eq!(worker.ack.home, home_of(dir.path()).to_string_lossy());
         let caps = &worker.ack.caps;
         assert!(caps.cpus > 0 && caps.memory > 0 && !caps.os_version.is_empty(), "{caps:?}");
-        assert_eq!(caps.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(caps.build, slopty_proto::wire::this_build(), "the build it runs, in full");
     }
 
     /// A shell in a repository whose working tree has an edited file and a new one carries the

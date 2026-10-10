@@ -234,6 +234,10 @@ pub(crate) struct Daemon {
     pub server_link: Arc<tokio::sync::watch::Sender<Option<slopty_proto::ctl::ServerHealth>>>,
     /// The clones under way, the server's and the person's, which share their turns.
     pub cloner: slopty_worker::repo::cloning::Cloner,
+    /// What has the daemon exit for its service manager to start it again, at a client's word
+    /// ([`slopty_proto::orchestration::Verb::RestartWorker`]); `None` for a worker no service
+    /// manager keeps alive (one run by hand or by a test), which would not come back.
+    pub restart: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Daemon {
@@ -389,6 +393,9 @@ fn join_server(
     }
     let settings = slopty_settings::path_in(data_dir);
     orchestrator.set_settings_file(settings.clone());
+    if let Some(restart) = &daemon.restart {
+        orchestrator.set_restart(Arc::clone(restart));
+    }
     let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
     let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
     let facts_task = tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
@@ -823,6 +830,7 @@ async fn run(
         session_key,
         server_link: Arc::new(tokio::sync::watch::Sender::new(None)),
         cloner: slopty_worker::repo::cloning::Cloner::default(),
+        restart: args.installed.then(Arc::default),
         displays,
         curtain,
         sources,
@@ -954,6 +962,10 @@ async fn run(
                 tracing::info!("SIGTERM: shutting down");
                 break Ok(());
             }
+            () = restarted(daemon.restart.as_deref()) => {
+                tracing::info!("restarting at a client's word: shutting down to be started again");
+                break Ok(());
+            }
             _gone = &mut ptyd_gone => {
                 tracing::error!("lost slopty-ptyd: shutting down for a worker that connects again");
                 break Err(anyhow::anyhow!("slopty-ptyd hung up"));
@@ -983,6 +995,15 @@ async fn run(
         tracing::warn!("the input source was not put back in time");
     }
     ended
+}
+
+/// Once a client asked this daemon to start again; never for one no service manager keeps
+/// alive.
+async fn restarted(restart: Option<&tokio::sync::Notify>) {
+    match restart {
+        Some(restart) => restart.notified().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Get the desktop half ready: capture and input warmed up, and their permissions checked (and,

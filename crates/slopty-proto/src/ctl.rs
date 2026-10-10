@@ -237,12 +237,11 @@ pub struct Health {
     /// The server it registers with and how its link stands; `None` while no server is set
     /// and it runs on its own.
     pub server: Option<ServerHealth>,
-    /// Daemon version.
-    pub version: String,
     /// Path of the daemon binary (which is what TCC grants permissions to).
     pub exe: String,
     /// What it can do as it last looked, as the server's directory lists it: Screen Recording
-    /// is [`WorkerCaps::can_capture`], Accessibility [`WorkerCaps::can_inject`].
+    /// is [`WorkerCaps::can_capture`], Accessibility [`WorkerCaps::can_inject`], and the build
+    /// it runs [`WorkerCaps::build`].
     pub caps: WorkerCaps,
     /// Where it listens (`[::]:45550` is every interface, both families).
     pub listen: String,

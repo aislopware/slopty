@@ -85,7 +85,9 @@ impl Sent {
             | Intent::Aside
             | Intent::Discard
             | Intent::KeepAside
-            | Intent::Review { .. } => self.outcome.is_some(),
+            | Intent::Review { .. }
+            | Intent::Seen { .. }
+            | Intent::Draft { .. } => self.outcome.is_some(),
         }
     }
 

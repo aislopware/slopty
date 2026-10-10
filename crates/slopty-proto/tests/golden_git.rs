@@ -93,6 +93,7 @@ mod golden_git {
             method: "squash".to_owned(),
             head: Some("89abcdef0123456789abcdef0123456789abcdef".to_owned()),
             delete_branch: true,
+            auto: false,
         }
     }
 
@@ -105,6 +106,14 @@ mod golden_git {
         snap("client_git_pull_request", &ask(6, pull_request()));
         snap("client_git_pull_status", &ask(7, GitOp::PullStatus));
         snap("client_git_merge", &ask(8, merge()));
+        let auto = GitOp::Merge {
+            method: "merge".to_owned(),
+            head: None,
+            delete_branch: false,
+            auto: true,
+        };
+        snap("client_git_merge_auto", &ask(8, auto));
+        snap("client_git_mark_ready", &ask(8, GitOp::MarkReady));
         let free = ClientMsg::Git {
             request: 9,
             repo: "~/src/demo/.claude/worktrees/fix-login".to_owned(),

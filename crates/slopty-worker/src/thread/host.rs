@@ -460,13 +460,16 @@ impl Host {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
-        // What waits to be sent and whether the tree is to review are the worker's own, which
-        // no agent's session has: they stay.
+        // What waits to be sent, whether the tree is to review and the person's own marks
+        // (how far they have seen it, what they were writing) are the worker's, which no
+        // agent's session has: they stay.
         // One that was being typed may be in the terminal already, so it is not typed again.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
         state.pending.clone_from(&hosted.log.state().pending);
         state.to_review = hosted.log.state().to_review;
+        state.seen = hosted.log.state().seen;
+        state.draft.clone_from(&hosted.log.state().draft);
         let first = hosted.own.first;
         for pending in state.pending.iter_mut().filter(|p| Some(p.intent) != first) {
             if pending.state == PendingState::Sending {

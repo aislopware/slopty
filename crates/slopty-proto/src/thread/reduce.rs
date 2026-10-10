@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 
-use super::wire::{Page, PullSeen, RequestCard, TableFrame, ThreadRow};
+use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
 use super::{
     Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item,
     ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
-    ToolState, Turn, TurnId,
+    ToolState, Turn, TurnId, TurnState,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -53,6 +53,10 @@ pub struct ThreadState {
     pub screens: Vec<AgentScreen>,
     /// Its branch's pull request ([`Action::PullSeen`]).
     pub pull: Option<PullSeen>,
+    /// The last turn the person has seen, on any device ([`Action::Seen`]).
+    pub seen: TurnId,
+    /// What the person was writing to it and has not sent ([`Action::DraftSet`]).
+    pub draft: Option<Draft>,
 }
 
 impl ThreadState {
@@ -75,6 +79,8 @@ impl ThreadState {
             goal: None,
             screens: Vec::new(),
             pull: None,
+            seen: TurnId::BEFORE,
+            draft: None,
         }
     }
 
@@ -148,6 +154,8 @@ impl ThreadState {
             Action::GoalSet(goal) => self.goal.clone_from(goal),
             Action::ScreensSet(screens) => self.screens.clone_from(screens),
             Action::PullSeen(pull) => self.pull.clone_from(pull),
+            Action::Seen(turn) => self.seen = self.seen.max(*turn),
+            Action::DraftSet(draft) => self.draft.clone_from(draft),
         }
     }
 
@@ -225,6 +233,20 @@ impl ThreadState {
         self.requests.iter().filter(|r| r.is_open())
     }
 
+    /// Its latest turn, once it ended ([`ThreadRow::ended`]); `None` while a turn is under way
+    /// or before the first.
+    #[must_use]
+    pub fn ended(&self) -> Option<TurnEnded> {
+        let last = self.last_turn()?;
+        let at_ms = last.ended_ms?;
+        Some(TurnEnded {
+            turn: last.id,
+            at_ms,
+            ran_ms: at_ms.as_millis().saturating_sub(last.started_ms.as_millis()),
+            answered: matches!(last.state, TurnState::Complete),
+        })
+    }
+
     /// The thread's row in its worker's table.
     #[must_use]
     pub fn row(&self, updated_ms: WallMs) -> ThreadRow {
@@ -262,6 +284,9 @@ impl ThreadState {
             to_review: self.to_review,
             pull: self.pull.clone(),
             meters: self.meters.clone(),
+            ended: self.ended(),
+            seen: self.seen,
+            draft: self.draft.clone(),
             updated_ms,
         }
     }

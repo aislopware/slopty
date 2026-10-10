@@ -39,6 +39,9 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>)
         to_review: false,
         pull: None,
         meters: Meters::default(),
+        ended: None,
+        seen: slopty_proto::thread::TurnId::BEFORE,
+        draft: None,
         updated_ms: WallMs::from_millis(since),
         cwd: None,
         repo: None,
@@ -191,8 +194,7 @@ impl Client {
     }
 
     pub(in crate::hub) fn at(&self, hub: &Hub, seat: Seat, active: bool, showing: Vec<TermRef>) {
-        let presence =
-            Presence { seat, active, workspace: None, showing, focus: None, listening: true };
+        let presence = Presence { seat, active, showing, focus: None, listening: true };
         hub.presence(self.seated.link(), presence);
     }
 
@@ -657,7 +659,6 @@ async fn needs_you_pushes_once_per_ask() {
     let gone = Presence {
         seat: Seat::Handheld,
         active: false,
-        workspace: None,
         showing: Vec::new(),
         focus: None,
         listening: false,
@@ -763,7 +764,6 @@ async fn a_pushed_ask_answered_elsewhere_is_taken_back() {
     let pocketed = Presence {
         seat: Seat::Handheld,
         active: false,
-        workspace: None,
         showing: Vec::new(),
         focus: None,
         listening: false,
@@ -841,7 +841,6 @@ async fn a_program_waiting_on_the_person_is_pushed_and_taken_back() {
     let pocketed = Presence {
         seat: Seat::Handheld,
         active: false,
-        workspace: None,
         showing: Vec::new(),
         focus: None,
         listening: false,
@@ -918,7 +917,6 @@ fn pocketed_phone(hub: &Hub, link: u64, client: ClientId) {
     let presence = Presence {
         seat: Seat::Handheld,
         active: false,
-        workspace: None,
         showing: Vec::new(),
         focus: None,
         listening: false,
@@ -1038,7 +1036,6 @@ async fn a_notice_no_link_could_take_is_pushed() {
     let presence = Presence {
         seat: Seat::Desk,
         active: true,
-        workspace: None,
         showing: Vec::new(),
         focus: None,
         listening: true,

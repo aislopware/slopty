@@ -200,7 +200,7 @@ impl Phones {
             if listening || short {
                 continue;
             }
-            let body = PushBody { notice: notice.clone(), ask: ask.cloned() };
+            let body = PushBody { notice: notice.clone(), ask: ask.cloned(), quiet: false };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
             self.owed_notes.retain(|(c, owed)| *c != *client || owed.notice.about != notice.about);

@@ -493,7 +493,7 @@ fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts
         ("can_capture", Fact::Bool(caps.can_capture)),
         ("can_inject", Fact::Bool(caps.can_inject)),
         ("virtual_displays", Fact::Bool(caps.virtual_displays)),
-        ("slopty_version", text(&caps.version)),
+        ("slopty_build", text(&caps.build)),
         ("load", Fact::Float(f64::from(info.load))),
         ("online", Fact::Bool(info.liveness == Liveness::Online)),
         ("live_agents", Fact::Int(i64::from(agents_here))),

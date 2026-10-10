@@ -35,6 +35,7 @@ fn stand_in(dir: &Path, mode: &str) -> PathBuf {
            echo '✓ Squashed and merged pull request #7 (Keep it)' ;;\n\
          'api graphql'*) cat \"{dir}/review.json\" ;;\n\
          'pr create') echo 'https://github.com/o/demo/pull/7' ;;\n\
+         'pr ready') echo '✓ Pull request #7 is marked as \"ready for review\"' ;;\n\
          *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
          esac\n",
         dir = dir.display()
@@ -134,6 +135,7 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
         method: method.to_owned(),
         head: Some("0123abcd".to_owned()),
         delete_branch: true,
+        auto: false,
     };
     let GitOutcome::Done(GitDone::Merged { said, pull }) =
         apply(&programs, &work, merge("Squash"), &[]).await
@@ -161,6 +163,31 @@ async fn a_merge_goes_as_the_person_said_and_a_refusal_in_gh_s_words() {
         matches!(&said, GitOutcome::Failed { said } if said.contains("base branch policy")),
         "{said:?}"
     );
+}
+
+/// An automatic merge asks gh to merge once the forge's requirements are met, which joins a
+/// merge queue where the branch has one; a draft is marked ready for review, and the pull
+/// request is read again after.
+#[tokio::test]
+async fn an_automatic_merge_and_a_draft_made_ready_go_through_gh() {
+    let dir = tempfile::tempdir().expect("temp");
+    let git = crate::changes::git().map(Path::to_path_buf);
+    let work = repo(dir.path()).to_string_lossy().into_owned();
+    let programs = Programs { git, gh: Some(stand_in(dir.path(), "open")), glab: None };
+    let auto =
+        GitOp::Merge { method: "merge".to_owned(), head: None, delete_branch: false, auto: true };
+    let merged = apply(&programs, &work, auto, &[]).await;
+    assert!(matches!(merged, GitOutcome::Done(GitDone::Merged { .. })), "{merged:?}");
+    assert_eq!(asked(dir.path()).first().map(String::as_str), Some("pr merge --merge --auto"));
+
+    let ready = apply(&programs, &work, GitOp::MarkReady, &[]).await;
+    let GitOutcome::Done(GitDone::PullStatus(Some(pull))) = ready else {
+        panic!("not read again: {ready:?}")
+    };
+    assert_eq!(pull.number, 7);
+    let calls = asked(dir.path());
+    let tail: Vec<&str> = calls.iter().rev().take(2).rev().map(String::as_str).collect();
+    assert_eq!(tail, ["pr ready", &format!("pr view --json {FIELDS}")]);
 }
 
 /// What the stand-in glab answers `glab mr view --output json` with: the API's merge request,
@@ -393,6 +420,7 @@ async fn a_merge_request_is_opened_and_merged_with_glab() {
         method: "squash".to_owned(),
         head: Some("0123abcd".to_owned()),
         delete_branch: true,
+        auto: false,
     };
     let GitOutcome::Done(GitDone::Merged { pull, .. }) = apply(&programs, &work, merge, &[]).await
     else {
@@ -751,6 +779,7 @@ async fn a_merge_from_a_worktree_reads_as_merged_and_leaves_the_worktree_on_its_
             method: "squash".to_owned(),
             head: Some("0123abcd".to_owned()),
             delete_branch: true,
+            auto: false,
         };
         let done = apply(&programs, &tree.to_string_lossy(), merge, &[]).await;
         let GitOutcome::Done(GitDone::Merged { said, pull }) = &done else {

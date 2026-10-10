@@ -942,6 +942,19 @@ impl Hub {
                 Ok(of) => self.forward(key, Verb::AnswerRequest { of, ask, choice, message }).await,
                 Err(refused) => refused,
             },
+            Verb::SendMessage { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "only the person sends a thread a message this way; an orchestrator tells its \
+                 tasks with task_tell",
+            ),
+            Verb::SendMessage { of, text } => match self.thread_on(of) {
+                Ok(of) => self.forward(key, Verb::SendMessage { of, text }).await,
+                Err(refused) => refused,
+            },
+            Verb::RestartWorker { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a machine's worker is the person's to restart, never an agent's",
+            ),
             Verb::CloneRepo { .. } | Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => error(
                 ErrorCode::Forbidden,
                 "the server clones and carries branches for tasks itself; task_start and \
@@ -1867,6 +1880,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::DropBranches { worker, .. }
+        | Verb::RestartWorker { worker }
         | Verb::StartThread { worker, .. } => Some(*worker),
         Verb::Settings { of, .. } => *of,
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
@@ -1878,7 +1892,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentStatus { term }
         | Verb::ResizeTerminal { term, .. }
         | Verb::Close { term } => Some(term.worker),
-        Verb::ReadThread { of, .. } | Verb::AnswerRequest { of, .. } => match of {
+        Verb::ReadThread { of, .. }
+        | Verb::AnswerRequest { of, .. }
+        | Verb::SendMessage { of, .. } => match of {
             ThreadOf::On { worker, .. } => Some(*worker),
             // The server finds the worker first ([`Hub::thread_on`]).
             ThreadOf::Task { .. } | ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
@@ -1958,7 +1974,7 @@ pub(crate) mod tests {
             can_inject: true,
             virtual_displays: false,
             curtain: false,
-            version: "0.1.0".to_owned(),
+            build: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,

@@ -100,7 +100,11 @@ mod tests {
     async fn push_to_every_link(listener: ServerListener) {
         while let Some(mut link) = listener.accept().await {
             tokio::spawn(async move {
-                let welcome = FromServer::Welcome { name: "server".to_owned(), link: 1 };
+                let welcome = FromServer::Welcome {
+                    name: "server".to_owned(),
+                    link: 1,
+                    build: String::new(),
+                };
                 if link.tx.send(&welcome).await.is_err() {
                     return;
                 }

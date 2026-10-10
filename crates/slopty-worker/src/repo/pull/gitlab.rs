@@ -188,11 +188,16 @@ pub(super) fn create_args<'a>(
     args
 }
 
-/// What `glab mr merge` is given for `method` (`merge`, `squash` or `rebase`): now, not once its
-/// pipeline passes, only at `head` when given, removing the branch when asked.
-pub(super) fn merge_args(method: &str, head: Option<&str>, delete_branch: bool) -> Vec<String> {
-    let mut args: Vec<String> =
-        ["mr", "merge", "--yes", "--auto-merge=false"].map(str::to_owned).to_vec();
+/// What `glab mr merge` is given for `method` (`merge`, `squash` or `rebase`): now, or once its
+/// pipeline passes when `auto`, only at `head` when given, removing the branch when asked.
+pub(super) fn merge_args(
+    method: &str,
+    head: Option<&str>,
+    delete_branch: bool,
+    auto: bool,
+) -> Vec<String> {
+    let auto = if auto { "--auto-merge=true" } else { "--auto-merge=false" };
+    let mut args: Vec<String> = ["mr", "merge", "--yes", auto].map(str::to_owned).to_vec();
     match method {
         "squash" => args.push("--squash".to_owned()),
         "rebase" => args.push("--rebase".to_owned()),

@@ -1394,7 +1394,12 @@ mod tests {
         );
         std::fs::remove_file(tree.join("draft.txt")).expect("removed");
 
-        let merge = GitOp::Merge { method: "squash".to_owned(), head: None, delete_branch: true };
+        let merge = GitOp::Merge {
+            method: "squash".to_owned(),
+            head: None,
+            delete_branch: true,
+            auto: false,
+        };
         let merged = apply(&programs, &at, merge, &[]).await;
         assert!(matches!(&merged, GitOutcome::Done(GitDone::Merged { .. })), "{merged:?}");
         let asked = std::fs::read_to_string(tmp.path().join("asked")).expect("asked");

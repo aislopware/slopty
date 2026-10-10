@@ -318,7 +318,8 @@ mod golden {
             can_inject: true,
             virtual_displays: false,
             curtain: false,
-            version: "0.1.0".to_owned(),
+            build: "0.1.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z"
+                .to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
@@ -1756,7 +1757,8 @@ mod golden {
             can_inject: true,
             virtual_displays: false,
             curtain: false,
-            version: "0.1.0".to_owned(),
+            build: "0.1.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z"
+                .to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
@@ -2280,6 +2282,12 @@ mod orchestration {
         snap("server_request_wake_peer", &request(peer));
         let sent = Outcome::WakeSent { by: "mac-mini".to_owned(), to: vec!["en0".to_owned()] };
         snap("server_reply_wake_sent", &FromServer::Reply { id: 8, outcome: sent });
+        let restart = Verb::RestartWorker { worker };
+        assert!(restart.changes(), "a restart is done once per key");
+        snap(
+            "server_client_restart_worker",
+            &ToServer::Request { id: 9, key: None, verb: restart },
+        );
     }
 }
 
@@ -2397,7 +2405,6 @@ mod ctl {
                 address: "127.0.0.1:45560".to_owned(),
                 link: LinkState::Linked,
             }),
-            version: "0.1.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
             caps: WorkerCaps {
                 os: Os::MacOs,
@@ -2413,7 +2420,8 @@ mod ctl {
                 can_inject: false,
                 virtual_displays: false,
                 curtain: false,
-                version: "0.1.0".to_owned(),
+                build: "0.1.0+wire.0badf00d.20261009T2307Z.commit.1a2b3c4d5e6f.20261010T0930Z"
+                    .to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,

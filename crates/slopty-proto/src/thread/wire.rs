@@ -453,6 +453,20 @@ pub enum Intent {
         /// The new side.
         to: TreeRef,
     },
+    /// The person saw the thread's turns through `turn`, on whichever device: its row's
+    /// [`ThreadRow::seen`] moves up to it and never back, so every device reads one account of
+    /// what is unread. Any thread takes it.
+    Seen {
+        /// The last turn seen.
+        turn: TurnId,
+    },
+    /// What the person is writing to the thread and has not sent, as a device last kept it:
+    /// its row's [`ThreadRow::draft`], stamped by the worker, so another device takes it up.
+    /// Empty words clear it. Refused past [`Draft::MAX_BYTES`]. Any thread takes it.
+    Draft {
+        /// The words.
+        text: String,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -474,14 +488,15 @@ pub struct Pick {
 }
 
 impl Intent {
-    /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`]),
-    /// which the worker does whatever its agent can.
+    /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`])
+    /// or for the person's own marks on it ([`Self::Seen`], [`Self::Draft`]), which the worker
+    /// does whatever its agent can.
     ///
     /// A send by interrupt ([`Delivery::Interrupt`]) needs [`Cap::QUEUE`] too.
     #[must_use]
     pub const fn needs(&self) -> Option<&'static str> {
         Some(match self {
-            Self::Discard => return None,
+            Self::Discard | Self::Seen { .. } | Self::Draft { .. } => return None,
             Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
             Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
@@ -840,8 +855,45 @@ pub struct ThreadRow {
     pub pull: Option<PullSeen>,
     /// Its meters: model, mode, context, cost, the plan's rate windows.
     pub meters: super::Meters,
+    /// Its latest turn that ended, so a device that was not linked when it ended still knows.
+    pub ended: Option<TurnEnded>,
+    /// The last turn the person has seen, on any device ([`Intent::Seen`]): a turn in
+    /// [`Self::ended`] past it is unread. [`TurnId::BEFORE`] until one is seen.
+    pub seen: TurnId,
+    /// What the person was writing to it and has not sent, as a device last kept it
+    /// ([`Intent::Draft`]).
+    pub draft: Option<Draft>,
     /// When it last changed.
     pub updated_ms: WallMs,
+}
+
+/// A thread's latest turn that ended ([`ThreadRow::ended`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TurnEnded {
+    /// Which.
+    pub turn: TurnId,
+    /// When it ended.
+    pub at_ms: WallMs,
+    /// How long it ran, in milliseconds: a short one is not worth a word.
+    pub ran_ms: u64,
+    /// The agent answered it: the person did not stop it, and it did not fail.
+    pub answered: bool,
+}
+
+/// What the person was writing to a thread and has not sent ([`ThreadRow::draft`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Draft {
+    /// The words, never empty.
+    pub text: String,
+    /// When a device last kept them, on the worker's clock: a device holding words of its own
+    /// keeps the newer.
+    pub at_ms: WallMs,
+}
+
+impl Draft {
+    /// The longest draft a worker keeps, in bytes: the row travels in every table frame. A
+    /// longer one stays on the device that has it.
+    pub const MAX_BYTES: usize = 16 * 1024;
 }
 
 /// A thread's pull request in a line: what a list shows of it and what the attention ladder

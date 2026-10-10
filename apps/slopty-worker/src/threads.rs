@@ -571,6 +571,19 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // The person's own marks, the same for every agent: on the worker alone.
+            ThreadRequest::Intent {
+                id,
+                thread,
+                intent: intent @ (Intent::Seen { .. } | Intent::Draft { .. }),
+            } => {
+                let now = slopty_core::WallMs::now();
+                let marked = threads.host.intent(thread, id, |state| {
+                    slopty_worker::thread::marks::act(state, &intent, now)
+                });
+                let outcome = marked.unwrap_or_else(|| refused("no such thread".to_owned()));
+                at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
+            }
             ThreadRequest::Intent { id, thread, intent: Intent::KeepAside } => {
                 let outcome = keep_aside(&threads, thread, id);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));

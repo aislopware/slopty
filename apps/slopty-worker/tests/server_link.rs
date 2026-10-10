@@ -132,7 +132,8 @@ mod tests {
         async fn welcome(link: AcceptedLink) -> (Self, Registration) {
             let Role::Worker(registration) = link.role else { panic!("{:?}", link.role) };
             let mut tx = link.tx;
-            let welcome = FromServer::Welcome { name: "fake".into(), link: 1 };
+            let welcome =
+                FromServer::Welcome { name: "fake".into(), link: 1, build: String::new() };
             tx.send(&welcome).await.unwrap();
             (Self { conn: link.conn, tx, rx: link.rx, heard: Vec::new(), next: 1 }, *registration)
         }
@@ -348,6 +349,27 @@ mod tests {
             }))
         })
         .await;
+    }
+
+    /// A worker no service manager keeps alive (one a test or a person started by hand) would
+    /// not come back from a restart, so it refuses one and goes on serving.
+    #[tokio::test]
+    async fn a_worker_started_by_hand_refuses_a_restart_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let refused = peer.ask(Verb::RestartWorker { worker: reg.worker }).await;
+        assert!(
+            matches!(&refused, Outcome::Error { code: ErrorCode::Unsupported, message }
+                if message.contains("start it again where it runs")),
+            "{refused:?}"
+        );
+        let still = peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![] }).await;
+        assert!(matches!(still, Outcome::Settings(_)), "still serving: {still:?}");
     }
 
     /// The doctor names the worker as the server lists it and says how its server answers:

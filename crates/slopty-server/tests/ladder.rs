@@ -87,6 +87,9 @@ mod tests {
             to_review: false,
             pull: None,
             meters: Meters::default(),
+            ended: None,
+            seen: slopty_proto::thread::TurnId::BEFORE,
+            draft: None,
             updated_ms: WallMs::from_millis(since),
             cwd: None,
             repo: None,
@@ -177,7 +180,6 @@ mod tests {
         let presence = |showing: Vec<TermRef>| Presence {
             seat: Seat::Desk,
             active: true,
-            workspace: Some("slopty".to_owned()),
             showing,
             focus: None,
             listening: true,

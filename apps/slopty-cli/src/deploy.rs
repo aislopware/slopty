@@ -163,7 +163,7 @@ pub fn report(target: &str, deployed: &Deployed) -> String {
     let Deployed { platform, health, server, ptyd, stops_at_logout, console, .. } = deployed;
     let mut out = vec![format!(
         "slopty-worker {} is up on {target} ({platform}), running {}",
-        health.version, health.exe
+        health.caps.build, health.exe
     )];
     if platform.os == Os::MacOs && !(health.caps.can_capture && health.caps.can_inject) {
         let missing: Vec<&str> = [

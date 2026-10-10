@@ -231,7 +231,7 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     };
     let lines = [
         vec![
-            format!("slopty-worker {}  ({})", h.version, h.exe),
+            format!("slopty-worker {}  ({})", h.caps.build, h.exe),
             format!("worker {}", h.worker),
             server,
             format!("up {} s · listening on {}", h.uptime_secs, h.listen),
@@ -339,9 +339,9 @@ mod tests {
                 address: "studio:45560".to_owned(),
                 link: LinkState::Linked,
             }),
-            version: "0.3.0".to_owned(),
             exe: "/opt/slopty/bin/slopty-worker".to_owned(),
             caps: WorkerCaps {
+                build: "0.3.0".to_owned(),
                 can_capture: true,
                 can_inject: false,
                 ..WorkerCaps::bare(Os::MacOs)
