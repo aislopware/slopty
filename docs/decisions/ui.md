@@ -10151,3 +10151,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   leads it with the success mark and no next step is drawn. Nothing shows before the
   orchestrator has said anything. A screen reader hears the whole as one status line.
   - Test: `workspace::tests::projects::the_board_says_where_the_goal_stands`.
+
+- ✅ **The board's head sets the project's autonomy** (2026-10-11, the orchestrator-first study,
+  item 10, the UI's half). At the end of the place line, a segmented track names how far the
+  project's agents go before they ask: Ask, Edits, Own, the level now on the selected wash. A
+  press of another level is `ProjectSet { autonomy }`, the person's word; a press of the level
+  already set says nothing. At Own a muted line under it says a managed Claude Code with auto
+  mode turned off starts these agents in `default` (`disableAutoMode` in the company's managed
+  settings), since the client cannot see those settings and the agent then asks after all. Each
+  level's name, said to a screen reader, says what it lets the agents do.
+  - Test: `workspace::tests::projects::the_board_sets_its_autonomy`.

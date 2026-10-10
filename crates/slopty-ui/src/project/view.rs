@@ -24,7 +24,7 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    NativeCounts, ProjectId, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    Autonomy, NativeCounts, ProjectId, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
 use slopty_proto::thread::AgentId;
@@ -84,6 +84,8 @@ pub enum ProjectEvent {
     Act(TaskId, TaskAction),
     /// Push the target after each merge, or stop.
     SetPush(bool),
+    /// Let the project's agents go this far before they ask the person.
+    SetAutonomy(Autonomy),
     /// Check each task's work by this command; an empty one is none.
     SetChecks {
         /// The verifier command.
@@ -595,6 +597,24 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
+/// The autonomy control's name, said to a screen reader.
+pub(crate) const AUTONOMY: &str = "Autonomy";
+/// What the autonomy control says under it at Own: a company's managed Claude Code that turns
+/// auto mode off starts its agents asking, by itself.
+pub(crate) const MANAGED_OWN: &str =
+    "A managed Claude Code with auto mode turned off starts these agents in default";
+
+/// Each level's word on the autonomy control, and what it lets the agents do.
+const fn autonomy_words(level: Autonomy) -> (&'static str, &'static str) {
+    match level {
+        Autonomy::Ask => {
+            ("Ask", "Ask: an edit or a command the agent's rules do not allow asks you")
+        }
+        Autonomy::Edits => ("Edits", "Edits: edits in a task's worktree go without asking"),
+        Autonomy::Own => ("Own", "Own: agents go on their own within their sandbox"),
+    }
+}
+
 /// What leads the board's progress line once the orchestrator says the goal is met.
 pub(crate) const GOAL_MET: &str = "Goal met";
 /// What leads the progress line's next step.
@@ -743,6 +763,7 @@ impl ProjectView {
         let meta = div()
             .id("project-place")
             .debug_selector(|| "project-place".to_owned())
+            .flex_1()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -759,9 +780,71 @@ impl ProjectView {
             .pt(px(sp.md))
             .pb(px(sp.sm))
             .child(title)
-            .child(meta)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(sp.sm))
+                    .child(meta)
+                    .child(self.autonomy(project.autonomy, cx)),
+            )
+            .children((project.autonomy == Autonomy::Own).then(|| {
+                crate::kit::typed(div(), theme.roles().metadata)
+                    .debug_selector(|| "project-autonomy-managed".to_owned())
+                    .text_color(hsla(s.text_muted))
+                    .child(MANAGED_OWN)
+            }))
             .children(self.standing(board))
             .child(self.bar(board))
+    }
+
+    /// How far the project's agents go before they ask the person, the person's to set:
+    /// `MonoCode`'s segmented track, Ask, Edits and Own, the level now on the selected wash. A
+    /// press of another level says it to the server.
+    fn autonomy(&self, now: Autonomy, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let sp = theme.spacing;
+        let options = [Autonomy::Ask, Autonomy::Edits, Autonomy::Own].map(|level| {
+            let (word, said) = autonomy_words(level);
+            let chosen = level == now;
+            let id = format!("project-autonomy-{}", word.to_lowercase());
+            let selector = id.clone();
+            let el = crate::kit::typed(div(), theme.roles().metadata)
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::RadioButton)
+                .aria_label(said)
+                .aria_selected(chosen)
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(px(theme.density.chip))
+                .px(px(sp.sm))
+                .rounded(px(crate::kit::thumb_radius(theme)))
+                .cursor_pointer()
+                .child(word);
+            // The level now on the selected wash; the rest quiet, rising under the pointer.
+            let el = el.when(chosen, |el| el.bg(hsla(s.selected)).text_color(hsla(s.text))).when(
+                !chosen,
+                |el| {
+                    el.text_color(hsla(s.text_secondary))
+                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                },
+            );
+            tab_stop(el, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                if !chosen {
+                    cx.emit(ProjectEvent::SetAutonomy(level));
+                }
+            }))
+        });
+        crate::kit::track(theme)
+            .id("project-autonomy")
+            .debug_selector(|| "project-autonomy".to_owned())
+            .role(Role::RadioGroup)
+            .aria_label(AUTONOMY)
+            .flex_none()
+            .children(options)
     }
 
     /// Where the goal stands, as the orchestrator last said it

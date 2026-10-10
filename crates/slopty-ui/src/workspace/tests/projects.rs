@@ -1669,3 +1669,52 @@ fn the_board_says_where_the_goal_stands(cx: &mut TestAppContext) {
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l == "Goal met. All three merged and pushed"), "{said:#?}");
 }
+
+/// The board's head shows how far the project's agents go before they ask, and sets it: a
+/// press of another level says it to the server, the person's word. At Own it says a managed
+/// Claude Code with auto mode off starts the agents asking; a press of the level already set
+/// says nothing.
+#[gpui::test]
+fn the_board_sets_its_autonomy(cx: &mut TestAppContext) {
+    use slopty_proto::project::Autonomy;
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let term = TermRef { worker: fixtures_worker(&view, cx, orchestrator), session: orchestrator };
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let place = cx.debug_bounds("project-place").expect("the place line");
+    let control = cx.debug_bounds("project-autonomy").expect("the control");
+    assert!(place.right() <= control.left(), "after the place: {place:?} {control:?}");
+    assert!(cx.debug_bounds("project-autonomy-managed").is_none(), "Ask says nothing more");
+
+    click(cx, "project-autonomy-own");
+    let set = sent(&mut queue, cx, done);
+    assert!(
+        matches!(
+            set.as_slice(),
+            [Verb::ProjectSet { autonomy: Some(Autonomy::Own), push: None, verifier: None, .. }]
+        ),
+        "{set:?}"
+    );
+
+    let mut record = project("board", Some(term));
+    record.autonomy = Autonomy::Own;
+    let update = ProjectUpdate {
+        project: fixtures::id("board"),
+        record: Some(record),
+        task: None,
+        native: None,
+        entry: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(11, update, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-autonomy-managed").is_some(), "the managed build's word");
+    click(cx, "project-autonomy-own");
+    assert!(sent(&mut queue, cx, done).is_empty(), "the level already set says nothing");
+}

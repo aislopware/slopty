@@ -35,6 +35,10 @@ Heading
 Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
+RadioGroup │ Autonomy
+RadioButton │ Ask: an edit or a command the agent's rules do not allow asks you
+RadioButton │ Edits: edits in a task's worktree go without asking
+RadioButton │ Own: agents go on their own within their sandbox
 ProgressIndicator │ 0 of 2 merged │ 0%
 List │ Working
 Heading │ Working

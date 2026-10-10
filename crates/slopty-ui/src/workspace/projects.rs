@@ -132,6 +132,19 @@ fn set_push(project: &ProjectId, push: bool) -> Verb {
     }
 }
 
+/// The person's change to how far `project`'s agents go before they ask.
+fn set_autonomy(project: &ProjectId, autonomy: Autonomy) -> Verb {
+    Verb::ProjectSet {
+        project: project.clone(),
+        orchestrator: None,
+        verifier: None,
+        push: None,
+        limits: LimitsChange::default(),
+        metadata: None,
+        autonomy: Some(autonomy),
+    }
+}
+
 /// The person's change to how `project`'s work is checked: its verifier command, empty for
 /// none.
 fn set_checks(project: &ProjectId, verifier: String) -> Verb {
@@ -608,6 +621,9 @@ impl WorkspaceView {
                 }
                 ProjectEvent::SetPush(push) => {
                     this.send_to_server(set_push(&asked, *push), |_, _| (), cx);
+                }
+                ProjectEvent::SetAutonomy(level) => {
+                    this.send_to_server(set_autonomy(&asked, *level), |_, _| (), cx);
                 }
                 ProjectEvent::Delete => {
                     this.send_to_server(
