@@ -126,6 +126,17 @@ pub struct Repo {
     /// Files of a review asked whole past the review's budget, by the blobs of their two
     /// sides ([`GitOp::FileDiff`]).
     pub whole: HashMap<Sides, Whole>,
+    /// Blobs a review asked for by id, a picture's sides ([`GitOp::Blob`]).
+    pub blobs: HashMap<String, Blob>,
+}
+
+/// A blob a review asked for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Blob {
+    /// Its bytes came.
+    Came(Arc<[u8]>),
+    /// They could not be read, in the worker's words.
+    Failed(String),
 }
 
 /// A file's blobs on its two sides, as a review names them: `None` for a side it lacks.
@@ -343,8 +354,11 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         GitDone::FileDiff { from, to, patch } => {
             repo.whole.insert((from, to), Whole::Came(Arc::from(patch)));
         }
-        // Asked by the review tile, which keeps what they bring; nothing here waits on them.
-        GitDone::Blob { .. } | GitDone::PullReviewed { .. } => {}
+        GitDone::Blob { blob, bytes } => {
+            repo.blobs.insert(blob, Blob::Came(Arc::from(bytes)));
+        }
+        // Asked by the review tile, which says how it went; nothing here waits on it.
+        GitDone::PullReviewed { .. } => {}
         GitDone::WorktreeRemoved { branch, branch_removed } => {
             let said = match branch {
                 Some(branch) if branch_removed => {
@@ -399,9 +413,13 @@ fn missed(
             repo.scripts = None;
             repo.said = Some((request, said(words)));
         }
-        // A file that could not be read whole says why where it was asked.
+        // A file that could not be read whole says why where it was asked, as a picture's side
+        // does.
         GitOp::FileDiff { from, to } => {
             repo.whole.insert((from.clone(), to.clone()), Whole::Failed(words));
+        }
+        GitOp::Blob { blob } => {
+            repo.blobs.insert(blob.clone(), Blob::Failed(words));
         }
         _ => repo.said = Some((request, said(words))),
     }
@@ -423,6 +441,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::Worktrees
             | GitOp::Scripts
             | GitOp::FileDiff { .. }
+            | GitOp::Blob { .. }
     )
 }
 

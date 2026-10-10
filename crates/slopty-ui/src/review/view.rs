@@ -70,6 +70,7 @@ mod authors;
 mod file_menu;
 mod gaps;
 mod keys;
+pub(in crate::review) mod sides;
 mod whole;
 
 pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
@@ -380,6 +381,10 @@ pub struct ReviewView {
     files_open: bool,
     /// The lines of each file side a stretch was opened in, by its blob, once they came.
     sides: HashMap<String, Rc<[String]>>,
+    /// Pictures' sides decoded, by blob, once their bytes came ([`sides`]).
+    pictures: std::cell::RefCell<HashMap<String, Arc<gpui::Image>>>,
+    /// The blobs of pictures' sides asked of the worker for this tile.
+    blobs_asked: std::cell::RefCell<HashSet<String>>,
     /// The opened stretches' lines as drawn, by the file's place and the stretch.
     context: HashMap<(usize, usize), Rc<[Line]>>,
     _subscriptions: Vec<Subscription>,
@@ -529,6 +534,8 @@ impl ReviewView {
             viewed: HashSet::new(),
             files_open: false,
             sides: HashMap::new(),
+            pictures: std::cell::RefCell::default(),
+            blobs_asked: std::cell::RefCell::default(),
             context: HashMap::new(),
             _subscriptions: vec![writing, hearing, watching],
         };
@@ -2120,11 +2127,7 @@ impl ReviewView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (name, dir) = lines::name_first(&file.path);
-        let status = match (&file.from, &file.to) {
-            (None, Some(_)) => Some("Added"),
-            (Some(_), None) => Some("Removed"),
-            _ => None,
-        };
+        let status = sides::head_words(file).map(SharedString::from);
         let radius = px(theme.radii.sm);
         let open = !self.folded.contains(&file.path);
         let side = px(theme.typography.icon());
@@ -2171,7 +2174,16 @@ impl ReviewView {
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(dir.to_owned())),
         )
-        .children(status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)))
+        .children(status.map(|st| {
+            div()
+                .debug_selector(move || format!("review-head-status-{at}"))
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(hsla(s.text_muted))
+                .child(st)
+        }))
         .children(kit::changes(theme, file.patch.added, file.patch.removed));
         let here = self.stands_on(at, None);
         let head = div()
@@ -2207,10 +2219,11 @@ impl ReviewView {
         {
             return self.whole_row(at, file.patch.clipped_lines, cx);
         }
-        let words = match self.model.file(at) {
-            Some(f) if !f.is_text() => "Binary file",
-            _ => "No lines to show",
-        };
+        if let Some(row) = self.sides_row(at, cx) {
+            return row;
+        }
+        let words =
+            self.model.file(at).map_or_else(|| "No lines to show".to_owned(), sides::bare_words);
         div()
             .px(px(self.theme.spacing.md))
             .py(px(self.theme.spacing.sm))

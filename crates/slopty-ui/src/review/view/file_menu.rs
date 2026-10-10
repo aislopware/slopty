@@ -102,7 +102,7 @@ impl ReviewView {
     }
 
     /// The file at `at`'s whole path on its machine, once the repository's root is known.
-    fn whole_path(&self, at: usize, cx: &App) -> Option<String> {
+    pub(super) fn whole_path(&self, at: usize, cx: &App) -> Option<String> {
         let path = &self.model.file(at)?.path;
         let root = self.root(cx)?;
         Some(format!("{}/{path}", root.trim_end_matches('/')))

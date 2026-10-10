@@ -103,11 +103,15 @@ impl ReviewView {
         }
     }
 
-    /// Draw the row of every file left out again: its reading moved on.
+    /// Draw the row of every file left out, and of every picture, again: its reading moved
+    /// on, or its sides' bytes came.
     pub(super) fn redraw_left_out(&self) {
         for (ix, row) in self.rows.iter().enumerate() {
             if let Row::Bare(at) = *row
-                && self.model.file(at).is_some_and(|f| f.patch.clipped_lines > 0)
+                && self.model.file(at).is_some_and(|f| {
+                    f.patch.clipped_lines > 0
+                        || matches!(f.kind, slopty_proto::thread::wire::FileKind::Image { .. })
+                })
             {
                 self.list.remeasure_items(ix..ix.saturating_add(1));
             }

@@ -1192,3 +1192,154 @@ fn a_narrow_tile_goes_to_a_file_from_its_menu(cx: &mut TestAppContext) {
     click(cx, "review-files-file-2");
     assert_eq!(view.read_with(cx, |v, _| v.cursor_file()), Some(2));
 }
+
+/// What a file's head and its empty row say of a rename, a change of mode, a picture and a file
+/// too large: never "Binary file" or "No lines to show" for what has a name.
+#[test]
+fn a_rename_a_mode_and_a_large_file_are_said_in_words() {
+    use slopty_proto::thread::wire::{FileKind, Modes};
+
+    use super::view::sides::{bare_words, head_words, mode_words};
+
+    let exec = |from, to| mode_words(Modes { from, to });
+    assert_eq!(exec(0o100_644, 0o100_755), "Made executable");
+    assert_eq!(exec(0o100_755, 0o100_644), "No longer executable");
+    assert_eq!(exec(0o100_644, 0o120_000), "Now a symbolic link");
+    assert_eq!(exec(0o120_000, 0o100_755), "No longer a symbolic link");
+    assert_eq!(exec(0o100_644, 0o160_000), "Mode 100644 \u{2192} 160000");
+
+    let mut renamed = file("src/new.rs", &[], 0, 0);
+    renamed.patch.hunks.clear();
+    renamed.old_path = Some("src/old.rs".to_owned());
+    assert_eq!(head_words(&renamed).as_deref(), Some("Renamed from old.rs"));
+    assert_eq!(bare_words(&renamed), "Moved with no change to its lines");
+    renamed.old_path = Some("lib/old.rs".to_owned());
+    renamed.modes = Some(Modes { from: 0o100_644, to: 0o100_755 });
+    assert_eq!(
+        head_words(&renamed).as_deref(),
+        Some("Moved from lib/old.rs \u{b7} Made executable")
+    );
+    assert_eq!(bare_words(&renamed), "Made executable, with no change to its lines");
+
+    let mut added = file("a.png", &[], 0, 0);
+    added.from = None;
+    assert_eq!(head_words(&added).as_deref(), Some("Added"));
+    added.kind = FileKind::TooLarge { bytes: 6 << 20 };
+    assert_eq!(bare_words(&added), "6.0 MB, too large to show its changes here");
+    added.kind = FileKind::Binary;
+    assert_eq!(bare_words(&added), "Binary file");
+}
+
+/// A picture shows its two sides, each asked of the worker by its blob once, the first time
+/// its row is drawn: one that came is drawn, one that could not be read says why. A text file
+/// too large to cut says its size and opens whole in a tile of its own once the repository's
+/// root is known.
+#[gpui::test]
+fn a_picture_shows_both_sides_and_a_large_file_opens_whole(cx: &mut TestAppContext) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome, GitStatus};
+    use slopty_proto::thread::wire::FileKind;
+
+    /// A one-pixel PNG.
+    const PIXEL: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    let (view, hub, sent, cx) = tile_in(cx, 1200.0, Some("/w/repo"));
+    let heard: Rc<RefCell<Vec<ReviewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
+            if matches!(event, ReviewEvent::OpenFile { .. }) {
+                into.borrow_mut().push(event.clone());
+            }
+        })
+        .detach();
+    });
+    let thread = sent
+        .borrow()
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Review { thread, .. }) => Some(*thread),
+            _ => None,
+        })
+        .expect("the review was asked");
+    let bare = |path: &str, kind| {
+        let mut file = file(path, &[], 0, 0);
+        file.patch.hunks.clear();
+        file.kind = kind;
+        file
+    };
+    let review = Review {
+        scope: ReviewScope::Turn(TurnId(1)),
+        from: None,
+        to: None,
+        files: vec![
+            bare("logo.png", FileKind::Image { bytes: 2_048 }),
+            bare("data.json", FileKind::TooLarge { bytes: 6 << 20 }),
+        ],
+        absent: None,
+    };
+    sent.borrow_mut().clear();
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(review)), cx));
+    cx.run_until_parked();
+    let blobs = |sent: &Sent| -> Vec<(u64, String)> {
+        sent.borrow()
+            .iter()
+            .filter_map(|m| match m {
+                ClientMsg::Git { request, op: GitOp::Blob { blob }, .. } => {
+                    Some((*request, blob.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let asked = blobs(&sent);
+    let names: Vec<&str> = asked.iter().map(|(_, b)| b.as_str()).collect();
+    assert_eq!(names, ["logo.png@old", "logo.png@new"], "each side once");
+    assert!(cx.debug_bounds("review-picture-before-0").is_some());
+    assert!(cx.debug_bounds("review-picture-after-0").is_some());
+
+    let (old, new) = (asked[0].0, asked[1].0);
+    let came = GitDone::Blob { blob: "logo.png@new".to_owned(), bytes: PIXEL.to_vec() };
+    hub.update(cx, |hub, cx| hub.git_done(new, GitOutcome::Done(came), cx));
+    let failed = GitOutcome::Failed { said: "fatal: bad object".to_owned() };
+    hub.update(cx, |hub, cx| hub.git_done(old, failed, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(blobs(&sent).len() == 2, "nothing asked again");
+    let pictures = view.read_with(cx, |v, _| v.pictures_held());
+    assert_eq!(pictures, ["logo.png@new"], "the side that came is decoded");
+
+    assert!(cx.debug_bounds("review-too-large-1").is_some(), "the large file says its size");
+    assert!(cx.debug_bounds("review-open-whole-1").is_none(), "no root, no open");
+    let status = sent.borrow().iter().find_map(|m| match m {
+        ClientMsg::Git { request, op: GitOp::Status, .. } => Some(*request),
+        _ => None,
+    });
+    let root = GitStatus {
+        root: "/r".to_owned(),
+        forge: None,
+        branch: Some("main".to_owned()),
+        head: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        files: Vec::new(),
+        more: 0,
+    };
+    let status = status.unwrap_or_else(|| {
+        hub.update(cx, |hub, cx| hub.git_op("/w/repo", GitOp::Status, cx)).expect("asked")
+    });
+    let done = GitOutcome::Done(GitDone::Status(Box::new(root)));
+    hub.update(cx, |hub, cx| hub.git_done(status, done, cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    click(cx, "review-open-whole-1");
+    assert_eq!(*heard.borrow(), [ReviewEvent::OpenFile { path: "/r/data.json".to_owned() }]);
+}

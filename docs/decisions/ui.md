@@ -9562,3 +9562,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::agent_tile::a_claude_thread_where_policy_keeps_the_hooks_off_says_so`,
     `net::tests::a_failed_dial_is_told_by_its_kind` and
     `server::tests::each_kind_of_failed_dial_is_its_own_status` (slopty-app).
+
+- ✅ **A review says what a file is: a rename, a mode, a picture, a file too large** (2026-10-11,
+  readiness audit item 18's drawing; W's half carries `FileDiff::{old_path, kind, modes}`).
+  - **The defect.** A renamed file read as a removal and an addition, a picture and a text
+    file over 4 MiB both said "Binary file", and a change of the executable bit said "No lines
+    to show".
+  - **The head.** A renamed file's head says where it was: "Renamed from old.rs" when it kept
+    its folder, "Moved from lib/old.rs" when it did not. A change of mode is said in words
+    ("Made executable", "No longer executable", "Now a symbolic link", "No longer a symbolic
+    link", else both modes), after any other status, joined by a middle dot. The words cut
+    with an ellipsis rather than push the counts off the row.
+  - **The empty row.** A rename or a change of mode with no change to its lines says so where
+    the lines would be.
+  - **A picture** shows its two sides beside each other, "Before" and "After" (one of them for
+    a picture added or removed), fitted in a 160-point well, with its size under them. Each
+    side's bytes are asked of the worker by blob (`GitOp::Blob`), once per tile, the first
+    time the row is drawn, so a review of many pictures fetches only those scrolled to.
+    The client's git book keeps the bytes, and the tile decodes each side once. A side that
+    could not be read says why in its well.
+  - **A text file too large to cut** says its size ("6.0 MB, too large to show its changes
+    here") with "Open the whole file", which opens it in a tile of its own once the
+    repository's root is known.
+  - **A blob read is a read.** The git book counted any op it did not list as a change, which
+    would have read the status again after every picture's side. `GitOp::Blob` is now listed
+    with the reads.
+  - **Deleted:** `conversation::diff::blocks`. Only its own tests called it; the review, the
+    face and the thread view all go through `thread_blocks`. Its tests now run over
+    `thread_blocks`, so `diff.rs` no longer names `slopty_proto::conversation`.
+  - Tests: `review::tests::a_rename_a_mode_and_a_large_file_are_said_in_words`,
+    `review::tests::a_picture_shows_both_sides_and_a_large_file_opens_whole`.

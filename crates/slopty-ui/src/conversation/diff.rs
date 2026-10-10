@@ -14,7 +14,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use slopty_proto::conversation::{Hunk, Patch};
+use slopty_proto::thread::Patch;
 
 use crate::highlight::{self, Span, Syntax};
 
@@ -64,26 +64,15 @@ pub struct Block {
     pub lines: Vec<Line>,
 }
 
-/// The line numbers and colours of `patch` for a file at `path`.
-#[must_use]
-pub fn blocks(path: &str, patch: &Patch) -> Rc<[Block]> {
-    let syntax = Syntax::for_path(path, "");
-    patch.hunks.iter().map(|hunk| block(hunk, syntax)).collect()
-}
-
 /// The line numbers and colours of a thread's `patch` for a file at `path`.
 #[must_use]
-pub fn thread_blocks(path: &str, patch: &slopty_proto::thread::Patch) -> Rc<[Block]> {
+pub fn thread_blocks(path: &str, patch: &Patch) -> Rc<[Block]> {
     let syntax = Syntax::for_path(path, "");
     patch
         .hunks
         .iter()
         .map(|h| block_of((h.old_start, h.new_start), h.heading.clone(), &h.lines, syntax))
         .collect()
-}
-
-fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
-    block_of((hunk.old_start, hunk.new_start), hunk.heading.clone(), &hunk.lines, syntax)
 }
 
 fn block_of(
@@ -396,6 +385,8 @@ pub const SUMMARY_LINES: usize = 12;
 
 #[cfg(test)]
 mod tests {
+    use slopty_proto::thread::detail::Hunk;
+
     use super::*;
 
     fn hunk(lines: &[&str]) -> Patch {
@@ -420,7 +411,7 @@ mod tests {
     #[test]
     fn lines_are_numbered_on_the_side_they_are_on() {
         let patch = hunk(&[" alpha", "-beta", "+BETA", " gamma", "\\ No newline at end of file"]);
-        let blocks = blocks("notes.txt", &patch);
+        let blocks = thread_blocks("notes.txt", &patch);
         let lines = &blocks[0].lines;
         let numbers: Vec<_> =
             lines.iter().map(|l| (l.kind, l.old, l.new, l.text.as_str(), l.no_newline)).collect();
@@ -441,7 +432,7 @@ mod tests {
     #[test]
     fn each_side_is_coloured_on_its_own() {
         let patch = hunk(&[" let a = 1;", "-let s = \"open", "+let s = 2;", " let b = 3;"]);
-        let blocks = blocks("main.rs", &patch);
+        let blocks = thread_blocks("main.rs", &patch);
         let added = blocks[0].lines.iter().find(|l| l.kind == Kind::Added).unwrap();
         let spans = added.spans.as_ref().unwrap();
         assert!(
@@ -488,7 +479,7 @@ mod tests {
             "+// something else entirely",
             "+fn new_name() {}",
         ]);
-        let blocks = blocks("lib.rs", &patch);
+        let blocks = thread_blocks("lib.rs", &patch);
         let emph = |ix: usize| {
             let line = &blocks[0].lines[ix];
             line.emph.iter().filter_map(|r| line.text.get(r.clone())).collect::<Vec<_>>()
@@ -505,9 +496,9 @@ mod tests {
     fn a_hunk_keeps_its_heading() {
         let mut patch = hunk(&[" a", "-b", "+B"]);
         patch.hunks[0].heading = Some("impl Client {".to_owned());
-        assert_eq!(blocks("x.rs", &patch)[0].heading.as_deref(), Some("impl Client {"));
+        assert_eq!(thread_blocks("x.rs", &patch)[0].heading.as_deref(), Some("impl Client {"));
         patch.hunks[0].heading = Some("  ".to_owned());
-        assert_eq!(blocks("x.rs", &patch)[0].heading, None);
+        assert_eq!(thread_blocks("x.rs", &patch)[0].heading, None);
     }
 
     /// A tab widens to spaces, and the colours after it move with the text.
