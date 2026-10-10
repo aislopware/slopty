@@ -10,7 +10,9 @@
 //!    app writes it to its settings;
 //! 2. both workers come from the directory, nobody adds them, and each gets a shell that
 //!    round-trips a command (far's over the shaped link, at the address the server listed);
-//! 3. a permission hook played on far through `slopty hook` badges the pill from near's shell;
+//! 3. a permission hook played on far through `slopty hook` badges the pill from near's shell, and
+//!    Deny pressed on its note as a phone woken for the press answers it (no window, a link of the
+//!    press's own to the server) reaches the held relay, and the request leaves the tile;
 //! 4. far is killed and restarted twice: once as soon as the app shows it down, which its own link
 //!    finds again; once after the server has called it unreachable and the app holds it, where the
 //!    server listing it online again is what wakes the dial. Each is measured and bounded.
@@ -20,10 +22,11 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
     use slopty_e2e::Dump;
-    use slopty_e2e::harness::{ServerFleet, TAILNET, artifacts_dir};
+    use slopty_e2e::harness::{ServerFleet, TAILNET, artifacts_dir, slopty_json};
     use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
 
     /// A round trip over the shaped link, a shell starting, the directory arriving.
@@ -108,6 +111,15 @@ mod tests {
         entry.and_then(|w| w["liveness"].as_str()).unwrap_or_default().to_owned()
     }
 
+    /// Far's agent's thread as the server reads it, by the terminal it runs in.
+    async fn thread_on(fleet: &ServerFleet, session: &str) -> serde_json::Value {
+        let term = format!("{FAR}/{session}");
+        let args = ["agent", "read", "--term", term.as_str()];
+        slopty_json(fleet.server.address(), &fleet.dir.path().join("cli"), &args, b"")
+            .await
+            .unwrap()
+    }
+
     /// Wait until nothing moves, so a spring still running cannot end up in the golden.
     async fn settled(fleet: &mut ServerFleet) {
         let mut last = fleet.driver.dump().await.unwrap();
@@ -185,7 +197,7 @@ mod tests {
         let session_far = shell_on(&fleet.driver.dump().await.unwrap(), FAR).unwrap().to_owned();
         focus_shell_on(&mut fleet, NEAR).await;
         // The worker holds the request for the person, so the relay stays up while the test runs.
-        let held = fleet
+        let mut held = fleet
             .far
             .hold_hook(&session_far, "PermissionRequest", r#","tool_name":"Bash""#)
             .await
@@ -231,8 +243,36 @@ mod tests {
         let path = fleet.dir.path().join("through-server.png");
         let frame = fleet.driver.render(&path).await.unwrap();
         assert_matches("through-server", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+
+        // (3b) Deny pressed on the note, answered as a phone woken in the background answers
+        // it: the note's keys, the server the settings name, a link of the press's own.
+        let read = thread_on(&fleet, &session_far).await;
+        let ask = read["requests"][0]["ask"].as_str().map(str::to_owned);
+        let ask = ask.unwrap_or_else(|| panic!("far's thread holds a request: {read}"));
+        let worker: slopty_core::WorkerId = read["worker"].as_str().unwrap().parse().unwrap();
+        // Spelled as `slopty_platform::notify::info` keys a note, which builds on Apple only.
+        let info = BTreeMap::from([
+            ("worker".to_owned(), worker.as_uuid().as_u128().to_string()),
+            ("session".to_owned(), session_far.clone()),
+            ("ask".to_owned(), ask),
+        ]);
+        let pressed = Instant::now();
+        fleet.driver.press_note("deny", info).await.unwrap();
+        let status = tokio::time::timeout(STEP, held.wait()).await;
+        let status = status.expect("the held relay got its answer").unwrap();
+        println!(
+            "MEASURE through-server: a pressed Deny reached far's held relay within {:.0} ms",
+            pressed.elapsed().as_secs_f64() * 1e3
+        );
+        assert!(status.success(), "the relay ends well on an answer: {status}");
+        let read = thread_on(&fleet, &session_far).await;
+        assert_eq!(read["requests"].as_array().map(Vec::len), Some(0), "{read}");
+        fleet
+            .driver
+            .wait_for("the request gone from far's tile", STEP, |d| !has(d, "Button", "Allow"))
+            .await
+            .unwrap();
         // Far's agent quits as the person's /exit does, so its tile shows the shell again.
-        drop(held);
         fleet
             .far
             .play_hook(&session_far, "SessionEnd", r#","reason":"prompt_input_exit""#)

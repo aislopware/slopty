@@ -9662,7 +9662,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `verdict::tests::a_press_names_its_thread_or_terminal_and_its_request`,
     `…::a_verdict_answers_with_the_choice_that_allows_or_denies_once` (slopty-app), and
     `notify::tests::a_tap_before_the_app_listens_arrives_once_it_does_exactly_once`, now
-    including the unheard press (slopty-platform).
-  - Not covered by a test: pressing a delivered note's button on the simulator. That needs
+    including the unheard press (slopty-platform). The e2e
+    `the_app_finds_its_workers_through_the_server` (`cargo xtask e2e through-server`) presses
+    Deny on far's held request with the test socket's `PressNote`, which takes the same
+    `verdict::answer_alone` the phone does. It proves the route end to end: the settings'
+    server, a link of the press's own, the held relay ending on its answer, and the request
+    gone from the tile.
+  - Not covered by a test: the system's own press of a delivered note's button. That needs
     XCUITest or synthetic input, and the session rules forbid the latter. The person checks it
     on a device.

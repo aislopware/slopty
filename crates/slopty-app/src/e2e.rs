@@ -164,6 +164,7 @@ pub(crate) fn serve(
                 // The system's own answers, from the async task: nothing on screen changes.
                 Command::PushRegister { token } => push_register(&token).await,
                 Command::OpenPush { payload } => open_push(&payload),
+                Command::PressNote { action, info } => press_note(action, info).await,
                 Command::Delivered => {
                     let notes = slopty_platform::notify::delivered().await;
                     Reply::Delivered {
@@ -528,6 +529,26 @@ fn open_push(payload: &str) -> Reply {
         Ok(note) => Reply::Opened {
             note: slopty_e2e::DeliveredNote { id: note.id, title: note.title, body: note.body },
         },
+        Err(e) => error(&e),
+    }
+}
+
+/// [`Command::PressNote`]: the press answered as one nobody in the app listens to, on a thread
+/// of its own since it blocks ([`crate::verdict::answer_alone`]).
+async fn press_note(action: String, info: std::collections::BTreeMap<String, String>) -> Reply {
+    let tap =
+        slopty_platform::notify::Tap { id: "e2e-press".to_owned(), info, action: Some(action) };
+    let (done_tx, done_rx) = oneshot::channel();
+    let spawned =
+        std::thread::Builder::new().name("slopty-e2e-press".to_owned()).spawn(move || {
+            let _sent = done_tx.send(crate::verdict::answer_alone(&tap));
+        });
+    if let Err(e) = spawned {
+        return error(&e);
+    }
+    match done_rx.await {
+        Ok(crate::verdict::Answered::Sent) => Reply::Ok,
+        Ok(other) => Reply::Error { message: format!("{other:?}") },
         Err(e) => error(&e),
     }
 }
@@ -897,6 +918,7 @@ fn apply(
         | Command::PushRegister { .. }
         | Command::OpenPush { .. }
         | Command::Delivered
+        | Command::PressNote { .. }
         | Command::KeepDragged { .. }
         | Command::DragOver { .. }
         | Command::DragDrop { .. }

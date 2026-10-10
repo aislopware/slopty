@@ -96,33 +96,10 @@ pub async fn answer(caller: &ServerCaller, verdict: Verdict) -> Answered {
 /// Answer `tap` with no window, then tell the system the press is done.
 ///
 /// It is what [`slopty_platform::notify::answer_unheard`] calls for a press nobody listens to,
-/// and it answers on a thread and a runtime of its own. A tap that is no verdict, or settings
-/// that name no server, is done at once.
+/// and it answers on a thread of its own ([`answer_alone`]).
 pub fn answer_unheard(tap: Tap) {
-    let Some(verdict) = verdict_of(&tap) else {
-        notify::taps_finished();
-        return;
-    };
-    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server;
-    let Some(server) = server else {
-        tracing::info!(id = tap.id, "a verdict pressed with no server set: not answered");
-        notify::taps_finished();
-        return;
-    };
     let spawned = std::thread::Builder::new().name("slopty-verdict".to_owned()).spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-        let answered = match runtime {
-            Ok(runtime) => runtime.block_on(async move {
-                let (task, _events) = match crate::net::serve_alone(server) {
-                    Ok(link) => link,
-                    Err(why) => return Answered::Failed(why),
-                };
-                let caller = task.caller();
-                let answered = tokio::time::timeout(ANSWER_WITHIN, answer(&caller, verdict)).await;
-                answered.unwrap_or_else(|_late| Answered::Failed("no answer in time".to_owned()))
-            }),
-            Err(e) => Answered::Failed(e.to_string()),
-        };
+        let answered = answer_alone(&tap);
         tracing::info!(id = tap.id, ?answered, "a verdict answered in the background");
         notify::taps_finished();
     });
@@ -130,6 +107,35 @@ pub fn answer_unheard(tap: Tap) {
         tracing::error!(error = %e, "the background answer's thread");
         notify::taps_finished();
     }
+}
+
+/// Answer `tap` through the server the settings name, within [`ANSWER_WITHIN`].
+///
+/// It runs on a runtime and a link of the call's own and blocks the calling thread, so it is
+/// called on one of its own. A tap that is no verdict, or settings that name no server, fail
+/// at once.
+#[must_use]
+pub fn answer_alone(tap: &Tap) -> Answered {
+    let Some(verdict) = verdict_of(tap) else {
+        return Answered::Failed("not an Allow or a Deny that names its request".to_owned());
+    };
+    let server = slopty_settings::Settings::load(&slopty_settings::path()).settings.client.server;
+    let Some(server) = server else {
+        return Answered::Failed("no server is set".to_owned());
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(e) => return Answered::Failed(e.to_string()),
+    };
+    runtime.block_on(async move {
+        let (task, _events) = match crate::net::serve_alone(server) {
+            Ok(link) => link,
+            Err(why) => return Answered::Failed(why),
+        };
+        let caller = task.caller();
+        let answered = tokio::time::timeout(ANSWER_WITHIN, answer(&caller, verdict)).await;
+        answered.unwrap_or_else(|_late| Answered::Failed("no answer in time".to_owned()))
+    })
 }
 
 #[cfg(test)]

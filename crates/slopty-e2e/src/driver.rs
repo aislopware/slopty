@@ -374,6 +374,20 @@ impl Driver {
         }
     }
 
+    /// Press `action` ("allow" or "deny") on an approval note carrying `info`, as a press with
+    /// no window is answered: through the server, over a link of the press's own.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks, or the server did not take the answer (in its words).
+    pub async fn press_note(
+        &mut self,
+        action: &str,
+        info: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.ok(&Command::PressNote { action: action.to_owned(), info }).await
+    }
+
     /// The notes the Notification Centre shows for the app.
     ///
     /// # Errors

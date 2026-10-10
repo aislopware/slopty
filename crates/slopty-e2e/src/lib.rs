@@ -346,6 +346,18 @@ pub enum Command {
     },
     /// The notes the Notification Centre shows for the app ([`Reply::Delivered`]).
     Delivered,
+    /// Press `action` ("allow" or "deny") on an approval note carrying `info` (its `userInfo`,
+    /// keyed as `slopty_platform::notify::info` keys it), as a press nobody in the app listens
+    /// to is answered (`slopty_app::verdict::answer_alone`): the server the settings name is
+    /// reached over a link of the press's own, and the thread's request answered there. It
+    /// answers [`Reply::Ok`] once the server took the answer. A real press needs the person's
+    /// finger, or synthetic input into the simulator, which the tests never send.
+    PressNote {
+        /// The note's action identifier.
+        action: String,
+        /// What the note carries.
+        info: std::collections::BTreeMap<String, String>,
+    },
     /// Open a push whose APNs `payload` (its JSON) carries a sealed body, as the notification
     /// extension does, with the key and the token the app kept in the Keychain they share
     /// ([`Reply::Opened`]). `simctl push` hands a note straight to the system and never starts
