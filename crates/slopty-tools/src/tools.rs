@@ -943,7 +943,11 @@ mod tests {
             .iter()
             .map(|t| json!({ "name": t.name, "input_schema": *t.input_schema }))
             .collect();
-        insta::assert_json_snapshot!(tools);
+        // Sorted, so the snapshot does not hang on whether some build unified serde_json's
+        // `preserve_order` (CI's per-shard builds and a local one differ).
+        insta::with_settings!({ sort_maps => true }, {
+            insta::assert_json_snapshot!(tools);
+        });
     }
 
     #[tokio::test]
