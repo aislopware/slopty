@@ -198,11 +198,11 @@ const FOOTERS: &[(&str, &str)] = &[
     ("Interface", "Reading size is for agents' answers and your messages; text size for the rest"),
     (
         "Light terminal colours",
-        "An empty colour keeps the theme's own; the chrome follows the background",
+        "An empty colour keeps the theme's own; these colour the terminal alone",
     ),
     (
         "Dark terminal colours",
-        "An empty colour keeps the theme's own; the chrome follows the background",
+        "An empty colour keeps the theme's own; these colour the terminal alone",
     ),
     ("Font", "JetBrains Mono is built in. Zooming a tile changes its size for that tile only"),
     ("Text", "Text under the minimum contrast moves toward black or white; 1 keeps every colour"),

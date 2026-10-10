@@ -1941,7 +1941,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Fills and hairlines are the content mixed toward the chrome's text at fixed shares; dark
     sinks the bars and the navigator toward black, light darkens them toward the text and
     lifts what floats toward white. The variant is the background's (`Rgb::is_light`), not the
-    appearance's, and `settings::theme_for` derives again after `[colors]`.
+    appearance's, and `settings::theme_for` derives again after `[colors]`. Amended
+    2026-10-10 (decisions/settings.md, "A `[colors]` background colours the terminal alone"):
+    the chrome derives from the appearance's ground only, and the variant is the appearance's.
 
     | Step | Dark share | Dark | Light share | Light |
     |---|---|---|---|---|

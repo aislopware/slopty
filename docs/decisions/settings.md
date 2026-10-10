@@ -540,3 +540,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A file that still has either key loads, with an unknown-key warning for each.
   - Tests: `worker_choices` (slopty-settings), `daemon::tests` (now on `keep_awake`),
     `a_change_of_the_file_is_applied_as_it_is_read` (slopty-workerd), the `sized` tests.
+
+- ✅ **A `[colors]` background colours the terminal alone** (2026-10-10, orchestrator-first
+  audit §C.5). This replaces part of "The chrome is derived from the content" (decisions/ui.md).
+  Before, a background set in `[colors.dark]` or `[colors.light]` derived the whole chrome again
+  from it, and a light one made light chrome under a dark appearance. One terminal colour
+  should not re-skin the app: the chrome is the theme's, so it stays tuned and checked.
+  - **Gone.** `Theme::derive_chrome`, and `settings::theme_for`'s call to it.
+  - **Now.** The chrome and its elevation come from the appearance's ground.
+    `Theme::content` is that ground and `Theme::variant` reads it, so a custom background
+    repaints the grid and leaves the bars, panes and their variant as they were.
+  - The form's colour footers say so.
+  - Tests: `a_terminal_background_leaves_the_chrome_alone` (slopty-theme),
+    `a_custom_background_is_the_terminal_s_alone` (slopty-app `settings`).

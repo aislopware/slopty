@@ -124,7 +124,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, settings.colors.for_dark(variant == Variant::Dark));
-    theme.derive_chrome();
     theme.density = density(crate::TOUCH);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
     theme.behaviour.option_as_alt = match settings.terminal.option_as_alt {
@@ -292,17 +291,17 @@ mod tests {
         assert_eq!(theme_for(&s, true).terminal.fg, Rgb::hex(0x00c0_caf5));
     }
 
-    /// A background set in `[colors.dark]` carries the chrome with it: the surfaces are derived
-    /// from it, and a light one makes a light theme under a dark appearance.
+    /// A background set in `[colors.dark]` repaints the terminal alone: the chrome and the
+    /// variant stay the appearance's, even under a light background.
     #[test]
-    fn a_custom_background_carries_the_chrome() {
+    fn a_custom_background_is_the_terminal_s_alone() {
         let mut s = Settings::default();
-        s.colors.dark.background = Color(Some([0x28, 0x2a, 0x36]));
-        let t = theme_for(&s, true);
-        assert_eq!(t.surfaces, slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36)));
-        assert_ne!(t.surfaces, theme_for(&Settings::default(), true).surfaces);
+        let stock = theme_for(&s, true);
         s.colors.dark.background = Color(Some([0xfd, 0xf6, 0xe3]));
-        assert_eq!(theme_for(&s, true).variant(), Variant::Light, "the background decides");
+        let t = theme_for(&s, true);
+        assert_eq!(t.terminal.bg, Rgb::hex(0x00fd_f6e3));
+        assert_eq!((t.surfaces, t.elevation), (stock.surfaces, stock.elevation));
+        assert_eq!(t.variant(), Variant::Dark, "the appearance decides");
     }
 
     /// The editor opens on the file, or the commented defaults; a text that does not parse

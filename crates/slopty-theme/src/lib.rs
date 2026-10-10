@@ -1793,7 +1793,8 @@ pub struct Theme {
     pub terminal: TerminalPalette,
     /// Terminal behaviour.
     pub behaviour: Behaviour,
-    /// Chrome colours, derived from the terminal's background.
+    /// Chrome colours, derived from the variant's ground; a `[colors]` background changes the
+    /// terminal alone.
     pub surfaces: Surfaces,
     /// The shadow of what floats and the scrim under a modal.
     pub elevation: Elevation,
@@ -1839,26 +1840,17 @@ impl Theme {
         }
     }
 
-    /// Derive the chrome again from the terminal's background, after something changed it (a
-    /// `[colors]` background in the settings).
-    pub fn derive_chrome(&mut self) {
-        self.surfaces = Surfaces::derive(self.terminal.bg);
-        self.elevation = Elevation::of(self.terminal.bg);
-    }
-
-    /// The content step of the surface order: what tile headers and bodies sit on. It is the
-    /// terminal's background, whatever the settings made it, so a shell's grid, the body
-    /// round it and its focused header are one surface.
+    /// The content step of the surface order: what tile headers and bodies sit on, the ground.
+    /// A shell's grid is the same surface unless a `[colors]` background repaints the grid alone.
     #[must_use]
     pub const fn content(&self) -> Rgb {
-        self.terminal.bg
+        self.surfaces.ground
     }
 
-    /// Which variant the colours are: light when the terminal's background reads as light,
-    /// whatever the settings made it.
+    /// Which variant the chrome is: light when its ground reads as light.
     #[must_use]
     pub const fn variant(&self) -> Variant {
-        if self.terminal.bg.is_light() { Variant::Light } else { Variant::Dark }
+        if self.surfaces.ground.is_light() { Variant::Light } else { Variant::Dark }
     }
 
     /// How lit an unlit dot of the mark is, over this theme's content.
@@ -2473,18 +2465,16 @@ mod tests {
         }
     }
 
-    /// The chrome follows the terminal's background: a light scheme set in the settings
-    /// makes light chrome in its own tint, whatever the appearance asked for.
+    /// The chrome is the appearance's: a light terminal background set in the settings repaints
+    /// the grid alone, and the chrome, its ground and its variant stay dark.
     #[test]
-    fn the_chrome_follows_the_terminals_background() {
-        let mut theme = Theme::new(Variant::Dark);
+    fn a_terminal_background_leaves_the_chrome_alone() {
+        let dark = Theme::new(Variant::Dark);
+        let mut theme = dark.clone();
         theme.terminal.bg = Rgb::hex(0xfd_f6e3);
-        assert_eq!(theme.variant(), Variant::Light, "the variant is the background's");
-        theme.derive_chrome();
-        assert_eq!(theme.surfaces, Surfaces::derive(theme.content()));
-        assert_eq!(theme.elevation, Elevation::LIGHT);
-        let chrome = theme.surfaces.chrome;
-        assert!(chrome.r > chrome.b, "the cream survives in the chrome: {chrome:?}");
+        assert_eq!(theme.variant(), Variant::Dark, "the variant is the chrome's");
+        assert_eq!(theme.surfaces, dark.surfaces);
+        assert_eq!(theme.content(), dark.terminal.bg, "the content is the ground");
     }
 
     /// A fill is a mark, seen by its hue: saturated and mid-light, so the light warn reads
