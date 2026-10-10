@@ -249,10 +249,10 @@ mod tests {
         let read = thread_on(&fleet, &session_far).await;
         let ask = read["requests"][0]["ask"].as_str().map(str::to_owned);
         let ask = ask.unwrap_or_else(|| panic!("far's thread holds a request: {read}"));
-        let worker: slopty_core::WorkerId = read["worker"].as_str().unwrap().parse().unwrap();
+        let held_on: slopty_core::WorkerId = read["worker"].as_str().unwrap().parse().unwrap();
         // Spelled as `slopty_platform::notify::info` keys a note, which builds on Apple only.
         let info = BTreeMap::from([
-            ("worker".to_owned(), worker.as_uuid().as_u128().to_string()),
+            ("worker".to_owned(), held_on.as_uuid().as_u128().to_string()),
             ("session".to_owned(), session_far.clone()),
             ("ask".to_owned(), ask),
         ]);
