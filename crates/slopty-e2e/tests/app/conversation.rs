@@ -1496,11 +1496,19 @@ fn palette_up(d: &Dump) -> bool {
 /// The palette's line that watches the agent's screen, first.
 const WATCH: &str = "Watch the agent's screen";
 
-/// Open the palette on [`WATCH`] until it offers it first: the line shows only once the agent
-/// has a screen to watch.
+/// Open the palette on [`WATCH`] from the thread's composer until it offers it first. The line
+/// shows only to the thread, and only once the agent's screen has come with its call; the
+/// palette takes its lines as it opens, so one opened before that says no command matches and
+/// is closed and opened again.
 async fn watch_line(drv: &mut Driver) {
     let started = tokio::time::Instant::now();
     loop {
+        click(drv, "MultilineTextInput", "Message").await;
+        drv.wait_for("the composer focused", STEP, |d| {
+            d.a11y_node("MultilineTextInput", Some("Message")).is_some_and(|n| n.focused)
+        })
+        .await
+        .unwrap();
         drv.keys("cmd-shift-p").await.unwrap();
         drv.wait_for("the palette", STEP, palette_up).await.unwrap();
         drv.type_text(WATCH).await.unwrap();
@@ -1508,25 +1516,31 @@ async fn watch_line(drv: &mut Driver) {
             d.a11y.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.as_deref())
                 == Some(WATCH)
         };
-        let offered = drv.wait_for(WATCH, Duration::from_secs(2), first).await;
-        if offered.is_ok() {
+        let dump = drv
+            .wait_for(WATCH, STEP, |d| first(d) || any_label(d, "No command matches"))
+            .await
+            .unwrap();
+        if first(&dump) {
             return;
         }
-        assert!(started.elapsed() < STEP, "the palette never offered {WATCH}: {offered:?}");
+        assert!(started.elapsed() < STEP, "the palette never offered {WATCH}");
         close_palette(drv).await;
     }
 }
 
-/// Close the palette: the first Esc may only clear what was typed, the next closes it.
+/// Close the palette: the first Esc clears what was typed, the next closes it.
 async fn close_palette(drv: &mut Driver) {
-    for _ in 0..3 {
+    drv.keys("escape").await.unwrap();
+    let cleared = |d: &Dump| {
+        !palette_up(d)
+            || d.a11y_node("TextInput", Some("Command"))
+                .is_some_and(|n| n.value.as_deref() == Some(""))
+    };
+    let dump = drv.wait_for("the query cleared", STEP, cleared).await.unwrap();
+    if palette_up(&dump) {
         drv.keys("escape").await.unwrap();
-        let closed = drv.wait_for("the palette closed", Duration::from_secs(1), |d| !palette_up(d));
-        if closed.await.is_ok() {
-            return;
-        }
+        drv.wait_for("the palette closed", STEP, |d| !palette_up(d)).await.unwrap();
     }
-    panic!("the palette stayed open");
 }
 
 /// The screen an agent drives beside its thread: the agent's computer-use call names a window

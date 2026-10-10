@@ -39,7 +39,6 @@ Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: Check the editor's page scrolls
-Button │ Branch from here
 Button │ Copy message
 Article │ I'll look at the editor and scroll its page.
 Button │ Copy message
@@ -49,7 +48,6 @@ Status │ Working
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude
-Button │ Watch Synthetic editor
 Button │ Stop
 Group │ Status
 Status │ Claude Code, Working
