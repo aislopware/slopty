@@ -247,23 +247,54 @@ const DISABLE_AUTO: &str = "disableAutoMode";
 /// auto when nothing names a mode, so this is also what starts it in `default`.
 #[must_use]
 pub fn held_to_asking(args: Vec<String>, cwd: &Path) -> Vec<String> {
+    held_to(args, cwd, false)
+}
+
+/// `claude` arguments held as [`held_to_asking`] holds them, with auto mode open when `auto`.
+///
+/// With `auto` (a project whose agents go on their own) bypass mode stays locked off, and Claude
+/// Code's own auto mode decides. Either way Slopty's own tools (`mcp__slopty`) join the
+/// settings' allow list, so the agent's work with its project never waits on the person.
+#[must_use]
+pub fn held_to(args: Vec<String>, cwd: &Path, auto: bool) -> Vec<String> {
     with_settings(args, cwd, |doc| {
         let Some(root) = doc.as_object_mut() else { return };
         let permissions = root.entry("permissions").or_insert_with(|| json!({}));
         if !permissions.is_object() {
             *permissions = json!({});
         }
-        if let Some(permissions) = permissions.as_object_mut() {
-            permissions.insert(DISABLE_BYPASS.to_owned(), json!("disable"));
+        let Some(permissions) = permissions.as_object_mut() else { return };
+        permissions.insert(DISABLE_BYPASS.to_owned(), json!("disable"));
+        if auto {
+            permissions.remove(DISABLE_AUTO);
+        } else {
             permissions.insert(DISABLE_AUTO.to_owned(), json!("disable"));
+        }
+        let allow = permissions.entry("allow").or_insert_with(|| json!([]));
+        if !allow.is_array() {
+            *allow = json!([]);
+        }
+        if let Some(allow) = allow.as_array_mut()
+            && !allow.iter().any(|rule| rule == SLOPTY_TOOLS)
+        {
+            allow.push(json!(SLOPTY_TOOLS));
         }
     })
 }
+
+/// The permission rule that allows every tool of Slopty's MCP server ([`MCP_SERVER_NAME`]).
+pub const SLOPTY_TOOLS: &str = "mcp__slopty";
 
 /// Whether a settings document holds the lock [`held_to_asking`] puts on.
 #[must_use]
 pub fn locks_bypass(doc: &Value) -> bool {
     doc.pointer(&format!("/permissions/{DISABLE_BYPASS}")).is_some_and(|v| v == "disable")
+}
+
+/// Whether a settings document locks bypass mode off but leaves auto mode open ([`held_to`]).
+#[must_use]
+pub fn leaves_auto(doc: &Value) -> bool {
+    locks_bypass(doc) && doc.pointer(&format!("/permissions/{DISABLE_AUTO}")).is_none()
 }
 
 /// `args` with their one `--settings` (the caller's last one, read as Claude Code reads it,
@@ -745,7 +776,7 @@ mod tests {
     /// A run held to asking carries the locks on bypass and auto mode on its one `--settings`,
     /// beside the relay and the caller's own permissions; nothing else is added.
     #[test]
-    fn a_run_without_permission_flags_locks_bypass_and_auto_mode_off() {
+    fn a_held_run_locks_bypass_and_auto_mode_off_and_allows_slopty_s_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         let user = dir.path().join("user-settings.json");
         let settings = |out: &[String]| -> Value {
@@ -760,7 +791,7 @@ mod tests {
         assert_eq!(
             doc["permissions"],
             json!({
-                "allow": ["Bash(git *)"],
+                "allow": ["Bash(git *)", SLOPTY_TOOLS],
                 "defaultMode": "plan",
                 DISABLE_BYPASS: "disable",
                 DISABLE_AUTO: "disable",
@@ -773,8 +804,20 @@ mod tests {
             "only a locked run carries it"
         );
         let bare = held_to_asking(Vec::new(), dir.path());
-        let both = json!({ DISABLE_BYPASS: "disable", DISABLE_AUTO: "disable" });
+        let both =
+            json!({ DISABLE_BYPASS: "disable", DISABLE_AUTO: "disable", "allow": [SLOPTY_TOOLS] });
         assert_eq!(settings(&bare), json!({ "permissions": both }));
+        assert!(!leaves_auto(&settings(&bare)), "auto locked off too");
+        // A project whose agents go on their own: bypass stays locked, auto mode is open, even
+        // where the caller's settings had locked it.
+        let given = r#"{"permissions":{"disableAutoMode":"disable","allow":["mcp__slopty"]}}"#;
+        let own = held_to(["--settings", given].map(str::to_owned).to_vec(), dir.path(), true);
+        let own = settings(&own);
+        assert_eq!(
+            own["permissions"],
+            json!({ DISABLE_BYPASS: "disable", "allow": [SLOPTY_TOOLS] })
+        );
+        assert!(leaves_auto(&own) && locks_bypass(&own));
         let odd = held_to_asking(
             ["--settings", r#"{"permissions":true}"#].map(str::to_owned).to_vec(),
             dir.path(),

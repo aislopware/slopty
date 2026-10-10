@@ -161,7 +161,7 @@ impl Recipe {
                 args = slopty_agent::hooks::with_relay(args, relay, &cwd);
             }
             if agent.locked {
-                args = slopty_agent::hooks::held_to_asking(args, &cwd);
+                args = slopty_agent::hooks::held_to(args, &cwd, agent.auto);
             }
             if agent.mcp
                 && let Some(relay) = &launch.relay
@@ -605,6 +605,7 @@ mod tests {
             relay: false,
             mcp: false,
             locked: false,
+            auto: false,
             role: None,
         };
         let open = |command: &[&str]| Recipe {
@@ -676,6 +677,7 @@ mod tests {
             relay: true,
             mcp: false,
             locked: false,
+            auto: false,
             role: None,
         };
         let open = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
@@ -721,6 +723,7 @@ mod tests {
                 relay: false,
                 mcp: false,
                 locked: false,
+                auto: false,
                 role: None,
             }),
             ..recipe(&["/bin/zsh"])
@@ -750,6 +753,7 @@ mod tests {
             relay: true,
             mcp: true,
             locked: true,
+            auto: false,
             role: Some("You work on task 3.\nReport with task_report.".to_owned()),
         };
         let launch =
@@ -827,6 +831,7 @@ mod tests {
             relay: false,
             mcp: false,
             locked: false,
+            auto: false,
             role: None,
         };
         keeper.agent(a, Some(conversation("first")));

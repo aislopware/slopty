@@ -2058,7 +2058,7 @@ mod orchestration {
                 env: vec![("A".to_owned(), "1".to_owned())],
                 size,
                 session: Some(term().session),
-                permission_flags: false,
+                autonomy: Some(slopty_proto::project::Autonomy::Ask),
                 worktree: None,
             }),
         );

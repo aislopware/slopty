@@ -239,9 +239,6 @@ pub struct Cap(pub String);
 impl Cap {
     /// Requests are answered through Slopty ([`wire::Intent::Answer`]).
     pub const APPROVALS: &'static str = "approvals";
-    /// [`wire::Intent::Continue`]: a new thread, on any agent here, that goes on from this one
-    /// with a portable account of it as its first message, held for the person to send.
-    pub const CONTINUE: &'static str = "continue";
     /// [`wire::Intent::Fork`]: a new thread branched off this one.
     pub const FORK: &'static str = "fork";
     /// [`wire::Intent::Interrupt`].
@@ -1035,11 +1032,6 @@ pub enum Delivery {
         /// When.
         at_ms: WallMs,
     },
-    /// Now, for an agent with no steer of its own ([`Cap::STEER`]): the worker puts the
-    /// message first in the agent's queue and stops the turn under way, so it goes as that
-    /// turn ends. It needs [`Cap::INTERRUPT`] and [`Cap::QUEUE`]; with no turn under way it
-    /// goes as a queued one does.
-    Interrupt,
 }
 
 impl Delivery {
@@ -1259,8 +1251,6 @@ pub enum Action {
     /// the worker compares it with what they kept, or the thread's first snapshot when they
     /// have kept nothing.
     ToReview(bool),
-    /// The goal the agent works toward, as it holds it; `None` once it has none.
-    GoalSet(Option<Goal>),
     /// The windows and displays on the worker its agent drives, the latest first; empty once
     /// it drives none.
     ScreensSet(Vec<AgentScreen>),
@@ -1302,37 +1292,6 @@ impl AgentScreen {
     pub const DESKTOP: &'static str = "desktop";
     /// A simulated device's window.
     pub const SIMULATOR: &'static str = "simulator";
-}
-
-/// A goal an agent works toward across turns, starting turns of its own until it is met
-/// (Codex's `/goal`). Shown as the agent holds it, and set or paused only in the agent's own
-/// TUI.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Goal {
-    /// What it is for, in the words it was set with.
-    pub objective: String,
-    /// Where it stands, as the agent names it. Open: [`Goal::ACTIVE`], `paused`, `blocked`,
-    /// `usage-limited`, `budget-limited`, `complete`.
-    pub state: String,
-    /// The tokens spent on it so far.
-    pub tokens_used: u64,
-    /// The tokens it may spend, when it is bounded.
-    pub token_budget: Option<u64>,
-    /// The time spent on it, in seconds.
-    pub time_used_s: u64,
-    /// When it last changed.
-    pub updated_ms: WallMs,
-}
-
-impl Goal {
-    /// The agent works on it, and may start a turn of its own once a turn ends.
-    pub const ACTIVE: &'static str = "active";
-
-    /// Whether the agent works on it.
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.state == Self::ACTIVE
-    }
 }
 
 /// A place in a thread's log, or in a worker's thread table.

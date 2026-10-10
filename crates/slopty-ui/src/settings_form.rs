@@ -2888,7 +2888,7 @@ mod map_tests {
         click(cx, leak(format!("settings-section-{}", Section::Agents.index())));
         let live = ix("server.projects", "live_agents");
         let key = ix("server.push", "apns_key");
-        for row in [ix("worker", "acp"), live, ix("server.projects", "permission_flags"), key] {
+        for row in [ix("worker", "acp"), live, key] {
             assert!(cx.debug_bounds(leak(format!("settings-row-{row}"))).is_some(), "row {row}");
         }
         click(cx, leak(format!("settings-increase-{live}")));

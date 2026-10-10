@@ -54,9 +54,8 @@ use crate::driven::{OUTPUT, PROSE, caps, choice, replaced_patch, title_of, tool,
 use crate::queue::Queue;
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 10] = [
+pub const CAPS: [&str; 9] = [
     Cap::APPROVALS,
-    Cap::CONTINUE,
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::SET_EFFORT,

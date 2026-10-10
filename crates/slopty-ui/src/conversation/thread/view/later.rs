@@ -53,7 +53,7 @@ pub(super) fn failed_on(state: &ThreadState) -> Option<&str> {
 pub(super) fn when_words(delivery: Delivery, now: WallMs) -> Option<String> {
     match delivery {
         Delivery::At { at_ms } => figures::stamp(at_ms, now),
-        Delivery::Steer | Delivery::Queue | Delivery::Interrupt => None,
+        Delivery::Steer | Delivery::Queue => None,
     }
 }
 

@@ -559,7 +559,7 @@ mod tests {
                 ],
                 size: None,
                 session: None,
-                permission_flags: false,
+                autonomy: Some(slopty_proto::project::Autonomy::Ask),
                 worktree: None,
             })
             .await;

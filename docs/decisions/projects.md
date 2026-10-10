@@ -223,11 +223,12 @@ merging on the person's word since 2026-10-04
   it is installed, pinned or not", below). A start pinned to a worker that is offline or lacks
   the agent is refused and never moves elsewhere.
 
-**One cap is a setting, under the person's bounds.** ✅ 2026-09-30, narrowed 2026-10-04
-- The person's `[server.projects]` bounds in `settings.toml` hold two things: `live_agents`,
-  the most live agents across the fleet (24), and `permission_flags`, the projects whose agents
-  may be given flags that loosen Claude Code's permissions. The server reads the file at start
-  (`Hub::set_policy`). Agents read the bounds and the live counts in `project_status` and cannot
+**One cap is a setting, under the person's bounds.** ✅ 2026-09-30, narrowed 2026-10-04 and
+2026-10-10
+- The person's `[server.projects]` bounds in `settings.toml` hold `live_agents`, the most live
+  agents across the fleet (24). `permission_flags` went on 2026-10-10: how far a project's
+  agents go is its autonomy ("A project's autonomy is how far its agents go", below). The
+  server reads the file at start and as it changes (`Hub::set_bounds`). Agents read the bounds and the live counts in `project_status` and cannot
   raise them.
 - A project's own `Limits` hold the review limit alone, which only the person sets.
 - The other sizes are constants in the server, not settings: projects kept (64), tasks per
@@ -302,10 +303,10 @@ merging on the person's word since 2026-10-04
     they run this worker's own `slopty hook …`; `--mcp-config` only when it names nothing but
     the `slopty mcp` server; `--plugin-dir` only as the worker's own mod.
   - `--debug-file` is not on the list, since it writes wherever it is pointed.
-- They are allowed only for the projects the person names in `[server.projects]
-  permission_flags`, and only to that project's own agents (`hub::projects::allowance`): an
-  agent has the allowance of the project it proves it works in, and names no other's. No agent
-  can start another with more than it has. Before, any agent that named such a project had it.
+- No agent's start may name them, in any project (`hub::projects::allowance`, since
+  2026-10-10; before, the projects in `[server.projects] permission_flags` could). How far a
+  project's agents go is its autonomy, which the server pins itself. The person's own start
+  names what it likes. No agent can start another with more than it has.
 - An agent's environment for a new terminal cannot steer what runs there: `PATH`, `HOME`,
   `ZDOTDIR`, `SHELL`, `BASH_ENV`, `ENV`, `XDG_CONFIG_HOME` and anything starting `SLOPTY_`,
   `CLAUDE`, `ANTHROPIC_`, `NODE_`, `BUN_`, `DYLD_`, `LD_` or `GIT_CONFIG` are refused with
@@ -319,15 +320,14 @@ merging on the person's word since 2026-10-04
 - Two backstops watch what actually runs, on every terminal the server started or an agent
   opened or typed into:
   - The mode each hook reports: a mode looser than those closes the terminal, with a note on its
-    task saying why, unless the person allows looser modes for the project.
+    task saying why, unless its project's autonomy allows that mode.
   - The worker judges the argv of the agent in each terminal's foreground with the same
     allowlist and reports what loosens it (`AgentReport::Loosened`, at most 16 items of 256
     bytes, sent when it changes). So `claude` started inside a shell by any means, which no
     start check sees, is closed the same way. The worker knows its own `slopty` and mod paths,
     so it can accept its own hooks and MCP config by value; the server cannot and refuses them.
-- An agent may not type into another agent's TUI (`Forbidden`), except in the person's
-  `permission_flags` projects: what reaches an agent from another goes through reports and
-  hooks. Nothing may type into an agent that waits on the person (a permission, a question) or
+- An agent may not type into another agent's TUI (`Forbidden`), in any project: what reaches
+  an agent from another goes through reports and hooks. Nothing may type into an agent that waits on the person (a permission, a question) or
   whose composer holds the person's unsent text (`AwaitsPerson`), nor into one no hook has yet
   spoken from (`AgentNotReady`).
 - A report's hook ends its turn only once: at a `Stop` that a hook already held
@@ -1346,7 +1346,7 @@ card reads its thread's pull request, and `Hub::watch_checks`, `Verb::PullChecks
   and `a_terminal_opens_in_a_worktree_made_from_its_base` (`slopty-workerd`, on a real
   repository whose clone is on another branch).
 - Its arguments are judged before it starts, as Claude Code's are: only what asks the person no
-  less goes through without the person's `permission_flags`. That is the model, images, a
+  less goes through on an agent's start. That is the model, images, a
   worktree, a `read-only` or `workspace-write` sandbox, the `untrusted` or `on-request` approval
   policy, and `-c` keys of the model alone. A bypass, `--full-auto`, `--approve-for-me`, a
   looser sandbox or policy, a profile, any other config key (an MCP server, a hook, a policy),
@@ -2264,11 +2264,12 @@ reordering and edited allows are gone" in `agents.md`.*
     `land_pull`, `pull_opened`, `project_reply_protected` and `task_in_pull_card`.
 
 - ✅ **Auto mode is looser than asking; a held terminal takes it away** (readiness 10-09 rank
-  5, 2026-10-09). Claude Code 2.1.283 and later start an interactive session in `auto` when
-  nothing names a mode (<https://code.claude.com/docs/en/permission-modes>, "Which mode a
-  session starts in"). So a `claude` an orchestrator typed into a terminal the server opened
-  for it came up in auto, the server read that as looser than allowed, and closed the
-  terminal.
+  5, 2026-10-09). *Revised 2026-10-10: a project the person lets go on its own runs its
+  agents in auto, see "A project's autonomy is how far its agents go" below.* Claude Code
+  2.1.283 and later start an interactive session in `auto` when nothing names a mode
+  (<https://code.claude.com/docs/en/permission-modes>, "Which mode a session starts in"). So a
+  `claude` an orchestrator typed into a terminal the server opened for it came up in auto, the
+  server read that as looser than allowed, and closed the terminal.
   - **Ruled: `auto` stays off `SAFE_MODES`.** In auto mode a second model, the classifier,
     reviews actions instead of the person, and lets through "everything, with background
     safety checks" (the same page's table of modes). That is less asking than `default`, which
@@ -2295,7 +2296,8 @@ reordering and edited allows are gone" in `agents.md`.*
     person opened carries no lock (the variable cannot be added to a running shell), so that
     case is still closed when it reports auto.
   - Tests: `slopty-agent`
-    `hooks::tests::a_run_without_permission_flags_locks_bypass_and_auto_mode_off`; `slopty-cli`
+    `hooks::tests::a_held_run_locks_bypass_and_auto_mode_off_and_allows_slopty_s_tools`;
+    `slopty-cli`
     `hook::tests::a_claude_typed_where_the_server_holds_to_asking_starts_in_default`;
     `slopty-server` `hub::project_tests::an_agent_looser_than_allowed_is_closed` (the
     variable on an agent's terminal, none on the person's, the closing and refusing words for
@@ -2632,8 +2634,9 @@ reordering and edited allows are gone" in `agents.md`.*
     default`, a locked watch). A Codex task's arguments were judged (`hub/codex.rs`), but the
     person's own `config.toml` still decided its approval policy and sandbox, so
     `approval_policy = "never"` there ran a task with no approvals at all.
-  - **At the start.** Without the person's leave (`permission_flags` off), a task's Codex in
-    its terminal starts with `--ask-for-approval on-request --sandbox workspace-write`. Flags
+  - **At the start.** At the project's autonomy ("A project's autonomy is how far its agents
+    go", 2026-10-10; before, without `permission_flags`), a task's Codex in its terminal
+    starts with `--ask-for-approval on-request --sandbox workspace-write`. Flags
     win over `config.toml`. Arguments that name their own policy or sandbox keep them, and the
     argument check lets those through only when they ask no less. (A task's Codex has run only
     in its terminal since 2026-10-10, when a start stopped naming its arguments.)
@@ -2647,7 +2650,7 @@ reordering and edited allows are gone" in `agents.md`.*
   - Rejected: reading the person's `config.toml` on the worker to predict the policy. Codex
     resolves profiles, project trust and managed configuration itself. Its row says the
     outcome, so the outcome is what is judged.
-  - Tests: `a_task_s_codex_is_held_to_asking` and
+  - Tests: `a_task_s_codex_is_held_to_its_level` and
     `a_codex_thread_s_settings_are_judged_as_its_arguments_are` (`hub/codex.rs`); the pinned
     command and the close in `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role`
     (`hub/project_tests.rs`).
@@ -2716,8 +2719,8 @@ reordering and edited allows are gone" in `agents.md`.*
   - **Autonomy.** `Project.autonomy` (`Ask`, `Edits`, `Own`; `Ask` by default) is how far the
     project's agents go before they ask. Only the person sets it, at `ProjectCreate` or through
     `ProjectSet.autonomy`. An agent naming anything but `Ask` is refused. How each level maps
-    onto each agent's own permission modes is item 10's change, which also replaces
-    `permission_flags`.
+    onto each agent's own permission modes is "A project's autonomy is how far its agents
+    go", below.
   - **Progress.** `Verb::ProjectProgress { summary, next, done }` is the orchestrator saying
     where the goal stands. The server keeps it as `Project.progress`, with its time, and logs it
     as `Moment::Update`. A task's agent may not say it, an empty summary is refused, and each
@@ -2750,7 +2753,7 @@ reordering and edited allows are gone" in `agents.md`.*
   - **One wait.** `project_status` reads at once. `task_wait` is the one wait, so
     `Verb::ProjectStatus` keeps its `timeout_ms` for it.
   - Tests: `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` (slopty-tools);
-    `flags_that_loosen_permissions_need_the_person_s_word` and
+    `flags_that_loosen_permissions_are_the_person_s_alone` and
     `a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task` (slopty-server); the CLI's
     `apps/slopty-cli/tests/projects.rs`, its stand-in agent scripted through the worker's
     environment; the goldens `task_spawn` and `task_spawn_agent`.
@@ -2779,3 +2782,46 @@ reordering and edited allows are gone" in `agents.md`.*
     `the_server_s_record_of_the_caller_s_terminal_names_its_task` (the trimmed arguments are
     unknown fields); `a_report_reaches_the_orchestrator_through_its_worker` (slopty-server, the
     role's words).
+
+- ✅ **A project's autonomy is how far its agents go** (2026-10-10, the orchestrator-first study,
+  item 10). It replaces `[server.projects] permission_flags` and revises "Auto mode is looser
+  than asking" (2026-10-09) for projects the person lets go on their own.
+  - **Why.** `permission_flags` was an all-or-nothing switch in a settings file, naming projects
+    whose agents could be handed any flag. The person sets `Project.autonomy` from the board
+    instead, and the server alone turns it into each agent's own permissions.
+  - **Each level, per agent.** `Autonomy::claude_mode` and `Autonomy::codex_approval`
+    (`slopty-proto`):
+
+    | Level | Claude Code `--permission-mode` | Codex `--ask-for-approval` |
+    |-------|---------------------------------|----------------------------|
+    | Ask   | `default`                       | `on-request`               |
+    | Edits | `acceptEdits`                   | `on-request`               |
+    | Own   | `auto`                          | `never`                    |
+
+    Codex always runs with `--sandbox workspace-write`. Its sandbox already lets it edit the
+    workspace, so Edits needs no looser policy.
+  - **The worker holds the level.** `Verb::SpawnAgent.autonomy` (in place of
+    `permission_flags`) tells the worker to lock the run (`hooks::held_to`). Bypass mode is
+    always locked off, auto mode unless the level is Own, and `mcp__slopty` joins the allow
+    list so the agent's work with its project never waits on the person. A resumed agent keeps
+    the lock it had (`Invocation::auto`).
+  - **The server watches it.** `Watched.held` (in place of `locked`) is the level the agent was
+    started at. A mode or Codex setting past that level closes its terminal and the timeline
+    says why: `acceptEdits` passes at Edits, `auto` only at Own, bypass never. A start keeps
+    its level. Raising a project's autonomy starts its next agents higher.
+  - **Agents never loosen.** No agent's start may name a loosening flag or a steering variable
+    in any project, and no agent types into another agent's TUI. An agent's own start, and a
+    terminal it opens, is held to Ask whatever it names. The person's own starts are theirs,
+    flags and all, and the worker holds them to nothing.
+  - **Managed builds.** A company's managed settings may set `disableAutoMode`. Then Claude
+    Code starts an Own agent in `default`, the strictest level, by itself. The board says so
+    (the UI's half).
+  - Tests: `a_task_s_agent_starts_at_its_project_s_autonomy`,
+    `an_agent_looser_than_allowed_is_closed` (a project raised to Edits keeps `acceptEdits` and
+    closes on `auto`), `flags_that_loosen_permissions_are_the_person_s_alone` and
+    `no_agent_starts_anything_looser_than_asking` (`hub/project_tests.rs`);
+    `a_task_s_codex_is_held_to_its_level` and
+    `a_codex_thread_s_settings_are_judged_as_its_arguments_are` (`hub/codex.rs`);
+    `a_held_run_locks_bypass_and_auto_mode_off_and_allows_slopty_s_tools` (`slopty-agent`
+    hooks); `the_project_bounds_come_from_the_shared_settings` (`slopty-serverd`); the goldens
+    `server_request_spawn` and `project_reply_status`.

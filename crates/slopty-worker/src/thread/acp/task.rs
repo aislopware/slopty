@@ -261,25 +261,12 @@ impl Task {
                     self.prompt(&text, &attachments, intent).await;
                 }
             }
-            ThreadAsk::Interrupting { text, attachments, intent } => {
-                if self.session.queue().release() {
-                    let shown = self.session.queue().shown();
-                    self.apply(vec![shown]);
-                }
-                if self.session.running() {
-                    let shown = self.session.queue().hold(intent, &text, attachments, (), true);
-                    self.apply(vec![shown]);
-                    self.cancel(now).await;
-                } else {
-                    self.prompt(&text, &attachments, intent).await;
-                }
-            }
             ThreadAsk::Withdraw { intent } => {
                 let shown = self.session.queue().withdraw(intent);
                 self.apply(shown.into_iter().collect());
             }
             // An ACP agent takes no steer: the held message goes first once the turn stops,
-            // as one sent by interrupt, under its own intent; what a stop held goes after it.
+            // under its own intent; what a stop held goes after it.
             ThreadAsk::Promote { intent } => {
                 let Some((held, ())) = self.session.queue().take(intent) else { return };
                 self.session.queue().release();

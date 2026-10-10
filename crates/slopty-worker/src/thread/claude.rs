@@ -351,9 +351,17 @@ async fn observe(
                     }
                     on.trust = trust;
                     on.begin(&native);
-                    // Slopty opened it with the hook relay: until a hook speaks, it may be held
-                    // at a dialog of its own. With its hooks kept off, none ever speaks.
-                    if on.hooks == 0 && !on.sources.hooks_off() {
+                    if on.trust.is_some() {
+                        // A folder Claude Code keeps no trust for: it opens at the trust dialog,
+                        // before any hook can speak, hooks kept off or not, so the person is
+                        // asked at once rather than after a silence.
+                        on.silent_since = None;
+                        if let Some(observed) = on.observed.as_mut() {
+                            take(&on.host, observed.unheard(WallMs::now(), on.trust.as_deref()));
+                        }
+                    } else if on.hooks == 0 && !on.sources.hooks_off() {
+                        // Slopty opened it with the hook relay: until a hook speaks, it may be
+                        // held at a dialog of its own. With its hooks kept off, none ever speaks.
                         on.silent_since = Some(Instant::now());
                     }
                     let _gone = reply.send(on.observed.as_ref().map(Observed::main));

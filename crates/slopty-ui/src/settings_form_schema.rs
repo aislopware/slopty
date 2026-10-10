@@ -171,11 +171,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         &["clipboard.sync", "clipboard.workers", "terminal.copy_on_select"],
     ),
     (Section::Agents, "ACP agents", &["worker.acp"]),
-    (
-        Section::Agents,
-        "Projects",
-        &["server.projects.live_agents", "server.projects.permission_flags"],
-    ),
+    (Section::Agents, "Projects", &["server.projects.live_agents"]),
     (
         Section::Agents,
         "Notes on your phone",
@@ -833,7 +829,6 @@ mod tests {
         let expected: Vec<(&str, String)> = [
             ("ACP agents", "worker.acp"),
             ("Projects", "server.projects.live_agents"),
-            ("Projects", "server.projects.permission_flags"),
             ("Notes on your phone", "server.push.apns_key"),
             ("Notes on your phone", "server.push.key_id"),
             ("Notes on your phone", "server.push.team_id"),

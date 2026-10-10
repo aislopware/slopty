@@ -47,9 +47,8 @@ pub const SEAT_FACT: &str = "slopty.seat";
 /// Claude Code's flags known to give an agent nothing the person would be asked for.
 ///
 /// From the CLI reference, checked against 2.1.285. Any other flag loosens, or may, and is refused
-/// unless the person allows it for a project (`[server.projects] permission_flags`): a new flag is
-/// judged before it is let through, never after. [`PERMISSION_MODE_FLAG`], `--settings` and
-/// `--mcp-config` are judged by their values instead.
+/// in an agent's start: a new flag is judged before it is let through, never after.
+/// [`PERMISSION_MODE_FLAG`], `--settings` and `--mcp-config` are judged by their values instead.
 pub const SAFE_FLAGS: [&str; 56] = [
     "--advisor",
     "--append-subagent-system-prompt",
@@ -319,15 +318,11 @@ pub const TIMELINE_KEPT: usize = 4096;
 pub struct Bounds {
     /// Most live agents across the fleet, in a project or not.
     pub live_agents: u16,
-    /// Whether an agent started for this project may be given flags that loosen Claude
-    /// Code's permissions (`--dangerously-skip-permissions`, `--permission-mode`), or run in
-    /// bypass mode.
-    pub permission_flags: bool,
 }
 
 impl Default for Bounds {
     fn default() -> Self {
-        Self { live_agents: 24, permission_flags: false }
+        Self { live_agents: 24 }
     }
 }
 
@@ -374,6 +369,45 @@ pub enum Autonomy {
     Edits,
     /// The agent goes on its own within its sandbox, its own auto mode deciding.
     Own,
+}
+
+impl Autonomy {
+    /// The Claude Code permission mode an agent at this level starts in: `default`,
+    /// `acceptEdits` or `auto`.
+    #[must_use]
+    pub const fn claude_mode(self) -> &'static str {
+        match self {
+            Self::Ask => "default",
+            Self::Edits => "acceptEdits",
+            Self::Own => "auto",
+        }
+    }
+
+    /// Whether Claude Code's permission `mode` goes no further than this level: one that asks
+    /// ([`SAFE_MODES`]) at every level, `acceptEdits` from [`Self::Edits`], `auto` at
+    /// [`Self::Own`], and bypass mode at none.
+    #[must_use]
+    pub fn allows_mode(self, mode: &str) -> bool {
+        SAFE_MODES.contains(&mode)
+            || (mode == "acceptEdits" && !matches!(self, Self::Ask))
+            || (mode == "auto" && matches!(self, Self::Own))
+    }
+
+    /// Whether Claude Code may open auto mode at this level, so its settings leave it open.
+    #[must_use]
+    pub const fn opens_auto(self) -> bool {
+        matches!(self, Self::Own)
+    }
+
+    /// Codex's approval policy at this level: `on-request` asks before anything outside its
+    /// sandbox, and `never` goes on its own inside it.
+    #[must_use]
+    pub const fn codex_approval(self) -> &'static str {
+        match self {
+            Self::Ask | Self::Edits => "on-request",
+            Self::Own => "never",
+        }
+    }
 }
 
 /// Where a project's goal stands, as its orchestrator last said
@@ -1603,6 +1637,26 @@ impl AgentReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each level starts Claude Code in its own mode and allows no mode past it: modes that
+    /// ask at every level, `acceptEdits` from edits, `auto` only on its own, bypass never.
+    /// Codex asks on request until the project goes on its own.
+    #[test]
+    fn each_autonomy_allows_its_own_modes_and_none_past_them() {
+        let levels = [Autonomy::Ask, Autonomy::Edits, Autonomy::Own];
+        for level in levels {
+            assert!(level.allows_mode(level.claude_mode()), "{level:?} starts where it may be");
+            assert!(SAFE_MODES.iter().all(|m| level.allows_mode(m)), "{level:?}");
+            assert!(!level.allows_mode("bypassPermissions"), "{level:?}");
+            assert_eq!(level.opens_auto(), level.allows_mode("auto"), "{level:?}");
+        }
+        let edits: Vec<bool> = levels.map(|l| l.allows_mode("acceptEdits")).to_vec();
+        assert_eq!(edits, [false, true, true]);
+        let auto: Vec<bool> = levels.map(|l| l.allows_mode("auto")).to_vec();
+        assert_eq!(auto, [false, false, true]);
+        let codex = levels.map(Autonomy::codex_approval);
+        assert_eq!(codex, ["on-request", "on-request", "never"]);
+    }
 
     /// A test file is one under a test directory, one named as a test is named, or one in a
     /// path the project names; anything else is not, however close its name.

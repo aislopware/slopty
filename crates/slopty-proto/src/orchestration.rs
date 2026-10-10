@@ -313,10 +313,11 @@ pub enum Verb {
         size: Option<Size>,
         /// The id the terminal takes, as for [`Verb::OpenTerminal`].
         session: Option<SessionId>,
-        /// The person allowed this agent flags and modes that loosen Claude Code's
-        /// permissions. Without it the worker locks bypass mode off in the agent's settings.
-        /// The server sets it from the person's policy on every start it forwards.
-        permission_flags: bool,
+        /// How far the agent may go before it asks, held by its settings: bypass mode locked
+        /// off, and auto mode too below [`crate::project::Autonomy::Own`]. `None` for the
+        /// person's own start, which their settings decide. The server sets it on every start
+        /// it forwards: an agent's start is held to asking, a task's to its project's level.
+        autonomy: Option<crate::project::Autonomy>,
         /// A worktree made first by the worker when it is not there, from the clone `cwd` is in
         /// at its base fetched current ([`crate::thread::wire::NewWorktree`]), for the agent's
         /// own `--worktree <name>` in `args` to open. Without it Claude Code makes that one

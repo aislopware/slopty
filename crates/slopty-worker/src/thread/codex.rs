@@ -768,10 +768,6 @@ enum Waiting {
         thread: ThreadId,
         update: Box<p::ThreadSettingsUpdateParams>,
     },
-    /// The goal Codex holds for Codex thread `native`.
-    Goal {
-        native: String,
-    },
     /// Codex thread `native`, archived, put back so it can be taken up again.
     Unarchive {
         native: String,
@@ -1123,8 +1119,6 @@ impl Session {
                         for ask in self.waking.remove(&native).unwrap_or_default() {
                             self.ask(ask).await?;
                         }
-                        let goal = p::ThreadGoalGetParams { thread_id: native.clone() };
-                        self.request(&goal, Waiting::Goal { native }).await?;
                     }
                     Err(e) => {
                         tracing::debug!(%native, "a Codex thread's resume did not read: {e}");
@@ -1152,23 +1146,6 @@ impl Session {
             (Waiting::Unarchive { native }, Err(e)) => {
                 tracing::debug!(%native, "Codex did not unarchive a thread: {e}");
                 self.unresumed(native, &e.to_string());
-            }
-            (Waiting::Goal { native }, Ok(result)) => {
-                let read = rpc::response::<p::ThreadGoalGetParams>(result);
-                match (read, self.threads.get(&native)) {
-                    (Ok(read), Some(followed)) => {
-                        if let Some(goal) = read.goal {
-                            let goal = slopty_agent::codex::shared::goal_of(&goal);
-                            self.host.apply(followed.id, vec![Action::GoalSet(Some(goal))]);
-                        }
-                    }
-                    (Err(e), _) => tracing::debug!(%native, "Codex's goal did not read: {e}"),
-                    (Ok(_), None) => {}
-                }
-            }
-            (Waiting::Goal { native }, Err(e)) => {
-                // A Codex built without goals.
-                tracing::trace!(%native, "Codex gave no goal: {e}");
             }
             (Waiting::Turn { thread }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");

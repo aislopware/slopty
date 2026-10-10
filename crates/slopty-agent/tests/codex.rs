@@ -1314,32 +1314,6 @@ mod tests {
         assert!(shared.next_queued().is_none());
     }
 
-    /// A goal Codex works toward shows on the thread as Codex holds it, its state in Slopty's
-    /// open words, and goes once Codex clears it. Nothing here sets one.
-    #[test]
-    fn a_codex_goal_shows_as_codex_holds_it() {
-        let (mut shared, mut state) = begun();
-        let native = shared.meta().native.clone();
-        let goal = json!({"threadId": native, "turnId": null, "goal": {
-            "threadId": native, "objective": "Make every fixture pass", "status": "budgetLimited",
-            "tokensUsed": 41_000, "tokenBudget": 500_000, "timeUsedSeconds": 380,
-            "createdAt": 1_790_000_000_i64, "updatedAt": 1_790_000_380_i64}});
-        hear(&mut shared, &mut state, "thread/goal/updated", &goal);
-        let held = state.goal.clone().expect("a goal");
-        assert_eq!(
-            (held.objective.as_str(), held.state.as_str()),
-            ("Make every fixture pass", "budget-limited")
-        );
-        assert_eq!(
-            (held.tokens_used, held.token_budget, held.time_used_s),
-            (41_000, Some(500_000), 380)
-        );
-        assert_eq!(held.updated_ms, WallMs::from_millis(1_790_000_380_000));
-        assert!(!held.is_active());
-        hear(&mut shared, &mut state, "thread/goal/cleared", &json!({"threadId": native}));
-        assert_eq!(state.goal, None);
-    }
-
     /// The person's stop holds what is queued: the turn is interrupted, every message queued
     /// says it waits on the stop, and none goes as the turn ends. Their next message lets them
     /// go again in their order, ahead of it; sending one held now lets the rest go after it.

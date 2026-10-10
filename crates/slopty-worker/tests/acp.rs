@@ -226,57 +226,6 @@ mod acp {
             .collect()
     }
 
-    /// A message sent by interrupt to an agent with no steer of its own goes first in its queue
-    /// and stops the turn under way, on the person's word: the stopped turn ends as the agent
-    /// ends it, and the message goes as the next turn, as the person's, before what waited.
-    #[tokio::test]
-    async fn a_message_sent_by_interrupt_stops_the_turn_and_goes_next() {
-        let rig = Rig::new();
-        // The recording's first turn, its third call's turn stopped, then a turn on the words
-        // sent by interrupt, which the agent answers as it answered the first.
-        let lines = lines("turns.jsonl");
-        let resent = lines[4..13].iter().map(|l| l.replace("Say hello.", "Say hello instead."));
-        let composed: Vec<String> =
-            lines[..13].iter().chain(&lines[35..44]).cloned().chain(resent).collect();
-        rig.replay_lines(&composed);
-        let (acp, _served) = rig.serve();
-        let outcome = acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await;
-        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
-        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-        let act = |id, intent: &Intent| -> Outcome {
-            let decide = |s: &ThreadState| (acp.decide(s, id, intent, rig.by()), Vec::new());
-            rig.host.intent(thread, id, decide).unwrap()
-        };
-        let now = |text: &str| Intent::Send {
-            text: text.to_owned(),
-            delivery: Delivery::Interrupt,
-            attachments: vec![],
-        };
-        assert_eq!(now("Say hello instead.").needs(), Some(Cap::INTERRUPT));
-
-        rig.send(&acp, thread, "Remove it again.");
-        rig.until(thread, "the call's ask", asking(1)).await;
-        let id = IntentId::new();
-        assert_eq!(act(id, &now("Say hello instead.")), Outcome::Done);
-        assert_eq!(act(id, &now("Say hello instead.")), Outcome::Done, "once");
-        let state =
-            rig.until(thread, "the message's turn", turn_ended(3, TurnState::Complete)).await;
-        assert_eq!(state.turns[1].state, TurnState::Interrupted, "the turn under way stopped");
-        assert_eq!(state.requests[0].state, RequestState::Withdrawn);
-        assert!(state.pending.is_empty(), "it went");
-        let (text, intent) = users(&state).pop().unwrap();
-        assert_eq!((text.as_str(), intent), ("Say hello instead.", Some(id)), "as the person's");
-        let record = rig.record();
-        assert_eq!(record["unexpected"], serde_json::json!([]), "the agent was sent what it was");
-        let cancels = record["heard"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|m| m["method"] == "session/cancel")
-            .count();
-        assert_eq!(cancels, 1, "stopped once");
-    }
-
     /// "Send now" on a message held for an agent with no steer of its own goes as one sent by
     /// interrupt does: the turn under way stops, and the held message goes next, under the
     /// intent that queued it, as the person's.

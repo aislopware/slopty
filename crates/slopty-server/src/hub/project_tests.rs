@@ -10,8 +10,8 @@ use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::Worktree;
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
-    ASKING_ENV, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, RunOn, TASK_ENV,
-    TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+    ASKING_ENV, Autonomy, Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, RunOn,
+    TASK_ENV, TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::AgentId;
@@ -19,7 +19,6 @@ use slopty_proto::thread::wire::{PullStands, TableFrame};
 
 use super::tests::{caps, registration, summary};
 use super::*;
-use crate::project::Policy;
 
 pub(super) fn project() -> ProjectId {
     ProjectId::new("slopty").unwrap()
@@ -77,7 +76,7 @@ pub(super) async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits
             limits,
             metadata: None,
             goal: None,
-            autonomy: slopty_proto::project::Autonomy::Ask,
+            autonomy: Autonomy::Ask,
         })
         .await;
     assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -264,10 +263,7 @@ async fn a_task_runs_where_the_person_says_and_keeps_why_it_went_there() {
 async fn concurrent_starts_never_pass_the_fleet_s_bound() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    hub.set_policy(Policy {
-        bounds: Bounds { live_agents: 1, ..Bounds::default() },
-        ..Policy::default()
-    });
+    hub.set_bounds(Bounds { live_agents: 1 });
     create(&hub, None).await;
     let (a, b) = (new_task(&hub, None).await, new_task(&hub, None).await);
     let first = spawn(&hub, Verb::TaskSpawn { project: project(), task: a, launch: claude() });
@@ -343,10 +339,7 @@ async fn a_start_its_task_can_no_longer_take_is_closed() {
 async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    hub.set_policy(Policy {
-        bounds: Bounds { live_agents: 1, ..Bounds::default() },
-        ..Policy::default()
-    });
+    hub.set_bounds(Bounds { live_agents: 1 });
     create(&hub, None).await;
     let plain = || Verb::SpawnAgent {
         worker: linux,
@@ -356,7 +349,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
         env: Vec::new(),
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
     let asked = spawn(&hub, plain());
@@ -371,26 +364,24 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
 }
 
 /// No agent starts another with more than it has: flags that loosen Claude Code's or Codex's
-/// permissions are refused on every way to start one that takes them, unless the person allowed
-/// them. A task's start takes none: the server makes its arguments.
+/// permissions are refused on every way an agent starts one, whatever project it names. The
+/// person's own start is theirs, flags and all, and the worker holds it to nothing.
 #[tokio::test]
-async fn flags_that_loosen_permissions_need_the_person_s_word() {
+async fn flags_that_loosen_permissions_are_the_person_s_alone() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, _lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create(&hub, None).await;
-    let task = new_task(&hub, None).await;
     let plain = Verb::SpawnAgent {
         worker: linux,
         cwd: "~".to_owned(),
         prompt: None,
         args: vec!["--allowedTools".to_owned(), "Bash".to_owned()],
-        env: vec![(PROJECT_ENV.to_owned(), "slopty".to_owned())],
+        env: Vec::new(),
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
-    refused(&hub.dispatch(plain).await, ErrorCode::Limit);
+    refused(&hub.dispatch_as(Speaker::Agent, None, plain.clone()).await, ErrorCode::Limit);
     let terminal = Verb::OpenTerminal {
         worker: linux,
         cwd: None,
@@ -403,7 +394,7 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
         session: None,
         worktree: None,
     };
-    refused(&hub.dispatch(terminal).await, ErrorCode::Limit);
+    refused(&hub.dispatch_as(Speaker::Agent, None, terminal).await, ErrorCode::Limit);
     for codex in [&["codex", "--yolo"][..], &["/usr/local/bin/codex", "-s", "danger-full-access"]] {
         let terminal = Verb::OpenTerminal {
             worker: linux,
@@ -415,20 +406,67 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
             session: None,
             worktree: None,
         };
-        let said = refused(&hub.dispatch(terminal).await, ErrorCode::Limit).to_owned();
-        assert!(said.contains("permission_flags"), "{codex:?}: {said}");
+        let said = hub.dispatch_as(Speaker::Agent, None, terminal).await;
+        assert!(refused(&said, ErrorCode::Limit).contains("autonomy"), "{codex:?}: {said:?}");
     }
     assert!(rx.try_recv().is_err(), "nothing reached the worker");
 
-    let allowed = Policy { permission_flags: [project()].into(), ..Policy::default() };
-    hub.set_policy(allowed);
-    assert!(status(&hub).await.bounds.permission_flags);
-    let start = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    let own = spawn(&hub, plain);
     let (_, verb) = request(&mut rx).await;
-    let Verb::SpawnAgent { args, permission_flags, .. } = verb else { panic!("{verb:?}") };
-    assert!(permission_flags, "the worker leaves bypass mode unlocked");
-    assert!(!args.iter().any(|a| a == "default"), "no mode pinned: {args:?}");
-    start.abort();
+    let Verb::SpawnAgent { args, autonomy, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(autonomy, None, "the worker holds the person's own start to nothing");
+    assert_eq!(args, ["--allowedTools", "Bash"], "and its flags stand");
+    own.abort();
+}
+
+/// A task's agent runs at its project's autonomy, which the person sets: Claude Code pinned to
+/// the mode of that level and the worker told to hold it there, so a later start of a project
+/// the person raised starts higher, and an agent's own start stays at asking.
+#[tokio::test]
+async fn a_task_s_agent_starts_at_its_project_s_autonomy() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, None).await;
+    for (level, mode) in
+        [(Autonomy::Ask, "default"), (Autonomy::Edits, "acceptEdits"), (Autonomy::Own, "auto")]
+    {
+        let set = Verb::ProjectSet {
+            project: project(),
+            autonomy: Some(level),
+            orchestrator: None,
+            verifier: None,
+            push: None,
+            limits: LimitsChange::default(),
+            metadata: None,
+        };
+        assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
+        let task = new_task(&hub, None).await;
+        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+        let start = request(&mut rx).await;
+        let Verb::SpawnAgent { args, autonomy, .. } = &start.1 else { panic!("{:?}", start.1) };
+        assert_eq!(*autonomy, Some(level), "the worker holds it to {level:?}");
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(words.get(..2), Some(&["--permission-mode", mode][..]), "{words:?}");
+        opened(&lease, &start);
+        assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    }
+    let by_agent = Verb::SpawnAgent {
+        worker: linux,
+        cwd: "~".to_owned(),
+        prompt: None,
+        args: Vec::new(),
+        env: Vec::new(),
+        size: None,
+        session: None,
+        autonomy: Some(Autonomy::Own),
+        worktree: None,
+    };
+    let asked = spawn_as(&hub, Speaker::Agent, by_agent);
+    let (_, verb) = request(&mut rx).await;
+    let Verb::SpawnAgent { args, autonomy, .. } = &verb else { panic!("{verb:?}") };
+    assert_eq!(*autonomy, Some(Autonomy::Ask), "an agent's start asks, whatever it says");
+    assert_eq!(args.get(..2), Some(&["--permission-mode".to_owned(), "default".to_owned()][..]));
+    asked.abort();
 }
 
 /// A server that restarts learns, when a worker registers again, which of its tasks' terminals
@@ -686,8 +724,8 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let (_, session) = chosen(&start.1);
-    let Verb::SpawnAgent { args, permission_flags, .. } = &start.1 else { panic!() };
-    assert!(!permission_flags);
+    let Verb::SpawnAgent { args, autonomy, .. } = &start.1 else { panic!() };
+    assert_eq!(*autonomy, Some(Autonomy::Ask));
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     assert_eq!(words.get(..2), Some(&["--permission-mode", "default"][..]), "{words:?}");
     let conversation = words.get(3).copied().map(str::to_owned);
@@ -834,10 +872,7 @@ async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
     announce(&lease, orchestrator, true);
     let (mini, mini_lease, _mini_rx) = worker_on(&hub, "mini", Os::MacOs, Vec::new());
     announce(&mini_lease, working, true);
-    hub.set_policy(Policy {
-        bounds: Bounds { live_agents: 2, ..Bounds::default() },
-        ..Policy::default()
-    });
+    hub.set_bounds(Bounds { live_agents: 2 });
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let task = new_task(&hub, None).await;
     let assigned =
@@ -862,7 +897,7 @@ async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
         env: Vec::new(),
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
     refused(&hub.dispatch(plain()).await, ErrorCode::Limit);
@@ -1084,7 +1119,7 @@ fn spawn_as(hub: &Hub, who: Speaker, verb: Verb) -> tokio::task::JoinHandle<Outc
 /// An agent the server started, or one in a terminal an agent opened, that says it runs looser
 /// than a mode that asks got there from a settings file or keys typed into its TUI, which an
 /// agent may type: its terminal is closed and the timeline says why. The person's own terminal
-/// is theirs, and a project the person allows looser modes keeps them.
+/// is theirs, and an agent of a project the person raised keeps the modes of its level.
 #[tokio::test]
 async fn an_agent_looser_than_allowed_is_closed() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1191,9 +1226,28 @@ async fn an_agent_looser_than_allowed_is_closed() {
     );
     by_person.abort();
 
-    hub.set_policy(Policy { permission_flags: [project()].into(), ..Policy::default() });
-    lease.handle(mode(started[1], "acceptEdits"));
-    assert!(rx.try_recv().is_err(), "the person allowed looser modes for the project");
+    // A project the person raised to edits starts its next agent there, and holds it there.
+    let raise = Verb::ProjectSet {
+        project: project(),
+        autonomy: Some(Autonomy::Edits),
+        orchestrator: None,
+        verifier: None,
+        push: None,
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    assert!(matches!(hub.dispatch(raise).await, Outcome::Project(_)));
+    let task = new_task(&hub, None).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    let start = request(&mut rx).await;
+    announce(&lease, chosen(&start.1).1, true);
+    let editing = opened(&lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    lease.handle(mode(editing, "acceptEdits"));
+    assert!(rx.try_recv().is_err(), "the person allowed edits for the project");
+    lease.handle(mode(editing, "auto"));
+    let (_, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term: editing }, "past its level, it is closed");
 }
 
 /// A `claude` inside a shell's line (`sh -c "cd x && claude --allowedTools Bash"`) is read as
@@ -1459,7 +1513,7 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
         env: Vec::new(),
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
     for (key, first, other) in
@@ -1543,7 +1597,7 @@ async fn an_agent_names_no_environment_that_steers_what_it_starts() {
         env,
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
     for (verb, name) in [
@@ -1593,10 +1647,7 @@ async fn an_agent_never_types_into_another_agent_s_tui() {
 async fn a_terminal_an_agent_opens_counts_against_the_fleet_bound() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, _lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    hub.set_policy(Policy {
-        bounds: Bounds { live_agents: 1, ..Bounds::default() },
-        ..Policy::default()
-    });
+    hub.set_bounds(Bounds { live_agents: 1 });
     let shell = || Verb::OpenTerminal {
         worker: linux,
         cwd: None,
@@ -1719,11 +1770,11 @@ async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     by_person.abort();
 }
 
-/// The person's allowance of looser permissions is a project's, for its own agents: another
-/// project's orchestrator, or an unproven agent, starts nothing loose; the project's own
-/// orchestrator does.
+/// No agent starts anything looser than asking, its own project's orchestrator included: how
+/// far a project's agents go is its autonomy, never a flag an agent names. Another project's
+/// orchestrator starts none of this project's tasks either.
 #[tokio::test]
-async fn a_project_s_looser_permissions_are_its_own_agents_only() {
+async fn no_agent_starts_anything_looser_than_asking() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (ours, theirs) = (SessionId::new(), SessionId::new());
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
@@ -1743,11 +1794,10 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             limits: LimitsChange::default(),
             metadata: None,
             goal: None,
-            autonomy: slopty_proto::project::Autonomy::Ask,
+            autonomy: Autonomy::Ask,
         })
         .await;
     assert!(matches!(made, Outcome::Project(_)), "{made:?}");
-    hub.set_policy(Policy { permission_flags: [project()].into(), ..Policy::default() });
     let loose = Verb::SpawnAgent {
         worker: linux,
         cwd: "~".to_owned(),
@@ -1756,10 +1806,10 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
         env: Vec::new(),
         size: None,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
-    for who in [Speaker::Proven(theirs), Speaker::Agent] {
+    for who in [Speaker::Proven(ours), Speaker::Proven(theirs), Speaker::Agent] {
         let said = hub.dispatch_as(who, None, loose.clone()).await;
         assert!(refused(&said, ErrorCode::Limit).contains("--allowedTools"), "{said:?}");
     }
@@ -1768,10 +1818,6 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
     let said = hub.dispatch_as(Speaker::Proven(theirs), None, spawned).await;
     assert!(refused(&said, ErrorCode::Forbidden).contains("elsewhere"), "{said:?}");
     assert!(rx.try_recv().is_err(), "nothing reached the worker");
-    let started = spawn_as(&hub, Speaker::Proven(ours), loose);
-    let (_, verb) = request(&mut rx).await;
-    assert!(matches!(verb, Verb::SpawnAgent { permission_flags: true, .. }), "{verb:?}");
-    started.abort();
 }
 
 /// The terminals an agent opened stay its project's across a server restart: the store keeps
@@ -1863,7 +1909,7 @@ async fn a_task_s_agent_works_only_on_its_own_task() {
                 limits: LimitsChange::default(),
                 metadata: None,
                 goal: None,
-                autonomy: slopty_proto::project::Autonomy::Ask,
+                autonomy: Autonomy::Ask,
             },
         )
         .await;
@@ -2517,8 +2563,8 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     assert_eq!(
         said.as_deref(),
         Some(
-            "its Codex runs with sandbox dangerFullAccess, looser than the person allows \
-             (`[server.projects] permission_flags`), so it was closed"
+            "its Codex runs with sandbox dangerFullAccess, past what the person allows its \
+             project (its autonomy), so it was closed"
         )
     );
 }
@@ -2528,7 +2574,6 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
 /// tries to set it is refused and changes nothing.
 #[tokio::test]
 async fn a_project_carries_its_goal_and_the_person_s_autonomy() {
-    use slopty_proto::project::Autonomy;
     let hub = Hub::new("server".to_owned(), Vec::new());
     let orchestrator = SessionId::new();
     let (worker, lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());

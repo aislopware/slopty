@@ -572,7 +572,7 @@ pub struct PushSettings {
 
 /// `[server.projects]`: what the person allows projects across the fleet
 /// (`docs/decisions/projects.md`). No agent raises them.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Projects")]
 pub struct ProjectBounds {
@@ -581,18 +581,11 @@ pub struct ProjectBounds {
     /// The most live agents the server lets run across every worker at once.
     #[schemars(title = "Live agents", example = 24)]
     pub live_agents: u16,
-    /// Projects whose agents may be started with looser permissions.
-    ///
-    /// The names of the projects whose spawned agents may be given flags that loosen Claude
-    /// Code's permissions (`--dangerously-skip-permissions`, `--permission-mode`). Empty
-    /// allows none.
-    #[schemars(title = "Looser permissions for", example = ["nightly-refactor"])]
-    pub permission_flags: Vec<String>,
 }
 
 impl Default for ProjectBounds {
     fn default() -> Self {
-        Self { live_agents: 24, permission_flags: Vec::new() }
+        Self { live_agents: 24 }
     }
 }
 
@@ -1546,15 +1539,12 @@ mod tests {
     fn server_project_bounds() {
         let d = Settings::default().server.projects;
         assert_eq!(d.live_agents, 24);
-        assert!(d.permission_flags.is_empty(), "no project loosens permissions by default");
-        let loaded = Settings::parse(
-            "[server.projects]\nlive_agents = 40\npermission_flags = [\"nightly\"]\n",
-        );
+        let loaded = Settings::parse("[server.projects]\nlive_agents = 40\n");
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        assert_eq!(
-            loaded.settings.server.projects,
-            ProjectBounds { live_agents: 40, permission_flags: vec!["nightly".to_owned()] }
-        );
+        assert_eq!(loaded.settings.server.projects, ProjectBounds { live_agents: 40 });
+        // How far a project's agents go is its autonomy, set per project: no fleet-wide key.
+        let gone = Settings::parse("[server.projects]\npermission_flags = [\"nightly\"]\n");
+        assert_eq!(gone.warnings, ["unknown key `server.projects.permission_flags`"]);
         let gone = Settings::parse("[server.projects]\ntimeline_kept = 4096\n");
         assert_eq!(gone.warnings, ["unknown key `server.projects.timeline_kept`"]);
         let typo = Settings::parse("[server.projects]\nlive_agent = 40\n");

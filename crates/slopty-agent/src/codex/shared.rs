@@ -54,10 +54,10 @@ use slopty_proto::thread::detail::{
 use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
-    Compaction, Delivery, Drive, Effect, Effort, Fork, Goal, IntentId, Item, ItemBody, ItemId,
-    Limit, Link, Liveness, Meters, Mode, Notice, Offers, PartKey, Phase, Plan, Request,
-    RequestState, Retry, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn,
-    TurnId, TurnState, Usage, UserMessage, Wait, kind,
+    Compaction, Delivery, Drive, Effect, Effort, Fork, IntentId, Item, ItemBody, ItemId, Limit,
+    Link, Liveness, Meters, Mode, Notice, Offers, PartKey, Phase, Plan, Request, RequestState,
+    Retry, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId,
+    TurnState, Usage, UserMessage, Wait, kind,
 };
 
 use super::form::Form;
@@ -70,9 +70,8 @@ use crate::attach::Attached;
 use crate::queue::Queue;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 13] = [
+pub const CAPS: [&str; 12] = [
     Cap::APPROVALS,
-    Cap::CONTINUE,
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::LIVE_TUI,
@@ -482,10 +481,10 @@ impl Shared {
             ServerNotification::ThreadSettingsUpdated(updated) => {
                 self.settings(&Settings::of(&updated.thread_settings))
             }
-            ServerNotification::ThreadGoalUpdated(updated) => {
-                vec![Action::GoalSet(Some(goal_of(&updated.goal)))]
+            // Codex's `/goal` is set and shown in its own TUI; the thread model holds no goal.
+            ServerNotification::ThreadGoalUpdated(_) | ServerNotification::ThreadGoalCleared(_) => {
+                Vec::new()
             }
-            ServerNotification::ThreadGoalCleared(_) => vec![Action::GoalSet(None)],
             ServerNotification::ThreadClosed(_) => {
                 let status = Status {
                     phase: Phase::Idle,
@@ -1975,27 +1974,6 @@ fn mcp_said(updated: &p::McpServerStatusUpdatedNotification) -> Option<String> {
         (None, Some(why)) if !why.is_empty() => format!("MCP server {name} didn't start: {why}"),
         (None, _) => format!("MCP server {name} didn't start"),
     })
-}
-
-/// The goal Codex holds for a thread, as the thread model shows it: its state in the open
-/// words Slopty uses (`usageLimited` reads `usage-limited`).
-#[must_use]
-pub fn goal_of(goal: &p::ThreadGoal) -> Goal {
-    let state = wire(&goal.status).chars().fold(String::new(), |mut words, c| {
-        if c.is_ascii_uppercase() {
-            words.push('-');
-        }
-        words.push(c.to_ascii_lowercase());
-        words
-    });
-    Goal {
-        objective: goal.objective.clone(),
-        state,
-        tokens_used: u64::try_from(goal.tokens_used).unwrap_or_default(),
-        token_budget: goal.token_budget.and_then(|b| u64::try_from(b).ok()),
-        time_used_s: u64::try_from(goal.time_used_seconds).unwrap_or_default(),
-        updated_ms: seconds(goal.updated_at),
-    }
 }
 
 /// `value`'s name on the wire: a string enum's value.

@@ -336,8 +336,8 @@ pub enum Intent {
         text: String,
     },
     /// Send a queued message now: into the turn under way, as a steer would go, where the agent
-    /// takes one ([`Cap::STEER`]), else first after stopping that turn, as a send by interrupt
-    /// would ([`Delivery::Interrupt`]); with no turn under way it starts one. Any thread that
+    /// takes one ([`Cap::STEER`]), else first after stopping that turn; with no turn under way it
+    /// starts one. Any thread that
     /// holds messages takes it ([`Cap::QUEUE`]).
     Promote {
         /// The intent that sent it.
@@ -392,16 +392,6 @@ pub enum Intent {
     Fork {
         /// The last turn the new thread shares with this one; `None` for all of them.
         after: Option<TurnId>,
-    },
-    /// Go on from this thread in a new one on agent `agent` (this one's own, to start afresh)
-    /// ([`Cap::CONTINUE`]). The new thread starts with nothing sent; the client that asked
-    /// puts a pointer to this one in its composer (its id, folder and branch, and how to read
-    /// it), for the person to send. Answered with [`Outcome::Started`] and the new thread,
-    /// whose [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) names this one; this
-    /// one goes on as it was.
-    Continue {
-        /// The agent the new thread runs.
-        agent: AgentId,
     },
     /// Set how hard the model thinks, by the agent's own name for the level
     /// ([`ThreadMeta::efforts`](super::ThreadMeta::efforts)).
@@ -471,8 +461,6 @@ impl Intent {
     /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`])
     /// or for the person's own marks on it ([`Self::Seen`], [`Self::Draft`]), which the worker
     /// does whatever its agent can.
-    ///
-    /// A send by interrupt ([`Delivery::Interrupt`]) needs [`Cap::QUEUE`] too.
     #[must_use]
     pub const fn needs(&self) -> Option<&'static str> {
         Some(match self {
@@ -483,7 +471,7 @@ impl Intent {
             | Self::Withdraw { .. }
             | Self::Edit { .. }
             | Self::Promote { .. } => Cap::QUEUE,
-            Self::Send { delivery: Delivery::Interrupt, .. } | Self::Interrupt => Cap::INTERRUPT,
+            Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,
@@ -491,7 +479,6 @@ impl Intent {
             Self::Fork { .. } | Self::Aside | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Review { .. } => Cap::REVIEW,
-            Self::Continue { .. } => Cap::CONTINUE,
         })
     }
 

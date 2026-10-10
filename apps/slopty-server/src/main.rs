@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use slopty_net::admission::{Admission, parse_allow};
-use slopty_server::project::{Bounds, Policy, ProjectId};
+use slopty_server::project::Bounds;
 use slopty_server::{Config, PushConfig, Server};
 
 /// Command line.
@@ -174,29 +174,17 @@ fn admission(allow: &[String]) -> Admission {
     Admission::new(parse_allow(allow, "[network]"))
 }
 
-/// The person's bounds on projects and the fleet (`[server.projects]`). A project name there
-/// that is no name is skipped, saying so; bounds past their ceiling leave the defaults.
-fn policy(settings: &slopty_settings::ProjectBounds) -> Policy {
-    let bounds = Bounds { live_agents: settings.live_agents, permission_flags: false };
-    let bounds = match bounds.check() {
+/// The person's bounds on projects and the fleet (`[server.projects]`); bounds past their
+/// ceiling leave the defaults.
+fn bounds(settings: slopty_settings::ProjectBounds) -> Bounds {
+    let bounds = Bounds { live_agents: settings.live_agents };
+    match bounds.check() {
         Ok(()) => bounds,
         Err(e) => {
             tracing::warn!(error = %e, "[server.projects] ignored; the default bounds hold");
             Bounds::default()
         }
-    };
-    let permission_flags = settings
-        .permission_flags
-        .iter()
-        .filter_map(|name| match ProjectId::new(name) {
-            Ok(id) => Some(id),
-            Err(e) => {
-                tracing::warn!(error = %e, "[server.projects] permission_flags: skipped");
-                None
-            }
-        })
-        .collect();
-    Policy { bounds, permission_flags }
+    }
 }
 
 #[tokio::main]
@@ -227,7 +215,7 @@ async fn main() -> Result<()> {
         push: push(&settings.server.push),
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
-    server.hub().set_policy(policy(&settings.server.projects));
+    server.hub().set_bounds(bounds(settings.server.projects));
     server.hub().set_settings_file(settings_path.clone());
     server.hub().keep_awake(Box::new(Assertion::default()), keep_awake(settings.keep_awake));
     let hub = server.hub().clone();
@@ -239,7 +227,7 @@ async fn main() -> Result<()> {
         }
         if changed.projects {
             tracing::info!("[server.projects] changed: applied");
-            hub.set_policy(policy(&now.server.projects));
+            hub.set_bounds(bounds(now.server.projects));
         }
         if changed.push {
             tracing::info!("[server.push] changed: applied");
@@ -276,8 +264,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Changed, ProjectId, PushConfig, admission, follow_settings, policy, push, settings,
-        settings_path,
+        Changed, PushConfig, admission, bounds, follow_settings, push, settings, settings_path,
     };
 
     /// An edit of the file reaches the running server within a poll: the ranges and the
@@ -362,43 +349,31 @@ mod tests {
         assert_eq!(ranges, ["10.8.0.0/24"]);
     }
 
-    /// The bounds on projects and the fleet are the person's, from the same settings; a
-    /// project allowed looser permissions by a name that is no name is skipped, and bounds past
-    /// their ceiling leave the defaults.
+    /// The bounds on projects and the fleet are the person's, from the same settings; bounds
+    /// past their ceiling leave the defaults, and a key the server no longer reads is no bound.
     #[test]
     fn the_project_bounds_come_from_the_shared_settings() {
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path().join("server");
-        let default = policy(&settings(&data_dir).server.projects);
-        assert_eq!(
-            default.bounds,
-            super::Bounds::default(),
-            "the file's defaults are the server's"
-        );
-        assert!(default.permission_flags.is_empty(), "no project may loosen by default");
-        let text = "[server.projects]\nlive_agents = 3\n\
-                    permission_flags = [\"nightly\", \"Not A Name\"]\n";
+        let default = bounds(settings(&data_dir).server.projects);
+        assert_eq!(default, super::Bounds::default(), "the file's defaults are the server's");
+        let text = "[server.projects]\nlive_agents = 3\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
-        let set = policy(&settings(&data_dir).server.projects);
-        assert_eq!(set.bounds.live_agents, 3);
-        assert_eq!(
-            set.permission_flags.into_iter().collect::<Vec<_>>(),
-            [ProjectId::new("nightly").unwrap()]
-        );
-        assert!(!set.bounds.permission_flags, "only per project, never fleet-wide");
+        let set = bounds(settings(&data_dir).server.projects);
+        assert_eq!(set.live_agents, 3);
         std::fs::write(
             root.path().join("settings.toml"),
             "[server.projects]\nlive_agents = 5000\n",
         )
         .unwrap();
-        let over = policy(&settings(&data_dir).server.projects);
-        assert_eq!(over.bounds, super::Bounds::default(), "past a ceiling, the defaults hold");
+        let over = bounds(settings(&data_dir).server.projects);
+        assert_eq!(over, super::Bounds::default(), "past a ceiling, the defaults hold");
         std::fs::write(
             root.path().join("settings.toml"),
-            "[server.projects]\ncomprehension_depth = 3\n",
+            "[server.projects]\npermission_flags = [\"nightly\"]\n",
         )
         .unwrap();
-        let deep = policy(&settings(&data_dir).server.projects);
-        assert_eq!(deep.bounds, super::Bounds::default(), "a rule's cost stays bounded");
+        let gone = bounds(settings(&data_dir).server.projects);
+        assert_eq!(gone, super::Bounds::default(), "no project may loosen by name");
     }
 }

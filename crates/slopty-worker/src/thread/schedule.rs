@@ -55,7 +55,7 @@ pub const fn when(pending: &Pending, now: WallMs) -> When {
     match pending.delivery {
         Delivery::At { at_ms } if at_ms.as_millis() <= now.as_millis() => When::Now,
         Delivery::At { at_ms } => When::At(at_ms),
-        Delivery::Steer | Delivery::Queue | Delivery::Interrupt => When::Later,
+        Delivery::Steer | Delivery::Queue => When::Later,
     }
 }
 

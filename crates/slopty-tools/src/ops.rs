@@ -162,7 +162,7 @@ pub async fn spawn_agent<D: Dispatch>(
 ) -> Result<TermRef, ToolError> {
     let worker = res.worker(worker).await?;
     let AgentSpec { cwd, prompt, args, env, size } = spec;
-    // The server sets `permission_flags` from the person's policy, whatever is asked here.
+    // The server sets `autonomy` from who asks, whatever is asked here.
     let verb = Verb::SpawnAgent {
         worker,
         cwd,
@@ -171,7 +171,7 @@ pub async fn spawn_agent<D: Dispatch>(
         env,
         size,
         session: None,
-        permission_flags: false,
+        autonomy: None,
         worktree: None,
     };
     opened(res.dispatch(), key, verb).await

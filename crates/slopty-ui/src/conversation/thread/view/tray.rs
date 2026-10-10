@@ -892,9 +892,6 @@ impl ThreadView {
             // The line over the queue says it once for all of them.
             (Some(_), ..) if queued.stopped => None,
             (Some(why), ..) => Some(why.clone()),
-            (None, false, ..) if queued.delivery == Delivery::Interrupt => {
-                Some("Stopping the turn to send".to_owned())
-            }
             (None, false, ..) if !queued.delivery.is_kept() => Some("Sending".to_owned()),
             (None, ..) => super::later::when_words(queued.delivery, crate::clock::now(cx)),
         };

@@ -547,8 +547,7 @@ fn a_task_s_card_follows_its_thread_s_pull_request() {
     assert_eq!(card(&p), None);
 }
 
-/// A project's review limit is at least one, and the person's policy says which projects'
-/// agents may loosen their permissions.
+/// A project's review limit is at least one, and the person's bounds are every project's.
 #[test]
 fn limits_and_the_person_s_bounds_hold() {
     let mut p = Projects::default();
@@ -563,12 +562,8 @@ fn limits_and_the_person_s_bounds_hold() {
     assert_eq!(made.project.limits, Limits::default());
     assert_eq!(made.bounds, Bounds::default());
 
-    let tight = Bounds { live_agents: 2, ..Bounds::default() };
-    let permitted = BTreeSet::from([id()]);
-    p.set_policy(Policy { bounds: tight, permission_flags: permitted });
-    let s = status(&p);
-    assert_eq!(s.bounds.live_agents, 2);
-    assert!(s.bounds.permission_flags, "this project may loosen its agents' permissions");
+    p.set_bounds(Bounds { live_agents: 2 });
+    assert_eq!(status(&p).bounds, Bounds { live_agents: 2 });
 }
 
 /// What the store writes reads back the same, timeline numbering included.

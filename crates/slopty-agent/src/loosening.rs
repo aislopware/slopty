@@ -16,10 +16,10 @@
 //! - `--permission-mode`, by the mode: one that asks no less than `default` ([`SAFE_MODES`]);
 //! - `--settings`, a document (JSON, or a file under the agent's directory) that holds only what is
 //!   known to loosen nothing: the worker's own hooks and status line, deny and ask rules, bypass
-//!   locked off, a mode that asks, and settings of display or model (`SAFE_SETTINGS`). Anything
-//!   else, an allow rule, another hook (which runs a command unasked, and may answer a permission),
-//!   an `env`, a helper command, loosens, and so does a document that cannot be read: it is judged
-//!   by what it could hold;
+//!   locked off, a mode that asks, the allow rule for Slopty's own tools, and settings of display
+//!   or model (`SAFE_SETTINGS`). Anything else, another allow rule, another hook (which runs a
+//!   command unasked, and may answer a permission), an `env`, a helper command, loosens, and so
+//!   does a document that cannot be read: it is judged by what it could hold;
 //! - `--mcp-config`, a document that names only the worker's own tools server, since every other
 //!   stdio server is a command run unasked;
 //! - `--plugin-dir`, the worker's own mod and no other plugin, whose hooks run unasked.
@@ -174,10 +174,19 @@ fn permissions(held: &Value) -> Vec<String> {
                 found.push(format!("{SETTINGS_FLAG} starting in {mode} (permissions.defaultMode)"));
             }
             key if SAFE_PERMISSIONS.contains(&key) => {}
+            // Slopty's own tools, which the worker allows its agents: each answers by who
+            // calls it on the server, so allowing it unasked gives nothing the server does not.
+            "allow" if value.as_array().is_some_and(|rules| rules.iter().all(is_slopty_tools)) => {}
             key => found.push(format!("{SETTINGS_FLAG} with permissions.{key}")),
         }
     }
     found
+}
+
+/// Whether an allow `rule` is the one the worker adds for Slopty's own tools
+/// ([`crate::hooks::SLOPTY_TOOLS`]).
+fn is_slopty_tools(rule: &Value) -> bool {
+    rule.as_str() == Some(crate::hooks::SLOPTY_TOOLS)
 }
 
 /// Every hook a document registers must be the worker's own relay: any other runs a command
@@ -373,6 +382,14 @@ mod tests {
             judged(json!({ "permissions": { "allow": ["Bash(rm:*)"] } })),
             ["--settings with permissions.allow"]
         );
+        assert_eq!(
+            judged(json!({ "permissions": { "allow": ["mcp__slopty", "Bash"] } })),
+            ["--settings with permissions.allow"],
+            "Slopty's own tools carry no other rule through"
+        );
+        let own = crate::hooks::held_to(Vec::new(), cwd, true);
+        let own: Vec<String> = std::iter::once("claude".to_owned()).chain(own).collect();
+        assert_eq!(loose(&own, cwd), Vec::<String>::new(), "auto left open: {own:?}");
         assert!(
             judged(json!({ "permissions": { "defaultMode": "acceptEdits" } }))[0]
                 .contains("acceptEdits")

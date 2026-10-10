@@ -1066,6 +1066,7 @@ impl Tracker {
             relay: invocation.relay,
             mcp: invocation.mcp,
             locked: invocation.locked,
+            auto: invocation.auto,
             role: invocation.role,
         })
     }

@@ -15,8 +15,8 @@ use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
     ASKING_ENV, Autonomy, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX,
-    PERMISSION_MODE_FLAG, PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, SAFE_MODES,
-    TASK_ENV, Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
+    PERMISSION_MODE_FLAG, PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, TASK_ENV,
+    Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -32,8 +32,8 @@ use super::{
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Installed, Wanted};
 use crate::project::{
-    Assignee, Caller, Cleanup, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting,
-    Teller, Watched, clipped,
+    Assignee, Caller, Cleanup, Drove, Keep, NewProject, ProjectChange, Running, Starting, Teller,
+    Watched, clipped,
 };
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
@@ -119,7 +119,7 @@ pub(super) fn watch(state: &mut State, term: TermRef, change: impl FnOnce(&mut W
     let mut fresh = false;
     let (held, _) = state.watched.entry(term.session).or_insert_with(|| {
         fresh = true;
-        (Watched { term, locked: false, drove: None }, tokio::time::Instant::now())
+        (Watched { term, held: None, drove: None }, tokio::time::Instant::now())
     });
     let before = *held;
     change(held);
@@ -137,38 +137,10 @@ pub(super) fn node_of(
     state.projects.working_on(term_of(state, from?)?)
 }
 
-/// The project `term` works for: the one it works on, or else the one whose agent opened it.
-pub(super) fn project_of(state: &State, term: TermRef) -> Option<ProjectId> {
-    if let Some((project, _)) = state.projects.working_on(term) {
-        return Some(project);
-    }
-    match state.watched.get(&term.session).and_then(|(w, _)| w.drove) {
-        Some(Drove::Opened { by }) => node_of(state, by).map(|(project, _)| project),
-        _ => None,
-    }
-}
-
-/// Whether the person allows looser permissions (`[server.projects] permission_flags`) to a
-/// start for `project` by `caller` speaking from `from`. The allowance is a project's: an agent
-/// has it only in the project it proves it works in, and names none of another's; a start that
-/// names no project has the agent's own.
-pub(super) fn allowance(
-    state: &State,
-    caller: Caller,
-    from: Option<SessionId>,
-    project: Option<&ProjectId>,
-) -> bool {
-    let project = match caller {
-        Caller::Person => project.cloned(),
-        Caller::Agent => {
-            let own = node_of(state, from).map(|(project, _)| project);
-            match project {
-                Some(named) if own.as_ref() != Some(named) => return false,
-                _ => own,
-            }
-        }
-    };
-    state.projects.policy().bounds_for(project.as_ref()).permission_flags
+/// Whether a start by `caller` may be given flags and environment that loosen what it asks:
+/// the person's own word only. An agent's starts are held to asking, whatever it names.
+pub(super) const fn allowance(caller: Caller) -> bool {
+    matches!(caller, Caller::Person)
 }
 
 /// Whether `term` is `project`'s to put to work, for an agent speaking from `from`: its own
@@ -425,33 +397,39 @@ fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
     error(
         ErrorCode::Limit,
         &format!(
-            "{flag} may give the agent more than its starter has ({why}); the person allows it \
-             for {whose} only in the server's settings.toml (`[server.projects] \
-             permission_flags`)"
+            "{flag} may give the agent more than its starter has ({why}), so {whose} are \
+             started without it: how far a project's agents go is its autonomy, which the \
+             person sets"
         ),
     )
 }
 
 /// Whether `flag`, as the loosening check words it, asks for auto mode.
 fn names_auto(flag: &str) -> bool {
-    flag.strip_prefix(PERMISSION_MODE_FLAG)
-        .map(|rest| rest.trim_start_matches(['=', ' ']).trim())
-        .is_some_and(|mode| mode == "auto")
+    mode_named(flag) == Some("auto")
 }
 
-/// `args` for an agent the server starts: the permission mode pinned to `default` when they
-/// name none and the person allows no looser one, so no settings file an agent may have
-/// written starts it in a looser mode; and, for a task, a conversation id chosen now
+/// The permission mode `flag` names, as the loosening check words it (`--permission-mode auto`,
+/// `--permission-mode=acceptEdits`); `None` for any other flag.
+fn mode_named(flag: &str) -> Option<&str> {
+    flag.strip_prefix(PERMISSION_MODE_FLAG).map(|rest| rest.trim_start_matches(['=', ' ']).trim())
+}
+
+/// `args` for an agent the server starts: the permission mode pinned to the one its level
+/// (`held`) starts in when they name none, so no settings file an agent may have written starts
+/// it in a looser mode; and, for a task, a conversation id chosen now
 /// (`--session-id`), so the task knows it before the first hook, and the role it plays
 /// (`--append-system-prompt`). The id, when chosen, comes back too.
 pub(super) fn started_args(
     mut args: Vec<String>,
-    permission_flags: bool,
+    held: Option<Autonomy>,
     role: Option<String>,
 ) -> (Vec<String>, Option<String>) {
     let mut first = Vec::new();
-    if !permission_flags && !names(&args, &[PERMISSION_MODE_FLAG]) {
-        first.extend([PERMISSION_MODE_FLAG.to_owned(), "default".to_owned()]);
+    if let Some(level) = held
+        && !names(&args, &[PERMISSION_MODE_FLAG])
+    {
+        first.extend([PERMISSION_MODE_FLAG.to_owned(), level.claude_mode().to_owned()]);
     }
     let mut conversation = None;
     if let Some(role) = role {
@@ -841,9 +819,9 @@ const fn maybe_done(outcome: &Outcome) -> bool {
 }
 
 impl Hub {
-    /// Take up the person's policy: the bounds on every project and on the fleet.
-    pub fn set_policy(&self, policy: Policy) {
-        self.inner.state.lock().projects.set_policy(policy);
+    /// Take up the person's bounds on every project and on the fleet.
+    pub fn set_bounds(&self, bounds: Bounds) {
+        self.inner.state.lock().projects.set_bounds(bounds);
     }
 
     pub(super) fn status_of(
@@ -1290,37 +1268,27 @@ impl Hub {
         let Verb::SpawnAgent { worker, cwd, prompt, args, env, size, worktree, .. } = verb else {
             return error(ErrorCode::Invalid, "not an agent's start");
         };
-        let admitted = Self::admit_agent(&mut self.inner.state.lock(), caller, from, worker, &args);
-        let (id, term, permission_flags) = match admitted {
+        let admitted = Self::admit_agent(&mut self.inner.state.lock(), caller, worker, &args);
+        let (id, term) = match admitted {
             Ok(admitted) => admitted,
             Err(refused) => return refused,
         };
-        // An agent's own starts never begin looser than `default`; a person's keep their
-        // settings' mode.
-        let args = match caller {
+        // An agent's own starts are held to asking; a person's keep their settings' mode.
+        let (args, autonomy) = match caller {
             Caller::Agent => {
                 let mut state = self.inner.state.lock();
                 watch(&mut state, term, |w| {
                     w.drove = Some(Drove::Opened { by: from });
-                    w.locked |= !permission_flags;
+                    w.held = Some(Autonomy::Ask);
                 });
                 drop(state);
-                started_args(args, permission_flags, None).0
+                (started_args(args, Some(Autonomy::Ask), None).0, Some(Autonomy::Ask))
             }
-            Caller::Person => args,
+            Caller::Person => (args, None),
         };
         let session = Some(term.session);
-        let start = Verb::SpawnAgent {
-            worker,
-            cwd,
-            prompt,
-            args,
-            env,
-            size,
-            session,
-            permission_flags,
-            worktree,
-        };
+        let start =
+            Verb::SpawnAgent { worker, cwd, prompt, args, env, size, session, autonomy, worktree };
         if let Some(key) = &key {
             keep_start(&mut self.inner.state.lock(), key.clone(), sent, &start);
         }
@@ -1347,25 +1315,24 @@ impl Hub {
         started.await.unwrap_or_else(|e| error(ErrorCode::Failed, &format!("the start ended: {e}")))
     }
 
-    /// Place a plain agent's start on `worker`, if the person's bounds allow it: its id, its
-    /// terminal, and whether it may loosen its permissions.
+    /// Place a plain agent's start on `worker`, if the person's bounds allow it: its id and its
+    /// terminal.
     fn admit_agent(
         state: &mut State,
         caller: Caller,
-        from: Option<SessionId>,
         worker: WorkerId,
         args: &[String],
-    ) -> Result<(u64, TermRef, bool), Outcome> {
-        let bounds = state.projects.policy().bounds_for(None);
-        let allowed = allowance(state, caller, from, None);
-        if !allowed && let Some(flag) = loosening(args) {
+    ) -> Result<(u64, TermRef), Outcome> {
+        let bounds = state.projects.bounds();
+        if !allowance(caller)
+            && let Some(flag) = loosening(args)
+        {
             return Err(loosened(&flag, None));
         }
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         fleet_room(state, &running, bounds)?;
-        let (id, term) = Self::place(state, worker, None, true);
-        Ok((id, term, allowed))
+        Ok(Self::place(state, worker, None, true))
     }
 
     /// Open a terminal under an id the hub chooses; one whose command is `claude` or `codex`
@@ -1385,7 +1352,7 @@ impl Hub {
         let Verb::OpenTerminal { worker, cwd, command, mut env, name, size, .. } = verb else {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
-        let allowed = allowance(&self.inner.state.lock(), caller, from, None);
+        let allowed = allowance(caller);
         let flag = claude_args(&command)
             .as_deref()
             .and_then(loosening)
@@ -1435,7 +1402,7 @@ impl Hub {
     /// Place an agent's terminal on `worker`, if the person's bounds allow another agent
     /// there: its start's id and its terminal.
     fn admit_terminal(state: &mut State, worker: WorkerId) -> Result<(u64, TermRef), Outcome> {
-        let bounds = state.projects.policy().bounds_for(None);
+        let bounds = state.projects.bounds();
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         fleet_room(state, &running, bounds)?;
@@ -1674,20 +1641,19 @@ impl Hub {
     }
 
     /// Everything a start checks before it is placed, read together: what it asks of its
-    /// worker, and whether the person lets it loosen its permissions.
+    /// worker.
     fn may_start(
         state: &mut State,
         project: &ProjectId,
         task: TaskId,
         launch: &Launch,
-    ) -> Result<(Wanted, bool), Outcome> {
-        let bounds = state.projects.policy().bounds_for(Some(project));
+    ) -> Result<Wanted, Outcome> {
+        let bounds = state.projects.bounds();
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         state.projects.may_start(project, task, launch.ignore_dependencies, &running)?;
         fleet_room(state, &running, bounds)?;
-        let wanted = Self::placement_for(state, project, task, launch)?;
-        Ok((wanted, bounds.permission_flags))
+        Self::placement_for(state, project, task, launch)
     }
 
     /// Hold a place on `worker` for a start, checked again: others may have started while
@@ -1749,7 +1715,7 @@ impl Hub {
     ) -> Outcome {
         let chosen = {
             let mut state = self.inner.state.lock();
-            Self::may_start(&mut state, project, task, &launch).and_then(|(wanted, _)| {
+            Self::may_start(&mut state, project, task, &launch).and_then(|wanted| {
                 let candidates = Self::candidates(&mut state, project);
                 let unplaced = |why: &str| {
                     error(
@@ -1787,8 +1753,6 @@ impl Hub {
         let reserved = {
             let mut state = self.inner.state.lock();
             Self::reserve(&mut state, (project, task), &launch, worker).and_then(|placed| {
-                let permission_flags =
-                    state.projects.policy().bounds_for(Some(project)).permission_flags;
                 let (record, card) =
                     (state.projects.project(project)?, state.projects.task(project, task)?);
                 let clone = launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
@@ -1801,18 +1765,19 @@ impl Hub {
                 });
                 let named = named_dir(&launch.cwd, record);
                 let role = agent_role(record, card, at.as_ref());
-                // Held to asking: Claude Code by its permission mode, Codex by its approval
-                // policy and sandbox, each as its own reports say them.
+                let level = record.autonomy;
+                // Held to its project's level: Claude Code by its permission mode, Codex by its
+                // approval policy and sandbox, each as its own reports say them.
                 let held_by_server =
                     launch.agent.is(AgentId::CLAUDE_CODE) || launch.agent.is(AgentId::CODEX);
-                if !permission_flags && held_by_server {
-                    watch(&mut state, placed.1, |w| w.locked = true);
+                if held_by_server {
+                    watch(&mut state, placed.1, |w| w.held = Some(level));
                 }
                 let at = at.unwrap_or(Place { path: named, worktree: None });
-                Ok((placed, permission_flags, role, at))
+                Ok((placed, level, role, at))
             })
         };
-        let ((id, term), permission_flags, role, at) = match reserved {
+        let ((id, term), level, role, at) = match reserved {
             Ok(reserved) => reserved,
             Err(refused) => return refused,
         };
@@ -1847,7 +1812,7 @@ impl Hub {
                     args.extend([WORKTREE_FLAGS[0].to_owned(), name.clone()]);
                     NewWorktree { name, base: Some(base), pull: None, setup: true }
                 });
-                let (args, conversation) = started_args(args, permission_flags, Some(role));
+                let (args, conversation) = started_args(args, Some(level), Some(role));
                 let spawn = Verb::SpawnAgent {
                     worker,
                     cwd,
@@ -1856,7 +1821,7 @@ impl Hub {
                     env,
                     size,
                     session,
-                    permission_flags,
+                    autonomy: Some(level),
                     worktree,
                 };
                 (spawn, conversation)
@@ -1866,7 +1831,7 @@ impl Hub {
                 let open = Verb::OpenTerminal {
                     worker,
                     cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: codex::command(&role, Vec::new(), prompt, !permission_flags),
+                    command: codex::command(&role, Vec::new(), prompt, level),
                     env,
                     name: Some(format!("{project} #{task}")),
                     size,
@@ -2036,13 +2001,14 @@ impl Hub {
 
     /// What the agent in `term` said its permission mode is, at its start and at each change.
     ///
-    /// An agent the server started without looser permissions, or one in a terminal an agent
-    /// opened or typed into, stays in a mode that asks (`default`, `plan`, `dontAsk`). A looser
-    /// one came from a settings file or from keys typed into its TUI, and an agent may type as
-    /// well as the person, so its terminal is closed and the timeline says why, unless the
-    /// person allows looser modes for its project.
+    /// An agent the server started stays within its level ([`Autonomy::allows_mode`]): a task's
+    /// within its project's, an agent's own start, or one in a terminal an agent opened or typed
+    /// into, within asking. A looser mode came from a settings file or from keys typed into its
+    /// TUI, and an agent may type as well as the person, so its terminal is closed and the
+    /// timeline says why.
     pub(super) fn permission_mode(&self, state: &mut State, term: TermRef, mode: &str) {
-        if SAFE_MODES.contains(&mode) || !Self::held_to_asking(state, term) {
+        let Some(level) = Self::held_level(state, term) else { return };
+        if level.allows_mode(mode) {
             return;
         }
         let how = if mode == "auto" {
@@ -2051,31 +2017,30 @@ impl Hub {
             ""
         };
         let why = format!(
-            "its agent went into {mode} mode{how}, looser than the person allows \
-             (`[server.projects] permission_flags`), so its terminal was closed"
+            "its agent went into {mode} mode{how}, past what the person allows its project \
+             (its autonomy), so its terminal was closed"
         );
         self.close_looser(state, term, &why);
     }
 
     /// What a Codex thread at `term` says its approval policy and sandbox are, at its start
-    /// and at each change: held to asking as [`Self::permission_mode`] holds Claude Code, a
-    /// Codex past `on-request`, or with a sandbox past its workspace, is closed and the
-    /// timeline says why. Its own configuration, or a switch in its TUI, set that.
+    /// and at each change: held to its level as [`Self::permission_mode`] holds Claude Code, a
+    /// Codex past that level's approval policy, or with a sandbox past its workspace, is closed
+    /// and the timeline says why. Its own configuration, or a switch in its TUI, set that.
     pub(super) fn codex_settings(
         &self,
         state: &mut State,
         term: TermRef,
         (mode, sandbox): &super::ladder::CodexSettings,
     ) {
-        let Some(looser) = codex::looser_settings(mode.as_deref(), sandbox.as_deref()) else {
+        let Some(level) = Self::held_level(state, term) else { return };
+        let Some(looser) = codex::looser_settings(level, mode.as_deref(), sandbox.as_deref())
+        else {
             return;
         };
-        if !Self::held_to_asking(state, term) {
-            return;
-        }
         let why = format!(
-            "its Codex runs with {looser}, looser than the person allows (`[server.projects] \
-             permission_flags`), so it was closed"
+            "its Codex runs with {looser}, past what the person allows its project (its \
+             autonomy), so it was closed"
         );
         self.close_looser(state, term, &why);
     }
@@ -2083,30 +2048,30 @@ impl Hub {
     /// What the worker read off the command line of the agent in `term` that loosens its
     /// permissions, however it was started: a `claude` inside a shell's line (`sh -c "cd x &&
     /// claude --allowedTools Bash"`) passes the flag check at the start, which sees only the
-    /// program it was handed. Judged as a looser mode is ([`Self::permission_mode`]).
+    /// program it was handed. A permission mode its level allows is no loosening; the rest is
+    /// judged as a looser mode is ([`Self::permission_mode`]).
     pub(super) fn loosened(&self, state: &mut State, term: TermRef, found: &[String]) {
-        if found.is_empty() || !Self::held_to_asking(state, term) {
+        let Some(level) = Self::held_level(state, term) else { return };
+        let found: Vec<&String> =
+            found.iter().filter(|f| !mode_named(f).is_some_and(|m| level.allows_mode(m))).collect();
+        if found.is_empty() {
             return;
         }
         let shown: Vec<String> =
             found.iter().take(LOOSENED_MAX).map(|f| clipped(f, LOOSENED_ITEM_MAX)).collect();
         let why = format!(
-            "its agent runs with {}, more than the person allows (`[server.projects] \
-             permission_flags`), so its terminal was closed",
+            "its agent runs with {}, more than the person allows its project (its autonomy), so \
+             its terminal was closed",
             shown.join(", ")
         );
         self.close_looser(state, term, &why);
     }
 
-    /// Whether the agent in `term` must stay in a mode that asks: the server started it
-    /// without looser permissions, or an agent opened or typed into its terminal, and the
-    /// person allows nothing looser for the project it works for ([`project_of`]).
-    fn held_to_asking(state: &State, term: TermRef) -> bool {
-        let project = project_of(state, term);
-        let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
-        let watched =
-            state.watched.get(&term.session).is_some_and(|(w, _)| w.locked || w.drove.is_some());
-        watched && !allowed
+    /// The level the agent in `term` is held to: the one the server started it at, or asking
+    /// for one in a terminal an agent opened or typed into; `None` for the person's own.
+    fn held_level(state: &State, term: TermRef) -> Option<Autonomy> {
+        let (watched, _) = state.watched.get(&term.session)?;
+        watched.held.or_else(|| watched.drove.is_some().then_some(Autonomy::Ask))
     }
 
     /// Close `term`, whose agent is looser than allowed, saying `why` on its task.
@@ -2343,19 +2308,22 @@ mod tests {
         assert_eq!(claude_args(&words("codex --yolo")), None, "only claude's flags are known");
     }
 
-    /// An agent the server starts is pinned to `default` unless it names a mode or the person
-    /// allows looser ones; a task's also gets a conversation id of the server's choosing and
-    /// its role, unless its arguments pick the conversation.
+    /// An agent the server starts is pinned to its level's mode unless it names one, and the
+    /// person's own start to none; a task's also gets a conversation id of the server's choosing
+    /// and its role, unless its arguments pick the conversation.
     #[test]
     fn a_started_agent_begins_in_default_mode_under_a_chosen_conversation() {
-        let (args, id) = started_args(words("--model opus"), false, None);
+        let (args, id) = started_args(words("--model opus"), Some(Autonomy::Ask), None);
         assert_eq!(args, words("--permission-mode default --model opus"));
         assert_eq!(id, None);
-        let (args, _) = started_args(words("--permission-mode plan"), false, None);
+        let (args, _) = started_args(words("--permission-mode plan"), Some(Autonomy::Own), None);
         assert_eq!(args, words("--permission-mode plan"));
-        let (args, _) = started_args(Vec::new(), true, None);
-        assert!(args.is_empty(), "the person allows looser modes: the settings' mode stands");
-        let (args, id) = started_args(words("fix-it"), false, Some("be good".to_owned()));
+        let (args, _) = started_args(Vec::new(), None, None);
+        assert!(args.is_empty(), "the person's own start: the settings' mode stands");
+        let (args, _) = started_args(Vec::new(), Some(Autonomy::Edits), None);
+        assert_eq!(args, words("--permission-mode acceptEdits"));
+        let (args, id) =
+            started_args(words("fix-it"), Some(Autonomy::Ask), Some("be good".to_owned()));
         let id = id.expect("a conversation");
         assert!(id.parse::<SessionId>().is_ok(), "{id}");
         assert_eq!(
@@ -2369,7 +2337,8 @@ mod tests {
                 "fix-it"
             ]
         );
-        let (args, id) = started_args(words("--resume abc"), false, Some("r".to_owned()));
+        let (args, id) =
+            started_args(words("--resume abc"), Some(Autonomy::Ask), Some("r".to_owned()));
         assert_eq!(id, None, "the arguments pick the conversation");
         assert!(!args.iter().any(|a| a == "--session-id"), "{args:?}");
     }

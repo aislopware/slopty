@@ -39,6 +39,9 @@ pub struct Resume {
     pub mcp: bool,
     /// Its `--settings` locked it out of the mode that asks no permission, locked afresh.
     pub locked: bool,
+    /// That lock left auto mode open (an agent of a project that goes on its own), so it is
+    /// left open afresh.
+    pub auto: bool,
     /// The system prompt appended to it, kept when it was started with Slopty's tools (the
     /// server's role for a project's agent). One that carries the pointer to Slopty's CLI keeps
     /// the pointer alone ([`crate::hooks::POINTER`]): a prompt the person appended is never kept.
@@ -91,6 +94,8 @@ pub struct Invocation {
     pub mcp: bool,
     /// Its `--settings` locked out the mode that asks no permission.
     pub locked: bool,
+    /// That lock left auto mode open ([`crate::hooks::leaves_auto`]).
+    pub auto: bool,
     /// Its appended system prompt, when [`Resume::role`] keeps it.
     pub role: Option<String>,
     /// It is a `--print` run, not a conversation in the terminal.
@@ -287,6 +292,7 @@ pub fn invocation(args: &[String]) -> Invocation {
             out.relay |=
                 doc.as_ref().is_some_and(|d| crate::hooks::has_relay(d, HookEvent::SessionStart));
             out.locked |= doc.as_ref().is_some_and(crate::hooks::locks_bypass);
+            out.auto |= doc.as_ref().is_some_and(crate::hooks::leaves_auto);
         } else if flag == crate::hooks::MCP_CONFIG_FLAG {
             let mut configs: Vec<&str> = inline.into_iter().collect();
             if inline.is_none() {
@@ -620,9 +626,11 @@ mod tests {
         let mut args = ours;
         args.push("--append-system-prompt=You work on task 3.\nReport with task_report.".into());
         let kept = invocation(&args);
-        assert!(kept.mcp && kept.locked && !kept.relay, "{kept:?}");
+        assert!(kept.mcp && kept.locked && !kept.auto && !kept.relay, "{kept:?}");
         assert_eq!(kept.role.as_deref(), Some("You work on task 3.\nReport with task_report."));
         assert_eq!(kept.args, words("--model x"), "no document is kept");
+        let own = invocation(&crate::hooks::held_to(words("--model x"), dir, true));
+        assert!(own.locked && own.auto, "a lock that leaves auto open is noted so: {own:?}");
 
         let theirs = words("--mcp-config {\"mcpServers\":{\"db\":{\"command\":\"pg\"}}}");
         let mut theirs = theirs;
@@ -730,6 +738,7 @@ mod tests {
             relay: false,
             mcp: false,
             locked: false,
+            auto: false,
             role: None,
         };
         let args = resume.args();
@@ -761,6 +770,7 @@ mod tests {
             relay: false,
             mcp: false,
             locked: false,
+            auto: false,
             role: None,
         };
         assert_eq!(

@@ -179,7 +179,7 @@ mod codex {
     }
 
     /// `thread` once `done` holds of it, looked at every few milliseconds: for a change to the
-    /// thread that leaves its row in the table as it was (a notice, a goal).
+    /// thread that leaves its row in the table as it was (a notice).
     async fn polled(
         host: &Host,
         thread: ThreadId,
@@ -993,7 +993,7 @@ mod codex {
     }
 
     /// A stand-in daemon whose one loaded thread was archived outside Slopty: it refuses the
-    /// first resume as Codex does, takes it up again once unarchived, and holds a goal for it.
+    /// first resume as Codex does, and takes it up again once unarchived.
     async fn archivist(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -1017,12 +1017,6 @@ mod codex {
                     archived = false;
                     json!({ "result": { "thread": resumed["result"]["thread"] } })
                 }
-                Some("thread/goal/get") => json!({ "result": { "goal": {
-                    "threadId": native, "objective": "Make every fixture pass",
-                    "status": "active", "tokensUsed": 41_000, "tokenBudget": null,
-                    "timeUsedSeconds": 380, "createdAt": 1_790_000_000_i64,
-                    "updatedAt": 1_790_000_380_i64,
-                } } }),
                 _ => continue,
             };
             let mut answer = answer;
@@ -1032,8 +1026,7 @@ mod codex {
     }
 
     /// A thread archived outside Slopty is put back from Codex's archive and taken up again by
-    /// the same resume, once (`thread/unarchive`), never by starting a fresh session; the goal
-    /// Codex holds for it then shows on the thread.
+    /// the same resume, once (`thread/unarchive`), never by starting a fresh session.
     #[tokio::test]
     async fn an_archived_thread_is_unarchived_and_taken_up_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1047,20 +1040,15 @@ mod codex {
         let _served = codex::spawn(host.clone(), socket, None, asks);
         let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
         let thread = shared::thread_of(&native);
-        let sent = until_sent(&mut heard, "thread/goal/get").await;
+        let sent = until_sent(&mut heard, "thread/unarchive").await;
         let asked: Vec<&str> = sent
             .iter()
             .filter_map(|m| m["method"].as_str())
             .filter(|m| m.starts_with("thread/") && *m != "thread/loaded/list")
             .collect();
-        assert_eq!(
-            asked,
-            ["thread/resume", "thread/unarchive", "thread/resume", "thread/goal/get"]
-        );
-        let state = polled(&host, thread, |s| s.goal.is_some()).await;
-        let goal = state.goal.unwrap();
-        assert_eq!((goal.objective.as_str(), goal.is_active()), ("Make every fixture pass", true));
-        assert!(!state.turns.is_empty(), "the thread as Codex holds it");
+        assert_eq!(asked, ["thread/resume", "thread/unarchive"]);
+        let state = polled(&host, thread, |s| !s.turns.is_empty()).await;
+        assert!(!state.turns.is_empty(), "taken up again, the thread as Codex holds it");
     }
 
     /// A followed thread offers Codex's models, its model's efforts and the approval policies.
@@ -1219,10 +1207,9 @@ mod codex {
         polled(&host, thread, held).await;
 
         revert.send(()).unwrap();
-        let sent = until_sent(&mut heard, "thread/goal/get").await;
+        let sent = until_sent(&mut heard, "thread/resume").await;
         let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
-        let read = ["thread/resume", "thread/goal/get"];
-        assert_eq!(methods, read, "read again, and the turn still runs: nothing sent");
+        assert_eq!(methods, ["thread/resume"], "read again, and the turn still runs: nothing sent");
         let (state, _) = host.state(thread).unwrap();
         assert_eq!(state.turns.len(), 2, "as the re-read says");
         assert!(held(&state), "held through it: {:?}", state.pending);

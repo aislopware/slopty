@@ -11,14 +11,11 @@ mod pi {
 
     use serde_json::Value;
     use slopty_core::{ClientId, SessionId, WallMs};
-    use slopty_proto::thread::detail::Clipped;
     use slopty_proto::thread::wire::{Intent, Outcome, Pick, Start};
     use slopty_proto::thread::{
-        Action, AgentId, Answerer, Cap, Changed, Delivery, Drive, Fork, IntentId, Item, ItemBody,
-        ItemId, Liveness, Phase, RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, Turn,
-        TurnId, TurnState, Usage, UserMessage,
+        AgentId, Answerer, Cap, Delivery, Drive, Fork, IntentId, ItemBody, Liveness, Phase,
+        RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, TurnId, TurnState,
     };
-    use slopty_worker::thread::carry::carry;
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::pi::{self, Pi};
     use slopty_worker::thread::review::Snapshots;
@@ -535,113 +532,6 @@ mod pi {
         let sent = users.last().unwrap();
         assert_eq!(sent.0, "Make a file called made-by-pi.");
         assert_eq!(sent.1, Some(schedule::sent_as(later)), "as the person's message");
-    }
-
-    /// A Claude Code thread goes on in pi: pi starts with nothing sent, once per intent, and the
-    /// new thread says where it came from. Nothing waits on the worker for it; the person's
-    /// first message goes to pi as any message does. A thread with nothing in it, or whose agent
-    /// cannot, is not gone on from.
-    #[tokio::test]
-    async fn a_claude_code_thread_goes_on_in_pi_with_the_persons_first_message() {
-        let rig = Rig::new();
-        let (pi, _served) = rig.serve();
-        let meta = ThreadMeta {
-            id: ThreadId::new(),
-            agent: AgentId::named(AgentId::CLAUDE_CODE),
-            agent_version: String::new(),
-            native: "claude-session".to_owned(),
-            cwd: rig.work.to_string_lossy().into_owned(),
-            title: "Fix the parser".to_owned(),
-            terminal: None,
-            parent: None,
-            origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
-            drive: Drive::named(Drive::OBSERVED),
-            caps: vec![Cap::named(Cap::CONTINUE)],
-            models: Vec::new(),
-            modes: Vec::new(),
-            efforts: Vec::new(),
-            facts: std::collections::BTreeMap::new(),
-            created_ms: WallMs::ZERO,
-        };
-        let from = meta.id;
-        rig.host.create(meta.clone()).unwrap();
-        let pi_agent = AgentId::named(AgentId::PI);
-        let not_started = |_, _| std::future::ready(Outcome::Refused { reason: "started".into() });
-        let empty = carry(&rig.host, from, IntentId::new(), pi_agent.clone(), not_started).await;
-        assert!(matches!(empty, Outcome::Refused { .. }), "nothing to go on from: {empty:?}");
-
-        let said = |n: &str, body| {
-            let item =
-                Item { id: ItemId(n.to_owned()), turn: TurnId(1), at_ms: WallMs::ZERO, body };
-            Action::ItemStarted(item)
-        };
-        let asked = UserMessage {
-            text: Clipped::whole("Fix the parser."),
-            images: Vec::new(),
-            command: None,
-            intent: None,
-        };
-        rig.host.apply(
-            from,
-            vec![
-                Action::TurnStarted(Turn {
-                    id: TurnId(1),
-                    input: None,
-                    state: TurnState::Active,
-                    started_ms: WallMs::ZERO,
-                    ended_ms: None,
-                    usage: Usage::default(),
-                    models: Vec::new(),
-                    changed: Changed::default(),
-                    before: None,
-                    after: None,
-                }),
-                said("u1", ItemBody::User(asked)),
-                said("a1", ItemBody::Text(Clipped::whole("Fixed it."))),
-                Action::TurnEnded {
-                    turn: TurnId(1),
-                    state: TurnState::Complete,
-                    usage: Usage::default(),
-                    ended_ms: WallMs::ZERO,
-                },
-            ],
-        );
-        let mut unable = meta;
-        unable.id = ThreadId::new();
-        unable.caps.clear();
-        rig.host.create(unable.clone()).unwrap();
-        let refused = carry(&rig.host, unable.id, IntentId::new(), pi_agent.clone(), not_started);
-        assert_eq!(refused.await, Outcome::Unsupported { cap: Cap::named(Cap::CONTINUE) });
-
-        let id = IntentId::new();
-        let begin = |id, mut start: Start| {
-            start.args.push("--offline".to_owned());
-            pi.start(id, Box::new(start))
-        };
-        let Outcome::Started { thread } = carry(&rig.host, from, id, pi_agent.clone(), begin).await
-        else {
-            panic!("not gone on");
-        };
-        let again = carry(&rig.host, from, id, pi_agent, not_started).await;
-        assert_eq!(again, Outcome::Started { thread }, "once");
-        let state = rig.until(thread, "it begins", |s| s.meta.forked_from.is_some()).await;
-        assert_eq!(state.meta.agent, AgentId::named(AgentId::PI));
-        assert_eq!(state.meta.forked_from, Some(Fork { thread: from, turn: Some(TurnId(1)) }));
-        assert!(state.turns.is_empty(), "nothing sent");
-        assert!(
-            state.pending.is_empty(),
-            "nothing waits on the worker: the client fills its composer"
-        );
-
-        // The person's first message goes as any message does.
-        let sent_id = rig.send(&pi, thread, "Say hello.");
-        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-        let sent = users(&state).pop().unwrap();
-        assert_eq!(sent, ("Say hello.".to_owned(), Some(sent_id)));
-        let record =
-            rig.record_once(|r| r["heard"].as_array().is_some_and(|h| !h.is_empty())).await;
-        assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
     /// The worker's turn snapshots are every adapter's: a pi thread in a git folder takes a

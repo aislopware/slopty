@@ -43,8 +43,8 @@ impl Queue {
 
 impl<X> Queue<X> {
     /// Hold `text` and the files at `attachments`, sent as intent `intent`, with `kept` beside
-    /// it: last, or `first`, before everything held, for a message sent by interrupt
-    /// ([`Delivery::Interrupt`]). The action that shows the queue.
+    /// it: last, or `first`, before everything held, for a held message promoted past a turn
+    /// that stops for it. The action that shows the queue.
     pub fn hold(
         &mut self,
         intent: IntentId,

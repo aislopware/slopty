@@ -799,15 +799,10 @@ impl Hub {
     /// Keys typed into Claude Code reach more than its prompt: `!` runs a command unasked,
     /// `/permissions` and `/sandbox` add what it may do unasked, and shift-tab cycles its mode.
     /// The TUI is the person's, so an agent speaks to another through reports and Claude
-    /// Code's own messages, which it reads as a peer's, never as the person's keys. The person
-    /// allows it per project (`[server.projects] permission_flags`).
-    fn types_into_shell(&self, from: Option<SessionId>, term: TermRef) -> Result<(), Outcome> {
-        let state = self.inner.state.lock();
-        let agent = state.board.agent_at(term).is_some();
-        let project = projects::project_of(&state, term);
-        let allowed = projects::allowance(&state, Caller::Agent, from, project.as_ref());
-        drop(state);
-        if !agent || allowed {
+    /// Code's own messages, which it reads as a peer's, never as the person's keys.
+    fn types_into_shell(&self, term: TermRef) -> Result<(), Outcome> {
+        let agent = self.inner.state.lock().board.agent_at(term).is_some();
+        if !agent {
             return Ok(());
         }
         Err(error(
@@ -820,26 +815,19 @@ impl Hub {
     /// Whether an agent may start what `verb` starts with the environment it names. A variable
     /// that moves what runs or what it may do (where programs and settings are found, what a
     /// runtime loads, which worker socket answers its hooks, which server or task it speaks
-    /// for) would give the started program more than its starter has, so an agent names none
-    /// unless the person allows looser starts for the project (`[server.projects]
-    /// permission_flags`).
-    fn env_of_agent(&self, from: Option<SessionId>, verb: &Verb) -> Result<(), Outcome> {
+    /// for) would give the started program more than its starter has, so an agent names none.
+    fn env_of_agent(verb: &Verb) -> Result<(), Outcome> {
         let (Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. }) = verb else {
             return Ok(());
         };
         let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
             return Ok(());
         };
-        let allowed = projects::allowance(&self.inner.state.lock(), Caller::Agent, from, None);
-        if allowed {
-            return Ok(());
-        }
         Err(error(
             ErrorCode::Limit,
             &format!(
-                "{name} in an agent's start may give what it starts more than the agent has; the \
-                 person allows that only in the server's settings.toml (`[server.projects] \
-                 permission_flags`)"
+                "{name} in an agent's start may give what it starts more than the agent has, so \
+                 an agent's start names none"
             ),
         ))
     }
@@ -887,7 +875,7 @@ impl Hub {
         if caller == Caller::Agent
             && let Verb::SendInput { term, .. } = &verb
         {
-            if let Err(refused) = self.types_into_shell(from, *term) {
+            if let Err(refused) = self.types_into_shell(*term) {
                 return refused;
             }
             projects::watch(&mut self.inner.state.lock(), *term, |w| {
@@ -901,7 +889,7 @@ impl Hub {
             return refused;
         }
         if caller == Caller::Agent
-            && let Err(refused) = self.env_of_agent(from, &verb)
+            && let Err(refused) = Self::env_of_agent(&verb)
         {
             return refused;
         }

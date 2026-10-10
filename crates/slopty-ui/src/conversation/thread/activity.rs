@@ -166,11 +166,7 @@ impl<'a> Activity<'a> {
             .collect();
         queue.extend(threads.unshown(thread).filter_map(|s| match &s.intent {
             Intent::Send { text, delivery, attachments }
-                if !s.failed()
-                    && matches!(
-                        delivery,
-                        Delivery::Queue | Delivery::Interrupt | Delivery::At { .. }
-                    ) =>
+                if !s.failed() && matches!(delivery, Delivery::Queue | Delivery::At { .. }) =>
             {
                 Some(Queued {
                     intent: s.id,

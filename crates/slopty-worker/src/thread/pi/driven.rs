@@ -256,14 +256,6 @@ impl Task {
                         let shown = self.driven.queue().hold(intent, &text, attachments, (), false);
                         self.apply(vec![shown]);
                     }
-                    // Put first and the run stopped, so it goes as the run ends.
-                    Delivery::Interrupt if self.driven.running() => {
-                        let shown = self.driven.queue().hold(intent, &text, attachments, (), true);
-                        self.apply(vec![shown]);
-                        if let Some(command) = self.driven.interrupt() {
-                            self.ask_for(command, None).await;
-                        }
-                    }
                     _ => {
                         if released {
                             let shown = self.driven.queue().shown();

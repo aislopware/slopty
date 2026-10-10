@@ -24,10 +24,10 @@ mod golden_thread {
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
         Clipped, Command, Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Effort,
-        Fork, Goal, Image, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode,
-        Model, Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState,
-        Retry, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
-        TreeRef, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
+        Fork, Image, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model,
+        Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry,
+        Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef,
+        Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -229,17 +229,6 @@ mod golden_thread {
         }
     }
 
-    fn goal() -> Goal {
-        Goal {
-            objective: "Make the parser pass every fixture".to_owned(),
-            state: Goal::ACTIVE.to_owned(),
-            tokens_used: 41_000,
-            token_budget: Some(500_000),
-            time_used_s: 380,
-            updated_ms: ms(1_800),
-        }
-    }
-
     fn meters() -> Meters {
         Meters {
             model: Some("Opus 5.5".to_owned()),
@@ -285,7 +274,6 @@ mod golden_thread {
             Action::PendingSet(vec![pending()]),
             Action::MetersSet(meters()),
             Action::ToReview(true),
-            Action::GoalSet(Some(goal())),
             Action::ScreensSet(vec![screen()]),
             Action::PullSeen(Some(pull_seen())),
         ] {
@@ -426,14 +414,6 @@ mod golden_thread {
                 attachments: Vec::new(),
             }),
         );
-        snap(
-            "intent_send_interrupt",
-            &send(Intent::Send {
-                text: "Stop, and fix the parser first".to_owned(),
-                delivery: Delivery::Interrupt,
-                attachments: Vec::new(),
-            }),
-        );
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
             "intent_edit",
@@ -458,7 +438,6 @@ mod golden_thread {
         snap("intent_keep_aside", &send(Intent::KeepAside));
         snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
-        snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
         snap("intent_seen", &send(Intent::Seen { turn: TurnId(3) }));
         snap("intent_draft", &send(Intent::Draft { text: "and the README".to_owned() }));
     }
@@ -651,8 +630,6 @@ mod golden_thread {
                 tree: TreeRef("9f2e".to_owned()),
             },
             Action::ToReview(true),
-            Action::GoalSet(Some(goal())),
-            Action::GoalSet(None),
             Action::ScreensSet(vec![
                 screen(),
                 AgentScreen {

@@ -209,9 +209,6 @@ mod codex {
         stub.answer("model/list", json!({ "data": [], "nextCursor": null })).await;
         let resume = stub.answer("thread/resume", resumed).await;
         assert_eq!(resume["params"]["threadId"], thread);
-        // The goal Codex keeps for the thread, asked as it is taken up; this thread has none.
-        let goal = stub.answer("thread/goal/get", json!({})).await;
-        assert_eq!(goal["params"]["threadId"], thread);
         for line in lines.iter().skip(resumed_at.saturating_add(1)) {
             if !line.sent {
                 stub.say(&line.msg).await;

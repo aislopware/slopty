@@ -484,6 +484,7 @@ mod tests {
             Some(json!({
                 "disableBypassPermissionsMode": "disable",
                 "disableAutoMode": "disable",
+                "allow": ["mcp__slopty"],
             }))
         );
         assert_eq!(permissions(None), None, "the person's own terminal");

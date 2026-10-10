@@ -223,8 +223,7 @@ pub fn under_way(state: &ThreadState) -> Option<&Turn> {
 const fn bubble(sent: &Sent) -> bool {
     match &sent.intent {
         Intent::Send { delivery: Delivery::Steer, .. } => true,
-        // An interrupting send waits in the tray, as a queued one does, until it goes.
-        Intent::Send { delivery: Delivery::Queue | Delivery::Interrupt, .. } => sent.failed(),
+        Intent::Send { delivery: Delivery::Queue, .. } => sent.failed(),
         _ => false,
     }
 }

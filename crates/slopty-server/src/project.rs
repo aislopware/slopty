@@ -11,7 +11,7 @@
 //! as a [`ProjectUpdate`] and hands the store what it must keep ([`Kept`]). A refused change
 //! leaves everything as it was.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use slopty_agent::status::{AgentStatus, BlockReason};
@@ -29,7 +29,7 @@ use slopty_proto::project::{
     TITLE_MAX, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry,
     VerifierRun,
 };
-/// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
+/// What the person bounds, for the binary that reads it from their settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
 use slopty_proto::terminal::RepoId;
 use slopty_proto::thread::ThreadId;
@@ -157,8 +157,9 @@ pub enum Drove {
 pub struct Watched {
     /// The terminal.
     pub term: TermRef,
-    /// The server started an agent there in `default` mode, which it may not leave.
-    pub locked: bool,
+    /// The level the server started an agent there at, which its permission mode may not go
+    /// past: [`Autonomy::Ask`] for an agent's own start, its project's level for a task.
+    pub held: Option<Autonomy>,
     /// What an agent did to it: the CLI in it speaks for an agent, and it counts as one.
     pub drove: Option<Drove>,
 }
@@ -405,25 +406,6 @@ impl From<Stored> for Record {
     }
 }
 
-/// What the person allows, from the server's settings.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct Policy {
-    /// The bounds on every project, and on the fleet.
-    pub bounds: Bounds,
-    /// The projects whose agents may be started with flags that loosen Claude Code's
-    /// permissions.
-    pub permission_flags: BTreeSet<ProjectId>,
-}
-
-impl Policy {
-    /// The bounds as they apply to `project`.
-    #[must_use]
-    pub fn bounds_for(&self, project: Option<&ProjectId>) -> Bounds {
-        let permission_flags = project.is_some_and(|p| self.permission_flags.contains(p));
-        Bounds { permission_flags, ..self.bounds }
-    }
-}
-
 /// What runs now, as the hub sees it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Running<'a> {
@@ -506,12 +488,12 @@ type Refused = Outcome;
 /// What a change answers: its result and the changes it made, in order.
 pub(crate) type Changed<T> = Result<(T, Vec<Change>), Refused>;
 
-/// Every project, the person's policy, and what Claude Code reported of sessions no task has
+/// Every project, the person's bounds, and what Claude Code reported of sessions no task has
 /// taken on yet.
 #[derive(Debug, Default)]
 pub(crate) struct Projects {
     records: BTreeMap<ProjectId, Record>,
-    policy: Policy,
+    bounds: Bounds,
     /// Natives of sessions no node holds, the oldest first: a spawned agent's first hooks can
     /// come before its task takes it on.
     unclaimed: VecDeque<(TermRef, Natives)>,
@@ -1002,14 +984,14 @@ impl Projects {
         }
     }
 
-    /// The person's policy.
-    pub(crate) const fn policy(&self) -> &Policy {
-        &self.policy
+    /// The person's bounds on every project and on the fleet.
+    pub(crate) const fn bounds(&self) -> Bounds {
+        self.bounds
     }
 
-    /// Take up the person's policy.
-    pub(crate) fn set_policy(&mut self, policy: Policy) {
-        self.policy = policy;
+    /// Take up the person's bounds.
+    pub(crate) const fn set_bounds(&mut self, bounds: Bounds) {
+        self.bounds = bounds;
     }
 
     /// Every project, by name.
@@ -1024,7 +1006,7 @@ impl Projects {
             .values()
             .map(|r| {
                 let live = Live { fleet, project: r.live(running) };
-                r.status(None, self.policy.bounds_for(Some(&r.project.id)), live)
+                r.status(None, self.bounds, live)
             })
             .collect()
     }
@@ -1038,7 +1020,7 @@ impl Projects {
     ) -> Result<ProjectStatus, Refused> {
         let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
         let live = Live { fleet: self.fleet(running), project: record.live(running) };
-        Ok(record.status(since, self.policy.bounds_for(Some(id)), live))
+        Ok(record.status(since, self.bounds, live))
     }
 
     /// Every live agent across the fleet, and every start not yet counted on its own: the

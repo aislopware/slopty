@@ -76,7 +76,6 @@ impl Sent {
             | Intent::Keep(_)
             | Intent::Revert(_)
             | Intent::Fork { .. }
-            | Intent::Continue { .. }
             | Intent::SetEffort { .. }
             | Intent::Aside
             | Intent::Discard

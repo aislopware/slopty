@@ -795,7 +795,7 @@ mod tests {
             env: Vec::new(),
             size: None,
             session: None,
-            permission_flags: true,
+            autonomy: None,
             worktree: None,
         };
         let Outcome::Opened(term) = peer.ask(spawn).await else { panic!("the agent starts") };
@@ -909,7 +909,7 @@ mod tests {
             env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
             size: None,
             session: Some(chosen),
-            permission_flags: false,
+            autonomy: Some(slopty_proto::project::Autonomy::Ask),
             worktree: None,
         };
         let term = TermRef { worker: reg.worker, session: chosen };
@@ -1085,7 +1085,7 @@ mod tests {
             env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
             size: None,
             session: Some(session),
-            permission_flags: false,
+            autonomy: Some(slopty_proto::project::Autonomy::Ask),
             worktree: None,
         };
         let term = TermRef { worker: reg.worker, session };
@@ -1195,7 +1195,7 @@ mod tests {
             env,
             size: None,
             session: Some(session),
-            permission_flags: false,
+            autonomy: Some(slopty_proto::project::Autonomy::Ask),
             worktree: None,
         };
         let term = TermRef { worker: reg.worker, session };

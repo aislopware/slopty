@@ -32,7 +32,6 @@ use slopty_worker::repo::worktrees;
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
 use slopty_worker::thread::authors::Authorship;
-use slopty_worker::thread::carry::carry;
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
@@ -595,17 +594,6 @@ impl Following {
                 let outcome = keep_aside(&threads, thread, id);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
-            // Going on in a new thread starts one: on a task of its own.
-            ThreadRequest::Intent { id, thread, intent: Intent::Continue { agent } } => {
-                tracing::info!(client = %at.client, %id, %thread, agent = %agent.0, "continue");
-                let out = at.out.clone();
-                at.tasks.spawn(async move {
-                    let host = threads.host.clone();
-                    let begun = |id, start| begin(&threads, id, Box::new(start));
-                    let outcome = carry(&host, thread, id, agent, begun).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
             ThreadRequest::Intent { id, thread, intent } => {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
@@ -1054,18 +1042,6 @@ fn decide(
 ) -> (Outcome, Vec<Action>) {
     if intent.needs().is_some_and(|needs| !state.meta.can(needs)) {
         return (intent.unsupported(), Vec::new());
-    }
-    if let Intent::Send { text, attachments, delivery: Delivery::Interrupt } = intent {
-        // "Now" goes by the agent's own steer where it has one. Only an agent without one is
-        // interrupted, and its adapter puts the message first in its queue.
-        if state.meta.can(Cap::STEER) {
-            let (text, attachments) = (text.clone(), attachments.clone());
-            let steer = Intent::Send { text, attachments, delivery: Delivery::Steer };
-            return decide(who, threads, state, id, &steer);
-        }
-        if !state.meta.can(Cap::QUEUE) {
-            return (Outcome::Unsupported { cap: Cap::named(Cap::QUEUE) }, Vec::new());
-        }
     }
     if codex::is_shared(state) {
         return (shared(who, &threads.codex, state, id, intent), Vec::new());

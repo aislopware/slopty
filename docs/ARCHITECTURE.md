@@ -440,10 +440,10 @@ a log line cut short at its end is passed over. The hub answers the project verb
   agent run as a thread, with `SLOPTY_PROJECT` and `SLOPTY_TASK` last in its env. The new
   terminal or thread is assigned to the task, and a start that can no longer be assigned is
   closed.
-- The person's `[server.projects]` bounds in `settings.toml` (`Hub::set_policy`) hold the
-  fleet-wide count of live agents and the projects allowed flags that loosen Claude Code's
-  permissions. A project's own `Limits` hold its review limit: while that many of its tasks
-  wait on the person, no new task starts.
+- The person's `[server.projects]` bounds in `settings.toml` (`Hub::set_bounds`) hold the
+  fleet-wide count of live agents. How far a project's agents go is its autonomy, which the
+  person sets and the server pins on each agent it starts. A project's own `Limits` hold its
+  review limit: while that many of its tasks wait on the person, no new task starts.
 - Every move between states is checked. An assigned task follows its agent's status while it
   is running, waiting or blocked. Its assignment ends when the session closes. A worker that
   registers again is reconciled against its session list.

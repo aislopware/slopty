@@ -532,11 +532,11 @@ impl Orchestrator {
                 env,
                 size,
                 session,
-                permission_flags,
+                autonomy,
                 worktree,
             } => {
                 self.mine(worker)?;
-                let spawn = Spawn { cwd, args, env, size: term_size(size)?, permission_flags };
+                let spawn = Spawn { cwd, args, env, size: term_size(size)?, autonomy };
                 let _choosing = self.choosing(session).await;
                 if let Some(running) = self.running(session) {
                     return Ok(Outcome::Opened(TermRef { worker, session: running }));
@@ -882,9 +882,9 @@ impl Orchestrator {
     /// Start the agent's TUI, under `chosen` when the caller chose the id; with a prompt, type
     /// it once the agent's hooks say it is at its prompt ([`type_when_ready`]). It gets the
     /// hook relay, Slopty's tools and the mod ([`Launch`]), a conversation id of its own
-    /// (`--session-id`, [`slopty_agent::resume::with_session_id`]), and unless the person
-    /// allowed it flags that loosen permissions, a lock on the mode that asks none
-    /// ([`slopty_agent::hooks::held_to_asking`]). The caller's own settings, MCP servers,
+    /// (`--session-id`, [`slopty_agent::resume::with_session_id`]), and, held to a
+    /// project's autonomy, a lock at that level ([`slopty_agent::hooks::held_to`]); the
+    /// person's own start is held to nothing. The caller's own settings, MCP servers,
     /// arguments and variables are kept, and its variables win. The server it asks for tools
     /// is the session's own `SLOPTY_SERVER`.
     async fn spawn_agent(
@@ -896,7 +896,7 @@ impl Orchestrator {
         // Subscribed before the spawn: the agent may report itself ready before the open
         // returns.
         let heard = self.inner.heard.subscribe();
-        let Spawn { cwd, args, env, size, permission_flags } = spawn;
+        let Spawn { cwd, args, env, size, autonomy } = spawn;
         let launch = &self.inner.launch;
         let (args, conversation) = slopty_agent::resume::with_session_id(args);
         let relay = launch.relay.as_deref().map(|relay| relay.to_string_lossy().into_owned());
@@ -908,10 +908,9 @@ impl Orchestrator {
                     Some(relay) => slopty_agent::hooks::with_relay(args, relay, &dir),
                     None => args,
                 };
-                Ok(if permission_flags {
-                    args
-                } else {
-                    slopty_agent::hooks::held_to_asking(args, &dir)
+                Ok(match autonomy {
+                    None => args,
+                    Some(level) => slopty_agent::hooks::held_to(args, &dir, level.opens_auto()),
                 })
             }
         })
@@ -1219,8 +1218,8 @@ struct Spawn {
     args: Vec<String>,
     env: Vec<(String, String)>,
     size: TermSize,
-    /// It may be given flags and modes that loosen its permissions.
-    permission_flags: bool,
+    /// How far it may go before it asks, held by its settings; `None` for the person's own.
+    autonomy: Option<slopty_proto::project::Autonomy>,
 }
 
 /// A terminal opened, in the worktree `made` when it was asked one.

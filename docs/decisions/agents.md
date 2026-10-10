@@ -1607,7 +1607,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Once.** The start is once per intent, as a client's start is. A repeat starts nothing and
     finishes what the first may not have, the draft and where it came from, both kept once.
   - **The client's half** is deleted (2026-10-10): no client door asks `Intent::Continue`
-    since "Branch from here" became Fork from here and Ask aside (`ui.md`). A seated thread's seat does not go with it.
+    since "Branch from here" became Fork from here and Ask aside (`ui.md`), and the wire went
+    with it ("Continue, the Codex goal and interrupt-and-send leave the wire", below). A seated thread's seat does not go with it.
     A project task starts fresh or goes to another agent from its board: see "A task starts
     fresh, or goes to another agent" in `docs/decisions/projects.md`.
   - Tests: `a_thread_is_told_whole_when_it_fits`,
@@ -1635,7 +1636,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     intents take the same path.
   - **The client's half** is deleted (2026-10-10): "Interrupt and send" left the composer
     with the rest of the single-agent chrome (`ui.md`, "The thread keeps only what directs
-    it"). `Delivery::Interrupt` stays on the wire for the worker's side.
+    it"). The wire followed the same day ("Continue, the Codex goal and interrupt-and-send
+    leave the wire", below).
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
@@ -1778,7 +1780,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     agent) and `slopty-agent/tests/codex.rs` (Codex).
 
 - ✅ **A Codex goal shows as Codex holds it, read-only** (2026-10-04, A11 of the T3 Code delta
-  study; T3's #6777 and #15133, and #7935 for why goal controls stay out).
+  study; T3's #6777 and #15133, and #7935 for why goal controls stay out). *Deleted
+  2026-10-10 with the client's reader: see "Continue, the Codex goal and interrupt-and-send
+  leave the wire".*
   - **The model.** `ThreadState::goal` is an open `Goal`, set by `Action::GoalSet`. It holds the
     objective, the state in open words (`active`, `paused`, `blocked`, `usage-limited`,
     `budget-limited`, `complete`: Codex's names in kebab case), the tokens used against the budget, the
@@ -2770,3 +2774,22 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Goldens: `intent_compact`, `intent_handoff`, `intent_rewind` and `intent_take_back` are
     deleted; the other intent goldens moved with the variant indices.
 
+- ✅ **Continue, the Codex goal and interrupt-and-send leave the wire** (2026-10-10). The thread
+  view kept only what directs a thread (`ui.md`, "The thread keeps only what directs it"), so
+  nothing in the client read these any more. Dead wire is deleted, not kept for later.
+  - **Gone from `slopty-proto`.** `Intent::Continue` and `Cap::CONTINUE`;
+    `Delivery::Interrupt`; `ThreadState::goal`, `Goal` and `Action::GoalSet`. The goldens
+    `intent_continue` and `intent_send_interrupt` are deleted, and the rest of
+    `golden_thread` moved once with the shifted variant indices.
+  - **Gone from the worker and the adapters.** `thread/carry.rs`, which started the continued
+    thread, and its handler; the daemon turning an interrupt into a steer; the ACP
+    adapter's `ThreadAsk::Interrupting`; pi's interrupt arm; Codex's `thread/goal/get` on a
+    resume. Codex's `thread/goal/updated` and `thread/goal/cleared` are read and dropped.
+  - **Kept.** `Promote`: a held message sent now still goes first through each adapter's own
+    queue (`a_held_message_sent_now_stops_the_turn_and_goes_next`).
+  - Tests deleted with their behaviour:
+    `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`,
+    `a_claude_code_thread_goes_on_in_pi_with_the_persons_first_message` and
+    `a_codex_goal_shows_as_codex_holds_it`. Reworked:
+    `an_archived_thread_is_unarchived_and_taken_up_again` (`slopty-worker/tests/codex.rs`, no
+    goal read on the resume).

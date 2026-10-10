@@ -635,7 +635,7 @@ mod tests {
             all.into_iter().map(|c| Keep::Project(Box::new(c.kept))).collect();
         let watched = |drove| Watched {
             term: TermRef { worker: WorkerId::new(), session: SessionId::new() },
-            locked: true,
+            held: Some(slopty_proto::project::Autonomy::Edits),
             drove,
         };
         let (kept_on, gone) = (watched(Some(Drove::Opened { by: None })), watched(None));

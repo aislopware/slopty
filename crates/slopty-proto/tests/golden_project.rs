@@ -203,7 +203,7 @@ mod golden_project {
             orchestrator_natives: Natives::default().counts(),
             timeline,
             next,
-            bounds: Bounds { permission_flags: true, ..Bounds::default() },
+            bounds: Bounds::default(),
             live: Live { fleet: 7, project: 3 },
         }
     }

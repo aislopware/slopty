@@ -748,7 +748,6 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Keep(pick) => format!("Couldn't keep {}", file_name(&pick.path)),
         Intent::Revert(pick) => format!("Couldn't revert {}", file_name(&pick.path)),
         Intent::Fork { .. } => "Couldn't fork the thread".to_owned(),
-        Intent::Continue { .. } => "Couldn't go on in a new thread".to_owned(),
         Intent::SetEffort { effort } => format!("Couldn't set the effort to {effort}"),
         Intent::Aside => "Couldn't ask aside".to_owned(),
         Intent::Discard => "Couldn't close the thread".to_owned(),

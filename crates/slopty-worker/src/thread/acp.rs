@@ -102,12 +102,6 @@ enum ThreadAsk {
         attachments: Vec<String>,
         intent: IntentId,
     },
-    /// Sent by interrupt: first in the queue, and the turn under way stopped.
-    Interrupting {
-        text: String,
-        attachments: Vec<String>,
-        intent: IntentId,
-    },
     Withdraw {
         intent: IntentId,
     },
@@ -248,16 +242,12 @@ impl Acp {
             Intent::Send { .. } if !live && !driven::resumable(&state.meta) => {
                 return refused("The agent cannot take this session up again; start a new thread");
             }
-            Intent::Send { text, attachments, delivery } => {
+            Intent::Send { text, attachments, .. } => {
                 if let Err(why) = super::attach::check(attachments) {
                     return refused(&why);
                 }
                 let (text, attachments) = (text.clone(), attachments.clone());
-                if *delivery == Delivery::Interrupt {
-                    ThreadAsk::Interrupting { text, attachments, intent }
-                } else {
-                    ThreadAsk::Send { text, attachments, intent }
-                }
+                ThreadAsk::Send { text, attachments, intent }
             }
             Intent::Withdraw { pending }
             | Intent::Edit { pending, .. }

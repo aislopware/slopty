@@ -8,9 +8,9 @@ use slopty_core::WallMs;
 
 use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
 use super::{
-    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item,
-    ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
-    ToolState, Turn, TurnId, TurnState,
+    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Item, ItemBody,
+    ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, ToolState, Turn,
+    TurnId, TurnState,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -47,8 +47,6 @@ pub struct ThreadState {
     pub commands: Vec<Command>,
     /// Whether its tree holds changes the person has not kept ([`Action::ToReview`]).
     pub to_review: bool,
-    /// The goal its agent works toward ([`Action::GoalSet`]).
-    pub goal: Option<Goal>,
     /// The windows and displays its agent drives ([`Action::ScreensSet`]).
     pub screens: Vec<AgentScreen>,
     /// Its branch's pull request ([`Action::PullSeen`]).
@@ -76,7 +74,6 @@ impl ThreadState {
             meters: Meters::default(),
             commands: Vec::new(),
             to_review: false,
-            goal: None,
             screens: Vec::new(),
             pull: None,
             seen: TurnId::BEFORE,
@@ -151,7 +148,6 @@ impl ThreadState {
                 }
             }
             Action::ToReview(to_review) => self.to_review = *to_review,
-            Action::GoalSet(goal) => self.goal.clone_from(goal),
             Action::ScreensSet(screens) => self.screens.clone_from(screens),
             Action::PullSeen(pull) => self.pull.clone_from(pull),
             Action::Seen(turn) => self.seen = self.seen.max(*turn),
