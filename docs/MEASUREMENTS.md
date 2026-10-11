@@ -16207,16 +16207,28 @@ Why: `.research/ui-test-compile-2026-10-11.md`. CI's `tests ui` job is a CPU-bou
 ```
 # before: gate run 38120306374 (`ci: run the worker's tests on the Linux lane`), artifact timings-ui
 gh run download 38120306374 -n timings-ui -D target/remote/A/timings/ui
-# after: the first gate run with slopty-kit, the same artifact
+# after: gate run 38132727347 (b5a48c0a, the first with slopty-kit), the same artifact
+gh run download 38132727347 -n timings-ui -D target/remote/A/timings/ui-after
+# each unit's seconds: UNIT_DATA in cargo-timings/cargo-timing.html, summed by crate
 ```
 
 | | before | after |
 |---|---|---|
-| `tests ui` cargo build | 274.6 s | (first gate run with the split) |
-| slopty-ui lib (`e2e`) | 70.7 s | |
-| slopty-ui lib test harness | 99.0 s | |
-| slopty-kit lib / harness | — | |
-| units, core-seconds | 712.7 | |
+| `tests ui` cargo build | 274.6 s | 208.4 s |
+| slopty-ui lib (`e2e`) | 70.7 s | 43.2 s |
+| slopty-ui lib test harness | 99.0 s | 83.8 s |
+| slopty-kit lib / harness | — | 7.0 s / 6.9 s |
+| units, core-seconds | 712.7 | 549.7 |
+| of those, Slopty's own crates | 306.8 | 298.8 |
+| of those, third-party crates | 405.9 | 250.9 |
+
+The wall time fell 66 s, but most of that is not the split: the runner's cache held more of the
+third-party crates this run (155 core-seconds fewer of them, `objc2-app-kit` alone 19 s), so
+every Slopty crate started earlier. What the split did: `slopty-ui`'s lib builds in 27.5 s less,
+and its test harness, which is still the build's last unit (it ends the build at 208.4 s), in
+15.2 s less (−15 %). The kit itself costs 13.9 core-seconds and builds beside the rest. Slopty's
+own crates take 8 core-seconds fewer in all, so the gain is in the tail's length, not in work.
+Step 2 takes the terminal (18,000 lines) out of that harness.
 
 Lines: `slopty-kit` holds 14,762 of Rust with its unit tests, and `slopty-ui` is that much
 smaller, less the lints. The lints move out of the kit into `slopty-ui/src/lints.rs` and
