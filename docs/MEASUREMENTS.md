@@ -16354,3 +16354,31 @@ steps; the build's parts from the tests lane's `cargo-timing.html`.
   rises at bac92dd6 (xtask's dependencies under `CARGO_PROFILE_DEV_OPT_LEVEL=0`, a new key) and
   8ac395d6: linux 0, worker 1, rest 2, ui 1, iOS clippy 5.
 - At a job's end the runner spent 2–10 s on orphan processes: the sccache server, each time.
+
+## 2026-10-11 — what holds a Mac test shard's memory: the worker's facts probes
+
+The tests lane reads `vm_stat` around each step and lists the processes every 10 s while the
+tests run (`xtask/src/memstat.rs`, on CI's Macs only). Gate run 38157096222 (8107ed3f):
+
+```sh
+gh run view 38157096222 --log --job 114522216712 | grep 'memory'   # worker
+gh run view 38157096222 --log --job 114522216729 | grep 'memory'   # rest
+```
+
+| step, MB | worker | rest |
+| --- | --- | --- |
+| the test build: compressed / decompressed / paged out | 3 217 / 1 859 / 17 | 1 976 / 1 155 / 13 |
+| the spawned binaries | 0 / 59 / 0 | 0 / 67 / 0 |
+| the tests: compressed / decompressed / paged out / swapped | 58 977 / 42 347 / 8 712 / 409 | 10 889 / 5 914 / 2 284 / 0 |
+
+- The pressure is the tests', not the links'. Through them the largest resident command was
+  `rustup`, 1 300–2 460 MB in every sample from 199 s to 500 s (worker) and 1 660–2 360 MB from
+  62 s to 163 s (rest), on a 7 GB VM; the test executables themselves held 170 MB.
+- Each is a worker daemon a test started gathering its facts (`slopty_worker::facts::gather`):
+  `rustup target list --installed` (28 seen), and the toolchain probes, whose `/usr/bin/git`,
+  `python3` and `swift` are Xcode's shims, each an `xcodebuild -sdk … -find <tool>` (68 seen),
+  plus `xcodebuild -license check` (10). 24 of them had parent 1: the daemon was killed with the
+  test, and its probes, each in a process group of its own, lived on.
+- Of our own processes, `slopty-ptyd` outlived the worker shard's tests.
+- No `cargo` or `rustc` ran during the tests: the spawned binaries were vouched and nothing
+  built them again.
