@@ -1200,7 +1200,8 @@ pub struct TaskCard {
     pub merge: Option<Merge>,
     /// What the server last did for it around its agent.
     pub step: Option<TaskStep>,
-    /// The worker it is pinned to, by its orchestrator or the person's "Run on".
+    /// The worker it is pinned to, as the person said with the CLI's `--run-on`. A start that
+    /// names a worker ([`TaskLaunch::pin`]) goes there over it.
     pub pin: Option<WorkerId>,
     /// How long its agents worked on it, idle waits left out.
     pub spent: Spent,

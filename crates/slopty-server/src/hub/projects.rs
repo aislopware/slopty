@@ -958,32 +958,6 @@ impl Hub {
         }
     }
 
-    /// The person pinned `task` to a worker, or let it run anywhere: its orchestrator hears of
-    /// it once it rests, so it starts the task where the person said and moves it nowhere else.
-    fn pinned(&self, state: &mut State, project: &ProjectId, task: &Task) {
-        let (id, title) = (task.id, &task.title);
-        let words = match task.pin {
-            Some(worker) => {
-                let name = state
-                    .workers
-                    .get(&worker)
-                    .map_or_else(|| worker.to_string(), |entry| entry.info.name.clone());
-                format!(
-                    "the person pinned task {id} ({title}) to the machine {name}: it runs there \
-                     and nowhere else. Start it there when it is due (task_start takes the pin)."
-                )
-            }
-            None => format!(
-                "the person let task {id} ({title}) run on any machine: the server places it \
-                 where it fits when it starts."
-            ),
-        };
-        let at = tokio::time::Instant::now();
-        let node = (project.clone(), None);
-        state.deliveries.notice(node, id, crate::deliver::Kind::Done, &words, at);
-        self.inner.deliver.notify_one();
-    }
-
     /// `verb`, a project to make, with the branch its work lands on: one it names, else a branch
     /// of its own ([`Task::goal_branch`]) made first in its repository on the orchestrator's
     /// worker at the tip of what is checked out there, so a goal never lands on the person's
@@ -1166,17 +1140,10 @@ impl Hub {
                     (Outcome::Done, u)
                 })
             }
-            Verb::TaskUpdate { project, task: id, change } => {
-                let was = state.projects.task(&project, id).ok().map(|t| t.pin);
-                let updated = state.projects.update_task(&project, id, *change, caller, now);
-                if let Ok((t, _)) = &updated
-                    && caller == Caller::Person
-                    && was.is_some_and(|was| was != t.pin)
-                {
-                    self.pinned(state, &project, t);
-                }
-                updated.map(|(t, u)| (task(t), u))
-            }
+            Verb::TaskUpdate { project, task: id, change } => state
+                .projects
+                .update_task(&project, id, *change, caller, now)
+                .map(|(t, u)| (task(t), u)),
             Verb::TaskReport { project, task: id, report } => {
                 let reported = state.projects.report_task(&project, id, &report, now);
                 if reported.is_ok() {

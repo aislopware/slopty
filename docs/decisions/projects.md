@@ -3038,3 +3038,13 @@ reordering and edited allows are gone" in `agents.md`.*
     - `repo::worktrees::tests::a_project_s_own_branch_starts_at_the_checkout_s_and_stays_where_it_went`
       (slopty-worker);
     - the `branch_off` golden.
+
+- ✅ **The person's pin is no longer told to the orchestrator** (2026-10-11, the
+  orchestrator-first study, item 3's server half). This supersedes "A pin is told" in the
+  2026-10-11 entry on the person's pin. A project is its orchestrator, and the board lost
+  "Run on…" (item 3), so the person no longer moves a task between machines from the GUI. The
+  notice (`Hub::pinned`) and its test are deleted.
+  - The CLI's `slopty project task update --run-on` still sets a planned task's pin. The
+    orchestrator reads it on the task (`project_status`, `task_get`), and a start that names no
+    worker goes there.
+  - `Task.pin`'s doc no longer names "Run on".
