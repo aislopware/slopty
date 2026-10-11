@@ -2668,9 +2668,9 @@ reordering and edited allows are gone" in `agents.md`.*
     (`Projects::pushed_with`).
   - So the board reads what waits off the cards: the merged tasks whose merge is not pushed.
     No count goes on the wire. A count of commits would need a git read of the orchestrator's
-    clone on every status, and tasks are the unit the board already shows. A push made outside
-    Slopty is not seen. Pushing from the board again answers at once, and the forge says
-    nothing new.
+    clone on every status, and tasks are the unit the board already shows.
+  - Superseded 2026-10-11 by "A push made outside Slopty is seen on the forge": that a push
+    made outside Slopty went unseen no longer holds.
   - Tests: `a_push_takes_every_merge_before_it` (`project/merge/tests.rs`);
     `a_merge_left_unpushed_is_pushed_on_the_person_s_word` (`hub/queue/tests.rs`).
 
@@ -3068,3 +3068,49 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_task_started_on_a_worker_is_spawned_there_and_put_on_its_task`. The board tests
     `a_node_says_where_it_runs`, `every_card_says_where_it_runs` and
     `a_task_never_started_is_started_from_its_card` lose their pinned cases.
+
+- ✅ **A push made outside Slopty is seen on the forge** (2026-10-11, the orchestrator-first
+  study, item 3's last part). This supersedes "A push made outside Slopty is not seen" in the
+  2026-10-12 entry on pushing from the board.
+  - **The gap.** A person who pushed the target from a terminal left every merged card saying
+    "not pushed". Pushing from the board then fixed the cards only when git agreed. If more had
+    reached the forge since, it refused the clone's target as behind, and the cards stayed
+    wrong with git's refusal on them.
+  - **The look.** `Verb::OnOrigin` asks the orchestrator's worker which of the given heads
+    `origin`'s target holds. The worker makes one fetch of that branch into its tracking ref,
+    bounded at 20 s, then asks `merge-base --is-ancestor` for each head
+    (`repo::verify::on_origin`). Nothing local moves but the tracking ref. The heads asked
+    about are those of the project's tasks merged into its target and not pushed, oldest merge
+    first (`Projects::unpushed`).
+  - **When.**
+    - As the orchestrator's worker registers (`Hub::origin_on`), after a server restart too:
+      one look per project of its with merged work not pushed. Each runs in a task of its own,
+      so a slow forge holds neither the registration nor another project. A project with
+      nothing waiting asks nothing.
+    - When the person's push from the board fails (`Hub::task_push`). If the forge holds the
+      task's merge, the card says it was pushed, and its step says "origin's <target> holds
+      <head> already" in place of git's refusal. A push that went needs no look: it took the
+      whole branch (`Projects::pushed_with`). The look runs within the push's own answer, so
+      the reply carries the truth and the card never shows a refusal that a later update
+      would correct.
+  - **What it marks.** The cards of the heads the forge holds say they were pushed, with any
+    failed push's words gone, as `pushed_with` has them say (`Projects::held_on_origin`). Only
+    the heads named go. A push from a terminal may have taken an earlier merge and not a later
+    one, so the time rule `pushed_with` applies to its own push would be wrong here.
+  - **Bounds.** The server's forward of `OnOrigin` gives up after 30 s (`ORIGIN_TIMEOUT`): the
+    worker's 20 s and ten seconds more. A forge that cannot be read, or a worker that does not
+    answer, leaves every card as it was. The look is a courtesy, so nothing waits on it.
+  - Rejected:
+    - A look on every status read. That is a fetch per read, the cost that kept a count of
+      commits off the wire.
+    - A timed poll. Registration and the person's push are the moments a stale card matters.
+      Merges pushed from a terminal while all stays up are seen at the next of those.
+  - Tests:
+    - `only_the_heads_origin_holds_are_marked_pushed` (`project/merge/tests.rs`);
+    - `a_push_made_outside_slopty_is_seen_as_the_orchestrator_s_worker_returns` and
+      `a_push_the_forge_refuses_stands_unless_origin_holds_the_merge`
+      (`hub/project_tests.rs`);
+    - the refused round of `a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word`
+      (`hub/queue/tests.rs`), which now answers the look;
+    - `the_forge_says_which_merged_heads_it_holds` (slopty-worker, `repo/verify/tests.rs`),
+      and the `on_origin` and `on_origin_held` goldens.

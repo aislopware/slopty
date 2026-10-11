@@ -19,8 +19,8 @@ use super::super::tests::summary;
 use super::super::*;
 use crate::project::RESUMING;
 
-const URL: &str = "https://example.com/o/demo.git";
-const TREE: &str = "/w/demo/.claude/worktrees/slopty-slopty-1";
+pub(in crate::hub) const URL: &str = "https://example.com/o/demo.git";
+pub(in crate::hub) const TREE: &str = "/w/demo/.claude/worktrees/slopty-slopty-1";
 pub(in crate::hub) const BRANCH: &str = "worktree-slopty-slopty-1";
 
 pub(in crate::hub) fn commit(c: char) -> String {
@@ -755,6 +755,13 @@ async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
             push_failed: said.map(str::to_owned),
         };
         answer(&studio.lease, id, went);
+        if said.is_some() {
+            // A refused push asks what the forge holds; it cannot be read either.
+            let (id, verb) = studio.request().await;
+            assert!(matches!(verb, Verb::OnOrigin { .. }), "round {round}: {verb:?}");
+            let message = "could not read Username".to_owned();
+            answer(&studio.lease, id, Outcome::Error { code: ErrorCode::Failed, message });
+        }
         let (head, pushed, failed) = merge_of(pushed.await.unwrap());
         assert_eq!(
             (head, (pushed, failed.as_deref())),

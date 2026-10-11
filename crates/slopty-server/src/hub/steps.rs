@@ -699,7 +699,7 @@ fn session_repo(state: &State, id: &RepoId, term: TermRef) -> Option<String> {
 ///
 /// # Errors
 /// The orchestrator's worker, which has no clone of the repository, and why.
-fn orchestrator_clone(
+pub(super) fn orchestrator_clone(
     state: &State,
     record: &Project,
 ) -> Result<Option<(WorkerId, String)>, (WorkerId, String)> {

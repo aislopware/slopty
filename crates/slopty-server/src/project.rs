@@ -2056,21 +2056,69 @@ impl Projects {
     /// the whole branch. Their cards say so, so what waits to be pushed is read off them: the
     /// merged tasks still not pushed.
     pub(crate) fn pushed_with(&mut self, id: &ProjectId, target: &str, at: WallMs) -> Vec<Change> {
+        self.mark_pushed(id, target, |_, at_ms| at_ms <= at)
+    }
+
+    /// Project `id`'s target `target` on `origin` holds `held`, heads of its merged tasks
+    /// whose cards say they were not pushed: a push made outside Slopty took them there. Those
+    /// cards say they were pushed, as [`Self::pushed_with`] has them say. Only the heads named
+    /// go: the forge may hold an earlier merge and not a later one.
+    pub(crate) fn held_on_origin(
+        &mut self,
+        id: &ProjectId,
+        target: &str,
+        held: &[String],
+    ) -> Vec<Change> {
+        self.mark_pushed(id, target, |head, _| held.iter().any(|h| h == head))
+    }
+
+    /// The target project `id`'s work lands on, and the heads of its tasks merged there whose
+    /// cards say they were not pushed, in the order they merged: what to ask the forge about
+    /// ([`Self::held_on_origin`]). `None` when nothing waits.
+    pub(crate) fn unpushed(&self, id: &ProjectId) -> Option<(String, Vec<String>)> {
+        let record = self.records.get(id)?;
+        let target = &record.project.target;
+        let mut merged: Vec<(WallMs, &str)> = record
+            .tasks
+            .iter()
+            .filter_map(|t| match &t.merge {
+                Some(Merge::Merged { target: into, head, at_ms, pushed: false, .. })
+                    if into == target =>
+                {
+                    Some((*at_ms, head.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        merged.sort_unstable();
+        let heads: Vec<String> = merged.into_iter().map(|(_, head)| head.to_owned()).collect();
+        (!heads.is_empty()).then(|| (target.clone(), heads))
+    }
+
+    /// Every task of project `id` merged into `target`, not pushed, whose head and time of
+    /// merging `went` says reached `origin`, says it was pushed, with any failed push's words
+    /// gone.
+    fn mark_pushed(
+        &mut self,
+        id: &ProjectId,
+        target: &str,
+        went: impl Fn(&str, WallMs) -> bool,
+    ) -> Vec<Change> {
         let Ok(record) = self.record(id) else { return Vec::new() };
-        let mut went = Vec::new();
+        let mut marked = Vec::new();
         for t in &mut record.tasks {
-            if let Some(Merge::Merged { target: into, at_ms, pushed, push_failed, .. }) =
+            if let Some(Merge::Merged { target: into, head, at_ms, pushed, push_failed, .. }) =
                 &mut t.merge
                 && into == target
                 && !*pushed
-                && *at_ms <= at
+                && went(head, *at_ms)
             {
                 *pushed = true;
                 *push_failed = None;
-                went.push(t.clone());
+                marked.push(t.clone());
             }
         }
-        went.iter().map(|t| record.task_update(t, None)).collect()
+        marked.iter().map(|t| record.task_update(t, None)).collect()
     }
 
     /// The server closes the agent of `task`, which is finished and rested `rested_mins`, with

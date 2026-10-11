@@ -237,3 +237,51 @@ fn a_push_takes_every_merge_before_it() {
     let states: Vec<_> = tasks.iter().map(|t| pushed(*t)).collect();
     assert_eq!(states, [(true, None), (true, None), (false, None), (false, None)]);
 }
+
+/// What the forge is asked about is every merge into the target not pushed, in the order they
+/// merged, and only the heads it says it holds are marked pushed: a push from a terminal may
+/// have taken an earlier merge and not a later one. One into another branch is never asked
+/// about, and a project with nothing waiting asks nothing.
+#[test]
+fn only_the_heads_origin_holds_are_marked_pushed() {
+    let mut p = projects(None);
+    assert_eq!(p.unpushed(&id()), None, "nothing merged, nothing to ask");
+    let head = |c: char| std::iter::repeat_n(c, 40).collect::<String>();
+    let merged = |into: &str, c: char, ms: u64, pushed: bool| Advance {
+        state: Some(TaskState::Merged),
+        merge: Queue::Set(Merge::Merged {
+            target: into.to_owned(),
+            head: head(c),
+            from: head('f'),
+            at_ms: at(ms),
+            pushed,
+            push_failed: (c == 'b').then(|| "rejected".to_owned()),
+        }),
+        ..Advance::default()
+    };
+    let mut tasks = Vec::new();
+    for (title, into, c, ms, pushed) in [
+        ("A", "main", 'c', 3, false),
+        ("B", "main", 'b', 2, false),
+        ("C", "main", 'a', 1, true),
+        ("D", "dev", 'd', 4, false),
+    ] {
+        let t = task(&mut p, title);
+        p.advance(&id(), t, queued(ms), at(ms)).unwrap();
+        p.advance(&id(), t, merged(into, c, ms, pushed), at(ms)).unwrap();
+        tasks.push(t);
+    }
+    let asked = Some(("main".to_owned(), vec![head('b'), head('c')]));
+    assert_eq!(p.unpushed(&id()), asked, "main's unpushed heads, oldest merge first");
+
+    let changes = p.held_on_origin(&id(), "main", &[head('b'), head('d')]);
+    assert_eq!(changes.len(), 1, "B alone: D merged into dev");
+    let pushed = |t: TaskId| match p.task(&id(), t).unwrap().merge.clone() {
+        Some(Merge::Merged { pushed, push_failed, .. }) => (pushed, push_failed),
+        other => panic!("{other:?}"),
+    };
+    let states: Vec<_> = tasks.iter().map(|t| pushed(*t)).collect();
+    assert_eq!(states, [(false, None), (true, None), (true, None), (false, None)]);
+    assert_eq!(p.unpushed(&id()), Some(("main".to_owned(), vec![head('c')])));
+    assert!(p.held_on_origin(&id(), "main", &[]).is_empty(), "nothing held, nothing moves");
+}

@@ -30,7 +30,7 @@ use slopty_proto::project::{
 use slopty_proto::terminal::SessionState;
 use slopty_proto::thread::ThreadId;
 
-use super::steps::{Onto, said};
+use super::steps::{Onto, orchestrator_clone, said};
 use super::{Hub, State, error};
 use crate::deliver::Kind;
 use crate::project::{Advance, Caller, Job, Queue};
@@ -77,6 +77,33 @@ pub(super) struct Place {
     pub push: bool,
     /// The project's checkout's name.
     pub worktree: String,
+}
+
+/// What the forge is asked about one project ([`Verb::OnOrigin`]): which of its merged heads
+/// not pushed `origin`'s target holds, read in the orchestrator's clone.
+#[derive(Clone, Debug)]
+pub(super) struct Look {
+    /// Which.
+    pub project: ProjectId,
+    /// The orchestrator's worker.
+    pub worker: WorkerId,
+    /// Its clone of the project's repository.
+    pub repo: String,
+    /// The branch work lands on.
+    pub target: String,
+    /// The heads of the tasks merged there whose cards say they were not pushed.
+    pub heads: Vec<String>,
+}
+
+impl Look {
+    /// What to ask about `project`: `None` when nothing it merged waits to be pushed, or there
+    /// is no orchestrator's clone to read the forge from.
+    pub(super) fn of(state: &State, project: &ProjectId) -> Option<Self> {
+        let record = state.projects.project(project).ok()?;
+        let (worker, repo) = orchestrator_clone(state, record).ok()??;
+        let (target, heads) = state.projects.unpushed(project)?;
+        Some(Self { project: project.clone(), worker, repo, target, heads })
+    }
 }
 
 /// How a job ended for the lane.
@@ -309,6 +336,60 @@ impl Hub {
                 }
             }
         });
+    }
+
+    /// Look at the forge for merged work a push made outside Slopty took there, for every
+    /// project whose orchestrator is on `worker`, as it registers: one [`Verb::OnOrigin`] for
+    /// each project with merged work not pushed, each in a task of its own and bounded by the
+    /// forward's deadline, so neither a slow forge nor another project's waits on it.
+    pub(super) fn origin_on(&self, state: &State, worker: WorkerId) {
+        if tokio::runtime::Handle::try_current().is_err()
+            || state.workers.get(&worker).is_none_or(|e| e.link.is_none())
+        {
+            return;
+        }
+        let looks: Vec<Look> = state
+            .projects
+            .list()
+            .iter()
+            .filter(|p| p.orchestrator.is_some_and(|o| o.worker == worker))
+            .filter_map(|p| Look::of(state, &p.id))
+            .collect();
+        for look in looks {
+            let hub = self.downgrade();
+            tokio::spawn(async move {
+                if let Some(hub) = hub.upgrade() {
+                    hub.on_origin(look).await;
+                }
+            });
+        }
+    }
+
+    /// Ask the forge which of `look`'s heads its target holds, and have those cards say they
+    /// were pushed ([`crate::project::Projects::held_on_origin`]). Answers the heads held:
+    /// none when the forge could not be read, which leaves every card as it was.
+    pub(super) async fn on_origin(&self, look: Look) -> Vec<String> {
+        let Look { project, worker, repo, target, heads } = look;
+        let verb = Verb::OnOrigin { worker, repo, target: target.clone(), heads };
+        let held = match self.forward(None, verb).await {
+            Outcome::OnOrigin { heads } => heads,
+            other => {
+                let why = said(&other);
+                tracing::info!(%project, target, %why, "the forge not read for outside pushes");
+                return Vec::new();
+            }
+        };
+        if !held.is_empty() {
+            let mut state = self.inner.state.lock();
+            let updates = state.projects.held_on_origin(&project, &target, &held);
+            if !updates.is_empty() {
+                let seen = updates.len();
+                tracing::info!(%project, target, seen, "merged work found pushed outside Slopty");
+            }
+            self.projects_moved(&mut state, updates);
+            drop(state);
+        }
+        held
     }
 
     /// Where `task`'s work is verified and merged: the orchestrator's clone, with the task's
@@ -1034,7 +1115,9 @@ impl Hub {
     /// pushed, as the project pushes nothing unless the person turned that on, or the push that
     /// went with it failed. The target goes as it is in the orchestrator's clone: the merge put
     /// the task's work there, and what the queue merged since went on top of it, so every
-    /// merged task's card not pushed yet says it was ([`Projects::pushed_with`]).
+    /// merged task's card not pushed yet says it was ([`Projects::pushed_with`]). A push the
+    /// forge refuses asks it what it holds ([`Self::on_origin`]): a push from a terminal may
+    /// have taken the merge there, and then the card says it was pushed.
     ///
     /// [`Projects::pushed_with`]: crate::project::Projects::pushed_with
     pub(super) async fn task_push(
@@ -1089,7 +1172,7 @@ impl Hub {
             to: branch,
             push: true,
         };
-        let (now_pushed, now_failed, detail) = match self.forward(None, push).await {
+        let (mut now_pushed, mut now_failed, mut detail) = match self.forward(None, push).await {
             Outcome::FastForwarded { head: now, pushed: true, .. } => {
                 (true, None, format!("{target} at {} pushed to origin", short(&now)))
             }
@@ -1102,11 +1185,24 @@ impl Hub {
                 (pushed, Some(why.clone()), format!("{target} not pushed: {why}"))
             }
         };
+        // Pushed here: the whole target went, with every merge before it.
+        let went = now_failed.is_none();
+        if !went {
+            // A push from a terminal may have taken the merge there already, and the forge
+            // refuses the clone's target as behind what came after it.
+            let look = Look::of(&self.inner.state.lock(), project);
+            if let Some(look) = look
+                && self.on_origin(look).await.contains(&head)
+            {
+                now_pushed = true;
+                now_failed = None;
+                detail = format!("origin's {target} holds {} already", short(&head));
+            }
+        }
         let done = match &now_failed {
             None => step(StepState::Done { detail }),
             Some(_) => step(StepState::Failed { why: detail }),
         };
-        let went = now_failed.is_none();
         let merge = Merge::Merged {
             target: target.clone(),
             head,

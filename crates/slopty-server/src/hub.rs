@@ -92,6 +92,9 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
 const CLONE_TIMEOUT: Duration = Duration::from_mins(31);
 /// How long making or fetching a bundle may take: the worker's own limit, and a minute.
 const BUNDLE_TIMEOUT: Duration = Duration::from_mins(11);
+/// How long a look at the forge for merged work pushed outside Slopty may take: the
+/// worker's own 20 s bound on its fetch, and ten seconds. A courtesy, so it gives up soon.
+const ORIGIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Directory changes buffered per client link before it lags and gets the whole directory again.
 const EVENT_BUFFER: usize = 1024;
 /// Events the log holds for [`Verb::Events`]; a cursor older than the oldest reads on from it
@@ -739,6 +742,7 @@ impl Hub {
         self.projects_moved(&mut state, ended);
         self.free_closed(&mut state, worker);
         self.clean_up_on(&mut state, worker);
+        self.origin_on(&state, worker);
         for summary in opened {
             let term = TermRef { worker, session: summary.id };
             self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
@@ -1258,6 +1262,7 @@ impl Hub {
             }
             Verb::CloneRepo { .. } => CLONE_TIMEOUT,
             Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => BUNDLE_TIMEOUT,
+            Verb::OnOrigin { .. } => ORIGIN_TIMEOUT,
             _ => FORWARD_TIMEOUT,
         };
         let Some(worker) = target(&verb) else {

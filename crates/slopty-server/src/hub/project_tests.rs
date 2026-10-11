@@ -2867,3 +2867,139 @@ async fn the_orchestrator_says_where_the_goal_stands() {
     assert!(refused(&by_task.await, ErrorCode::Forbidden).contains("orchestrator"));
     assert_eq!(status(&hub).await.project.progress.map(|p| p.done), Some(false));
 }
+
+/// The fleet of the merge queue's tests with its one task merged, the merge not pushed: the
+/// orchestrator's worker, its terminal, the task, and its agent's terminal.
+async fn merged_unpushed(hub: &Hub) -> (queue::tests::Studio, TermRef, TaskId, TermRef) {
+    use queue::tests::{commit, done, fleet, merge, until_state};
+    let (mut studio, orchestrator, task, agent) = fleet(hub).await;
+    done(hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, _close) = studio.past_screens(&["ok"]).await;
+    answer(&studio.lease, id, Outcome::Done);
+    until_state(hub, task, TaskState::Done).await;
+    merge(hub, task).await;
+    let (id, _rebase) = studio.request().await;
+    let rebased = Outcome::Rebased {
+        head: commit('a'),
+        from: commit('a'),
+        onto: commit('b'),
+        verified: true,
+    };
+    answer(&studio.lease, id, rebased);
+    let (id, _forward) = studio.request().await;
+    let kept = Outcome::FastForwarded { head: commit('a'), pushed: false, push_failed: None };
+    answer(&studio.lease, id, kept);
+    until_state(hub, task, TaskState::Merged).await;
+    (studio, orchestrator, task, agent)
+}
+
+/// The next request that is not a read of the worker's facts or screens.
+async fn next_asked(studio: &mut queue::tests::Studio) -> (RequestId, Verb) {
+    studio.past_screens(&[]).await
+}
+
+/// Whether `task`'s merge is pushed, and the words of a push that failed.
+async fn push_of(hub: &Hub, task: TaskId) -> (bool, Option<String>) {
+    match task_now(hub, task).await.merge {
+        Some(slopty_proto::project::Merge::Merged { pushed, push_failed, .. }) => {
+            (pushed, push_failed)
+        }
+        other => panic!("not merged: {other:?}"),
+    }
+}
+
+/// A merge pushed from a terminal rather than from Slopty is seen on the forge: as the
+/// orchestrator's worker registers, it is asked once which merged heads not pushed `origin`'s
+/// target holds, and the cards of those it names say they were pushed. A forge that could not
+/// be read leaves the cards as they were, and with nothing waiting nothing is asked.
+#[tokio::test]
+async fn a_push_made_outside_slopty_is_seen_as_the_orchestrator_s_worker_returns() {
+    use queue::tests::{Studio, TREE, URL, commit};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (studio, orchestrator, task, agent) = merged_unpushed(&hub).await;
+    assert_eq!(push_of(&hub, task).await, (false, None));
+    let back = |hub: &Hub| {
+        let sessions = vec![
+            in_repo(orchestrator.session, "/w/demo", Some(URL)),
+            in_repo(agent.session, TREE, Some(URL)),
+        ];
+        let (_, lease, rx) = worker_again(hub, orchestrator.worker, "studio", Os::MacOs, sessions);
+        Studio::new(lease, rx)
+    };
+    drop(studio);
+
+    let mut studio = back(&hub);
+    let (id, verb) = next_asked(&mut studio).await;
+    let Verb::OnOrigin { worker, repo, target, heads } = &verb else { panic!("{verb:?}") };
+    let asked = (*worker, repo.as_str(), target.as_str(), heads.as_slice());
+    let want = [commit('a')];
+    assert_eq!(asked, (orchestrator.worker, "/w/demo", "main", want.as_slice()));
+    let unreachable = Outcome::Error {
+        code: ErrorCode::Failed,
+        message: "fatal: unable to access the forge".to_owned(),
+    };
+    answer(&studio.lease, id, unreachable);
+    let quiet = tokio::time::timeout(Duration::from_millis(300), next_asked(&mut studio)).await;
+    assert!(quiet.is_err(), "asked once: {quiet:?}");
+    assert_eq!(push_of(&hub, task).await, (false, None), "an unread forge changes nothing");
+    drop(studio);
+
+    let mut studio = back(&hub);
+    let (id, verb) = next_asked(&mut studio).await;
+    assert!(matches!(verb, Verb::OnOrigin { .. }), "{verb:?}");
+    answer(&studio.lease, id, Outcome::OnOrigin { heads: vec![commit('a')] });
+    let seen = tokio::time::timeout(Duration::from_secs(5), async {
+        while push_of(&hub, task).await != (true, None) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    seen.await.expect("the card says it was pushed");
+    drop(studio);
+
+    let mut studio = back(&hub);
+    let quiet = tokio::time::timeout(Duration::from_millis(300), next_asked(&mut studio)).await;
+    assert!(quiet.is_err(), "nothing waits, nothing is asked: {quiet:?}");
+}
+
+/// A push from the board that the forge refuses, because a push from a terminal took the
+/// merge there and more came after it, asks the forge what it holds: holding the merge, the
+/// card says it was pushed, with no failure; not holding it, git's refusal stands.
+#[tokio::test]
+async fn a_push_the_forge_refuses_stands_unless_origin_holds_the_merge() {
+    use queue::tests::commit;
+    use slopty_proto::project::StepState;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, _agent) = merged_unpushed(&hub).await;
+    let refused_push = Outcome::FastForwarded {
+        head: commit('a'),
+        pushed: false,
+        push_failed: Some("! [rejected] main -> main (non-fast-forward)".to_owned()),
+    };
+    for (holds, want) in [(false, false), (true, true)] {
+        let pushing = spawn(&hub, Verb::TaskPush { project: project(), task });
+        let (id, verb) = next_asked(&mut studio).await;
+        assert!(matches!(verb, Verb::FastForward { push: true, .. }), "{verb:?}");
+        answer(&studio.lease, id, refused_push.clone());
+        let (id, verb) = next_asked(&mut studio).await;
+        let Verb::OnOrigin { heads, .. } = &verb else { panic!("{verb:?}") };
+        assert_eq!(heads, &[commit('a')]);
+        let held = if holds { vec![commit('a')] } else { Vec::new() };
+        answer(&studio.lease, id, Outcome::OnOrigin { heads: held });
+        let Outcome::Task(card) = pushing.await.unwrap() else { panic!("a card") };
+        let Some(slopty_proto::project::Merge::Merged { pushed, push_failed, .. }) = card.merge
+        else {
+            panic!("not merged")
+        };
+        assert_eq!((pushed, push_failed.is_none()), (want, want), "held: {holds}");
+        let step = card.step.expect("the push's step");
+        match (&step.state, want) {
+            (StepState::Done { detail }, true) => {
+                assert_eq!(detail, "origin's main holds aaaaaaa already");
+            }
+            (StepState::Failed { why }, false) => assert!(why.contains("rejected"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
