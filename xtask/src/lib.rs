@@ -27,6 +27,7 @@ mod icon;
 mod ime;
 mod ios;
 mod land;
+mod latency;
 mod linux;
 mod nightly;
 mod pi;
@@ -142,6 +143,12 @@ enum Cmd {
     /// The checks of the working tree on a GitHub runner, not this Mac: `xtask check` for the
     /// crates named and an e2e case, whose accepted goldens come back into the tree.
     Remote(remote::RemoteOpts),
+    /// How long each push to `gate` took to reach main, and the spread: the wait a lane feels.
+    GateLatency {
+        /// Pushes since this time (`2026-10-11T00:00:00Z`); the last day by default.
+        #[arg(long)]
+        since: Option<String>,
+    },
     /// nextest's setup script: build every binary a test spawns before the first test starts.
     SpawnedBins,
     /// Write `.cargo/ci-profile.toml`, which CI compiles every proc-macro dependency with
@@ -381,6 +388,7 @@ pub fn main() -> Result<()> {
         Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
+        Cmd::GateLatency { since } => latency::run(&sh, since.as_deref()),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),
         Cmd::CiProfile => ci_profile::write(&sh),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {

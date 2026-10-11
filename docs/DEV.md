@@ -239,7 +239,8 @@ rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
   cancelled by its next push. When every lane passed, the `promote` job fast-forwards main to that
   exact commit (`git push origin <sha>:main`); it refuses one that is not on top of main, and main
   is never gated a second time. A failed lane writes the run's summary: the lane, the step that
-  failed and, for the tests, each failed test from the JUnit report.
+  failed and, for the tests, each failed test from the JUnit report. `cargo xtask gate-latency
+  [--since <time>]` prints how long each push to `gate` took to reach main, and the spread.
 
 `cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
 the quick gate and CI gates its tag in full before it builds anything. The gate checks the

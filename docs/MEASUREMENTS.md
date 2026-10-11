@@ -16301,3 +16301,15 @@ cargo test -p slopty-workerd --release --test e2e -- --ignored --nocapture --tes
   a_transcript_write_reaches_its_follower observed_sessions_at_rest
 # before: main with only the two tests added (apps/slopty-worker/tests/e2e.rs)
 ```
+
+## 2026-10-11 — from a push to `gate` to main
+
+What a lane waits for: from its push to `gate` until main holds it (`cargo xtask gate-latency
+--since 2026-10-10T12:00:00Z`, run 2026-10-11 12:10 UTC). A push whose run failed or was
+cancelled lands with a later run, so its wait counts that one's too.
+
+- 57 pushes in 24 hours, 54 landed: median 22 min, p90 57 min, max 107 min.
+- The 27 whose own run passed: median 16 min (8–57). The others waited for the next green run:
+  a red lane's fix (963d71f2, 107 min; 7722cbef and 79973fbf, 88 min), or a newer push.
+- 14e3576a and 058d32be waited 41 and 39 min, while lane checks held all five macOS runners and
+  the gate's test shards queued (gate run 38136668846), before `remote` yielded to the gate.
