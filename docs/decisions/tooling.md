@@ -1634,25 +1634,30 @@ more full-window layer.
   - No Linux job deletes the image's SDKs any more: x86_64 has 82 GB free without it, and it
     took 92–106 s a job.
 
-- ❌ **Six test threads on a hosted Mac: tried, reverted** (2026-10-11,
+- ✅ **Six test threads on a hosted Mac: the worker shard's only** (2026-10-11,
   `.research/ci-speed-2026-10-11.md` item 7). The same tests took three to six times as long
   on the macOS runner as on Linux (client 104 against 18 test-s, net 61 against 14), more than
   three cores against four and an M1 VM against EPYC explain, so the tests seemed to wait: on
-  process start, timers and sockets. The test shards ran nextest with
-  `NEXTEST_TEST_THREADS=6` on their three cores. The timing tests take
-  every slot already (`threads-required = "num-test-threads"`), so they still run alone. Kept
-  if nextest's wall time in the worker and rest shards falls 20 % or more against the ten green
-  runs before, with no new timing failure and no pseudo-terminal peak over the budget, over ten
-  runs; otherwise reverted.
-  - Over ten runs the worker shard's nextest took a median 139.4 s against 179.4 s for the ten
-    green runs before (−22 %), but the same batch took `slopty-engine`'s and `slopty-media`'s
-    328 tests off the Mac, 33–41 test-seconds, about 12 s of the old run. Without them the
-    gain is about 17 %, under the bar. The rest shard's tests changed too much to compare.
-  - The tests it kept ran 1.3–1.5 times as long each (the shard's common tests summed 414–487
-    test-seconds before, 631–637 after), so the cores were busy, not waiting.
-  - A workerd save raced under it (run 38117219424, fixed at its root).
+  process start, timers and sockets. The trial ran every test shard's nextest with
+  `NEXTEST_TEST_THREADS=6` on its three cores; the timing tests take every slot
+  (`threads-required = "num-test-threads"`), so they still ran alone. The bar: nextest's wall
+  time 20 % lower over ten runs, with no new timing failure.
+  - ✅ **The worker shard** (`slopty-worker`, `slopty-workerd` and the crates under them): a
+    median 139.4 s over ten runs at six threads, against 176.1 s over three at three threads
+    on the same 1090 tests once the trial ended (142.8, 176.1, 228.7 s): −21 %. Its tests
+    wait on the daemons and agents they start. Its one failure in thirteen runs was a race in
+    a workerd save (run 38117219424), fixed at its root. The VideoToolbox group, run apart one
+    at a time, hung twice, the guest codec's known wedge (`.research/ci-vt-hang-2026-10-11.md`).
+  - ❌ **The rest and ui shards**: their tests contend for the cores. With six threads the
+    rest shard's tests summed 722 test-seconds (`slopty-client` alone 214) and its run took
+    167–175 s; with three, 335 test-seconds (`slopty-client` 55) and 107–149 s. The ui
+    shard's run, 38–59 s at three threads, has too little to gain.
+  - Against the ten runs before the trial, the worker's figure looked like −22 %, but the same
+    batch took `slopty-engine`'s and `slopty-media`'s 328 tests off the Mac (about 12 s of the
+    old run), so the first verdict, −17 %, reverted the trial for every shard. The runs at
+    three threads afterwards gave the like-for-like figure above.
   - A same-runner A/B of three against six threads lost its runner twice (38130090331,
-    38134936380), so the verdict rests on the gate's runs.
+    38134936380).
 
 - ✅ **A remote check lints on Linux** (2026-10-11, `.research/ci-speed-2026-10-11.md` item 3).
   A remote check was one macOS job: about 105 s of setup, then fmt, host clippy, the tests,

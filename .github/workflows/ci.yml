@@ -220,9 +220,13 @@ jobs:
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
       # and fails on a leak, on more than its budget, or on running out.
-      - run: >-
-          xtask gate --ci --lane ${{ matrix.lane }}
-          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
+      # The worker shard's tests mostly wait on the processes they start, so six run on its three
+      # cores; the other shards' contend, and keep nextest's default (docs/decisions/tooling.md,
+      # "Six test threads on a hosted Mac: the worker shard's only").
+      - run: |
+          if [ "${{ matrix.shard }}" = worker ]; then export NEXTEST_TEST_THREADS=6; fi
+          xtask gate --ci --lane ${{ matrix.lane }} \
+            ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
