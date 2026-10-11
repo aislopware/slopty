@@ -17,7 +17,7 @@
 //! A conversation Claude Code still runs in the background (`claude --bg`, in its session
 //! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
 //! A project task's Codex, its terminal's own command, comes back with `codex resume --last` in
-//! its worktree ([`Recipe::codex_again`]).
+//! its worktree (`Recipe::codex_again`).
 //!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
@@ -114,7 +114,7 @@ pub struct Reopen {
     pub agent: Option<Resume>,
     /// What its viewers are told.
     pub restored: Restored,
-    /// It runs a project task's Codex again ([`Recipe::codex_again`]), to be given Slopty's
+    /// It runs a project task's Codex again (`Recipe::codex_again`), to be given Slopty's
     /// tools afresh.
     pub codex: bool,
 }

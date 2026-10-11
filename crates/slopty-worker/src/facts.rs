@@ -594,8 +594,8 @@ async fn launcher(search: &SearchPath, program: &Path) -> Launcher {
 /// A daemon launchd started has little on its `PATH`, so a git hook, git-lfs, a signing helper
 /// or a pre-commit tool installed by Homebrew, mise or npm is found only on the login shell's.
 /// The login shell is read once for the worker's life. While it does not answer, the daemon's
-/// own `PATH` stands in, and it is asked again only [`LOGIN_RETRY`] after it last failed: each
-/// ask waits up to [`LOGIN_WAIT`], which a commit or a push would otherwise wait every time.
+/// own `PATH` stands in, and it is asked again only `LOGIN_RETRY` after it last failed: each
+/// ask waits up to `LOGIN_WAIT`, which a commit or a push would otherwise wait every time.
 pub async fn person_path() -> OsString {
     static READ: tokio::sync::OnceCell<OsString> = tokio::sync::OnceCell::const_new();
     static FAILED_MS: AtomicU64 = AtomicU64::new(0);

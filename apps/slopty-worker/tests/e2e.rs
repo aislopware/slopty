@@ -4688,13 +4688,28 @@ mod tests {
             base_modified_ms: base,
         };
         worker.tx.send(&save("two\n", Some(base))).await.unwrap();
-        let WriteResult::Saved { size: 4, modified_ms: saved } =
-            next_written(&mut worker, &name).await
-        else {
-            panic!("saved")
+        // The watch hears the rename as soon as it lands, so its read may come before the save's
+        // answer, which is sent once the write is done: either order is the protocol's.
+        let (mut written, mut heard) = (None, None);
+        while written.is_none() || heard.is_none() {
+            next_msg(&mut worker, |m| match m {
+                WorkerMsg::Written { path: p, result } if p == name => {
+                    written = Some(result);
+                    Some(())
+                }
+                WorkerMsg::File { path: p, read } if p == name => {
+                    heard = Some(read);
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
+        }
+        let Some(WriteResult::Saved { size: 4, modified_ms: saved }) = written else {
+            panic!("saved: {written:?}")
         };
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
-        let read = next_file(&mut worker, &name).await;
+        let read = heard.unwrap();
         assert!(
             matches!(&read, FileRead::Text { text, modified_ms, .. } if text == "two" && *modified_ms == saved),
             "the writer's own watch hears the save: {read:?}"
