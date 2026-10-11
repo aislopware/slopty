@@ -797,3 +797,94 @@ fn a_task_s_review_is_its_thread_s_and_its_comments_go_back_through_the_project(
     review.update(cx, |_, cx| cx.emit(ReviewEvent::Merge { thread }));
     assert_eq!(sent(cx), [Verb::TaskMerge { project: board, task: TaskId(8) }]);
 }
+
+/// A finished goal's review reads its branch as committed since it left the branch it lands
+/// into (`GitOp::Range`), with no pull request of the clone's own asked, no commit sheet and
+/// no other span to switch to. Its comments go to the project's orchestrator as the person's
+/// word, and stay until they went.
+#[gpui::test]
+fn a_goals_range_reads_as_committed_and_its_comments_go_to_the_orchestrator(
+    cx: &mut TestAppContext,
+) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::thread::Patch;
+    use slopty_proto::thread::wire::{FileDiff, Review, ReviewScope};
+
+    use crate::project::fixtures::{self, project, snapshot, status};
+    use crate::review::ReviewEvent;
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut record = project("board", None);
+    record.target = "slopty/board/goal".to_owned();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.projects_part(snapshot(10, vec![status(record, Vec::new(), Vec::new())]), cx);
+    });
+    let (base, head) = ("develop".to_owned(), "slopty/board/goal".to_owned());
+    let kind = ItemKind::Changes {
+        path: "/w/slopty".into(),
+        against: Some(base.clone()),
+        head: Some(head.clone()),
+    };
+    let tile = arrives(&view, cx, &studio, kind, 20);
+    frames(cx);
+    let sent = studio.drain();
+    let ops: Vec<(&str, &GitOp)> = sent
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Git { repo, op, .. } => Some((repo.as_str(), op)),
+            _ => None,
+        })
+        .collect();
+    let range = GitOp::Range { base: base.clone(), head: head.clone() };
+    assert!(ops.contains(&("/w/slopty", &range)), "the goal's range, asked: {ops:?}");
+    assert!(!ops.iter().any(|(_, op)| matches!(op, GitOp::PullStatus)), "not the clone's pull");
+    let request = sent
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Git { request, op, .. } if *op == range => Some(*request),
+            _ => None,
+        })
+        .expect("asked");
+    let file = FileDiff {
+        path: "src/board.rs".to_owned(),
+        from: Some("old".to_owned()),
+        to: Some("new".to_owned()),
+        kind: slopty_proto::thread::wire::FileKind::Text,
+        old_path: None,
+        modes: None,
+        patch: Patch { hunks: Vec::new(), added: 3, removed: 1, clipped_lines: 0, full: None },
+    };
+    let review = Review {
+        scope: ReviewScope::Range { base, head: head.clone() },
+        from: None,
+        to: None,
+        files: vec![file],
+        absent: None,
+    };
+    let done = GitOutcome::Done(GitDone::Changes(Box::new(review)));
+    view.update_in(cx, |v, _w, cx| v.git_done(key, request, done, cx));
+    frames(cx);
+    assert!(cx.debug_bounds("review-head-0").is_some(), "the goal's file shows");
+    assert!(cx.debug_bounds("review-commit").is_none(), "nothing of its own to commit");
+    assert!(cx.debug_bounds("review-scope-Uncommitted").is_none(), "its range alone");
+
+    let goal = view.read_with(cx, |v, _| v.changes_view(tile.item).cloned()).expect("the review");
+    assert_eq!(goal.read_with(cx, |g, _| g.head().map(str::to_owned)), Some(head.clone()));
+    let text = "Name the store's errors".to_owned();
+    goal.update(cx, |_, cx| {
+        cx.emit(ReviewEvent::Tell { head: head.clone(), text: text.clone(), id: 1 });
+    });
+    cx.run_until_parked();
+    let (verb, reply) = queue.try_next().expect("told the orchestrator");
+    assert_eq!(verb, Verb::TaskTell { project: fixtures::id("board"), task: None, text });
+    let _gone = reply.send(Outcome::Done);
+    cx.run_until_parked();
+    let said = view.read_with(cx, |v, _| v.toast_texts());
+    assert!(said.iter().any(|s| s == "Sent to the orchestrator"), "{said:?}");
+}

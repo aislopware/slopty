@@ -214,7 +214,8 @@ impl WorkspaceView {
     }
 
     /// The clock a worker's time out of reach is told by, with the tick that keeps its tiles'
-    /// "Reconnecting for …" current started, once, while any worker is away.
+    /// "Reconnecting for …" and the boards' "Start elsewhere" current started, once, while any
+    /// worker is away.
     fn away_clock(&mut self, cx: &Context<Self>) -> Duration {
         if !self.away_ticking {
             self.away_ticking = true;
@@ -224,6 +225,9 @@ impl WorkspaceView {
                     let away = this.update(cx, |this, cx| {
                         let away = this.workers.values().any(|w| w.away_since.is_some());
                         if away {
+                            // A board's tasks on a machine gone past its grace are offered
+                            // elsewhere: the boards look again with the clock.
+                            this.projects.dirty = true;
                             cx.notify();
                         } else {
                             this.away_ticking = false;

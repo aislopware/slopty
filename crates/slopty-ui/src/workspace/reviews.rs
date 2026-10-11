@@ -253,6 +253,12 @@ impl WorkspaceView {
                     self.merge_task(&project, task, cx);
                 }
             }
+            ReviewEvent::Tell { head, text, id } => {
+                let (review, id) = (view.downgrade(), *id);
+                self.tell_goal(head, text.clone(), cx, move |sent, cx| {
+                    let _gone = review.update(cx, |v, cx| v.added(id, sent, cx));
+                });
+            }
             ReviewEvent::Drafted => self.drafts_changed(cx),
             // A folder's alone, heard with the window it starts in (`sync_changes`).
             ReviewEvent::NewAgent { .. } => {}
@@ -356,22 +362,23 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some((key, path)) = self.changes_here() else { return };
-        self.open_changes(key, path, None, cx);
+        self.open_changes(key, path, (None, None), cx);
     }
 
     /// The changes of `path` on `key`, in their own tile, against `against` when it names a
-    /// branch (the whole branch since it left it); the one open there already for that folder
-    /// and branch takes the focus instead.
+    /// branch (the whole branch since it left it), or the branch `head` as committed since it
+    /// left `against`; the one open there already for that folder and branches takes the
+    /// focus instead.
     pub(super) fn open_changes(
         &mut self,
         key: WorkerKey,
         path: String,
-        against: Option<String>,
+        (against, head): (Option<String>, Option<String>),
         cx: &mut Context<Self>,
     ) {
         let open = self.layout.tiles().find_map(|t| match &self.item(t)?.kind {
-            ItemKind::Changes { path: p, against: a, head: None }
-                if t.worker == key && *p == path && *a == against =>
+            ItemKind::Changes { path: p, against: a, head: h }
+                if t.worker == key && *p == path && *a == against && *h == head =>
             {
                 Some(t.item)
             }
@@ -383,7 +390,7 @@ impl WorkspaceView {
         }
         let item = Item {
             id: ItemId::new(),
-            kind: ItemKind::Changes { path, against, head: None },
+            kind: ItemKind::Changes { path, against, head },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
@@ -394,29 +401,36 @@ impl WorkspaceView {
 
     /// Make the view of each folder's changes tile, and let go of those whose tile is gone.
     pub(super) fn sync_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tiled: Vec<(ItemId, WorkerKey, String, Option<String>)> = self
+        type Tiled = (ItemId, WorkerKey, String, Option<String>, Option<String>);
+        let tiled: Vec<Tiled> = self
             .layout
             .tiles()
             .filter_map(|t| match &self.item(t)?.kind {
-                ItemKind::Changes { path, against, head: None } => {
-                    Some((t.item, t.worker, path.clone(), against.clone()))
+                ItemKind::Changes { path, against, head } => {
+                    Some((t.item, t.worker, path.clone(), against.clone(), head.clone()))
                 }
                 _ => None,
             })
             .collect();
-        for (item, key, path, against) in &tiled {
+        for (item, key, path, against, head) in &tiled {
             if self.reviews.changes.contains_key(item) {
                 continue;
             }
             let hub = self.thread_hub(*key, cx);
             let theme = self.theme.clone();
             let path = path.clone();
+            let place = super::drafts::folder_place(&path, head.as_deref());
             let left =
-                self.drafts.review(&super::drafts::review_key(None, Some((*key, &path)))).cloned();
+                self.drafts.review(&super::drafts::review_key(None, Some((*key, &place)))).cloned();
             let view = cx.new(|cx| {
-                let mut view = match against.clone() {
-                    Some(branch) => ReviewView::branch(hub, path, branch, theme, window, cx),
-                    None => ReviewView::folder(hub, path, theme, window, cx),
+                let mut view = match (against.clone(), head.clone()) {
+                    (Some(base), Some(head)) => {
+                        ReviewView::range(hub, path, (base, head), theme, window, cx)
+                    }
+                    (Some(branch), None) => {
+                        ReviewView::branch(hub, path, branch, theme, window, cx)
+                    }
+                    (None, _) => ReviewView::folder(hub, path, theme, window, cx),
                 };
                 if let Some(left) = left {
                     view.take_back(left, cx);
@@ -452,10 +466,8 @@ impl WorkspaceView {
         let folders = self.reviews.changes.iter().filter_map(|(item, (view, _))| {
             let worker = *tiles.get(item)?;
             let view = view.read(cx);
-            Some((
-                super::drafts::review_key(None, Some((worker, view.folder_path()?))),
-                view.left(),
-            ))
+            let place = super::drafts::folder_place(view.folder_path()?, view.head());
+            Some((super::drafts::review_key(None, Some((worker, &place))), view.left()))
         });
         threads.chain(folders).collect()
     }

@@ -10437,28 +10437,61 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::proposed`; goldens `thread*`, `wide-reading-thread`,
     `review-agent*`, `agent-*` and `empty-workspace` (its composer).
 
-- ✅ **A met goal opens its pull request; an ended orchestrator opens by its thread**
-  (2026-10-11, the board's half of `Verb::ProjectLand` and `Project::orchestrator_thread`;
-  the server's half is in `docs/decisions/projects.md`).
-  - **Open pull request.** Once the orchestrator says the goal is met, the standing under the
-    board's head ends with "Open pull request", the solid button, the one thing left for the
-    person to do. Beside it, in the metadata role, "into {base}" while the server knows the
-    branch the goal's own branch was made from (`Project::base`); a target the person named
-    says nothing more. A press sends `ProjectLand { into: None }` and says "Opening pull
-    request…" in its place at once. The answer's pull request then stands there as a link
-    with the pull request glyph, "Pull request #N", opening its page. A refusal is said in
-    the server's words and the button comes back. No branch picker: naming another branch is
-    rare, and the server's refusal says to name one.
+- ✅ **A met goal is reviewed whole, lands, and its pull request is followed; an ended
+  orchestrator is resumed from the board** (2026-10-11, the board's half of
+  `Verb::ProjectLand`, `Project::landed`, `GitOp::Range` and `Verb::ProjectResume`; the server's
+  half is in `docs/decisions/projects.md`; `.research/readiness-a-2026-10-11.md` items 5, 6, 7
+  and 9).
+  - **Review.** Once the orchestrator says the goal is met, the standing under the board's head
+    offers "Review", a secondary button, before "Open pull request". It opens the goal's branch
+    as committed since it left the branch it lands into (`ItemKind::Changes` with `head`, read
+    by `GitOp::Range`), in the orchestrator's clone on its machine, in a tile of its own there.
+    That is what the pull request will bring, which no task's review showed. The clone is the
+    orchestrator's terminal's repository while it is listed, else its thread's, else the
+    project's own when it names a path. The tile shows that one span: no Uncommitted switch, no
+    commit sheet, and no pull request of the clone's own. Its comments go to the orchestrator as
+    the person's word ("Send to the orchestrator", `TaskTell` with no task), not to a new agent,
+    since the orchestrator owns the goal. A goal with no branch it was made from and no pull
+    request to name one offers no Review.
+  - **Open pull request.** The solid button, the one thing left for the person to do. Beside
+    it, in the metadata role, "into {base}" while the server knows the branch the goal's own
+    branch was made from (`Project::base`). A press sends `ProjectLand { into: None }` and says
+    "Opening pull request…" in its place until the project holds the pull request; a refusal
+    is said in the server's words and the button comes back. No branch picker: naming another
+    branch is rare, and the server's refusal says to name one.
+  - **Followed.** The pull request is the project's (`Project::landed`), not this device's
+    memory, so every device shows it and a restart keeps it. The head shows it as the forge
+    last said it stands: the glyph by its state in that state's ink, and "Pull request" then its
+    own line ("#42: checks running", "#42 merged"), in the warning ink while it waits on the
+    person, a link to its page. Review and Open go once it exists; one closed without a merge
+    offers both again. Deleted: the board's own `Landing::Opened`.
   - **The orchestrator stopped.** While its machine is linked and lists its terminal no more,
     and the server knows its thread, the head says "The orchestrator has stopped" with a
-    secondary "Open its thread". The press opens the thread on its machine (its face, or a
-    tile of its own), whose Resume starts the agent again; the server then follows it to its
-    new terminal and the line goes. A machine away says nothing of it: its tiles say away.
-    Meanwhile the board's line to the orchestrator goes, since words typed there would wait for
-    nobody, and the board's "message the orchestrator" key opens the thread instead
-    (`.research/readiness-a-2026-10-11.md` item 6).
-  - Tests: `workspace::tests::projects::a_met_goal_opens_its_pull_request`,
-    `workspace::tests::projects::an_ended_orchestrator_is_opened_by_its_thread`.
+    secondary "Resume the orchestrator". The press sends `ProjectResume` and says "Resuming the
+    orchestrator…" until its agent is back (the server follows it to its new terminal and the
+    line goes); a refusal is said and the button comes back. "Open its thread", a ghost button
+    beside it, opens the thread on its machine for the person who wants to read first. Resume
+    was two steps (open the thread, press its Resume) and opened a tile not asked for. A
+    machine away says nothing of it: its tiles say away. Meanwhile the board's line to the
+    orchestrator goes, since words typed there would wait for nobody, and the board's "message
+    the orchestrator" key opens the thread instead.
+  - Tests: `workspace::tests::projects::a_met_goal_is_reviewed_whole_then_lands_and_its_pull_request_is_followed`,
+    `workspace::tests::projects::an_ended_orchestrator_is_resumed_from_its_board`,
+    `workspace::tests::review_tile::a_goals_range_reads_as_committed_and_its_comments_go_to_the_orchestrator`.
+
+- ✅ **A task on a machine gone too long starts elsewhere from its card** (2026-10-11,
+  `.research/readiness-a-2026-10-11.md` item 8; the server's half, `TaskRestart::worker`, is in
+  `docs/decisions/projects.md`). A task whose machine had gone for good could only be
+  cancelled, and if its orchestrator had ended too nothing could move it. Once its machine has
+  been out of reach past `project::GONE_AFTER` (two minutes, past a relink and a short sleep,
+  short of a person left waiting), the card leads its actions with "Start elsewhere". The press
+  sends `TaskRestart` naming no worker, so the server places it on a machine that is up, and
+  the card says "Starting #N elsewhere…" until its new agent shows; a refusal is said and the
+  button comes back. Within the grace the card wears only the away mark. The workspace's away
+  tick, which already keeps "Reconnecting for …" current, hands the boards the clock too.
+  - Rejected: a machine picker on the card. Placement is the server's, as for any start, and
+    a person who wants one machine can say so to the orchestrator.
+  - Test: `workspace::tests::projects::a_task_on_a_machine_gone_too_long_starts_elsewhere`.
 
 - ✅ **A settings field's share is its row's** (2026-10-11, the design pass). Every typed field
   (a colour, a path, a list) was drawn at 60 % of its own width: its share was set on the field

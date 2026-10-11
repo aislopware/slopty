@@ -19,7 +19,9 @@ pub mod recap;
 mod view;
 
 pub(crate) use view::{ALLOW, DENY};
-pub use view::{AgentSeen, Asked, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
+pub use view::{
+    AgentSeen, Asked, CTX, GONE_AFTER, Node, ProjectEvent, ProjectView, Seen, WorkerSeen,
+};
 
 gpui::actions!(
     project,

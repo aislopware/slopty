@@ -32,6 +32,8 @@ impl Scope {
         [Self::LastTurn, Self::SinceReviewed, Self::AllTurns, Self::Uncommitted, Self::WholeBranch];
     /// A folder's scopes, in the switch's order.
     pub const FOLDER: [Self; 2] = [Self::Uncommitted, Self::WholeBranch];
+    /// A branch reviewed as committed, checked out nowhere: its whole change alone.
+    pub const RANGE: [Self; 1] = [Self::WholeBranch];
     /// A thread's scopes, in the switch's order: its turns, then its folder's working tree
     /// against `HEAD` and against where its branch left its base.
     pub const THREAD: [Self; 5] =

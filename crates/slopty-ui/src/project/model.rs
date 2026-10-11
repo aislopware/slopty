@@ -253,6 +253,10 @@ pub enum TaskAction {
     /// Give it up: it holds its paths no more and leaves the merge queue, and it may be
     /// planned again. Its agent, if one runs, is left to the person.
     Cancel,
+    /// Start it again on a machine that is up, its own gone too long
+    /// ([`slopty_proto::orchestration::Verb::TaskRestart`] naming no worker, so the server
+    /// places it): from its branch as `origin` has it, else from the target.
+    StartElsewhere,
 }
 
 impl TaskAction {
@@ -269,6 +273,7 @@ impl TaskAction {
             Self::ResolveConflicts => "Resolve conflicts",
             Self::Push => "Push",
             Self::Cancel => "Cancel task",
+            Self::StartElsewhere => "Start elsewhere",
         }
     }
 
@@ -291,6 +296,7 @@ impl TaskAction {
             Self::ResolveConflicts => "resolve-conflicts",
             Self::Push => "push",
             Self::Cancel => "cancel",
+            Self::StartElsewhere => "start-elsewhere",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -799,7 +805,8 @@ impl Board {
             | TaskAction::Start
             | TaskAction::Retry
             | TaskAction::Push
-            | TaskAction::Cancel => None,
+            | TaskAction::Cancel
+            | TaskAction::StartElsewhere => None,
         }
     }
 

@@ -102,6 +102,9 @@ const ADD_TO_MESSAGE: &str = "Add to message";
 /// A folder's foot: its comments start a new agent in the folder.
 pub const SEND_TO_NEW_AGENT: &str = "Send to a new agent";
 
+/// A goal's review's foot: its comments go to the project's orchestrator, as the person.
+pub const SEND_TO_ORCHESTRATOR: &str = "Send to the orchestrator";
+
 /// The foot's way to keep every file as it is.
 const MARK_REVIEWED: &str = "Mark reviewed";
 
@@ -237,6 +240,17 @@ pub enum ReviewEvent {
         /// The task's thread.
         thread: ThreadId,
     },
+    /// A goal's comments go to its project's orchestrator as the person's word: the host sends
+    /// `text` to the project whose goal is `head`, then says whether it went
+    /// ([`ReviewView::added`]). The comments stay until it did.
+    Tell {
+        /// The goal's branch.
+        head: String,
+        /// The comments as one message.
+        text: String,
+        /// Which hand-over this is, for its answer.
+        id: u64,
+    },
 }
 
 /// One row of the diff.
@@ -346,6 +360,10 @@ pub struct ReviewView {
     scope: Scope,
     /// The branch a folder's whole branch is compared with; its base when `None`.
     branch: Option<String>,
+    /// The branch reviewed as committed since it left [`Self::branch`], in place of the
+    /// folder's working tree ([`GitOp::Range`]): a project's finished goal, checked out
+    /// nowhere. Its comments go to the project's orchestrator.
+    head: Option<String>,
     /// The scope asked for, and over which turn: asked again when the thread moves to a new
     /// turn.
     asked: Option<ReviewScope>,
@@ -466,7 +484,7 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::of(hub, Reviewed::Thread(thread), None, theme, window, cx)
+        Self::of(hub, Reviewed::Thread(thread), (None, None), theme, window, cx)
     }
 
     /// The review of the folder `path`'s changes from `hub`'s machine, with no thread: what is
@@ -478,7 +496,7 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::of(hub, Reviewed::Folder(path), None, theme, window, cx)
+        Self::of(hub, Reviewed::Folder(path), (None, None), theme, window, cx)
     }
 
     /// A folder's whole branch since it left `branch`, as a finished task's review shows what
@@ -492,13 +510,27 @@ impl ReviewView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::of(hub, Reviewed::Folder(path), Some(branch), theme, window, cx)
+        Self::of(hub, Reviewed::Folder(path), (Some(branch), None), theme, window, cx)
+    }
+
+    /// A project's finished goal in the orchestrator's clone `path`: the commits of `head`
+    /// since it left `base`, as committed, which is what its pull request lands. Nothing is
+    /// checked out for it, and its comments go to the orchestrator ([`ReviewEvent::Tell`]).
+    pub fn range(
+        hub: Entity<ThreadHub>,
+        path: String,
+        (base, head): (String, String),
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::of(hub, Reviewed::Folder(path), (Some(base), Some(head)), theme, window, cx)
     }
 
     fn of(
         hub: Entity<ThreadHub>,
         reviewed: Reviewed,
-        branch: Option<String>,
+        (branch, head): (Option<String>, Option<String>),
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -545,6 +577,7 @@ impl ReviewView {
                 (false, _) => Scope::default(),
             },
             branch,
+            head,
             asked: None,
             model: Model::default(),
             blocks: HashMap::new(),
@@ -622,6 +655,24 @@ impl ReviewView {
         &self.reviewed
     }
 
+    /// What a folder's span on show is on the wire: its working tree against a commit, or a
+    /// branch as committed ([`Self::head`]).
+    fn folder_scope(&self) -> Option<ReviewScope> {
+        match (&self.branch, &self.head) {
+            (Some(base), Some(head)) => {
+                Some(ReviewScope::Range { base: base.clone(), head: head.clone() })
+            }
+            _ => self.scope.wire_alone(self.branch.as_deref()),
+        }
+    }
+
+    /// The branch it reviews as committed, a project's finished goal; none for a working
+    /// tree or a thread.
+    #[must_use]
+    pub fn head(&self) -> Option<&str> {
+        self.head.as_deref()
+    }
+
     const fn own(&self) -> Option<ThreadId> {
         match self.reviewed {
             Reviewed::Thread(thread) => Some(thread),
@@ -684,10 +735,13 @@ impl ReviewView {
         let thread = match &self.reviewed {
             Reviewed::Thread(thread) => *thread,
             Reviewed::Folder(path) => {
-                let (path, scope) = (path.clone(), self.scope.wire_alone(self.branch.as_deref()));
-                let Some(ReviewScope::WorkingTree(against)) = scope.clone() else { return };
+                let (path, scope) = (path.clone(), self.folder_scope());
+                let op = match scope.clone() {
+                    Some(ReviewScope::WorkingTree(against)) => GitOp::Changes { against },
+                    Some(ReviewScope::Range { base, head }) => GitOp::Range { base, head },
+                    _ => return,
+                };
                 self.asked = scope;
-                let op = GitOp::Changes { against };
                 let _asked = self.hub.update(cx, |hub, cx| hub.git_op(&path, op, cx));
                 return;
             }
@@ -754,11 +808,13 @@ impl ReviewView {
         let Some(repo) = self.repo(cx) else { return };
         self.pull_asked = true;
         let rooted = self.root(cx).is_some();
+        // A goal's range is no checkout's: the clone's own pull request is not its.
+        let range = self.head.is_some();
         let _asked = self.hub.update(cx, |hub, cx| {
             if !rooted {
                 let _status = hub.git_op(&repo, GitOp::Status, cx);
             }
-            hub.git_op(&repo, GitOp::PullStatus, cx)
+            (!range).then(|| hub.git_op(&repo, GitOp::PullStatus, cx))
         });
     }
 
@@ -837,12 +893,15 @@ impl ReviewView {
     /// The worker's review came: a thread's on its stream, a folder's from its repository.
     fn reviewed(&mut self, cx: &mut Context<Self>) {
         let hub = self.hub.read(cx);
-        let review = match (&self.reviewed, self.scope.wire_alone(self.branch.as_deref())) {
+        let review = match (&self.reviewed, self.folder_scope()) {
             (Reviewed::Thread(thread), _) => {
                 self.asked.as_ref().and_then(|scope| hub.review(*thread, scope)).cloned()
             }
             (Reviewed::Folder(path), Some(ReviewScope::WorkingTree(against))) => {
                 hub.git().repo(path).and_then(|r| r.changes.get(&against)).cloned()
+            }
+            (Reviewed::Folder(path), Some(ReviewScope::Range { base, head })) => {
+                hub.git().repo(path).and_then(|r| r.ranges.get(&(base, head))).cloned()
             }
             (Reviewed::Folder(_), _) => None,
         };
@@ -1240,6 +1299,21 @@ impl ReviewView {
         let id = self.adds;
         self.adding = Some((id, batch));
         cx.emit(ReviewEvent::NewAgent { folder, text, id });
+        cx.notify();
+    }
+
+    /// "Send to the orchestrator": a goal's comments, as one message, to its project's
+    /// orchestrator ([`ReviewEvent::Tell`]).
+    fn send_to_orchestrator(&mut self, cx: &mut Context<Self>) {
+        if self.comments_away() {
+            return;
+        }
+        let Some(head) = self.head.clone() else { return };
+        let Some((text, batch)) = self.model.message() else { return };
+        self.adds = self.adds.wrapping_add(1);
+        let id = self.adds;
+        self.adding = Some((id, batch));
+        cx.emit(ReviewEvent::Tell { head, text, id });
         cx.notify();
     }
 
@@ -1653,6 +1727,7 @@ impl ReviewView {
     const fn scopes(&self) -> &'static [Scope] {
         match self.reviewed {
             Reviewed::Thread(_) => &Scope::THREAD,
+            Reviewed::Folder(_) if self.head.is_some() => &Scope::RANGE,
             Reviewed::Folder(_) => &Scope::FOLDER,
         }
     }
@@ -2019,7 +2094,7 @@ impl ReviewView {
     fn pull_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let repo = self.repo(cx)?;
+        let repo = self.repo(cx).filter(|_| self.head.is_none())?;
         let hub = self.hub.read(cx);
         let pull = hub.git().repo(&repo).and_then(|r| r.pull.status()).map(|pull| {
             let tone = crate::conversation::thread::commit::standing_tone(theme, pull.standing());
@@ -2055,9 +2130,10 @@ impl ReviewView {
         pull.map(IntoElement::into_any_element)
     }
 
-    /// The way to the commit sheet on the reviewed repository.
+    /// The way to the commit sheet on the reviewed repository; none for a goal's range, which
+    /// is committed already and checked out nowhere.
     fn commit_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        self.repo(cx)?;
+        self.repo(cx).filter(|_| self.head.is_none())?;
         Some(
             self.action("review-commit".to_owned(), COMMIT, false)
                 .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
@@ -2524,9 +2600,11 @@ impl ReviewView {
         let n = self.model.waiting();
         let away = self.comments_away();
         let folder = self.own().is_none();
+        let goal = self.head.is_some();
         let task = self.task;
         let send_words = match n {
             _ if away => SENDING.to_owned(),
+            _ if goal => SEND_TO_ORCHESTRATOR.to_owned(),
             _ if folder => SEND_TO_NEW_AGENT.to_owned(),
             n if task.is_some() => send_back_words(n),
             1 => "Send 1 comment".to_owned(),
@@ -2534,7 +2612,11 @@ impl ReviewView {
         };
         // A task's review is decided by its merge, so it keeps nothing reviewed of its own.
         let mark = !folder && task.is_none() && !self.model.listed().is_empty();
-        let selector = if folder { "review-send-new" } else { "review-send" };
+        let selector = match (goal, folder) {
+            (true, _) => "review-send-orchestrator",
+            (false, true) => "review-send-new",
+            (false, false) => "review-send",
+        };
         let mut row = kit::priority_row("review-foot-row")
             .h_full()
             .gap(px(theme.spacing.sm))
@@ -2555,8 +2637,10 @@ impl ReviewView {
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(SharedString::from(send_words))
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    if folder { this.send_to_new_agent(cx) } else { this.send_comments(cx) }
+                .on_click(cx.listener(move |this, _ev, _w, cx| match (goal, folder) {
+                    (true, _) => this.send_to_orchestrator(cx),
+                    (false, true) => this.send_to_new_agent(cx),
+                    (false, false) => this.send_comments(cx),
                 }));
             if !folder && task.is_none() {
                 let add = self

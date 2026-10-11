@@ -121,6 +121,9 @@ pub struct Repo {
     /// Its working tree's changes against each commit it was compared with, as last read, or
     /// why they could not be ([`Review::absent`]).
     pub changes: HashMap<Against, Arc<Review>>,
+    /// Branches' commits since they left another, as committed, by the base and the branch
+    /// ([`GitOp::Range`]): a project's finished goal, checked out nowhere.
+    pub ranges: HashMap<(String, String), Arc<Review>>,
     /// The branches a new worktree of it could start from, as last read.
     pub branches: Option<Arc<Branches>>,
     /// Its open pull request's review still open, as last read: asked whenever the pull request
@@ -350,11 +353,15 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
                 None => then.push(Then::Pull),
             }
         }
-        GitDone::Changes(review) => {
-            if let ReviewScope::WorkingTree(against) = review.scope.clone() {
+        GitDone::Changes(review) => match review.scope.clone() {
+            ReviewScope::WorkingTree(against) => {
                 repo.changes.insert(against, Arc::from(review));
             }
-        }
+            ReviewScope::Range { base, head } => {
+                repo.ranges.insert((base, head), Arc::from(review));
+            }
+            ReviewScope::Turn(_) | ReviewScope::Since(_) | ReviewScope::Kept => {}
+        },
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
         GitDone::Scripts(scripts) => repo.scripts = Some(Arc::from(scripts)),
@@ -406,6 +413,16 @@ fn missed(
             };
             repo.changes.insert(against.clone(), Arc::new(review));
         }
+        GitOp::Range { base, head } => {
+            let review = Review {
+                scope: ReviewScope::Range { base: base.clone(), head: head.clone() },
+                from: None,
+                to: None,
+                files: Vec::new(),
+                absent: Some(words),
+            };
+            repo.ranges.insert((base.clone(), head.clone()), Arc::new(review));
+        }
         // Branches that could not be read (not a repository, out of reach) leave a start's
         // place as words: there is no worktree to make of it.
         GitOp::Branches => {}
@@ -446,6 +463,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::PullStatus
             | GitOp::PullComments { .. }
             | GitOp::Changes { .. }
+            | GitOp::Range { .. }
             | GitOp::Branches
             | GitOp::Worktrees
             | GitOp::Scripts

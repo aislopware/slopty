@@ -18,8 +18,8 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Autonomy, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, TaskChange, TaskId, TaskLaunch,
-    TaskState,
+    Autonomy, LimitsChange, Project, ProjectId, ProjectUpdate, ProjectsPart, TaskChange, TaskId,
+    TaskLaunch, TaskState,
 };
 use slopty_proto::thread::AgentId;
 
@@ -50,6 +50,14 @@ const RECAP_PAGES: usize = 8;
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// What the timeline says of a task the person cancelled from the board.
 pub(crate) const CANCELLED: &str = "Cancelled by the person";
+/// What "Review" on a finished goal says when there is no range to read: no orchestrator, no
+/// clone, or no branch it was made from.
+pub(crate) const GOAL_NOT_REVIEWABLE: &str =
+    "The goal's branch has no clone or base here to review it against";
+/// What a goal's review says when the orchestrator's machine is not one of this device's.
+pub(crate) const ORCHESTRATOR_NOT_HERE: &str = "The orchestrator's machine is not linked here";
+/// What a goal's review's comments say once the orchestrator has them.
+pub(crate) const SENT_TO_ORCHESTRATOR: &str = "Sent to the orchestrator";
 /// The open "New goal" sheet.
 pub(super) struct Sheet {
     view: Entity<GoalSheet>,
@@ -582,6 +590,7 @@ impl WorkspaceView {
                 self.make_board(project.clone(), cx);
             }
         }
+        let now_away = self.now();
         let names: BTreeMap<WorkerId, WorkerSeen> = self
             .projects
             .mirror
@@ -600,7 +609,10 @@ impl WorkspaceView {
                 let caps = worker.caps.as_ref();
                 let (os, form) = (caps.map(|c| c.os), caps.map(|c| c.form));
                 let away = worker.link.is_none();
-                Some((id, WorkerSeen { name: worker.name.clone(), os, form, away }))
+                let gone = worker.away_since.is_some_and(|since| {
+                    now_away.saturating_sub(since) >= crate::project::GONE_AFTER
+                });
+                Some((id, WorkerSeen { name: worker.name.clone(), os, form, away, gone }))
             })
             .collect();
         let now = crate::clock::now(cx);
@@ -784,6 +796,8 @@ impl WorkspaceView {
                     }
                 }
                 ProjectEvent::Land => this.land_project(&asked, cx),
+                ProjectEvent::ReviewGoal => this.review_goal(&asked, cx),
+                ProjectEvent::ResumeOrchestrator => this.resume_orchestrator(&asked, cx),
                 ProjectEvent::OpenOrchestrator => this.open_orchestrator_thread(&asked, cx),
                 ProjectEvent::Delete => {
                     this.send_to_server(
@@ -824,6 +838,7 @@ impl WorkspaceView {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::Push => Verb::TaskPush { project, task },
             TaskAction::Start => return self.start_task(&project, task, cx),
+            TaskAction::StartElsewhere => return self.start_elsewhere(&project, task, cx),
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),
@@ -949,7 +964,7 @@ impl WorkspaceView {
         if !self.workers.contains_key(&key) {
             return self.show_notice(format!("#{task}'s machine is not linked here"), cx);
         }
-        self.open_changes(key, path, Some(target), cx);
+        self.open_changes(key, path, (Some(target), None), cx);
     }
 
     /// The person's words from a board's line to its orchestrator. The server keeps them on
@@ -1012,13 +1027,13 @@ impl WorkspaceView {
     }
 
     /// Land `project`'s finished goal, the person's word: its branch into a pull request
-    /// (`Verb::ProjectLand`), whose number and page its board then shows. A refusal is said in
-    /// the server's words, and the board offers it again.
+    /// (`Verb::ProjectLand`), which the project then holds and every board shows. A refusal is
+    /// said in the server's words, and the board offers it again.
     fn land_project(&self, project: &ProjectId, cx: &mut Context<Self>) {
         if self.projects.caller.is_none() {
             Self::not_sent(cx);
             if let Some(board) = self.projects.views.get(project).cloned() {
-                board.update(cx, |b, cx| b.landed(None, cx));
+                board.update(cx, ProjectView::land_refused);
             }
             return;
         }
@@ -1029,30 +1044,142 @@ impl WorkspaceView {
         });
     }
 
-    /// What the server answered a landing of `project`'s goal: its board, where it is open,
-    /// shows the pull request opened, or offers Open again; a refusal is said in a toast, in
-    /// the server's words.
+    /// What the server answered a landing of `project`'s goal. The pull request opened shows
+    /// from the project, which holds it ([`slopty_proto::project::Project::landed`]); anything
+    /// else gives the board its Open back, and a refusal is said in a toast, in the server's
+    /// words.
     pub(super) fn land_answered(
         &mut self,
         project: &ProjectId,
         outcome: Outcome,
         cx: &mut Context<Self>,
     ) {
-        let opened = match outcome {
-            Outcome::PullOpened { number, url } => Some((number, url)),
-            Outcome::Error { message, .. } => {
-                self.show_failure(message, cx);
-                None
-            }
-            _ => None,
-        };
+        match outcome {
+            Outcome::PullOpened { .. } => return,
+            Outcome::Error { message, .. } => self.show_failure(message, cx),
+            _ => {}
+        }
         if let Some(board) = self.projects.views.get(project).cloned() {
-            board.update(cx, |b, cx| b.landed(opened, cx));
+            board.update(cx, ProjectView::land_refused);
         }
     }
 
-    /// Open `project`'s orchestrator's thread on its machine, whose agent has ended: the thread
-    /// face's Resume starts it again, and the server then follows it to its new terminal.
+    /// "Review" on a finished goal: its branch as committed since it left the branch it lands
+    /// into, read in the orchestrator's clone on its machine with no checkout, in a tile of its
+    /// own there ([`slopty_proto::git::GitOp::Range`]). Its comments go to the orchestrator.
+    fn review_goal(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
+        let Some(board) = self.projects.mirror.get(project) else { return };
+        let p = board.project.clone();
+        let base = p.base.clone().or_else(|| p.landed.as_ref().map(|l| l.base.clone()));
+        let (Some(term), Some(base)) = (p.orchestrator, base) else {
+            return self.show_notice(GOAL_NOT_REVIEWABLE.to_owned(), cx);
+        };
+        let key = worker_key(term.worker);
+        if !self.workers.contains_key(&key) {
+            return self.show_notice(ORCHESTRATOR_NOT_HERE.to_owned(), cx);
+        }
+        let Some(clone) = self.goal_clone(&p, key, cx) else {
+            return self.show_notice(GOAL_NOT_REVIEWABLE.to_owned(), cx);
+        };
+        self.open_changes(key, clone, (Some(base), Some(p.target)), cx);
+    }
+
+    /// The orchestrator's clone of `project`'s repository on `key`, where its goal's branch
+    /// is: its terminal's repository while it is listed, else its thread's, else the
+    /// project's own when it names a path.
+    fn goal_clone(&self, project: &Project, key: WorkerKey, cx: &gpui::App) -> Option<String> {
+        let term = project.orchestrator?;
+        let listed = self.summary(term.session).and_then(|s| s.repo.clone());
+        let thread = || {
+            let thread = project.orchestrator_thread?;
+            let hub = self.held_hub(key)?.read(cx);
+            hub.threads().rows().rows.get(&thread)?.repo.clone()
+        };
+        let named = || {
+            let repo = &project.repo;
+            (repo.starts_with('/') || repo.starts_with('~')).then(|| repo.clone())
+        };
+        listed.or_else(thread).or_else(named)
+    }
+
+    /// A goal's review's comments, `text`, to its project's orchestrator as the person's
+    /// word: the project whose goal's branch is `head`. `done` hears whether they went; a
+    /// refusal is said.
+    pub(super) fn tell_goal(
+        &self,
+        head: &str,
+        text: String,
+        cx: &mut Context<Self>,
+        done: impl FnOnce(bool, &mut gpui::App) + 'static,
+    ) {
+        let project = self
+            .projects
+            .mirror
+            .boards()
+            .find(|b| b.project.target == head)
+            .map(|b| b.project.id.clone());
+        let (Some(project), Some(caller)) = (project, self.projects.caller.clone()) else {
+            Self::not_sent(cx);
+            done(false, cx);
+            return;
+        };
+        let verb = Verb::TaskTell { project, task: None, text };
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(verb).await;
+            let sent = !matches!(outcome, Outcome::Error { .. });
+            let _gone = this.update(cx, |this, cx| {
+                match outcome {
+                    Outcome::Error { message, .. } => this.show_notice(message, cx),
+                    _ => this.show_notice(SENT_TO_ORCHESTRATOR.to_owned(), cx),
+                }
+                done(sent, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// "Resume the orchestrator" on a board whose orchestrator's agent has ended, the person's
+    /// word (`Verb::ProjectResume`): the server takes its own session up again on its machine
+    /// and follows it to its new terminal. A refusal is said in the server's words, and the
+    /// board offers it again.
+    fn resume_orchestrator(&self, project: &ProjectId, cx: &mut Context<Self>) {
+        let refused = |this: &Self, project: &ProjectId, cx: &mut Context<Self>| {
+            if let Some(board) = this.projects.views.get(project).cloned() {
+                board.update(cx, ProjectView::resume_refused);
+            }
+        };
+        if self.projects.caller.is_none() {
+            Self::not_sent(cx);
+            return refused(self, project, cx);
+        }
+        let verb = Verb::ProjectResume { project: project.clone() };
+        let project = project.clone();
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            if let Outcome::Error { message, .. } = outcome {
+                this.show_failure(message, cx);
+                refused(this, &project, cx);
+            }
+        });
+    }
+
+    /// "Start elsewhere" on a task whose machine has been gone past
+    /// [`crate::project::GONE_AFTER`]: it starts again with the agent it ran last, where the
+    /// server places it (`Verb::TaskRestart` naming no worker, its own away). Its card says
+    /// so until its new agent shows; a refusal is said and the card says what it did.
+    fn start_elsewhere(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+        if self.projects.caller.is_none() {
+            return self.start_refused(project, task, NOT_SENT.to_owned(), cx);
+        }
+        let verb = Verb::TaskRestart { project: project.clone(), task, agent: None, worker: None };
+        let asked = project.clone();
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            if let Outcome::Error { message, .. } = outcome {
+                this.start_refused(&asked, task, message, cx);
+            }
+        });
+    }
+
+    /// Open `project`'s orchestrator's thread on its machine, whose agent has ended.
     fn open_orchestrator_thread(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
         let Some(board) = self.projects.mirror.get(project) else { return };
         let (Some(term), Some(thread)) =

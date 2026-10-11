@@ -29,6 +29,7 @@ use slopty_proto::project::{
     VerifierRun,
 };
 use slopty_proto::thread::AskId;
+use slopty_proto::thread::wire::PullStands;
 use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
@@ -44,8 +45,8 @@ use super::{
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::icons::{GitGlyph, IconSize, Mark, Phase, Status, Symbol, icon, status_icon};
-use crate::kit::Priority;
 use crate::kit::progress::Progress;
+use crate::kit::{ButtonKind, Priority};
 use crate::palette::{Plate, age_label, dotted};
 
 /// The key context of a board; its keys are bound in it.
@@ -97,7 +98,13 @@ pub enum ProjectEvent {
     MergeReady(Vec<TaskId>),
     /// Land the finished goal: its branch into a pull request ("Open pull request").
     Land,
-    /// Open the orchestrator's thread, whose agent has ended: its Resume starts it again.
+    /// Review the finished goal whole: its branch as committed since it left the branch it
+    /// lands into, which is what its pull request brings.
+    ReviewGoal,
+    /// Resume the orchestrator, whose agent has ended, in its own session
+    /// ([`slopty_proto::orchestration::Verb::ProjectResume`]).
+    ResumeOrchestrator,
+    /// Open the orchestrator's thread, whose agent has ended.
     OpenOrchestrator,
     /// Let the project's agents go this far before they ask the person.
     SetAutonomy(Autonomy),
@@ -211,7 +218,14 @@ pub struct WorkerSeen {
     pub form: Option<slopty_proto::server::Form>,
     /// It is out of reach now: a task running there is not heard from until it is back.
     pub away: bool,
+    /// It has been out of reach past [`GONE_AFTER`]: a task running there is offered to start
+    /// elsewhere.
+    pub gone: bool,
 }
+
+/// How long a machine is out of reach before a task running there is offered to start
+/// elsewhere: past a relink and a short sleep, and short of a person left waiting.
+pub const GONE_AFTER: std::time::Duration = std::time::Duration::from_mins(2);
 
 /// What the workspace hands a board: the project and what the board names it by.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -231,18 +245,6 @@ pub struct Seen {
     /// The orchestrator's agent has ended: its machine is linked and lists its terminal no
     /// more.
     pub orchestrator_ended: bool,
-}
-
-/// Where the finished goal's pull request stands, as the person asked for it here.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
-enum Landing {
-    /// Not asked, or the server refused.
-    #[default]
-    Idle,
-    /// Asked; the server has not answered.
-    Asking,
-    /// The pull request the goal waits in: its number and its page.
-    Opened(u32, String),
 }
 
 /// How a project's work is checked, as the person sets it on the board: the verifier command.
@@ -289,8 +291,11 @@ pub struct ProjectView {
     checks: Option<Checks>,
     /// The tasks asked to start again whose new agent the board does not show yet.
     handing: BTreeMap<TaskId, Handing>,
-    /// The finished goal's pull request, once asked for.
-    landing: Landing,
+    /// "Open pull request" was pressed here and the project holds no pull request yet: the
+    /// server has not answered, or has and its project has not come.
+    landing: bool,
+    /// "Resume the orchestrator" was pressed here and its agent has not come back yet.
+    resuming: bool,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -332,7 +337,8 @@ impl ProjectView {
             refused: None,
             checks: None,
             handing: BTreeMap::new(),
-            landing: Landing::Idle,
+            landing: false,
+            resuming: false,
             #[cfg(test)]
             renders: 0,
         }
@@ -370,6 +376,13 @@ impl ProjectView {
             && self.seen.orchestrator_ended == seen.orchestrator_ended;
         if !same {
             self.seen = seen;
+            // What was asked here shows once the project says so, on every device alike.
+            let board = self.seen.board.as_ref();
+            let open = |b: &Arc<Board>| {
+                b.project.landed.as_ref().is_none_or(|pull| pull.stands == PullStands::Closed)
+            };
+            self.landing &= board.is_some_and(open);
+            self.resuming &= self.seen.orchestrator_ended;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
                 self.picked = None;
             }
@@ -392,11 +405,17 @@ impl ProjectView {
         }
     }
 
-    /// The server's answer to "Open pull request": the pull request the goal waits in, by
-    /// its number and its page, or `None` when it refused (said apart, in its words) and the
-    /// button comes back.
-    pub fn landed(&mut self, opened: Option<(u32, String)>, cx: &mut Context<Self>) {
-        self.landing = opened.map_or(Landing::Idle, |(number, url)| Landing::Opened(number, url));
+    /// The server refused "Open pull request" (said apart, in its words): the button comes
+    /// back. One it opened shows from the project ([`slopty_proto::project::Project::landed`]).
+    pub fn land_refused(&mut self, cx: &mut Context<Self>) {
+        self.landing = false;
+        cx.notify();
+    }
+
+    /// The server refused "Resume the orchestrator" (said apart, in its words): the button
+    /// comes back.
+    pub fn resume_refused(&mut self, cx: &mut Context<Self>) {
+        self.resuming = false;
         cx.notify();
     }
 
@@ -416,8 +435,13 @@ impl ProjectView {
 
     /// Do `action` to `task`: a start shows at once on its card.
     fn act(&mut self, task: TaskId, action: TaskAction, cx: &mut Context<Self>) {
-        if action == TaskAction::Start {
-            self.hand(task, format!("Starting #{task}\u{2026}"));
+        let words = match action {
+            TaskAction::Start => Some(format!("Starting #{task}\u{2026}")),
+            TaskAction::StartElsewhere => Some(format!("Starting #{task} elsewhere\u{2026}")),
+            _ => None,
+        };
+        if let Some(words) = words {
+            self.hand(task, words);
             cx.notify();
         }
         cx.emit(ProjectEvent::Act(task, action));
@@ -487,10 +511,13 @@ impl ProjectView {
             cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
             return;
         };
-        let handing = self.handing.contains_key(&task) && action == TaskAction::Start;
+        let starts = matches!(action, TaskAction::Start | TaskAction::StartElsewhere);
+        let handing = self.handing.contains_key(&task) && starts;
         if handing {
             cx.emit(ProjectEvent::Say(format!("#{task} is starting")));
-        } else if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
+        } else if self.offered(board, task).contains(&action)
+            || board.controls(task).contains(&action)
+        {
             self.act(task, action, cx);
         } else {
             cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
@@ -562,6 +589,24 @@ impl ProjectView {
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
         Some((place, short, lines.join("\n")))
+    }
+
+    /// What moves `task` on ([`Board::actions`]), led by "Start elsewhere" while its agent
+    /// runs on a machine gone past [`GONE_AFTER`] and it is not starting already: then nothing
+    /// else moves it.
+    fn offered(&self, board: &Board, task: TaskId) -> Vec<TaskAction> {
+        let mut offered = board.actions(task);
+        let open = board
+            .tasks
+            .get(&task)
+            .is_some_and(|c| !matches!(c.state, TaskState::Merged | TaskState::Failed));
+        let gone = board.place(Some(task)).is_some_and(|p| {
+            p.how == PlaceHow::Runs && self.seen.workers.get(&p.worker).is_some_and(|w| w.gone)
+        });
+        if open && gone && !self.handing.contains_key(&task) {
+            offered.insert(0, TaskAction::StartElsewhere);
+        }
+        offered
     }
 
     /// Whether `place` is where an agent runs on a machine out of reach now.
@@ -669,12 +714,18 @@ pub(crate) const OPEN_PULL: &str = "Open pull request";
 pub(crate) const OPENING_PULL: &str = "Opening pull request\u{2026}";
 /// Before the branch it lands into.
 pub(crate) const INTO: &str = "into";
-/// Before the opened pull request's number.
+/// Before the goal's pull request's line ("Pull request #12 is ready to merge").
 pub(crate) const PULL_REQUEST: &str = "Pull request";
 /// What the board says while its orchestrator's agent has ended.
 pub(crate) const ORCHESTRATOR_ENDED: &str = "The orchestrator has stopped";
-/// Its way back: the orchestrator's thread, whose Resume starts it again.
+/// Its way back: its own session taken up again.
+pub(crate) const RESUME_ORCHESTRATOR: &str = "Resume the orchestrator";
+/// What the board says while the server resumes it.
+pub(crate) const RESUMING_ORCHESTRATOR: &str = "Resuming the orchestrator\u{2026}";
+/// The quiet way to its thread, beside Resume.
 pub(crate) const OPEN_ORCHESTRATOR: &str = "Open its thread";
+/// The finished goal's review, beside "Open pull request".
+pub(crate) const REVIEW_GOAL: &str = "Review";
 /// The review limit's name, in its track and said to a screen reader.
 pub(crate) const REVIEW_LIMIT: &str = "Review limit";
 /// What the review limit holds to, under its name.
@@ -739,6 +790,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::ResolveConflicts => "resolve",
         TaskAction::Push => "push",
         TaskAction::Cancel => "cancel",
+        TaskAction::StartElsewhere => "start elsewhere",
     }
 }
 
@@ -851,7 +903,7 @@ impl ProjectView {
                 theme,
                 "project-merge-ready",
                 format!("{MERGE_READY} ({n})"),
-                crate::kit::ButtonKind::Secondary,
+                ButtonKind::Secondary,
             )
             .on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.emit(ProjectEvent::MergeReady(ready.clone()));
@@ -1076,56 +1128,74 @@ impl ProjectView {
         )
     }
 
-    /// The finished goal's way out: "Open pull request", which lands its branch into the one
-    /// it was made from (said after it, when the server knows it), while the server works
-    /// "Opening pull request…", then the pull request's number as a link to its page.
+    /// The finished goal's way out. Before it lands: "Review", its whole branch as its pull
+    /// request would bring it, and "Open pull request", which lands it into the branch it was
+    /// made from (said after it, when the server knows it), "Opening pull request…" while the
+    /// server works. Once it has one: the pull request as the forge last said it stands, its
+    /// glyph in its state's ink and its line a link to its page, on every device alike
+    /// ([`slopty_proto::project::Project::landed`]). One closed unmerged offers Open again.
     fn land(&self, board: &Board, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let row = div().pt(px(sp.xs)).flex().items_center().gap(px(sp.sm));
-        if let Landing::Opened(number, url) = &self.landing {
-            let url = url.clone();
-            let words = SharedString::from(format!("{PULL_REQUEST} #{number}"));
-            let link = crate::kit::typed(div(), theme.roles().chrome)
+        let row = div().pt(px(sp.xs)).flex().flex_wrap().items_center().gap(px(sp.sm));
+        let landed = board.project.landed.as_ref();
+        let pull = landed.map(|pull| {
+            let url = pull.url.clone();
+            let glyph = GitGlyph::of_stands(pull.stands);
+            let ink = glyph.state_ink(theme).unwrap_or(s.text_muted);
+            let words = SharedString::from(format!("{PULL_REQUEST} {}", pull.line()));
+            let tone = if pull.stands.needs_you() { s.warn } else { s.text };
+            crate::kit::typed(div(), theme.roles().chrome)
                 .id("project-pull")
                 .debug_selector(|| "project-pull".to_owned())
                 .role(Role::Link)
                 .aria_label(words.clone())
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(sp.xs))
                 .cursor_pointer()
-                .text_color(hsla(s.text))
+                .text_color(hsla(tone))
                 .hover(gpui::Styled::underline)
-                .child(icon(theme, GitGlyph::PullRequest, IconSize::Inline, hsla(s.text_muted)))
-                .child(words)
-                .on_click(move |_ev, _w, cx| cx.open_url(&url));
-            return row.child(link).into_any_element();
+                .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
+                .child(div().min_w_0().truncate().child(words))
+                .on_click(move |_ev, _w, cx| cx.open_url(&url))
+        });
+        let again = landed.is_none_or(|pull| pull.stands == PullStands::Closed);
+        if !again {
+            return row.children(pull).into_any_element();
         }
-        if self.landing == Landing::Asking {
-            let opening = crate::kit::meta(div(), theme)
+        let base = board.project.base.as_ref().or_else(|| landed.map(|p| &p.base));
+        let review = base.map(|_| {
+            crate::kit::button(theme, "project-review-goal", REVIEW_GOAL, ButtonKind::Secondary)
+                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::ReviewGoal)))
+        });
+        let open = if self.landing {
+            crate::kit::meta(div(), theme)
                 .debug_selector(|| "project-landing".to_owned())
-                .child(OPENING_PULL);
-            return row.child(opening).into_any_element();
-        }
-        let button =
-            crate::kit::button(theme, "project-land", OPEN_PULL, crate::kit::ButtonKind::Primary)
+                .child(OPENING_PULL)
+                .into_any_element()
+        } else {
+            crate::kit::button(theme, "project-land", OPEN_PULL, ButtonKind::Primary)
                 .on_click(cx.listener(|this, _ev, _w, cx| {
-                    this.landing = Landing::Asking;
+                    this.landing = true;
                     cx.emit(ProjectEvent::Land);
                     cx.notify();
-                }));
-        let into = board.project.base.as_ref().map(|base| {
+                }))
+                .into_any_element()
+        };
+        let into = board.project.base.as_ref().filter(|_| !self.landing).map(|base| {
             crate::kit::meta(div(), theme)
                 .debug_selector(|| "project-land-into".to_owned())
                 .child(SharedString::from(format!("{INTO} {base}")))
         });
-        row.child(button).children(into).into_any_element()
+        row.children(pull).children(review).child(open).children(into).into_any_element()
     }
 
-    /// While the orchestrator's agent has ended, a quiet line says so with the way back: its
-    /// thread, whose Resume starts it again (the server then follows it to its new terminal).
+    /// While the orchestrator's agent has ended, a quiet line says so with the way back:
+    /// "Resume the orchestrator", which takes its own session up again on its machine (the
+    /// server then follows it to its new terminal), and its thread, one quiet press away.
     /// None while it runs, or while its thread is not known.
     fn ended_orchestrator(&self, board: &Board, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.seen.orchestrator_ended {
@@ -1135,11 +1205,31 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
+        let resume = if self.resuming {
+            crate::kit::meta(div(), theme)
+                .debug_selector(|| "project-orchestrator-resuming".to_owned())
+                .flex_none()
+                .child(RESUMING_ORCHESTRATOR)
+                .into_any_element()
+        } else {
+            crate::kit::button(
+                theme,
+                "project-orchestrator-resume",
+                RESUME_ORCHESTRATOR,
+                ButtonKind::Secondary,
+            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.resuming = true;
+                cx.emit(ProjectEvent::ResumeOrchestrator);
+                cx.notify();
+            }))
+            .into_any_element()
+        };
         let open = crate::kit::button(
             theme,
             "project-orchestrator-thread",
             OPEN_ORCHESTRATOR,
-            crate::kit::ButtonKind::Secondary,
+            ButtonKind::Ghost,
         )
         .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::OpenOrchestrator)));
         Some(
@@ -1163,6 +1253,7 @@ impl ProjectView {
                         .child(ORCHESTRATOR_ENDED),
                 )
                 .child(open)
+                .child(resume)
                 .into_any_element(),
         )
     }
@@ -1234,7 +1325,7 @@ impl ProjectView {
     ) -> Option<Div> {
         // Starting is a control of the card stood on, so a lane of planned tasks is not a
         // column of the same button.
-        let offered = board.actions(task);
+        let offered = self.offered(board, task);
         let stood_on = [TaskAction::Start];
         let mut actions: Vec<(TaskAction, bool)> =
             offered.iter().copied().filter(|a| !stood_on.contains(a)).map(|a| (a, false)).collect();

@@ -738,7 +738,9 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => self.shell_context(*session, title),
             ItemKind::File { path } | ItemKind::Folder { path } => file_dir(path),
-            // The folder whose changes they are: the title says what they are.
+            // The folder whose changes they are, or the goal's branch reviewed as committed:
+            // the title says what they are.
+            ItemKind::Changes { head: Some(head), .. } => Some(head.clone()),
             ItemKind::Changes { path, .. } => Some(folder_title(path)),
             // The host alone: the path is the page's business, and the title names the page.
             ItemKind::Browser { .. } => self.page_facts(item.id).and_then(|page| {

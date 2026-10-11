@@ -112,6 +112,13 @@ pub fn review_key(thread: Option<ThreadId>, folder: Option<(WorkerKey, &str)>) -
     }
 }
 
+/// What a folder's review is kept under: the folder, and the branch it reviews as committed
+/// when it is a goal's range, so that review and the clone's own changes keep apart.
+#[must_use]
+pub fn folder_place(path: &str, head: Option<&str>) -> String {
+    head.map_or_else(|| path.to_owned(), |head| format!("{path}#{head}"))
+}
+
 /// The drafts, as the workspace holds them.
 #[derive(Default)]
 pub(super) struct Drafts {
