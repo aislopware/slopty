@@ -853,7 +853,7 @@ impl WorkspaceView {
                     .child(panel)
                     .into_any_element(),
             });
-        let layer = crate::palette::Layer::Popover.priority();
+        let layer = slopty_kit::layer::Layer::Popover.priority();
         Some(gpui::deferred(away).with_priority(layer).into_any_element())
     }
 

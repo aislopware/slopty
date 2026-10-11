@@ -598,7 +598,7 @@ impl WorkspaceView {
         };
         let layer = layer.child(kit::presence(panel, shown, open));
         gpui::deferred(gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(layer))
-            .with_priority(crate::palette::Layer::Popover.priority())
+            .with_priority(slopty_kit::layer::Layer::Popover.priority())
             .into_any_element()
     }
 }

@@ -389,6 +389,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     crate::keymap::current().bindings(|scope| !matches!(scope, Scope::Terminal | Scope::App))
 }
 
+/// A terminal's key bindings in effect: the keymap's terminal scope, the terminal's own commands
+/// ([`crate::terminal::commands`]) with the file's `[keys.terminal]` over them.
+#[must_use]
+pub fn terminal_key_bindings() -> Vec<KeyBinding> {
+    crate::keymap::current().bindings(|scope| scope == Scope::Terminal)
+}
+
 /// The palette's lines for the workspace's and the terminal's actions, with their keys.
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
@@ -397,7 +404,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         RerunLast,
     };
     let workspace = key_bindings();
-    let terminal = crate::terminal::key_bindings();
+    let terminal = terminal_key_bindings();
     let w = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &workspace);
     let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
     let mut items = vec![
@@ -503,7 +510,7 @@ impl super::WorkspaceView {
         if self.block_target(session).is_none() {
             return Vec::new();
         }
-        let terminal = crate::terminal::key_bindings();
+        let terminal = terminal_key_bindings();
         let block = Box::new(crate::terminal::AttachBlock);
         let mut lines = vec![PaletteItem::new("Attach block to agent", block, &terminal)];
         if self.terminals.get(&session).is_some_and(|t| t.read(cx).has_selection()) {

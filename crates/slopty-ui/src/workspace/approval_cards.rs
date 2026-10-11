@@ -164,7 +164,7 @@ impl WorkspaceView {
             .children(cards.into_iter().map(|card| self.render_card(card, cx)));
         Some(
             gpui::deferred(stack)
-                .with_priority(crate::palette::Layer::Popover.priority())
+                .with_priority(slopty_kit::layer::Layer::Popover.priority())
                 .into_any_element(),
         )
     }

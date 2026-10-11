@@ -594,7 +594,7 @@ fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings());
-        cx.bind_keys(crate::terminal::key_bindings());
+        cx.bind_keys(terminal_key_bindings());
     });
     let (host, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {

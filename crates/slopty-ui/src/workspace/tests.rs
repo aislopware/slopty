@@ -72,7 +72,7 @@ fn workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTest
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings());
-        cx.bind_keys(crate::terminal::key_bindings());
+        cx.bind_keys(terminal_key_bindings());
     });
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = WorkspaceView::new(Theme::default(), None, cx);

@@ -292,7 +292,7 @@ impl ReviewView {
                 },
             );
             gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopLeft).child(panel))
-                .with_priority(crate::palette::Layer::Submenu.priority())
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         });
         Some(div().relative().flex_none().child(button).children(menu).into_any_element())
     }

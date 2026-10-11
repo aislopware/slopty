@@ -393,7 +393,7 @@ impl SettingsForm {
                         .snap_to_window_with_margin(px(spacing.sm))
                         .child(self.machine_menu(cx)),
                 )
-                .with_priority(crate::palette::Layer::Submenu.priority()),
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority()),
             )
         });
         div()

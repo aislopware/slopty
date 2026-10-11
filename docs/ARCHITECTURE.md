@@ -1638,12 +1638,13 @@ default, the first of two of the file's keeps it, and each clash is said naming 
 unknown contexts, actions and keys, in the settings notice. `keymap::install` swaps the bindings
 tagged as the keymap's for the new ones and keeps every other binding (gpui-kit's fields, the
 menu's) ahead of them, so a saved file rebinds at once; the map in effect is kept for the main
-thread, where `workspace::key_bindings`, `terminal::key_bindings` and the palette read the
-chord each line shows. Settings > Keyboard lists every command with its chords and its name in
-the file; a press on its chords takes the next keystroke through a GPUI keystroke interceptor
-(before any binding runs it) into `[keys.<scope>]`, and a set command has a reset that takes the
-line out. The terminal's key encoding is untouched: a chord bound in the terminal context runs
-its command, every other key still goes to the program.
+thread, where `workspace::key_bindings`, `workspace::terminal_key_bindings` and the palette
+read the chord each line shows. The terminal declares its own commands (`terminal::commands`),
+which the table takes in as its own. Settings > Keyboard lists every command with its chords
+and its name in the file; a press on its chords takes the next keystroke through a GPUI
+keystroke interceptor (before any binding runs it) into `[keys.<scope>]`, and a set command has
+a reset that takes the line out. The terminal's key encoding is untouched: a chord bound in the
+terminal context runs its command, every other key still goes to the program.
 
 **Workers.** The app holds every added worker at once: one `WorkerLink` (on the process's one
 client endpoint, with its own reconnect loop and silence check) per worker

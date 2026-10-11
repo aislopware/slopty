@@ -249,9 +249,6 @@ const PAGE: Option<&str> = Some("Workspace && Page && !Screen");
 const PAGE_HELD: Option<&str> = Some("PageBody > NativeView");
 /// A page's find bar (Esc is the bar's own).
 const PAGE_SEARCH: Option<&str> = Some("PageSearch");
-const TERMINAL: Option<&str> = Some("Terminal");
-/// The terminal's search field itself: Esc in the grid goes to the program.
-const TERMINAL_SEARCH: Option<&str> = Some("TerminalSearch");
 
 const W: &[Option<&str>] = &[CTX];
 /// The navigator holding the keyboard, a row or its filter: ⌘F there is its filter's.
@@ -480,30 +477,15 @@ pub fn defaults() -> Vec<Command> {
         c(Search, "toggle_match_case", crate::search::ToggleMatchCase, &["cmd-alt-c"], &[SEARCH]),
         c(Search, "toggle_whole_word", crate::search::ToggleWholeWord, &["cmd-alt-w"], &[SEARCH]),
         c(Search, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[SEARCH]),
-        c(Terminal, "copy", t::Copy, &["cmd-c"], &[TERMINAL]),
-        c(Terminal, "paste", t::Paste, &["cmd-v"], &[TERMINAL]),
-        c(Terminal, "find", t::Find, &["cmd-f"], &[TERMINAL]),
-        c(Terminal, "find_next", t::FindNext, &["cmd-g"], &[TERMINAL]),
-        c(Terminal, "find_previous", t::FindPrev, &["cmd-shift-g"], &[TERMINAL]),
-        c(Terminal, "close_find", t::CloseFind, &["escape"], &[TERMINAL_SEARCH]),
-        c(Terminal, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[TERMINAL]),
-        c(Terminal, "next_prompt", t::NextPrompt, &["cmd-down"], &[TERMINAL]),
-        // ghostty's scroll keys; the ⌘ pair is what Terminal.app taught the Mac.
-        c(Terminal, "scroll_page_up", t::ScrollPageUp, &["shift-pageup"], &[TERMINAL]),
-        c(Terminal, "scroll_page_down", t::ScrollPageDown, &["shift-pagedown"], &[TERMINAL]),
-        c(Terminal, "scroll_to_top", t::ScrollToTop, &["shift-home", "cmd-home"], &[TERMINAL]),
-        c(Terminal, "scroll_to_bottom", t::ScrollToBottom, &["shift-end", "cmd-end"], &[TERMINAL]),
-        c(Terminal, "select_all", t::SelectAll, &["cmd-a"], &[TERMINAL]),
-        c(Terminal, "copy_last_output", t::CopyLastOutput, &["cmd-shift-c"], &[TERMINAL]),
-        // WezTerm's copy mode chord (⌃⇧X), with ⌘ for ⌃ as every app chord here.
-        c(Terminal, "copy_mode", t::CopyMode, &["cmd-shift-x"], &[TERMINAL]),
-        // ⌘⇧↩ is the workspace's zoom-pane; "Rerun last command" is in the palette.
-        c(Terminal, "rerun_last", t::RerunLast, &[], &[TERMINAL]),
-        c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),
-        c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),
-        c(Terminal, "attach_selection", t::AttachSelection, &[], &[TERMINAL]),
-        c(Terminal, "clear_screen", t::ClearScreen, &["cmd-k"], &[TERMINAL]),
     ]);
+    // The terminal's own, declared beside its view.
+    out.extend(crate::terminal::commands().into_iter().map(|command| Command {
+        scope: Terminal,
+        name: Cow::Borrowed(command.name),
+        action: command.action,
+        contexts: command.contexts,
+        defaults: command.chords.iter().copied().map(str::to_owned).collect(),
+    }));
     // AppKit's menu and WebKit take these nowhere a page's field would expect; the page does
     // them itself (`browser::Edit`). UIKit hands a hardware keyboard's keys to a page that holds
     // them, which does its own edits, so on iOS the keymap never hears them there: no chord is
@@ -517,18 +499,15 @@ pub fn defaults() -> Vec<Command> {
         ]);
     }
     // An iPad's Magic Keyboard has no Esc key; ⌘. is the Mac's old Escape, and iPadOS gives
-    // it no other meaning in an app that takes the keys.
+    // it no other meaning in an app that takes the keys (a terminal's is the terminal's own).
     if cfg!(target_os = "ios") {
-        out.extend([
-            c(Terminal, "send_escape", t::SendEscape, &["cmd-."], &[TERMINAL]),
-            c(
-                Workspace,
-                "send_escape_to_remote_window",
-                t::SendEscape,
-                &["cmd-."],
-                &[Some("Screen")],
-            ),
-        ]);
+        out.push(c(
+            Workspace,
+            "send_escape_to_remote_window",
+            t::SendEscape,
+            &["cmd-."],
+            &[Some("Screen")],
+        ));
     }
     out.extend(crate::project::key_bindings());
     out.extend(crate::review::key_bindings());
@@ -868,7 +847,7 @@ const KIT_ROOT: &str = "Root";
 
 /// The views that take every key the table leaves them: a terminal's program and a remote
 /// window's worker.
-const KEY_TAKERS: [&str; 2] = ["Terminal", "Screen"];
+const KEY_TAKERS: [&str; 2] = [crate::terminal::CTX, "Screen"];
 
 /// What gives the chords without ⌘ that `others` bind around every view back to the views
 /// that take every key. GPUI runs a key's binding before any view hears the key, so gpui-kit's

@@ -770,7 +770,7 @@ impl WorkspaceView {
                             .snap_to_window_with_margin(px(theme.spacing.sm))
                             .child(stack),
                     )
-                    .with_priority(crate::palette::Layer::Toast.priority()),
+                    .with_priority(slopty_kit::layer::Layer::Toast.priority()),
                 )
             });
             let count = div()
@@ -793,7 +793,7 @@ impl WorkspaceView {
             .child(row);
         Some(
             gpui::deferred(row)
-                .with_priority(crate::palette::Layer::Toast.priority())
+                .with_priority(slopty_kit::layer::Layer::Toast.priority())
                 .into_any_element(),
         )
     }

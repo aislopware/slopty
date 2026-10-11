@@ -13,7 +13,7 @@ use slopty_proto::terminal::{Progress as Report, ProgressState};
 /// A figure is its share. With no figure, a running report is under way with its share unknown,
 /// and a failed or paused one has no share.
 #[must_use]
-pub(crate) fn shown(report: Report) -> Option<Progress> {
+pub fn shown(report: Report) -> Option<Progress> {
     let share = report.percent.map(|p| f32::from(p.min(100)) / 100.0);
     match report.state {
         ProgressState::None => None,

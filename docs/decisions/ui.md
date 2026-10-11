@@ -293,11 +293,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (lines missing from the scrollback cache copy as empty); ⌘V sends the clipboard as
   `TermRequest::Paste`, which the host brackets when the program asked for it. Any key, a
   resize or an epoch change (reflow, alt screen) clears the selection. Bindings live in the
-  "Terminal" key context (`slopty_ui::terminal::key_bindings`). Double-click selects the word
-  (run of non-blank cells), triple-click the line. On touch a plain drag pans the canvas (GPUI
-  recognises it as a scroll), so the terminal element claims GPUI's *long press* instead
-  (`window.prevent_default()` at `Started`): hold to select the word under the finger, keep
-  holding and move to extend, as iOS text views do.
+  "Terminal" key context (`terminal::CTX`, its commands `terminal::commands`). Double-click
+  selects the word (run of non-blank cells), triple-click the line. On touch a plain drag pans
+  the canvas (GPUI recognises it as a scroll), so the terminal element claims GPUI's *long press*
+  instead (`window.prevent_default()` at `Started`): hold to select the word under the finger,
+  keep holding and move to extend, as iOS text views do.
 
 - ✅ **Input methods in terminals.** In the fork, `prefers_ime_for_printable_keys` follows
   `accepts_text_input` (true for `TerminalView`), so with the input handler installed macOS
@@ -2045,13 +2045,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **One stacking order for what floats** (2026-09-27, UI wave 2 overlays). Each overlay
   used to pick its own `deferred` priority, or none, so a toast could fall under a dialog and
-  a phone's drawer over the palette. `palette::Layer` names the order once: popover (the inbox,
-  a menu, the hosts) < submenu (a menu opened from one) < dialog (the palette, the pickers, the
-  settings) < toast. A panel that is part of the frame, such as the docked or drawn-out
-  navigator, paints at the default priority, under all of them. The palette, the picker, the
-  settings dialog and the toasts paint through it now; the title bar's menus and inbox, the
-  hosts popover and a block's menu move to it with their owners' files.
-  Test: palette `the_layers_stack_popover_submenu_dialog_toast`.
+  a phone's drawer over the palette. `slopty_kit::layer::Layer` names the order once: popover
+  (the inbox, a menu, the hosts) < submenu (a menu opened from one) < dialog (the palette, the
+  pickers, the settings) < toast. A panel that is part of the frame, such as the docked or
+  drawn-out navigator, paints at the default priority, under all of them. The palette, the
+  picker, the settings dialog and the toasts paint through it now; the title bar's menus and
+  inbox, the hosts popover and a block's menu move to it with their owners' files.
+  Test: slopty-kit layer `the_layers_stack_popover_submenu_dialog_toast`.
 
 - ❌ **Settings open in a dialog as tall as the file** (2026-09-27, UI wave 2 overlays;
   superseded 2026-10-09 by "The settings are a page in the panes' place" below). The

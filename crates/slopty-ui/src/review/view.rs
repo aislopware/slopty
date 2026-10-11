@@ -1718,7 +1718,7 @@ impl ReviewView {
                 }
             });
             gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopRight).child(panel))
-                .with_priority(crate::palette::Layer::Submenu.priority())
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         });
         div().relative().flex_none().child(button).children(menu).into_any_element()
     }
@@ -2729,7 +2729,7 @@ impl ReviewView {
                 }
             });
             gpui::deferred(gpui::anchored().anchor(gpui::Anchor::BottomRight).child(panel))
-                .with_priority(crate::palette::Layer::Submenu.priority())
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         });
         div().relative().flex_none().child(button).children(menu).into_any_element()
     }

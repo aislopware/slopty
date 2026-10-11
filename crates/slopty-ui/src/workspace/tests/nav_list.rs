@@ -298,7 +298,7 @@ fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navi
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings());
-        cx.bind_keys(crate::terminal::key_bindings());
+        cx.bind_keys(terminal_key_bindings());
     });
     let (host, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {

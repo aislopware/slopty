@@ -18,7 +18,7 @@ fn relaunched<'a>(
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings());
-        cx.bind_keys(crate::terminal::key_bindings());
+        cx.bind_keys(terminal_key_bindings());
     });
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view = WorkspaceView::new(Theme::default(), Some(saved), cx);

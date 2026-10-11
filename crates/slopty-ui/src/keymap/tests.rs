@@ -231,3 +231,86 @@ fn a_bare_key_binds_where_nothing_takes_typing() {
     assert!(bare(Scope::Folder, "open"));
     assert!(!bare(Scope::Workspace, "new_terminal"));
 }
+
+/// The whole default table, one command a line in the table's order: its key, the action it
+/// runs, its chords as GPUI reads them and the contexts it binds in (`*` everywhere). What
+/// another crate declares (the terminal's, a board's, a review's) is held here as the table's
+/// own, so moving a command's row between crates cannot rename, rebind or reorder it unseen.
+/// The record is `keymap/defaults.txt`; a change to the table is made there too, on purpose.
+#[test]
+fn the_default_table_is_as_recorded() {
+    let keymap = Keymap::default();
+    let lines: Vec<String> = keymap
+        .commands()
+        .iter()
+        .enumerate()
+        .map(|(ix, command)| {
+            let contexts: Vec<&str> =
+                command.contexts.iter().map(|context| context.unwrap_or("*")).collect();
+            format!(
+                "{} {} [{}] {}",
+                command.key(),
+                command.action().name(),
+                keymap.chords(ix).join(", "),
+                contexts.join(" | ")
+            )
+        })
+        .collect();
+    let recorded: Vec<&str> = include_str!("defaults.txt").lines().collect();
+    let table = lines.join("\n");
+    for (ix, (now, then)) in lines.iter().zip(&recorded).enumerate() {
+        assert_eq!(now, then, "line {} of `keymap/defaults.txt`; the table now:\n{table}", ix + 1);
+    }
+    assert_eq!(lines.len(), recorded.len(), "the table now:\n{table}");
+}
+
+/// Under gpui-kit's window root, the keys the kit binds around every view without ⌘ are a
+/// shell's once the keymap is installed (`released`): Tab and ⇧Tab type rather than walk the
+/// focus, and ⌃C, which the kit binds to copy off Apple's platforms (bound here as it binds it
+/// there), interrupts rather than copies. The shell keeps the focus.
+#[gpui::test]
+fn the_kits_keys_around_a_shell_go_to_the_program(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Focusable as _, px, size};
+    use slopty_core::SessionId;
+    use slopty_proto::ClientMsg;
+    use slopty_proto::input::{KeyCode, Mods};
+    use slopty_proto::terminal::{TermRequest, TermSize};
+    use tokio::sync::mpsc;
+
+    use crate::terminal::TerminalView;
+
+    let (tx, mut rx) = mpsc::channel(64);
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.bind_keys([KeyBinding::new("ctrl-c", gpui_kit::component::input::Copy, Some("Root"))]);
+        install(Keymap::default(), cx);
+    });
+    let grid = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+    let theme = slopty_theme::Theme::default();
+    let view = cx.new(|cx| TerminalView::new(SessionId::new(), grid, tx, theme, cx));
+    let held = view.clone();
+    let (_root, cx) = cx.add_window_view(|window, cx| {
+        let focus = held.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        gpui_kit::component::Root::new(held, window, cx)
+    });
+    cx.simulate_resize(size(px(400.0), px(300.0)));
+    cx.run_until_parked();
+    let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                ClientMsg::Term { req: TermRequest::Key(key), .. } => Some((key.code, key.mods)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    keys(&mut rx);
+    cx.simulate_keystrokes("tab shift-tab ctrl-c");
+    cx.run_until_parked();
+    assert_eq!(
+        keys(&mut rx),
+        [(KeyCode::Tab, Mods::empty()), (KeyCode::Tab, Mods::SHIFT), (KeyCode::C, Mods::CTRL)]
+    );
+    let focused = cx.update(|window, cx| view.read(cx).focus_handle(cx).is_focused(window));
+    assert!(focused, "the shell kept the focus");
+}

@@ -42,12 +42,13 @@ use slopty_client::search::{Row, SearchResults, SearchState};
 use slopty_kit::colors::{hsla, hsla_alpha};
 use slopty_kit::icons::{IconSize, Symbol};
 use slopty_kit::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
+use slopty_kit::layer::Layer;
 use slopty_proto::search::{ContextLine, FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_theme::{Theme, Typography, alpha};
 pub use tiles::{SearchScope, TileHit, TileOpen};
 
-use crate::palette::{Layer, Plate};
+use crate::palette::Plate;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 mod actions {

@@ -12,6 +12,7 @@
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`draw`] — a view's elements built from another entity's state, read and never written.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
+//! * [`layer`] — where every floating layer (a popover, a menu, a dialog, a notice) stacks.
 //! * [`clock`], [`fuzzy`], [`chrome_text`], [`file_types`] — the small pieces the views share.
 //! * `retained` — the oracle: the frame shown against the same state drawn from scratch (tests).
 //!
@@ -37,6 +38,7 @@ pub mod highlight;
 pub mod icons;
 pub mod keys;
 pub mod kit;
+pub mod layer;
 pub mod markdown;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;

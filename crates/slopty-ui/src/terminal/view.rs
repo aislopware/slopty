@@ -10,16 +10,18 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent, ModifiersChangedEvent,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored,
-    deferred, div, point, px, relative, size,
+    KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
+    TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
+    relative, size,
 };
 use gpui_kit::component::input::{self, InputEvent, InputState};
+use slopty_client::clip::{ClipFiles, ClipSync, ShellPaste};
+use slopty_client::layout::WorkerKey;
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
-use slopty_core::SessionId;
+use slopty_core::{ClientId, SessionId};
 use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
 use slopty_kit::colors::{hsla, hsla_alpha};
 use slopty_kit::keys;
@@ -31,6 +33,7 @@ use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, Mo
 use slopty_proto::terminal::{
     PasteChord, Placement, PointerShape, SearchMatch, TermEvent, TermRequest, TermSize,
 };
+use slopty_proto::transfer::ClipMsg;
 use slopty_theme::{Colors, Theme, alpha};
 use tokio::sync::mpsc;
 
@@ -127,15 +130,117 @@ pub use actions::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, SendEscape,
 };
 
-/// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
-/// the table is). A chord bound here runs its command; every other key goes to the program.
+/// The key context of a terminal's grid, where its commands bind.
+pub const CTX: &str = "Terminal";
+/// The key context of a terminal's find field: Esc there closes the bar, while Esc in the grid
+/// goes to the program.
+pub const SEARCH_CTX: &str = "TerminalSearch";
+
+/// One of the terminal's commands as the app's keymap takes it.
+///
+/// Its name under `[keys.terminal]`, what it runs, its default chords (GPUI's syntax) and the
+/// key contexts it binds in. The keymap holds them in its one table, with the file's `[keys]`
+/// laid over them.
+pub struct KeyCommand {
+    /// Its name in `[keys.terminal]`: `copy_mode`.
+    pub name: &'static str,
+    /// What it runs.
+    pub action: Box<dyn gpui::Action>,
+    /// Its chords by default.
+    pub chords: &'static [&'static str],
+    /// Where it binds.
+    pub contexts: &'static [Option<&'static str>],
+}
+
+impl std::fmt::Debug for KeyCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyCommand")
+            .field("name", &self.name)
+            .field("action", &self.action.name())
+            .field("chords", &self.chords)
+            .field("contexts", &self.contexts)
+            .finish()
+    }
+}
+
+/// The terminal's commands, in the order the keymap lists them.
 #[must_use]
-pub fn key_bindings() -> Vec<KeyBinding> {
-    crate::keymap::current().bindings(|scope| scope == crate::keymap::Scope::Terminal)
+pub fn commands() -> Vec<KeyCommand> {
+    const GRID: &[Option<&str>] = &[Some(CTX)];
+    fn c(
+        name: &'static str,
+        action: impl gpui::Action,
+        chords: &'static [&'static str],
+        contexts: &'static [Option<&'static str>],
+    ) -> KeyCommand {
+        KeyCommand { name, action: Box::new(action), chords, contexts }
+    }
+    let mut out = vec![
+        c("copy", Copy, &["cmd-c"], GRID),
+        c("paste", Paste, &["cmd-v"], GRID),
+        c("find", Find, &["cmd-f"], GRID),
+        c("find_next", FindNext, &["cmd-g"], GRID),
+        c("find_previous", FindPrev, &["cmd-shift-g"], GRID),
+        c("close_find", CloseFind, &["escape"], &[Some(SEARCH_CTX)]),
+        c("previous_prompt", PrevPrompt, &["cmd-up"], GRID),
+        c("next_prompt", NextPrompt, &["cmd-down"], GRID),
+        // ghostty's scroll keys; the ⌘ pair is what Terminal.app taught the Mac.
+        c("scroll_page_up", ScrollPageUp, &["shift-pageup"], GRID),
+        c("scroll_page_down", ScrollPageDown, &["shift-pagedown"], GRID),
+        c("scroll_to_top", ScrollToTop, &["shift-home", "cmd-home"], GRID),
+        c("scroll_to_bottom", ScrollToBottom, &["shift-end", "cmd-end"], GRID),
+        c("select_all", SelectAll, &["cmd-a"], GRID),
+        c("copy_last_output", CopyLastOutput, &["cmd-shift-c"], GRID),
+        // WezTerm's copy mode chord (⌃⇧X), with ⌘ for ⌃ as every app chord here.
+        c("copy_mode", CopyMode, &["cmd-shift-x"], GRID),
+        // ⌘⇧↩ is the workspace's zoom-pane; "Rerun last command" is in the palette.
+        c("rerun_last", RerunLast, &[], GRID),
+        c("copy_block_output", CopyBlockOutput, &[], GRID),
+        c("attach_block", AttachBlock, &[], GRID),
+        c("attach_selection", AttachSelection, &[], GRID),
+        c("clear_screen", ClearScreen, &["cmd-k"], GRID),
+    ];
+    // An iPad's Magic Keyboard has no Esc key; ⌘. is the Mac's old Escape, and iPadOS gives
+    // it no other meaning in an app that takes the keys.
+    if cfg!(target_os = "ios") {
+        out.push(c("send_escape", SendEscape, &["cmd-."], GRID));
+    }
+    out
+}
+
+/// The terminal's commands bound to their default chords, for its tests, which install no
+/// keymap. A chord bound here runs its command; every other key goes to the program.
+#[cfg(test)]
+fn key_bindings() -> Vec<gpui::KeyBinding> {
+    let mut out = Vec::new();
+    for command in commands() {
+        for chord in command.chords {
+            for context in command.contexts {
+                let predicate = context
+                    .map(gpui::KeyBindingContextPredicate::parse)
+                    .transpose()
+                    .expect("a context")
+                    .map(Rc::new);
+                out.push(
+                    gpui::KeyBinding::load(
+                        chord,
+                        command.action.boxed_clone(),
+                        predicate,
+                        false,
+                        None,
+                        &gpui::DummyKeyboardMapper,
+                    )
+                    .expect("a chord"),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// The Escape key, pressed alone.
-pub(crate) fn escape() -> Keystroke {
+#[must_use]
+pub fn escape() -> Keystroke {
     Keystroke { modifiers: gpui::Modifiers::default(), key: "escape".to_owned(), key_char: None }
 }
 
@@ -286,7 +391,7 @@ pub enum TerminalViewEvent {
     },
     /// ⌘V with files on the clipboard: the workspace sends them to the shell's directory and
     /// types their paths, as a drop does.
-    PasteFiles(crate::clipboard::ClipFiles),
+    PasteFiles(ClipFiles),
 }
 
 /// What the clipboard holds for a shell's paste, as the workspace reads it.
@@ -295,7 +400,7 @@ pub enum ClipPaste {
     /// Nothing but what the view reads itself: text pastes as it always has.
     Text,
     /// Files, pasted as a drop ([`TerminalViewEvent::PasteFiles`]).
-    Files(crate::clipboard::ClipFiles),
+    Files(ClipFiles),
     /// A picture and no text. The worker's pasteboard must hold it before the chord goes on,
     /// since a program there (Claude Code) reads the picture off it. `offer` is this client's
     /// clipboard offer when the worker has not heard it, sent ahead of the chord.
@@ -303,6 +408,19 @@ pub enum ClipPaste {
         /// The offer, for the control stream ahead of the chord.
         offer: Option<ClientMsg>,
     },
+}
+
+impl ClipPaste {
+    /// What a paste into a shell of `worker` finds on the clipboard `sync` keeps.
+    pub fn of(sync: &mut ClipSync, worker: WorkerKey, me: ClientId) -> Self {
+        match sync.shell_paste(worker, me) {
+            ShellPaste::Text => Self::Text,
+            ShellPaste::Files(files) => Self::Files(files),
+            ShellPaste::Picture { offer } => {
+                Self::Picture { offer: offer.map(|o| ClientMsg::Clip(ClipMsg::Offer(o))) }
+            }
+        }
+    }
 }
 
 /// Asked by ⌘V and ⌃V before they go on: what the clipboard holds.
@@ -1891,7 +2009,7 @@ impl TerminalView {
                 .snap_to_window_with_margin(px(self.theme.spacing.sm))
                 .child(panel),
         )
-        .with_priority(crate::palette::Layer::Submenu.priority())
+        .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         .into_any_element()
     }
 
@@ -4102,7 +4220,7 @@ impl TerminalView {
             });
         let spacing = self.theme.spacing;
         div()
-            .key_context("TerminalSearch")
+            .key_context(SEARCH_CTX)
             .absolute()
             .top(px(spacing.sm))
             // A phone-wide terminal can be wider than the screen; its left edge is the part
@@ -4134,7 +4252,7 @@ impl Render for TerminalView {
         div()
             .id("terminal")
             .debug_selector(|| "terminal".to_owned())
-            .key_context("Terminal")
+            .key_context(CTX)
             .track_focus(&self.focus)
             .role(gpui::accesskit::Role::Group)
             .relative()
@@ -5456,17 +5574,14 @@ mod tests {
     fn a_picture_goes_to_the_worker_ahead_of_the_paste_chord(cx: &mut TestAppContext) {
         use slopty_platform::pasteboard::{Memory, Pasteboard, TEXT_UTI};
         use slopty_proto::terminal::PasteChord;
-        use slopty_proto::transfer::ClipMsg;
 
         let (view, mut rx, cx) = terminal(cx);
         let board = Rc::new(Memory::default());
         let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
-        let sync = Rc::new(RefCell::new(crate::clipboard::ClipSync::new(shared)));
-        let (me, worker) = (slopty_core::ClientId::new(), slopty_client::layout::WorkerKey::new(1));
+        let sync = Rc::new(RefCell::new(ClipSync::new(shared)));
+        let (me, worker) = (ClientId::new(), WorkerKey::new(1));
         view.update(cx, |view, _cx| {
-            view.set_clip_hook(Rc::new(move || {
-                crate::clipboard::shell_paste(&mut sync.borrow_mut(), worker, me)
-            }));
+            view.set_clip_hook(Rc::new(move || ClipPaste::of(&mut sync.borrow_mut(), worker, me)));
         });
         let sent = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
@@ -9454,51 +9569,6 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(pasted(&mut rx), ["claude --resume", "Enter"], "typed, then ↩");
         assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
-    }
-
-    /// Under gpui-kit's window root, the keys the kit binds around every view without ⌘ are
-    /// the program's: Tab and ⇧Tab type rather than walk the focus, and ⌃C, which the kit binds
-    /// to copy off Apple's platforms (bound here as it binds it there), interrupts rather than
-    /// copies. The shell keeps the focus.
-    #[gpui::test]
-    fn the_kits_keys_around_a_shell_go_to_the_program(cx: &mut TestAppContext) {
-        use slopty_proto::input::{KeyCode, Mods};
-
-        let (tx, mut rx) = mpsc::channel(64);
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            cx.bind_keys([KeyBinding::new("ctrl-c", input::Copy, Some("Root"))]);
-            crate::keymap::install(crate::keymap::Keymap::default(), cx);
-        });
-        let grid = TermSize { cols: 10, rows: 3, ..TermSize::default() };
-        let view = cx.new(|cx| TerminalView::new(SessionId::new(), grid, tx, Theme::default(), cx));
-        let held = view.clone();
-        let (_root, cx) = cx.add_window_view(|window, cx| {
-            let focus = held.read(cx).focus.clone();
-            window.focus(&focus, cx);
-            gpui_kit::component::Root::new(held, window, cx)
-        });
-        cx.simulate_resize(size(px(400.0), px(300.0)));
-        cx.run_until_parked();
-        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
-            std::iter::from_fn(|| rx.try_recv().ok())
-                .filter_map(|msg| match msg {
-                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
-                        Some((key.code, key.mods))
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        keys(&mut rx);
-        cx.simulate_keystrokes("tab shift-tab ctrl-c");
-        cx.run_until_parked();
-        assert_eq!(
-            keys(&mut rx),
-            [(KeyCode::Tab, Mods::empty()), (KeyCode::Tab, Mods::SHIFT), (KeyCode::C, Mods::CTRL)]
-        );
-        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
-        assert!(focused, "the shell kept the focus");
     }
 
     /// A login shell restored has nothing to run again: the chip says so and can be put away.

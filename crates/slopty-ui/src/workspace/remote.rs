@@ -35,7 +35,7 @@ pub use drop_in::DropIn;
 
 use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
-use crate::clipboard::{ClipFiles, ClipSync, provider, shell_paste, worker_file_paths};
+use crate::clipboard::{ClipFiles, ClipSync, provider, worker_file_paths};
 use crate::conversation::Attach;
 use crate::conversation::attach::Target;
 use crate::palette::{CommandPalette, PaletteItem};
@@ -352,7 +352,7 @@ impl WorkspaceView {
             if unshared.borrow().contains(&key) {
                 return ClipPaste::Text;
             }
-            shell_paste(&mut clip.borrow_mut(), key, me)
+            ClipPaste::of(&mut clip.borrow_mut(), key, me)
         }))
     }
 

@@ -156,7 +156,7 @@ impl ThreadView {
                     .snap_to_window_with_margin(px(self.theme.spacing.sm))
                     .child(panel),
             )
-            .with_priority(crate::palette::Layer::Submenu.priority())
+            .with_priority(slopty_kit::layer::Layer::Submenu.priority())
             .into_any_element(),
         )
     }

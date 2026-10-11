@@ -1,0 +1,182 @@
+workspace.new_goal workspace::NewGoal [cmd-n] Workspace && !Screen
+workspace.start_agent workspace::StartAgent [cmd-t] Workspace && !Screen
+workspace.new_terminal workspace::NewTerminal [cmd-shift-t] Workspace && !Screen
+workspace.new_agent workspace::NewAgent [] Workspace && !Screen
+workspace.split_right workspace::SplitRight [cmd-d] Workspace && !Screen
+workspace.split_down workspace::SplitDown [cmd-shift-d] Workspace && !Screen
+workspace.tab_terminal workspace::TabTerminal [alt-cmd-t] Workspace && !Screen
+workspace.new_note workspace::NewNote [cmd-shift-n] Workspace && !Screen
+workspace.add_window workspace::AddWindow [cmd-o] Workspace && !Screen
+workspace.open_file workspace::OpenFile [cmd-p] Workspace && !Screen
+workspace.open_folder workspace::OpenFolder [] Workspace && !Screen
+workspace.open_url workspace::OpenUrl [] Workspace && !Screen
+workspace.review_changes workspace::ReviewChanges [] Workspace && !Screen
+workspace.review_next workspace::ReviewNext [cmd-shift-r] Workspace && !Screen
+workspace.remove_worktree workspace::RemoveWorktree [] Workspace && !Screen
+workspace.remove_merged_worktrees workspace::RemoveMerged [] Workspace && !Screen
+workspace.run_script workspace::RunHere [] Workspace && !Screen
+workspace.save_copy workspace::SaveCopy [] Workspace && !Screen
+workspace.close_tile workspace::CloseItem [cmd-w] Workspace && !Screen
+workspace.undo_close workspace::UndoClose [cmd-z] Workspace && ClosingOffered && !Screen
+workspace.next_attention workspace::NextAttention [cmd-shift-a] Workspace && !Screen
+workspace.show_needs_you workspace::ShowNeedsYou [cmd-shift-u] Workspace && !Screen
+workspace.filter_navigator workspace::FilterNavigator [cmd-shift-e] Workspace && !Screen
+workspace.filter_navigator_from_a_row workspace::FilterNavigator [cmd-f] Navigator
+workspace.toggle_mute workspace::ToggleMute [cmd-shift-m] Workspace && !Screen
+workspace.toggle_stats workspace::ToggleStats [cmd-shift-i] Workspace && !Screen
+workspace.type_clipboard workspace::TypeClipboard [] Workspace && !Screen
+workspace.toggle_sized_display workspace::ToggleSizedDisplay [] Workspace && !Screen
+workspace.toggle_own_window workspace::ToggleOwnWindow [ctrl-cmd-n] Workspace && !Screen | PopOut
+workspace.toggle_system_keys workspace::ToggleSystemKeys [] Workspace && !Screen
+workspace.toggle_curtain workspace::ToggleCurtain [] Workspace && !Screen
+workspace.toggle_navigator workspace::ToggleNavigator [cmd-b] Workspace && !Screen
+workspace.find terminal::Find [cmd-f] Workspace && !Screen
+workspace.focus_next workspace::FocusNext [ctrl-tab] Workspace
+workspace.focus_previous workspace::FocusPrev [ctrl-shift-tab] Workspace
+workspace.open_palette workspace::OpenPalette [cmd-k] Workspace && !Screen
+workspace.open_commands workspace::OpenCommands [cmd-shift-p] Workspace && !Screen
+workspace.open_palette_in_remote_window workspace::OpenPalette [ctrl-cmd-shift-p] Workspace > Screen
+workspace.toggle_mute_in_remote_window workspace::ToggleMute [ctrl-cmd-shift-m] Workspace > Screen
+workspace.toggle_stats_in_remote_window workspace::ToggleStats [ctrl-cmd-shift-i] Workspace > Screen
+workspace.list_ports workspace::ListPorts [] Workspace && !Screen
+workspace.rename_tile workspace::RenameItem [cmd-e] Workspace && !Screen
+workspace.search_in_files workspace::SearchInFiles [cmd-shift-f] Workspace && !Screen | Input
+workspace.focus_left workspace::FocusLeft [alt-cmd-left] Workspace && !Screen
+workspace.focus_right workspace::FocusRight [alt-cmd-right] Workspace && !Screen
+workspace.focus_up workspace::FocusUp [alt-cmd-up] Workspace && !Screen | FileEditor > Input
+workspace.focus_down workspace::FocusDown [alt-cmd-down] Workspace && !Screen | FileEditor > Input
+workspace.move_left workspace::MoveLeft [alt-cmd-shift-left] Workspace && !Screen
+workspace.move_right workspace::MoveRight [alt-cmd-shift-right] Workspace && !Screen
+workspace.move_up workspace::MoveUp [alt-cmd-shift-up] Workspace && !Screen
+workspace.move_down workspace::MoveDown [alt-cmd-shift-down] Workspace && !Screen
+workspace.zoom_pane workspace::ZoomPane [cmd-shift-enter] Workspace && !Screen
+workspace.equalize_panes workspace::EqualizePanes [] Workspace && !Screen
+workspace.previous_project workspace::PreviousProject [alt-cmd-pageup] Workspace && !Screen
+workspace.next_project workspace::NextProject [alt-cmd-pagedown] Workspace && !Screen
+workspace.previous_tab workspace::PreviousTab [cmd-shift-[] Workspace && !Screen
+workspace.next_tab workspace::NextTab [cmd-shift-]] Workspace && !Screen
+workspace.last_tab workspace::LastTab [cmd-9] Workspace && !Screen
+workspace.go_back workspace::GoBack [cmd-[] Workspace && !Screen
+workspace.go_forward workspace::GoForward [cmd-]] Workspace && !Screen
+workspace.previous_pane_tab workspace::PreviousPaneTab [alt-cmd-[] Workspace && !Screen
+workspace.next_pane_tab workspace::NextPaneTab [alt-cmd-]] Workspace && !Screen
+workspace.other_tabs workspace::OtherTabs [] Workspace && !Screen
+workspace.close_other_tabs workspace::CloseOtherTabs [] Workspace && !Screen
+workspace.move_to_project workspace::MoveToProject [] Workspace && !Screen
+workspace.font_larger workspace::FontLarger [cmd-=, cmd-shift-=] Workspace && !Screen
+workspace.font_smaller workspace::FontSmaller [cmd--] Workspace && !Screen
+workspace.font_reset workspace::FontReset [cmd-0] Workspace && !Screen
+workspace.switch_face workspace::SwitchFace [cmd-j] Workspace && !Screen
+workspace.toggle_board workspace::ToggleBoard [cmd-shift-j] Workspace && !Screen
+workspace.edit_address workspace::EditAddress [cmd-l] Workspace && !Screen
+workspace.toggle_trackpad screen::ToggleTrackpad [] Workspace && !Screen
+workspace.toggle_remote_gestures screen::ToggleRemoteGestures [] Workspace && !Screen
+workspace.select_tab_1 workspace::SelectTab [cmd-1] Workspace && !Screen
+workspace.select_tab_2 workspace::SelectTab [cmd-2] Workspace && !Screen
+workspace.select_tab_3 workspace::SelectTab [cmd-3] Workspace && !Screen
+workspace.select_tab_4 workspace::SelectTab [cmd-4] Workspace && !Screen
+workspace.select_tab_5 workspace::SelectTab [cmd-5] Workspace && !Screen
+workspace.select_tab_6 workspace::SelectTab [cmd-6] Workspace && !Screen
+workspace.select_tab_7 workspace::SelectTab [cmd-7] Workspace && !Screen
+workspace.select_tab_8 workspace::SelectTab [cmd-8] Workspace && !Screen
+page.back workspace::PageBack [cmd-left] Workspace && Page && !Screen
+page.forward workspace::PageForward [cmd-right] Workspace && Page && !Screen
+page.reload workspace::ReloadPage [] Workspace && Page && !Screen
+page.find_next terminal::FindNext [cmd-g] PageSearch
+page.find_previous terminal::FindPrev [cmd-shift-g] PageSearch
+conversation.cycle_density conversation::CycleDensity [ctrl-o] Conversation | Conversation > Input
+conversation.interrupt conversation::Interrupt [escape] Conversation
+conversation.queue_message conversation::QueueMessage [cmd-enter] ThreadComposer > Input
+conversation.edit_last_queued conversation::EditLastQueued [alt-up] ThreadComposer > Input
+conversation.ask_aside conversation::AskAside [] Conversation
+conversation.review_changes conversation::ReviewChanges [] Conversation
+conversation.resume_agent conversation::ResumeAgent [] Conversation
+conversation.previous_prompt terminal::PrevPrompt [cmd-up] Conversation | Conversation > Input
+conversation.next_prompt terminal::NextPrompt [cmd-down] Conversation | Conversation > Input
+conversation.find terminal::Find [cmd-f] Conversation | Conversation > Input
+conversation.allow_request conversation::AllowRequest [cmd-enter] Request
+conversation.deny_request conversation::DenyRequest [cmd-backspace] Request
+file.save file::SaveFile [cmd-s] FileEditor
+file.finish_edit file::FinishEdit [cmd-enter] FileEditor | FileEditor > Input
+file.find terminal::Find [cmd-f] FileEditor > Input | FileEditor
+file.close_find terminal::CloseFind [escape] FileSearch
+file.find_next terminal::FindNext [cmd-g] FileSearch
+file.find_previous terminal::FindPrev [cmd-shift-g] FileSearch
+file.toggle_comment file::ToggleComment [cmd-/] FileText > Input
+file.go_to_line file::GoToLine [ctrl-g] FileText > Input
+file.close_go_to_line file::CloseGoToLine [escape] FileGoTo
+file.move_line_up file::MoveLineUp [alt-up] FileText > Input
+file.move_line_down file::MoveLineDown [alt-down] FileText > Input
+file.duplicate_line file::DuplicateLine [alt-shift-down] FileText > Input
+file.jump_to_bracket file::JumpToBracket [cmd-shift-\] FileText > Input
+file.toggle_soft_wrap file::ToggleSoftWrap [] FileEditor
+file.toggle_preview file::TogglePreview [cmd-shift-v] FileEditor
+file.toggle_replace file::ToggleReplace [cmd-shift-h] FileText > Input | FileSearch
+file.toggle_match_case project_search::ToggleMatchCase [alt-cmd-c] FileSearch
+file.toggle_whole_word project_search::ToggleWholeWord [alt-cmd-w] FileSearch
+file.toggle_regex project_search::ToggleRegex [alt-cmd-r] FileSearch
+file.scroll_down pdf::ScrollDown [down] FileEditor && FilePages
+file.scroll_up pdf::ScrollUp [up] FileEditor && FilePages
+file.next_screen pdf::NextScreen [pagedown, space] FileEditor && FilePages
+file.previous_screen pdf::PreviousScreen [pageup, shift-space] FileEditor && FilePages
+folder.select_previous folder::SelectPrevious [up] FolderView
+folder.select_next folder::SelectNext [down] FolderView
+folder.select_first folder::SelectFirst [home] FolderView
+folder.select_last folder::SelectLast [end] FolderView
+folder.open folder::OpenSelected [enter] FolderView
+folder.open_parent folder::OpenParent [backspace, cmd-up] FolderView
+folder.new_folder folder::NewFolder [cmd-shift-n] FolderView
+folder.rename folder::RenameSelected [] FolderView
+folder.move_to_trash folder::TrashSelected [cmd-backspace] FolderView
+project.select_previous project::SelectPrevious [up, k] ProjectBoard
+project.select_next project::SelectNext [down, j] ProjectBoard
+project.open project::OpenNode [enter] ProjectBoard
+search.toggle_match_case project_search::ToggleMatchCase [alt-cmd-c] ProjectSearch
+search.toggle_whole_word project_search::ToggleWholeWord [alt-cmd-w] ProjectSearch
+search.toggle_regex project_search::ToggleRegex [alt-cmd-r] ProjectSearch
+terminal.copy terminal::Copy [cmd-c] Terminal
+terminal.paste terminal::Paste [cmd-v] Terminal
+terminal.find terminal::Find [cmd-f] Terminal
+terminal.find_next terminal::FindNext [cmd-g] Terminal
+terminal.find_previous terminal::FindPrev [cmd-shift-g] Terminal
+terminal.close_find terminal::CloseFind [escape] TerminalSearch
+terminal.previous_prompt terminal::PrevPrompt [cmd-up] Terminal
+terminal.next_prompt terminal::NextPrompt [cmd-down] Terminal
+terminal.scroll_page_up terminal::ScrollPageUp [shift-pageup] Terminal
+terminal.scroll_page_down terminal::ScrollPageDown [shift-pagedown] Terminal
+terminal.scroll_to_top terminal::ScrollToTop [shift-home, cmd-home] Terminal
+terminal.scroll_to_bottom terminal::ScrollToBottom [shift-end, cmd-end] Terminal
+terminal.select_all terminal::SelectAll [cmd-a] Terminal
+terminal.copy_last_output terminal::CopyLastOutput [cmd-shift-c] Terminal
+terminal.copy_mode terminal::CopyMode [cmd-shift-x] Terminal
+terminal.rerun_last terminal::RerunLast [] Terminal
+terminal.copy_block_output terminal::CopyBlockOutput [] Terminal
+terminal.attach_block terminal::AttachBlock [] Terminal
+terminal.attach_selection terminal::AttachSelection [] Terminal
+terminal.clear_screen terminal::ClearScreen [cmd-k] Terminal
+page.undo workspace::PageUndo [cmd-z] PageBody > NativeView
+page.redo workspace::PageRedo [cmd-shift-z] PageBody > NativeView
+page.cut workspace::PageCut [cmd-x] PageBody > NativeView
+page.select_all workspace::PageSelectAll [cmd-a] PageBody > NativeView
+project.review_task project::ReviewTask [v] ProjectBoard
+project.merge_task project::MergeTask [m] ProjectBoard
+project.retry_task project::RetryTask [r] ProjectBoard
+project.fix_ci project::FixCi [] ProjectBoard
+project.address_comments project::AddressComments [] ProjectBoard
+project.resolve_conflicts project::ResolveConflicts [] ProjectBoard
+project.cancel_task project::CancelTask [] ProjectBoard
+project.show_terminal project::ShowTerminal [t] ProjectBoard
+project.tell_orchestrator project::TellOrchestrator [c] ProjectBoard
+project.start_task project::StartTask [s] ProjectBoard
+project.toggle_push project::TogglePush [] ProjectBoard
+project.delete_project project::DeleteProject [] ProjectBoard
+project.edit_checks project::EditChecks [] ProjectBoard
+review.next_change review::NextChange [down, j] Review && !Input
+review.previous_change review::PreviousChange [up, k] Review && !Input
+review.next_file review::NextFile [shift-down, shift-j] Review && !Input
+review.previous_file review::PreviousFile [shift-up, shift-k] Review && !Input
+review.keep_change review::KeepChange [cmd-y] Review && !Input
+review.put_back_change review::PutBackChange [cmd-n] Review && !Input
+review.comment_on_change review::CommentOnChange [c] Review && !Input
+review.toggle_viewed review::ToggleViewed [v] Review && !Input
+review.show_files review::ShowFiles [cmd-shift-o] Review && !Input

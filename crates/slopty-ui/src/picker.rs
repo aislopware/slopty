@@ -635,7 +635,7 @@ impl Render for WindowPicker {
                 .inset_0()
                 .bg(slopty_kit::kit::scrim(&theme))
         });
-        let layer = crate::palette::Layer::Dialog.priority();
+        let layer = slopty_kit::layer::Layer::Dialog.priority();
         if self.leaving {
             let panel = panel.debug_selector(|| "picker-leaving".to_owned());
             let root = crate::palette::list_anchor(&theme, window).id("picker-backdrop");
