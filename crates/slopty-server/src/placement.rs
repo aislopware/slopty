@@ -99,7 +99,7 @@ pub(crate) fn choose(candidates: &[Candidate], wanted: &Wanted) -> Result<Worker
     if let Some(pin) = wanted.pin
         && !candidates.iter().any(|c| c.worker == pin)
     {
-        return Err(format!("it is pinned to worker {pin}, which the server does not know"));
+        return Err(format!("it names worker {pin}, which the server does not know"));
     }
     if candidates.is_empty() {
         return Err("the server knows no worker".to_owned());

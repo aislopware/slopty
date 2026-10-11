@@ -148,7 +148,7 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
         autonomy: None,
     };
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
-    let task = new_task(hub, None).await;
+    let task = new_task(hub).await;
     let agent = TermRef { worker, session: agent };
     let assigned = hub.assign_for_test(&project(), task, agent);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");

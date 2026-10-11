@@ -18,9 +18,9 @@ mod golden_project {
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Commits, Fact, Facts, GiveBacks, Limits, LimitsChange,
         Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail,
-        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Report, RunOn, Spent,
-        StepKind, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep,
-        TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
+        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Report, Spent, StepKind,
+        StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TestDiff,
+        TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::settings::{DaemonSettings, SettingEdit};
@@ -97,7 +97,6 @@ mod golden_project {
             title: "Server store".to_owned(),
             brief: "Keep projects beside workers.json.".to_owned(),
             read_only: false,
-            pin: Some(term().worker),
             verifier: Some("cargo nextest run -p slopty-server".to_owned()),
             metadata: Some(r#"{"lane":"server"}"#.to_owned()),
         }
@@ -118,7 +117,6 @@ mod golden_project {
             title: s.title,
             brief: s.brief,
             read_only: s.read_only,
-            pin: s.pin,
             verifier: s.verifier,
             metadata: s.metadata,
             state: TaskState::Blocked,
@@ -385,7 +383,6 @@ mod golden_project {
             base: Some(commit('b')),
             note: Some("ready".to_owned()),
             depends_on: Some(vec![TaskId(1), TaskId(2)]),
-            run_on: Some(RunOn::Worker(term().worker)),
             verifier: Some(String::new()),
             metadata: Some("{}".to_owned()),
         };
@@ -623,6 +620,16 @@ mod golden_project {
                 branch: "slopty/slopty/goal".to_owned(),
             }),
         );
+        snap(
+            "on_origin",
+            &request(Verb::OnOrigin {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                target: "main".to_owned(),
+                heads: vec![commit('a'), commit('b')],
+            }),
+        );
+        snap("on_origin_held", &reply(Outcome::OnOrigin { heads: vec![commit('a')] }));
         let edit = |key: &str, entry: Option<&str>, literal: Option<&str>| SettingEdit {
             table: "worker".to_owned(),
             key: key.to_owned(),

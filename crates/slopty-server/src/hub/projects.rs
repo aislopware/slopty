@@ -1741,15 +1741,16 @@ impl Hub {
         }
     }
 
-    /// What a start of `task` asks: the worker the start or the task names, one with a clone
-    /// of the project's repository first when it names no directory, and the agent it runs.
+    /// What a start of `task` asks: the worker the start names, one with a clone of the
+    /// project's repository first when it names no directory, and the agent it runs.
     fn placement_for(
         state: &State,
         project: &ProjectId,
         task: TaskId,
         launch: &Launch,
     ) -> Result<Wanted, Outcome> {
-        let pin = launch.pin.or(state.projects.task(project, task)?.pin);
+        state.projects.task(project, task)?;
+        let pin = launch.pin;
         let repo = state.projects.project(project)?.repo_id.as_ref();
         let clone =
             launch.cwd.trim().is_empty() && repo.is_some_and(|id| id.keys().next().is_some());
@@ -1849,8 +1850,8 @@ impl Hub {
                 match repo.filter(|id| wanted.clone && !beside && id.url.is_none()) {
                     Some(id) => Err(unplaced(&format!(
                         "it goes beside a clone of {}, the worker it would go to has none, and \
-                         no address to clone it from is known: clone it on a worker, or pin the \
-                         task to one that has it",
+                         no address to clone it from is known: clone it on a worker, or start the \
+                         task on one that has it",
                         id.keys().next().unwrap_or_default()
                     ))),
                     None => Ok(worker),
@@ -2353,7 +2354,7 @@ struct Earlier {
 /// run in their own terminals, any other agent as a thread.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Launch {
-    /// The worker, over the task's pin; one with room when absent.
+    /// The worker; one with room when absent.
     pub pin: Option<WorkerId>,
     /// The folder on it; beside a clone of the project's repository, in a worktree of the
     /// task's own when it writes, when empty.

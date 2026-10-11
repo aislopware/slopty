@@ -686,7 +686,7 @@ mod tests {
     }
 
     /// Two real workers, the orchestrator's with a clone of the project's repository and
-    /// another with none. A task pinned to the other gets a clone there first, made by
+    /// another with none. A task started on the other gets a clone there first, made by
     /// that worker's own git from the address the orchestrator's clone names (its person's
     /// `insteadOf` reaching the forge), shown as a step. Once its agent reports done, the
     /// branch it committed comes home: bundled there, carried by the server, fetched into the
@@ -773,15 +773,12 @@ mod tests {
         .await;
         assert_eq!(id.url.as_deref(), Some(url), "the address to clone from, as its config has it");
 
-        let spec = TaskSpec {
-            title: "Write it".to_owned(),
-            pin: Some(linux_worker),
-            ..TaskSpec::default()
-        };
+        let spec = TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() };
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
+        let launch =
+            TaskLaunch { pin: Some(linux_worker), agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
@@ -1010,15 +1007,12 @@ mod tests {
         })
         .await;
 
-        let spec = TaskSpec {
-            title: "Write it".to_owned(),
-            pin: Some(linux_worker),
-            ..TaskSpec::default()
-        };
+        let spec = TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() };
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) };
+        let launch =
+            TaskLaunch { pin: Some(linux_worker), agent: AgentId::named(AgentId::CLAUDE_CODE) };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;

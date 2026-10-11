@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_proto::project::{
-    Autonomy, LimitsChange, ProjectStatus, Report, RunOn, Task, TaskChange, TaskState, VerifierRun,
+    Autonomy, LimitsChange, ProjectStatus, Report, Task, TaskChange, TaskState, VerifierRun,
 };
 use slopty_tools::ops::{self, NewTask, ProjectEdit, ProjectSpec, Which};
 use slopty_tools::resolve::Resolver;
@@ -260,9 +260,6 @@ pub struct UpdateTask {
     /// It depends on nothing now.
     #[arg(long, conflicts_with = "depends_on")]
     no_dependencies: bool,
-    /// Run it on this worker, or `anywhere` to let the server choose.
-    #[arg(long, value_name = "WORKER")]
-    run_on: Option<String>,
     /// Its own verifier; empty for the project's.
     #[arg(long)]
     verifier: Option<String>,
@@ -455,7 +452,6 @@ pub async fn task(
                 note,
                 depends_on,
                 no_dependencies,
-                run_on,
                 verifier,
                 metadata,
             } = *update;
@@ -485,11 +481,6 @@ pub async fn task(
                 base,
                 note,
                 depends_on,
-                run_on: match run_on.as_deref() {
-                    None => None,
-                    Some("anywhere") => Some(RunOn::Anywhere),
-                    Some(name) => Some(RunOn::Worker(res.worker(Some(name)).await?)),
-                },
                 verifier,
                 metadata,
             };

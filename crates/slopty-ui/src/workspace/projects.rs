@@ -567,7 +567,7 @@ impl WorkspaceView {
                 let tasks = b.tasks.values().flat_map(|c| {
                     let ran = c.assignment.as_ref().map(|a| a.term.worker);
                     let step = c.step.as_ref().map(|s| s.worker);
-                    [ran, c.pin, step].into_iter().flatten()
+                    [ran, step].into_iter().flatten()
                 });
                 orchestrator.into_iter().chain(tasks).collect::<Vec<_>>()
             })
@@ -946,21 +946,20 @@ impl WorkspaceView {
         }
     }
 
-    /// "Start" on a task not started yet: the task spawned on its pin when it has one, by the
-    /// agent its orchestrator is (Claude Code when this client cannot tell), its brief its first
-    /// prompt. The server places it, as it would for the orchestrator.
+    /// "Start" on a task not started yet: the task spawned by the agent its orchestrator is
+    /// (Claude Code when this client cannot tell), its brief its first prompt. The server places
+    /// it, as it would for the orchestrator.
     fn start_task(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
         if self.projects.caller.is_none() {
             return self.start_refused(project, task, NOT_SENT.to_owned(), cx);
         }
         let board = self.projects.mirror.get(project);
-        let pin = board.and_then(|b| b.tasks.get(&task)).and_then(|c| c.pin);
         let orchestrator = board.and_then(|b| b.project.orchestrator).map(|t| t.session);
         let agent = orchestrator
             .and_then(|s| self.session_agent(s))
             .map_or_else(|| AgentId::named(AgentId::CLAUDE_CODE), AgentId::named);
         let asked = project.clone();
-        let launch = TaskLaunch { pin, agent };
+        let launch = TaskLaunch { pin: None, agent };
         let verb = Verb::TaskSpawn { project: project.clone(), task, launch };
         self.ask_server(verb, cx, move |this, outcome, cx| {
             if let Outcome::Error { message, .. } = outcome {

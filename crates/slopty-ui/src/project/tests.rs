@@ -621,7 +621,7 @@ fn a_merge_whose_push_failed_says_so() {
 }
 
 /// Each node says where it is: the orchestrator and a running task where their agents run, an
-/// ended one where it ran, then a pin, with the worktree and branch.
+/// ended one where it ran, with the worktree and branch; one not started is nowhere.
 #[test]
 fn a_node_says_where_it_runs() {
     use super::model::{Place, PlaceHow, os_name};
@@ -634,11 +634,9 @@ fn a_node_says_where_it_runs() {
     if let Some(a) = ended.assignment.as_mut() {
         a.ended_ms = Some(AT);
     }
-    let mut pinned = card(3, "Pinned", TaskState::Planned);
-    pinned.pin = Some(linux);
-    let loose = card(4, "Anywhere", TaskState::Planned);
+    let loose = card(3, "Anywhere", TaskState::Planned);
     let mut mirror = Projects::default();
-    let tasks = vec![running, ended, pinned, loose];
+    let tasks = vec![running, ended, loose];
     mirror.apply_part(snapshot(
         10,
         vec![status(project("board", Some(orchestrator)), tasks, Vec::new())],
@@ -658,8 +656,7 @@ fn a_node_says_where_it_runs() {
         })
     );
     assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran, None)));
-    assert_eq!(place(Some(TaskId(3))), Some((linux, PlaceHow::Pinned, Some("pinned".into()))));
-    assert_eq!(place(Some(TaskId(4))), None, "nowhere yet: no place to show");
+    assert_eq!(place(Some(TaskId(3))), None, "nowhere yet: no place to show");
     assert_eq!(os_name(slopty_proto::server::Os::Linux), "Linux");
     assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");
 }

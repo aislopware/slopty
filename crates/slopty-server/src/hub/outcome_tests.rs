@@ -66,7 +66,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     };
     let role = next_batch(&mut rx).await;
     ack(&role);
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let term = TermRef { worker, session: working };
     let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -152,7 +152,7 @@ async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() 
     let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
     let role = next_batch(&mut rx).await;
     lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: working });
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
     lease.handle(agent(working, &AgentStatus::Working));
@@ -182,7 +182,7 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
@@ -231,7 +231,7 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let term = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -295,7 +295,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
         message: "a terminal works in /w/demo/.claude/worktrees/slopty-demo-2".to_owned(),
     };
     for (n, worker_says) in [(1, removed), (2, kept)] {
-        let task = new_task(&hub, None).await;
+        let task = new_task(&hub).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let term = opened(&lease, &request(&mut rx).await);
         assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -391,7 +391,7 @@ async fn only_the_orchestrator_tells_a_task_in_its_own_words() {
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
     let role = next_batch(&mut rx).await;
     lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
-    let (first, second) = (new_task(&hub, None).await, new_task(&hub, None).await);
+    let (first, second) = (new_task(&hub).await, new_task(&hub).await);
     for (task, session) in [(first, one), (second, two)] {
         let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session });
         assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -449,7 +449,7 @@ async fn a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled() {
     create(&hub, None).await;
     let mut started = Vec::new();
     for n in 1..=3 {
-        let task = new_task(&hub, None).await;
+        let task = new_task(&hub).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let term = opened(&lease, &request(&mut rx).await);
         assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -522,7 +522,7 @@ async fn a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_wo
     let (worker, lease, mut rx) =
         worker_on(&hub, "studio", Os::MacOs, vec![summary(orchestrating)]);
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let term = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));

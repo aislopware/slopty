@@ -357,7 +357,7 @@ pub fn list() -> Vec<Tool> {
         tool::<ProjectStatusArgs>(
             "project_status",
             "A project whole: its `tasks` (each with `state`, its agent's own `status`, \
-             `depends_on`, `kind`, the worker it is pinned to, its terminal's `term`, \
+             `depends_on`, `kind`, its terminal's `term`, \
              `branch`, `pr`, `verified`), `natives` (Claude Code's own subagents and to-dos in \
              each node's session), `bounds` and `limits` with what runs now (`live`), and its \
              `timeline` from `since`, with `next` to read on from. It answers at once; \
@@ -375,7 +375,7 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<TaskGetArgs>(
             "task_get",
-            "One node of a project's tree in full: the task's brief, pin, verifier, base \
+            "One node of a project's tree in full: the task's brief, verifier, base \
              commit and metadata, and the subagents and to-dos Claude Code keeps \
              in it. project_status shows the tree; this shows a node.",
             Kind::Read,
@@ -644,7 +644,6 @@ mod tests {
             title: title.to_owned(),
             brief: String::new(),
             read_only: false,
-            pin: None,
             verifier: None,
             metadata: None,
             state: if started { TaskState::Running } else { TaskState::Planned },

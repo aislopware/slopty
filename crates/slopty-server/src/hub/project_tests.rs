@@ -86,12 +86,11 @@ pub(super) async fn create(hub: &Hub, orchestrator: Option<TermRef>) {
     create_with(hub, orchestrator, LimitsChange::default()).await;
 }
 
-/// A task pinned to `pin`, when it names a worker.
-pub(super) async fn new_task(hub: &Hub, pin: Option<WorkerId>) -> TaskId {
+/// A new task.
+pub(super) async fn new_task(hub: &Hub) -> TaskId {
     let spec = TaskSpec {
         title: "Server".to_owned(),
         brief: "Build it.".to_owned(),
-        pin,
         ..TaskSpec::default()
     };
     match hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await {
@@ -114,6 +113,11 @@ pub(super) async fn task_now(hub: &Hub, task: TaskId) -> TaskCard {
 
 pub(super) fn claude() -> TaskLaunch {
     TaskLaunch { pin: None, agent: AgentId::named(AgentId::CLAUDE_CODE) }
+}
+
+/// Claude Code started on `worker`, as the orchestrator names it in `task_start`.
+pub(super) fn on(worker: WorkerId) -> TaskLaunch {
+    TaskLaunch { pin: Some(worker), ..claude() }
 }
 
 pub(super) fn spawn(hub: &Hub, verb: Verb) -> tokio::task::JoinHandle<Outcome> {
@@ -155,20 +159,20 @@ pub(super) fn refused(outcome: &Outcome, code: ErrorCode) -> &str {
     }
 }
 
-/// A task pinned to the Linux worker starts there, never on the Mac, told its brief, with the
+/// A task started on the Linux worker starts there, never on the Mac, told its brief, with the
 /// project and the task in its environment; once the worker answers it is the task's terminal,
 /// and every link hears so. With the Linux worker gone, the start is refused saying
 /// why.
 #[tokio::test]
-async fn a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task() {
+async fn a_task_started_on_a_worker_is_spawned_there_and_put_on_its_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_mac, _mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Some(linux)).await;
+    let task = new_task(&hub).await;
     let mut pushed = hub.subscribe();
 
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on(linux) });
     let start = request(&mut linux_rx).await;
     let verb = start.1.clone();
     let Verb::SpawnAgent { worker, env, cwd, prompt, .. } = verb else { panic!("{verb:?}") };
@@ -197,64 +201,10 @@ async fn a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task() {
     refused(&again.await, ErrorCode::Conflict);
 
     drop(linux_lease);
-    let other = new_task(&hub, Some(linux)).await;
-    let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: other, launch: claude() });
+    let other = new_task(&hub).await;
+    let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: other, launch: on(linux) });
     let no = no.await;
     assert_eq!(refused(&no, ErrorCode::Unplaced), "no worker can take task 2 now: box: not online");
-}
-
-/// The worker a start names is the orchestrator's own word: the task starts there whatever
-/// worker the task names.
-#[tokio::test]
-async fn a_start_s_pin_goes_over_the_task_s() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let (linux, _linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create(&hub, None).await;
-    let task = new_task(&hub, Some(linux)).await;
-    let launch = TaskLaunch { pin: Some(mac), ..claude() };
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
-    let start = request(&mut mac_rx).await;
-    let verb = start.1.clone();
-    assert!(matches!(verb, Verb::SpawnAgent { worker, .. } if worker == mac));
-    linux_rx.try_recv().unwrap_err();
-    opened(&mac_lease, &start);
-    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
-}
-
-/// The person's "Run on" pins a task to a worker, and "Anywhere" lets the server choose again;
-/// the card says where it is pinned.
-#[tokio::test]
-async fn a_task_runs_where_the_person_says_and_keeps_why_it_went_there() {
-    use slopty_proto::project::RunOn;
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create(&hub, None).await;
-    let run_on = |task, run_on| Verb::TaskUpdate {
-        project: project(),
-        task,
-        change: Box::new(TaskChange { run_on: Some(run_on), ..TaskChange::default() }),
-    };
-
-    let pinned = new_task(&hub, None).await;
-    assert!(matches!(hub.dispatch(run_on(pinned, RunOn::Worker(mac))).await, Outcome::Task(_)));
-    assert_eq!(task_now(&hub, pinned).await.pin, Some(mac), "the card says where it is pinned");
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: pinned, launch: claude() });
-    let start = request(&mut mac_rx).await;
-    opened(&mac_lease, &start);
-    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
-    linux_rx.try_recv().unwrap_err();
-
-    let free = new_task(&hub, None).await;
-    hub.dispatch(run_on(free, RunOn::Worker(mac))).await;
-    hub.dispatch(run_on(free, RunOn::Anywhere)).await;
-    assert_eq!(task_now(&hub, free).await.pin, None, "anywhere takes the pin off");
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: free, launch: claude() });
-    let start = request(&mut linux_rx).await;
-    assert_eq!(chosen(&start.1).0, linux, "the worker running the fewest agents");
-    opened(&linux_lease, &start);
-    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 }
 
 /// Two starts at once never both take the fleet's last place: the second is placed while the
@@ -265,7 +215,7 @@ async fn concurrent_starts_never_pass_the_fleet_s_bound() {
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     hub.set_bounds(Bounds { live_agents: 1 });
     create(&hub, None).await;
-    let (a, b) = (new_task(&hub, None).await, new_task(&hub, None).await);
+    let (a, b) = (new_task(&hub).await, new_task(&hub).await);
     let first = spawn(&hub, Verb::TaskSpawn { project: project(), task: a, launch: claude() });
     let second = spawn(&hub, Verb::TaskSpawn { project: project(), task: b, launch: claude() });
     let start = request(&mut rx).await;
@@ -295,7 +245,7 @@ async fn a_start_whose_caller_left_still_puts_its_terminal_on_the_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     asked.abort();
@@ -317,7 +267,7 @@ async fn a_start_its_task_can_no_longer_take_is_closed() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     for state in [TaskState::Done, TaskState::Merged] {
@@ -358,7 +308,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     assert!(matches!(asked.await.unwrap(), Outcome::Opened(_)));
     let said = refused(&hub.dispatch(plain()).await, ErrorCode::Limit).to_owned();
     assert!(said.contains("runs 1 agents") && said.contains("live_agents"), "{said}");
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let start = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: claude() });
     refused(&start.await, ErrorCode::Limit);
 }
@@ -440,7 +390,7 @@ async fn a_task_s_agent_starts_at_its_project_s_autonomy() {
             metadata: None,
         };
         assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
-        let task = new_task(&hub, None).await;
+        let task = new_task(&hub).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let start = request(&mut rx).await;
         let Verb::SpawnAgent { args, autonomy, .. } = &start.1 else { panic!("{:?}", start.1) };
@@ -477,7 +427,7 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
     let session = SessionId::new();
     let (linux, lease, _rx) = worker_on(&hub, "box", Os::Linux, vec![summary(session)]);
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let term = TermRef { worker: linux, session };
     let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -573,7 +523,7 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
     let branch = AgentBranch { session, worktree: Some(worktree) };
     lease.handle(ToServer::Report(AgentReport::Branch(branch.clone())));
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let Outcome::Task(assigned) = hub.assign_for_test(&project(), task, term) else {
         panic!("assigned")
     };
@@ -668,7 +618,7 @@ async fn a_status_read_waits_for_the_project_s_next_change() {
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished(), "nothing new yet");
-    new_task(&hub, None).await;
+    new_task(&hub).await;
     let Outcome::Project(news) =
         tokio::time::timeout(Duration::from_secs(10), waiting).await.unwrap().unwrap()
     else {
@@ -699,7 +649,7 @@ async fn a_client_is_told_the_projects_with_the_fleet_as_of_one_event() {
     assert_eq!(snapshot.projects.len(), 1);
     assert_eq!(snapshot.projects.first().map(|p| p.project.id.clone()), Some(project()));
     assert!(snapshot.projects.iter().all(|p| !p.timeline.is_empty()), "with its latest entries");
-    new_task(&hub, None).await;
+    new_task(&hub).await;
     let Ok(FromServer::Event(after)) = pushed.try_recv() else { panic!("a change is pushed") };
     assert!(after.seq > snapshot.seq, "a change after the snapshot is past its seq");
 }
@@ -721,7 +671,7 @@ async fn a_start_a_restart_cut_off_is_put_on_its_task_when_its_worker_returns() 
     let mut kept = hub.keep_projects();
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let _asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let (_, session) = chosen(&start.1);
@@ -758,7 +708,7 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let (_, session) = chosen(&start.1);
@@ -822,7 +772,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, sessions);
     announce(&lease, agent_here, true);
     create(&hub, Some(TermRef { worker, session: agent_here })).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let term = TermRef { worker, session: plain };
     let orchestrating = Speaker::Proven(agent_here);
     let answer = Verb::AnswerRequest {
@@ -918,7 +868,7 @@ async fn a_task_s_machine_going_away_is_said_and_frees_its_place() {
     announce(&mini_lease, working, true);
     hub.set_bounds(Bounds { live_agents: 2 });
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let assigned =
         hub.assign_for_test(&project(), task, TermRef { worker: mini, session: working });
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -989,7 +939,7 @@ async fn a_worker_back_within_the_grace_tells_nobody() {
     let (mini, mini_lease, _mini_rx) = worker_on(&hub, "mini", Os::MacOs, Vec::new());
     announce(&mini_lease, working, true);
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let assigned =
         hub.assign_for_test(&project(), task, TermRef { worker: mini, session: working });
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -1124,7 +1074,7 @@ async fn an_agent_looser_than_allowed_is_closed() {
     create(&hub, None).await;
     let mut started = Vec::new();
     for _ in 0..2 {
-        let task = new_task(&hub, None).await;
+        let task = new_task(&hub).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let start = request(&mut rx).await;
         announce(&lease, chosen(&start.1).1, true);
@@ -1233,7 +1183,7 @@ async fn an_agent_looser_than_allowed_is_closed() {
         metadata: None,
     };
     assert!(matches!(hub.dispatch(raise).await, Outcome::Project(_)));
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     announce(&lease, chosen(&start.1).1, true);
@@ -1338,8 +1288,8 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(!context.contains("runs Claude Code"), "{context}");
     lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
 
-    let task = new_task(&hub, None).await;
-    let other = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
+    let other = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
@@ -1748,12 +1698,12 @@ async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     let theirs = hub.dispatch_as(as_orchestrator, None, limit(Some(5))).await;
     assert!(refused(&theirs, ErrorCode::Forbidden).contains("review limit"), "{theirs:?}");
     assert!(matches!(hub.dispatch(limit(Some(1))).await, Outcome::Project(_)));
-    let ready = new_task(&hub, None).await;
+    let ready = new_task(&hub).await;
     let done = Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() });
     let update = Verb::TaskUpdate { project: project(), task: ready, change: done };
     assert!(matches!(hub.dispatch(update).await, Outcome::Task(_)));
 
-    let next = new_task(&hub, None).await;
+    let next = new_task(&hub).await;
     let launch = claude();
     let start = || Verb::TaskSpawn { project: project(), task: next, launch: launch.clone() };
     let held = hub.dispatch_as(as_orchestrator, None, start()).await;
@@ -1809,7 +1759,7 @@ async fn no_agent_starts_anything_looser_than_asking() {
         let said = hub.dispatch_as(who, None, loose.clone()).await;
         assert!(refused(&said, ErrorCode::Limit).contains("--allowedTools"), "{said:?}");
     }
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let spawned = Verb::TaskSpawn { project: project(), task, launch: claude() };
     let said = hub.dispatch_as(Speaker::Proven(theirs), None, spawned).await;
     assert!(refused(&said, ErrorCode::Forbidden).contains("elsewhere"), "{said:?}");
@@ -1827,7 +1777,7 @@ async fn the_terminals_an_agent_opened_are_kept_across_a_restart() {
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker, session: orchestrator })).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let shell = opened_by(&hub, orchestrator, worker, &lease, &mut rx).await;
     let mut watched = Vec::new();
     while let Ok(keep) = kept.try_recv() {
@@ -1865,8 +1815,8 @@ async fn a_task_s_agent_works_only_on_its_own_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
-    let beside = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
+    let beside = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let agent = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -1984,8 +1934,8 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let anywhere = claude();
 
-    let writes = new_task(&hub, Some(linux)).await;
-    let verb = Verb::TaskSpawn { project: project(), task: writes, launch: anywhere.clone() };
+    let writes = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task: writes, launch: on(linux) };
     let asked = spawn(&hub, verb);
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
@@ -2008,8 +1958,8 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     // Codex's terminal opens in one the worker makes from the target too: its own `--worktree`
     // would start from whatever the clone has checked out.
     linux_lease.handle(ToServer::Facts(installed(&["claude", "codex"])));
-    let codex_task = new_task(&hub, Some(linux)).await;
-    let launch = TaskLaunch { agent: AgentId::named(AgentId::CODEX), ..anywhere.clone() };
+    let codex_task = new_task(&hub).await;
+    let launch = TaskLaunch { agent: AgentId::named(AgentId::CODEX), ..on(linux) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: codex_task, launch });
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
@@ -2039,18 +1989,14 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let task = assigned(&hub, task.id).await;
     assert_eq!(task.worktree.as_deref(), Some(path.as_str()), "the task knows its worktree");
 
-    let spec = TaskSpec {
-        title: "Read the logs".to_owned(),
-        read_only: true,
-        pin: Some(linux),
-        ..TaskSpec::default()
-    };
+    let spec =
+        TaskSpec { title: "Read the logs".to_owned(), read_only: true, ..TaskSpec::default() };
     let Outcome::Task(reads) =
         hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await
     else {
         panic!("no task")
     };
-    let verb = Verb::TaskSpawn { project: project(), task: reads.id, launch: anywhere.clone() };
+    let verb = Verb::TaskSpawn { project: project(), task: reads.id, launch: on(linux) };
     let asked = spawn(&hub, verb);
     let start = request(&mut linux_rx).await;
     let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
@@ -2059,7 +2005,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
-    let there = new_task(&hub, None).await;
+    let there = new_task(&hub).await;
     let verb = Verb::TaskSpawn { project: project(), task: there, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
     let start = request(&mut studio_rx).await;
@@ -2068,15 +2014,15 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     opened(&studio_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
-    // Pinned to a worker with no clone, and no address to clone from, it is refused rather
+    // Started on a worker with no clone, and no address to clone from, it is refused rather
     // than started in that worker's home with nothing to work on.
-    let homeless = new_task(&hub, Some(bare)).await;
-    let verb = Verb::TaskSpawn { project: project(), task: homeless, launch: anywhere.clone() };
+    let homeless = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task: homeless, launch: on(bare) };
     let said = refused(&hub.dispatch(verb).await, ErrorCode::Unplaced).to_owned();
-    assert!(said.contains("pin the task to one that has it"), "{said}");
+    assert!(said.contains("start the task on one that has it"), "{said}");
 
     drop((studio_lease, linux_lease));
-    let stranded = new_task(&hub, None).await;
+    let stranded = new_task(&hub).await;
     let verb = Verb::TaskSpawn { project: project(), task: stranded, launch: anywhere };
     let no = hub.dispatch(verb).await;
     let said = refused(&no, ErrorCode::Unplaced);
@@ -2098,9 +2044,9 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
     let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let launch = claude();
+    let launch = on(linux);
 
-    let task = new_task(&hub, Some(linux)).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: launch.clone() });
     let (id, verb) = request(&mut studio_rx).await;
     let Verb::BundleBranch { repo, branch, target, .. } = verb else { panic!("{verb:?}") };
@@ -2139,7 +2085,7 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
 
     // The start answers once placed, the target's trip still to go; one that fails then says
     // why on the card and to the orchestrator, and starts nothing.
-    let next = new_task(&hub, Some(linux)).await;
+    let next = new_task(&hub).await;
     let asked = hub.dispatch(Verb::TaskSpawn { project: project(), task: next, launch }).await;
     let Outcome::Task(placed) = asked else { panic!("{asked:?}") };
     let readying =
@@ -2160,7 +2106,7 @@ async fn a_task_elsewhere_starts_from_the_target_the_orchestrator_s_clone_holds(
     let failed = step_of(&hub, next).await.map(|s| s.state);
     assert!(matches!(failed, Some(StepState::Failed { .. })), "the card says so too: {failed:?}");
     assert!(linux_rx.try_recv().is_err(), "nothing started");
-    let again = spawn(&hub, Verb::TaskSpawn { project: project(), task: next, launch: claude() });
+    let again = spawn(&hub, Verb::TaskSpawn { project: project(), task: next, launch: on(linux) });
     let (id, verb) = request(&mut studio_rx).await;
     assert!(matches!(verb, Verb::BundleBranch { .. }), "a failed start holds no place: {verb:?}");
     answer(&studio_lease, id, Outcome::Error { code: ErrorCode::Failed, message: "no".to_owned() });
@@ -2181,8 +2127,8 @@ async fn a_task_starts_on_its_dependency_s_checked_branch() {
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
 
-    let builds = new_task(&hub, Some(studio)).await;
-    let verb = Verb::TaskSpawn { project: project(), task: builds, launch: claude() };
+    let builds = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task: builds, launch: on(studio) };
     let asked = spawn(&hub, verb);
     let start = request(&mut studio_rx).await;
     opened(&studio_lease, &start);
@@ -2209,12 +2155,11 @@ async fn a_task_starts_on_its_dependency_s_checked_branch() {
         title: "Use it".to_owned(),
         depends_on: vec![builds],
         start_from: Some(builds),
-        pin: Some(linux),
         ..TaskSpec::default()
     };
     let made = hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await;
     let Outcome::Task(after) = made else { panic!("{made:?}") };
-    let verb = Verb::TaskSpawn { project: project(), task: after.id, launch: claude() };
+    let verb = Verb::TaskSpawn { project: project(), task: after.id, launch: on(linux) };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut studio_rx).await;
     let Verb::BundleBranch { repo, branch, target, .. } = verb else { panic!("{verb:?}") };
@@ -2334,10 +2279,9 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let anywhere = claude();
 
-    let task = new_task(&hub, Some(linux)).await;
-    let verb = Verb::TaskSpawn { project: project(), task, launch: anywhere.clone() };
+    let task = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task, launch: on(linux) };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut linux_rx).await;
     let Verb::CloneRepo { url: asked_url, clone, .. } = verb else { panic!("{verb:?}") };
@@ -2386,8 +2330,8 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     );
 
     // The next task there finds the clone: no second one.
-    let next = new_task(&hub, Some(linux)).await;
-    let verb = Verb::TaskSpawn { project: project(), task: next, launch: anywhere.clone() };
+    let next = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task: next, launch: on(linux) };
     let asked = spawn(&hub, verb);
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
@@ -2397,8 +2341,8 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
 
     // A clone that fails: the orchestrator hears why, and so does the card.
     let (other, other_lease, mut other_rx) = worker_on(&hub, "other", Os::Linux, Vec::new());
-    let failing = new_task(&hub, Some(other)).await;
-    let verb = Verb::TaskSpawn { project: project(), task: failing, launch: anywhere };
+    let failing = new_task(&hub).await;
+    let verb = Verb::TaskSpawn { project: project(), task: failing, launch: on(other) };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut other_rx).await;
     assert!(matches!(verb, Verb::CloneRepo { .. }), "{verb:?}");
@@ -2426,9 +2370,8 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
     let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, Some(linux)).await;
-    let launch = claude();
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    let task = new_task(&hub).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on(linux) });
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
@@ -2544,9 +2487,8 @@ async fn a_merge_waiting_for_its_branch_outlives_a_restart() {
     let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, Some(linux)).await;
-    let launch = claude();
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    let task = new_task(&hub).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on(linux) });
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
@@ -2629,8 +2571,8 @@ async fn a_branch_on_its_way_home_waits_for_both_ends_after_a_restart() {
     let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, Some(linux)).await;
-    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
+    let task = new_task(&hub).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on(linux) });
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
     let start = request(&mut linux_rx).await;
     let term = opened(&linux_lease, &start);
@@ -2690,7 +2632,7 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let mut kept = hub.keep_projects();
     create(&hub, None).await;
-    new_task(&hub, None).await;
+    new_task(&hub).await;
     let mut pushed = hub.subscribe();
     let delete = || Verb::ProjectDelete { project: project() };
     let theirs = hub.dispatch_as(Speaker::Agent, None, delete()).await;
@@ -2726,7 +2668,7 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     mac_lease.handle(ToServer::Facts(installed(&["claude"])));
     linux_lease.handle(ToServer::Facts(installed(&["codex"])));
     create(&hub, None).await;
-    let docs = new_task(&hub, None).await;
+    let docs = new_task(&hub).await;
     let codex = |pin: Option<WorkerId>| TaskLaunch { pin, agent: AgentId::named(AgentId::CODEX) };
     let spawn_verb =
         |task: TaskId, launch: TaskLaunch| Verb::TaskSpawn { project: project(), task, launch };
@@ -2916,7 +2858,7 @@ async fn the_orchestrator_says_where_the_goal_stands() {
     refused(&hub.dispatch(say("  ", false)).await, ErrorCode::Invalid);
     let long = "x".repeat(Progress::TEXT_MAX + 1);
     refused(&hub.dispatch(say(&long, false)).await, ErrorCode::Invalid);
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);

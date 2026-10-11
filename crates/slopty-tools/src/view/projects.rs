@@ -199,9 +199,6 @@ pub struct TaskView<'a> {
     title: &'a str,
     brief: &'a str,
     read_only: bool,
-    /// The worker it runs on and no other.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pin: Option<WorkerId>,
     verifier: Option<&'a str>,
     metadata: Option<Value>,
     state: &'static str,
@@ -276,9 +273,6 @@ pub struct CardView<'a> {
     state: &'static str,
     status: Option<&'a str>,
     term: Option<String>,
-    /// The worker it is pinned to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pin: Option<WorkerId>,
     agent_since_ms: Option<WallMs>,
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
@@ -313,7 +307,6 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         state: state_word(t.state),
         status: t.status.as_deref(),
         term: t.assignment.as_ref().map(|a| term_string(a.term)),
-        pin: t.pin,
         agent_since_ms: t.assignment.as_ref().map(|a| a.since_ms),
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
@@ -372,7 +365,6 @@ pub fn task(t: &Task) -> TaskView<'_> {
         title: &t.title,
         brief: &t.brief,
         read_only: t.read_only,
-        pin: t.pin,
         verifier: t.verifier.as_deref(),
         metadata: metadata(t.metadata.as_deref()),
         state: state_word(t.state),
@@ -681,10 +673,6 @@ pub fn status_text<S: std::hash::BuildHasher>(
         );
         if let Some(status) = &t.status {
             let _infallible = writeln!(out, "{indent}   {status}");
-        }
-        if let Some(pin) = t.pin {
-            let worker = names.get(&pin).cloned().unwrap_or_else(|| pin.to_string());
-            let _infallible = writeln!(out, "{indent}   runs on {worker}");
         }
         if !t.depends_on.is_empty() {
             let on: Vec<String> = t.depends_on.iter().map(|d| format!("#{d}")).collect();

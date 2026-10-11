@@ -38,7 +38,7 @@ async fn any_agent_runs_a_task_as_a_thread() {
     mac_lease.handle(ToServer::Facts(installed(&["claude"])));
     linux_lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let spawn_verb = |launch| Verb::TaskSpawn { project: project(), task, launch };
     let pi = || AgentId::named(AgentId::PI);
 
@@ -174,7 +174,7 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let pi = AgentId::named(AgentId::PI);
     let asked =
         spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) });
@@ -247,7 +247,7 @@ async fn a_thread_task_s_card_shows_its_thread_s_failing_pull_request() {
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let pi = AgentId::named(AgentId::PI);
     let asked =
         spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) });
@@ -290,7 +290,7 @@ async fn a_task_goes_to_another_agent_and_starts_fresh() {
     mac_lease.handle(ToServer::Facts(installed(&["pi", "codex"])));
     lease.handle(ToServer::Facts(installed(&["pi", "codex"])));
     create(&hub, None).await;
-    let task = new_task(&hub, None).await;
+    let task = new_task(&hub).await;
     let pi = AgentId::named(AgentId::PI);
     let codex = AgentId::named(AgentId::CODEX);
     let restart = |agent| Verb::TaskRestart { project: project(), task, agent };

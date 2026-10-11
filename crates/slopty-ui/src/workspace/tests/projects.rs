@@ -1421,9 +1421,8 @@ fn a_finished_task_is_reviewed_from_the_board(cx: &mut TestAppContext) {
     assert_eq!(opened(&view, cx).len(), 1, "the open tile takes the focus, no second one");
 }
 
-/// Every card says where it is at a glance: the worker and its system, a pinned one's card
-/// saying why it is there. Its place is only words: where a task runs is the orchestrator's to
-/// choose.
+/// Every card says where it is at a glance: the worker and its system. Its place is only
+/// words: where a task runs is the orchestrator's to choose.
 #[gpui::test]
 fn every_card_says_where_it_runs(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -1433,20 +1432,13 @@ fn every_card_says_where_it_runs(cx: &mut TestAppContext) {
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let running = on(card(1, "Wire the board", TaskState::Running), worker, agent);
-    let mut pinned = card(3, "Golden files", TaskState::Planned);
-    pinned.pin = Some(worker);
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
         v.project_update(11, task_changed("board", running, None), cx);
-        v.project_update(12, task_changed("board", pinned, None), cx);
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
-    for task in ["1", "3"] {
-        let id = format!("project-card-project-node-{task}-where");
-        assert!(cx.debug_bounds(Box::leak(id.clone().into_boxed_str())).is_some(), "{id}");
-    }
-    assert!(cx.debug_bounds("project-card-3-why").is_some(), "a pin says why it is there");
+    assert!(cx.debug_bounds("project-card-project-node-1-where").is_some());
     let said = labels(&view, cx);
     let card1 = said.iter().find(|l| l.starts_with("Wire the board")).expect("task 1's card");
     assert!(card1.contains("studio \u{b7} macOS"), "{card1}");
@@ -1454,10 +1446,9 @@ fn every_card_says_where_it_runs(cx: &mut TestAppContext) {
         said.iter().any(|l| l.starts_with("Runs on studio, macOS. Branch slopty/board/1")),
         "{said:?}"
     );
-    assert!(said.iter().any(|l| l.starts_with("Pinned to studio, macOS")), "{said:?}");
 
-    click(cx, "project-card-project-node-3-where");
-    assert_eq!(sent(&mut queue, cx, done), [], "a place still to come stays words");
+    click(cx, "project-card-project-node-1-where");
+    assert_eq!(sent(&mut queue, cx, done), [], "a place stays words");
 }
 
 /// The board sets how its project's work is checked: the header's toggle opens a panel holding
@@ -1763,11 +1754,9 @@ fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
-    let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let mut pinned = card(3, "Golden files", TaskState::Planned);
     pinned.depends_on = vec![TaskId(1)];
-    pinned.pin = Some(worker);
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
         v.project_update(11, task_changed("board", pinned, None), cx);
@@ -1791,7 +1780,7 @@ fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     let [Verb::TaskSpawn { task: TaskId(3), launch, .. }] = spawned.as_slice() else {
         panic!("a spawn: {spawned:?}");
     };
-    assert_eq!(launch.pin, Some(worker), "on its pin");
+    assert_eq!(launch.pin, None, "where the server places it");
     assert!(launch.agent.is(AgentId::CLAUDE_CODE), "by the orchestrator's agent");
 
     let start = crate::project::model::TaskAction::Start;

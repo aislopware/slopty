@@ -1,9 +1,9 @@
 //! Project: one goal worked on by many agents across the fleet (`docs/decisions/projects.md`).
 //!
 //! A [`Project`] lives on the server. Its [`Task`]s are its orchestrator's, one level under it,
-//! and form a graph by [`Task::depends_on`]. Each may be pinned to a
-//! worker ([`Task::pin`]) and, once something runs for it, names that terminal, or the thread any
-//! agent runs as ([`Assignment`]): Claude Code, Codex, pi or an ACP agent ([`TaskLaunch`]).
+//! and form a graph by [`Task::depends_on`]. Each runs where its orchestrator starts it
+//! ([`TaskLaunch`]) and, once something runs for it, names that terminal, or the thread any
+//! agent runs as ([`Assignment`]): Claude Code, Codex, pi or an ACP agent.
 //! Claude Code's own subagents and task list inside a session show as
 //! [`Natives`] of its node. Everything that happens is kept in the project's timeline
 //! ([`TimelineEntry`]) and pushed to every client as a [`ProjectUpdate`], so the tree is followed
@@ -746,8 +746,6 @@ pub struct TaskSpec {
     pub brief: String,
     /// It only reads.
     pub read_only: bool,
-    /// The worker it runs on and no other; the server places it when absent.
-    pub pin: Option<WorkerId>,
     /// Its own verifier, over the project's.
     pub verifier: Option<String>,
     /// Anything its agents keep with it: the text of a JSON object.
@@ -775,8 +773,6 @@ pub struct Task {
     pub brief: String,
     /// It only reads.
     pub read_only: bool,
-    /// The worker it runs on and no other; the server places it when absent.
-    pub pin: Option<WorkerId>,
     /// Its own verifier, over the project's.
     pub verifier: Option<String>,
     /// Anything its agents keep with it: the text of a JSON object.
@@ -1153,7 +1149,6 @@ impl Task {
             verified: self.verified.clone(),
             merge: self.merge.clone(),
             step: self.step.clone(),
-            pin: self.pin,
             spent: self.spent,
             natives: natives.counts(),
             created_ms: self.created_ms,
@@ -1200,9 +1195,6 @@ pub struct TaskCard {
     pub merge: Option<Merge>,
     /// What the server last did for it around its agent.
     pub step: Option<TaskStep>,
-    /// The worker it is pinned to, as the person said with the CLI's `--run-on`. A start that
-    /// names a worker ([`TaskLaunch::pin`]) goes there over it.
-    pub pin: Option<WorkerId>,
     /// How long its agents worked on it, idle waits left out.
     pub spent: Spent,
     /// How many natives its node holds.
@@ -1534,21 +1526,10 @@ pub struct TaskChange {
     pub note: Option<String>,
     /// New dependencies, in place of the old.
     pub depends_on: Option<Vec<TaskId>>,
-    /// Where it runs: what the person's "Run on" sets.
-    pub run_on: Option<RunOn>,
     /// A new verifier of its own.
     pub verifier: Option<String>,
     /// New metadata, in place of the old.
     pub metadata: Option<String>,
-}
-
-/// Where a task runs, as [`TaskChange::run_on`] says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum RunOn {
-    /// On this worker and no other: its pin.
-    Worker(WorkerId),
-    /// Wherever the server places it: no pin.
-    Anywhere,
 }
 
 /// How to start a task's agent: in a git worktree of its own beside a clone of the project's
@@ -1556,7 +1537,7 @@ pub enum RunOn {
 /// [`Autonomy`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskLaunch {
-    /// This worker, over the task's pin; the server places it when absent.
+    /// This worker; the server places it when absent.
     pub pin: Option<WorkerId>,
     /// The agent: Claude Code, Codex, pi or an ACP agent; it goes only to a worker that has it.
     pub agent: crate::thread::AgentId,

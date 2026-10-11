@@ -902,7 +902,6 @@ async fn task_create<D: Dispatch>(
         title: new.title,
         brief: new.brief,
         read_only: new.read_only,
-        pin: None,
         verifier: new.verifier,
         metadata: new.metadata,
     };
@@ -952,7 +951,7 @@ pub enum Which {
 /// starts work, so a start means one thing wherever it is asked.
 ///
 /// Its `agent` (by [`agent_id`]'s names; Claude Code when absent) starts on `worker` (by name or
-/// id, over the task's pin; one with room when absent), told the task's brief
+/// id; one with room when absent), told the task's brief
 /// ([`Verb::TaskSpawn`]). A new task that is made but refused its start is kept, and the refusal
 /// says its number, so a later start names it rather than making it again.
 ///

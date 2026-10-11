@@ -24,10 +24,9 @@ use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, Autonomy, BRIEF_MAX, DEPENDS_MAX, GiveBacks, KIND_MAX,
     Limits, LimitsChange, Live, METADATA_MAX, Merge, Moment, NOTE_MAX, Native, NativeAgent,
     NativeChange, Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Progress, Project, ProjectStatus,
-    ProjectUpdate, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch,
-    TASKS_MAX, TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES,
-    TITLE_MAX, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry,
-    VerifierRun,
+    ProjectUpdate, REF_MAX, Report, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch, TASKS_MAX,
+    TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, TITLE_MAX,
+    Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 /// What the person bounds, for the binary that reads it from their settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -1349,7 +1348,6 @@ impl Projects {
             title,
             brief: spec.brief,
             read_only: spec.read_only,
-            pin: spec.pin,
             verifier: verifier(spec.verifier)?,
             metadata: metadata(spec.metadata)?,
             state: TaskState::Planned,
@@ -1374,7 +1372,7 @@ impl Projects {
         Ok((task, vec![update]))
     }
 
-    /// Change a task: move it, set its status, dependencies, pin, verifier or metadata, record
+    /// Change a task: move it, set its status, dependencies, verifier or metadata, record
     /// its branch or its verifier's word, note something. The
     /// person's change is their word on it: a failure held past its give-backs is theirs now,
     /// and its count starts again.
@@ -1453,14 +1451,6 @@ impl Projects {
             // The person's word that it no longer needs that task: it merges with what it holds.
             t.start_from = t.start_from.filter(|on| deduped.contains(on));
             t.depends_on = deduped;
-        }
-        if let Some(run_on) = change.run_on {
-            let pin = match run_on {
-                RunOn::Worker(worker) => Some(worker),
-                RunOn::Anywhere => None,
-            };
-            quiet |= t.pin != pin;
-            t.pin = pin;
         }
         if let Some(verifier) = change.verifier {
             let verifier = words(Some(verifier));

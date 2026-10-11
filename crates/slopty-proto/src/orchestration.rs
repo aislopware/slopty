@@ -653,7 +653,7 @@ pub enum Verb {
         /// This worker only; every one when absent.
         worker: Option<WorkerId>,
     },
-    /// One node of a project's tree in full: a task with its brief, pin and metadata, or the
+    /// One node of a project's tree in full: a task with its brief and metadata, or the
     /// orchestrator's node, each with the natives Claude Code keeps in it. Answered with
     /// [`Outcome::Node`].
     TaskGet {
@@ -1007,6 +1007,21 @@ pub enum Verb {
         repo: String,
         /// The branch, by name.
         branch: String,
+    },
+    /// Server → worker: which of `heads` the forge's `target` holds, after one fetch of it
+    /// from `origin` in the clone at `repo`: merged work a push made outside Slopty took there
+    /// ([`crate::project::Merge::Merged`]'s `pushed`). A head the clone does not have is not
+    /// held. Answered with [`Outcome::OnOrigin`]; a fetch that fails is
+    /// [`ErrorCode::Failed`], saying why.
+    OnOrigin {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The branch on `origin`.
+        target: String,
+        /// The commits asked about, in hex.
+        heads: Vec<String>,
     },
 }
 
@@ -1594,6 +1609,12 @@ pub enum Outcome {
     },
     /// For [`Verb::Settings`]: the daemon's settings file as it stands.
     Settings(Box<crate::settings::DaemonSettings>),
+    /// For [`Verb::OnOrigin`]: those of the heads asked about that the forge's branch holds, in
+    /// the order asked.
+    OnOrigin {
+        /// The commits, in hex.
+        heads: Vec<String>,
+    },
 }
 
 /// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`] or a [`Verb::SendMessage`]

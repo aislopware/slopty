@@ -3044,7 +3044,27 @@ reordering and edited allows are gone" in `agents.md`.*
   2026-10-11 entry on the person's pin. A project is its orchestrator, and the board lost
   "Run on…" (item 3), so the person no longer moves a task between machines from the GUI. The
   notice (`Hub::pinned`) and its test are deleted.
-  - The CLI's `slopty project task update --run-on` still sets a planned task's pin. The
-    orchestrator reads it on the task (`project_status`, `task_get`), and a start that names no
-    worker goes there.
-  - `Task.pin`'s doc no longer names "Run on".
+  - `Task.pin`'s doc no longer names "Run on". The pin itself went next (the entry below).
+
+- ✅ **A task has no pin: the orchestrator places work when it starts it** (2026-10-11, the
+  orchestrator-first study, item 3). The CLI's `--run-on` was the last way to pin a task. It
+  set a pin the orchestrator never heard of, so where a task ran had two sources of truth, one
+  of them hidden. Under orchestrator-first, placing work is the orchestrator's job: it names the
+  worker in `task_start`, or lets the server place the task. A person who wants a machine tells
+  the orchestrator.
+  - **Gone from `slopty-proto`.** `Task.pin`, `TaskSpec.pin`, `TaskCard.pin`,
+    `TaskChange.run_on` and `RunOn`. The project goldens moved once. `TaskLaunch.pin`, the
+    worker a start names, stays.
+  - **Gone elsewhere.** The server's fallback from the start's worker to the task's pin
+    (`placement_for`); the pin in `project_status` and `task_get` (JSON and text); the CLI's
+    `slopty project task update --run-on`; and the board's "Pinned to" place. A task not started
+    yet has no place, and its card's Start lets the server place it.
+  - Words: a start the server cannot place on a named worker says "it names worker …", and one
+    with no clone says to "start the task on one that has it".
+  - Tests: the server's start tests now name the worker at start (`on(worker)`).
+    `a_start_s_pin_goes_over_the_task_s` and
+    `a_task_runs_where_the_person_says_and_keeps_why_it_went_there` are deleted with their
+    behaviour, and `a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task` is now
+    `a_task_started_on_a_worker_is_spawned_there_and_put_on_its_task`. The board tests
+    `a_node_says_where_it_runs`, `every_card_says_where_it_runs` and
+    `a_task_never_started_is_started_from_its_card` lose their pinned cases.

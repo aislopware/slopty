@@ -237,7 +237,7 @@ pub enum TaskAction {
     Merge,
     /// Check it again from the start, and merge it if it passes.
     Retry,
-    /// Start a task not started yet with an agent of the person's, on its pin when it has one
+    /// Start a task not started yet with an agent of the person's, where the server places it
     /// ([`slopty_proto::orchestration::Verb::TaskSpawn`]): the orchestrator need not be there.
     Start,
     /// Tell its agent, as the person, to make its failed verifier pass.
@@ -552,8 +552,8 @@ impl Board {
         Some((card.assignment.as_ref()?.term.worker, path.clone()))
     }
 
-    /// Where `node` runs, ran last, is pinned to or would start, with the worktree and branch
-    /// its work is in and why it went there: the board's map of the fleet, row by row.
+    /// Where `node` runs or ran last, with the worktree and branch its work is in: the board's
+    /// map of the fleet, row by row. A task not started yet is nowhere.
     #[must_use]
     pub fn place(&self, node: Node) -> Option<Place> {
         let Some(task) = node else {
@@ -572,8 +572,7 @@ impl Board {
             let how = if a.open() { PlaceHow::Runs } else { PlaceHow::Ran };
             return Some(Place { worker: a.term.worker, how, worktree, branch, why: None });
         }
-        let why = Some("pinned".to_owned());
-        Some(Place { worker: card.pin?, how: PlaceHow::Pinned, worktree, branch, why })
+        None
     }
 
     /// The worker a node runs on, or ran on last.
