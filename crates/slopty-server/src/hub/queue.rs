@@ -1228,6 +1228,96 @@ impl Hub {
         }
         Outcome::Task(Box::new(card))
     }
+
+    /// The person lands `project`'s finished goal ([`Verb::ProjectLand`]): its target, the
+    /// project's own branch as the orchestrator's clone has it, goes to `origin` and into a
+    /// pull request found or opened there into `into`, else the branch the target was made
+    /// from. That push takes the whole branch, so every merged task's card says it was pushed
+    /// ([`Projects::pushed_with`]), and the timeline names the pull request.
+    ///
+    /// [`Projects::pushed_with`]: crate::project::Projects::pushed_with
+    pub(super) async fn project_land(
+        &self,
+        caller: Caller,
+        project: &ProjectId,
+        into: Option<String>,
+    ) -> Outcome {
+        if caller == Caller::Agent {
+            return error(
+                ErrorCode::Forbidden,
+                "whether a goal's work goes to the forge is the person's choice, so only the \
+                 person lands it",
+            );
+        }
+        let read = {
+            let state = self.inner.state.lock();
+            state.projects.project(project).cloned().map(|record| {
+                let clone = orchestrator_clone(&state, &record);
+                (record, clone)
+            })
+        };
+        let (record, clone) = match read {
+            Ok(read) => read,
+            Err(refused) => return error(ErrorCode::Invalid, &said(&refused)),
+        };
+        let target = record.target.clone();
+        let into = into.map(|i| i.trim().to_owned()).filter(|i| !i.is_empty());
+        let Some(into) = into.or_else(|| record.base.clone()) else {
+            return error(
+                ErrorCode::Invalid,
+                &format!(
+                    "{target} was not made from a branch Slopty knows: name the branch its pull \
+                     request goes into"
+                ),
+            );
+        };
+        if into == target {
+            return error(ErrorCode::Invalid, &format!("its work lands on {into} already"));
+        }
+        let (worker, repo) = match clone {
+            Ok(Some(place)) => place,
+            Ok(None) => {
+                return error(
+                    ErrorCode::Invalid,
+                    "the project has no orchestrator, in whose clone its work was merged",
+                );
+            }
+            Err((_, why)) => return error(ErrorCode::Invalid, &why),
+        };
+        let title = match record.goal.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+            Some(goal) => goal.lines().next().unwrap_or(goal).to_owned(),
+            None => record.title.clone(),
+        };
+        let mut body = format!(
+            "The work of the Slopty project {project}, merged one task at a time on {target} by \
+             its merge queue."
+        );
+        if let Some(progress) = &record.progress {
+            body.push_str("\n\n");
+            body.push_str(&progress.summary);
+        }
+        let land = Verb::LandPull {
+            worker,
+            repo,
+            head: format!("refs/heads/{target}"),
+            branch: target.clone(),
+            target: into.clone(),
+            title: crate::project::clipped(&title, slopty_proto::project::TITLE_MAX),
+            body,
+        };
+        let outcome = self.forward(None, land).await;
+        let Outcome::PullOpened { number, url } = &outcome else {
+            return error(ErrorCode::Failed, &format!("{target} did not land: {}", said(&outcome)));
+        };
+        let now = WallMs::now();
+        let mut state = self.inner.state.lock();
+        let mut changes = state.projects.pushed_with(project, &target, now);
+        let words = format!("{target} goes into {into} through pull request #{number}: {url}");
+        changes.extend(state.projects.note(project, None, &words, now));
+        self.projects_moved(&mut state, changes);
+        drop(state);
+        outcome
+    }
 }
 
 /// What a failed verifier tells the agent whose work it judged: what ran, on which commits,

@@ -634,6 +634,12 @@ impl Board {
         self.thread_in(term).map(|r| r.id)
     }
 
+    /// The terminal `thread` runs in on `worker` now, while its agent has not ended.
+    pub(super) fn running_at(&self, worker: WorkerId, thread: ThreadId) -> Option<SessionId> {
+        let row = self.tables.get(&worker)?.get(&thread)?;
+        if there(row) { seat_of(row) } else { None }
+    }
+
     /// The worker whose table holds `thread`.
     pub(super) fn worker_of(&self, thread: ThreadId) -> Option<WorkerId> {
         self.tables.iter().find(|(_, table)| table.contains_key(&thread)).map(|(w, _)| *w)

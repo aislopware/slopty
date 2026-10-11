@@ -670,6 +670,22 @@ pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Op
     })
 }
 
+/// The mode of pi's gate a task at `level` runs in ([`slopty_agent::pi::modes`]).
+const fn pi_mode(level: Autonomy) -> &'static str {
+    match level {
+        Autonomy::Ask => slopty_agent::pi::modes::ASK,
+        Autonomy::Edits => slopty_agent::pi::modes::EDITS,
+        Autonomy::Own => slopty_agent::pi::modes::OWN,
+    }
+}
+
+/// The branch `term`'s terminal has checked out, as its worker last said; none on a detached
+/// `HEAD` or outside a repository.
+fn checked_out(state: &State, term: TermRef) -> Option<String> {
+    let entry = state.workers.get(&term.worker)?;
+    entry.sessions.iter().find(|s| s.id == term.session)?.branch.clone()
+}
+
 /// What an agent started for `task` is told of its role, beside Claude Code's own prompt.
 fn agent_role(project: &Project, task: &Task, at: Option<&Place>, on: Option<TaskId>) -> String {
     let mut lines = vec![
@@ -958,6 +974,36 @@ impl Hub {
         }
     }
 
+    /// Follow the orchestrators on `worker` as its table says: each one's thread is kept once
+    /// it shows in the orchestrator's terminal, and an orchestrator whose session was taken up
+    /// in another terminal there (`claude --resume`, the same thread) is the project's again in
+    /// that terminal, where what waits for it goes.
+    pub(super) fn follow_orchestrators(&self, state: &mut State, worker: WorkerId) {
+        let now = WallMs::now();
+        let mut moved = Vec::new();
+        let mut followed = false;
+        for (project, term, known) in state.projects.orchestrated_on(worker) {
+            let Some(thread) = known.or_else(|| state.board.thread_at(term)) else { continue };
+            let at = state
+                .board
+                .running_at(worker, thread)
+                .filter(|session| *session != term.session)
+                .map(|session| TermRef { worker, session });
+            if known == Some(thread) && at.is_none() {
+                continue;
+            }
+            if let Some(to) = at {
+                tracing::info!(%project, from = %term.session, to = %to.session, "orchestrator followed");
+            }
+            followed |= at.is_some();
+            moved.extend(state.projects.orchestrator_seen(&project, thread, at, now));
+        }
+        self.projects_moved(state, moved);
+        if followed {
+            self.unpark_deliveries(state);
+        }
+    }
+
     /// `verb`, a project to make, with the branch its work lands on: one it names, else a branch
     /// of its own ([`Task::goal_branch`]) made first in its repository on the orchestrator's
     /// worker at the tip of what is checked out there, so a goal never lands on the person's
@@ -1072,6 +1118,11 @@ impl Hub {
                 limits,
                 metadata,
             } => known_term(state, orchestrator).and_then(|()| {
+                // The project's own branch was made from what the orchestrator's checkout has
+                // checked out, which its finished goal lands into.
+                let base = orchestrator
+                    .filter(|_| target == Task::goal_branch(&project))
+                    .and_then(|term| checked_out(state, term));
                 let new = NewProject {
                     id: project,
                     title,
@@ -1079,6 +1130,7 @@ impl Hub {
                     autonomy,
                     repo,
                     target,
+                    base,
                     verifier,
                     push,
                     orchestrator,
@@ -1754,7 +1806,8 @@ impl Hub {
         let repo = state.projects.project(project)?.repo_id.as_ref();
         let clone =
             launch.cwd.trim().is_empty() && repo.is_some_and(|id| id.keys().next().is_some());
-        Ok(Wanted { pin, agent: Some(installed(&launch.agent)), clone })
+        let fetchable = repo.is_some_and(|id| id.url.is_some());
+        Ok(Wanted { pin, agent: Some(installed(&launch.agent)), clone, fetchable })
     }
 
     /// Everything a start checks before it is placed, read together: what it asks of its
@@ -2093,13 +2146,15 @@ impl Hub {
                     pull: None,
                     setup: true,
                 });
+                let pi = agent.is(AgentId::PI);
                 let start = Start {
                     agent,
                     cwd,
                     drive: None,
                     prompt,
                     model: None,
-                    mode: None,
+                    // pi runs under Slopty's gate, whose mode is the project's level.
+                    mode: pi.then(|| pi_mode(level).to_owned()),
                     effort: None,
                     attachments: Vec::new(),
                     args: Vec::new(),
@@ -2617,6 +2672,7 @@ mod tests {
             title: "Big".to_owned(),
             repo: "~/src/big".to_owned(),
             target: "main".to_owned(),
+            base: None,
             verifier: None,
             push: false,
             orchestrator: None,

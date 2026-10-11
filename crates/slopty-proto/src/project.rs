@@ -450,6 +450,11 @@ pub struct Project {
     pub repo_id: Option<RepoId>,
     /// The branch finished work lands on.
     pub target: String,
+    /// The branch [`Self::target`] was made from when it is the project's own
+    /// ([`Task::goal_branch`]): what the orchestrator's checkout had checked out then, which
+    /// the finished goal's pull request goes into ([`crate::orchestration::Verb::ProjectLand`]).
+    /// None for a target the person named, or one made from a detached `HEAD`.
+    pub base: Option<String>,
     /// The command that says a task's work is right (`cargo gate`), when there is one.
     pub verifier: Option<String>,
     /// Whether the merge queue pushes the target branch to its clone's `origin` after each
@@ -457,6 +462,10 @@ pub struct Project {
     pub push: bool,
     /// The terminal of the agent the person talks to, which splits the goal into tasks.
     pub orchestrator: Option<TermRef>,
+    /// The orchestrator's thread, once its worker's table showed it in [`Self::orchestrator`]:
+    /// the same across a resume of its session in another terminal, which the project then
+    /// follows, and the door to resume it while its agent has ended.
+    pub orchestrator_thread: Option<crate::thread::ThreadId>,
     /// How long the orchestrator worked, idle waits left out: its share, apart from its
     /// tasks'.
     pub orchestrator_spent: Spent,

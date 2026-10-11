@@ -932,9 +932,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `ssh` came from (`$SSH_CONNECTION`), and the server refuses a LAN address unless
     `[server] allow` lists it, which it does not by default.
   - **The server.** A worker that dialed over loopback while listening on every interface is
-    watched for as long as it stays linked (`link::republish`, every 10 s). Once this node has
-    a tailnet address, `Lease::republish` lists the worker there on its own port, tells every
-    client and saves the listing. A worker bound to one address, or one that dialed from
+    watched while it is published at loopback (`link::republish`, every 10 s). Once this node
+    has a tailnet address, `Lease::republish` lists the worker there on its own port, tells
+    every client and saves the listing, and the watch stops (2026-10-11, readiness-w 10-11): a
+    node's tailnet address does not move, so asking Tailscale's local API every 10 s for the
+    lease's life bought nothing. A worker bound to one address, or one that dialed from
     elsewhere, is never watched. A tailnet that goes down again does not move it back to
     loopback: an address that stops answering for a while beats one that never answers.
   - **The deploy.** When the host `ssh` connects to names a peer on this machine's tailnet (by

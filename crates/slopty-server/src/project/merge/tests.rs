@@ -29,6 +29,7 @@ fn logged(verifier: Option<&str>, log: &mut Vec<Change>) -> Projects {
         title: "Demo".to_owned(),
         repo: "demo".to_owned(),
         target: "main".to_owned(),
+        base: None,
         verifier: verifier.map(str::to_owned),
         push: false,
         orchestrator: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),

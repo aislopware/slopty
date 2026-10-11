@@ -985,9 +985,9 @@ impl Hub {
             Verb::ProjectDelete { .. } if caller == Caller::Agent => {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
-            verb @ (Verb::TaskPush { .. } | Verb::ProjectDelete { .. }) => {
-                self.once(caller, key, verb).await
-            }
+            verb @ (Verb::TaskPush { .. }
+            | Verb::ProjectLand { .. }
+            | Verb::ProjectDelete { .. }) => self.once(caller, key, verb).await,
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -1039,7 +1039,8 @@ impl Hub {
         }
     }
 
-    /// A push or a project let go, made once under `key`: a repeat answers as the first did.
+    /// A push, a goal landed or a project let go, made once under `key`: a repeat answers as the
+    /// first did.
     async fn once(&self, caller: Caller, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
         if let Some(key) = &key {
             let mut state = self.inner.state.lock();
@@ -1049,8 +1050,14 @@ impl Hub {
         }
         let outcome = match &verb {
             Verb::TaskPush { project, task } => self.task_push(caller, (project, *task)).await,
+            Verb::ProjectLand { project, into } => {
+                self.project_land(caller, project, into.clone()).await
+            }
             Verb::ProjectDelete { project } => self.project_delete(project),
-            _ => error(ErrorCode::Invalid, "only a push or a project let go is made once here"),
+            _ => error(
+                ErrorCode::Invalid,
+                "only a push, a landing or a project let go is made once here",
+            ),
         };
         if let Some(key) = key {
             remember(&mut self.inner.state.lock(), caller, key, &verb, &outcome);
@@ -1708,6 +1715,7 @@ impl Lease {
                 let now = WallMs::now();
                 let mut moved = Vec::new();
                 state.board.take(worker, frame);
+                hub.follow_orchestrators(&mut state, worker);
                 for (seat, settings) in state.board.codex_moves(worker) {
                     hub.codex_settings(&mut state, TermRef { worker, session: seat }, &settings);
                 }
@@ -1809,7 +1817,8 @@ fn remember(
         | Verb::TaskTell { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. }
-        | Verb::TaskPush { project, .. } => Some(project),
+        | Verb::TaskPush { project, .. }
+        | Verb::ProjectLand { project, .. } => Some(project),
         _ => None,
     };
     let answer = match (outcome, project) {
@@ -1964,6 +1973,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskReport { .. }
         | Verb::TaskMerge { .. }
         | Verb::TaskPush { .. }
+        | Verb::ProjectLand { .. }
         | Verb::ProjectDelete { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }

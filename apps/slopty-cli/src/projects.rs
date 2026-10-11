@@ -6,10 +6,12 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use slopty_proto::orchestration::IdempotencyKey;
+use slopty_proto::orchestration::{IdempotencyKey, Outcome, Verb};
 use slopty_proto::project::{
-    Autonomy, LimitsChange, ProjectStatus, Report, Task, TaskChange, TaskState, VerifierRun,
+    Autonomy, LimitsChange, ProjectId, ProjectStatus, Report, Task, TaskChange, TaskState,
+    VerifierRun,
 };
+use slopty_tools::Dispatch as _;
 use slopty_tools::ops::{self, NewTask, ProjectEdit, ProjectSpec, Which};
 use slopty_tools::resolve::Resolver;
 use slopty_tools::view::projects as view;
@@ -100,6 +102,15 @@ pub enum ProjectCmd {
         /// What to say.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
+    },
+    /// Land a finished goal, as the person: the project's own branch goes to the forge, into
+    /// one pull request found or opened there into the branch it was made from.
+    Land {
+        /// The project.
+        project: String,
+        /// The branch its pull request goes into, over the one its branch was made from.
+        #[arg(long)]
+        into: Option<String>,
     },
     /// Let a project go: its tasks, queue and timeline. The terminals that worked in it stay.
     Delete {
@@ -391,6 +402,21 @@ pub async fn project(
             println!("Told {project}'s orchestrator");
             Ok(())
         }
+        ProjectCmd::Land { project, into } => {
+            let Ok(project) = ProjectId::new(&project) else {
+                bail!("{project} is not a project's name");
+            };
+            match link.send(key, Verb::ProjectLand { project, into }).await {
+                Outcome::PullOpened { number, url } if json => {
+                    print_json(&serde_json::json!({ "number": number, "url": url }))
+                }
+                Outcome::PullOpened { number, url } => {
+                    println!("Pull request #{number}: {url}");
+                    Ok(())
+                }
+                other => Err(slopty_tools::ToolError::unexpected(other).into()),
+            }
+        }
         ProjectCmd::Delete { project } => {
             ops::project_delete(link, &project, key).await?;
             println!("Let {project} go");
@@ -591,5 +617,31 @@ mod tests {
         assert_eq!(agent, None, "the agent it ran last");
         let TaskCmd::Push { which } = parse(&["push", "--task", "#4"]).unwrap() else { panic!() };
         assert_eq!(which.task.as_deref(), Some("#4"));
+    }
+
+    #[derive(Parser, Debug)]
+    struct ProjectCli {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    }
+
+    /// `project land` names the project, and the branch to land into only when it is not the
+    /// one the project's branch was made from.
+    #[test]
+    fn land_names_its_project_and_maybe_where() {
+        let parse = |args: &[&str]| {
+            let args = std::iter::once("project").chain(args.iter().copied());
+            ProjectCli::try_parse_from(args).map(|c| c.cmd)
+        };
+        let ProjectCmd::Land { project, into } = parse(&["land", "demo"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!((project.as_str(), into), ("demo", None));
+        let ProjectCmd::Land { into, .. } = parse(&["land", "demo", "--into", "release"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(into.as_deref(), Some("release"));
+        assert!(parse(&["land"]).is_err(), "a project is named");
     }
 }

@@ -483,6 +483,7 @@ impl Orchestrator {
             | Verb::ProjectProgress { .. }
             | Verb::TaskMerge { .. }
             | Verb::TaskPush { .. }
+            | Verb::ProjectLand { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectList

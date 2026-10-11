@@ -72,9 +72,13 @@ mod golden_project {
                 url: Some("https://github.com/aislopware/slopty.git".to_owned()),
             }),
             target: "main".to_owned(),
+            base: None,
             verifier: Some("cargo gate".to_owned()),
             push: false,
             orchestrator: Some(term()),
+            orchestrator_thread: Some(ThreadId::from_uuid(Uuid::from_u128(
+                0x0199_a000_0000_7000_8000_0000_0000_0007,
+            ))),
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
             created_ms: at(),
@@ -630,6 +634,10 @@ mod golden_project {
             }),
         );
         snap("on_origin_held", &reply(Outcome::OnOrigin { heads: vec![commit('a')] }));
+        snap(
+            "project_land",
+            &request(Verb::ProjectLand { project: project_id(), into: Some("main".to_owned()) }),
+        );
         let edit = |key: &str, entry: Option<&str>, literal: Option<&str>| SettingEdit {
             table: "worker".to_owned(),
             key: key.to_owned(),

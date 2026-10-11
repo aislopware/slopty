@@ -216,9 +216,15 @@ merging on the person's word since 2026-10-04
 
 **Where a task starts.** ✅ 2026-09-30, narrowed 2026-10-04
 - A task runs on the worker its start names (`task_start`'s `worker`, a name or an id), or on
-  one the person picked with "Run on…". A start that names none goes to a worker with room:
-  beside a clone of the project's repository when the task named no directory and a worker has
-  one, then the fewest live agents, the least load per cpu, and the name.
+  one the person picked with "Run on…". A start that names none goes to the worker with the
+  fewest live agents, then the least load per cpu, then the name.
+- A clone of the project's repository, when the task named no directory, decides only among
+  workers within one live agent of the fewest (2026-10-11, readiness-w 10-11 rank 10). It used
+  to go first, so every task the orchestrator did not place piled onto the one machine with a
+  clone while another sat idle. A clone costs one fetch, and a pile-up holds the whole queue.
+  When the repository's address is not known, no clone can be made, so a worker with one still
+  goes first however busy it is. Test: `a_clone_does_not_pile_every_task_onto_one_machine`
+  (`placement/tests.rs`).
 - Wherever it goes, the worker is online and has the agent installed ("An agent goes only where
   it is installed, pinned or not", below). A start pinned to a worker that is offline or lacks
   the agent is refused and never moves elsewhere.
@@ -1785,8 +1791,17 @@ reordering and edited allows are gone" in `agents.md`.*
 - `slopty_proto::git` carries it to the worker code (`slopty_worker::repo::commit`). The
   app's commit sheet asks the worker straight, with `ClientMsg::Git { request, repo, op }`
   answered by `WorkerMsg::GitDone`. It rides the client's save queue, so a file saved and then
-  committed is committed as saved. A status or a commit runs in that order. A push or a pull
-  request waits on the network, so it runs beside later saves, after what came before.
+  committed is committed as saved. Each git op starts once the saves sent before it are on
+  disk, and after the earlier status, commit, review or worktree removal of its repository.
+  - It runs beside the saves sent after it (2026-10-11, readiness-w 10-11 rank 8). A save
+    waits only for a git op that holds its path: a commit holds the paths it commits, and a
+    worktree's removal holds everything under it. A committed path is matched by its last
+    components, so a file of the same name elsewhere waits as well, which costs a wait and
+    never commits half a save. A folder op waits for every op that holds paths. Before, a
+    status, commit, review or removal ran in the save loop itself, so a pre-commit hook that
+    ran for minutes held every save the client made. Test:
+    `a_long_commit_hook_holds_only_the_saves_of_what_it_commits` (`slopty-workerd` e2e, a
+    hook that waits on a fifo the test opens).
 - There is no `slopty git` (cut on 2026-10-04): a person or an agent at a shell already has git
   and gh, and no top-tier tool ships a git wrapper of its own.
 - `GitOp` is `Status`, `Commit { paths, message }`, `Push` and `PullRequest { title, body,
@@ -1823,6 +1838,11 @@ reordering and edited allows are gone" in `agents.md`.*
     `PATH` already. The op is scoped to that `PATH` (`Programs::scope`), so gh's and glab's
     reads, the pull-request watcher and the merge queue's landing run on it too. Test:
     `repo::commit::tests::a_hook_s_tool_is_found_on_the_person_s_path`.
+  - A login shell that does not say its `PATH` within `LOGIN_WAIT` (5 s) is left for a minute
+    (`LOGIN_RETRY`, 2026-10-11, readiness W item 6). Meanwhile git runs on the daemon's own
+    `PATH`, and the worker warns once. Before, a failed read was never kept, so a slow or
+    broken rc file added 5 s to every commit, push and forge read. Test:
+    `facts::tests::a_login_shell_that_failed_is_left_a_minute`.
   - A refusal comes back as `GitOutcome::Failed { said }`: the end of git's or gh's own words,
     at most `SAID_MAX`, such as a rejected push or a hook that failed.
   - What Slopty itself refuses is `Refused { why }`: no files chosen, an empty message,
@@ -3114,3 +3134,101 @@ reordering and edited allows are gone" in `agents.md`.*
       (`hub/queue/tests.rs`), which now answers the look;
     - `the_forge_says_which_merged_heads_it_holds` (slopty-worker, `repo/verify/tests.rs`),
       and the `on_origin` and `on_origin_held` goldens.
+
+- ✅ **A finished goal lands as one pull request into the branch it came from** (2026-10-11,
+  readiness-w 10-11 rank 1).
+  - **The gap.** When no target is named, merges land on the project's own branch
+    (`slopty/<project>/goal`). That branch was made from whatever the orchestrator's checkout
+    had checked out, but nothing recorded which branch that was. Once the goal was done,
+    nothing opened its pull request, so the work had no way back to the person's branch.
+  - **The base.** `Project.base` is the branch the project's own branch was made from: what
+    the orchestrator's terminal had checked out at create (`SessionSummary.branch`). It is
+    none for a target the person named, and none for a checkout on a detached `HEAD`.
+  - **The landing.** `Verb::ProjectLand { project, into }` is the person's alone; an agent is
+    refused.
+    - The project's branch goes from the orchestrator's clone to `origin` as itself, through
+      the queue's `LandPull`. The open pull request of that branch into `into` (else the base)
+      is found, or one is opened, titled with the goal's first line, and its body says where
+      the goal stands.
+    - The push takes the whole branch, so every merged task's card says it was pushed
+      (`Projects::pushed_with`).
+    - The timeline names the pull request, and the answer is `Outcome::PullOpened`. A repeat
+      finds the same pull request.
+    - A project with no base and no `into` is refused, asking for the branch. So is one asked
+      to land on its own target.
+  - **Doors.** `slopty project land <project> [--into <branch>]`, and the board's head once
+    the goal is done (the UI's half).
+  - Rejected: merging the goal branch into the person's branch locally. A pull request is how
+    every forge the person uses reviews and merges, and the person always merges.
+  - Tests: `a_finished_goal_lands_through_one_pull_request_into_where_it_came_from`
+    (`hub/project_tests.rs`); `land_names_its_project_and_maybe_where` (slopty-cli); the
+    `project_land` golden, and the project goldens, which moved for `base`.
+
+- ✅ **An orchestrator resumed in another terminal is followed** (2026-10-11, readiness-w
+  10-11 rank 2, the server's half).
+  - **The gap.** `Project.orchestrator` changed only on `ProjectSet`, which the GUI sends
+    only at create. An orchestrator whose Claude Code exited, resumed from its thread
+    (`claude --resume` in a new terminal), ran under a new terminal id the project never
+    learned. The reports for it then waited for a terminal that never came back.
+  - **The thread.** `Project.orchestrator_thread` is the orchestrator's thread, kept once its
+    worker's table shows that thread in the orchestrator's terminal. A Claude Code session is
+    one thread across a resume in another terminal ("A thread per Claude Code session" in
+    `agents.md`). A `ProjectSet` that names another orchestrator clears it, to be learned
+    again.
+  - **Following.** When the worker's table shows that thread running in another terminal
+    there, that terminal becomes the project's orchestrator (`Hub::follow_orchestrators`,
+    on every table frame). The timeline says so (`Moment::Orchestrator`), and the reports that
+    waited go there.
+  - **The door.** While the orchestrator's agent has ended, its thread is the way back: the
+    board opens it, and its Resume takes the session up (the UI's half). No verb of its own is
+    needed.
+  - Tests: `an_orchestrator_resumed_in_another_terminal_is_followed`
+    (`hub/project_tests.rs`); the project goldens, which moved for `orchestrator_thread`.
+
+- ✅ **A pull request's worktree pushes to the branch it tracks, and a failed commit stages
+  nothing** (2026-10-11, readiness-w 10-11 ranks 3 and 9). This refines "The person commits,
+  pushes and opens a pull request from any thread".
+  - **Push.** A worktree made from a pull request has a branch of its own name
+    (`worktree-<n>`) that tracks the pull request's branch. A bare `git push` there is fatal
+    under git's default `push.default=simple`, because the names differ. That was reproduced:
+    "The upstream branch of your current branch does not match the name of your current
+    branch". A branch with an upstream now pushes `HEAD:refs/heads/<the branch it tracks>` to
+    that branch's remote, by name, and the answer names that branch.
+    - One that tracks a fork's head (`refs/pull/<n>/head`, `refs/merge-requests/<n>/head`)
+      is refused in words, since no forge takes a push to those refs. It used to fall through
+      to pushing a new branch of its own name and tracking that instead.
+    - A branch with no upstream is pushed and tracked as before.
+  - **Commit.** The chosen paths are staged (`git add --all`) for `git commit --only`. A hook
+    that refused the commit used to leave them staged, though the person never staged them.
+    Now the index entries of those paths, read before (`git ls-files --stage`), are put back
+    (`git reset`, then `git update-index --index-info`). A path the person had staged stays
+    staged as it was.
+  - Tests: `a_branch_tracking_another_name_pushes_to_the_one_it_tracks` and the failing hook
+    in `a_refusal_is_said_in_git_s_own_words` (slopty-worker `repo/commit/tests.rs`).
+
+- ✅ **A task's Codex comes back after a reboot** (2026-10-11, readiness-w 10-11 rank 5). This
+  extends "Sessions come back after a reboot" (`terminal.md`), which brought back Claude Code
+  alone.
+  - **The gap.** A task's Codex runs as its terminal's own command. A reboot reopened that
+    terminal as a plain shell under the same id, so the task still read as running while
+    nothing worked.
+  - **How.** The worker reopens it as `codex resume --last` in the directory it was opened in,
+    with the flags it was started with: its role (`-c developer_instructions`), the policy and
+    sandbox the server pinned, the model, and how its TUI draws. The brief and its images
+    were sent already, so they are not kept. `--worktree` is not kept either, since it would
+    make another worktree. Slopty's tools are given afresh, as they were at the open
+    (`Manager::codex_tools`).
+  - **Why `--last`.** Codex takes no conversation id at the start, and a TUI started as a
+    terminal's command tells the worker no thread id: when no daemon runs, the worker never
+    sees its thread. `--last` is Codex's own door to the conversation last updated in a
+    directory. It is exact only where no other conversation shares that directory, so it is
+    used only in a linked worktree (its `.git` is a file), which the worker makes for one
+    writing task. Codex's `worktrees` feature is turned off for the run, because with it on
+    (the default) the lookup also takes in every sibling worktree of the repository
+    (`codex-rs/tui/src/resume_picker.rs`, `repository_cwd_filter`).
+  - **Otherwise the shell alone.** That covers a task outside a worktree of its own, a
+    directory that is gone, a Codex the person opened (its terminal names no project), and a
+    flag Slopty does not know, which is never guessed at. Each case leaves one line in the log.
+  - Rejected: matching the daemon's threads to terminals by directory and start time. That is
+    a guess, and with no daemon running there are no threads to match.
+  - Test: `restore::tests::a_task_s_codex_comes_back_resumed_in_its_worktree` (slopty-worker).

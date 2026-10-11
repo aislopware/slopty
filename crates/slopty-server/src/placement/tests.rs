@@ -75,6 +75,23 @@ fn equal_workers_go_beside_a_clone_then_to_the_least_busy_then_by_name() {
     assert_eq!(choose(&fleet, &beside), Ok(fleet[0].worker));
 }
 
+/// A clone decides only among workers about as busy: an idle machine without one is taken over
+/// one with a clone and three agents, since a clone costs a fetch. Where none can be made, the
+/// clone goes first however busy it is.
+#[test]
+fn a_clone_does_not_pile_every_task_onto_one_machine() {
+    let mut fleet = [worker("cloned", 8, 1.0), worker("idle", 8, 1.0)];
+    fleet[0].clone = true;
+    fleet[0].fleet_live = 3;
+    let beside = Wanted { clone: true, fetchable: true, ..Wanted::default() };
+    assert_eq!(choose(&fleet, &beside), Ok(fleet[1].worker), "the idle one makes a clone");
+    fleet[0].fleet_live = 1;
+    assert_eq!(choose(&fleet, &beside), Ok(fleet[0].worker), "within one agent, the clone");
+    fleet[0].fleet_live = 3;
+    let unfetchable = Wanted { fetchable: false, ..beside };
+    assert_eq!(choose(&fleet, &unfetchable), Ok(fleet[0].worker), "no clone can be made");
+}
+
 /// A worker's facts are kept within their bounds as it reports them: a long text is cut at a
 /// character, a long list keeps its first items, and past the bytes in all the rest is
 /// dropped in name order.

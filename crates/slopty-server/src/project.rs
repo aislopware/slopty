@@ -466,6 +466,8 @@ pub(crate) struct NewProject {
     pub autonomy: Autonomy,
     pub repo: String,
     pub target: String,
+    /// The branch `target` was made from, when it is the project's own.
+    pub base: Option<String>,
     pub verifier: Option<String>,
     pub push: bool,
     pub orchestrator: Option<TermRef>,
@@ -1201,6 +1203,7 @@ impl Projects {
         let limits = limited(Limits::default(), new.limits)?;
         within("a repository", Some(&new.repo), REF_MAX)?;
         within("a target branch", Some(&new.target), REF_MAX)?;
+        within("a base branch", new.base.as_deref(), REF_MAX)?;
         let project = Project {
             orchestrator_spent: Spent::default(),
             id: new.id.clone(),
@@ -1211,9 +1214,11 @@ impl Projects {
             repo: new.repo.trim().to_owned(),
             repo_id: None,
             target: new.target.trim().to_owned(),
+            base: new.base.map(|b| b.trim().to_owned()).filter(|b| !b.is_empty()),
             verifier: verifier(new.verifier)?,
             push: new.push,
             orchestrator: new.orchestrator,
+            orchestrator_thread: None,
             limits,
             metadata: metadata(new.metadata)?,
             created_ms: now,
@@ -1269,6 +1274,8 @@ impl Projects {
         if let Some(term) = change.orchestrator.filter(|t| record.project.orchestrator != Some(*t))
         {
             record.project.orchestrator = Some(term);
+            // Another agent's thread, learned again from its worker's table.
+            record.project.orchestrator_thread = None;
             let entry = record.log(None, Moment::Orchestrator { term }, now);
             updates.push(record.record_update(Some(entry)));
         } else if quiet {
@@ -2049,6 +2056,48 @@ impl Projects {
                 })
             })
             .collect()
+    }
+
+    /// The projects whose orchestrator's terminal is on `worker`: each one's id, that terminal
+    /// and the orchestrator's thread once it was seen.
+    pub(crate) fn orchestrated_on(
+        &self,
+        worker: WorkerId,
+    ) -> Vec<(ProjectId, TermRef, Option<ThreadId>)> {
+        self.records
+            .values()
+            .filter_map(|r| {
+                let term = r.project.orchestrator.filter(|t| t.worker == worker)?;
+                Some((r.project.id.clone(), term, r.project.orchestrator_thread))
+            })
+            .collect()
+    }
+
+    /// What `id`'s orchestrator's worker shows of it: the thread it runs, and the terminal
+    /// that thread runs in now when its session was taken up in another (`at`). The thread is
+    /// kept quietly; the project follows it to `at`, and its timeline says so, so what the
+    /// orchestrator is told goes there.
+    pub(crate) fn orchestrator_seen(
+        &mut self,
+        id: &ProjectId,
+        thread: ThreadId,
+        at: Option<TermRef>,
+        now: WallMs,
+    ) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let mut changes = Vec::new();
+        let learned = record.project.orchestrator_thread != Some(thread);
+        record.project.orchestrator_thread = Some(thread);
+        match at.filter(|term| record.project.orchestrator != Some(*term)) {
+            Some(term) => {
+                record.project.orchestrator = Some(term);
+                let entry = record.log(None, Moment::Orchestrator { term }, now);
+                changes.push(record.record_update(Some(entry)));
+            }
+            None if learned => changes.push(record.record_update(None)),
+            None => {}
+        }
+        changes
     }
 
     /// Project `id`'s target `target` reached `origin` as it stood at `at`: every task merged

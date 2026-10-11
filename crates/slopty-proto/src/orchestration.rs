@@ -1023,6 +1023,19 @@ pub enum Verb {
         /// The commits asked about, in hex.
         heads: Vec<String>,
     },
+    /// Land a project's finished goal, the person's word: its target (the project's own
+    /// branch, [`crate::project::Task::goal_branch`]) goes to `origin` from the orchestrator's
+    /// clone, into a pull request found or opened there into `into`, else the branch it was
+    /// made from ([`crate::project::Project::base`]). Every merged task's card says it was
+    /// pushed. Answered with [`Outcome::PullOpened`]; a repeat finds the same pull request. A
+    /// project with no branch to land into is [`ErrorCode::Invalid`], saying to name one, and
+    /// an agent is [`ErrorCode::Forbidden`].
+    ProjectLand {
+        /// Which.
+        project: ProjectId,
+        /// The branch to land into, over the one the target was made from.
+        into: Option<String>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1107,6 +1120,7 @@ impl Verb {
             | Self::FetchBundle { .. }
             | Self::TaskMerge { .. }
             | Self::TaskPush { .. }
+            | Self::ProjectLand { .. }
             | Self::ProjectDelete { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
@@ -1602,7 +1616,7 @@ pub enum Outcome {
         /// The path.
         path: String,
     },
-    /// For [`Verb::LandPull`]: the pull request the work waits in.
+    /// For [`Verb::LandPull`] and [`Verb::ProjectLand`]: the pull request the work waits in.
     PullOpened {
         /// Its number.
         number: u32,

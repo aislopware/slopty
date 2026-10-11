@@ -51,6 +51,7 @@ async fn any_agent_runs_a_task_as_a_thread() {
     let Verb::StartThread { worker, start, seat, env, role } = verb else { panic!("{verb:?}") };
     assert_eq!(worker, linux);
     assert_eq!((start.agent.clone(), start.model.as_deref()), (pi(), None));
+    assert_eq!(start.mode.as_deref(), Some("ask"), "its gate at the project's autonomy");
     assert_eq!(start.prompt.as_deref(), Some("Build it."), "told its brief");
     let at = (start.cwd.as_str(), start.worktree);
     assert_eq!(at, ("~/src/slopty", None), "no clone known: the repository it names");

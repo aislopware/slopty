@@ -3003,3 +3003,117 @@ async fn a_push_the_forge_refuses_stands_unless_origin_holds_the_merge() {
         }
     }
 }
+
+/// A finished goal lands as one pull request: the project's own branch, made from what the
+/// orchestrator's checkout had checked out, goes from the orchestrator's clone into that
+/// branch, and the timeline names the pull request. Only the person lands it, and a project
+/// whose target is the person's own branch has nothing to land without a branch named.
+#[tokio::test]
+async fn a_finished_goal_lands_through_one_pull_request_into_where_it_came_from() {
+    use queue::tests::URL;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let on_main = SessionSummary {
+        branch: Some("main".to_owned()),
+        ..in_repo(orchestrator, "/w/demo", Some(URL))
+    };
+    lease.handle(ToServer::SessionChanged(on_main));
+    lease.handle(agent(orchestrator, &AgentStatus::Working));
+    let term = TermRef { worker, session: orchestrator };
+    let make = |target: &str| Verb::ProjectCreate {
+        project: project(),
+        title: "Projects".to_owned(),
+        goal: Some("Ship the inbox\nwith its notes".to_owned()),
+        autonomy: Autonomy::Ask,
+        repo: "/w/demo".to_owned(),
+        target: target.to_owned(),
+        verifier: None,
+        push: false,
+        orchestrator: Some(term),
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    let made = spawn(&hub, make(""));
+    let (id, verb) = request(&mut rx).await;
+    assert!(matches!(verb, Verb::BranchOff { .. }), "{verb:?}");
+    answer(&lease, id, Outcome::Done);
+    let Outcome::Project(made) = made.await.unwrap() else { panic!("made") };
+    let kept = (made.project.target.as_str(), made.project.base.as_deref());
+    assert_eq!(kept, ("slopty/slopty/goal", Some("main")), "made from main");
+
+    let land = |into: Option<&str>| Verb::ProjectLand {
+        project: project(),
+        into: into.map(str::to_owned),
+    };
+    let by_agent = hub.dispatch_as(Speaker::Proven(orchestrator), None, land(None)).await;
+    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("person"), "{by_agent:?}");
+    let onto_itself = hub.dispatch(land(Some("slopty/slopty/goal"))).await;
+    refused(&onto_itself, ErrorCode::Invalid);
+
+    let landing = spawn(&hub, land(None));
+    let (id, verb) = request(&mut rx).await;
+    let Verb::LandPull { repo, head, branch, target, title, .. } = &verb else {
+        panic!("{verb:?}")
+    };
+    let asked = (repo.as_str(), head.as_str(), branch.as_str(), target.as_str(), title.as_str());
+    let want = ("/w/demo", "refs/heads/slopty/slopty/goal", "slopty/slopty/goal", "main");
+    assert_eq!(asked, (want.0, want.1, want.2, want.3, "Ship the inbox"), "from its clone");
+    let url = "https://example.com/o/demo/pull/9".to_owned();
+    answer(&lease, id, Outcome::PullOpened { number: 9, url: url.clone() });
+    let landed = landing.await.unwrap();
+    assert_eq!(landed, Outcome::PullOpened { number: 9, url: url.clone() });
+    let noted = status(&hub).await.timeline.into_iter().any(
+        |e| matches!(&e.what, Moment::Note { text } if text.contains("#9") && text.contains(&url)),
+    );
+    assert!(noted, "the timeline names the pull request");
+
+    let failed = spawn(&hub, land(Some("release")));
+    let (id, verb) = request(&mut rx).await;
+    assert!(matches!(&verb, Verb::LandPull { target, .. } if target == "release"), "{verb:?}");
+    let message = "gh: not logged in".to_owned();
+    answer(&lease, id, Outcome::Error { code: ErrorCode::Failed, message });
+    assert!(refused(&failed.await.unwrap(), ErrorCode::Failed).contains("not logged in"));
+
+    hub.dispatch(Verb::ProjectDelete { project: project() }).await;
+    let named = spawn(&hub, make("main"));
+    let Outcome::Project(named) = named.await.unwrap() else { panic!("made") };
+    assert_eq!(named.project.base, None, "the person's own branch");
+    let nothing = hub.dispatch(land(None)).await;
+    assert!(refused(&nothing, ErrorCode::Invalid).contains("name the branch"), "{nothing:?}");
+}
+
+/// An orchestrator taken up again in another terminal (`claude --resume`, the same thread) is
+/// followed: its thread is kept once its worker's table shows it in the orchestrator's
+/// terminal, another thread elsewhere moves nothing, and once that thread runs in another
+/// terminal the project's orchestrator is that terminal, as the timeline says.
+#[tokio::test]
+async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
+    use ladder::tests::{row, snapshot};
+    use slopty_proto::thread::Phase;
+    use slopty_proto::thread::wire::ThreadRow;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (old, other, new) = (SessionId::new(), SessionId::new(), SessionId::new());
+    let (worker, lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, old, true);
+    create(&hub, Some(TermRef { worker, session: old })).await;
+    let thread = row(Phase::Working, 10, Some(old));
+    let elsewhere = row(Phase::Working, 11, Some(other));
+    lease.handle(snapshot(vec![thread.clone(), elsewhere.clone()]));
+    let seen = status(&hub).await.project;
+    assert_eq!(seen.orchestrator_thread, Some(thread.id), "learned from its terminal");
+    assert_eq!(seen.orchestrator, Some(TermRef { worker, session: old }));
+
+    announce(&lease, new, true);
+    let resumed = ThreadRow { id: thread.id, terminal: Some(new), ..row(Phase::Working, 20, None) };
+    lease.handle(snapshot(vec![resumed, elsewhere]));
+    let now = status(&hub).await;
+    let to = TermRef { worker, session: new };
+    assert_eq!(now.project.orchestrator, Some(to), "followed to the resumed session");
+    assert_eq!(now.project.orchestrator_thread, Some(thread.id));
+    let said = now.timeline.iter().rev().find_map(|e| match e.what {
+        Moment::Orchestrator { term } => Some(term),
+        _ => None,
+    });
+    assert_eq!(said, Some(to), "the timeline says where it went");
+}

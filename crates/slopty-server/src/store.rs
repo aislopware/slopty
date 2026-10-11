@@ -618,6 +618,7 @@ mod tests {
             title: "Projects".to_owned(),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
+            base: None,
             verifier: None,
             push: false,
             orchestrator: None,

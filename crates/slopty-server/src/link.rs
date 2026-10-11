@@ -111,31 +111,25 @@ const REPUBLISH_EVERY: Duration = Duration::from_secs(10);
 /// One that dialed over loopback and listens everywhere is published at this machine's tailnet
 /// address, but only once Tailscale gives one: until then it is published at loopback, which
 /// no other machine can use. So while it is, Tailscale is asked again `every` so often, and the
-/// address it gives once it is up is published in its place. An address once published stays
-/// when Tailscale stops answering, rather than flap back to loopback. Never returns for any
-/// other worker.
-#[expect(
-    clippy::infinite_loop,
-    reason = "it watches for as long as the lease lives; the link's select ends it with the lease"
-)]
+/// address it gives once it is up is published in its place. Then it is asked no more: a
+/// machine's tailnet address does not move, and an address once published stays rather than
+/// flap back to loopback. Never returns: the link's select ends it with the lease.
 async fn republish(
     lease: &Lease,
     (ip, bound, at): (IpAddr, IpAddr, IpAddr),
     admission: &Admission,
     every: Duration,
 ) {
-    if !(ip.is_loopback() && bound.is_unspecified()) {
-        return std::future::pending().await;
-    }
     let mut at = at;
-    loop {
+    while ip.is_loopback() && bound.is_unspecified() && at.is_loopback() {
         tokio::time::sleep(every).await;
         let now = published(ip, bound, admission.local_api().as_ref()).await;
-        if now != at && !now.is_loopback() {
+        if !now.is_loopback() {
             lease.republish(now);
             at = now;
         }
     }
+    std::future::pending::<()>().await;
 }
 
 /// Where clients reach a worker that dialed in from `ip` and listens on `bound`.
@@ -442,8 +436,8 @@ mod tests {
 
     /// Tailscale coming up after a worker on the server's own machine registered, published
     /// at loopback for want of a tailnet address, republishes it at the machine's tailnet
-    /// address, and every client hears it; a worker that dialed from elsewhere is never asked
-    /// about again.
+    /// address, and every client hears it; then Tailscale is asked no more. A worker that dialed
+    /// from elsewhere is never asked about again.
     #[tokio::test]
     async fn tailscale_coming_up_republishes_a_worker_published_at_loopback() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -478,6 +472,9 @@ mod tests {
             while address() != "100.64.0.3:45550" {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            let asked = seen.lock().len();
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            assert_eq!(seen.lock().len(), asked, "once published, Tailscale is asked no more");
         };
         tokio::select! {
             () = watching => unreachable!("it watches for as long as the lease"),

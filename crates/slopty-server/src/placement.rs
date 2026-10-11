@@ -1,8 +1,9 @@
 //! Where a task's start goes (`docs/decisions/projects.md`): on the worker its orchestrator
 //! names, and otherwise the least busy worker, beside a clone of the project's repository when
-//! the task named no directory and one has a clone. Wherever it goes, the worker is online and
-//! has the agent installed, named or not. The orchestrator reads every worker's facts with
-//! `slopty workers` and names the worker itself; nothing here judges rules over them.
+//! the task named no directory and one about as busy has a clone. Wherever it goes, the worker
+//! is online and has the agent installed, named or not. The orchestrator reads every worker's
+//! facts with `slopty workers` and names the worker itself; nothing here judges rules over
+//! them.
 
 use slopty_core::WorkerId;
 use slopty_proto::project::{Fact, Facts};
@@ -72,27 +73,37 @@ pub(crate) struct Wanted {
     /// The agent it runs, as a worker's facts name it: a worker that does not report it
     /// installed does not fit, named or not.
     pub agent: Option<Installed>,
-    /// Whether a worker with a clone of the project's repository goes first.
+    /// Whether the start goes beside a clone of the project's repository.
     pub clone: bool,
+    /// Whether a worker with no clone can make one: the repository's address is known.
+    pub fetchable: bool,
 }
 
-/// The worker to start on: the named one when it fits, and otherwise, of those that fit, one
-/// with a clone when one is wanted, then the one running the fewest agents, then the least
-/// busy, then by name.
+/// The worker to start on: the named one when it fits, and otherwise, of those that fit, the
+/// one with the fewest agents running, then the least busy, then by name. A clone, when one is
+/// wanted, decides among those within one agent of the fewest: a worker without one makes it
+/// with a fetch, while a pile-up on the machines that have one holds the whole queue. Where no
+/// clone can be made, a worker without one is taken last.
 ///
 /// # Errors
 /// Why no worker fits, in words, naming each with why.
 pub(crate) fn choose(candidates: &[Candidate], wanted: &Wanted) -> Result<WorkerId, String> {
     let named = |c: &&Candidate| wanted.pin.is_none_or(|pin| pin == c.worker);
-    let best =
-        candidates.iter().filter(named).filter(|c| unfit(c, wanted).is_none()).min_by(|a, b| {
-            (wanted.clone && b.clone)
-                .cmp(&(wanted.clone && a.clone))
-                .then(a.fleet_live.cmp(&b.fleet_live))
-                .then(busy(&a.facts).total_cmp(&busy(&b.facts)))
-                .then_with(|| a.name.cmp(&b.name))
-                .then_with(|| a.worker.cmp(&b.worker))
-        });
+    let fit: Vec<&Candidate> =
+        candidates.iter().filter(named).filter(|c| unfit(c, wanted).is_none()).collect();
+    let fewest = fit.iter().map(|c| c.fleet_live).min().unwrap_or_default();
+    let key = |c: &Candidate| {
+        let cloneless = wanted.clone && !c.clone;
+        (cloneless && !wanted.fetchable, c.fleet_live > fewest.saturating_add(1), cloneless)
+    };
+    let best = fit.into_iter().min_by(|a, b| {
+        key(a)
+            .cmp(&key(b))
+            .then(a.fleet_live.cmp(&b.fleet_live))
+            .then(busy(&a.facts).total_cmp(&busy(&b.facts)))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.worker.cmp(&b.worker))
+    });
     if let Some(best) = best {
         return Ok(best.worker);
     }
