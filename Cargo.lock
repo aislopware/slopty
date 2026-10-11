@@ -2767,7 +2767,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.1"
-source = "git+https://github.com/aislopware/gpui-kit.git#92df9ec2063fe0c0b39c10ae151c05f57a8919b0"
+source = "git+https://github.com/aislopware/gpui-kit.git#582d181245bfa84f7e8baedf9764eaeaf0ea9d1e"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2808,7 +2808,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.1"
-source = "git+https://github.com/aislopware/gpui-kit.git#92df9ec2063fe0c0b39c10ae151c05f57a8919b0"
+source = "git+https://github.com/aislopware/gpui-kit.git#582d181245bfa84f7e8baedf9764eaeaf0ea9d1e"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2854,7 +2854,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.1"
-source = "git+https://github.com/aislopware/gpui-kit.git#92df9ec2063fe0c0b39c10ae151c05f57a8919b0"
+source = "git+https://github.com/aislopware/gpui-kit.git#582d181245bfa84f7e8baedf9764eaeaf0ea9d1e"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2865,7 +2865,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.7.1"
-source = "git+https://github.com/aislopware/gpui-kit.git#92df9ec2063fe0c0b39c10ae151c05f57a8919b0"
+source = "git+https://github.com/aislopware/gpui-kit.git#582d181245bfa84f7e8baedf9764eaeaf0ea9d1e"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2879,7 +2879,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.1"
-source = "git+https://github.com/aislopware/gpui-kit.git#92df9ec2063fe0c0b39c10ae151c05f57a8919b0"
+source = "git+https://github.com/aislopware/gpui-kit.git#582d181245bfa84f7e8baedf9764eaeaf0ea9d1e"
 dependencies = [
  "anyhow",
  "gpui-pre",
