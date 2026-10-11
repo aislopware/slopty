@@ -16,7 +16,7 @@ use gpui::{
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::Symbol;
+use slopty_kit::icons::{Mark, Symbol};
 use slopty_kit::kit;
 use slopty_proto::thread::{Cap, Delivery};
 use slopty_theme::{Rgb, Theme};
@@ -436,7 +436,7 @@ impl ThreadView {
         } else if self.composing.editing() {
             ("thread-send", Symbol::Checkmark, "Update")
         } else if !working {
-            ("thread-send", Symbol::ArrowUp, "Send")
+            ("thread-send", Symbol::Send, "Send")
         } else if self.send_now(cx) == Delivery::Queue {
             ("thread-send", Symbol::Clock, "Queue")
         } else {
@@ -469,90 +469,68 @@ impl ThreadView {
     }
 
     /// The composer's shell, which what stands in its place shares: a message's frame
-    /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, all
-    /// its corners round, or with the tray as its head only the foot's; full-bleed in a narrow
-    /// pane ([`Self::bleeds`]). `focused`: the field has the keyboard, and the wash says so.
-    pub(super) fn shell<E: Styled>(&self, el: E, capped: bool, focused: bool) -> E {
-        let frame = kit::message::Frame { capped, focused, bleeds: self.bleeds() };
-        kit::message::shell(el, &self.theme, frame)
+    /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, the
+    /// pane's width under the lighter line.
+    pub(super) fn shell<E: Styled>(&self, el: E) -> E {
+        kit::message::shell(el, &self.theme)
     }
 
-    /// The composer runs edge to edge under a sash line, as a pane's own bar does, in a pane
-    /// too narrow for a box with gutters round it to leave the field its room. Centred under an
-    /// empty thread's question it stands boxed, as it does until its tile has said its width.
-    pub(super) fn bleeds(&self) -> bool {
-        self.width > 0.0 && self.room().is_narrow() && !self.heroed
-    }
-
-    /// The composer card. `capped`: the tray stands on it as its head, so its top corners are
-    /// square and its top edge is the quieter hairline between the two.
-    pub(super) fn composer_box(
-        &self,
-        capped: bool,
-        focused: bool,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        if let Some(strip) = self.exited_strip(capped, cx) {
+    /// The composer, Delta's next turn: the pane's width at its foot under the lighter line,
+    /// its field and foot in the reading column, the person's mark hung beside the field as it
+    /// hangs beside their turns.
+    pub(super) fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
+        if let Some(strip) = self.exited_strip(cx) {
             return strip;
         }
         let theme = &self.theme;
         let editing = self.composing.editing();
         let view = cx.weak_entity();
+        let field = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(theme.spacing.xs))
+            .pt(px(theme.spacing.sm))
+            // The strips over the field are a row's words.
+            .text_size(px(theme.roles().chrome.size))
+            .children(self.ledge(cx))
+            .children(self.exited_line(cx))
+            .children(self.menu_section(cx))
+            .children(self.limit_strip(cx))
+            .children(self.failed_strip(cx))
+            .children(self.notice_strip())
+            .children(self.editing_strip(cx))
+            .children(self.attachment_chips(cx))
+            .child(
+                // The kit's least field, its pads and line fixed in points, the words
+                // and lines at the prose's size.
+                div().py(px(theme.spacing.xs)).child(
+                    self.hang(
+                        Textarea::new(&self.composer)
+                            .with_size(Size::XSmall)
+                            .appearance(false)
+                            .bordered(false)
+                            .text_size(px(theme.typography.prose()))
+                            .line_height(gpui::relative(theme.typography.prose_line_height))
+                            .aria_label("Message")
+                            .on_paste(move |item, _window, cx| {
+                                view.update(cx, |v, cx| v.paste_attachment(item, cx))
+                                    .unwrap_or(false)
+                            })
+                            .into_any_element(),
+                        Some(Mark::Symbol(Symbol::Person)),
+                        "turn-mark-composer".to_owned(),
+                    ),
+                ),
+            );
+        let foot = div().w_full().pb(px(theme.spacing.sm)).child(self.composer_foot(editing, cx));
         div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
             .key_context(super::COMPOSER_CTX)
             .w_full()
-            .flex()
-            .flex_col()
-            .map(|el| self.shell(el, capped, focused))
-            // Under the tray the shell has no top edge: the tray's band over the field's raised
-            // tone parts them, with no line between.
-            .when(capped, Styled::border_t_0)
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(theme.spacing.xs))
-                    .px(px(theme.spacing.md))
-                    .pt(px(theme.spacing.sm))
-                    // The strips over the field are a row's words.
-                    .text_size(px(theme.roles().chrome.size))
-                    .children(self.ledge(cx))
-                    .children(self.exited_line(cx))
-                    .children(self.menu_section(cx))
-                    .children(self.limit_strip(cx))
-                    .children(self.failed_strip(cx))
-                    .children(self.notice_strip())
-                    .children(self.editing_strip(cx))
-                    .children(self.attachment_chips(cx))
-                    .child(
-                        // The kit's least field, its pads and line fixed in points, the words
-                        // and lines at the prose's size.
-                        div().py(px(theme.spacing.xs)).child(
-                            Textarea::new(&self.composer)
-                                .with_size(Size::XSmall)
-                                .appearance(false)
-                                .bordered(false)
-                                .text_size(px(theme.typography.prose()))
-                                .line_height(gpui::relative(theme.typography.prose_line_height))
-                                .aria_label("Message")
-                                .on_paste(move |item, _window, cx| {
-                                    view.update(cx, |v, cx| v.paste_attachment(item, cx))
-                                        .unwrap_or(false)
-                                }),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .px(px(theme.spacing.sm))
-                    .pb(px(theme.spacing.sm))
-                    .pt(px(theme.spacing.xs))
-                    .child(self.composer_foot(editing, cx)),
-            )
+            .map(|el| self.shell(el))
+            .child(self.column(div().w_full().flex().flex_col().child(field).child(foot)))
             .into_any_element()
     }
 
@@ -611,15 +589,15 @@ impl ThreadView {
     }
 }
 
-/// `el` as one of the composer foot's controls, `MonoCode`'s: a square at the small radius on
-/// the selected wash, its words and glyph in the secondary tone, a step firmer under the
-/// pointer and the pressed wash while its menu is `open`.
+/// `el` as one of the composer foot's controls, Zed's subtle button: bare at rest at the small
+/// radius, its words and glyph in the secondary tone, the pointer's wash under it and the
+/// selected wash while its menu is `open`.
 fn squared(el: gpui::Stateful<Div>, theme: &Theme, open: bool) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     el.rounded(px(theme.radii.sm))
-        .bg(hsla(if open { s.pressed } else { s.selected }))
+        .when(open, move |el| el.bg(hsla(s.selected)))
         .text_color(hsla(s.text_secondary))
-        .hover(move |el| el.bg(hsla(s.keyed)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.

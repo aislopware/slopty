@@ -235,13 +235,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The tray, when anything waits in it, and whether it ends tucked behind the composer's
-    /// top edge.
+    /// The tray, when anything waits in it.
     ///
     /// A request put to the person is a card of its own, a full step of space above the rest:
     /// a decision never reads as another way to send the message under it. The rest (the
-    /// plan, the queue, the work in the background) is the composer's head, tucked behind its
-    /// top edge, or a card of its own where there is no composer (a subagent's thread).
+    /// plan, the queue, the work in the background) is Zed's activity bar: lined on its top
+    /// and sides with its top corners round, standing on the composer's line where there is a
+    /// composer (`tucked`), else a card of its own (a subagent's thread).
     ///
     /// A request on show stands whole; what else waits stands at most a share of the window's
     /// height `window_h` ([`super::TRAY`], [`super::TRAY_ASKING`] under a request) and scrolls
@@ -251,7 +251,7 @@ impl ThreadView {
         tucked: bool,
         window_h: gpui::Pixels,
         cx: &Context<Self>,
-    ) -> Option<(AnyElement, bool)> {
+    ) -> Option<AnyElement> {
         let hub = self.hub.read(cx);
         let state = self.state(cx)?;
         let bar = Activity::of(hub.threads(), self.thread, state);
@@ -348,13 +348,9 @@ impl ThreadView {
                 .mb(px(theme.spacing.md))
                 .child(request)
         });
-        // Over the composer the tray is the card's head: as wide, its corners the composer's,
-        // one ring round both and the quieter line between them, so no row reads as cut by the
-        // composer. Alone, it is a card of its own. It is the thread's one card, as the
-        // composer is (`kit::raised`).
+        // Over the composer the tray stands on its line, which closes it; alone, it is a card
+        // of its own.
         let radius = px(theme.radii.md);
-        // A composer that bleeds has no box for the tray to head: the tray stands as a card.
-        let tucked = tucked && !self.bleeds();
         let rest = rest.map(|rest| {
             div()
                 .id("thread-activity")
@@ -379,13 +375,8 @@ impl ThreadView {
                 .map(|el| kit::inset(el, theme))
                 .overflow_hidden()
                 .child(rest)
-                // Over the composer, whose top edge it takes, the quieter line parts the two.
-                .when(tucked, |el| {
-                    el.child(div().flex_none().w_full().h(kit::HAIR).bg(hsla(s.stroke)))
-                })
         });
-        let tucked = tucked && rest.is_some();
-        Some((
+        Some(
             div()
                 .w_full()
                 .min_h_0()
@@ -394,8 +385,7 @@ impl ThreadView {
                 .children(request)
                 .children(rest)
                 .into_any_element(),
-            tucked,
-        ))
+        )
     }
 
     /// One of the tray's lines: a row's height, the chrome's edge, its parts a base unit

@@ -10404,7 +10404,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     place chip and `Place::why` ("Why: pinned") go with it.
   - Test: `workspace::tests::projects::the_board_sets_its_review_limit_and_merges_all_ready`.
 
-- ✅ **The thread is one card language** (2026-10-11, `.research/monocode-anatomy-2026-10-10.md`
+- ✅ **The thread is one card language** (superseded in part 2026-10-12 by "The thread is
+  Delta's": the person's turn, the composer and the tray left the card; 2026-10-11,
+  `.research/monocode-anatomy-2026-10-10.md`
   §7 and its rulings). The thread's parts had each grown a surface of their own: the person's
   turn a grey wash with no edge, the changes card a wash with a ring, the request card and the
   composer white `elevated` plates with rings, a plan nothing at all. Three surfaces and two
@@ -10694,6 +10696,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and editors match the chrome. Lilex at 13 pt makes the same 8 by 17 cell JetBrains Mono did
     (`hhea` 999 and −301 against 1020 and −300), so the terminal's grid keeps its size; at 2× the
     baseline lands one device pixel lower.
+    It costs no more to draw: a 200-column line shapes in 184 µs at the p50 against JetBrains
+    Mono's 290, and its ASCII rasters take the same atlas room (`docs/MEASUREMENTS.md`, "the
+    terminal face: Lilex against JetBrains Mono").
   - Tests: `slopty-theme` `tests` and `vision`, `slopty-kit`
     `fonts::bundled::each_family_weight_and_slant_is_the_bundled_face`, `slopty-terminal`
     `metrics`, the e2e `check_lilex_face`, and every golden, retaken.
@@ -10845,3 +10850,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::nav_list::needs_you_lists_a_waiting_tile_scrolled_out_of_view`,
     `workspace::tests::nav_list::a_tiles_row_hangs_from_its_head_by_the_indent_guide` and
     `lints::a_tabs_title_fades_over_its_end`.
+
+- ✅ **The thread is Delta's** (2026-10-12, `.research/zed-clone-2026-10-11.md` §5.6, step 8 of
+  the Zed port; supersedes the person's card, the boxed composer and the tray as the composer's
+  head in "The thread is one card language").
+  - **Turns are prose with a mark.** The person's message lies on the page as the agent's answer
+    does, on the column's edge in `text` at the prose's size, with no card. Whose turn it is
+    hangs in the gutter: Carbon's `user` in `icon_muted` beside the person's message, the
+    agent's owner mark in `text_muted` beside the first row of its answer, each 16 pt in
+    Delta's 24 pt slot ending at the column's edge, on the first line. A gutter narrower than
+    the slot (a narrow pane's 16) hangs nothing, so the words keep the width.
+  - **The composer is the next turn, unboxed.** It runs the pane's width at its foot under the
+    lighter `stroke` line, with no ring, radius or fill at any width; its field and foot keep
+    to the reading column, the person's mark beside the field. The keyboard in it is the
+    caret's to say. The box with its focused ring, and the narrow pane's bleed as a separate
+    case, went. The board's message to its orchestrator wears the same frame.
+  - **Send** is Carbon's `send--alt` in an icon button's square in the tinted accent; stop is
+    `stop--filled` in its place. The foot's controls are Zed's subtle buttons: bare at rest,
+    the pointer's wash, the selected wash while their menu is up.
+  - **The tray** (the plan, the queue, the work in the background) is Zed's activity bar: lined
+    on its top and sides, top corners round, standing on the composer's line, which closes it.
+    A request put to the person stays a card of its own above it.
+  - Tests: `slopty-kit` `kit::message::tests::a_message_is_the_next_turn_unboxed`,
+    `kit::message::tests::send_is_a_tinted_square`; `slopty-ui`
+    `conversation::thread::tests::face::the_composer_runs_the_panes_width_at_its_foot`,
+    `conversation::thread::tests::face::the_one_tinted_square_stops_a_turn_or_sends_the_draft`,
+    `conversation::thread::tests::steps::a_question_and_its_answer_read_as_one_turn`,
+    `conversation::thread::tests::steps::whose_turn_it_is_hangs_in_the_gutter`.

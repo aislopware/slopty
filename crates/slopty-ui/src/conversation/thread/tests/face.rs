@@ -330,8 +330,9 @@ fn the_one_tinted_square_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext
     let fill = |c: slopty_theme::Tint| gpui::Background::from(slopty_kit::colors::hsla(c));
     let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
-    let square = theme.radii.sm / slopty_kit::kit::message::SEND;
-    assert!((f32::from(stop.size.width) - slopty_kit::kit::message::SEND).abs() < 0.5, "{stop:?}");
+    let side = slopty_kit::kit::icon_button_side(&theme);
+    let square = theme.radii.sm / side;
+    assert!((f32::from(stop.size.width) - side).abs() < 0.5, "{stop:?}");
     let (painted, round) = disc(cx, stop).expect("the stop's square");
     assert_eq!(painted, fill(theme.surfaces.info_background), "stopping is tinted");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
@@ -1135,10 +1136,11 @@ fn the_add_menu_offers_photos_where_they_live(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-add-menu").is_none(), "and the menu closes");
 }
 
-/// Boxed in a roomy pane, the composer stands inside the column's gutters at a card's radius;
-/// in a narrow one it runs the pane's whole width to its foot, under a sash line.
+/// The composer is Delta's next turn, unboxed at any width: it runs the pane's whole width to
+/// its foot under the lighter line, and its field keeps to the reading column, the person's
+/// mark hung in the gutter beside it while the gutter has room for it.
 #[gpui::test]
-fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
+fn the_composer_runs_the_panes_width_at_its_foot(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let state = fixtures::thread("edit");
     let thread = state.meta.id;
@@ -1147,15 +1149,22 @@ fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     let theme = slopty_theme::Theme::default();
     let narrow = slopty_kit::kit::Room::narrow_below(&theme) - 40.0;
-    for (width, bleeds) in [(800.0, false), (narrow, true)] {
+    for width in [800.0, narrow] {
         view.update(cx, |v, cx| v.set_layout(width, cx));
         cx.run_until_parked();
         let pane = cx.debug_bounds("thread").expect("the thread");
         let composer = cx.debug_bounds("thread-composer").expect("the composer");
-        let whole = (composer.size.width - pane.size.width).abs() < px(0.5);
-        assert_eq!(whole, bleeds, "{width}: {composer:?} in {pane:?}");
-        let at_foot = (composer.bottom() - pane.bottom()).abs() < px(0.5);
-        assert_eq!(at_foot, bleeds, "{width}: at the foot only when it bleeds");
+        assert!((composer.size.width - pane.size.width).abs() < px(0.5), "{width}: {composer:?}");
+        assert!((composer.bottom() - pane.bottom()).abs() < px(0.5), "{width}: at the foot");
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let line = slopty_kit::colors::hsla(theme.surfaces.stroke);
+        let lined = quads.iter().any(|q| {
+            (q.bounds.origin.y.0 / scale - f32::from(composer.top())).abs() < 0.5
+                && q.border_color == line
+                && q.border_widths.top.0 > 0.0
+                && q.border_widths.left.0 == 0.0
+        });
+        assert!(lined, "{width}: the lighter line along its top, no ring");
     }
 }
 

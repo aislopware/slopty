@@ -30,7 +30,7 @@ use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{Status, Symbol};
+use slopty_kit::icons::{AgentMark, Mark, Status, Symbol};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
@@ -98,8 +98,8 @@ const HEADINGS: [f32; 2] = [3.0, 1.0];
 /// The gap between an answer's paragraphs, in points at the prose size.
 const PARAGRAPH: f32 = 10.0;
 
-/// The widest a message's bubble grows, as a share of the column.
-const BUBBLE: f32 = 0.85;
+/// The gutter a turn's mark hangs in, left of the column's words: Delta's 24.
+const TURN_MARK: f32 = 24.0;
 
 /// A message longer than this many lines or characters shows its start first.
 const BUBBLE_LINES: usize = 8;
@@ -1477,6 +1477,40 @@ impl ThreadView {
         )
     }
 
+    /// `el` with `mark` hung in the gutter left of it, Delta's turn mark: the 16 pt glyph
+    /// centred in a [`TURN_MARK`] slot ending at the column's edge, on the first line of
+    /// prose, in the quiet icon ink. A gutter narrower than the slot hangs nothing, so the
+    /// words keep the narrow pane's whole width.
+    pub(super) fn hang(&self, el: AnyElement, mark: Option<Mark>, id: String) -> AnyElement {
+        let theme = &self.theme;
+        let Some(mark) = mark.filter(|_| self.gutter() >= TURN_MARK) else { return el };
+        let line = theme.typography.prose() * theme.typography.prose_line_height;
+        let ink = match mark {
+            Mark::Agent(_) => theme.surfaces.text_muted,
+            _ => theme.surfaces.icon_muted,
+        };
+        let glyph = slopty_kit::icons::Drawn::new(theme, mark)
+            .slot(px(theme.typography.icon()), hsla(ink))
+            .debug_selector(move || id);
+        div()
+            .relative()
+            .w_full()
+            .child(el)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(-TURN_MARK))
+                    .w(px(TURN_MARK))
+                    .h(px(line))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(glyph),
+            )
+            .into_any_element()
+    }
+
     // ----- drawing: rows ---------------------------------------------------------------
 
     fn render_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -1528,6 +1562,20 @@ impl ThreadView {
             _ if self.is_plan(ix, cx) => gap.max(spacing.md),
             _ => gap,
         };
+        // Whose turn it is hangs in the gutter: the person's mark by their message, the
+        // agent's by the first row of its answer.
+        let mark = match &row {
+            Row::User { .. } | Row::Sending { .. } => Some(Mark::Symbol(Symbol::Person)),
+            _ if ix
+                .checked_sub(1)
+                .and_then(|b| self.rows.get(b))
+                .is_some_and(|b| matches!(b, Row::User { .. } | Row::Sending { .. })) =>
+            {
+                self.state(cx).map(|st| Mark::Agent(AgentMark::of(st.meta.agent.0.as_str())))
+            }
+            _ => None,
+        };
+        let inner = self.hang(inner, mark, format!("turn-mark-{ix}"));
         let found = self.find_row(cx) == Some(ix);
         let inner = if found {
             // The match the find bar is on: a wash under the whole row, the selection's hue at
@@ -1573,7 +1621,7 @@ impl ThreadView {
                 .into_any_element()
         });
         let actions = self.message_actions(id, at_ms, words.clone(), true, cx);
-        // Under a pointer the actions wait at the bubble's foot, beside it, so a line kept for
+        // Under a pointer the actions wait at the message's foot, beside it, so a line kept for
         // them while they are hidden does not push the answer off its question; under a finger
         // they always show and keep their own line.
         let touch = self.theme.density == slopty_theme::Density::TOUCH;
@@ -1583,7 +1631,7 @@ impl ThreadView {
             div()
                 .flex()
                 .flex_col()
-                .items_end()
+                .items_start()
                 .w_full()
                 .children(more)
                 .children(actions)
@@ -1680,9 +1728,9 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// What the person sent, the thread's one card (`kit::raised`) at the column's right, its
-    /// pictures over it: the card's wash and ring lift it off the page, where the agent's
-    /// answer lies on it.
+    /// What the person sent, Delta's turn: plain prose on the page as the agent's answer is,
+    /// on the column's edge, its pictures over it. Whose turn it is is the mark in the gutter
+    /// beside it ([`Self::hang`]), not a box.
     fn bubble(
         &self,
         id: String,
@@ -1695,29 +1743,21 @@ impl ThreadView {
         let s = theme.surfaces;
         let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
         let words = div()
-            .max_w(relative(BUBBLE))
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.sm))
-            .rounded(px(theme.radii.md))
-            .map(|el| kit::raised(el, theme))
+            .flex_1()
+            .min_w_0()
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
             .whitespace_normal()
             .when(faded, |el| el.opacity(alpha::STRONG))
             .child(SharedString::from(words));
-        let line = match around.beside {
-            Some(beside) => div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .items_end()
-                .gap(px(theme.spacing.xs))
-                .child(div().flex_none().child(beside))
-                .child(words)
-                .into_any_element(),
-            None => words.into_any_element(),
-        };
+        let line = div()
+            .w_full()
+            .flex()
+            .items_end()
+            .gap(px(theme.spacing.xs))
+            .child(words)
+            .children(around.beside.map(|beside| div().flex_none().child(beside)));
         div()
             .id(ElementId::Name(id.clone().into()))
             .debug_selector(move || id)
@@ -1726,7 +1766,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .items_end()
+            .items_start()
             .gap(px(theme.spacing.xxs))
             .children(pictures)
             .child(line)
@@ -2443,8 +2483,6 @@ impl Render for ThreadView {
         let sent = self.draft.as_ref().is_some_and(|d| d.read(cx).sent());
         let composes = !self.in_subagent() && !sent;
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
-        let tucked = bar.as_ref().is_some_and(|(_, tucked)| *tucked);
-        let bar = bar.map(|(bar, _)| bar);
         // An empty thread is its composer, centred under its question; the first message docks
         // it at the foot, moving there unless motion is reduced.
         let hero = self.hero(cx).filter(|_| composes);
@@ -2452,8 +2490,7 @@ impl Render for ThreadView {
             self.docks = Some(self.docks.map_or(0, |n| n.wrapping_add(1)));
         }
         self.heroed = hero.is_some();
-        let typing = self.composer.focus_handle(cx).contains_focused(window, cx);
-        let composer = composes.then(|| self.composer_box(tucked, typing, cx));
+        let composer = composes.then(|| self.composer_box(cx));
         self.keep_keyboard(composes, window, cx);
         let dock = self.docks.map(|n| {
             div()
@@ -2583,7 +2620,8 @@ impl Render for ThreadView {
 impl ThreadView {
     /// The tray over the composer, on the reading column. Below the rows, never over them,
     /// so a click above its edge is the rows'. When what waits is taller than the thread, the
-    /// tray gives way and scrolls while the composer stands whole.
+    /// tray gives way and scrolls while the composer stands whole. The composer runs the
+    /// pane's width under it, its line the tray's foot.
     fn foot(&self, bar: Option<AnyElement>, composer: Option<AnyElement>) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
@@ -2594,8 +2632,7 @@ impl ThreadView {
                 .debug_selector(|| "thread-tray".to_owned())
                 .w_full()
                 .min_h_0()
-                // Apart from the last row above it, as the composer is apart from the tray:
-                // a card flush with the transcript's own card read as one.
+                // Apart from the last row above it.
                 .pt(px(spacing.sm))
                 // A column, so a card in it gives up the height of what scrolls inside it
                 // before the tray itself scrolls: a request's answers stay in view.
@@ -2604,11 +2641,7 @@ impl ThreadView {
                 .overflow_y_scroll()
                 .child(bar)
         });
-        // Boxed, the composer stands in the column over the gutter's foot; bleeding, it runs
-        // the pane's width to its foot, under the tray's column.
-        let bleeds = self.bleeds();
         let composer = composer.map(|c| div().w_full().flex_none().child(c));
-        let (boxed, bled) = if bleeds { (None, composer) } else { (composer, None) };
         div()
             .w_full()
             .min_h_0()
@@ -2623,11 +2656,9 @@ impl ThreadView {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .when(!bleeds, |el| el.pb(px(spacing.md)))
-                    .children(bar)
-                    .children(boxed),
+                    .children(bar),
             )
-            .children(bled)
+            .children(composer)
             .into_any_element()
     }
 }

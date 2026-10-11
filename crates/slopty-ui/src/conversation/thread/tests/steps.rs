@@ -363,6 +363,30 @@ fn a_question_and_its_answer_read_as_one_turn(cx: &mut TestAppContext) {
     assert!(copy.top() >= u1.top() && copy.bottom() <= u1.bottom(), "beside the bubble {copy:?}");
 }
 
+/// Whose turn it is hangs in the gutter, Delta's way: the person's mark beside their message
+/// and the agent's beside the first row of its answer, each on its row's first line and
+/// ending at the column's edge, with one beside the composer too. A narrow pane's gutter
+/// hangs none.
+#[gpui::test]
+fn whose_turn_it_is_hangs_in_the_gutter(cx: &mut TestAppContext) {
+    let (view, cx) = two_turns(cx, 800.0);
+    let bounds = |cx: &mut gpui::VisualTestContext, id: &'static str| {
+        cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"))
+    };
+    let (u1, a1) = (bounds(cx, "item-u1"), bounds(cx, "item-a1"));
+    let (person, agent) = (bounds(cx, "turn-mark-0"), bounds(cx, "turn-mark-1"));
+    for (mark, row) in [(person, u1), (agent, a1)] {
+        assert!(mark.right() <= row.left() + gpui::px(0.5), "in the gutter: {mark:?} {row:?}");
+        assert!(mark.top() >= row.top() && mark.top() < row.top() + gpui::px(24.0), "{mark:?}");
+    }
+    assert!(cx.debug_bounds("turn-mark-composer").is_some(), "beside the next turn too");
+    let narrow = slopty_kit::kit::Room::narrow_below(&slopty_theme::Theme::default()) - 40.0;
+    cx.simulate_resize(gpui::size(gpui::px(narrow), gpui::px(600.0)));
+    view.update(cx, |v, cx| v.set_layout(narrow, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("turn-mark-0").is_none(), "a narrow gutter hangs none");
+}
+
 /// The column stands off the tile by its room's gutter: wide, regular and narrow.
 #[gpui::test]
 fn the_column_s_gutter_follows_the_tile_s_room(cx: &mut TestAppContext) {

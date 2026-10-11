@@ -140,7 +140,7 @@ impl ThreadView {
 
     /// In the composer's place while nothing typed would reach the agent: that it exited,
     /// and the way to take it up again where there is one.
-    pub(super) fn exited_strip(&self, capped: bool, cx: &Context<Self>) -> Option<AnyElement> {
+    pub(super) fn exited_strip(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let gone = self.gone(cx).filter(|g| *g != Gone::ByMessage)?;
         let state = self.state(cx)?;
         let theme = &self.theme;
@@ -179,7 +179,7 @@ impl ThreadView {
                 .gap(px(theme.spacing.xs))
                 .px(px(theme.spacing.md))
                 .py(px(theme.spacing.sm))
-                .map(|el| self.shell(el, capped, false))
+                .map(|el| self.shell(el))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(if resuming {

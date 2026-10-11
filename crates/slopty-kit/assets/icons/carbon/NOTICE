@@ -69,6 +69,7 @@ Minus                                subtract.svg
 Paperclip                            attachment.svg
 Palette                              color-palette.svg
 PauseCircle                          pause--outline.svg
+Person                               user.svg
 Pencil                               edit.svg
 Photo                                image.svg
 Pin                                  pin.svg
@@ -79,6 +80,7 @@ PuzzlepieceExtension                 plug.svg
 QuestionmarkBubble                   help.svg
 RectangleSplit3x1                    split-screen.svg
 Scissors                             cut.svg
+Send                                 send--alt.svg
 ServerRack                           bare-metal-server.svg
 SidebarLeft                          side-panel--open.svg
 SpeakerSlash                         volume--mute.svg

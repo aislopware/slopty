@@ -2464,20 +2464,14 @@ impl ProjectView {
     }
 
     /// The message to the orchestrator at the board's foot, while it has one: a thread's
-    /// composer's frame ([`slopty_kit::kit::message`]) with the field in the prose's size over its
-    /// send control, the frame's edge in the accent while the keyboard is in it.
-    fn composer_row(
-        &self,
-        board: &Board,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> Option<Stateful<Div>> {
+    /// composer's frame ([`slopty_kit::kit::message`]), the board's width under the lighter
+    /// line, with the field in the prose's size over its send control.
+    fn composer_row(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
         // An orchestrator whose agent has ended takes no words: the head says so and opens it.
         board.project.orchestrator.filter(|_| !self.beside && !self.seen.orchestrator_ended)?;
         let (input, _) = self.composer.as_ref()?;
         let theme = &self.theme;
         let sp = theme.spacing;
-        let focused = input.read(cx).focus_handle(cx).contains_focused(window, cx);
         let field = div().px(px(sp.md)).pt(px(sp.sm)).child(
             Textarea::new(input)
                 .with_size(Size::XSmall)
@@ -2488,7 +2482,7 @@ impl ProjectView {
                 .aria_label(COMPOSE_LABEL),
         );
         let send =
-            slopty_kit::kit::message::send_control(theme, "project-send", Symbol::ArrowUp, SEND)
+            slopty_kit::kit::message::send_control(theme, "project-send", Symbol::Send, SEND)
                 .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()
             .flex()
@@ -2496,25 +2490,20 @@ impl ProjectView {
             .px(px(sp.sm))
             .pb(px(sp.sm))
             .child(tab_stop(send, theme.surfaces.focus));
-        let frame = slopty_kit::kit::message::shell(
-            div().flex().flex_col().gap(px(sp.xs)),
-            theme,
-            slopty_kit::kit::message::Frame { focused, ..Default::default() },
-        )
-        .child(field)
-        .child(foot);
-        let row = div()
+        let row = slopty_kit::kit::message::shell(div(), theme)
             .id("project-composer")
             .debug_selector(|| "project-composer".to_owned())
             .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(sp.xs))
             .px(px(sp.inset() - sp.xs))
-            .pt(px(sp.xs))
-            .pb(px(sp.sm))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 window.focus(&this.focus, cx);
                 cx.notify();
             }))
-            .child(frame);
+            .child(field)
+            .child(foot);
         Some(row)
     }
 
@@ -2720,7 +2709,7 @@ impl Render for ProjectView {
             );
         };
         let body = self.board(&board, cx);
-        let composer = self.composer_row(&board, window, cx);
+        let composer = self.composer_row(&board, cx);
         let keys = keys.children(self.recap(&board, cx)).child(
             self.scroll_fade(
                 div()
