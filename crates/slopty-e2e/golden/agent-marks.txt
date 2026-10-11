@@ -72,6 +72,10 @@ Button │ Model, Claude
 Button │ Send
 Group │ Status
 Button │ Show the tab's terminal
+Group │ Waiting on you
+Group │ Question: Claude Code, Wants to run a command
+Button │ Put away
+Button │ Open thread
 Status │ Claude Code needs approval
 Image │ Needs you
 Button │ Go

@@ -20,6 +20,7 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ Synthetic editor
 Button │ Close tile
+Button │ Frames late
 Button │ Close tile
 Button │ Show its window
 Status │ In its own window

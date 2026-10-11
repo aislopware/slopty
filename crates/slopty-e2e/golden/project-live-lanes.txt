@@ -41,6 +41,9 @@ Heading
 Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
+Group │ Review limit: 3
+Button │ Fewer tasks waiting on you
+Button │ More tasks waiting on you
 RadioGroup │ Autonomy
 RadioButton │ Ask: an edit or a command the agent's rules do not allow asks you
 RadioButton │ Edits: edits in a task's worktree go without asking
