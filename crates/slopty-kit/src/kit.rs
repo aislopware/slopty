@@ -574,6 +574,49 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.well))
 }
 
+/// `el` as the one card a thread's column keeps, Zed's agent panel's tool card.
+///
+/// It holds a call put to the person (a permission, a question, a plan to approve) and what
+/// the turn changed: the work's ground inside the `border` line at `radii.md`, clipped to its
+/// corners, its head on [`card_head`].
+#[must_use]
+pub fn call_card<E: Styled>(el: E, theme: &Theme) -> E {
+    raised(el, theme).rounded(px(theme.radii.md)).overflow_hidden()
+}
+
+/// `el` as a [`call_card`]'s head.
+///
+/// The element's ground a shade toward the text (Zed's 2.5 %), the lighter line under it.
+#[must_use]
+pub fn card_head<E: Styled>(el: E, theme: &Theme) -> E {
+    el.bg(hsla(theme.surfaces.card_head)).border_b(HAIR).border_color(hsla(theme.surfaces.stroke))
+}
+
+/// `el` on Zed's activity bar's ground, over a thread's composer.
+///
+/// The work's ground moved [`alpha::QUIET`] toward the selection, so the plan and the queue
+/// above the composer read as the composer's own shelf and not as a well of code.
+#[must_use]
+pub fn activity<E: Styled>(el: E, theme: &Theme) -> E {
+    let s = theme.surfaces;
+    el.bg(hsla(s.ground.mix(s.selected.over(s.ground), alpha::QUIET)))
+}
+
+/// `el` as Delta's code well: a diff, a command and its output, a code block.
+///
+/// The [`inset`] ground at `radii.sm` inside the lighter `stroke` line, with the soft shade of
+/// the theme's `sunk.well` held inside it, so code reads as set into the page rather than laid
+/// on it.
+#[must_use]
+pub fn well<E: Styled>(el: E, theme: &Theme) -> E {
+    let layer = theme.elevation.sunk.well;
+    inset(el, theme)
+        .rounded(px(theme.radii.sm))
+        .border(HAIR)
+        .border_color(hsla(theme.surfaces.stroke))
+        .shadow(vec![BoxShadow { inset: true, ..drop_shadow(theme, layer) }])
+}
+
 /// `el` drawn as a field's ground: the work's ground inside the `border` line, sunk ([`sunk`])
 /// so it reads as somewhere to type rather than something to press.
 #[must_use]
@@ -1690,6 +1733,14 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.primary_hover = hsla(s.accent_fill.mix(content, alpha::FAINT));
     c.primary_active = hsla(s.accent_fill.mix(content, alpha::DIM));
     c.primary_foreground = hsla(s.accent_ink);
+    // Its primary button (a questionnaire's Next and Submit) is Zed's tinted accent, as
+    // [`ButtonKind::Primary`] is: the accent's quiet ground under the text's words. Zed has no
+    // solid primary.
+    let (hovered, pressed) = tinted_states(theme);
+    c.button_primary = hsla(s.info_background);
+    c.button_primary_hover = hsla(hovered);
+    c.button_primary_active = hsla(pressed);
+    c.button_primary_foreground = hsla(s.text);
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
@@ -1724,6 +1775,9 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     let mut highlight = (*kit.highlight_theme).clone();
     highlight.style.editor_gutter_background = Some(hsla(theme.content()));
     kit.highlight_theme = Arc::new(highlight);
+    // The components paint from the tokens, which a write to the colours here leaves as they
+    // were: they follow the colours whole.
+    kit.tokens = gpui_kit::component::ThemeTokens::from(&kit.colors);
     KitTheme::sync_base(cx);
     // `sync_base` reinstalls the Markdown defaults, so the code colouring goes on after it.
     TextViewDefaults::global(cx)
@@ -1763,6 +1817,24 @@ mod tests {
         assert_eq!(drawn_keys("↑↓"), "↑↓", "the arrows have no emoji form");
     }
 
+    /// A code well is Delta's: the well's ground at `radii.sm` in the lighter line, its shade
+    /// soft and held inside it, never cast out.
+    #[test]
+    fn a_code_well_is_sunk_softly_inside_its_line() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let mut el = well(div(), &theme);
+            let style = el.style();
+            assert_eq!(style.background, Some(gpui::Fill::from(hsla(theme.surfaces.well))));
+            assert_eq!(style.border_color, Some(hsla(theme.surfaces.stroke)), "{variant:?}");
+            assert_eq!(style.corner_radii.top_left, Some(px(theme.radii.sm).into()));
+            let shade = style.box_shadow.as_ref().and_then(|s| s.first()).cloned();
+            let shade = shade.expect("a shade");
+            assert!(shade.inset, "{variant:?}: held inside");
+            assert!(shade.blur_radius > px(0.0), "{variant:?}: soft");
+        }
+    }
+
     #[test]
     fn the_first_line_skips_blank_ones() {
         assert_eq!(first_line("\n  \n  cargo build  \nnext"), "cargo build");
@@ -1783,6 +1855,12 @@ mod tests {
                 assert_eq!(kit.colors.foreground, hsla(theme.surfaces.text));
                 assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "the accent");
                 assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_ink));
+                // Its primary button is the tinted accent, and its tokens, what it paints from,
+                // say so too: a write to the colours alone left a black solid Next.
+                let tinted = hsla(theme.surfaces.info_background);
+                assert_eq!(kit.colors.button_primary, tinted, "the tinted accent");
+                assert_eq!(kit.tokens.button_primary.color, tinted, "in its tokens too");
+                assert_eq!(kit.colors.button_primary_foreground, hsla(theme.surfaces.text));
                 assert_eq!(kit.colors.caret, hsla(theme.surfaces.text), "a neutral caret");
                 assert_eq!(kit.font_family.as_ref(), crate::fonts::UI_FAMILY, "the bundled faces");
                 assert_eq!(kit.mono_font_family.as_ref(), crate::fonts::MONO_FAMILY);

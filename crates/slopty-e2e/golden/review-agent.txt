@@ -41,12 +41,8 @@ Tab │ Review
 Button │ Close tile
 Button │ Close tile
 Group │ Review (focused)
-TabList
-Tab │ Last turn
-Tab │ Since reviewed
-Tab │ All turns
-Tab │ Uncommitted
-Tab │ Whole branch
+Toolbar
+Button │ Showing last turn
 Button │ Collapse all files
 Button │ Review with Claude Code
 Button │ Commit…

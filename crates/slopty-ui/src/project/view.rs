@@ -1875,19 +1875,10 @@ impl ProjectView {
                 })
                 .min_w_0()
                 .flex()
-                .flex_col()
-                .p(px(sp.xxs))
-                .rounded(px(theme.radii.md));
-            slopty_kit::kit::raised(group, theme).children(rows.into_iter().enumerate().map(
-                |(ix, row)| {
-                    div()
-                        .min_w_0()
-                        .when(ix > 0, |el| {
-                            el.border_t(slopty_kit::kit::HAIR).border_color(hsla(s.stroke))
-                        })
-                        .child(row)
-                },
-            ))
+                .flex_col();
+            // Delta's list under its head: square rows on the board's own plane, no card and
+            // no rule between them.
+            group.children(rows.into_iter().map(|row| div().min_w_0().child(row)))
         });
         let selector = format!("project-lane-{}", lane.selector());
         div()
@@ -1904,10 +1895,9 @@ impl ProjectView {
             .into_any_element()
     }
 
-    /// A row's height: Linear's 32 on the Mac, a finger's row on a touch screen.
+    /// A row's height: the density's row, Zed's 24 on the Mac and a finger's on a touch screen.
     const fn row_height(&self) -> gpui::Pixels {
-        let theme = &self.theme;
-        px(theme.spacing.xxl.max(theme.density.row))
+        px(self.theme.density.row)
     }
 
     /// The least a row's title narrows to before its facts leave.

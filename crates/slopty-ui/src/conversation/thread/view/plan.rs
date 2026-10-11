@@ -1,9 +1,9 @@
-//! A plan the agent proposes, as a document in the thread rather than a call, on the thread's
-//! one card (`kit::raised`, as the changes card and the composer are): a head of its mark and
-//! a small muted "Plan" (how it stands after the word, in the warn tone while it waits on the
-//! person), the title in the medium weight at the prose size, then its Markdown at the prose
-//! size. It is a thing put to the person, so it holds its own edge. Its copy shows under the
-//! pointer. A long plan shows its head until opened. While the agent waits on the person's
+//! A plan the agent proposes, as a document in the thread rather than a call, on Zed's tool
+//! card (`kit::call_card`, as the changes and a call put to the person are): a head on the
+//! card's ground of its mark and a small muted "Plan" (how it stands after the word, in the
+//! warn tone while it waits on the person), the title at the prose size, then its Markdown at
+//! the prose size. It is a thing put to the person, so it holds its own edge. Its copy shows under
+//! the pointer. A long plan shows its head until opened. While the agent waits on the person's
 //! word, its answers end the card, as a call's do.
 
 use gpui::accesskit::Role;
@@ -85,10 +85,11 @@ impl ThreadView {
             }))
         };
         let group: SharedString = format!("plan-{}", id.0).into();
-        let eyebrow = div()
+        let eyebrow = kit::card_head(div(), theme)
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.md))
             .min_h(px(theme.density.row))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
@@ -110,6 +111,8 @@ impl ThreadView {
                     .child(copy),
             );
         let heading = div()
+            .px(px(theme.spacing.md))
+            .pt(px(theme.spacing.sm))
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
@@ -142,7 +145,7 @@ impl ThreadView {
             Some(word) => format!("Plan: {title}, {word}"),
             None => format!("Plan: {title}"),
         };
-        kit::raised(div(), theme)
+        kit::call_card(div(), theme)
             .id(ElementId::Name(SharedString::from(selector.clone())))
             .debug_selector(move || selector)
             .group(group)
@@ -151,14 +154,12 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(theme.radii.md))
-            .px(px(theme.spacing.md))
-            .pt(px(theme.spacing.xxs))
             .pb(px(theme.spacing.sm + theme.spacing.xxs))
             .child(eyebrow)
             .child(heading)
             .child(
                 div()
+                    .px(px(theme.spacing.md))
                     .flex()
                     .flex_col()
                     .gap(px(theme.spacing.xs))
@@ -170,7 +171,7 @@ impl ThreadView {
                     .children(open_more)
                     .children(clipped),
             )
-            .children(answers)
+            .children(answers.map(|a| div().px(px(theme.spacing.md)).child(a)))
             .into_any_element()
     }
 }

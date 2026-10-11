@@ -537,7 +537,8 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     assert!(head.bottom() <= group.top(), "the head over its group");
     assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
     let one = at(cx, "project-card-3").expect("drawn");
-    assert!((one.size.height - px(32.0)).abs() < px(0.5), "a row is 32 pt: {one:?}");
+    let row = px(Theme::default().density.row);
+    assert!((one.size.height - row).abs() < px(0.5), "a row is the density's row: {one:?}");
     for row in ["project-card-1", "project-card-2", "project-card-3"] {
         let row = at(cx, row).expect("drawn");
         assert!(row.left() >= tile.left() && row.right() <= tile.right(), "{row:?} in {tile:?}");

@@ -129,7 +129,7 @@ impl ThreadView {
         };
         let thread = self.thread;
         let acts = self.turn_review(turn, cx).is_some_and(|r| !r.files.is_empty());
-        let head = div()
+        let head = kit::card_head(div(), theme)
             .w_full()
             .flex()
             .items_center()
@@ -252,9 +252,8 @@ impl ThreadView {
             Some(_) => format!("{words}, {added} added, {removed} removed"),
             None => words,
         };
-        // The thread's one card; the quieter line parts its head from its files.
-        let rule = div().flex_none().w_full().h(kit::HAIR).bg(hsla(s.stroke));
-        kit::raised(div(), theme)
+        // One of the thread's two cards, Zed's tool card: its head on the card's own ground.
+        kit::call_card(div(), theme)
             .id(ElementId::Name(format!("changes-{}", turn.0).into()))
             .debug_selector(move || format!("changes-{}", turn.0))
             .role(Role::Group)
@@ -262,10 +261,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(theme.radii.md))
-            .overflow_hidden()
             .child(head)
-            .child(rule)
             .child(div().w_full().flex().flex_col().py(px(theme.spacing.xxs)).children(rows))
             .children(toggle)
             .into_any_element()

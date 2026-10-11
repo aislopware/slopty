@@ -10443,7 +10443,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     not explain. Approvals as two bare buttons under the call: the decision row (the deny's
     split, standing grants, the release) stays and takes the card's foot.
   - Lints: `lints::the_thread_rests_on_one_card` (no `elevated` and no hand-laid card
-    wash under `conversation/thread/`), `lints::the_work_wears_no_card`.
+    wash under `conversation/thread/`), `lints::the_work_wears_no_card`; both since 2026-10-12
+    `lints::the_thread_has_no_card_but_calls_and_wells` ("The thread is Delta's").
   - Tests: `kit::message::tests::a_message_is_the_threads_card_and_focus_steps_its_ring`,
     `conversation::thread::questions::tests::an_answer_is_a_pill_and_chosen_is_the_selection`,
     `conversation::thread::tests::proposed`; goldens `thread*`, `wide-reading-thread`,
@@ -10870,10 +10871,85 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the pointer's wash, the selected wash while their menu is up.
   - **The tray** (the plan, the queue, the work in the background) is Zed's activity bar: lined
     on its top and sides, top corners round, standing on the composer's line, which closes it.
-    A request put to the person stays a card of its own above it.
+    A request put to the person stays a card of its own above it. Its ground is the page moved
+    30 % toward the selection (`kit::activity`), as Zed's is; the plan's steps lead with the
+    thread's own marks: a step to come the dashed ring, the one under way turning, a done one
+    the success check.
+  - **Two things are set apart, and only two.** A call put to the person (a permission, a
+    question, a plan to approve) and what the turn changed are Zed's tool card
+    (`kit::call_card`): the page's ground in the `border` line at `radii.md`, its head on the
+    `card_head` plane over the lighter line. A waiting call's line is that head, and what it
+    would do and the answers lie under it. Everything else is type on the page. This replaces
+    the card language's ring-only card and "no call is a card".
+  - **Answers lead with their meaning**, Zed's permission buttons: an allow with Carbon's
+    checkmark in the success tone, a deny with the cross in the error tone, an answer to a
+    question with its words alone. The arrangement (the deny's split, standing grants, the
+    release, the tinted allow last) stays. This overturns "Answers are words". Zed's key
+    binding on the first answer is not taken: keys are the palette's.
+  - **Code is a well**, Delta's (`kit::well`): the well's ground at `radii.sm` in the lighter
+    line, a soft shade held inside it (`0 1 4`, 20 % in dark, 3.2 % in light, the theme's
+    `sunk.well`), in the code face at the code role (12 on 18). A diff's lines lie on the
+    version-control bands (`vc_added_line`, `vc_deleted_line`) with the changed words on the
+    word washes and no sign column, Delta's diff markers off, in the thread and the review
+    alike; the line numbers take `line_number`. A command reads `$ command` in `text_secondary`.
+  - **A file a call names** is its path in `text_muted` over the accent's underline at 40 %
+    (`alpha::LINK`), full accent under the pointer, after the verb in `text_secondary`; the
+    chip on the well's wash went.
+  - **A fold's disclosure** is Zed's: 12 pt (`Typography::icon_small`), at 30 % until the
+    pointer is on its line, then 70 %.
+  - Lint: `lints::the_thread_has_no_card_but_calls_and_wells` (no raised card, `elevated` or
+    hand-laid well under `conversation/thread/`) replaces `the_thread_rests_on_one_card` and
+    `the_work_wears_no_card`.
   - Tests: `slopty-kit` `kit::message::tests::a_message_is_the_next_turn_unboxed`,
     `kit::message::tests::send_is_a_tinted_square`; `slopty-ui`
     `conversation::thread::tests::face::the_composer_runs_the_panes_width_at_its_foot`,
     `conversation::thread::tests::face::the_one_tinted_square_stops_a_turn_or_sends_the_draft`,
     `conversation::thread::tests::steps::a_question_and_its_answer_read_as_one_turn`,
     `conversation::thread::tests::steps::whose_turn_it_is_hangs_in_the_gutter`.
+
+- ✅ **The review compares as Delta's Changes do** (2026-10-12, `.research/zed-clone-2026-10-11.md`
+  §5.7, step 9 of the Zed port; supersedes the five-way span switch).
+  - **One comparison.** The scope bar leads with one ghost button naming the span on show, in
+    `text` with a 12 pt chevron, whose menu offers every span the review can show, the one on
+    show ticked. The five spans side by side went: they took the bar's width from its actions,
+    and a narrow tile sent all but one behind "More". A range reviewed as committed has only
+    its whole change: the button names it, with no chevron and no press.
+  - **A file's head is Delta's band**: the tile's width, a row and a base unit tall (28), square,
+    on the `element` plane, the selected wash while the keyboard is on it; the fold's chevron
+    and the file's type in `icon_muted`, the name in `text`, its folder muted. Kept from "Space,
+    headings and tone part the review and the thread": no line rules a file or the bar; the
+    band's plane parts the files where Delta also draws a line under it.
+  - Tests: `slopty-ui` `review::tests::the_comparison_names_the_span_and_offers_the_rest`,
+    `review::tests::no_rule_or_frame_parts_the_review`, and the review tile's tests in
+    `workspace::tests::review_tile`.
+
+- ✅ **The board's lanes are Delta's lists** (2026-10-12, `.research/zed-clone-2026-10-11.md`
+  §5.8, step 10 of the Zed port; supersedes the lanes' raised groups). A lane is its head and
+  its rows on the board's own plane: square rows the density's row tall (24, a finger's on
+  touch), with no card round them and no rule between them, as Delta's sidebar lists a state's
+  threads. The raised group with its ring and the 32 pt rows (Linear's) went.
+  - Tests: `slopty-ui` `workspace::tests::projects` (the lanes' column and a row's height).
+
+- ✅ **Settings, the empty page and the kit's primary are Zed's** (2026-10-12,
+  `.research/zed-clone-2026-10-11.md` §5.5, §5.9 and §5.11).
+  - **Settings rows are ruled, not carded**: on the page's own plane, each parted from the one
+    before by the lighter `stroke` line, with no ring, radius or wash round a group (Zed's
+    settings). The cards with their `radii.lg` ring went; a row keeps the inset its group's
+    label and footer start at.
+  - **The empty page's composer is unboxed**, as the thread's next turn is: the lighter line
+    over the field and no field's box.
+  - **gpui-kit's primary button is the tinted accent** (a question's Next and Submit), set on
+    its tokens as well as its colours: the components paint from the tokens, which a write to
+    the colours alone left at gpui-kit's own black solid.
+  - Tests: `slopty-kit` `kit::tests::the_kit_theme_follows_the_tokens`; `slopty-ui`
+    `workspace::tests::palette` (the empty page),
+    `settings_form::tests::a_groups_rows_are_ruled_under_its_label`.
+
+- ✅ **The terminal's scrollbar is Zed's 6 pt** (2026-10-12, `.research/zed-clone-2026-10-11.md`
+  §5.10, step 11 of the Zed port). The overlay thumb is `stroke::SCROLLBAR` (6 pt) across at
+  any font size, where it was 0.6 of a cell (about 5 pt at 13 pt Lilex, wider at a larger
+  size); its block ticks share the column. The rest of §5.10 was already so: the grid on the
+  work's ground with One's palette, the block cursor in the accent, a failed block's 3 pt bar
+  in `error` over its head's wash, and no header of the tile's own. Lilex's cost on the frame
+  path is measured (MEASUREMENTS, "the terminal face: Lilex against JetBrains Mono"); the
+  thumb's width changes no draw. Test: `terminal::element::tests::the_scrollbar_thumb_tracks_the_viewport_and_maps_back`.

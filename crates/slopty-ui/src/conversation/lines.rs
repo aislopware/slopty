@@ -1,17 +1,18 @@
 //! A diff's lines drawn: the one renderer for the thread view's edits and the review tile.
 //!
-//! As git-delta and Zed's Delta draw them: each changed line on a faint wash, the words that
-//! changed in it on a stronger one, every line in its grammar's colours (context and removed
-//! lines too), the numbers and signs muted, one gutter of the new file's numbers in a column.
+//! As Zed's Delta draws them: each changed line on its version-control band, the words that
+//! changed in it on the stronger word wash, every line in its grammar's colours (context and
+//! removed lines too), the numbers in the line number's tone, and no sign column (Delta's diff
+//! markers are off by default): the band says which side a line is on.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Div, Hsla, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     StyledText, TextRun, div, px,
 };
-use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::colors::hsla;
 use slopty_kit::highlight;
-use slopty_theme::{Rgb, Theme, alpha};
+use slopty_theme::Theme;
 
 use super::diff::{Block, Kind, Line, TAB_SPACES};
 
@@ -45,16 +46,14 @@ impl Ink<'_> {
             .border_color(hsla(self.theme.surfaces.stroke))
     }
 
-    /// The line's wash, its sign and the sign's tone: muted, the wash says the rest.
+    /// The line's band: Delta's `version_control.added` or `.deleted`, none for context.
     #[must_use]
-    pub fn tone(&self, kind: Kind) -> (Option<Hsla>, &'static str, Rgb) {
+    pub fn tone(&self, kind: Kind) -> Option<Hsla> {
         let s = self.theme.surfaces;
         match kind {
-            Kind::Added => (Some(hsla_alpha(s.success_fill, alpha::FAINT)), "+", s.text_muted),
-            Kind::Removed => {
-                (Some(hsla_alpha(s.error_fill, alpha::FAINT)), "\u{2212}", s.text_muted)
-            }
-            Kind::Context => (None, " ", s.text_muted),
+            Kind::Added => Some(hsla(s.vc_added_line)),
+            Kind::Removed => Some(hsla(s.vc_deleted_line)),
+            Kind::Context => None,
         }
     }
 
@@ -62,8 +61,8 @@ impl Ink<'_> {
     fn emph(&self, kind: Kind) -> Option<Hsla> {
         let s = self.theme.surfaces;
         match kind {
-            Kind::Added => Some(hsla_alpha(s.success_fill, alpha::EMPH)),
-            Kind::Removed => Some(hsla_alpha(s.error_fill, alpha::EMPH)),
+            Kind::Added => Some(hsla(s.vc_word_added)),
+            Kind::Removed => Some(hsla(s.vc_word_deleted)),
             Kind::Context => None,
         }
     }
@@ -82,7 +81,7 @@ impl Ink<'_> {
             .flex()
             .justify_end()
             .text_size(px(self.theme.typography.small()))
-            .text_color(hsla(s.text_muted))
+            .text_color(hsla(s.line_number))
             .children(n.map(|n| SharedString::from(n.to_string())))
     }
 
@@ -114,11 +113,11 @@ impl Ink<'_> {
             .into_any_element()
     }
 
-    /// One line in a column: the new file's number (a removed line has none), the sign, the
-    /// text, on the line's wash.
+    /// One line in a column: the new file's number (a removed line has none) and the text, on
+    /// the line's band.
     #[must_use]
     pub fn unified(&self, line: &Line) -> Div {
-        let (wash, sign, sign_tone) = self.tone(line.kind);
+        let wash = self.tone(line.kind);
         let spacing = self.theme.spacing;
         div()
             .w_full()
@@ -128,7 +127,6 @@ impl Ink<'_> {
             .px(px(spacing.sm))
             .when_some(wash, gpui::Styled::bg)
             .child(self.number(line.new))
-            .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
             .child(self.text(line))
     }
 
@@ -136,7 +134,7 @@ impl Ink<'_> {
     /// file's, so a removed line keeps its place in the old file and an added one in the new.
     #[must_use]
     pub fn unified_numbered(&self, line: &Line) -> Div {
-        let (wash, sign, sign_tone) = self.tone(line.kind);
+        let wash = self.tone(line.kind);
         let spacing = self.theme.spacing;
         let old = line.old.filter(|_| line.kind != Kind::Added);
         let new = line.new.filter(|_| line.kind != Kind::Removed);
@@ -155,7 +153,6 @@ impl Ink<'_> {
                     .child(self.number(old))
                     .child(self.number(new)),
             )
-            .child(div().flex_none().text_color(hsla(sign_tone)).child(sign))
             .child(self.text(line))
     }
 
@@ -244,7 +241,8 @@ pub fn digits(blocks: &[Block]) -> usize {
 mod tests {
     use gpui::{Hsla, TextRun, font};
 
-    use super::{detabbed, name_first, washed};
+    use super::{Ink, detabbed, name_first, washed};
+    use crate::conversation::diff::Kind;
 
     /// A file reads name first, its folder after.
     #[test]
@@ -272,5 +270,18 @@ mod tests {
         let shape: Vec<(usize, bool)> =
             runs.iter().map(|r| (r.len, r.background_color.is_some())).collect();
         assert_eq!(shape, [(1, true), (4, false), (2, true), (2, true), (5, false)]);
+    }
+
+    /// A changed line lies on Delta's version-control band, opaque, and context on nothing.
+    #[test]
+    fn a_changed_line_lies_on_its_version_control_band() {
+        for variant in [slopty_theme::Variant::Dark, slopty_theme::Variant::Light] {
+            let theme = slopty_theme::Theme::new(variant);
+            let ink = Ink { theme: &theme, digits: 2 };
+            let s = theme.surfaces;
+            assert_eq!(ink.tone(Kind::Added), Some(slopty_kit::colors::hsla(s.vc_added_line)));
+            assert_eq!(ink.tone(Kind::Removed), Some(slopty_kit::colors::hsla(s.vc_deleted_line)));
+            assert_eq!(ink.tone(Kind::Context), None);
+        }
     }
 }

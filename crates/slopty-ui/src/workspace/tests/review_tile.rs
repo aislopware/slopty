@@ -239,7 +239,10 @@ fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-keep-file-0").is_none(), "nothing to keep for an agent");
     assert!(cx.debug_bounds("review-mark").is_none(), "and no foot");
 
-    let branch = cx.debug_bounds("review-scope-WholeBranch").expect("the whole branch");
+    let compare = cx.debug_bounds("review-scope").expect("the comparison");
+    cx.simulate_click(compare.center(), Modifiers::none());
+    cx.run_until_parked();
+    let branch = cx.debug_bounds("review-scope-menu-WholeBranch").expect("the whole branch");
     cx.simulate_click(branch.center(), Modifiers::none());
     cx.run_until_parked();
     let then = changes(&studio.drain());
@@ -872,7 +875,10 @@ fn a_goals_range_reads_as_committed_and_its_comments_go_to_the_orchestrator(
     frames(cx);
     assert!(cx.debug_bounds("review-head-0").is_some(), "the goal's file shows");
     assert!(cx.debug_bounds("review-commit").is_none(), "nothing of its own to commit");
-    assert!(cx.debug_bounds("review-scope-Uncommitted").is_none(), "its range alone");
+    let compare = cx.debug_bounds("review-scope").expect("the comparison");
+    cx.simulate_click(compare.center(), Modifiers::none());
+    frames(cx);
+    assert!(cx.debug_bounds("review-scope-menu-Uncommitted").is_none(), "its range alone");
 
     let goal = view.read_with(cx, |v, _| v.changes_view(tile.item).cloned()).expect("the review");
     assert_eq!(goal.read_with(cx, |g, _| g.head().map(str::to_owned)), Some(head.clone()));

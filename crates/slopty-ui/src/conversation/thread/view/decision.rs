@@ -23,6 +23,7 @@ use slopty_kit::colors::hsla;
 use slopty_kit::icons::Symbol;
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::{Choice, Effect, Request};
+use slopty_theme::{Rgb, Surfaces};
 
 use super::ThreadView;
 use super::denying::{deny_choice, plain_deny};
@@ -86,6 +87,17 @@ pub(super) fn answer_label(words: &str, scope: Option<&str>) -> String {
 /// words after it show it: "Always allow edits in /work this session".
 pub(super) fn standing_label(words: &str, reach: Option<&str>) -> String {
     reach.map_or_else(|| words.to_owned(), |reach| format!("{words} {reach}"))
+}
+
+/// The glyph an answer leads with, Zed's permission buttons': an allow's check in the success
+/// tone, a deny's cross in the error tone. An answer to a question has none: its words are
+/// the answer.
+pub(super) const fn answer_glyph(effect: Effect, s: &Surfaces) -> Option<(Symbol, Rgb)> {
+    match effect {
+        Effect::Allow => Some((Symbol::Checkmark, s.success)),
+        Effect::Deny => Some((Symbol::Xmark, s.error)),
+        Effect::Answer => None,
+    }
 }
 
 /// How far an answer reaches, when its words do not say it already ([`answer_label`]).
@@ -180,6 +192,7 @@ impl ThreadView {
             format!("answer-{}-{}", ask.0, choice.id),
             (words, answer_scope(choice).map(str::to_owned)),
             kind,
+            answer_glyph(choice.effect, &self.theme.surfaces),
         )
         .on_click(cx.listener(move |this, _ev, _w, cx| this.answer(ask.clone(), id.clone(), cx)))
     }
@@ -363,7 +376,7 @@ mod tests {
     use slopty_kit::kit::ButtonKind;
     use slopty_proto::thread::{Choice, Effect};
 
-    use super::{answer_label, answer_scope, arrange, standing_label};
+    use super::{answer_glyph, answer_label, answer_scope, arrange, standing_label};
 
     fn choice(id: &str, effect: Effect, scope: Option<&str>, stops: bool) -> Choice {
         Choice {
@@ -452,5 +465,20 @@ mod tests {
             "Always allow edits in /work this session",
             "a standing grant's reach reads on from its button"
         );
+    }
+
+    /// An answer leads with its meaning, as Zed's permission buttons do: allow a success
+    /// check, deny an error cross, an answer to a question its words alone.
+    #[test]
+    fn an_answer_leads_with_its_meaning() {
+        let theme = slopty_theme::Theme::default();
+        let s = &theme.surfaces;
+        let check = Some((slopty_kit::icons::Symbol::Checkmark, s.success));
+        assert_eq!(answer_glyph(Effect::Allow, s), check);
+        assert_eq!(
+            answer_glyph(Effect::Deny, s),
+            Some((slopty_kit::icons::Symbol::Xmark, s.error))
+        );
+        assert_eq!(answer_glyph(Effect::Answer, s), None);
     }
 }

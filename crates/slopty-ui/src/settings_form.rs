@@ -1699,7 +1699,7 @@ impl SettingsForm {
             }
             parts.push((Part::Row { spaced: true }, self.key_line(row, cx)));
         }
-        let mut children = carded(&theme, parts);
+        let mut children = ruled(&theme, parts);
         if about {
             if by_section {
                 children.push(self.heading(Section::About.label(), children.len(), last.is_none()));
@@ -2258,49 +2258,26 @@ fn row_height(theme: &Theme) -> f32 {
     if touch { theme.density.row } else { theme.density.row + theme.spacing.sm }
 }
 
-/// The page's children with each run of rows set in one card, as System Settings groups them:
-/// the line that bounds a region (`border`) round the group at `radii.lg`, filled with
-/// the card's wash (`MonoCode`'s settings cards), the rows the content itself, each parted from the
-/// one before by the quieter hairline inside a region (`stroke`), inset to start where the titles
-/// do. On near-black the quieter one alone left the group's edge all but gone. Each
-/// row stays a child of the page, so scrolling to one still finds it; a font's list hangs from
-/// its row with no rule.
-fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
+/// The page's children with each run of rows set as Zed's settings set them: rows on the page's
+/// own plane with no card, ring or radius, each parted from the one before by the lighter
+/// `stroke` line the page's width. Each row stays a child of the page, so scrolling to one
+/// still finds it; a font's list hangs from its row with no rule.
+fn ruled(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
-    let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
-    let (r, inset) = (px(theme.radii.lg), px(theme.spacing.lg));
-    let wash = hsla(theme.surfaces.ground);
+    let rule = hsla(theme.surfaces.stroke);
     parts
         .into_iter()
         .enumerate()
         .map(|(i, (part, child))| {
             let Part::Row { spaced } = part else { return child };
             let first = !row_at(i.checked_sub(1));
-            let last = !row_at(i.checked_add(1));
             div()
-                .debug_selector(move || format!("settings-card-{i}"))
-                .relative()
+                .debug_selector(move || format!("settings-ruled-{i}"))
                 .w_full()
-                .px(inset)
-                .bg(wash)
-                .border_color(ring)
-                .border_l(slopty_kit::kit::HAIR)
-                .border_r(slopty_kit::kit::HAIR)
-                .when(first, |el| el.border_t(slopty_kit::kit::HAIR).rounded_t(r))
-                .when(last, |el| el.border_b(slopty_kit::kit::HAIR).rounded_b(r))
-                .when(spaced && !first, |el| {
-                    el.child(
-                        div()
-                            .debug_selector(move || format!("settings-rule-{i}"))
-                            .absolute()
-                            .top_0()
-                            .left(inset)
-                            .right_0()
-                            .h(slopty_kit::kit::HAIR)
-                            .bg(rule),
-                    )
-                })
+                // In from the page's edge to where the group's label and footer start.
+                .px(px(theme.spacing.lg))
+                .when(spaced && !first, |el| el.border_t(slopty_kit::kit::HAIR).border_color(rule))
                 .child(child)
                 .into_any_element()
         })
@@ -2527,13 +2504,11 @@ mod tests {
 
     use super::*;
 
-    /// A group's rows are one ring under its label, as System Settings draws a group: the
-    /// label stands apart, the rows' parts meet edge to edge on one column, the first rounded at
-    /// the top, on the card's wash and the page on the content plane; each row after the
-    /// first is parted by a hairline inset to where the titles start, and the group's footer
-    /// stands under the ring.
+    /// A group's rows are Zed's settings list: the rows meet edge to edge on one column, each
+    /// after the first parted by the lighter `stroke` line, with no ring, radius or wash round
+    /// them.
     #[gpui::test]
-    fn a_groups_rows_are_one_ring_under_its_label(cx: &mut TestAppContext) {
+    fn a_groups_rows_are_ruled_under_its_label(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let theme = Theme::default();
         let (_form, cx): (_, &mut VisualTestContext) =
@@ -2543,45 +2518,29 @@ mod tests {
         let at = |cx: &mut VisualTestContext, what: &str, i: usize| {
             cx.debug_bounds(Box::leak(format!("settings-{what}-{i}").into_boxed_str()))
         };
-        assert!(at(cx, "card", 0).is_none(), "the label stands apart");
-        let parts: Vec<_> = (1..).map_while(|i| at(cx, "card", i)).collect();
-        assert!(parts.len() > 1, "a group of rows: {parts:?}");
-        for pair in parts.windows(2) {
+        let start = usize::from(at(cx, "ruled", 0).is_none());
+        let rows: Vec<_> = (start..).map_while(|i| at(cx, "ruled", i)).collect();
+        assert!(rows.len() > 1, "a group of rows: {rows:?}");
+        for pair in rows.windows(2) {
             let [a, b] = pair else { continue };
-            assert!((a.bottom() - b.top()).abs() < px(0.5), "edge to edge: {a:?} {b:?}");
             assert_eq!((a.left(), a.right()), (b.left(), b.right()), "one column");
+            assert!((b.top() - a.bottom()).abs() < px(0.5), "edge to edge: {a:?} {b:?}");
         }
-        let first = parts.first().copied().expect("a part");
-        assert!(at(cx, "rule", 1).is_none(), "no rule over the first row");
-        let rule = at(cx, "rule", 2).expect("a rule over the second");
-        // The rule starts where the titles do: inside the ring's line, then the inset.
-        let inset = slopty_kit::kit::HAIR + px(theme.spacing.lg);
-        assert!((rule.left() - first.left() - inset).abs() < px(0.5), "inset to the titles");
-        let footer = at(cx, "footer", parts.len().saturating_add(1)).expect("the group's footer");
-        let last = parts.last().copied().expect("a part");
-        assert!(footer.top() >= last.bottom() - px(0.5), "under the ring");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let filled = quads.iter().any(|q| {
-            (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
-                && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
-                && q.background == gpui::Background::from(hsla(theme.surfaces.ground))
-        });
-        assert!(filled, "the work's ground under the ring");
-        // The ring bounds a region; the rules part rows inside it, a step quieter.
         let at_origin = |b: gpui::Bounds<gpui::Pixels>| {
             move |q: &&gpui::Quad| {
                 (q.bounds.origin.y.0 / scale - f32::from(b.top())).abs() < 0.5
                     && (q.bounds.origin.x.0 / scale - f32::from(b.left())).abs() < 0.5
             }
         };
-        let ring = quads.iter().filter(at_origin(first)).find(|q| q.border_widths.top.0 > 0.0);
-        let ring = ring.expect("the ring's top edge");
-        assert_eq!(ring.border_color, hsla(theme.surfaces.border), "the ring is a region's edge");
-        let drawn = quads.iter().find(at_origin(rule)).expect("the rule drawn");
-        assert_eq!(
-            drawn.background,
-            gpui::Background::from(hsla(theme.surfaces.stroke)),
-            "a rule inside the ring is the quieter hairline"
+        let first = rows.first().copied().expect("a row");
+        let edged = |b| quads.iter().filter(at_origin(b)).find(|q| q.border_widths.top.0 > 0.0);
+        assert!(edged(first).is_none(), "no line over the first row");
+        let ruled = rows.iter().skip(1).find_map(|b| edged(*b)).expect("a line between rows");
+        assert_eq!(ruled.border_color, hsla(theme.surfaces.stroke), "the quieter line");
+        assert!(
+            ruled.corner_radii.top_left.0 == 0.0 && ruled.border_widths.left.0 == 0.0,
+            "a line, not a ring"
         );
     }
 

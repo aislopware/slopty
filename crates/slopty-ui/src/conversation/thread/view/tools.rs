@@ -1,4 +1,4 @@
-//! A call, drawn as Zed's and Codex's threads draw one: a line on the thread's plane.
+//! A call, drawn as Zed's and Delta's threads draw one: a line on the thread's plane.
 //!
 //! Every call is one line, whatever it did: its kind's mark (a file's type for a call on one
 //! file), what it did (a file's verb, then the file named first and its folder after; a
@@ -6,10 +6,10 @@
 //! the pointer. The file's name opens the file in a tile of its own; the rest of the line
 //! opens its diff, its command and output or its sources under it, in a quiet well indented to
 //! its words. A call that only looked is muted; one that changed or ran something is a step
-//! stronger. How it stands is said by its mark while it runs or waits, and after it by an icon
-//! and a word at its end, never by an edge: no call is a card, so no row of the thread is
-//! boxed where its neighbours are not. A request whose call is on screen is answered under the
-//! call's line.
+//! stronger. How it stands is said by its mark while it runs, and after it by an icon and a
+//! word at its end, never by an edge. Only a call put to the person is a card, Zed's tool card:
+//! its line the head, and under it what it would do and the answers, while the request is on
+//! screen.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -20,11 +20,11 @@ use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_kit::colors::hsla;
+use slopty_kit::colors::{hsla, hsla_alpha};
 use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::thread::{ItemBody, ItemId, Patch, ToolCall, ToolDetail, ToolState};
-use slopty_theme::{Rgb, Surfaces};
+use slopty_theme::{Rgb, Surfaces, alpha};
 
 use super::{
     PEEK_LINES, TOOL_ROW, ThreadView, ThreadViewEvent, call_path, patch_of, path_patch, tail,
@@ -147,14 +147,37 @@ impl ThreadView {
             return self.plan_card(id, call, text, answers, cx);
         }
         let theme = &self.theme;
+        let selector = {
+            let id = id.0.clone();
+            move || format!("call-{id}")
+        };
+        if waiting && child.is_none() {
+            // A call put to the person is the column's one card, Zed's tool card: its line the
+            // head, what it would do and the answers under it.
+            return kit::call_card(div(), theme)
+                .debug_selector(selector)
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(kit::card_head(div(), theme).px(px(theme.spacing.xs)).child(line))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme.spacing.xxs))
+                        .p(px(theme.spacing.sm))
+                        .children(body)
+                        .children(pictures.map(gpui::IntoElement::into_any_element))
+                        .children(answers.map(gpui::IntoElement::into_any_element)),
+                )
+                .into_any_element();
+        }
         // Under the line, indented to its words: the body in its well, the pictures, the
         // answers.
         let under = |el: AnyElement| div().w_full().pl(px(TOOL_ROW + theme.spacing.xs)).child(el);
         div()
-            .debug_selector({
-                let id = id.0.clone();
-                move || format!("call-{id}")
-            })
+            .debug_selector(selector)
             .w_full()
             .flex()
             .flex_col()
@@ -238,7 +261,9 @@ impl ThreadView {
         };
         let quiet = rows::quiet(call);
         let ink = if quiet { s.text_muted } else { s.text_secondary };
-        let lead_ink = if a_file { s.text } else { ink };
+        // A file's path is Delta's: the placeholder's tone over the accent's faint underline,
+        // so it reads as a way to the file and not as the line's words.
+        let lead_ink = if a_file { s.text_muted } else { ink };
         let group: SharedString = format!("call-{}", id.0).into();
         let name_id = format!("call-file-{}", id.0);
         let what = match file {
@@ -247,19 +272,17 @@ impl ThreadView {
                 .flex()
                 .items_baseline()
                 .gap(px(theme.spacing.xs))
-                .children(verb.map(|v| div().flex_none().text_color(hsla(ink)).child(v)))
+                .children(
+                    verb.map(|v| div().flex_none().text_color(hsla(s.text_secondary)).child(v)),
+                )
                 .child(
-                    // A file is a chip set into the line (`MonoCode`'s file chip): the card's
-                    // wash with no ring, at the least radius.
                     div()
                         .id(ElementId::Name(name_id.clone().into()))
                         .debug_selector(move || name_id)
                         .flex_none()
                         .max_w(gpui::relative(0.7))
                         .when(a_file, |el| {
-                            kit::inset(el, theme)
-                                .rounded(px(theme.radii.xs))
-                                .px(px(theme.spacing.xs))
+                            el.underline().text_decoration_color(hsla_alpha(s.accent, alpha::LINK))
                         })
                         .overflow_hidden()
                         .text_ellipsis()
@@ -271,7 +294,7 @@ impl ThreadView {
                             el.role(Role::Link)
                                 .aria_label(SharedString::from(format!("Open {path}")))
                                 .cursor_pointer()
-                                .hover(gpui::Styled::underline)
+                                .hover(move |el| el.text_decoration_color(hsla(s.accent)))
                                 .on_click(cx.listener(move |_this, _ev, _w, cx| {
                                     cx.stop_propagation();
                                     cx.emit(ThreadViewEvent::OpenFile { path: path.clone() });
@@ -402,8 +425,10 @@ impl ThreadView {
             .flex_col()
             .gap(px(theme.spacing.xs))
             .font_family(self.mono())
-            .text_size(px(theme.typography.small()))
-            .children(command.map(|c| div().text_color(hsla(s.text)).child(SharedString::from(c))))
+            .children(
+                command
+                    .map(|c| div().text_color(hsla(s.text_secondary)).child(SharedString::from(c))),
+            )
             .children(input.map(|i| {
                 let id = id.0.clone();
                 div()
@@ -473,7 +498,8 @@ impl ThreadView {
             }
         }
         let selector = format!("patch-{}", key.0);
-        let code = ink.code().py(px(theme.spacing.xxs)).children(children);
+        let code =
+            kit::typed(ink.code(), theme.roles().code).py(px(theme.spacing.xxs)).children(children);
         let well = if walled { self.well(code) } else { code };
         let well = well.debug_selector(move || selector);
         let more = (!whole).then(|| self.show_lines(key, total as u64, cx));
@@ -569,14 +595,13 @@ impl ThreadView {
         Some(self.well(list.p(px(theme.spacing.xs))).into_any_element())
     }
 
-    /// An opened call's well: set into the thread's plane ([`kit::inset`]) at a code shell's
-    /// `radii.sm`, no edge, clipped to its corners.
+    /// An opened call's well: Delta's code well ([`kit::well`]), its code at the code role,
+    /// clipped to its corners.
     fn well(&self, content: impl gpui::IntoElement) -> Div {
         let theme = &self.theme;
-        kit::inset(div(), theme)
+        kit::typed(kit::well(div(), theme), theme.roles().code)
             .w_full()
             .overflow_hidden()
-            .rounded(px(theme.radii.sm))
             .child(content)
     }
 }

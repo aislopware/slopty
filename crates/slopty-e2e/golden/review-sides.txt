@@ -24,9 +24,8 @@ Tab │ Changes
 Button │ Close tile
 Button │ Close tile
 Group │ Review
-TabList
-Tab │ Uncommitted
-Tab │ Whole branch
+Toolbar
+Button │ Showing uncommitted
 Button │ Collapse all files
 Button │ Refresh
 Button │ Commit…
@@ -44,5 +43,7 @@ Image │ After: art/logo.png
 Button │ capture.log
 CheckBox │ Viewed
 Button │ Open the whole file
+Button │ deploy.sh
+CheckBox │ Viewed
 Group │ Status
 Button │ Show the tab's terminal

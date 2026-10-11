@@ -18,7 +18,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::Symbol;
+use slopty_kit::icons::{Status, Symbol};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
@@ -318,7 +318,6 @@ impl ThreadView {
                 .overflow_y_scroll()
                 .children(sections)
         });
-        let radius = px(theme.radii.md);
         let request = request.map(|request| {
             // The request takes the keyboard by a press anywhere on it, or by Tab to one of
             // its answers; then, and only then, ⌘↵ and ⌘⌫ answer it. A press that a field or
@@ -342,9 +341,7 @@ impl ThreadView {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .rounded(radius)
-                .map(|el| kit::raised(el, theme))
-                .overflow_hidden()
+                .map(|el| kit::call_card(el, theme))
                 .mb(px(theme.spacing.md))
                 .child(request)
         });
@@ -372,7 +369,7 @@ impl ThreadView {
                         .mb(px(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
-                .map(|el| kit::inset(el, theme))
+                .map(|el| kit::activity(el, theme))
                 .overflow_hidden()
                 .child(rest)
         });
@@ -533,20 +530,23 @@ impl ThreadView {
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
         let release = request.id.clone();
         Some(
-            self.answer_button(format!("release-{}", release.0), (words, None), kind)
+            self.answer_button(format!("release-{}", release.0), (words, None), kind, None)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.release(release.clone(), cx)))
                 .into_any_element(),
         )
     }
 
-    /// A button of a request's: its words, then how far it reaches, muted. A rule can be long
-    /// ("cargo test -p atlas-api refresh"): it gives way to an ellipsis at [`SCOPE_EMS`], so
-    /// the answers keep one row and the button's hint and a screen reader still say all of it.
+    /// A button of a request's: its `glyph` in its tone when it has one (Zed's permission
+    /// buttons: allow's check in the success tone, deny's cross in the error tone), its words,
+    /// then how far it reaches, muted. A rule can be long ("cargo test -p atlas-api refresh"):
+    /// it gives way to an ellipsis at [`SCOPE_EMS`], so the answers keep one row and the
+    /// button's hint and a screen reader still say all of it.
     pub(super) fn answer_button(
         &self,
         id: String,
         (words, scope): (String, Option<String>),
         kind: ButtonKind,
+        glyph: Option<(Symbol, slopty_theme::Rgb)>,
     ) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -567,6 +567,7 @@ impl ThreadView {
             .max_w_full()
             .gap(px(theme.spacing.xs))
             .px(px(theme.spacing.sm))
+            .children(glyph.map(|(glyph, tone)| self.icon(glyph, tone)))
             .child(div().min_w_0().text_center().child(SharedString::from(words)))
             .children(scope)
     }
@@ -713,6 +714,7 @@ impl ThreadView {
             });
             (None, body)
         };
+        let under = text.is_some() || plan.is_some() || proposed.is_some() || body.is_some();
         div()
             .id(ElementId::Name(format!("request-{id}").into()))
             .debug_selector(move || format!("request-{id}"))
@@ -727,8 +729,10 @@ impl ThreadView {
             .flex()
             .flex_col()
             .child(
-                self.section()
+                kit::card_head(self.section(), theme)
                     .flex_none()
+                    // A head with nothing under it is the whole card.
+                    .map(|el| if under { el.mb(px(theme.spacing.md)) } else { el.border_b_0() })
                     .min_h(px(theme.density.header))
                     .px(px(theme.spacing.md))
                     .child(self.needs_you())
@@ -820,20 +824,29 @@ impl ThreadView {
         let steps = open.then(|| {
             div().w_full().flex().flex_col().pb(px(theme.spacing.xs)).children(
                 plan.steps.iter().map(|step| {
-                    let (icon, tone) = match step.status.as_str() {
-                        STEP_DONE => (Symbol::CheckmarkCircle, s.text_muted),
-                        "in_progress" => (Symbol::CircleInsetFilled, s.text),
-                        _ => (Symbol::Circle, s.text_muted),
+                    // The thread's own marks, as Zed's plan list leads with its task glyph:
+                    // a step to come is the dashed ring, the one under way turns, a done one
+                    // is the success check.
+                    let (status, ink, tone) = match step.status.as_str() {
+                        STEP_DONE => {
+                            let done = Status::Done;
+                            (done, done.ink(theme), s.text_muted)
+                        }
+                        "in_progress" => (Status::Working, s.text_muted, s.text),
+                        _ => (Status::Running, s.text_muted, s.text_secondary),
                     };
-                    self.section()
-                        .text_color(hsla(tone))
-                        .child(Self::slot().child(self.icon(icon, tone)))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .child(SharedString::from(step.text.clone())),
-                        )
+                    let mark = slopty_kit::icons::status_icon(
+                        theme,
+                        status,
+                        px(theme.typography.icon()),
+                        hsla(ink),
+                    );
+                    self.section().text_color(hsla(tone)).child(Self::slot().child(mark)).child(
+                        div()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(SharedString::from(step.text.clone())),
+                    )
                 }),
             )
         });

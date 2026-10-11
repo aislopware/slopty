@@ -150,9 +150,6 @@ const FOOT_ADD: &str = "add";
 /// The foot's "Mark reviewed", by its key in its row.
 const FOOT_MARK: &str = "mark";
 
-/// What the other spans give way to in the scope bar: only Commit outranks them.
-const SCOPE_PRIORITY: kit::Priority = kit::Priority(176);
-
 /// The scope bar's refresh, by its key in its row.
 const BAR_REFRESH: &str = "refresh";
 
@@ -398,6 +395,8 @@ pub struct ReviewView {
     foot_dropped: kit::Dropped,
     /// The scope bar's "More" menu is open.
     scopes_open: bool,
+    /// The comparison's menu, the spans to show, is open.
+    scope_open: bool,
     /// What the scope bar left out at its last layout, which its "More" offers.
     scopes_dropped: kit::Dropped,
     /// The agent's own review, while it runs.
@@ -596,6 +595,7 @@ impl ReviewView {
             more_open: false,
             foot_dropped: kit::Dropped::default(),
             scopes_open: false,
+            scope_open: false,
             scopes_dropped: kit::Dropped::default(),
             reviewing: None,
             came: None,
@@ -1589,44 +1589,17 @@ impl ReviewView {
         slopty_kit::a11y::tab_stop(el, s.focus)
     }
 
-    /// The switch of spans, then the bar's actions at its end: one row that fits the tile
-    /// (`kit::priority_row`), each item at its shaped width. The span on show and the refresh
-    /// never leave; the pull request, the agent's review, the other spans and Commit leave in
-    /// that order and wait behind "More" (`docs/decisions/ui.md`, "How surfaces adapt to their
-    /// room").
+    /// The comparison, then the bar's actions at its end: one row that fits the tile
+    /// (`kit::priority_row`), each item at its shaped width. The comparison and the refresh
+    /// never leave; the pull request, the agent's review and Commit leave in that order and
+    /// wait behind "More" (`docs/decisions/ui.md`, "How surfaces adapt to their room").
     fn scope_bar(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
-        let s = theme.surfaces;
-        let mut row = kit::priority_row("review-scope-row")
+        let row = kit::priority_row("review-scope-row")
             .h_full()
             .gap(px(theme.spacing.xxs))
-            .dropped(&self.scopes_dropped);
-        for scope in self.scopes().iter().copied() {
-            let on = scope == self.scope;
-            let id = format!("review-scope-{scope:?}");
-            let selector = id.clone();
-            let tab = div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::Tab)
-                .aria_label(scope.label())
-                .aria_selected(on)
-                .flex_none()
-                .whitespace_nowrap()
-                .px(px(theme.spacing.sm))
-                .py(px(theme.spacing.xxs))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .when(on, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .when(!on, |el| {
-                    el.text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.text_color(hsla(s.text)))
-                })
-                .child(scope.label())
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)));
-            let priority = if on { kit::Priority::ESSENTIAL } else { SCOPE_PRIORITY };
-            row = row.item(scope.label(), priority, tab);
-        }
+            .dropped(&self.scopes_dropped)
+            .item("scope", kit::Priority::ESSENTIAL, self.comparison(cx));
         let mut row = row.end();
         if let Some(files) = self.files_part(cx) {
             row = row.item(BAR_FILES, kit::Priority::ESSENTIAL, files);
@@ -1648,7 +1621,7 @@ impl ReviewView {
         }
         div()
             .id("review-scopes")
-            .role(Role::TabList)
+            .role(Role::Toolbar)
             .flex_none()
             .w_full()
             .h(px(theme.density.header))
@@ -1672,19 +1645,6 @@ impl ReviewView {
         let menu = self.scopes_open.then(|| {
             let mut menu = kit::Menu::new();
             let dropped = self.scopes_dropped.keys();
-            for scope in self.scopes().iter().copied() {
-                if !dropped.iter().any(|k| k == scope.label()) {
-                    continue;
-                }
-                let to = this.clone();
-                let key = format!("{scope:?}");
-                menu.push(kit::MenuItem::new(key, scope.label(), move |_w, cx| {
-                    let _gone = to.update(cx, |this, cx| {
-                        this.scopes_open = false;
-                        this.set_scope(scope, cx);
-                    });
-                }));
-            }
             if dropped.iter().any(|k| k == BAR_AGENT)
                 && self.reviewing.is_none()
                 && let Some((_, name)) = self.door_of(cx)
@@ -1722,7 +1682,76 @@ impl ReviewView {
         div().relative().flex_none().child(button).children(menu).into_any_element()
     }
 
-    /// The spans the switch offers: a thread's turns, or a folder's working tree.
+    /// What the review compares, Delta's comparison: one ghost button with the span on show
+    /// in `text` and a 12 pt chevron, which opens the menu of the spans it can show instead
+    /// while there are others. A range reviewed as committed has only its whole change, and
+    /// says so with no chevron and no press.
+    fn comparison(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let others = self.scopes().len() > 1;
+        let label = self.scope.label();
+        let el = div()
+            .id("review-scope")
+            .debug_selector(|| "review-scope".to_owned())
+            .role(if others { Role::Button } else { Role::Label })
+            .aria_label(SharedString::from(format!("Showing {}", label.to_lowercase())))
+            .flex_none()
+            .h(px(theme.density.button))
+            .px(px(theme.spacing.xs + theme.spacing.xxs))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs))
+            .whitespace_nowrap()
+            .rounded(px(theme.radii.sm))
+            .text_color(hsla(s.text))
+            .child(label)
+            .when(others, |el| {
+                el.aria_expanded(self.scope_open)
+                    .cursor_pointer()
+                    .when(self.scope_open, move |el| el.bg(hsla(s.selected)))
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .child(
+                        slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                            .slot(px(theme.typography.icon()), hsla(s.icon_muted)),
+                    )
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.scope_open = !this.scope_open;
+                        cx.notify();
+                    }))
+            });
+        let this = cx.entity().downgrade();
+        let menu = (others && self.scope_open).then(|| {
+            let mut menu = kit::Menu::new();
+            for scope in self.scopes().iter().copied() {
+                let to = this.clone();
+                let item =
+                    kit::MenuItem::new(format!("{scope:?}"), scope.label(), move |_w, cx| {
+                        let _gone = to.update(cx, |this, cx| {
+                            this.scope_open = false;
+                            this.set_scope(scope, cx);
+                        });
+                    });
+                menu.push(item.mark(kit::menu::Mark::Radio(scope == self.scope)));
+            }
+            let panel =
+                kit::MenuPanel::new("review-scope-menu", "Compare", Rc::new(menu), theme, {
+                    move |window, cx| {
+                        let _gone = this.update(cx, |this, cx| {
+                            this.scope_open = false;
+                            window.focus(&this.focus, cx);
+                            cx.notify();
+                        });
+                    }
+                });
+            gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopLeft).child(panel))
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority())
+        });
+        let el = if others { slopty_kit::a11y::tab_stop(el, s.focus) } else { el };
+        div().relative().flex_none().child(el).children(menu).into_any_element()
+    }
+
+    /// The spans the comparison offers: a thread's turns, or a folder's working tree.
     const fn scopes(&self) -> &'static [Scope] {
         match self.reviewed {
             Reviewed::Thread(_) => &Scope::THREAD,
@@ -2292,7 +2321,6 @@ impl ReviewView {
         let s = theme.surfaces;
         let (name, dir) = lines::name_first(&file.path);
         let status = sides::head_words(file).map(SharedString::from);
-        let radius = px(theme.radii.sm);
         let open = !self.folded.contains(&file.path);
         let side = px(theme.typography.icon());
         let fold = slopty_kit::a11y::tab_stop(
@@ -2316,8 +2344,12 @@ impl ReviewView {
             open,
             theme,
             side,
-            hsla(s.text_muted),
+            hsla(s.icon_muted),
         ))
+        .child(
+            slopty_kit::icons::Drawn::new(theme, slopty_kit::icons::file_mark(&file.path))
+                .slot(side, hsla(s.icon_muted)),
+        )
         .child(
             div()
                 .flex_none()
@@ -2349,17 +2381,18 @@ impl ReviewView {
         }))
         .children(kit::changes(theme, file.patch.added, file.patch.removed));
         let here = self.stands_on(at, None);
+        // Delta's file head: a band the tile's width on the element plane, a row and a base
+        // unit tall, square; the keyboard's file on the selected wash.
         let head = div()
             .debug_selector(move || format!("review-head-row-{at}"))
             .w_full()
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .px(px(theme.spacing.sm))
-            .rounded(radius)
+            .px(px(theme.spacing.md))
+            .bg(hsla(s.element))
             .when(here, |el| el.bg(hsla(s.selected)))
-            .when(!here, |el| kit::inset(el, theme))
-            .min_h(px(kit::Row::One.height(theme)))
+            .min_h(px(kit::Row::One.height(theme) + theme.spacing.xs))
             .text_size(px(theme.typography.small()))
             .child(fold)
             .child(self.viewed_box(at, cx))
@@ -2367,9 +2400,7 @@ impl ReviewView {
         div()
             .debug_selector(move || format!("review-head-{at}"))
             .w_full()
-            .px(px(theme.spacing.md))
-            .pt(px(theme.spacing.lg))
-            .pb(px(theme.spacing.xs))
+            .when(at > 0, |el| el.pt(px(theme.spacing.sm)))
             .child(Self::file_menu_press(head, at, cx))
             .into_any_element()
     }

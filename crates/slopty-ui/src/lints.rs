@@ -820,45 +820,32 @@ fn a_resting_fill_is_raised_or_sunk() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// The thread's work is type on one plane: no call in it is a card or rests raised. A card
-/// there boxed the calls that changed something while their neighbours that only looked
-/// were lines, and a stream of type then wore four kinds of edge; how a call stands is its
-/// mark and a word. An opened call's body is a well ([`super::inset`]), and a file it names
-/// a chip on the same wash. What holds something of its own (a plan, the changes, a
-/// request) is a card, the one in [`the_thread_rests_on_one_card`].
+/// The thread is Delta's document (`docs/decisions/ui.md`, "The thread is Delta's"): type on
+/// one plane, with only two things set apart. A call put to the person (a permission, a
+/// question, a plan to approve) and what the turn changed are Zed's tool card
+/// ([`slopty_kit::kit::call_card`] with its [`slopty_kit::kit::card_head`]); code is a well
+/// ([`slopty_kit::kit::well`], or the plain [`slopty_kit::kit::inset`] ground). No part raises a
+/// card of its own, names the `elevated` plane, which is the floats'
+/// ([`slopty_kit::kit::elevate`]), or lays the well's ground by hand.
 #[test]
-fn the_work_wears_no_card() {
-    const WORK: [&str; 1] = ["conversation/thread/view/tools.rs"];
-    const RAISED: [&str; 4] = ["kit::card(", "kit::card_part(", "kit::raised(", "raised_part("];
-    let mut wrong = Vec::new();
-    for (file, no, line) in ui_lines() {
-        let code = !line.trim_start().starts_with("//");
-        if !code || !WORK.iter().any(|s| file.ends_with(s)) {
-            continue;
-        }
-        if let Some(raised) = RAISED.iter().find(|r| line.contains(*r)) {
-            wrong.push(format!("{file}:{no}: `{raised}` in the work: {}", line.trim()));
-        }
-    }
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
-/// Everything that rests in the thread's column wears one card (`docs/decisions/ui.md`,
-/// "The thread is one card language"): the work's ground and its ring through
-/// [`super::raised`], or the well alone through [`super::inset`]. No part names the
-/// `elevated` plane, which is the floats' ([`super::elevate`]), nor lays the well by hand, so
-/// no part grows a surface of its own again.
-#[test]
-fn the_thread_rests_on_one_card() {
-    const PLANES: [&str; 3] = ["elevated", "surfaces.well)", "s.well)"];
+fn the_thread_has_no_card_but_calls_and_wells() {
+    const BANNED: [&str; 7] = [
+        "kit::raised(",
+        "kit::card(",
+        "kit::card_part(",
+        "raised_part(",
+        "elevated",
+        "surfaces.well)",
+        "s.well)",
+    ];
     let mut wrong = Vec::new();
     for (file, no, line) in ui_lines() {
         let code = !line.trim_start().starts_with("//");
         if !code || !file.contains("conversation/thread/") {
             continue;
         }
-        if let Some(plane) = PLANES.iter().find(|p| line.contains(*p)) {
-            wrong.push(format!("{file}:{no}: `{plane}` in the thread: {}", line.trim()));
+        if let Some(banned) = BANNED.iter().find(|b| line.contains(*b)) {
+            wrong.push(format!("{file}:{no}: `{banned}` in the thread: {}", line.trim()));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));

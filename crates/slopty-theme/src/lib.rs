@@ -554,6 +554,13 @@ impl Typography {
     pub fn icon(&self) -> f32 {
         self.ui_size + 2.0
     }
+
+    /// A small glyph (base − 2): a thread's fold disclosure, Zed's `IconSize::Small`, 12 at the
+    /// default size.
+    #[must_use]
+    pub fn icon_small(&self) -> f32 {
+        self.ui_size - 2.0
+    }
 }
 
 /// A type role: a size, the line it sits on, and its weight, in points at zoom 1.
@@ -593,6 +600,9 @@ pub struct TypeRoles {
     pub section: TypeRole,
     /// A panel's or a dialog's title: Zed's large label, 16/22 at the strong weight.
     pub panel_title: TypeRole,
+    /// Code in a thread's well (a diff, a command and its output), in the code face: Delta's
+    /// 12/18.
+    pub code: TypeRole,
     /// What is read at length, at [`Typography::prose_size`]: 14/23, Delta's 1.625.
     pub prose: TypeRole,
     /// What the person writes in the composer, at [`Typography::prose_size`]: 14/23.
@@ -630,6 +640,7 @@ impl Typography {
             task_title: role((0.0, 6.0), (3.0, 5.0), regular),
             section: role((-2.0, 4.0), (-1.0, 7.0), regular),
             panel_title: role((2.0, 6.0), (5.0, 5.0), strong),
+            code: role((-2.0, 6.0), (-1.0, 7.0), regular),
             prose: TypeRole {
                 size: prose,
                 line: (prose * self.prose_line_height).round(),
@@ -771,30 +782,35 @@ pub mod stroke {
     pub const MARK: f32 = 1.5;
     /// A terminal block's state down its left edge (a failed command's): Warp's 3 pt bar.
     pub const BAR: f32 = 3.0;
+    /// An overlay scrollbar's thumb, across: Zed's 6 pt, whatever the grid's cell.
+    pub const SCROLLBAR: f32 = 6.0;
 }
 
 /// Opacities for the few real washes over a surface.
 ///
-/// A selection over text, a scrim, a changed line in a diff, a quiet pill. Planes, lines and
+/// A selection over text, a scrim, a quiet pill. Planes, lines and
 /// states are opaque colours, as Zed's are ([`Surfaces`]).
 pub mod alpha {
     /// Barely there: the faint fill of a quiet pill, a wash across the terminal grid (a block
-    /// separator, the visual bell), a changed line's wash in a diff.
+    /// separator, the visual bell).
     pub const FAINT: f32 = 0.12;
-    /// The words that changed inside a changed line of a diff, over the line's own
-    /// [`FAINT`] wash: Zed's Delta measures about 0.34, git-delta's emphasis sits about 2.5
-    /// times its line's luminance off it.
-    pub const EMPH: f32 = 0.34;
     /// A step past [`FAINT`]: a pressed wash, given this far toward its plane.
     pub const DIM: f32 = 0.16;
     /// A tint that has to be seen: answer buttons, a selection.
     pub const TINT: f32 = 0.25;
     /// A tint under the pointer, a scrollbar thumb.
     pub const PRESSED: f32 = 0.4;
+    /// The accent's underline under a path that opens its file, in a thread's call: Delta's
+    /// 40 %.
+    pub const LINK: f32 = 0.4;
     /// The window under a modal, in both variants: black at 40 %.
     pub const SCRIM: f32 = 0.40;
-    /// Present but set back: a read row in the inbox.
+    /// Present but set back: a read row in the inbox, a thread's fold disclosure under the
+    /// pointer.
     pub const STRONG: f32 = 0.7;
+    /// Barely drawn until wanted: a thread's fold disclosure at rest, Zed's 30 %; and how far
+    /// the activity bar's ground moves toward the selection.
+    pub const QUIET: f32 = 0.3;
 }
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`). The mark's and the icon's
@@ -1342,6 +1358,8 @@ impl Shadow {
 pub struct Sunk {
     /// The black shade's opacity inside the top edge.
     pub shade: f32,
+    /// A code well's shade inside it, soft and a point down: Delta's `0 1 4` inset.
+    pub well: Shadow,
 }
 
 /// What floats and what dims the window under a modal, in both variants alike.
@@ -1377,7 +1395,7 @@ impl Elevation {
             Self::layer(3.0, 6.0, 0.08),
             Self::layer(6.0, 12.0, 0.04),
         ],
-        sunk: Sunk { shade: 0.18 },
+        sunk: Sunk { shade: 0.18, well: Self::layer(1.0, 4.0, 0.20) },
     };
     /// Light.
     pub const LIGHT: Self = Self {
@@ -1390,7 +1408,7 @@ impl Elevation {
             Self::layer(3.0, 6.0, 0.06),
             Self::layer(6.0, 12.0, 0.04),
         ],
-        sunk: Sunk { shade: 0.05 },
+        sunk: Sunk { shade: 0.05, well: Self::layer(1.0, 4.0, 0.032) },
     };
 
     /// One of Zed's layers: `y` down, blurred over `blur`, black at `alpha`, with no spread.

@@ -632,7 +632,7 @@ impl WorkspaceView {
     }
 
     /// An empty workspace. With a machine to begin on it is the composer page: one question,
-    /// "What should we work on?", over a boxed composer in the reading column, vertically
+    /// "What should we work on?", over the unboxed composer in the reading column, vertically
     /// centred, whose ↵ hands the goal to an orchestrator as "New goal…" would
     /// ([`Self::goal_from_page`]), its foot saying where the goal goes; under it one quiet line
     /// keeps a terminal and a window one press away. With no worker, or the server out of reach,
@@ -734,7 +734,7 @@ impl WorkspaceView {
             .pb(px(spacing.md))
             .text_color(hsla(s.text))
             .child(asked.clone());
-        // Where ↵ sends the goal, said inside the box: nothing starts somewhere unseen, and a
+        // Where ↵ sends the goal, said under the field: nothing starts somewhere unseen, and a
         // press opens the sheet that changes it.
         let foot = self.page_goal_place(cx).map(|place| {
             let el = kit::typed(div(), theme.roles().metadata)
@@ -762,11 +762,12 @@ impl WorkspaceView {
                 },
             ))
         });
+        // The thread's next turn, unboxed: the lighter line over it and no field's box, as
+        // Zed's empty state sets its composer.
         let composer = self.empty_goal.as_ref().map(|(goal, _)| {
-            kit::field(div(), theme)
+            kit::message::shell(div(), theme)
                 .debug_selector(|| "empty-goal".to_owned())
                 .w_full()
-                .rounded(px(theme.radii.md))
                 .px(px(kit::FIELD_INSET))
                 .pt(px(spacing.xs))
                 .pb(px(spacing.xxs))

@@ -1230,6 +1230,26 @@ impl ThreadView {
         kit::Disclosure::new(id, open, &self.theme, side, tone).into_any_element()
     }
 
+    /// A fold's disclosure, Zed's: small, at [`alpha::QUIET`] until the pointer is on its row
+    /// (`group`), then at [`alpha::STRONG`].
+    fn fold_chevron(
+        &self,
+        id: impl Into<SharedString>,
+        open: bool,
+        group: SharedString,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let side = px(theme.typography.icon_small());
+        let tone = hsla(theme.surfaces.text_secondary);
+        div()
+            .flex_none()
+            .rounded(px(theme.radii.xs))
+            .opacity(alpha::QUIET)
+            .group_hover(group, |el| el.opacity(alpha::STRONG))
+            .child(kit::Disclosure::new(id, open, theme, side, tone))
+            .into_any_element()
+    }
+
     fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
         slopty_kit::icons::icon(&self.theme, name, hsla(tone))
             .size(px(self.theme.typography.icon()))
@@ -1973,7 +1993,11 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.chevron(format!("fold-{}-chevron", turn.0), open)))
+            .child(Self::slot().child(self.fold_chevron(
+                format!("fold-{}-chevron", turn.0),
+                open,
+                SharedString::from(format!("fold-{}", turn.0)),
+            )))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -2025,8 +2049,10 @@ impl ThreadView {
         let line = fold.line();
         let id = format!("fold-{}-{part}", turn.0);
         let selector = id.clone();
+        let group = SharedString::from(id.clone());
         div()
             .id(ElementId::Name(id.into()))
+            .group(group.clone())
             .debug_selector(move || selector)
             .role(Role::Button)
             .aria_label(SharedString::from(line.clone()))
@@ -2040,9 +2066,11 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(
-                Self::slot().child(self.chevron(format!("fold-{}-{part}-chevron", turn.0), open)),
-            )
+            .child(Self::slot().child(self.fold_chevron(
+                format!("fold-{}-{part}-chevron", turn.0),
+                open,
+                group,
+            )))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -2064,8 +2092,10 @@ impl ThreadView {
         let s = theme.surfaces;
         let line = fold.line();
         let toggle = first.clone();
+        let group = SharedString::from(format!("group-{}", first.0));
         div()
             .id(ElementId::Name(format!("group-{}", first.0).into()))
+            .group(group.clone())
             .debug_selector({
                 let id = first.0.clone();
                 move || format!("group-{id}")
@@ -2082,7 +2112,11 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.chevron(format!("group-{}-chevron", first.0), open)))
+            .child(Self::slot().child(self.fold_chevron(
+                format!("group-{}-chevron", first.0),
+                open,
+                group,
+            )))
             .child(
                 kit::tabular(div())
                     .min_w_0()

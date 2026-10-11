@@ -2398,8 +2398,8 @@ pub(super) fn placement_bounds(
     Some((Bounds::new(point(left, top), shown), whole))
 }
 
-/// The scrollbar thumb's width, in cells of the grid's advance, and its least height in rows.
-const THUMB_CELLS: f32 = 0.6;
+/// The scrollbar thumb's least height, in rows. It is Zed's [`slopty_theme::stroke::SCROLLBAR`]
+/// across, whatever the cell.
 const THUMB_MIN_ROWS: f32 = 1.5;
 /// How far left of the grid's right edge the pointer brings the scrollbar up, in cells: about
 /// the width of a macOS overlay scroller's track.
@@ -2556,7 +2556,7 @@ pub(super) fn scrollbar_thumb(
     #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
     let above = (history.saturating_sub(offset)) as f64;
     let top = (track - height) * above / history_f;
-    let width = m.cell_width * THUMB_CELLS;
+    let width = px(slopty_theme::stroke::SCROLLBAR);
     let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
     #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
     let (y, h) = (px(top as f32), px(height as f32));
@@ -2592,7 +2592,7 @@ pub(super) fn block_ticks(
     #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
     let whole = history.saturating_add(u64::from(m.rows)) as f64;
     let track = f64::from(f32::from(m.line_height)) * f64::from(m.rows);
-    let width = m.cell_width * THUMB_CELLS;
+    let width = px(slopty_theme::stroke::SCROLLBAR);
     let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
     let lowest = m.origin.y + m.line_height * f32::from(m.rows) - height;
     let mut out: Vec<Tick> = Vec::new();
@@ -2794,6 +2794,7 @@ mod tests {
         assert!((f32::from(thumb.size.height) - track / 2.0).abs() < 0.01);
         assert!((f32::from(thumb.origin.y - m.origin.y) - track / 2.0).abs() < 0.01);
         assert!((f32::from(thumb.origin.x + thumb.size.width - m.origin.x) - 640.0).abs() < 0.01);
+        assert_eq!(thumb.size.width, px(slopty_theme::stroke::SCROLLBAR), "Zed's 6 across");
         // Scrolled all the way up: at the top.
         let top = scrollbar_thumb(&m, 24, 24).expect("a thumb");
         assert_eq!(top.origin.y, m.origin.y);
