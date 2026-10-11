@@ -459,15 +459,7 @@ impl Worker {
         let project =
             req.env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
         if name == CODEX {
-            let relay = self.agent_launch().relay.filter(|_| project && self.served());
-            let args = req.command.get(1..).unwrap_or_default();
-            return match relay {
-                Some(relay) if !codex_names_server(args) => {
-                    let wired = codex_with_mcp(args, &relay);
-                    (std::iter::once(program.clone()).chain(wired).collect(), req.env.clone())
-                }
-                _ => unchanged,
-            };
+            return (self.codex_tools(&req.command, &req.env), req.env.clone());
         }
         if name != "claude" || !slopty_agent::detect::is_claude(name, &req.command) {
             return unchanged;
@@ -492,6 +484,21 @@ impl Worker {
             None => (args, req.env.clone()),
         };
         (std::iter::once(program.clone()).chain(args).collect(), env)
+    }
+
+    /// `command`, a `codex` command line, with Slopty's tools among its MCP servers when it is
+    /// a project's agent (`env` names a project), this worker has a server, and its arguments
+    /// do not name the server themselves; else as it is.
+    fn codex_tools(&self, command: &[String], env: &[(String, String)]) -> Vec<String> {
+        let Some((program, args)) = command.split_first() else { return Vec::new() };
+        let project =
+            env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
+        match self.agent_launch().relay.filter(|_| project && self.served()) {
+            Some(relay) if !codex_names_server(args) => {
+                std::iter::once(program.clone()).chain(codex_with_mcp(args, &relay)).collect()
+            }
+            _ => command.to_vec(),
+        }
     }
 
     /// Whether this worker has a server, so `slopty mcp` can serve an agent Slopty's tools.
@@ -561,12 +568,13 @@ impl Worker {
         let plan = recipe.reopen(id, shells, &slopty_platform::dirs::home(), launch);
         let screen = self.inner.keeper.screen(id).await;
         let env = self.env_for(id, &recipe.env);
-        let spec = SpawnSpec {
-            command: plan.command.clone(),
-            cwd: plan.cwd.clone(),
-            env,
-            size: recipe.size,
+        // A task's Codex comes back with Slopty's tools given afresh, as it was opened.
+        let command = if plan.codex {
+            self.codex_tools(&plan.command, &recipe.env)
+        } else {
+            plan.command.clone()
         };
+        let spec = SpawnSpec { command, cwd: plan.cwd.clone(), env, size: recipe.size };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(
             id,

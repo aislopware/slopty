@@ -16,6 +16,8 @@
 //! person typed `claude` into gets the resuming line typed at its first prompt.
 //! A conversation Claude Code still runs in the background (`claude --bg`, in its session
 //! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
+//! A project task's Codex, its terminal's own command, comes back with `codex resume --last` in
+//! its worktree ([`Recipe::codex_again`]).
 //!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
@@ -30,6 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use slopty_agent::resume::Resume;
 use slopty_core::{SessionId, WallMs};
+use slopty_proto::project::PROJECT_ENV;
 use slopty_proto::terminal::{Restored, TermSize};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
@@ -111,6 +114,9 @@ pub struct Reopen {
     pub agent: Option<Resume>,
     /// What its viewers are told.
     pub restored: Restored,
+    /// It runs a project task's Codex again ([`Recipe::codex_again`]), to be given Slopty's
+    /// tools afresh.
+    pub codex: bool,
 }
 
 impl Recipe {
@@ -138,6 +144,16 @@ impl Recipe {
     /// session is the shell alone, with one line in the log.
     #[must_use]
     pub fn reopen(&self, id: SessionId, shells: &str, home: &Path, launch: &AgentLaunch) -> Reopen {
+        if let Some((command, cwd)) = self.codex_again(id) {
+            return Reopen {
+                command,
+                cwd: Some(cwd),
+                launch: None,
+                agent: None,
+                restored: self.restored(true),
+                codex: true,
+            };
+        }
         let shell = self.reopen_command(shells);
         let agent = self.agent.as_ref().and_then(|agent| {
             let Some(cwd) = existing_dir(&agent.cwd) else {
@@ -159,6 +175,7 @@ impl Recipe {
                 launch: None,
                 agent: None,
                 restored: self.restored(again),
+                codex: false,
             };
         };
         // What Slopty gave it is given again: the relay, the lock, its tools, and its role,
@@ -211,6 +228,7 @@ impl Recipe {
                 launch: None,
                 agent: Some(agent.clone()),
                 restored: self.restored(true),
+                codex: false,
             };
         }
         let words: Vec<String> = std::iter::once("claude".to_owned()).chain(args(true)).collect();
@@ -225,6 +243,7 @@ impl Recipe {
                 agent: None,
                 restored: self.restored(again),
                 command: shell,
+                codex: false,
             };
         }
         let words: Vec<String> = words.iter().map(|word| slopty_core::shell_quote(word)).collect();
@@ -234,7 +253,43 @@ impl Recipe {
             launch: Some(words.join(" ")),
             agent: Some(agent.clone()),
             restored: self.restored(again),
+            codex: false,
         }
+    }
+
+    /// How a project task's Codex, the session's own command, starts again: `codex resume
+    /// --last` with the flags it was started with ([`codex_kept`]), in the directory it was
+    /// opened in (`docs/decisions/projects.md`, "A task's Codex comes back after a reboot").
+    ///
+    /// Codex resumes the conversation last updated in that directory. It is the task's own only
+    /// where no other conversation shares the directory, so this is done only in a linked
+    /// worktree, which the worker makes for one writing task, and with Codex's `worktrees`
+    /// feature off for the run: on, it takes the conversations of every worktree of the
+    /// repository for its own. Anywhere else, or with a flag it does not know, the session is
+    /// the shell alone, with one line in the log.
+    fn codex_again(&self, id: SessionId) -> Option<(Vec<String>, PathBuf)> {
+        let (program, args) = self.command.split_first()?;
+        if program.rsplit('/').next() != Some(CODEX) {
+            return None;
+        }
+        let task = self.env.iter().any(|(k, v)| k == PROJECT_ENV && !v.is_empty());
+        if !task {
+            return None;
+        }
+        let Some(cwd) = self.cwd.as_deref().and_then(existing_dir) else {
+            tracing::info!(session = %id, "task's Codex not resumed: its directory is gone");
+            return None;
+        };
+        if !cwd.join(".git").is_file() {
+            tracing::info!(session = %id, cwd = %cwd.display(), "task's Codex not resumed: it ran outside a worktree of its own");
+            return None;
+        }
+        let Some(kept) = codex_kept(args) else {
+            tracing::warn!(session = %id, "task's Codex not resumed: its command line has a flag Slopty does not know");
+            return None;
+        };
+        let resume = CODEX_RESUME.iter().map(|word| (*word).to_owned());
+        Some((std::iter::once(program.clone()).chain(resume).chain(kept).collect(), cwd))
     }
 
     /// What the new shell runs, given the system's shells (`/etc/shells`): the session's own
@@ -262,6 +317,66 @@ impl Recipe {
         };
         Restored { saved_ms: self.saved_ms, command }
     }
+}
+
+/// Codex's program.
+const CODEX: &str = "codex";
+
+/// What a task's Codex comes back with before its own flags: the conversation last updated in
+/// its directory, with the feature off that would take its sibling worktrees' for its own.
+const CODEX_RESUME: [&str; 4] = ["resume", "--last", "--disable", "worktrees"];
+
+/// Codex's flags a resume keeps with the value they take (`codex resume --help`, 0.162.0).
+const CODEX_VALUED: [&str; 10] = [
+    "-c",
+    "--config",
+    "-m",
+    "--model",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "--enable",
+    "--disable",
+];
+
+/// Codex's switches a resume keeps.
+const CODEX_SWITCHES: [&str; 2] = ["--no-alt-screen", "--no-daemon"];
+
+/// The words of a task's Codex command line (`args`, after the program) its resume keeps: its
+/// configuration (its role among it), model, sandbox, approval policy and features, and how its
+/// TUI draws. The brief, the first word that is no flag, went already, and so did its images;
+/// `--worktree` would make another worktree. A command line that was itself a resume
+/// ([`CODEX_RESUME`]) keeps what followed it. `None` for any other flag, which is never guessed
+/// at: it may take a value, and it may loosen what the task asks.
+fn codex_kept(args: &[String]) -> Option<Vec<String>> {
+    let resumed = args.starts_with(&CODEX_RESUME.map(str::to_owned));
+    let mut words = args.iter().skip(if resumed { CODEX_RESUME.len() } else { 0 }).peekable();
+    let mut kept = Vec::new();
+    while let Some(word) = words.next() {
+        let (flag, inline) = match word.split_once('=') {
+            Some((flag, _)) if flag.starts_with("--") => (flag, true),
+            _ => (word.as_str(), false),
+        };
+        match flag {
+            "--worktree" if !inline => {}
+            "-i" | "--image" => {
+                if !inline {
+                    while words.next_if(|w| !w.starts_with('-')).is_some() {}
+                }
+            }
+            f if CODEX_SWITCHES.contains(&f) && !inline => kept.push(word.clone()),
+            f if CODEX_VALUED.contains(&f) => {
+                kept.push(word.clone());
+                if !inline {
+                    kept.push(words.next()?.clone());
+                }
+            }
+            f if f.starts_with('-') => return None,
+            _ => break,
+        }
+    }
+    Some(kept)
 }
 
 /// The conversations of `recipes` that Claude Code runs in the background now, as its session
@@ -679,6 +794,80 @@ mod tests {
                 "{word:?}"
             );
         }
+    }
+
+    /// A project task's Codex comes back as `codex resume --last` in its worktree, with the
+    /// flags it was started with and without its brief, again after a second loss. A Codex the
+    /// person opened, one outside a worktree of its own, and one with a flag Slopty does not
+    /// know come back as the shell alone.
+    #[test]
+    fn a_task_s_codex_comes_back_resumed_in_its_worktree() {
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::write(worktree.path().join(".git"), b"gitdir: /r/.git/worktrees/t\n").unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(clone.path().join(".git")).unwrap();
+        let words = |w: &[&str]| -> Vec<String> { w.iter().map(|s| (*s).to_owned()).collect() };
+        let task = |command: &[&str], cwd: &Path| Recipe {
+            env: vec![(PROJECT_ENV.to_owned(), "p1".to_owned())],
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            ..recipe(command)
+        };
+        let started = [
+            "codex",
+            "-c",
+            "developer_instructions=\"Your task\"",
+            "--ask-for-approval",
+            "on-request",
+            "--sandbox=workspace-write",
+            "-m",
+            "gpt-5",
+            "--no-alt-screen",
+            "Fix the build.",
+            "-a",
+            "never",
+        ];
+        let first = reopen(&task(&started, worktree.path()));
+        let resumed = words(&[
+            "codex",
+            "resume",
+            "--last",
+            "--disable",
+            "worktrees",
+            "-c",
+            "developer_instructions=\"Your task\"",
+            "--ask-for-approval",
+            "on-request",
+            "--sandbox=workspace-write",
+            "-m",
+            "gpt-5",
+            "--no-alt-screen",
+        ]);
+        assert_eq!(first.command, resumed, "the brief and what follows it are not kept");
+        assert_eq!(first.cwd.as_deref(), Some(worktree.path()));
+        assert!(first.codex && first.launch.is_none() && first.agent.is_none());
+        assert!(first.restored.command.is_empty(), "the agent runs again");
+        let again = reopen(&Recipe { command: first.command, ..task(&[], worktree.path()) });
+        assert_eq!(again.command, resumed, "a second loss resumes it the same way");
+
+        let shell = |recipe: &Recipe| {
+            let reopened = reopen(recipe);
+            reopened.command.is_empty() && !reopened.codex
+        };
+        let theirs = Recipe { env: Vec::new(), ..task(&started, worktree.path()) };
+        assert!(shell(&theirs), "a Codex the person opened is theirs");
+        assert!(shell(&task(&started, clone.path())), "not in a worktree");
+        let gone = task(&started, Path::new("/nowhere/at/all"));
+        assert!(shell(&gone), "its directory is gone");
+        for unknown in [&["codex", "--yolo"][..], &["codex", "-p", "loose"], &["codex", "--", "x"]]
+        {
+            assert!(shell(&task(unknown, worktree.path())), "{unknown:?}");
+        }
+        assert_eq!(
+            codex_kept(&words(&["-i", "a.png", "b.png", "--worktree", "-m", "o3", "Go"])),
+            Some(words(&["-m", "o3"])),
+            "images and a worktree of Codex's own are not kept"
+        );
+        assert_eq!(codex_kept(&words(&["-c"])), None, "a flag missing its value");
     }
 
     /// A conversation Claude Code still runs in the background is opened where it runs,
