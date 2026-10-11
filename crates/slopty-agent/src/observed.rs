@@ -15,12 +15,12 @@
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
 //! - **Live blocks.** Where the mod is heard, a block the model is writing is an item of its own,
-//!   appended to as it grows, and removed once the transcript's entry settles it
-//!   ([`crate::live::Overlay`], which this keeps for the thread). A tool call's live block takes
-//!   the call's own id, so the transcript's entry replaces it. A block goes in its thread's open
-//!   turn; one that begins before the transcript has its prompt (the hook and the mod run ahead of
-//!   the file) waits for that prompt, with what it says meanwhile, so it never stands in the turn
-//!   before.
+//!   appended to as it grows, until the transcript's entry settles it ([`crate::live::Overlay`],
+//!   which this keeps for the thread). A tool call's live block takes the call's own id, and a
+//!   text's or a thinking's entry takes the block's id, so the entry replaces the block where it
+//!   stands. A block goes in its thread's open turn; one that begins before the transcript has its
+//!   prompt (the hook and the mod run ahead of the file) waits for that prompt, with what it says
+//!   meanwhile, so it never stands in the turn before.
 //! - **Requests.** A permission prompt the worker holds is a request with the answers Claude Code
 //!   takes: allow, allow always (with what the suggestions grant), deny, and deny and stop.
 //!   [`verdict`] maps a chosen answer back. A prompt is held only through the `PermissionRequest`
@@ -304,6 +304,9 @@ struct Mapped {
     /// The work left running in the background, by the call that started it, in the order
     /// the calls came, as last sent.
     tasks: Vec<BackgroundTask>,
+    /// The entries that settled a live text or thinking block, and that block's item, which
+    /// they are shown as: where the block stood, not after what began since.
+    shown_as: HashMap<String, ItemId>,
 }
 
 impl Mapped {
@@ -320,6 +323,7 @@ impl Mapped {
             background: HashMap::new(),
             calls: HashMap::new(),
             tasks: Vec::new(),
+            shown_as: HashMap::new(),
         }
     }
 
@@ -668,6 +672,17 @@ impl Observed {
     /// batch, where the turn first changed, so the entries that ended it (an interrupt, the
     /// error it stopped on) come after it.
     pub fn transcript(&mut self, changes: &[Change], outputs: &[conv::Output]) -> Vec<Out> {
+        // A live text or thinking the changes settle gives its item to the entry, which then
+        // takes the block's place in the thread rather than landing after a call that began
+        // since. A tool call's block has the call's own id already.
+        let settled = self.overlay.settle_by(changes);
+        for (entry, clear) in &settled {
+            let Live::Clear { id } = clear else { continue };
+            let Some(p) = self.live.get(id).filter(|p| !p.tool) else { continue };
+            let Some(mapped) = self.threads.get_mut(&p.thread) else { continue };
+            mapped.shown_as.insert(entry.clone(), p.item.clone());
+            self.live.remove(id);
+        }
         let (turns, entries): (Vec<&Change>, Vec<&Change>) =
             changes.iter().partition(|c| matches!(c, Change::Turn { .. }));
         for change in entries.into_iter().chain(turns) {
@@ -687,7 +702,7 @@ impl Observed {
         for output in outputs {
             self.output(output);
         }
-        let cleared = self.overlay.settle(changes);
+        let cleared: Vec<Live> = settled.into_iter().map(|(_, clear)| clear).collect();
         self.cleared(&cleared);
         self.drain()
     }
@@ -1289,7 +1304,9 @@ impl Observed {
         }
         let changed = changed_by(&entry.body);
         let had = mapped.items.insert(entry.id.clone(), (turn, changed)).map(|(_, c)| c);
-        let mut item = Item { id: ItemId(entry.id.clone()), turn, at_ms: entry.at_ms, body };
+        let shown_as = mapped.shown_as.get(&entry.id).cloned();
+        let item_id = shown_as.unwrap_or_else(|| ItemId(entry.id.clone()));
+        let mut item = Item { id: item_id, turn, at_ms: entry.at_ms, body };
         if let ItemBody::Tool(call) = &mut item.body
             && call.state == ToolState::Running
             && let Some(asked) = self.open.iter().find(|r| r.item.as_ref() == Some(&item.id))
@@ -1354,7 +1371,8 @@ impl Observed {
     fn remove(&mut self, thread: &conv::ThreadId, entry: &str) {
         let id = self.ensure(thread);
         let Some(mapped) = self.threads.get_mut(thread) else { return };
-        let mut actions = vec![Action::ItemRemoved { item: ItemId(entry.to_owned()) }];
+        let item = mapped.shown_as.remove(entry).unwrap_or_else(|| ItemId(entry.to_owned()));
+        let mut actions = vec![Action::ItemRemoved { item }];
         mapped.items.remove(entry);
         mapped.background.remove(entry);
         mapped.calls.remove(entry);
@@ -1366,6 +1384,8 @@ impl Observed {
             mapped.turn = after;
             mapped.prompts.retain(|_, t| *t < turn);
             mapped.items.retain(|_, (t, _)| *t < turn);
+            let items = &mapped.items;
+            mapped.shown_as.retain(|entry, _| items.contains_key(entry));
             mapped.turns.retain(|t, _| *t < turn);
             mapped.ended.retain(|t| *t < turn);
             mapped.interrupted.retain(|t| *t < turn);

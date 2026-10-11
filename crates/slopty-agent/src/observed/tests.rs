@@ -253,11 +253,96 @@ fn live_blocks_stream_after_their_prompt_then_the_transcript_settles_them() {
         host.take(live.transcript(&changes, &[]));
         assert_eq!(provisional(&host), 0, "{scenario}: every live item settled");
         assert!(!live.ticking(), "{scenario}: nothing left to expire");
+        // As the transcript alone has them, but for the ids: a text or thinking that was live
+        // keeps the id it was shown under.
         let (_, alone, _) = replay(&dir);
+        let unnamed = |items: &[Item]| -> Vec<(TurnId, WallMs, ItemBody)> {
+            items.iter().map(|i| (i.turn, i.at_ms, i.body.clone())).collect()
+        };
         for (id, state) in &alone.threads {
-            assert_eq!(host.thread(*id).items, state.items, "{scenario}: as the transcript alone");
+            let items = &host.thread(*id).items;
+            assert_eq!(
+                unnamed(items),
+                unnamed(&state.items),
+                "{scenario}: as the transcript alone"
+            );
+            for (shown, alone) in items.iter().zip(&state.items) {
+                assert!(shown.id == alone.id || shown.id.0.starts_with("live:"), "{scenario}");
+            }
         }
     }
+}
+
+/// A live text the transcript settles stays where it was shown: before the live call that
+/// began after it, not after it as a new item. Its entry takes the live item's place and id,
+/// and every later change to the entry goes to that item.
+#[test]
+fn a_settled_live_text_keeps_its_place_before_a_later_call() {
+    let dir = dir("mod", "bash");
+    let events = std::fs::read_to_string(dir.join("events.jsonl")).expect("events");
+    let now = Instant::now();
+    let mut board = Board::default();
+    let mut live = observed();
+    let mut host = Host::default();
+    host.take(live.drain());
+    for line in events.lines() {
+        let batch: live::Batch = serde_json::from_str(line).expect("a batch");
+        for event in batch.decoded().iter().filter(|e| {
+            !matches!(e, ModEvent::Bye | ModEvent::Stop(_) | ModEvent::TurnComplete { .. })
+        }) {
+            board.apply(event, now);
+        }
+        host.take(live.live(&board, now, WallMs::ZERO));
+    }
+    let whole = std::fs::read_to_string(dir.join("transcript.jsonl")).expect("transcript");
+    let lines: Vec<&str> = whole.lines().collect();
+    let line_of = |needle: &str| lines.iter().position(|l| l.contains(needle)).expect(needle);
+    let (prompt, answer) = (line_of(r#""type":"user""#), line_of("Let me run it."));
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let path = scratch.path().join("s.jsonl");
+    let (mut conversation, mut tail) = (Conversation::default(), Tail::default());
+    let mut upto = |end: usize| {
+        let head = lines.get(..=end).expect("in the transcript").join("\n");
+        std::fs::write(&path, format!("{head}\n")).expect("written");
+        conversation.read(&mut tail, &path).expect("read")
+    };
+    host.take(live.transcript(&upto(prompt), &[]));
+    let main_id = live.main();
+    let order = |host: &Host| -> Vec<String> {
+        host.thread(main_id)
+            .items
+            .iter()
+            .map(|i| match &i.body {
+                ItemBody::User(_) => "prompt".to_owned(),
+                ItemBody::Text(text) => format!("text {}", text.text),
+                ItemBody::Tool(_) => format!("call {}", i.id.0),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    };
+    let shown = order(&host);
+    assert_eq!(
+        shown.get(..3),
+        Some(&["prompt", "text Let me run it.", "call toolu_fake1"].map(str::to_owned)[..]),
+        "{shown:?}"
+    );
+    let live_text = host.thread(main_id).items.get(1).map(|i| i.id.clone()).expect("shown");
+
+    host.take(live.transcript(&upto(answer), &[]));
+    assert_eq!(order(&host), shown, "the settled text kept its place");
+    let main = host.thread(main_id);
+    assert_eq!(main.items.get(1).map(|i| &i.id), Some(&live_text), "under the id it was shown as");
+    let texts = main
+        .items
+        .iter()
+        .filter(|i| matches!(&i.body, ItemBody::Text(t) if t.text == "Let me run it."))
+        .count();
+    assert_eq!(texts, 1, "once");
+
+    host.take(live.transcript(&upto(lines.len().saturating_sub(1)), &[]));
+    let at = |needle: &str| order(&host).iter().position(|o| o.contains(needle));
+    assert!(at("Let me run it.") < at("toolu_fake1"), "{:?}", order(&host));
+    assert!(at("toolu_fake1") < at("Done: the command said hi."), "{:?}", order(&host));
 }
 
 /// Claude Code's own lists, as the recorded mod sent them, are the thread's menu and models:

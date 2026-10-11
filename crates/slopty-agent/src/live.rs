@@ -551,6 +551,11 @@ impl Overlay {
     /// never shows a gap between the live block and its entry. Bring the overlay up to date
     /// first ([`Overlay::update`]), so a block is compared whole.
     pub fn settle(&mut self, changes: &[Change]) -> Vec<Live> {
+        self.settle_by(changes).into_iter().map(|(_, clear)| clear).collect()
+    }
+
+    /// [`Overlay::settle`], each clear beside the id of the entry that settled it.
+    pub fn settle_by(&mut self, changes: &[Change]) -> Vec<(String, Live)> {
         let mut cleared = Vec::new();
         for change in changes {
             let Change::Upsert { thread, entry } = change else { continue };
@@ -567,10 +572,11 @@ impl Overlay {
             });
             if let Some(id) = matched.map(|(id, _)| id.clone()) {
                 self.shown.remove(&id);
-                cleared.push(id);
+                self.settled.insert(id.clone());
+                cleared.push((entry.id.clone(), Live::Clear { id }));
             }
         }
-        self.clear(cleared)
+        cleared
     }
 
     /// Clear the blocks whose step stopped [`SETTLE_GRACE`] ago with no entry to settle them.
