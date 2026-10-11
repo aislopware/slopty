@@ -4,6 +4,8 @@
 //! the running app binds, its own ⌘, among the workspace's keys. The Input page shows a map's
 //! entries, the clipboard's machines by name.
 
+use std::fmt::Write as _;
+
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
 use super::gallery::{STEP, first_shell, golden};
@@ -54,7 +56,7 @@ async fn the_settings_form_edits_the_file() {
     // name, and one no machine has, which says so.
     let worker = slopty_e2e::harness::worker_id(&dir).expect("the worker's id");
     let mut before = std::fs::read_to_string(&settings).unwrap();
-    before.push_str(&format!("\n[clipboard.workers]\n\"{GONE}\" = false\n\"{worker}\" = true\n"));
+    write!(before, "\n[clipboard.workers]\n\"{GONE}\" = false\n\"{worker}\" = true\n").unwrap();
     std::fs::write(&settings, &before).unwrap();
 
     drv.keys("cmd-,").await.unwrap();
