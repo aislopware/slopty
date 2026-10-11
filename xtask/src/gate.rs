@@ -1936,8 +1936,10 @@ mod tests {
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
             "clippy for Linux takes a Linux runner, not one of the five Macs"
         );
-        let zig = format!("version: {}.", crate::tools::ZIG);
-        assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
+        let zig = std::fs::read_to_string(path.with_file_name("../actions/zig/action.yml"))
+            .expect("the zig action");
+        let pinned = format!("default: {}.", crate::tools::ZIG);
+        assert!(zig.contains(&pinned), "CI's zig is the one setup asks for");
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");
         let action = std::fs::read_to_string(path.with_file_name("../actions/sccache/action.yml"))
             .expect("the sccache action");
