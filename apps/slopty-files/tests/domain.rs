@@ -33,7 +33,7 @@ mod tests {
 
     /// ptyd and a worker whose home is `dir/home`, killed with the test.
     struct Daemons {
-        _ptyd: Child,
+        ptyd: Child,
         worker: Child,
         addr: SocketAddr,
         id: WorkerId,
@@ -44,17 +44,38 @@ mod tests {
         /// Stop the worker and start it again on the same port and data directory, as an
         /// update restarts it: the same worker at the same address.
         async fn restart_worker(&mut self, dir: &Path) {
-            self.worker.kill().await.unwrap();
+            end(std::slice::from_mut(&mut self.worker));
             let (worker, addr) = worker(dir, &self.home, self.addr.port()).await;
             assert_eq!(addr, self.addr, "back at its address");
             self.worker = worker;
         }
     }
 
+    impl Drop for Daemons {
+        fn drop(&mut self) {
+            end(&mut [&mut self.ptyd, &mut self.worker]);
+        }
+    }
+
+    /// End `children`, each the leader of a process group of its own, whole, and wait for them:
+    /// nothing a daemon started outlives the test holding its output (`slopty_testkit::group`).
+    fn end<C: std::borrow::BorrowMut<Child>>(children: &mut [C]) {
+        use std::borrow::{Borrow, BorrowMut};
+        let id = |child: &C| <C as Borrow<Child>>::borrow(child).id();
+        let reaped = |child: &mut C| {
+            let child = <C as BorrowMut<Child>>::borrow_mut(child);
+            child.try_wait().is_ok_and(|status| status.is_some())
+        };
+        let ended = slopty_testkit::group::end(children, id, reaped);
+        debug_assert!(ended, "a daemon's group outlived the test");
+    }
+
+    /// `program` from a clean environment with its home at `home`, leading a process group of
+    /// its own, killed with the test.
     fn scrubbed(program: PathBuf, home: &Path) -> Command {
         let mut command = Command::new(program);
         slopty_testkit::env::scrub(command.as_std_mut(), home);
-        command.kill_on_drop(true);
+        command.process_group(0).kill_on_drop(true);
         command
     }
 
@@ -71,6 +92,7 @@ mod tests {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(ptyd.id());
         let ready = tokio::time::timeout(STEP, async {
             while tokio::net::UnixStream::connect(&ptyd_sock).await.is_err() {
                 // The socket appears once ptyd listens; polled, as nothing announces it.
@@ -83,7 +105,7 @@ mod tests {
         let hello = Hello { client: ClientId::new(), name: "test".to_owned() };
         let conn = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello));
         let id = conn.await.unwrap().unwrap().ack.worker;
-        Daemons { _ptyd: ptyd, worker, addr, id, home }
+        Daemons { ptyd, worker, addr, id, home }
     }
 
     /// The worker on `dir`'s ptyd and data directory, listening on `port` (any when 0), and its
@@ -108,6 +130,7 @@ mod tests {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(worker.id());
         let mut line = String::new();
         let stdout = worker.stdout.take().unwrap();
         let mut stdout = BufReader::new(stdout);

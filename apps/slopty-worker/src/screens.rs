@@ -222,7 +222,7 @@ pub async fn run_display(
         return serve_opened(link, id, made, opened, shield, commands).await;
     }
     let displays = link.daemon.displays.as_ref();
-    let opened = sized::open::<Native, sized::Cg>(displays, id, asked, sink, on_event).await;
+    let opened = sized::open::<Native, _>(displays, id, asked, sink, on_event).await;
     let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
     serve_opened(link, id, made, opened, shield, commands).await;
 }
@@ -2017,7 +2017,7 @@ mod made {
     impl Factory for Instantly {
         type Display = Made;
 
-        fn create(&mut self, _plan: &Plan) -> Result<Made, DisplayError> {
+        fn create(&mut self, _key: DisplayKey, _plan: &Plan) -> Result<Made, DisplayError> {
             self.next = self.next.max(100).saturating_add(1);
             self.alive.lock().push(self.next);
             Ok(Made(self.next, self.max, Arc::clone(&self.alive)))

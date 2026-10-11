@@ -89,6 +89,7 @@ use crate::platform::{Native, Platform};
 pub mod curtain;
 pub mod drag;
 mod engines;
+pub mod holder;
 mod region;
 pub mod sized;
 pub mod sound;

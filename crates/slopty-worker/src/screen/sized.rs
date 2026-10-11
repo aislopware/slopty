@@ -52,12 +52,12 @@ pub const LINGER: Duration = Duration::from_mins(10);
 pub trait Factory: 'static {
     /// A display, alive as long as the value.
     type Display;
-    /// Make the display `plan` describes.
+    /// Make the display `plan` describes, for the client that asked with `key`.
     ///
     /// # Errors
     ///
     /// Why it could not be made.
-    fn create(&mut self, plan: &Plan) -> Result<Self::Display, DisplayError>;
+    fn create(&mut self, key: DisplayKey, plan: &Plan) -> Result<Self::Display, DisplayError>;
     /// Put `display` in `plan`'s mode, keeping it.
     ///
     /// # Errors
@@ -72,6 +72,16 @@ pub trait Factory: 'static {
     fn enforce(&mut self, display: &Self::Display) -> Result<Enforced, DisplayError>;
     /// Its `CGDirectDisplayID`.
     fn id(&self, display: &Self::Display) -> u32;
+    /// End `display`. A display only dropped is let go of without ending, where the factory
+    /// can keep it: the display holder's outlive the worker ([`super::holder`]).
+    fn release(&mut self, display: Self::Display) {
+        drop(display);
+    }
+    /// The displays the factory holds already, each with its key and plan: those a display
+    /// holder kept through the last worker's end ([`Displays::adopt`]).
+    fn held(&mut self) -> Vec<(DisplayKey, Plan, Self::Display)> {
+        Vec::new()
+    }
 }
 
 /// A job for the main thread, handed the state that lives there.
@@ -258,7 +268,7 @@ impl<F: Factory> Displays<F> {
                     }
                     return Ok(());
                 }
-                let display = registry.factory.create(&plan).map_err(|e| {
+                let display = registry.factory.create(key, &plan).map_err(|e| {
                     tracing::info!(error = %e, "no virtual display");
                     why(&e)
                 })?;
@@ -274,6 +284,31 @@ impl<F: Factory> Displays<F> {
         let lease = Lease { displays: self.clone(), key };
         // A display shared with another stream takes this stream's shape as well.
         lease.resize(shape).await.map(|_resized| lease)
+    }
+
+    /// Hand `job` the factory, on the main thread.
+    pub fn with_factory(&self, job: impl FnOnce(&mut F) + Send + 'static) {
+        self.main.run(Box::new(move |registry| job(&mut registry.factory)));
+    }
+
+    /// Take the displays the factory holds already ([`Factory::held`]) as kept for their
+    /// clients: each lingers as if its last lease had just let go, so its client takes it back
+    /// within the linger, windows where they were. The worker does this at start, after
+    /// [`Self::set_linger`].
+    pub fn adopt(&self) {
+        let this = self.clone();
+        self.main.run(Box::new(move |registry| {
+            for (key, plan, display) in registry.factory.held() {
+                if registry.displays.contains_key(&key) {
+                    continue;
+                }
+                let id = registry.factory.id(&display);
+                tracing::info!(id, mode = ?plan.mode, "virtual display kept from before");
+                registry.displays.insert(key, Entry::new(display, plan, 1, Vec::new()));
+                this.let_go(registry, key);
+                this.enforce_soon(registry, key);
+            }
+        }));
     }
 
     /// The displays were reconfigured: every display is enforced again, until it settles.
@@ -374,6 +409,7 @@ impl<F: Factory> Displays<F> {
         if let Some(mut gone) = registry.displays.remove(&key) {
             gone.tell(Err(NoVirtualDisplay::Refused));
             tracing::info!(id = registry.factory.id(&gone.display), "virtual display released");
+            registry.factory.release(gone.display);
         }
     }
 }
@@ -462,14 +498,15 @@ impl<F: Factory> Lease<F> {
                     Err(DisplayError::Outgrown { wanted, max }) => {
                         tracing::info!(?wanted, ?max, "virtual display outgrown: making it anew");
                         // The old one goes first: the new one has its identity.
-                        let old = displays.remove(&key);
-                        let users = old.as_ref().map_or(1, |old| old.users);
-                        let waiting = old.map(|mut old| std::mem::take(&mut old.waiting));
-                        let display = factory.create(&plan).map_err(|e| why(&e))?;
-                        displays.insert(
-                            key,
-                            Entry::new(display, plan, users, waiting.unwrap_or_default()),
-                        );
+                        let (users, waiting) = match displays.remove(&key) {
+                            Some(Entry { display, users, waiting, .. }) => {
+                                factory.release(display);
+                                (users, waiting)
+                            }
+                            None => (1, Vec::new()),
+                        };
+                        let display = factory.create(key, &plan).map_err(|e| why(&e))?;
+                        displays.insert(key, Entry::new(display, plan, users, waiting));
                         this.enforce_soon(registry, key);
                         return Ok(Resized::Remade);
                     }
@@ -504,7 +541,7 @@ pub struct Cg;
 impl Factory for Cg {
     type Display = slopty_vdisplay::VirtualDisplay;
 
-    fn create(&mut self, plan: &Plan) -> Result<Self::Display, DisplayError> {
+    fn create(&mut self, _key: DisplayKey, plan: &Plan) -> Result<Self::Display, DisplayError> {
         slopty_vdisplay::VirtualDisplay::create(plan)
     }
 
@@ -573,18 +610,20 @@ impl<S: 'static> Main<S> for MainQueue<S> {
     }
 }
 
-/// The worker's displays: CoreGraphics' on the main queue, enforced again on every display
-/// reconfiguration, with no linger until the worker gives them its own.
+/// The worker's displays on the main queue, made by `factory`.
+///
+/// The factory is the display holder ([`super::holder::Remote`]). Every display is enforced again
+/// on each display reconfiguration, with no linger until the worker gives them its own.
 ///
 /// `None` off the main thread or where no display can be made, and the worker then answers
 /// every `OpenDisplay` with a physical display.
 #[cfg(target_os = "macos")]
 #[must_use]
-pub fn on_main_queue() -> Option<Displays<Cg>> {
+pub fn on_main_queue<F: Factory>(factory: F) -> Option<Displays<F>> {
     if !slopty_vdisplay::available() {
         return None;
     }
-    let main = MainQueue::new(Registry::new(Cg))?;
+    let main = MainQueue::new(Registry::new(factory))?;
     let displays = Displays::new(Arc::new(main), SETTLE_WITHIN);
     let notified = displays.clone();
     if let Err(e) = slopty_vdisplay::on_reconfiguration(move || notified.reconfigured()) {

@@ -203,7 +203,7 @@ pub(crate) struct Daemon {
     pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
     /// The displays made for clients, on the main thread; `None` where none can be made, and
     /// every `OpenDisplay` then streams a physical display.
-    pub displays: Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>,
+    pub displays: Displays,
     /// The curtain over the Mac's own screens and input while a client holds it, on the main
     /// thread; `None` off a Mac.
     pub curtain: Curtain,
@@ -575,7 +575,8 @@ fn watch_caps(
 }
 
 /// The displays made for clients, as the worker holds them.
-type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>;
+type Displays =
+    Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::holder::Remote>>;
 
 /// The curtain over the Mac, as the worker holds it: `None` off a Mac.
 type Curtain =
@@ -587,6 +588,104 @@ const PANICKED: i32 = 101;
 
 /// One connection's hold on the curtain.
 type CurtainLink = slopty_worker::screen::curtain::Link<slopty_worker::screen::curtain::Native>;
+
+/// Have the displays made for clients held by the display holder beside the control socket
+/// at `ctl_path`, its list under `data_dir`, and take those it holds from the worker before
+/// ([`slopty_worker::screen::holder`]). Once more a little later, for those a holder that had to
+/// go is still making again.
+fn hold_displays(
+    displays: &slopty_worker::screen::sized::Displays<slopty_worker::screen::holder::Remote>,
+    ctl_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) {
+    use slopty_worker::screen::holder;
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(e) => {
+            tracing::warn!(error = %e, "no display holder: every display streams a physical one");
+            return;
+        }
+    };
+    let dial = holder::spawning(
+        program,
+        ctl_path.with_file_name("displays.sock"),
+        data_dir.join("displays.json"),
+    );
+    displays.with_factory(move |remote| remote.set_dial(dial));
+    displays.adopt();
+    let again = displays.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(holder::ADOPT_AGAIN_AFTER).await;
+        again.adopt();
+    });
+}
+
+/// The display holder's whole life, when this binary was started as one
+/// (`slopty-worker --display-holder <socket> <list>`, [`slopty_worker::screen::holder`]): its
+/// displays on the main thread, workers served from a thread beside it, until it is alone for
+/// [`slopty_worker::screen::holder::ALONE_FOR`] or asked to quit.
+#[cfg(target_os = "macos")]
+fn holder_main() -> Option<std::process::ExitCode> {
+    use std::sync::Arc;
+
+    use slopty_worker::screen::holder::{self, Ended, Holder};
+    use slopty_worker::screen::sized::{self, Main};
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != holder::HOLDER_ARG {
+        return None;
+    }
+    let (Some(socket), Some(store)) = (args.next(), args.next()) else {
+        return Some(std::process::ExitCode::FAILURE);
+    };
+    let (socket, store) = (PathBuf::from(socket), PathBuf::from(store));
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+    let Some(queue) = sized::MainQueue::new(Holder::new(sized::Cg, store.clone())) else {
+        return Some(std::process::ExitCode::FAILURE);
+    };
+    let main: Arc<dyn Main<Holder<sized::Cg>>> = Arc::new(queue);
+    let serving =
+        std::thread::Builder::new().name("slopty-display-holder".to_owned()).spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let ended = runtime.map(|runtime| {
+                runtime.block_on(async {
+                    let first = holder::first_link()
+                        .inspect_err(|e| tracing::info!(error = %e, "no worker on stdin"))
+                        .ok();
+                    let listener = holder::listen(&socket)
+                        .inspect_err(|e| tracing::warn!(error = %e, "the holder's socket"))
+                        .ok();
+                    let restoring = Arc::clone(&main);
+                    tokio::spawn(async move { holder::restore(restoring, &store).await });
+                    let ended =
+                        holder::serve(Arc::clone(&main), first, listener, holder::ALONE_FOR).await;
+                    if ended == Ended::Alone {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        main.run(Box::new(move |held: &mut Holder<sized::Cg>| {
+                            held.release_all();
+                            let _done = tx.send(());
+                        }));
+                        let _released = rx.await;
+                    }
+                    tracing::info!(?ended, "display holder ending");
+                });
+            });
+            #[expect(
+                clippy::exit,
+                reason = "the main thread never returns; this ends the process"
+            )]
+            std::process::exit(i32::from(ended.is_err()));
+        });
+    if serving.is_err() {
+        return Some(std::process::ExitCode::FAILURE);
+    }
+    sized::park_main()
+}
 
 /// What this binary is started with to be the daemon's warden ([`slopty_worker::warden`]).
 const WARDEN_ARG: &str = "--warden";
@@ -634,6 +733,10 @@ pub fn main() -> Result<std::process::ExitCode> {
         return Ok(code);
     }
     slopty_crash::install(slopty_crash::Process::Worker, &slopty_platform::dirs::data_dir());
+    #[cfg(target_os = "macos")]
+    if let Some(code) = holder_main() {
+        return Ok(code);
+    }
     start_warden();
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
@@ -651,7 +754,9 @@ pub fn main() -> Result<std::process::ExitCode> {
 /// and the daemon runs on a thread beside it, ending the process when it ends.
 #[cfg(target_os = "macos")]
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
-    let displays = slopty_worker::screen::sized::on_main_queue();
+    let displays = slopty_worker::screen::sized::on_main_queue(
+        slopty_worker::screen::holder::Remote::unlinked(),
+    );
     let curtain = slopty_worker::screen::curtain::on_main_queue();
     let exit_lock = curtain.clone();
     let sources = slopty_input::sources::Sources::system();
@@ -793,6 +898,9 @@ async fn run(
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
     let (own_acp, acp) = tokio::sync::watch::channel(own.acp.clone());
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
+    if let Some(displays) = &displays {
+        hold_displays(displays, &ctl_path, &data_dir);
+    }
     let mod_path = modsock::beside(&ctl_path);
     let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
         Ok(dir) => Some(slopty_agent::claude_mod::Installed { dir, socket: mod_path.clone() }),

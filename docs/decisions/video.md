@@ -3059,3 +3059,50 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   whatever is needed. Tests: `a_frame_delivered_is_stale_while_a_restart_is_awaited`
   (`pipeline.rs`), and the two inputs, kept as
   `fuzz/regressions/reassemble/frame-delivered-again-while-a-restart-is-awaited-{1,2}`.
+
+- ✅ **The displays made for clients outlive the worker: a display holder owns them**
+  (2026-10-12; research and measurements in `.research/vdisplay-holder-2026-10-11.md`).
+  - **Why.** A `CGVirtualDisplay` ends with the process that made it, `exec` included, and
+    macOS then moves every window on it to a physical display (measured on a `macos-26` VM:
+    the display leaves 160–590 ms after its owner dies, its windows with it). A worker update,
+    restart or crash threw a remote desktop's windows off the client's display, and the
+    linger that keeps a display for a roaming client could not cover it.
+  - **The holder.** `slopty-worker --display-holder <socket> <list>`, a mode of the worker's
+    own binary in a process group of its own, so launchd's end of the worker leaves it. It owns
+    the displays by `DisplayKey`, each with its plan, on its main thread
+    (`screen::holder::Holder`), answers one JSON line per ask on a Unix socket beside the
+    worker's control socket (`holder::wire`), and keeps its list in `displays.json` under the
+    data dir. The worker's `Registry` keeps its leases, lingers and enforcement ticks; its
+    `Factory` is now `holder::Remote`, which asks the holder from the worker's main thread. A
+    display the worker drops rather than releases (`Factory::release`) stays in the holder.
+  - **Across a restart.** A worker that starts asks the holder what it holds and takes each as
+    lingering for its client (`Displays::adopt`), so a client back within the linger has its
+    own display, windows where they were. It asks again 20 s later for those a new holder was
+    still making.
+  - **When the holder goes.** A holder of another wire (a fingerprint of `holder/wire.rs`) is
+    asked to quit, and a new one is started. A new holder, or one started after a crash, makes
+    every display in the list again under the same identity, trying for up to 16 s while
+    macOS still holds one for the holder before. macOS brings their windows back to the
+    display, though not to their exact place (measured: every time, from 0.28 s to 30 s
+    after). A holder no worker has dialled for a minute (`ALONE_FOR`) ends, and its displays
+    with it: a worker launchd restarts is back within seconds, and one that is not was stopped
+    or removed.
+  - **Started only when needed.** The first worker's first `OpenDisplay` starts the holder,
+    over a socket pair on its standard input, so the first link needs no wait for it to
+    listen. A worker that starts with no holder running starts one only when the list holds
+    displays to make again. A worker that never makes a display, every test among them,
+    starts none.
+  - **Not chosen.**
+    - Making the displays again in each new worker with no holder: every update and crash
+      would move the windows to the physical display for the restart's length.
+    - Putting them in ptyd: a crash in a private CoreGraphics call would end every shell, and
+      ptyd's succession `exec`s in place, which a display does not survive.
+    - Two displays with one identity for a gapless handover: macOS refuses the second.
+    - Handing the display object to another process: no initialiser takes a port, and none of
+      the projects studied does it.
+  - Tests (`slopty-worker`, `screen::holder::tests`, a fake factory in the holder and a real
+    Unix socket): `a_held_display_outlives_its_worker_and_its_client_takes_it_back`,
+    `a_new_holder_makes_the_kept_displays_again`, and
+    `a_holder_ends_alone_or_when_asked_to_quit`. On a Mac, with real displays and the worker's
+    binary as the holder: `holder::a_display_the_holder_made_outlives_the_worker_that_asked_for_it`
+    (`slopty-workerd`).
