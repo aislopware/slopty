@@ -214,10 +214,9 @@ impl Composer {
 
     /// Go on with what every thread has waiting, as after a restart of the worker.
     pub fn resume(&self) {
-        for thread in self.host.threads() {
-            if self.host.update(thread, |s| (vec![], !s.pending.is_empty())) == Some(true) {
-                self.kick(thread);
-            }
+        // Read off each thread's head, so only those with something waiting are opened.
+        for thread in self.host.visit(|s| (!s.pending.is_empty()).then_some(s.meta.id)) {
+            self.kick(thread);
         }
     }
 

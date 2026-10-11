@@ -15867,6 +15867,30 @@ profile, a `macos-26` GitHub runner (run 38117846929), one run of five opens.
 cargo nextest run -p slopty-worker --release --run-ignored only -E 'test(host_open_cost)' --no-capture
 ```
 
+## 2026-10-11 — a worker's start over 2,000 kept threads, reading heads
+
+The same probe after the lazy open: each thread directory keeps a `head` beside its log (its
+row, and its state without the items), and a start reads only those; a thread's log opens on
+its first use. The probe also times that first use, over every thread, after a fresh open.
+Release profile, a `macos-26` GitHub runner (run 38122879943), one run of five opens.
+
+| what | before (38117846929) | after |
+| --- | --- | --- |
+| on disk | 76 MiB | 77 MiB |
+| open, median of five | 431 ms | 65 ms |
+| open, worst of five | 732 ms | 70 ms |
+| a thread's first use, median | (paid at open) | 168 µs |
+| a thread's first use, worst | (paid at open) | 875 µs |
+
+- **The start is 6.6 times faster and steadier.** About 33 µs a thread, all of it reading and
+  decoding the small heads; the logs are read only when a thread is opened, searched or due.
+- **Still linear in the threads kept.** Ten thousand would take about a third of a second. One
+  index for every head would make it a single read, if that number ever matters.
+
+```sh
+cargo nextest run -p slopty-worker --release --run-ignored only -E 'test(host_open_cost)' --no-capture
+```
+
 ## 2026-10-10 — CI with the proc macros unoptimised and no doctest step
 
 The first gate run with `.cargo/ci-profile.toml` (every proc-macro dependency at opt-level 0)

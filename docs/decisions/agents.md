@@ -152,7 +152,22 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     property proves. With no budget, each batch goes alone. A follower that lags the feed,
     or meets a batch that does not follow on, catches up from its cursor, by the tail or by a
     snapshot.
-  - **The table** is in memory and rebuilt from the logs at start, under a new random epoch,
+  - **A log opens on first use** (2026-10-11, readiness-w 10-11 rank 7). A start used to open
+    and replay every log the worker ever kept: 431 ms for 2,000 threads of 20 turns, every state
+    held in memory after (`docs/MEASUREMENTS.md`). Each thread now also keeps `head`: its row
+    and its state without its items, written whenever it rests (any apply while its phase is
+    not working), naming the tail it was written over by the tail's cursor and length. A start
+    reads the heads alone, puts their rows in the table, and opens a thread's log the first
+    time anything asks for it. A look over every thread (`Host::visit`) sees an unopened one
+    by its head; a search reads the items off the disk without opening the log
+    (`Host::visit_whole`). A head missing or behind its log (the worker stopped mid-turn, or
+    crashed) makes that one thread open at the start, and its head is written then.
+    - Kept, not pruned. A worker's log may be the last copy of a session the agent has since
+      cleaned up (Claude Code's `cleanupPeriodDays` is 30 by default), so nothing deletes one
+      unasked.
+    - Test: `a_start_reads_the_heads_and_opens_a_log_on_first_use`; the measurement
+      `host_open_cost`.
+  - **The table** is in memory and rebuilt from the logs' heads at start, under a new random epoch,
     so a client's cursor from an earlier run gets every row. It sends a delta while it still
     remembers every removal since the cursor (the last 1024 of them). A row that differs only
     in `updated_ms` changes nothing.

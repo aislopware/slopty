@@ -314,14 +314,11 @@ pub fn spawn(
             running: HashMap::new(),
             ended: ended_tx,
         };
-        for thread in host.threads() {
-            let Some((state, _)) = host.state(thread) else { continue };
-            if !is_pi(&state) {
-                continue;
-            }
-            if state.status.liveness == Liveness::Live {
-                host.apply(thread, slopty_agent::pi::driven::gone(&state, WallMs::now()));
-            }
+        // Only the threads left live are opened, by their heads.
+        let live =
+            host.visit(|s| (is_pi(s) && s.status.liveness == Liveness::Live).then_some(s.meta.id));
+        for thread in live {
+            host.update(thread, |state| (slopty_agent::pi::driven::gone(state, WallMs::now()), ()));
         }
         loop {
             tokio::select! {

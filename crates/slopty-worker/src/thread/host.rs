@@ -4,6 +4,11 @@
 //! to a file, and a snapshot written at a turn's end once in a while. A follower subscribes
 //! and takes its catch-up under the same lock, so it misses nothing and is sent nothing twice
 //! ([`Host::follow`]).
+//!
+//! A thread's log is opened only when the thread is first used. At the start the host reads each
+//! thread's head ([`Log::head`]): its row for the table, and its state without items for a look
+//! over every thread ([`Host::visit`]). A thread whose head is missing or behind its log is
+//! opened then, and its head written, so the next start reads the head alone.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -20,7 +25,7 @@ use slopty_proto::thread::{
 use tokio::sync::{broadcast, watch};
 
 use super::intents::Intents;
-use super::log::{Catchup, Limits, Log};
+use super::log::{Catchup, Head, Limits, Log};
 use super::table::Table;
 use super::{SeatEnv, Seated};
 
@@ -103,7 +108,10 @@ pub struct Host {
 struct Inner {
     dir: PathBuf,
     limits: Limits,
+    /// The threads whose logs are open.
     threads: HashMap<ThreadId, Hosted>,
+    /// The threads held whose logs are not opened yet, by their heads.
+    cold: HashMap<ThreadId, Head>,
     table: Table,
     /// Intents that start a thread, which have no thread of their own to be kept with yet.
     starts: Intents,
@@ -335,7 +343,7 @@ impl Host {
     /// what is in them never fails an open.
     pub fn open(dir: &Path, limits: Limits) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let mut threads = HashMap::new();
+        let mut cold = HashMap::new();
         let mut table = Table::new(ThreadId::new().as_uuid().as_u64_pair().1);
         for entry in std::fs::read_dir(dir)? {
             // One entry the OS will not list is one thread lost, not every thread.
@@ -349,11 +357,28 @@ impl Host {
             if !path.is_dir() {
                 continue;
             }
+            if let Some(head) = Log::head(&path) {
+                table.put(head.row.clone());
+                cold.insert(head.row.id, head);
+                continue;
+            }
+            // No head, or one the log has moved past: the log is read once, and its head
+            // written for the next start.
             let hosted = Log::open(&path, limits).and_then(|log| Hosted::open(&path, log));
             match hosted {
-                Ok(hosted) => {
-                    table.put(hosted.log.state().row(WallMs::now()));
-                    threads.insert(hosted.log.id(), hosted);
+                Ok(mut hosted) => {
+                    let row = hosted.log.state().row(WallMs::now());
+                    table.put(row.clone());
+                    match hosted.log.write_head(&row) {
+                        Ok(head) => {
+                            cold.insert(row.id, head);
+                        }
+                        Err(e) => {
+                            tracing::warn!(path = %path.display(), "a thread's head was not kept: {e}");
+                            let head = Head { row, state: hosted.log.state().clone() };
+                            cold.insert(head.row.id, head);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(path = %path.display(), "a thread's log is unreadable: {e}");
@@ -365,7 +390,8 @@ impl Host {
             inner: Arc::new(Mutex::new(Inner {
                 dir: dir.to_owned(),
                 limits,
-                threads,
+                threads: HashMap::new(),
+                cold,
                 table,
                 starts,
                 heard: Heard {
@@ -390,25 +416,64 @@ impl Host {
     /// Whether `thread` is held.
     #[must_use]
     pub fn holds(&self, thread: ThreadId) -> bool {
-        self.inner.lock().threads.contains_key(&thread)
+        let inner = self.inner.lock();
+        inner.threads.contains_key(&thread) || inner.cold.contains_key(&thread)
+    }
+
+    /// How many threads have their logs open: those used since the worker started.
+    #[must_use]
+    pub fn opened(&self) -> usize {
+        self.inner.lock().threads.len()
     }
 
     /// The threads held.
     #[must_use]
     pub fn threads(&self) -> Vec<ThreadId> {
-        let mut ids: Vec<ThreadId> = self.inner.lock().threads.keys().copied().collect();
+        let inner = self.inner.lock();
+        let mut ids: Vec<ThreadId> =
+            inner.threads.keys().chain(inner.cold.keys()).copied().collect();
+        drop(inner);
         ids.sort_unstable();
         ids
     }
 
     /// What `see` makes of each thread held, those it makes nothing of left out. The lock is
     /// taken for one thread at a time, so an adapter waits on no more than one thread's look.
+    ///
+    /// A thread not opened yet is seen by its head: everything but its items, which stay on
+    /// disk ([`Self::visit_whole`] reads them).
     pub fn visit<T>(&self, mut see: impl FnMut(&ThreadState) -> Option<T>) -> Vec<T> {
         self.threads()
             .into_iter()
             .filter_map(|thread| {
                 let inner = self.inner.lock();
-                inner.threads.get(&thread).and_then(|hosted| see(hosted.log.state()))
+                match inner.threads.get(&thread) {
+                    Some(hosted) => see(hosted.log.state()),
+                    None => inner.cold.get(&thread).and_then(|head| see(&head.state)),
+                }
+            })
+            .collect()
+    }
+
+    /// [`Self::visit`] with every thread whole, its items too: a thread not opened yet is read
+    /// from its log for the look alone and stays unopened. The reading is done off the lock.
+    pub fn visit_whole<T>(&self, mut see: impl FnMut(&ThreadState) -> Option<T>) -> Vec<T> {
+        self.threads()
+            .into_iter()
+            .filter_map(|thread| {
+                let inner = self.inner.lock();
+                if let Some(hosted) = inner.threads.get(&thread) {
+                    return see(hosted.log.state());
+                }
+                let dir = inner.dir.join(thread.to_string());
+                drop(inner);
+                match Log::read(&dir) {
+                    Ok(state) => see(&state),
+                    Err(e) => {
+                        tracing::debug!(%thread, "a thread's log did not read: {e}");
+                        None
+                    }
+                }
             })
             .collect()
     }
@@ -419,6 +484,7 @@ impl Host {
     pub fn apply(&self, thread: ThreadId, actions: Vec<Action>) -> Option<Cursor> {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let hosted = inner.threads.get_mut(&thread)?;
         Some(apply(hosted, &mut inner.table, &inner.heard, actions))
     }
@@ -427,8 +493,9 @@ impl Host {
     #[must_use]
     pub fn session(&self, agent: &AgentId, native: &str) -> Option<(ThreadId, String)> {
         let inner = self.inner.lock();
-        inner.threads.iter().find_map(|(id, hosted)| {
-            let meta = &hosted.log.state().meta;
+        let open = inner.threads.iter().map(|(id, hosted)| (id, &hosted.log.state().meta));
+        let cold = inner.cold.iter().map(|(id, head)| (id, &head.state.meta));
+        open.chain(cold).find_map(|(id, meta)| {
             (meta.agent == *agent && meta.native == native).then(|| (*id, meta.title.clone()))
         })
     }
@@ -442,6 +509,7 @@ impl Host {
     {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let hosted = inner.threads.get_mut(&thread)?;
         let (actions, out) = change(hosted.log.state());
         if !actions.is_empty() {
@@ -459,6 +527,7 @@ impl Host {
     pub fn reset(&self, thread: ThreadId, state: ThreadState) -> io::Result<Option<Cursor>> {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
         // What waits to be sent, whether the tree is to review and the person's own marks
         // (how far they have seen it, what they were writing) are the worker's, which no
@@ -479,7 +548,13 @@ impl Host {
         }
         hosted.log.reset(state)?;
         let cursor = hosted.log.cursor();
-        inner.table.put(hosted.log.state().row(WallMs::now()));
+        let row = hosted.log.state().row(WallMs::now());
+        if hosted.log.state().status.phase != Phase::Working
+            && let Err(e) = hosted.log.write_head(&row)
+        {
+            tracing::debug!(%thread, "a thread's head was not kept: {e}");
+        }
+        inner.table.put(row);
         let _no_follower =
             hosted.feed.send(Arc::new(Batch { epoch: cursor.epoch, seq: 0, actions: Vec::new() }));
         Ok(Some(cursor))
@@ -493,6 +568,9 @@ impl Host {
     pub fn remove(&self, thread: ThreadId) -> io::Result<()> {
         let mut inner = self.inner.lock();
         inner.table.remove(thread);
+        if inner.cold.remove(&thread).is_some() {
+            return std::fs::remove_dir_all(inner.dir.join(thread.to_string()));
+        }
         match inner.threads.remove(&thread) {
             Some(hosted) => hosted.log.delete(),
             None => Ok(()),
@@ -504,6 +582,7 @@ impl Host {
     pub fn aside(&self, thread: ThreadId, of: Option<ThreadId>) -> bool {
         let meta = {
             let mut inner = self.inner.lock();
+            inner.load(thread);
             let Some(hosted) = inner.threads.get_mut(&thread) else { return false };
             hosted.own.aside = of;
             hosted.log.state().meta.clone()
@@ -517,6 +596,7 @@ impl Host {
     pub fn forked(&self, thread: ThreadId, fork: Fork) {
         let meta = {
             let mut inner = self.inner.lock();
+            inner.load(thread);
             let Some(hosted) = inner.threads.get_mut(&thread) else { return };
             hosted.own.fork = Some(fork);
             hosted.log.state().meta.clone()
@@ -532,6 +612,7 @@ impl Host {
         let meta = {
             let mut guard = self.inner.lock();
             let inner = &mut *guard;
+            inner.load(thread);
             let Some(hosted) = inner.threads.get_mut(&thread) else { return };
             hosted.own.seat = Some(seated.seat.to_string());
             hosted.own.seated = Some(seated.clone());
@@ -547,7 +628,7 @@ impl Host {
     /// The seat `thread` was started at, if it was ([`Self::seated`]).
     #[must_use]
     pub fn seated_of(&self, thread: ThreadId) -> Option<Seated> {
-        self.inner.lock().threads.get(&thread)?.own.seated.clone()
+        self.inner.lock().hosted(thread)?.own.seated.clone()
     }
 
     /// Give the worker's own variables for a seat to every seated agent from now on.
@@ -568,17 +649,20 @@ impl Host {
     pub fn seated_at(&self, seat: SessionId) -> Option<ThreadId> {
         let seat = seat.to_string();
         let inner = self.inner.lock();
-        inner
-            .threads
-            .iter()
-            .find(|(_, hosted)| hosted.own.seat.as_deref() == Some(seat.as_str()))
-            .map(|(thread, _)| *thread)
+        let open = inner.threads.iter().find(|(_, h)| h.own.seat.as_deref() == Some(seat.as_str()));
+        let cold = || {
+            inner.cold.iter().find(|(_, head)| {
+                head.state.meta.facts.get(slopty_proto::project::SEAT_FACT) == Some(&seat)
+            })
+        };
+        open.map(|(thread, _)| *thread).or_else(|| cold().map(|(thread, _)| *thread))
     }
 
     /// Message `text` was typed for intent `id` into `thread`'s agent: the item the agent
     /// makes of it is marked with the intent ([`slopty_proto::thread::UserMessage::intent`]).
     pub fn typed(&self, thread: ThreadId, id: IntentId, text: &str) {
         let mut inner = self.inner.lock();
+        inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return };
         let typed = &mut hosted.own.typed;
         if typed.len() >= TYPED {
@@ -595,6 +679,7 @@ impl Host {
     pub fn first_message(&self, thread: ThreadId, pending: Pending) {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return };
         hosted.own.first = Some(pending.intent);
         let mut list = hosted.log.state().pending.clone();
@@ -618,7 +703,7 @@ impl Host {
     /// The outcome intent `id` for `thread` had, if it was acted on.
     #[must_use]
     pub fn outcome(&self, thread: ThreadId, id: IntentId) -> Option<Outcome> {
-        self.inner.lock().threads.get(&thread)?.intents.outcome(&id).cloned()
+        self.inner.lock().hosted(thread)?.intents.outcome(&id).cloned()
     }
 
     /// How many follow `thread` now: clients' streams and anything else that watches it.
@@ -630,28 +715,28 @@ impl Host {
     /// Every batch `thread` applies from now on; `None` for a thread not held.
     #[must_use]
     pub fn watch(&self, thread: ThreadId) -> Option<broadcast::Receiver<Arc<Batch>>> {
-        self.inner.lock().threads.get(&thread).map(|h| h.feed.subscribe())
+        self.inner.lock().hosted(thread).map(|h| h.feed.subscribe())
     }
 
     /// Follow `thread` from `have`: what was missed, and every batch after it. `None` for a
     /// thread not held.
     #[must_use]
     pub fn follow(&self, thread: ThreadId, have: Option<Cursor>, turns: u32) -> Option<Follow> {
-        let inner = self.inner.lock();
-        let hosted = inner.threads.get(&thread)?;
+        let mut inner = self.inner.lock();
+        let hosted = inner.hosted(thread)?;
         Some(Follow { catchup: hosted.log.since(have, turns), feed: hosted.feed.subscribe() })
     }
 
     /// Up to `turns` turns of `thread` before `before`.
     #[must_use]
     pub fn page(&self, thread: ThreadId, before: TurnId, turns: u32) -> Option<Page> {
-        self.inner.lock().threads.get(&thread).map(|h| h.log.state().page(before, turns))
+        self.inner.lock().hosted(thread).map(|h| h.log.state().page(before, turns))
     }
 
     /// `thread` as it stands, and its cursor.
     #[must_use]
     pub fn state(&self, thread: ThreadId) -> Option<(ThreadState, Cursor)> {
-        self.inner.lock().threads.get(&thread).map(|h| (h.log.state().clone(), h.log.cursor()))
+        self.inner.lock().hosted(thread).map(|h| (h.log.state().clone(), h.log.cursor()))
     }
 
     /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
@@ -682,6 +767,7 @@ impl Host {
     {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let hosted = inner.threads.get_mut(&thread)?;
         if let Some(outcome) = hosted.intents.outcome(&id) {
             return Some(outcome.clone());
@@ -705,6 +791,7 @@ impl Host {
     {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        inner.load(thread);
         let hosted = inner.threads.get_mut(&thread)?;
         if let Some(outcome) = hosted.intents.outcome(&id) {
             return Some(outcome.clone());
@@ -728,8 +815,7 @@ impl Host {
     pub fn is_scheduled(&self, thread: ThreadId, intent: IntentId) -> bool {
         self.inner
             .lock()
-            .threads
-            .get(&thread)
+            .hosted(thread)
             .is_some_and(|h| h.own.scheduled.iter().any(|p| p.intent == intent))
     }
 
@@ -745,6 +831,16 @@ impl Host {
         use super::schedule::{Due, When, when};
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
+        // A thread not opened yet that holds a message for later is opened to send it.
+        let holding: Vec<ThreadId> = inner
+            .cold
+            .iter()
+            .filter(|(_, head)| head.state.pending.iter().any(|p| p.delivery.is_kept()))
+            .map(|(thread, _)| *thread)
+            .collect();
+        for thread in holding {
+            inner.load(thread);
+        }
         let mut next: Option<WallMs> = None;
         let mut moved: Vec<(ThreadId, IntentId, PendingState)> = Vec::new();
         let mut due = Vec::new();
@@ -780,7 +876,7 @@ impl Host {
         let mut inner = self.inner.lock();
         match outcome {
             Outcome::Done | Outcome::Accepted | Outcome::Started { .. } => {
-                if let Some(hosted) = inner.threads.get_mut(&thread) {
+                if let Some(hosted) = inner.hosted(thread) {
                     hosted.own.scheduled.retain(|p| p.intent != intent);
                 }
                 set_scheduled(&mut inner, thread, intent, |_| {});
@@ -859,6 +955,7 @@ fn set_scheduled(
     intent: IntentId,
     change: impl FnOnce(&mut Pending),
 ) {
+    inner.load(thread);
     let Some(hosted) = inner.threads.get_mut(&thread) else { return };
     if let Some(pending) = hosted.own.scheduled.iter_mut().find(|p| p.intent == intent) {
         change(pending);
@@ -874,6 +971,31 @@ fn write_seat(dir: &Path, seated: &Seated) -> io::Result<()> {
     let staging = dir.join(format!(".{SEAT_FILE}"));
     std::fs::write(&staging, bytes)?;
     std::fs::rename(&staging, dir.join(SEAT_FILE))
+}
+
+impl Inner {
+    /// Open `thread`'s log if it is held and not opened yet, on its first use. One that cannot
+    /// be read is let go, with a warning: its agent's own session still has everything.
+    fn load(&mut self, thread: ThreadId) {
+        let Some(head) = self.cold.remove(&thread) else { return };
+        let dir = self.dir.join(thread.to_string());
+        match Log::open(&dir, self.limits).and_then(|log| Hosted::open(&dir, log)) {
+            Ok(hosted) => {
+                self.table.put(hosted.log.state().row(head.row.updated_ms));
+                self.threads.insert(thread, hosted);
+            }
+            Err(e) => {
+                tracing::warn!(%thread, "a thread's log is unreadable: {e}");
+                self.table.remove(thread);
+            }
+        }
+    }
+
+    /// `thread`, its log opened on its first use; `None` for a thread not held.
+    fn hosted(&mut self, thread: ThreadId) -> Option<&mut Hosted> {
+        self.load(thread);
+        self.threads.get_mut(&thread)
+    }
 }
 
 fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {
@@ -928,7 +1050,15 @@ fn apply(
             crate::caps::not_written(LOGS, &e);
         }
     }
-    table.put(hosted.log.state().row(WallMs::now()));
+    let row = hosted.log.state().row(WallMs::now());
+    // A thread at rest keeps its head current, so the next start reads it alone; one at work
+    // writes it once it rests.
+    if hosted.log.state().status.phase != Phase::Working
+        && let Err(e) = hosted.log.write_head(&row)
+    {
+        tracing::debug!(thread = %hosted.log.id(), "a thread's head was not kept: {e}");
+    }
+    table.put(row);
     let thread = hosted.log.id();
     let state = hosted.log.state();
     if !was_working && state.status.phase == Phase::Working {

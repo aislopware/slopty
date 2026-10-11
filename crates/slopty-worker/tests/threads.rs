@@ -141,21 +141,85 @@ mod threads {
             }
         }
         let bytes = walk(dir.path());
-        let mut times = Vec::new();
+        let (mut times, mut firsts) = (Vec::new(), Vec::new());
         for _ in 0..5 {
             let started = std::time::Instant::now();
             let host = open(dir.path());
             times.push(started.elapsed());
+            let thread = host.threads()[THREADS / 2];
+            let started = std::time::Instant::now();
+            assert_eq!(
+                state(&host, thread).0.turns.len(),
+                usize::try_from(TURNS).unwrap(),
+                "read whole"
+            );
+            firsts.push(started.elapsed());
             drop(host);
         }
         times.sort_unstable();
+        firsts.sort_unstable();
         eprintln!(
             "host_open_cost: {THREADS} threads x {TURNS} turns, {} MiB on disk, open median {} ms, \
-             worst {} ms",
+             worst {} ms; a thread's first use median {} us, worst {} us",
             bytes >> 20,
             times[times.len() / 2].as_millis(),
-            times[times.len() - 1].as_millis()
+            times[times.len() - 1].as_millis(),
+            firsts[firsts.len() / 2].as_micros(),
+            firsts[firsts.len() - 1].as_micros()
         );
+    }
+
+    /// A worker's start reads each thread's head alone: the table has every row as it was, and
+    /// no log is opened until its thread is used. A look over every thread sees each by its
+    /// head, items left on the disk, and a search reads the items without opening the log. A
+    /// thread that changed after its head was written (it was working when the worker
+    /// stopped) is read whole at the start and its head written, so the start after that reads
+    /// the head alone; and a thread let go goes from the disk whether opened or not.
+    #[test]
+    fn a_start_reads_the_heads_and_opens_a_log_on_first_use() {
+        use slopty_proto::thread::{Phase, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let metas = [meta(), meta(), meta()];
+        let [rests, works, gone] = metas.each_ref().map(|m| m.id);
+        let before = {
+            let host = open(dir.path());
+            for meta in metas {
+                host.create(meta).unwrap();
+            }
+            for thread in [rests, works, gone] {
+                host.apply(thread, vec![turn(1), text("a1", 1), append("a1", "the answer")]);
+            }
+            let working = Status { phase: Phase::Working, ..Status::default() };
+            host.apply(works, vec![Action::Status(working), turn(2), text("a2", 2)]);
+            host.apply(works, vec![append("a2", "half an answer")]);
+            [rests, works].map(|thread| state(&host, thread).0)
+        };
+
+        let host = open(dir.path());
+        assert_eq!(host.opened(), 0, "no log is opened at the start");
+        let TableFrame::Snapshot { rows, .. } = host.table(None) else { panic!("a snapshot") };
+        assert_eq!(rows.len(), 3, "every thread in the table");
+        let working = rows.iter().find(|r| r.id == works).expect("its row");
+        assert_eq!(working.status.phase, Phase::Working, "as its log left it, read whole");
+        let looked = host.visit(|s| Some((s.meta.id, s.turns.len(), s.items.len())));
+        assert!(looked.contains(&(rests, 1, 0)), "by its head, the items left: {looked:?}");
+        let said = host.visit_whole(|s| {
+            s.items.iter().any(|i| i.id == ItemId("a2".to_owned())).then_some(s.meta.id)
+        });
+        assert_eq!(said, [works], "a search reads the items");
+        assert_eq!(host.opened(), 0, "and opens nothing");
+        assert_eq!(state(&host, rests).0, before[0], "a first use reads it whole");
+        assert_eq!(state(&host, works).0, before[1]);
+        assert_eq!(host.opened(), 2);
+        host.remove(gone).unwrap();
+        assert!(!dir.path().join(gone.to_string()).exists(), "let go unopened, gone from disk");
+        drop(host);
+
+        let host = open(dir.path());
+        let TableFrame::Snapshot { rows, .. } = host.table(None) else { panic!("a snapshot") };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(host.opened(), 0, "every head current now");
+        assert_eq!(state(&host, works).0, before[1], "the working thread as it was");
     }
 
     /// The bytes of every file under `dir`.

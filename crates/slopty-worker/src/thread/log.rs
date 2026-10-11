@@ -8,6 +8,12 @@
 //! has grown past [`Limits::compact_after`] actions, the snapshot is written anew and the tail
 //! file starts over; the in-memory tail is kept, so a compaction costs no follower a snapshot.
 //!
+//! Beside them, `head` keeps the thread's row and its state without its items, written whenever
+//! the thread rests ([`Log::write_head`]): a worker's start reads the heads alone and opens a log
+//! only when its thread is first used ([`Log::head`]). A head names the tail it was written
+//! over, by the cursor the tail continues from and its length, so one the log has moved past
+//! since is not taken.
+//!
 //! The log is a cache of the agent's own session, so nothing is synced to the disk: a crash
 //! loses at most what the operating system had not written, the torn end of the tail file is
 //! dropped on reading, and the adapter rebuilds from the native session ([`Log::reset`]), which
@@ -21,11 +27,12 @@ use std::path::{Path, PathBuf};
 use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use slopty_proto::codec;
-use slopty_proto::thread::wire::ThreadFrame;
+use slopty_proto::thread::wire::{ThreadFrame, ThreadRow};
 use slopty_proto::thread::{Action, Cursor, ThreadId, ThreadState};
 
 const SNAPSHOT: &str = "snapshot";
 const TAIL: &str = "tail";
+const HEAD: &str = "head";
 
 /// How much a log keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +99,33 @@ struct TailHead {
     from: Cursor,
 }
 
+/// What a worker's start reads of a thread in place of its log ([`Log::head`]).
+#[derive(Clone, Debug)]
+pub struct Head {
+    /// Its row in the table.
+    pub row: ThreadRow,
+    /// Its state, with no items: what a look over every thread needs, without the bulk.
+    pub state: ThreadState,
+}
+
+/// A head as kept: the tail it was written over, by the cursor that tail continues from and
+/// its length then, and the head itself.
+#[derive(Deserialize)]
+struct StoredHead {
+    from: Cursor,
+    len: u64,
+    row: ThreadRow,
+    state: ThreadState,
+}
+
+#[derive(Serialize)]
+struct StoredHeadRef<'a> {
+    from: Cursor,
+    len: u64,
+    row: &'a ThreadRow,
+    state: &'a ThreadState,
+}
+
 /// One thread's log.
 #[derive(Debug)]
 pub struct Log {
@@ -105,6 +139,10 @@ pub struct Log {
     file: File,
     /// Actions in the tail file.
     on_disk: u64,
+    /// The cursor the tail file continues from.
+    tail_from: Cursor,
+    /// The tail file's length; [`u64::MAX`] once a write to it failed, so no head names it.
+    tail_len: u64,
 }
 
 impl Log {
@@ -117,7 +155,7 @@ impl Log {
         std::fs::create_dir_all(dir)?;
         let cursor = Cursor { epoch: fresh_epoch(), seq: 0 };
         write_snapshot(dir, cursor, &state)?;
-        let file = start_tail(dir, cursor)?;
+        let (file, tail_len) = start_tail(dir, cursor)?;
         Ok(Self {
             dir: dir.to_owned(),
             limits,
@@ -127,6 +165,8 @@ impl Log {
             tail_bytes: 0,
             file,
             on_disk: 0,
+            tail_from: cursor,
+            tail_len,
         })
     }
 
@@ -139,11 +179,11 @@ impl Log {
     pub fn open(dir: &Path, limits: Limits) -> io::Result<Self> {
         let stored: Stored = decode(&std::fs::read(dir.join(SNAPSHOT))?)?;
         let (actions, whole) = read_tail(&dir.join(TAIL), stored.cursor);
-        let file = match whole {
+        let (file, tail_len) = match whole {
             Some(len) => {
                 let file = OpenOptions::new().append(true).open(dir.join(TAIL))?;
                 file.set_len(len)?;
-                file
+                (file, len)
             }
             None => start_tail(dir, stored.cursor)?,
         };
@@ -156,6 +196,8 @@ impl Log {
             tail_bytes: 0,
             file,
             on_disk: 0,
+            tail_from: stored.cursor,
+            tail_len,
         };
         for (action, bytes) in actions {
             log.state.apply(&action);
@@ -164,6 +206,51 @@ impl Log {
             log.keep(action, bytes);
         }
         Ok(log)
+    }
+
+    /// The state the log in `dir` holds, as [`Self::open`] would read it, with nothing written:
+    /// a look at a thread not opened yet.
+    ///
+    /// # Errors
+    ///
+    /// When there is no readable snapshot.
+    pub fn read(dir: &Path) -> io::Result<ThreadState> {
+        let stored: Stored = decode(&std::fs::read(dir.join(SNAPSHOT))?)?;
+        let (actions, _) = read_tail(&dir.join(TAIL), stored.cursor);
+        let mut state = stored.state;
+        for (action, _) in &actions {
+            state.apply(action);
+        }
+        Ok(state)
+    }
+
+    /// The head of the log in `dir` ([`Self::write_head`]), when it was written over the tail
+    /// as it stands: `None` when there is none, it cannot be read, or the tail has moved since.
+    #[must_use]
+    pub fn head(dir: &Path) -> Option<Head> {
+        let stored: StoredHead = decode(&std::fs::read(dir.join(HEAD)).ok()?).ok()?;
+        let (from, len) = tail_mark(&dir.join(TAIL))?;
+        (from == stored.from && len == stored.len)
+            .then_some(Head { row: stored.row, state: stored.state })
+    }
+
+    /// Keep `row`, the thread's row now, and the state without its items as the log's head,
+    /// over the tail as it stands; the head as kept.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be written.
+    pub fn write_head(&mut self, row: &ThreadRow) -> io::Result<Head> {
+        let items = std::mem::take(&mut self.state.items);
+        let head = Head { row: row.clone(), state: self.state.clone() };
+        self.state.items = items;
+        let stored =
+            StoredHeadRef { from: self.tail_from, len: self.tail_len, row, state: &head.state };
+        let body = codec::encode_body(&stored).map_err(io::Error::other)?;
+        let staging = self.dir.join(".head");
+        std::fs::write(&staging, body)?;
+        std::fs::rename(staging, self.dir.join(HEAD))?;
+        Ok(head)
     }
 
     /// The thread.
@@ -204,7 +291,16 @@ impl Log {
         }
         self.on_disk =
             self.on_disk.saturating_add(u64::try_from(actions.len()).unwrap_or(u64::MAX));
-        self.file.write_all(&frames)?;
+        match self.file.write_all(&frames) {
+            Ok(()) => {
+                let wrote = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+                self.tail_len = self.tail_len.saturating_add(wrote);
+            }
+            Err(e) => {
+                self.tail_len = u64::MAX;
+                return Err(e);
+            }
+        }
         if turn_ended && self.on_disk >= self.limits.compact_after {
             self.compact()?;
         }
@@ -270,7 +366,10 @@ impl Log {
 
     fn compact(&mut self) -> io::Result<()> {
         write_snapshot(&self.dir, self.cursor, &self.state)?;
-        self.file = start_tail(&self.dir, self.cursor)?;
+        let (file, len) = start_tail(&self.dir, self.cursor)?;
+        self.file = file;
+        self.tail_from = self.cursor;
+        self.tail_len = len;
         self.on_disk = 0;
         Ok(())
     }
@@ -299,13 +398,32 @@ struct StoredRef<'a> {
     state: &'a ThreadState,
 }
 
-fn start_tail(dir: &Path, from: Cursor) -> io::Result<File> {
+/// A new tail file continuing from `from`, and its length.
+fn start_tail(dir: &Path, from: Cursor) -> io::Result<(File, u64)> {
     let head = codec::encode(&TailHead { from }).map_err(io::Error::other)?;
     let staging = dir.join(".tail");
     std::fs::write(&staging, &head)?;
     std::fs::rename(&staging, dir.join(TAIL))?;
-    OpenOptions::new().append(true).open(dir.join(TAIL))
+    let file = OpenOptions::new().append(true).open(dir.join(TAIL))?;
+    Ok((file, u64::try_from(head.len()).unwrap_or(u64::MAX)))
 }
+
+/// The cursor the tail file at `path` continues from and its length, read from its first
+/// frame alone; `None` when it is missing or its head is torn.
+fn tail_mark(path: &Path) -> Option<(Cursor, u64)> {
+    use std::io::Read as _;
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut first = [0_u8; TAIL_HEAD_READ];
+    let read = file.read(&mut first).ok()?;
+    let mut rest = BytesMut::from(first.get(..read)?);
+    let body = codec::try_take(&mut rest).ok().flatten()?;
+    let head: TailHead = decode(&body).ok()?;
+    Some((head.from, len))
+}
+
+/// Bytes read for a tail file's first frame: its length prefix and a cursor, with room.
+const TAIL_HEAD_READ: usize = 256;
 
 /// The whole actions of the tail file that continues from `from`, each with its framed size,
 /// and the length of the file's whole part. `None` when the file is missing, torn in its head,

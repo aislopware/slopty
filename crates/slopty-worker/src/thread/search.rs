@@ -40,7 +40,7 @@ pub fn search(host: &Host, query: &str, limit: u32) -> ThreadHits {
         return ThreadHits { query: query.to_owned(), threads: Vec::new(), more: 0 };
     }
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut found = host.visit(|state| thread_hits(state, &pattern, &mut matcher));
+    let mut found = host.visit_whole(|state| thread_hits(state, &pattern, &mut matcher));
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
     let limit = usize::try_from(limit.clamp(1, SEARCH_THREADS)).unwrap_or(usize::MAX);
     let more = u32::try_from(found.len().saturating_sub(limit)).unwrap_or(u32::MAX);

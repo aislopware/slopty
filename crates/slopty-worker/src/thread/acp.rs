@@ -330,11 +330,11 @@ pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks)
         let (ended_tx, mut ended) = mpsc::unbounded_channel();
         let mut served =
             Served { host: host.clone(), path, own, running: HashMap::new(), ended: ended_tx };
-        for thread in host.threads() {
-            let Some((state, _)) = host.state(thread) else { continue };
-            if is_acp(&state) && state.status.liveness == Liveness::Live {
-                host.apply(thread, driven::gone(&state, WallMs::now()));
-            }
+        // Only the threads left live are opened, by their heads.
+        let live =
+            host.visit(|s| (is_acp(s) && s.status.liveness == Liveness::Live).then_some(s.meta.id));
+        for thread in live {
+            host.update(thread, |state| (driven::gone(state, WallMs::now()), ()));
         }
         loop {
             tokio::select! {
@@ -507,11 +507,7 @@ impl Served {
 
     /// The thread this worker keeps of `agent`'s session `native`, when it keeps one.
     fn kept(&self, agent: &AgentId, native: &str) -> Option<ThreadId> {
-        self.host.threads().into_iter().find(|thread| {
-            self.host
-                .state(*thread)
-                .is_some_and(|(s, _)| s.meta.agent == *agent && s.meta.native == native)
-        })
+        self.host.session(agent, native).map(|(thread, _)| thread)
     }
 
     /// Branch a new thread off `from` through turn `after`, or all of it, for intent `id`,
