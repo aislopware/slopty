@@ -1147,7 +1147,9 @@ impl Verb {
             | Self::WorkingOn { .. }
             // A second magic packet wakes nothing that the first did not.
             | Self::Wake { .. }
-            | Self::WakePeer { .. } => false,
+            | Self::WakePeer { .. }
+            // A fetch and a read: asked again, it says what holds then.
+            | Self::OnOrigin { .. } => false,
         }
     }
 }

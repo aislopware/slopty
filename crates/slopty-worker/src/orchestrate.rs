@@ -630,7 +630,8 @@ impl Orchestrator {
             | Verb::LandPull { .. }
             | Verb::RemoveWorktree { .. }
             | Verb::DropBranches { .. }
-            | Verb::BranchOff { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::BranchOff { .. }
+            | Verb::OnOrigin { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
                 let threads = inner.task_threads.get().cloned().ok_or_else(|| {

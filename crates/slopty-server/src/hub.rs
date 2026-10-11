@@ -1006,6 +1006,11 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server makes a project's own branch itself, when it is made with no target",
             ),
+            Verb::OnOrigin { .. } => error(
+                ErrorCode::Forbidden,
+                "the server asks what the forge holds itself, when it looks for merged work \
+                 pushed outside Slopty",
+            ),
             Verb::Settings { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "a machine's settings are the person's to read and change, never an agent's",
@@ -1977,6 +1982,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TestDiff { worker, .. }
         | Verb::FastForward { worker, .. }
         | Verb::CatchUp { worker, .. }
+        | Verb::OnOrigin { worker, .. }
         | Verb::LandPull { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::DropBranches { worker, .. }
