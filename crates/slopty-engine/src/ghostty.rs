@@ -3136,6 +3136,18 @@ impl GhosttyEngine {
     }
 }
 
+/// `rgb`, checked to be no colour either theme's terminal palette holds, so a program setting
+/// it is always a change of the program's, whatever the driver's palette is.
+#[cfg(test)]
+fn foreign(rgb: [u8; 3]) -> [u8; 3] {
+    for palette in [slopty_theme::TerminalPalette::DARK, slopty_theme::TerminalPalette::LIGHT] {
+        let wire = palette.wire();
+        let held = [wire.fg, wire.bg, wire.cursor].into_iter().chain(wire.ansi);
+        assert!(held.into_iter().all(|c| c != rgb), "{rgb:?} is a theme's colour");
+    }
+    rgb
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -4392,11 +4404,12 @@ mod tests {
                 })
                 .collect()
         };
-        let bg = Some([0x28, 0x2c, 0x34]);
-        e.write(b"\x1b]11;#282c34\x1b\\");
+        let bg = Some(foreign([0x28, 0x2c, 0x35]));
+        e.write(b"\x1b]11;#282c35\x1b\\");
         assert_eq!(colors(&mut e), vec![ColorOverrides { bg, ..ColorOverrides::default() }]);
-        e.write(b"\x1b]4;1;rgb:e0/6c/75;17;#123456\x1b\\\x1b]12;#ffffff\x1b\\");
-        let red = (1, [0xe0, 0x6c, 0x75]);
+        e.write(b"\x1b]4;1;rgb:c0/1c/28;17;#123456\x1b\\\x1b]12;#ffffff\x1b\\");
+        let red = (1, foreign([0xc0, 0x1c, 0x28]));
+        let _white = foreign([0xff; 3]);
         assert_eq!(
             colors(&mut e),
             vec![ColorOverrides {
@@ -5409,7 +5422,7 @@ mod checkpoint_tests {
         b.write(&checkpoint);
         assert!(colors(&mut b).is_empty(), "a light driver's palette is not a program's change");
         assert_eq!(all_text(&b), all_text(&a));
-        a.write(b"\x1b]11;#282c34\x1b\\\x1b]12;#ffffff\x1b\\\x1b]4;1;#e06c75;200;#123456\x1b\\");
+        a.write(b"\x1b]11;#282c35\x1b\\\x1b]12;#ffffff\x1b\\\x1b]4;1;#c01c28;200;#123456\x1b\\");
         let _seen = colors(&mut a);
         let checkpoint = {
             let mut v = Vec::new();
@@ -5422,9 +5435,9 @@ mod checkpoint_tests {
             colors(&mut c),
             vec![ColorOverrides {
                 fg: None,
-                bg: Some([0x28, 0x2c, 0x34]),
-                cursor: Some([0xff; 3]),
-                palette: vec![(1, [0xe0, 0x6c, 0x75]), (200, [0x12, 0x34, 0x56])],
+                bg: Some(foreign([0x28, 0x2c, 0x35])),
+                cursor: Some(foreign([0xff; 3])),
+                palette: vec![(1, foreign([0xc0, 0x1c, 0x28])), (200, [0x12, 0x34, 0x56])],
             }]
         );
     }
