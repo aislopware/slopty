@@ -10293,8 +10293,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   mark, three launcher rows, "Recent" and "Machines". With work handed to orchestrators, the
   first thing an empty workspace asks is what should get done. Ruled:
   - **One question and a composer.** "What should we work on?" at the empty heading role
-    (18/24, regular), or "What should we work on in {project}?" while a project is on show with
-    nothing open in it (its name as the title bar says it; MonoCode's `EmptySession`), over a
+    (18/24, regular), or "What should we work on in {project}?" while a project (a folder's or
+    a repository's, never a machine's own work) is on show with nothing open in it (its name as
+    the title bar says it; MonoCode's `EmptySession`), over a
     boxed composer (the field's ground at `radii.md`), in the reading column
     (`thread::view::COLUMN`), centred both ways. The composer takes the keyboard when the
     page first shows with nothing else holding it, and ↵ on the bare workspace gives it back.
@@ -10362,3 +10363,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `GroupNavigatorBy` action, and `layout::Navigator::group_by` with `Navigator::by_project`.
     The navigator reads the project grouping and nothing else.
   - Test: `workspace::tests::palette::the_navigator_offers_no_other_grouping`.
+
+- ✅ **The board's head sets the review limit and merges all ready** (2026-10-11, the readiness
+  audit's gap 6). The review limit (`docs/decisions/projects.md`, "The person's plan bounds
+  concurrency") was the person's alone to set, yet no surface set it: the wire carried
+  `LimitsChange { review }` and nothing sent it. And a person back from a while away found
+  several tasks finished and verified, each merged by its own card's button, one press per task.
+  Ruled:
+  - **A stepper in the head's track.** After the place line, before the autonomy track, in the
+    same `kit::track`: a step down, the number in tabular figures at the metadata role, a step
+    up (Tabler minus and plus, icon buttons a chip tall). Each step sends `ProjectSet` with
+    `LimitsChange { review }` alone. It never goes under one, since none would stop the project
+    for good: at one the step down keeps its place and does not show, so nothing moves. Said to
+    a screen reader as "Review limit: N", with what it holds to as its description.
+  - **"Merge all ready (N)" while two or more are.** A secondary button in the title row at
+    high priority, beside the unpushed count, counting the tasks whose actions offer Merge
+    (`Board::mergeable`). One press sends one `TaskMerge` per task in their numbers' order; the
+    server's merge queue takes them one at a time, as it does presses on their cards. With one
+    ready it does not show: that task's own card merges it, and a button for one repeats it.
+  - **The pin's leftovers deleted.** The server no longer pins a task to a machine before it
+    starts (`docs/decisions/projects.md`), so the board's `PlaceHow::Pinned`, its lock on the
+    place chip and `Place::why` ("Why: pinned") go with it.
+  - Test: `workspace::tests::projects::the_board_sets_its_review_limit_and_merges_all_ready`.

@@ -643,8 +643,8 @@ fn a_node_says_where_it_runs() {
     ));
     let board = board(&mirror);
 
-    let place = |node| board.place(node).map(|p| (p.worker, p.how, p.why));
-    assert_eq!(place(None), Some((studio, PlaceHow::Runs, None)));
+    let place = |node| board.place(node).map(|p| (p.worker, p.how));
+    assert_eq!(place(None), Some((studio, PlaceHow::Runs)));
     assert_eq!(
         board.place(Some(TaskId(1))),
         Some(Place {
@@ -652,10 +652,9 @@ fn a_node_says_where_it_runs() {
             how: PlaceHow::Runs,
             worktree: Some("/w/board-1".into()),
             branch: Some("slopty/board/1".into()),
-            why: None,
         })
     );
-    assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran, None)));
+    assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran)));
     assert_eq!(place(Some(TaskId(3))), None, "nowhere yet: no place to show");
     assert_eq!(os_name(slopty_proto::server::Os::Linux), "Linux");
     assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");

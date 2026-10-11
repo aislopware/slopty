@@ -845,10 +845,12 @@ impl WorkspaceView {
         self.layout.shown_tab().is_none()
     }
 
-    /// The empty workspace's question: in the project on show, by its name, when one is, else
-    /// [`EMPTY_QUESTION`].
+    /// The empty workspace's question: in the project on show, by its name, when one is (a
+    /// folder's or a repository's), else [`EMPTY_QUESTION`]. A machine's own work is no
+    /// project, and the composer's foot already says which machine a goal goes to.
     pub(super) fn empty_question(&self) -> SharedString {
-        let name = self.project_name();
+        let project = self.layout.shown_project().filter(|p| p.home().worker().is_none());
+        let name = project.map(|_| self.project_name()).unwrap_or_default();
         if name.is_empty() {
             return EMPTY_QUESTION.into();
         }

@@ -274,11 +274,11 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
 }
 
 /// A project on show with nothing open in it asks what to work on there, by its name; with no
-/// project on show the question names none.
+/// project on show, or a machine's own work, the question names none.
 #[gpui::test]
 fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    let _fake = connect(&view, cx, 1, "studio");
+    let fake = connect(&view, cx, 1, "studio");
     cx.update(|window, _cx| window.set_a11y_active(true));
     let heading = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
@@ -286,6 +286,9 @@ fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
         tree.iter().find(|n| n.role == "Heading").and_then(|n| n.label.clone())
     };
     assert_eq!(heading(cx).as_deref(), Some(EMPTY_QUESTION), "no project on show");
+    let studio = slopty_client::groups::GroupKey::machine(fake.key);
+    view.update_in(cx, |v, _w, cx| v.layout_action(cx, |l| l.show_project(&studio)));
+    assert_eq!(heading(cx).as_deref(), Some(EMPTY_QUESTION), "a machine is no project");
     let atlas = slopty_client::groups::GroupKey::new("project", "atlas");
     view.update_in(cx, |v, _w, cx| {
         v.layout_action(cx, |l| {

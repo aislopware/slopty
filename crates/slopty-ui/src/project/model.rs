@@ -307,8 +307,6 @@ pub struct Place {
     pub worktree: Option<String>,
     /// The branch its work is on.
     pub branch: Option<String>,
-    /// Why it went there, when it was named: "pinned".
-    pub why: Option<String>,
 }
 
 /// How a node is on its worker.
@@ -318,8 +316,6 @@ pub enum PlaceHow {
     Runs,
     /// Its agent ran there last.
     Ran,
-    /// It is pinned there and has not started.
-    Pinned,
 }
 
 /// A system's name as the board says it.
@@ -558,19 +554,13 @@ impl Board {
     pub fn place(&self, node: Node) -> Option<Place> {
         let Some(task) = node else {
             let worker = self.project.orchestrator?.worker;
-            return Some(Place {
-                worker,
-                how: PlaceHow::Runs,
-                worktree: None,
-                branch: None,
-                why: None,
-            });
+            return Some(Place { worker, how: PlaceHow::Runs, worktree: None, branch: None });
         };
         let card = self.tasks.get(&task)?;
         let (worktree, branch) = (card.worktree.clone(), card.branch.clone());
         if let Some(a) = &card.assignment {
             let how = if a.open() { PlaceHow::Runs } else { PlaceHow::Ran };
-            return Some(Place { worker: a.term.worker, how, worktree, branch, why: None });
+            return Some(Place { worker: a.term.worker, how, worktree, branch });
         }
         None
     }
@@ -623,6 +613,17 @@ impl Board {
             }
             _ => None,
         }
+    }
+
+    /// The tasks whose work waits on the person's merge and offers it ([`Self::actions`]), by
+    /// number: what "Merge all ready" merges.
+    #[must_use]
+    pub fn mergeable(&self) -> Vec<TaskId> {
+        self.tasks
+            .keys()
+            .copied()
+            .filter(|t| self.actions(*t).contains(&TaskAction::Merge))
+            .collect()
     }
 
     /// Where `task` waits in the merge queue: its place from 1, and how many wait.

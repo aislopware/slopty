@@ -153,6 +153,19 @@ fn set_push(project: &ProjectId, push: bool) -> Verb {
     }
 }
 
+/// The person's change to how many of `project`'s tasks may wait on them.
+fn set_review_limit(project: &ProjectId, review: u16) -> Verb {
+    Verb::ProjectSet {
+        project: project.clone(),
+        orchestrator: None,
+        verifier: None,
+        push: None,
+        limits: LimitsChange { review: Some(review) },
+        metadata: None,
+        autonomy: None,
+    }
+}
+
 /// The person's change to how far `project`'s agents go before they ask.
 fn set_autonomy(project: &ProjectId, autonomy: Autonomy) -> Verb {
     Verb::ProjectSet {
@@ -748,6 +761,14 @@ impl WorkspaceView {
                 }
                 ProjectEvent::SetAutonomy(level) => {
                     this.send_to_server(set_autonomy(&asked, *level), |_, _| (), cx);
+                }
+                ProjectEvent::SetReviewLimit(review) => {
+                    this.send_to_server(set_review_limit(&asked, *review), |_, _| (), cx);
+                }
+                ProjectEvent::MergeReady(tasks) => {
+                    for task in tasks {
+                        this.act_on_task(&asked, *task, TaskAction::Merge, cx);
+                    }
                 }
                 ProjectEvent::Delete => {
                     this.send_to_server(

@@ -1901,3 +1901,77 @@ fn the_board_sets_its_autonomy(cx: &mut TestAppContext) {
     click(cx, "project-autonomy-own");
     assert!(sent(&mut queue, cx, done).is_empty(), "the level already set says nothing");
 }
+
+/// The board's head sets how many tasks may wait on the person, a step at a time, never under
+/// one: each step says the new limit to the server, the person's word. With two or more tasks
+/// ready, "Merge all ready" sends one `TaskMerge` for each, in their numbers' order; one ready
+/// task merges from its own card, so the head offers nothing.
+#[gpui::test]
+fn the_board_sets_its_review_limit_and_merges_all_ready(cx: &mut TestAppContext) {
+    use slopty_proto::project::LimitsChange;
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let term = TermRef { worker: fixtures_worker(&view, cx, orchestrator), session: orchestrator };
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let board_id = fixtures::id("board");
+    let limit = |verbs: &[Verb]| match verbs {
+        [
+            Verb::ProjectSet {
+                limits: LimitsChange { review }, push: None, autonomy: None, ..
+            },
+        ] => *review,
+        _ => panic!("one review limit: {verbs:?}"),
+    };
+    let set_review = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, review: u16| {
+        let mut record = project("board", Some(term));
+        record.limits.review = review;
+        let update = ProjectUpdate {
+            project: fixtures::id("board"),
+            record: Some(record),
+            task: None,
+            native: None,
+            entry: None,
+        };
+        view.update_in(cx, |v, _w, cx| v.project_update(11, update, cx));
+        cx.run_until_parked();
+    };
+
+    // The default, three: a step either way.
+    let labels_now = labels(&view, cx);
+    assert!(labels_now.iter().any(|l| l == "Review limit: 3"), "{labels_now:#?}");
+    click(cx, "project-review-more");
+    assert_eq!(limit(&sent(&mut queue, cx, done)), Some(4));
+    click(cx, "project-review-fewer");
+    assert_eq!(limit(&sent(&mut queue, cx, done)), Some(2));
+
+    // At one the step down says nothing: none would stop the project for good.
+    set_review(&view, cx, 1);
+    assert!(labels(&view, cx).iter().any(|l| l == "Review limit: 1"));
+    click(cx, "project-review-fewer");
+    assert!(sent(&mut queue, cx, done).is_empty(), "never under one");
+    click(cx, "project-review-more");
+    assert_eq!(limit(&sent(&mut queue, cx, done)), Some(2));
+
+    // One task ready: its card merges it, and the head offers nothing.
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(12, task_changed("board", card(6, "Land it", TaskState::Done), None), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-merge-ready").is_none(), "one ready merges from its card");
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(13, task_changed("board", card(5, "Wire it", TaskState::Done), None), cx);
+    });
+    cx.run_until_parked();
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "Merge all ready (2)"), "{said:#?}");
+    click(cx, "project-merge-ready");
+    let merge = |task| Verb::TaskMerge { project: board_id.clone(), task: TaskId(task) };
+    assert_eq!(sent(&mut queue, cx, done), [merge(5), merge(6)]);
+}

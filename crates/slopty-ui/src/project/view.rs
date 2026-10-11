@@ -91,6 +91,10 @@ pub enum ProjectEvent {
     Act(TaskId, TaskAction),
     /// Push the target after each merge, or stop.
     SetPush(bool),
+    /// Let this many of its tasks wait on the person before its orchestrator starts no more.
+    SetReviewLimit(u16),
+    /// Merge these tasks, each ready and offering it: "Merge all ready".
+    MergeReady(Vec<TaskId>),
     /// Let the project's agents go this far before they ask the person.
     SetAutonomy(Autonomy),
     /// Check each task's work by this command; an empty one is none.
@@ -523,14 +527,12 @@ impl ProjectView {
         let mut lines = vec![match place.how {
             PlaceHow::Runs => format!("Runs on {on}"),
             PlaceHow::Ran => format!("Ran on {on}"),
-            PlaceHow::Pinned => format!("Pinned to {on}"),
         }];
         if away {
             lines.push(format!("{name} is away: its agent is not heard from until it is back"));
         }
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
-        lines.extend(place.why.as_ref().map(|why| format!("Why: {why}")));
         Some((place, short, lines.join("\n")))
     }
 
@@ -541,18 +543,16 @@ impl ProjectView {
 
     /// `node`'s place as a quiet chip: the worker and its system in words, in a stronger ink
     /// while its agent runs there, with no machine glyph: a row carries one mark, its state's,
-    /// and a machine's colour is the navigator's alone. A pin keeps its lock, which the words
-    /// do not say. Its hint says the rest. Words only: where a task runs is the orchestrator's
-    /// to choose.
+    /// and a machine's colour is the navigator's alone. Its hint says the rest. Words only: where
+    /// a task runs is the orchestrator's to choose.
     fn where_chip(&self, board: &Board, node: Node, prefix: &str) -> Option<Stateful<Div>> {
         let (place, short, hint) = self.where_words(board, node)?;
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let (pinned, tone) = match place.how {
-            PlaceHow::Runs => (false, s.text_secondary),
-            PlaceHow::Ran => (false, s.text_muted),
-            PlaceHow::Pinned => (true, s.text_muted),
+        let tone = match place.how {
+            PlaceHow::Runs => s.text_secondary,
+            PlaceHow::Ran => s.text_muted,
         };
         // Its machine out of reach, the chip wears the away mark: the row's own mark still says
         // the task's state, which nothing has changed yet.
@@ -585,12 +585,6 @@ impl ProjectView {
             .overflow_hidden()
             .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(tone))
-            .when(pinned, |el| {
-                el.child(
-                    icon(theme, Symbol::Lock, IconSize::Inline, hsla(tone))
-                        .size(px(theme.typography.icon())),
-                )
-            })
             .children(away)
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
             .map(crate::kit::hint_timing)
@@ -641,6 +635,16 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
+/// The review limit's name, said to a screen reader and in its hint.
+pub(crate) const REVIEW_LIMIT: &str = "Review limit";
+/// What the review limit holds to, under its name.
+pub(crate) const REVIEW_LIMIT_SAYS: &str =
+    "How many tasks may wait on you before the orchestrator starts no more";
+/// The header's way to merge every task that is ready.
+pub(crate) const MERGE_READY: &str = "Merge all ready";
+/// The review limit's two steps.
+pub(crate) const FEWER_REVIEWS: &str = "Fewer tasks waiting on you";
+pub(crate) const MORE_REVIEWS: &str = "More tasks waiting on you";
 /// The autonomy control's name, said to a screen reader.
 pub(crate) const AUTONOMY: &str = "Autonomy";
 /// What the autonomy control says under it at Own: a company's managed Claude Code that turns
@@ -799,6 +803,21 @@ impl ProjectView {
         if let Some(unpushed) = self.unpushed(board, cx) {
             title = title.item("unpushed", Priority::HIGH, unpushed);
         }
+        // Two or more tasks ready: one press merges them all, in their numbers' order.
+        let ready = board.mergeable();
+        if ready.len() > 1 {
+            let n = ready.len();
+            let merge = crate::kit::button(
+                theme,
+                "project-merge-ready",
+                format!("{MERGE_READY} ({n})"),
+                crate::kit::ButtonKind::Secondary,
+            )
+            .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                cx.emit(ProjectEvent::MergeReady(ready.clone()));
+            }));
+            title = title.item("merge-ready", Priority::HIGH, merge);
+        }
         let title = title
             .item("live", Priority::LOW, live)
             .item("checks", Priority::ESSENTIAL, checks_toggle)
@@ -830,6 +849,7 @@ impl ProjectView {
                     .items_center()
                     .gap(px(sp.sm))
                     .child(meta)
+                    .child(self.review_limit(project.limits.review, cx))
                     .child(self.autonomy(project.autonomy, cx)),
             )
             .children((project.autonomy == Autonomy::Own).then(|| {
@@ -840,6 +860,44 @@ impl ProjectView {
             }))
             .children(self.standing(board))
             .child(self.bar(board))
+    }
+
+    /// How many of its tasks may wait on the person before its orchestrator starts no more,
+    /// the person's to set: a step down, the number, a step up, in the autonomy's track. Never
+    /// under one: none would stop the project for good, so the step down hides at one.
+    fn review_limit(&self, now: u16, cx: &Context<Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let step = |id: &'static str, glyph: Symbol, label: &'static str, to: Option<u16>| {
+            let el = crate::kit::icon_button(theme, id, glyph, label).size(px(theme.density.chip));
+            match to {
+                Some(to) => el.on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(ProjectEvent::SetReviewLimit(to));
+                })),
+                // At the end it can go no further: its place is kept, so nothing moves.
+                None => el.invisible(),
+            }
+        };
+        let fewer = (now > 1).then(|| now.saturating_sub(1));
+        let more = (now < u16::MAX).then(|| now.saturating_add(1));
+        crate::kit::track(theme)
+            .id("project-review-limit")
+            .debug_selector(|| "project-review-limit".to_owned())
+            .role(Role::Group)
+            .aria_label(SharedString::from(format!("{REVIEW_LIMIT}: {now}")))
+            .aria_description(REVIEW_LIMIT_SAYS)
+            .flex_none()
+            .gap(px(theme.spacing.xxs))
+            .child(step("project-review-fewer", Symbol::Minus, FEWER_REVIEWS, fewer))
+            .child(
+                crate::kit::tabular(crate::kit::typed(div(), theme.roles().metadata))
+                    .debug_selector(|| "project-review-count".to_owned())
+                    .min_w(px(theme.density.chip))
+                    .text_center()
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(now.to_string())),
+            )
+            .child(step("project-review-more", Symbol::Plus, MORE_REVIEWS, more))
     }
 
     /// How far the project's agents go before they ask the person, the person's to set:
@@ -1909,7 +1967,6 @@ impl ProjectView {
         let held = stages.iter().any(|stage| stage.holds) || failed;
         let place_words =
             self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
-        let reason = board.place(node).and_then(|p| p.why);
         let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
         let label = said(&[
             &card.title,
@@ -1917,7 +1974,6 @@ impl ProjectView {
             asks.as_deref().unwrap_or(""),
             handing.as_deref().unwrap_or(""),
             &place_words,
-            reason.as_deref().unwrap_or(""),
             &meta,
             &along.join(", "),
         ]);
@@ -1963,9 +2019,6 @@ impl ProjectView {
             let fact =
                 self.fact(format!("{key}-branch"), Some(GitGlyph::Branch.into()), branch.clone());
             line = line.item("branch", Priority(96), fact);
-        }
-        if let Some(why) = reason {
-            line = line.item("why", Priority::LOW, self.fact(format!("{key}-why"), None, why));
         }
         if let Some(chip) = self.where_chip(board, node, "project-card") {
             line = line.item("where", Priority(144), chip);
