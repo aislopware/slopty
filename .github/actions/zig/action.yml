@@ -1,0 +1,42 @@
+# zig for a job, unpacked from the Actions cache. setup-zig keeps the release's `.tar.xz` and
+# unpacks it in every job: 9.5 s of its 13 on a macOS runner, xz on one core (gate run
+# 38143863116). The unpacked tree comes back zstd-compressed in a few seconds. A job of the gate
+# or of main saves it once per version, OS and architecture; any other branch reads main's.
+name: zig
+description: Put zig, the version libghostty-vt pins, on the PATH.
+inputs:
+  version:
+    description: The zig release (`tools::ZIG`).
+    required: false
+    default: 0.16.0
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/zig-${{ inputs.version }}
+        key: zig-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ inputs.version }}
+        # Its cache holds zig's own caches, which libghostty-vt-sys never reads (it passes its
+        # own --cache-dir), and took 2.3 GB of the 10 GB quota sccache lived in.
+        use-cache: false
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/.cache
+        cp -R "$(dirname "$(command -v zig)")" ~/.cache/zig-${{ inputs.version }}
+    - if: >-
+        steps.cache.outputs.cache-hit != 'true'
+        && (github.ref == 'refs/heads/gate' || github.ref == 'refs/heads/main')
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/zig-${{ inputs.version }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+    - shell: bash
+      run: |
+        echo "$HOME/.cache/zig-${{ inputs.version }}" >> "$GITHUB_PATH"
+        "$HOME/.cache/zig-${{ inputs.version }}/zig" version

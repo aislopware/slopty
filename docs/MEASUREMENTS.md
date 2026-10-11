@@ -16313,3 +16313,36 @@ cancelled lands with a later run, so its wait counts that one's too.
   a red lane's fix (963d71f2, 107 min; 7722cbef and 79973fbf, 88 min), or a newer push.
 - 14e3576a and 058d32be waited 41 and 39 min, while lane checks held all five macOS runners and
   the gate's test shards queued (gate run 38136668846), before `remote` yielded to the gate.
+
+## 2026-10-11 — a macOS test shard's timeline, and what of it is fixed
+
+Gate run 38143863116 (16302814, which changed xtask), each step from the Actions API's job
+steps; the build's parts from the tests lane's `cargo-timing.html`.
+
+| step (s) | worker | rest | ui |
+| --- | --- | --- | --- |
+| set up the job | 6 | 7 | 6 |
+| checkout, with Ghostty's submodule | 9 | 10 | 10 |
+| sccache, the pinned toolchain | 1 + 9 | 2 + 8 | 2 + 11 |
+| registry cache restore | 10 | 13 | 10 |
+| setup-zig | 13 | 13 | 14 |
+| xtask build (a change to it; a hit otherwise, about 1) | 48 | 52 | 33 |
+| tests step: test build / spawned binaries / nextest | 225 / 18 / 133 | 207 / 24 / 153 | 258 / 2 / 70 |
+| artifacts, stats, post steps, completion | 41 | 21 | 7 |
+| job | 534 | 532 | 441 |
+
+- Of the test build, the dependencies took the first 85 s (worker), 77 s (rest) and 120 s (ui):
+  391, 366 and 685 units, almost all compile-cache hits, at 85–91 % of the three cores. A hit
+  costs CPU here, not the network: sccache hashes each unit's sources and the dependencies it
+  reads, then unpacks the object, so more jobs would not go faster. The rest is the workspace's
+  test executables (225–358 CPU-seconds), which sccache never caches since they link.
+- setup-zig spent 9.5 of its 13 s unpacking the release's `.tar.xz` on one core. The unpacked
+  tree from the Actions cache (`.github/actions/zig`, 81 MB with zstd) took 4 s against 13 on a
+  miss, on arm Linux (trial runs 38146885080, 38146631447): 9 s off every job that builds with
+  zig, the three Mac shards' critical path among them.
+- With the toolchain named in `RUSTUP_TOOLCHAIN` (8ac395d6), the registry cache's step took
+  10–13 s against 31–33 s: rustup no longer installed `rust-toolchain.toml`'s every component
+  and target on the job's first cargo call. The compile cache's misses per job, after one-time
+  rises at bac92dd6 (xtask's dependencies under `CARGO_PROFILE_DEV_OPT_LEVEL=0`, a new key) and
+  8ac395d6: linux 0, worker 1, rest 2, ui 1, iOS clippy 5.
+- At a job's end the runner spent 2–10 s on orphan processes: the sccache server, each time.
