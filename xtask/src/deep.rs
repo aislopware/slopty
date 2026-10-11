@@ -244,7 +244,10 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
         )?;
     }
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("miri")?);
-    let _flags = sh.push_env("MIRIFLAGS", "-Zmiri-disable-isolation");
+    // Floats exact, as the hardware computes them: Miri otherwise adds a random error to every
+    // operation the language leaves inexact, and the theme's colour tests, which compare
+    // conversions to `f32::EPSILON`, failed on it (Deep trial run 38148072272).
+    let _flags = sh.push_env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-deterministic-floats");
     let _cases = sh.push_env("PROPTEST_CASES", "8");
     let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
     // insta shells out to `cargo metadata` for the workspace root unless told it; Miri cannot
@@ -259,7 +262,7 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
     let packages = packages(chosen, PURE);
     // Under nextest each test is its own interpreter, side by side on the cores, and the `miri`
     // profile ends one that runs past its bound instead of the night.
-    let filter = MIRI_FILTER;
+    let filter = miri_filter();
     step(
         "miri",
         &cmd!(
@@ -273,6 +276,33 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
 /// thousands of operations (an hour each under the interpreter, 2026-10-01) and hold no
 /// `unsafe` of their own; the code they drive runs under Miri in the other targets.
 const MIRI_FILTER: &str = "not binary(allocs)";
+
+/// Tests Miri cannot run, by package and name, with why. Each failed or timed out on the first
+/// night Miri ran a test at all (Deep trial run 38148072272); none of them was a finding.
+const MIRI_CANNOT_RUN: &[(&str, &str, &str)] = &[
+    // Settings are written whole and the directory synced after the rename; Miri syncs files only.
+    ("slopty-settings", "tests::init_writes_once", "fsync on a directory"),
+    (
+        "slopty-settings",
+        "tests::a_mac_joins_the_server_it_is_given_unless_it_has_one",
+        "fsync on a directory",
+    ),
+    // Decoding at the frame limits, and a thousand random edits: past 20 minutes under the
+    // interpreter. The same code runs under Miri on small inputs in the other tests.
+    ("slopty-proto", "bounds::a_largest_frame_of_blank_lines_stops_at_the_budget", "too slow"),
+    ("slopty-proto", "bounds::lines_wider_than_any_terminal_do_not_decode", "too slow"),
+    ("slopty-proto", "units::a_frame_at_the_limit_passes_and_one_past_it_is_refused", "too slow"),
+    ("slopty-predict", "editing::random_editing_never_shows_a_wrong_line", "too slow"),
+];
+
+/// The nextest filterset Miri runs: [`MIRI_FILTER`] without [`MIRI_CANNOT_RUN`].
+fn miri_filter() -> String {
+    let skipped: Vec<String> = MIRI_CANNOT_RUN
+        .iter()
+        .map(|(package, test, _)| format!("(package({package}) & test(={test}))"))
+        .collect();
+    format!("{MIRI_FILTER} & not ({})", skipped.join(" | "))
+}
 
 /// `-Zbuild-std` so the standard library is instrumented too (a race through `std` is still
 /// a race); the host triple is passed explicitly because build-std needs it.
@@ -688,6 +718,15 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(test_binaries(&built), ["/t/deps/net-1"]);
+    }
+
+    #[test]
+    fn miri_leaves_out_the_allocation_targets_and_each_test_it_cannot_run() {
+        let filter = miri_filter();
+        assert!(filter.starts_with("not binary(allocs) & not ("), "{filter}");
+        for (package, test, _) in MIRI_CANNOT_RUN {
+            assert!(filter.contains(&format!("(package({package}) & test(={test}))")), "{filter}");
+        }
     }
 
     #[test]
