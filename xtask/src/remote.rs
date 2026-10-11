@@ -95,6 +95,10 @@ pub struct RemoteOpts {
     /// Accept every insta snapshot the tests change, and apply them to the tree.
     #[arg(long)]
     pub accept_snapshots: bool,
+    /// Follow run `ID` already started (a wrapper that was stopped, say) instead of starting
+    /// one: wait for it, print what failed and apply what it accepted, as the same options say.
+    #[arg(long = "run", value_name = "ID")]
+    pub attach: Option<u64>,
     /// Check `HEAD` as committed, without the tree's edits: other lanes' unfinished work stays
     /// out of it.
     #[arg(long)]
@@ -113,7 +117,7 @@ struct Listed {
 
 pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     ensure!(
-        !opts.packages.is_empty() || opts.e2e.is_some(),
+        opts.attach.is_some() || !opts.packages.is_empty() || opts.e2e.is_some(),
         "name what to check: `-p <crate>` (repeatable), `--e2e <case>`, or both"
     );
     ensure!(
@@ -125,20 +129,27 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let dir = root.join("target").join("remote").join(&opts.name);
     std::fs::create_dir_all(&dir)?;
     let started = Instant::now();
-    let sha = if opts.head {
-        cmd!(sh, "git rev-parse HEAD").read()?
-    } else {
-        snapshot(sh, &root, &dir, &opts.name, &opts.only)?
-    };
-    let short = sha.get(..10).unwrap_or(&sha);
-    let branch = format!("check/{}", opts.name);
-    cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/{branch}")
-        .run()
-        .context("pushing the snapshot")?;
-    dispatch(sh, opts, &sha)?;
-    let run = find(sh, &format!("check {} {sha}", opts.name))?;
     let what = describe(opts);
+    let (run, short) = if let Some(id) = opts.attach {
+        let run_id = id.to_string();
+        let url = cmd!(sh, "gh run view {run_id} --json url --jq .url").read()?;
+        (Listed { id, title: String::new(), url }, format!("run {id}"))
+    } else {
+        let sha = if opts.head {
+            cmd!(sh, "git rev-parse HEAD").read()?
+        } else {
+            snapshot(sh, &root, &dir, &opts.name, &opts.only)?
+        };
+        let branch = format!("check/{}", opts.name);
+        cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/{branch}")
+            .run()
+            .context("pushing the snapshot")?;
+        dispatch(sh, opts, &sha)?;
+        let run = find(sh, &format!("check {} {sha}", opts.name))?;
+        (run, sha.get(..10).unwrap_or(&sha).to_owned())
+    };
     println!("▶ {short} ({what}) on a runner: {}", run.url);
+    println!("  if this is stopped: cargo xtask remote --name {} --run {} …", opts.name, run.id);
     let conclusion = finish(sh, run.id)?;
     let logs = download(sh, run.id, "logs", &dir.join("logs"));
     if let Some(logs) = logs.as_deref() {

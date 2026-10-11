@@ -37,7 +37,8 @@ zed itself so it is never behind zed while longbridge lags.
   `target/e2e/artifacts/`. A newer check of the same name cancels the older one. It is quick
   by default (fmt, host clippy, nextest, shear, typos); `--full` adds iOS and Linux clippy and
   rustdoc. `--only <path>` (repeatable) checks `HEAD` plus the edits under those paths alone,
-  so another lane's unfinished work stays out. Only the quick gate (tools, seconds) and xtask
+  so another lane's unfinished work stays out. A stopped wrapper leaves the run going;
+  `--run <id>` with the same options follows it again and applies what it accepted. Only the quick gate (tools, seconds) and xtask
   itself build here.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
