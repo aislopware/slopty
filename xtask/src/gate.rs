@@ -1053,6 +1053,7 @@ fn test_lane(
     // Beside the JUnit report, which CI keeps.
     let log = tree.join("target").join("nextest").join(profile).join("ptys.log");
     let ptys = crate::ptys::Sampler::start(std::process::id(), &tree, Some(log));
+    let watch = crate::memstat::Watch::start();
     // On a runner the VideoToolbox tests run beside the rest, not after them: they mostly wait
     // on the encoder, and after the rest they added 75–135 s to the worker shard, the run's
     // critical path (`.research/dev-speed-2026-10-10.md` item 6). They report under a profile
@@ -1099,6 +1100,9 @@ fn test_lane(
     let ptys = ptys.finish();
     print!("{}", ptys.report());
     let _memory = crate::memstat::report(sh, "the tests", memory);
+    if let Some(watch) = watch {
+        watch.finish();
+    }
     both(both(tests, videotoolbox), ptys.verdict())
 }
 
