@@ -6,8 +6,10 @@
 //! `<width>` × `<height>` points on it, near its top left corner. From then on it handles
 //! AppKit's events, and prints a line each time the window's frame or screen changes:
 //! `frame <screen> <x> <y> <width> <height>`, the screen as its display id (0 for none) and
-//! the frame in AppKit's global points. It runs until it is killed. It fails on any other
-//! platform.
+//! the frame in points from that screen's bottom-left corner (AppKit's global points when it
+//! has none). Read in the same turn as the screen's own frame, the place holds while macOS
+//! lays the displays out again around it, as it does when another display comes or goes. It
+//! runs until it is killed. It fails on any other platform.
 
 #![allow(
     clippy::print_stdout,
@@ -134,13 +136,20 @@ mod mac {
         let mut said = String::new();
         loop {
             // SAFETY: as the caller vouches; `screen` and `frame` are `NSWindow`'s documented
-            // getters, with their declared types.
+            // getters and `frame` `NSScreen`'s, with their declared types.
             let line = unsafe {
                 let screen: *mut AnyObject = msg_send![window, screen];
                 let frame: NSRect = msg_send![window, frame];
-                let (at, size) = (frame.origin, frame.size);
+                let corner = if screen.is_null() {
+                    NSPoint::new(0.0, 0.0)
+                } else {
+                    let on: NSRect = msg_send![screen, frame];
+                    on.origin
+                };
+                let (x, y, size) =
+                    (frame.origin.x - corner.x, frame.origin.y - corner.y, frame.size);
                 let number = number_of(screen);
-                format!("frame {number} {} {} {} {}", at.x, at.y, size.width, size.height)
+                format!("frame {number} {x} {y} {} {}", size.width, size.height)
             };
             if line != said {
                 println!("{line}");

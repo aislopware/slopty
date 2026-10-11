@@ -92,7 +92,8 @@ mod tests {
     }
 
     /// Where the stand-in's window is: the display its screen shows (0 for none) and its frame
-    /// in AppKit's global points.
+    /// in points from that screen's corner, so the displays laid out again around it (as other
+    /// tests' displays come and go) is no move of its own.
     #[derive(Clone, Copy, PartialEq, Debug)]
     struct Frame {
         screen: u32,
@@ -232,7 +233,9 @@ mod tests {
         };
         assert_eq!(second.id(display), id, "the same display");
         let after = window.during(Duration::from_secs(3));
-        let moved: Vec<Frame> = restarting.iter().chain(&after).map(|(_, f)| *f).collect();
+        // A line comes too when only the screen's own place moved; that is no move.
+        let moved: Vec<Frame> =
+            restarting.iter().chain(&after).map(|(_, f)| *f).filter(|f| *f != before).collect();
         eprintln!(
             "MEASURE worker-replaced: window moves {} in {:.1} s, new worker took the display \
              back in {:.1} ms, window {}x{} at ({}, {}) on {}",

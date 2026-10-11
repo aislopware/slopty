@@ -165,6 +165,18 @@ filter = '''
 '''
 test-group = 'videotoolbox'
 
+# Every test that makes a virtual display: macOS lays every display out again when one comes or
+# goes, which moves the others in global coordinates. Side by side, one test's display came and
+# went under another's window, whose frame then read as moved (run 38179247257). One at a time,
+# each sees only its own displays come and go.
+[test-groups.virtual-displays]
+max-threads = 1
+
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = '(package(slopty-workerd) & binary(holder)) | (package(slopty-vdisplay) & binary(live))'
+test-group = 'virtual-displays'
+
 # fseventsd starts one stream at a time for the whole system (0.4 s each on macOS 27), so the
 # tests that wait for a stream run two at a time to keep the run's own share of that queue small.
 # Their 90 s wait is only a hang guard.
