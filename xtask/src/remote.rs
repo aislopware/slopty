@@ -88,7 +88,11 @@ fn lane(name: &str) -> &str {
 /// Why a check of `name` taking `mine` macOS jobs must wait, given the macOS jobs in flight;
 /// `None` once it may start.
 /// - The gate goes first: none while any of its macOS jobs waits for a runner.
-/// - Checks hold at most [`CHECK_MACS`] macOS jobs, this one's counted.
+/// - Checks hold at most [`CHECK_MACS`] macOS jobs, this one's counted. Held means running, or a
+///   check's job queued for a runner: it passed this same wait and takes the next free Mac, so two
+///   lanes asking at once do not both start. Another workflow's queued jobs are not held: the Deep
+///   workflow's matrix lists all its macOS jobs as queued while it runs one at a time, and counting
+///   them kept every check waiting for hours (Deep run 38133881188).
 /// - One check of a lane at a time: another of the same lane waits for it. One of the same name
 ///   does not: dispatching cancels it (`check.yml`'s concurrency group), giving its Mac back.
 fn mac_verdict(jobs: &[MacJob], name: &str, mine: usize) -> Option<String> {
@@ -100,7 +104,11 @@ fn mac_verdict(jobs: &[MacJob], name: &str, mine: usize) -> Option<String> {
     if let Some(sibling) = others.iter().find(|check| lane(check) == lane(name)) {
         return Some(format!("lane {}'s check {sibling} holds a Mac", lane(name)));
     }
-    let held = jobs.iter().filter(|j| !j.gate && j.check.as_deref() != Some(name)).count();
+    let held = jobs
+        .iter()
+        .filter(|j| !j.gate && j.check.as_deref() != Some(name))
+        .filter(|j| !j.queued || j.check.is_some())
+        .count();
     (held.saturating_add(mine) > CHECK_MACS)
         .then(|| format!("{held} macOS jobs outside the gate already, {CHECK_MACS} at most"))
 }
@@ -610,6 +618,21 @@ mod tests {
         // An e2e run of its own workflow counts as outside the gate.
         let e2e = MacJob { gate: false, queued: false, check: None };
         assert!(mac_verdict(&[e2e, check("W-stream", false)], "A-cuts", 1).is_some());
+    }
+
+    #[test]
+    fn another_workflows_queued_macos_jobs_hold_no_mac() {
+        // The Deep workflow running one macOS job and listing its other nine as queued.
+        let running = MacJob { gate: false, queued: false, check: None };
+        let mut deep: Vec<MacJob> =
+            std::iter::repeat_with(|| MacJob { gate: false, queued: true, check: None })
+                .take(9)
+                .collect();
+        deep.push(running);
+        assert_eq!(mac_verdict(&deep, "A-cuts", 1), None);
+        // Its one running job and a check queued for a runner are two: a third waits.
+        deep.push(check("W-stream", true));
+        assert!(mac_verdict(&deep, "A-cuts", 1).is_some());
     }
 
     #[test]
