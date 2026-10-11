@@ -16234,6 +16234,38 @@ Lines: `slopty-kit` holds 14,762 of Rust with its unit tests, and `slopty-ui` is
 smaller, less the lints. The lints move out of the kit into `slopty-ui/src/lints.rs` and
 `lints/overflow.rs` (1,725 lines), so the views' harness still builds them.
 
+## 2026-10-11 — the wire stamp recompiled the workspace on every gate run
+
+`slopty-proto`'s build script stamped `BUILD` with the goldens' last commit, which a shallow
+checkout (every CI job's) reads as the commit checked out. Every gate run so recompiled the
+crate and, its library changed, every crate above it, past the compile cache. 8673889a leaves
+the stamp out in a shallow clone.
+
+- Probe 38130787695 (ubuntu-24.04), the same five crates' tests built again under a new shallow
+  head: 15 misses (`slopty-proto` and fourteen crates above it), 334 s; with the change, under
+  another new head, 0 misses of 251, 207 s.
+- Misses per lane (Rust), four gate runs before (f86c38b6, c2793d1b, 34c8fb33, 28fc6d48), the
+  change's first run (b5a48c0a, a new key for proto) and the next (14e3576a, which also changed
+  the lock and `slopty-kit`):
+
+| lane | before | b5a48c0a | 14e3576a |
+| --- | --- | --- | --- |
+| linux | 21 | 22 | 4 |
+| rustdoc | 23 | 24 | 7 |
+| clippy-host | 7 | 7 | 4 |
+| clippy-linux | 4 | 5 | 4 |
+| tests worker | 15–22 | 13 | 0 |
+| tests rest | 14–21 | 22 | 2 |
+| tests ui | 9–11 | 12 | 3 |
+
+- The Mac shards on 14e3576a (run 38134075243) against f86c38b6 (38126378174): worker 455 s,
+  build 171.9 s, against 628 s and 274.5 s; rest 475 s and 146.4 s against 596 s and 232.0 s;
+  ui 415 s and 247.4 s against 492 s and 318.7 s. The run's slowest Mac job went from 628 s to
+  475 s. The worker's chain of `slopty-proto`, `slopty-agent`, `slopty-worker` and
+  `slopty-workerd` (30–56 s each, one after another) now comes from the cache.
+- On the same run the icon test kept its verdict (absent from the rest shard's slowest ten,
+  against 147.7 s when it ran in full).
+
 ## 2026-10-11 — an observed Claude Code's transcript, read on the kernel's word
 
 With no mod and no hook for the write, an observed session read its transcript on a 250 ms

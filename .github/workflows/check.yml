@@ -183,7 +183,8 @@ jobs:
     if: inputs.packages != ''
     name: test (${{ inputs.name }})
     runs-on: ${{ inputs.test_runner }}
-    timeout-minutes: 60
+    # One of the five macOS slots the gate's test shards need: a hung check gives it back.
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -304,7 +305,9 @@ jobs:
     if: inputs.probe != '' || inputs.e2e != ''
     name: run (${{ inputs.name }})
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+    # A probe is a step tried once; one that lost its runner held a Mac slot for 79 minutes
+    # (run 38130090331). An e2e case builds the daemons and the app first.
+    timeout-minutes: ${{ inputs.e2e != '' && 90 || 45 }}
     defaults:
       run:
         shell: bash

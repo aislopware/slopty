@@ -52,6 +52,137 @@ fn test_runner(packages: &[String]) -> &'static str {
     }
 }
 
+/// The macOS jobs a check holds at most while the gate runs: the gate's three test shards need
+/// the other three of the account's five macOS runners. Lane checks once held all five, and
+/// the gate's shards queued behind them until each newer push cancelled the run (gate run
+/// 38136668846: nothing reached main for over an hour).
+const CHECK_MACS: usize = 2;
+
+/// How often `remote` asks again whether a Mac is free for a check.
+const MAC_POLL: Duration = Duration::from_secs(60);
+
+/// How many macOS jobs the check asked for takes: the tests when they need a Mac, and a probe
+/// or an e2e case on a Mac. Linux's never wait.
+fn mac_jobs(opts: &RemoteOpts) -> usize {
+    let tests = !opts.packages.is_empty() && test_runner(&opts.packages).starts_with("macos");
+    let run = (opts.probe.is_some() || opts.e2e.is_some()) && opts.runner.starts_with("macos");
+    usize::from(tests).saturating_add(usize::from(run))
+}
+
+/// A macOS job queued or running in the repository's Actions.
+#[derive(Debug)]
+struct MacJob {
+    /// A job of the gate: `ci.yml` on `gate`.
+    gate: bool,
+    /// Waiting for a runner.
+    queued: bool,
+    /// The check's name, for a run of `check.yml` (`check <name> <sha>`).
+    check: Option<String>,
+}
+
+/// The lane a check's name belongs to: what comes before its first `-` (`A-cuts` is lane A's).
+fn lane(name: &str) -> &str {
+    name.split('-').next().unwrap_or(name)
+}
+
+/// Why a check of `name` taking `mine` macOS jobs must wait, given the macOS jobs in flight;
+/// `None` once it may start.
+/// - The gate goes first: none while any of its macOS jobs waits for a runner.
+/// - Checks hold at most [`CHECK_MACS`] macOS jobs, this one's counted.
+/// - One check of a lane at a time: another of the same lane waits for it. One of the same name
+///   does not: dispatching cancels it (`check.yml`'s concurrency group), giving its Mac back.
+fn mac_verdict(jobs: &[MacJob], name: &str, mine: usize) -> Option<String> {
+    if jobs.iter().any(|j| j.gate && j.queued) {
+        return Some("the gate's macOS jobs are queued".to_owned());
+    }
+    let others: Vec<&str> =
+        jobs.iter().filter_map(|j| j.check.as_deref()).filter(|check| *check != name).collect();
+    if let Some(sibling) = others.iter().find(|check| lane(check) == lane(name)) {
+        return Some(format!("lane {}'s check {sibling} holds a Mac", lane(name)));
+    }
+    let held = jobs.iter().filter(|j| !j.gate && j.check.as_deref() != Some(name)).count();
+    (held.saturating_add(mine) > CHECK_MACS)
+        .then(|| format!("{held} macOS jobs outside the gate already, {CHECK_MACS} at most"))
+}
+
+/// The macOS jobs queued or running in the repository, as the Actions API lists them.
+fn mac_jobs_in_flight(sh: &Shell) -> Result<Vec<MacJob>> {
+    #[derive(serde::Deserialize)]
+    struct Runs {
+        workflow_runs: Vec<Run>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Run {
+        id: u64,
+        path: String,
+        head_branch: Option<String>,
+        display_title: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<Job>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Job {
+        status: String,
+        labels: Vec<String>,
+    }
+    let mut found = Vec::new();
+    for status in ["queued", "in_progress"] {
+        let url = format!("repos/{{owner}}/{{repo}}/actions/runs?status={status}&per_page=100");
+        let runs: Runs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read()?)
+            .context("the Actions API's runs")?;
+        for run in runs.workflow_runs {
+            let url = format!("repos/{{owner}}/{{repo}}/actions/runs/{}/jobs?per_page=100", run.id);
+            let jobs: Jobs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read()?)
+                .context("the Actions API's jobs")?;
+            let gate =
+                run.path.ends_with("workflows/ci.yml") && run.head_branch.as_deref() == Some(REF);
+            let check = run
+                .path
+                .ends_with(WORKFLOW)
+                .then(|| run.display_title.split(' ').nth(1).map(str::to_owned))
+                .flatten();
+            for job in jobs.jobs {
+                let mac = job.labels.iter().any(|l| l.starts_with("macos"));
+                if mac && matches!(job.status.as_str(), "queued" | "in_progress" | "waiting") {
+                    let queued = job.status != "in_progress";
+                    found.push(MacJob { gate, queued, check: check.clone() });
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Waits until a check of `name` taking `mine` macOS jobs may start ([`mac_verdict`]), asking
+/// every [`MAC_POLL`] and saying why while it waits. The lane keeps working meanwhile; its check
+/// only starts later.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
+fn wait_for_mac(sh: &Shell, name: &str, mine: usize) -> Result<()> {
+    let started = Instant::now();
+    let mut said = String::new();
+    loop {
+        // A transient API error is asked again, not taken for a free Mac.
+        if let Ok(jobs) = mac_jobs_in_flight(sh) {
+            let Some(why) = mac_verdict(&jobs, name, mine) else {
+                return Ok(());
+            };
+            if why != said {
+                let secs = started.elapsed().as_secs();
+                println!(
+                    "  waiting for a Mac slot (gate first): {why} ({}m{:02}s)",
+                    secs / 60,
+                    secs % 60
+                );
+                said = why;
+            }
+        }
+        ensure!(started.elapsed() < FINISH, "no Mac slot for {name} after {FINISH:?}");
+        std::thread::sleep(MAC_POLL);
+    }
+}
+
 /// What a run does with the goldens of its e2e case.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Goldens {
@@ -169,6 +300,11 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         } else {
             snapshot(sh, &root, &dir, &opts.name, &opts.only)?
         };
+        // The tree as it was asked about, dispatched once a Mac is free for it.
+        let macs = mac_jobs(opts);
+        if macs > 0 {
+            wait_for_mac(sh, &opts.name, macs)?;
+        }
         let branch = format!("check/{}", opts.name);
         cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/{branch}")
             .run()
@@ -448,7 +584,44 @@ fn noise(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{noise, unaccepted};
+    use super::{MacJob, mac_verdict, noise, unaccepted};
+
+    fn check(name: &str, queued: bool) -> MacJob {
+        MacJob { gate: false, queued, check: Some(name.to_owned()) }
+    }
+
+    fn gate(queued: bool) -> MacJob {
+        MacJob { gate: true, queued, check: None }
+    }
+
+    #[test]
+    fn a_check_yields_its_mac_to_the_gate() {
+        // Free: nothing in flight, or the gate's shards all running.
+        assert_eq!(mac_verdict(&[], "A-cuts", 2), None);
+        assert_eq!(mac_verdict(&[gate(false), gate(false), gate(false)], "A-cuts", 1), None);
+        // The gate waits for a runner: every check waits for it.
+        let why = mac_verdict(&[gate(true), gate(false)], "A-cuts", 1);
+        assert!(why.is_some_and(|w| w.contains("gate")));
+        // Two macOS jobs outside the gate at most, this check's counted.
+        assert_eq!(mac_verdict(&[check("W-stream", false)], "A-cuts", 1), None);
+        assert!(mac_verdict(&[check("W-stream", false)], "A-cuts", 2).is_some());
+        let two = [check("W-stream", false), check("C-ab", true)];
+        assert!(mac_verdict(&two, "A-cuts", 1).is_some());
+        // An e2e run of its own workflow counts as outside the gate.
+        let e2e = MacJob { gate: false, queued: false, check: None };
+        assert!(mac_verdict(&[e2e, check("W-stream", false)], "A-cuts", 1).is_some());
+    }
+
+    #[test]
+    fn a_lane_holds_one_mac_check_and_a_rerun_replaces_its_own() {
+        // Another check of lane A waits for the first.
+        let why = mac_verdict(&[check("A-perf", false)], "A-cuts", 1);
+        assert!(why.is_some_and(|w| w.contains("A-perf")));
+        // The same name does not wait: its dispatch cancels the older run, whose Macs come
+        // back, so they are not counted against it either.
+        let own = [check("A-cuts", false), check("A-cuts", false), check("W-x", false)];
+        assert_eq!(mac_verdict(&own, "A-cuts", 1), None);
+    }
 
     #[test]
     fn progress_lines_are_noise_and_diagnostics_are_not() {
