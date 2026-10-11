@@ -44,6 +44,8 @@ pub mod idle;
 pub mod input_source;
 #[cfg(target_vendor = "apple")]
 pub mod keyboard;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub mod keyboard_presence;
 #[cfg(target_os = "linux")]
 mod linux;
 pub mod login;
@@ -543,8 +545,10 @@ fn system_reduce_motion() -> bool {
     }
 }
 
-/// Whether a physical keyboard is attached. On iOS this is `GameController`'s coalesced keyboard
-/// (nil until one connects over Smart Connector, Bluetooth or USB); a Mac always has one.
+/// Whether a physical keyboard is attached; a Mac always has one.
+///
+/// On iOS this is `GameController`'s coalesced keyboard (nil until one connects over Smart
+/// Connector, Bluetooth or USB), heard as it comes and goes by `keyboard_presence::watch`.
 #[cfg_attr(not(target_os = "ios"), expect(clippy::missing_const_for_fn, reason = "constant here"))]
 pub fn hardware_keyboard_attached() -> bool {
     #[cfg(target_os = "ios")]

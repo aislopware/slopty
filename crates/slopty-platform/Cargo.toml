@@ -27,6 +27,9 @@ slopty-proto.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
+# A hardware keyboard heard as it comes and goes (`keyboard_presence`); a Mac's tests post its
+# notifications.
+objc2-game-controller.workspace = true
 objc2-audio-toolbox.workspace = true
 # A pushed note: the phone's key, the seal it opens, and the notice inside (`notify::pushed`).
 slopty-push.workspace = true
@@ -192,7 +195,6 @@ libc.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
-objc2-game-controller.workspace = true
 # The main run loop's observer that asks again for a forgotten worker's page store (`web`), and
 # the Keychain's queries for the push key (`notify::pushed::keychain`).
 objc2-core-foundation = { workspace = true, features = [

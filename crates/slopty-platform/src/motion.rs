@@ -42,7 +42,7 @@ pub fn watch_reduce_motion(changed: impl Fn(bool) + 'static) -> Watch {
 }
 
 /// Run `heard` on the main thread each time `center` posts `name`, until the watch drops.
-fn observe(
+pub(crate) fn observe(
     center: Retained<NSNotificationCenter>,
     name: &objc2_foundation::NSNotificationName,
     heard: impl Fn() + 'static,

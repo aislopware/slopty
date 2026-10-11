@@ -123,16 +123,21 @@ const FROM_A_MAC_HOW: &str = "On a Mac, Use this Mac shares it, and Install over
 /// pointer, a finger's target on glass.
 const FIELD_H: f32 = if TOUCH { Density::TOUCH.hit } else { 36.0 };
 
-/// Whether a hardware keyboard is attached. The e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1`
-/// decide instead of the platform: on the simulator `GameController` reports the Mac's keyboard
-/// about a second after launch, and a golden must not depend on which side of that poll the
-/// frame landed on.
+/// Whether a hardware keyboard is attached, as the platform says now.
 fn hardware_keyboard_attached() -> bool {
+    keyboard_said(slopty_platform::hardware_keyboard_attached)
+}
+
+/// Whether a hardware keyboard is attached, as `said` says. The e2e build lets
+/// `SLOPTY_HARDWARE_KEYBOARD=0|1` decide instead of the platform: on the simulator
+/// `GameController` reports the Mac's keyboard about a second after launch, and a golden must
+/// not depend on which side of that the frame landed on.
+fn keyboard_said(said: impl FnOnce() -> bool) -> bool {
     #[cfg(feature = "e2e")]
     if let Some(forced) = std::env::var_os("SLOPTY_HARDWARE_KEYBOARD") {
         return forced == "1";
     }
-    slopty_platform::hardware_keyboard_attached()
+    said()
 }
 
 /// Link events applied per foreground turn at most (see the link loop).
@@ -527,6 +532,9 @@ pub struct Workspace {
     window_subscriptions: Vec<gpui::Subscription>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
+    /// A hardware keyboard heard as it comes and goes ([`watch_hardware_keyboard`]).
+    #[cfg(target_os = "ios")]
+    keyboard_watch: Option<slopty_platform::keyboard_presence::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
     /// The person leaving this Mac: its lock, its sleep, another session
@@ -705,6 +713,8 @@ impl Workspace {
             subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
             motion_watch: None,
+            #[cfg(target_os = "ios")]
+            keyboard_watch: None,
             resume_watch: None,
             #[cfg(target_os = "macos")]
             leaving_watch: None,
@@ -994,6 +1004,9 @@ impl Workspace {
         moved
     }
 
+    /// Follow a hardware keyboard that came or went. A Mac always has one, so only a touch
+    /// device hears it change.
+    #[cfg(not(target_os = "macos"))]
     fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
             tracing::info!(attached, "hardware keyboard");
@@ -4281,6 +4294,8 @@ pub fn open_workspace(
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
+    #[cfg(target_os = "ios")]
+    watch_hardware_keyboard(&workspace, cx);
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
     hangs::watch(cx);
     // A self-test reads no network.
@@ -4411,8 +4426,30 @@ fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
+/// A hardware keyboard heard as it comes and goes, rather than asked about every second: the
+/// key bar and the on-screen affordances follow it ([`Workspace::set_hardware_keyboard`]).
+#[cfg(target_os = "ios")]
+fn watch_hardware_keyboard(workspace: &Entity<Workspace>, cx: &mut App) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = slopty_platform::keyboard_presence::watch(move |attached| {
+        let _closed = tx.send(attached);
+    });
+    workspace.update(cx, |ws, _cx| ws.keyboard_watch = Some(watch));
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        while let Some(attached) = rx.recv().await {
+            let attached = keyboard_said(|| attached);
+            if workspace.update(cx, |ws, cx| ws.set_hardware_keyboard(attached, cx)).is_err() {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
 /// Hear what may have killed the links under the app (the Mac waking, an unlock, a return to
-/// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]).
+/// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]). On iOS
+/// a keyboard that came or went while the app was away went unheard, so it is read again.
 fn watch_resumes(
     workspace: &Entity<Workspace>,
     source: &dyn slopty_platform::resume::Source,
@@ -4432,7 +4469,10 @@ fn watch_resumes(
                 ws.person_back(resume, cx);
             });
             #[cfg(not(target_os = "macos"))]
-            let heard = workspace.update(cx, |ws, _cx| ws.resume(resume));
+            let heard = workspace.update(cx, |ws, cx| {
+                ws.resume(resume);
+                ws.set_hardware_keyboard(hardware_keyboard_attached(), cx);
+            });
             if heard.is_err() {
                 return;
             }
@@ -4441,16 +4481,14 @@ fn watch_resumes(
     .detach();
 }
 
-/// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls),
-/// and notice a hardware keyboard coming or going on the same tick. The app's own saves are
+/// Reload `settings.toml` whenever its stamp changes (see [`settings`] for why this polls).
+/// The app's own saves are
 /// already applied and seen ([`settings::save`]), so they are not reloaded.
 fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(settings::POLL).await;
-            let keyboard = hardware_keyboard_attached();
             workspace.update(cx, |ws, cx| {
-                ws.set_hardware_keyboard(keyboard, cx);
                 if ws.settings_seen.changed(&ws.settings_path) {
                     tracing::info!(path = %ws.settings_path.display(), "settings changed; reloading");
                     let loaded = Settings::load(&ws.settings_path);

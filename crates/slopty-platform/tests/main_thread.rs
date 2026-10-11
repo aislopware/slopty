@@ -29,7 +29,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 5] = [
+    pub const TESTS: [(&str, fn()); 6] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -47,7 +47,51 @@ mod mac {
             "a_layout_names_the_key_each_character_is_on",
             a_layout_names_the_key_each_character_is_on,
         ),
+        ("a_keyboard_is_heard_as_it_comes_and_goes", a_keyboard_is_heard_as_it_comes_and_goes),
     ];
+
+    /// The first keyboard connecting is heard as attached and the last going as gone, on the
+    /// main thread, as `GameController` posts them; a dropped watch hears nothing more.
+    fn a_keyboard_is_heard_as_it_comes_and_goes() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use objc2_foundation::NSNotificationCenter;
+        use objc2_game_controller::{
+            GCKeyboardDidConnectNotification, GCKeyboardDidDisconnectNotification,
+        };
+
+        let heard: Rc<RefCell<Vec<bool>>> = Rc::default();
+        let into = Rc::clone(&heard);
+        let watch = slopty_platform::keyboard_presence::watch(move |attached| {
+            assert!(MainThreadMarker::new().is_some(), "heard on the main thread");
+            into.borrow_mut().push(attached);
+        });
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: an immutable `NSString` static GameController defines (GCKeyboard.h).
+        let connected = unsafe { GCKeyboardDidConnectNotification };
+        // SAFETY: as above.
+        let gone = unsafe { GCKeyboardDidDisconnectNotification };
+        // SAFETY: Foundation rule: a notification posted with no object, on the main thread.
+        unsafe {
+            center.postNotificationName_object(connected, None);
+        }
+        until("the keyboard connecting", || heard.borrow().len() == 1);
+        // SAFETY: as above.
+        unsafe {
+            center.postNotificationName_object(gone, None);
+        }
+        until("the keyboard going", || heard.borrow().len() == 2);
+        assert_eq!(*heard.borrow(), [true, false], "attached, then gone");
+        drop(watch);
+        // SAFETY: as above.
+        unsafe {
+            center.postNotificationName_object(connected, None);
+        }
+        let deadline = Instant::now().checked_add(Duration::from_millis(200)).unwrap();
+        until("a moment", || Instant::now() >= deadline);
+        assert_eq!(heard.borrow().len(), 2, "a dropped watch hears nothing");
+    }
 
     /// What a ⌘ chord's character is on, read from layouts macOS ships, none of them selected.
     /// French AZERTY types `a` on Q's place and `q` on A's, German QWERTZ `z` on Y's. Under ⌘
