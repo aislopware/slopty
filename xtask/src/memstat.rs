@@ -122,6 +122,41 @@ fn list() -> Vec<Process> {
         .unwrap_or_default()
 }
 
+/// Each process in `ps -axo pid=,ppid=,args=`'s `text`: its pid, its parent's, and its command
+/// line.
+fn command_lines(text: &str) -> Vec<(u32, u32, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse().ok()?;
+            let ppid = words.next()?.parse().ok()?;
+            Some((pid, ppid, words.collect::<Vec<_>>().join(" ")))
+        })
+        .collect()
+}
+
+/// The command lines of `pids`, each cut to 240 characters.
+fn args_of(pids: &[u32]) -> Vec<String> {
+    let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,args="]).output()
+    else {
+        return Vec::new();
+    };
+    command_lines(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .filter(|(pid, ..)| pids.contains(pid))
+        .map(|(pid, ppid, args)| {
+            let cut: String = args.chars().take(240).collect();
+            format!("{pid} (parent {ppid}): {cut}")
+        })
+        .collect()
+}
+
+/// A process that builds or asks Xcode, which no test should start: a tool's memory in the
+/// middle of the tests is somebody's build.
+fn builds(name: &str) -> bool {
+    matches!(name, "rustup" | "cargo" | "rustc" | "xcodebuild" | "xcrun" | "clang" | "ld")
+}
+
 /// Resident memory by command, in MB, largest first.
 fn by_command(processes: &[Process]) -> Vec<(String, u64)> {
     let mut sums: BTreeMap<&str, u64> = BTreeMap::new();
@@ -158,8 +193,23 @@ impl Watch {
         let thread = std::thread::spawn(move || {
             let started = Instant::now();
             let mut lines = Vec::new();
+            let mut seen: Vec<u32> = Vec::new();
             loop {
                 let all = list();
+                let fresh: Vec<u32> = all
+                    .iter()
+                    .filter(|p| builds(&p.name) && !seen.contains(&p.pid))
+                    .map(|p| p.pid)
+                    .collect();
+                if !fresh.is_empty() && seen.len() < 60 {
+                    for args in args_of(&fresh) {
+                        lines.push(format!(
+                            "  memory at {:>4} s, a build: {args}",
+                            started.elapsed().as_secs()
+                        ));
+                    }
+                    seen.extend(fresh);
+                }
                 let total: u64 = all.iter().map(|p| p.rss).sum::<u64>() / 1024;
                 let top: Vec<String> = by_command(&all)
                     .into_iter()
@@ -200,7 +250,7 @@ impl Watch {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Process, by_command, line, ours, parse, processes};
+    use super::{Counters, Process, by_command, command_lines, line, ours, parse, processes};
 
     const VM_STAT: &str = "Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                                   327412.
@@ -243,5 +293,11 @@ Swapouts:                                   60804356.
             [("slopty-worker".to_owned(), 300), ("A B".to_owned(), 50), ("launchd".to_owned(), 20)]
         );
         assert!(ours("slopty-ptyd") && ours("slopty-stub-claude") && !ours("launchd"));
+    }
+
+    #[test]
+    fn a_command_line_keeps_its_spaces_after_the_two_pids() {
+        let lines = command_lines("  812   1 /usr/bin/xcrun --sdk macosx --show-sdk-path\n bad\n");
+        assert_eq!(lines, [(812, 1, "/usr/bin/xcrun --sdk macosx --show-sdk-path".to_owned())]);
     }
 }
