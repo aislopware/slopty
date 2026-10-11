@@ -15953,3 +15953,51 @@ RUST_LOG=slopty_worker=debug,slopty_workerd=debug,info SLOPTY_BINS_FRESH=1 \
   recipe holding the directory OSC 7 reported, so a kill between the two writes brings the
   shell back in the directory before. A loaded runner widens that gap. The test now waits for
   the recipe too, polling every 20 ms within its 20 s step. It passes in 3.4 s.
+
+## 2026-10-11 — Apple clippy and rustdoc on a Linux runner
+
+Probes from `cargo xtask remote --probe` on the same commit (bff87dd594), with gpui-fast's build
+script fixed (aislopware/gpui-fast#33), `DOCS_RS=1`, and `cargo-zigbuild` compiling the build
+scripts' C. Cold: each runner's compile cache was empty (0 hits, 915 Rust misses).
+
+| step (s) | `ubuntu-24.04-arm` (38110275409) | `ubuntu-24.04` (38110276818) | macOS gate lane, warm |
+| --- | --- | --- | --- |
+| clippy `aarch64-apple-darwin`, workspace, every target, live e2e | 218 | 246 | 169–249 |
+| rustdoc `aarch64-apple-darwin`, after it | 42 | 39 | 183–397 (beside iOS clippy's build scripts) |
+| the whole job, setup included | 8.4 min | 9.8 min | 6.8 (host clippy) and 8.4 (iOS + rustdoc) median |
+
+- Both passed with `-D warnings`, the verdict of the Mac lanes on that commit.
+- Before the fix the same clippy failed on gpui_apple's missing `stitched_shaders.metal`
+  (38109746842), and plain `cargo clippy` failed on ring's and blake3's C (38109746110).
+- The fuzz crate's clippy for Darwin failed on Linux: libFuzzer includes `sys/syscall.h`, which
+  zig's Darwin headers lack. Linted for the host instead, it passed in 25 s (38110886453).
+- `cargo-zigbuild` refuses `aarch64-apple-ios` ("unsupported target"). zig itself compiled ring
+  and blake3 for iOS only with its Darwin headers named on the include path (38111307984
+  failed on `assert.h` and `TargetConditionals.h` without them). With them, clippy of both iOS
+  triples passed in 231 s cold on arm (38111701720), against 173–229 s warm on the Mac.
+- The whole gate on the new layout, as a pull request (38113194655, commit 12c518823a) against
+  the last green gate push (38112080050). The pull request reads main's caches, not gate's,
+  so its Linux jobs ran cold or nearly; the tools lane failed only on `committed` refusing the
+  pull request's merge commit.
+
+  | job (s, start to end) | before: runner | before | after: runner | after |
+  | --- | --- | --- | --- | --- |
+  | host clippy | macOS | 368 | arm Linux | 286 |
+  | iOS clippy, rustdoc after it | macOS | 539 | arm Linux | 288 |
+  | rustdoc alone | (in iOS clippy's job) | | arm Linux | 256 |
+  | tests ui / worker / rest | macOS | 467 / 602 / 483 | macOS, six threads | 646 / 688 / 467 |
+  | Linux tests | x86_64 | 698 | x86_64, five pure crates more | 460 |
+
+  Mac time per gate run fell from 2459 s in five jobs to 1801 s in three. The shards' test
+  steps took 480 / 457 / 355 s against 353 / 447 / 355 s; one run on cold caches does not
+  separate six threads from the cache, so that trial stays open. The arm lints passed in
+  197 s (host) and 199 s (iOS) of gate step against 241 and 247 + 161 s on the Mac, with iOS's C
+  compiled by zig through xtask itself named `CC`.
+- Disk: `/` is 145 GB on both images. arm has 110 GB free; x86_64 has 82 GB free with nothing
+  deleted (38111839587). The SDKs the gate deleted first (Android 12 GB, .NET 5.8 GB, CodeQL
+  1.4 GB; GHC is gone from the image) cost 92–106 s a job and are not needed.
+
+```sh
+cargo xtask remote --name <n> --runner ubuntu-24.04-arm --head --probe "$(cat probe.sh)"
+gh run view <id> --json jobs --jq '.jobs[0] | "\(.startedAt) \(.completedAt)"'
+```

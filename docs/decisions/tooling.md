@@ -1580,3 +1580,84 @@ more full-window layer.
   - **A check costs a fifth of a gate run** in macOS job-minutes (one job against five), so
     checking before a commit is cheaper than a red gate run's cycle, and it keeps unverified
     code out of the `HEAD` every lane's check stands on.
+
+- ✅ **One compile cache key space on CI** (2026-10-11, `.research/ci-speed-2026-10-11.md`
+  item 2). sccache v0.18.0 keys a rustc call by its arguments, its inputs, the cwd and every
+  `CARGO_*` variable in its environment (`generate_hash_key`, `src/compiler/rust.rs`), less
+  `CARGO_MAKEFLAGS`, `CARGO_REGISTRIES_*`, `CARGO_BUILD_JOBS` and `CARGO_ENCODED_RUSTFLAGS`.
+  The gate set `CARGO_TARGET_DIR=target/gate/<lane>` in each lane's environment, so:
+  - each CI lane's dependency units had keys no other lane, remote check or e2e run could read;
+  - the first remote check, of `slopty-core`, hit 13 % of its Rust units (245 of 1 859, run
+    38107906317) on the same ref where the gate's lanes hit 92–99 %, and wrote 517 failed
+    entries into the 10 GB cache.
+
+  Ruled: on a runner (`gate --ci`) a lane has the machine to itself, so it builds into the
+  checkout's own `target/`, as `xtask check` and `xtask e2e` do, with no `CARGO_TARGET_DIR`.
+  CI already ran the lanes in place, so the cwd matched. Here, where lanes run side by side,
+  each keeps its own target dir under `target/gate/`, since cargo serialises builds sharing one.
+  Rejected: a `--target-dir` flag on every cargo call. It keeps the per-lane dirs, but on CI one
+  dir per runner is all a lane needs, and `CARGO_TARGET_TMPDIR`, which cargo sets from the
+  target dir for integration tests, would still split those keys.
+
+- ✅ **Apple targets are linted on Linux** (2026-10-11, `.research/ci-speed-2026-10-11.md`
+  item 1; supersedes round 3's "Do not move host clippy or rustdoc to Linux"). Host clippy, iOS
+  clippy and rustdoc for the Apple triples were 15.2 of the gate's 44.8 macOS job-minutes and two
+  of its five macOS jobs, yet they never link. Only build scripts tied them to a Mac, three of
+  them:
+  - **gpui_apple's build script** decided on the host's `cfg`, so on Linux it wrote nothing and
+    `include_str!(OUT_DIR/stitched_shaders.metal)` failed. The fork now decides on
+    `CARGO_CFG_TARGET_OS` (aislopware/gpui-fast#33).
+  - **libghostty-vt-sys** builds the library with zig and asks `xcrun` for the SDKs. `DOCS_RS=1`
+    skips that build; a check never links the library. objc-sys reads it only for non-Apple
+    targets, and serde's script only prints a check-cfg line.
+  - **ring, blake3 and `objc_exception`** compile C and Objective-C for the target. zig compiles
+    them: `cargo-zigbuild` for macOS, and for the iOS triples, which `cargo-zigbuild` refuses,
+    xtask itself, through links named `zigcc-<triple>` and `zigcxx-<triple>` set as `CC` and
+    `CXX`. A `CC` of several words does not work: `cc` and sccache run its first word alone to
+    tell the compiler's family (run 38112204055). It drops what `cc` adds for Apple's clang (the
+    SDK, `-arch`, the deployment target) and puts zig's Darwin headers on the include path.
+  - **libFuzzer** includes `sys/syscall.h`, which zig's Darwin headers lack. No fuzz target calls
+    Apple code, so off a Mac the fuzz crate is linted for the host.
+
+  `tools::apple_cargo` holds all of it; on a Mac it is plain cargo, as before. Measured on the
+  same commit, cold (0 % compile cache): workspace clippy for `aarch64-apple-darwin` with every
+  target in 218 s on `ubuntu-24.04-arm` (run 38110275409) and 246 s on `ubuntu-24.04` (run
+  38110276818), against 169–249 s warm on the macOS runner; rustdoc then took 42 s. Clippy and
+  rustdoc diagnostics follow the target's `cfg`, not the host's, and no proc macro in the graph
+  branches on the host, so the verdicts are the Mac's. Ruled:
+  - `clippy-host`, `clippy-ios` and `rustdoc` are three jobs on `ubuntu-24.04-arm`, faster than
+    x86_64 here, with 110 GB free. The macOS runners carry the three test shards alone.
+  - The lint jobs need neither the zig packages nor libghostty-vt's prebuilt cache, and the test
+    shards install neither clippy nor the iOS targets.
+  - iOS clippy passed in 231 s cold on arm (run 38111701720).
+  - No Linux job deletes the image's SDKs any more: x86_64 has 82 GB free without it, and it
+    took 92–106 s a job.
+
+- 🧪 **Six test threads on a hosted Mac, on trial** (2026-10-11, `.research/ci-speed-2026-10-11.md`
+  item 7). The same tests took three to six times as long on the macOS runner as on Linux (client
+  104 against 18 test-s, net 61 against 14), more than three cores against four and an M1 VM
+  against EPYC explain, so the tests mostly wait: on process start, timers and sockets. The test
+  shards run nextest with `NEXTEST_TEST_THREADS=6` on their three cores. The timing tests take
+  every slot already (`threads-required = "num-test-threads"`), so they still run alone. Kept
+  if nextest's wall time in the worker and rest shards falls 20 % or more against the ten green
+  runs before, with no new timing failure and no pseudo-terminal peak over the budget, over ten
+  runs; otherwise reverted.
+
+- ✅ **A remote check lints on Linux** (2026-10-11, `.research/ci-speed-2026-10-11.md` item 3).
+  A remote check was one macOS job: about 105 s of setup, then fmt, host clippy, the tests,
+  shear and typos one after another, queued behind the gate for the same five macOS slots
+  (4.5–10.5 min in the first hour). `check.yml` now runs it as two jobs side by side:
+  - **lint** on `ubuntu-24.04-arm` (`xtask check --part lint`): fmt, clippy for the Mac through
+    `tools::apple_cargo` and, with `--full`, iOS and Linux clippy and rustdoc; shear and typos.
+    It reads the compile cache the gate's Apple lint jobs fill on the same image.
+  - **test** (`--part tests`) on `ubuntu-24.04` when every crate named tests on Linux
+    (`gate::linux_tested`), as the linux lane tests them, and on a Mac otherwise. `remote` picks
+    the runner and sends it as `test_runner` only when it is not the Mac, so a tree whose xtask
+    knows the input still dispatches the `check.yml` before it.
+  - A probe or an e2e case is a third job, on the runner `--runner` names.
+
+  Its first run (38111839587, `slopty-core`, a branch with a cold cache) took 6.4 min for each
+  job. The lint job's clippy took 156 s; the test job spent 230 of its 240 s building the worker
+  and server daemons, which `slopty-core`'s tests never start, so a Linux check now builds them
+  only when a test spawns one. `remote --workflow-ref <branch>` runs a branch's `check.yml`,
+  to try it before it lands.

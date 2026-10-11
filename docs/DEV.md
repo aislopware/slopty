@@ -26,19 +26,22 @@ zed itself so it is never behind zed while longbridge lags.
   Tools (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
   also checks the free space against the floor below.
 - **Nothing compiles on this Mac** (`docs/decisions/tooling.md`, "Every compile runs on a
-  runner"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside the
-  real index, pushes it to `check/<name>` (`--name`, or `SLOPTY_LANE`) and runs
-  `cargo xtask check` for those crates on a GitHub macOS runner (`check.yml`): fmt, clippy for
-  the host, iOS and Linux, nextest, rustdoc, shear, typos. It waits, prints the failed log's
-  end and keeps every log under `target/remote/<name>/`. `--e2e app -E '<filterset>'` adds an
-  e2e case; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
-  `--accept-snapshots` does its insta snapshots, `--head` checks the commit without the tree's
-  edits, and `--goldens review` brings every changed frame's render and diff to
-  `target/e2e/artifacts/`. A newer check of the same name cancels the older one. It is quick
-  by default (fmt, host clippy, nextest, shear, typos); `--full` adds iOS and Linux clippy and
-  rustdoc. `--only <path>` (repeatable) checks `HEAD` plus the edits under those paths alone,
-  so another lane's unfinished work stays out. A stopped wrapper leaves the run going;
-  `--run <id>` with the same options follows it again and applies what it accepted. Only the quick gate (tools, seconds) and xtask
+  runner"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside the real
+  index, pushes it to `check/<name>` (`--name`, or `SLOPTY_LANE`) and runs `cargo xtask check` for
+  those crates on GitHub runners (`check.yml`), in two jobs side by side: the lints (fmt, clippy
+  for the Mac, iOS and Linux, rustdoc, shear, typos) on an arm Linux runner, and the tests on
+  Linux when every crate tests there (`gate::linux_tested`), else on a Mac. `--workflow-ref
+  <branch>` runs that branch's `check.yml`, to try a change to it. It waits, prints the failed
+  log's end and keeps every log under `target/remote/<name>/`. `--e2e app -E '<filterset>'` adds
+  an e2e case; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
+  `--accept-snapshots` does its insta snapshots (a patch of anything else, which no accept writes,
+  is refused whole and its paths named), `--head` checks the commit without the tree's edits, and
+  `--goldens review` brings every changed frame's render and diff to `target/e2e/artifacts/`. A
+  newer check of the same name cancels the older one. It is quick by default (fmt, host clippy,
+  nextest, shear, typos); `--full` adds iOS and Linux clippy and rustdoc. `--only <path>`
+  (repeatable) checks `HEAD` plus the edits under those paths alone, so another lane's unfinished
+  work stays out. A stopped wrapper leaves the run going; `--run <id>` with the same options
+  follows it again and applies what it accepted. Only the quick gate (tools, seconds) and xtask
   itself build here.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
@@ -219,21 +222,24 @@ rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
   about to be made too, and leaves it in `target/gate/COMMIT_MSG` for `git commit -F`. It ends
   by printing the next step.
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
-  makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs
-  as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
-  `xtask/src/gate.rs`), rustdoc runs before iOS clippy on its runner, and the tools lane and Linux
-  clippy (`clippy-linux`, its build scripts' C compiled by zig) run on Linux, which keeps the
-  run within five Macs. The app's e2e runs every four hours on main and by hand, in `e2e.yml`,
-  not yet a gate lane. Before the push, `land` runs host clippy, rustdoc and iOS clippy of the
-  packages the commits change and of their dependents, side by side at a low priority
-  (`gate::land_checks`); `--full` adds their tests and Linux clippy. Runs on that branch
-  form one concurrency group. A newer push waits behind the run in progress rather than
-  cancelling it, and GitHub keeps only the newest push pending, whose green covers every commit
-  under it; a pull request's run is still cancelled by its next push. When every lane passed,
-  the `promote` job fast-forwards main to that exact commit (`git push origin <sha>:main`); it
-  refuses one that is not on top of main, and main is never gated a second time. A failed lane
-  writes the run's summary: the lane, the step that failed and, for the tests, each failed test
-  from the JUnit report.
+  makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs as
+  three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
+  `xtask/src/gate.rs`); they alone take Macs. The tools lane and Linux clippy (`clippy-linux`) run
+  on x86_64 Linux, and host clippy, iOS clippy and rustdoc for the Apple triples on arm Linux
+  (`ubuntu-24.04-arm`), each a job of its own: they never link, so zig compiles the C their build
+  scripts compile (`cargo-zigbuild` for macOS, xtask itself for iOS) and libghostty-vt's zig build
+  is skipped (`tools::apple_cargo`). That leaves two of the plan's five macOS jobs for remote
+  checks and the e2e. The app's e2e runs every four hours on the main `promote` pushed and by
+  hand, in `e2e.yml`, dispatched on `gate` to read the test shards' compile cache; it is not yet a
+  gate lane. Before the push, `land` runs host clippy, rustdoc and iOS clippy of the packages the
+  commits change and of their dependents, side by side at a low priority (`gate::land_checks`);
+  `--full` adds their tests and Linux clippy. Runs on that branch form one concurrency group. A
+  newer push waits behind the run in progress rather than cancelling it, and GitHub keeps only the
+  newest push pending, whose green covers every commit under it; a pull request's run is still
+  cancelled by its next push. When every lane passed, the `promote` job fast-forwards main to that
+  exact commit (`git push origin <sha>:main`); it refuses one that is not on top of main, and main
+  is never gated a second time. A failed lane writes the run's summary: the lane, the step that
+  failed and, for the tests, each failed test from the JUnit report.
 
 `cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
 the quick gate and CI gates its tag in full before it builds anything. The gate checks the

@@ -1247,6 +1247,8 @@ mod tests {
     use super::*;
 
     /// This process's threads, read by name: one started here under its own name is there.
+    // Linux keeps 15 bytes of a thread's name (`comm`); the soak reads the app's threads on a Mac.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_process_s_threads_read_by_name() {
         // A thread names itself as it starts, so it answers once its name is set.

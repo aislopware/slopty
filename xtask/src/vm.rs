@@ -1565,6 +1565,8 @@ mod tests {
 
     /// Every volume of the startup disk's container is refused, the data volume included though
     /// its device number differs from the system's.
+    // The startup disk and its container are a Mac's (`diskutil`), where the VMs run.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_home_on_the_startup_disk_is_refused() {
         let user_home = std::env::var("HOME").expect("HOME");

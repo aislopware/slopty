@@ -32,7 +32,7 @@ pub const SERVER_CRATES: [&str; 8] = [
 /// The crates that build for Linux and must go on doing so: [`SERVER_CRATES`], the worker with
 /// every crate under it, and the CLI with the client core, for `slopty worker install` and
 /// `slopty hook` on a Linux worker (`docs/decisions/platform.md`, "Linux seams").
-pub const LINUX_CRATES: [&str; 22] = [
+pub const LINUX_CRATES: [&str; 28] = [
     "slopty-core",
     "slopty-crash",
     "slopty-proto",
@@ -55,6 +55,15 @@ pub const LINUX_CRATES: [&str; 22] = [
     "slopty-workerd",
     "slopty-client",
     "slopty-cli",
+    // Pure crates, which CI tests on Linux alone (`gate::LINUX_ONLY_TESTS`), and the test kit,
+    // which it tests on both. Not the deploy crate yet: its sshd test times out on a Linux
+    // runner (run 38112204055).
+    "slopty-grid",
+    "slopty-predict",
+    "slopty-shape",
+    "slopty-push",
+    "slopty-theme",
+    "slopty-testkit",
 ];
 
 /// The [`LINUX_CRATES`] whose tests are the Mac's: they drive `ScreenCaptureKit`, `CGEvent` or
@@ -119,6 +128,47 @@ pub fn lint_linux(sh: &Shell, crates: &[&str]) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The cargo that lints or documents an Apple target on this host (`ios`: the iOS triples), and
+/// the environment it needs for that, held while the returned guards live.
+///
+/// On a Mac, cargo. Elsewhere (CI's Linux runners, where the lint jobs run so the five macOS
+/// slots stay with the tests: `docs/decisions/tooling.md`, "Apple targets are linted on
+/// Linux"), zig compiles the C and Objective-C build scripts compile for the target (ring,
+/// blake3, `objc_exception`): through `cargo-zigbuild` for macOS, and for iOS, which it refuses,
+/// through links to xtask that run as zig's compiler (`zig_cc`), named as each iOS triple's `CC`
+/// and `CXX`, with an empty stand-in for
+/// the SDK `cc` asks for. `DOCS_RS` is set either way: libghostty-vt-sys then skips its zig build
+/// of the library, which asks `xcrun` for the SDKs and which a check never links. The only other
+/// build scripts in the Apple graphs that read it are objc-sys, for non-Apple targets alone, and
+/// serde's, for a check-cfg line.
+pub fn apple_cargo(sh: &Shell, ios: bool) -> Result<(&'static str, Vec<xshell::PushEnv<'_>>)> {
+    if cfg!(target_os = "macos") {
+        return Ok(("cargo", Vec::new()));
+    }
+    let mut env = vec![sh.push_env("DOCS_RS", "1")];
+    if !ios {
+        ensure!(
+            has(sh, "cargo-zigbuild"),
+            "an Apple target is linted off a Mac with zig's C compiler: `cargo binstall cargo-zigbuild`"
+        );
+        return Ok(("cargo-zigbuild", env));
+    }
+    // `cc` takes `SDKROOT` for the SDK only when it names a directory; zig's compiler drops it.
+    let target = repo_root()?.join("target");
+    let sdk = target.join("apple-sdk-stand-in");
+    std::fs::create_dir_all(&sdk).with_context(|| format!("create {sdk}"))?;
+    env.push(sh.push_env("SDKROOT", &sdk));
+    for (triple, zig) in
+        [("aarch64_apple_ios", "aarch64-ios"), ("aarch64_apple_ios_sim", "aarch64-ios-simulator")]
+    {
+        let (cc, cxx) = crate::zig_cc::links(&target.join("zig-cc"), zig)?;
+        env.push(sh.push_env(format!("CC_{triple}"), cc));
+        env.push(sh.push_env(format!("CXX_{triple}"), cxx));
+        env.push(sh.push_env(format!("AR_{triple}"), "zig ar"));
+    }
+    Ok(("cargo", env))
 }
 
 /// The package every `cargo xtask check` build names beside the checked crates, so each crate
