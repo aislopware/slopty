@@ -84,6 +84,22 @@ const NOT_HELD: &str = "Codex no longer holds this thread, so the message did no
 /// How long the worker waits before it tries the daemon again.
 pub const RETRY: Duration = Duration::from_secs(2);
 
+/// How long a message written while Codex's app-server is away waits for it to come back.
+///
+/// An app-server that restarts, as an update restarts it, is back and has taken the thread up
+/// again within seconds; past half a minute the person had better know the message did not go
+/// than wonder where it is.
+pub const HOLD_FOR: Duration = Duration::from_secs(30);
+
+/// Why a message written while Codex's app-server was away did not go ([`HOLD_FOR`]).
+pub const NOT_BACK: &str =
+    "Codex's app-server didn't come back within half a minute, so the message did not go";
+
+/// Why an answer given while Codex's app-server was away did not go: the request it answered
+/// ended with the app-server.
+pub const REQUEST_ENDED: &str =
+    "Codex's request ended when its app-server stopped, so the answer did not go";
+
 /// The name Slopty gives itself to the app-server.
 const CLIENT: &str = "slopty";
 
@@ -134,6 +150,8 @@ enum Ask {
         ask: AskId,
         choice: String,
         by: Answerer,
+        /// The intent that gave it, to say under should it not go.
+        intent: IntentId,
     },
     Send {
         thread: ThreadId,
@@ -339,10 +357,19 @@ impl Codex {
         (Self(tx), Asks { asks, rest: REST })
     }
 
-    /// Answer request `ask` of `thread` with `choice`, as `by`. The answer is the JSON-RPC
-    /// Codex's TUI would send; the first one Codex hears settles the request.
-    pub fn answer(&self, thread: ThreadId, ask: AskId, choice: String, by: Answerer) {
-        let _gone = self.0.send(Ask::Answer { thread, ask, choice, by });
+    /// Answer request `ask` of `thread` with `choice`, as `by`, for intent `intent`. The answer
+    /// is the JSON-RPC Codex's TUI would send; the first one Codex hears settles the request.
+    /// Given while Codex's app-server is away, it goes nowhere and the thread says so
+    /// ([`REQUEST_ENDED`]).
+    pub fn answer(
+        &self,
+        thread: ThreadId,
+        ask: AskId,
+        choice: String,
+        by: Answerer,
+        intent: IntentId,
+    ) {
+        let _gone = self.0.send(Ask::Answer { thread, ask, choice, by, intent });
     }
 
     /// Send `text` and the files at `attachments` to `thread` as intent `intent`.
@@ -544,6 +571,77 @@ fn refuse_held(host: &Host, held: &mut Vec<Ask>, reason: &str) {
     }
 }
 
+/// A message kept while Codex's app-server is away, and since when.
+struct Parked {
+    at: Instant,
+    ask: Ask,
+}
+
+/// Say of each message in `parked` kept for [`HOLD_FOR`] by `now` that it did not go.
+fn expire(host: &Host, parked: &mut Vec<Parked>, now: Instant) {
+    let (late, kept): (Vec<Parked>, Vec<Parked>) =
+        parked.drain(..).partition(|p| now.duration_since(p.at) >= HOLD_FOR);
+    *parked = kept;
+    for Parked { ask, .. } in late {
+        message_not_sent(host, ask, NOT_BACK);
+    }
+}
+
+/// The message `ask` (a send, or an edit of one waiting) that did not go, for `reason`: held in
+/// its thread's list for the person to send again ([`not_sent`]).
+fn message_not_sent(host: &Host, ask: Ask, reason: &str) {
+    match ask {
+        Ask::Send { thread, text, attachments, delivery, intent } => {
+            let pending =
+                Pending { intent, text, attachments, delivery, state: PendingState::Sending };
+            not_sent(host, thread, pending, reason);
+        }
+        Ask::Edit { thread, intent, text } => {
+            let Some((state, _)) = host.state(thread) else { return };
+            let Some(was) = state.pending.into_iter().find(|p| p.intent == intent) else {
+                return;
+            };
+            not_sent(host, thread, Pending { text, ..was }, reason);
+        }
+        other => tracing::debug!(?other, "not a message"),
+    }
+}
+
+/// The answer `choice` to request `ask` of `thread`, given as intent `intent` while Codex's
+/// app-server was away: its request ended with it, so the answer is held in the thread's list
+/// as words of the choice's label, for the person to send as a message should they still mean
+/// it ([`REQUEST_ENDED`]).
+fn answer_not_sent(host: &Host, thread: ThreadId, (ask, choice): (&AskId, &str), intent: IntentId) {
+    let Some((state, _)) = host.state(thread) else { return };
+    let label = state
+        .requests
+        .iter()
+        .find(|r| r.id == *ask)
+        .and_then(|r| r.options.iter().find(|o| o.id == choice))
+        .map_or_else(|| choice.to_owned(), |o| o.label.clone());
+    let pending = Pending {
+        intent,
+        text: label,
+        attachments: Vec::new(),
+        delivery: Delivery::Steer,
+        state: PendingState::Sending,
+    };
+    not_sent(host, thread, pending, REQUEST_ENDED);
+}
+
+/// A message for `thread` that could not go, for `reason`: it is held in the thread's list of
+/// messages on their way, saying why, for the person to send again, rather than lost.
+fn not_sent(host: &Host, thread: ThreadId, pending: Pending, reason: &str) {
+    let Some((state, _)) = host.state(thread) else {
+        tracing::debug!(%thread, "a message for a thread the worker does not hold");
+        return;
+    };
+    let mut list = state.pending;
+    list.retain(|p| p.intent != pending.intent);
+    list.push(Pending { state: PendingState::Held { reason: reason.to_owned() }, ..pending });
+    host.apply(thread, vec![Action::PendingSet(list)]);
+}
+
 /// Where the daemon's start stands while no daemon answers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bringing {
@@ -572,6 +670,8 @@ pub fn spawn(
         let mut open = Opened { launch, said, running: HashMap::new(), waiting: HashMap::new() };
         // The starts waiting on the daemon's start.
         let mut held: Vec<Ask> = Vec::new();
+        // The messages written while no daemon answers, waiting for one ([`HOLD_FOR`]).
+        let mut parked: Vec<Parked> = Vec::new();
         let mut bringing = Bringing::Idle;
         loop {
             match connect(&socket).await {
@@ -579,9 +679,12 @@ pub fn spawn(
                     bringing = Bringing::Idle;
                     let mut session = Session::new(host.clone(), ws, open, rest);
                     session.held = std::mem::take(&mut held);
+                    expire(&host, &mut parked, Instant::now());
+                    session.held.extend(std::mem::take(&mut parked).into_iter().map(|p| p.ask));
                     let ended = session.run(&mut asks, &mut hear).await;
                     session.exited();
-                    session.abandon(WENT);
+                    let at = Instant::now();
+                    parked.extend(session.abandon(WENT).into_iter().map(|ask| Parked { at, ask }));
                     open = session.into_tuis();
                     match ended {
                         Ended::Asks => return,
@@ -598,11 +701,22 @@ pub fn spawn(
                 Err(why) => tracing::trace!(socket = %socket.display(), "no Codex: {why}"),
             }
             // What is asked while Codex is not there is not kept: its intent was answered. A
-            // start waits on the daemon's start, and a request handed to the TUI is refused.
+            // start waits on the daemon's start, and a request handed to the TUI is refused. A
+            // message waits for Codex to come back, for a while ([`HOLD_FOR`]), and an answer
+            // goes nowhere, as its request ended with Codex.
             loop {
                 tokio::select! {
-                    () = tokio::time::sleep(RETRY) => break,
+                    () = tokio::time::sleep(RETRY) => {
+                        expire(&host, &mut parked, Instant::now());
+                        break;
+                    }
                     ask = asks.recv() => match ask {
+                        Some(ask @ (Ask::Send { .. } | Ask::Edit { .. })) => {
+                            parked.push(Parked { at: Instant::now(), ask });
+                        }
+                        Some(Ask::Answer { thread, ask, choice, intent, .. }) => {
+                            answer_not_sent(&host, thread, (&ask, &choice), intent);
+                        }
                         Some(Ask::Start { id, start, seated, reply }) => {
                             if let Some(first) = host.started(id) {
                                 let _gone = reply.send(first);
@@ -871,11 +985,25 @@ impl Session {
     }
 
     /// Every start not answered is refused with `reason`: Codex went before it answered.
-    fn abandon(&mut self, reason: &str) {
-        let held = std::mem::take(&mut self.held).into_iter().filter_map(|ask| match ask {
-            Ask::Start { id, reply, .. } => Some((id, vec![reply])),
-            _ => None,
-        });
+    /// What waited on this link when it went: starts and forks refused for `reason`, answers
+    /// said not to have gone ([`REQUEST_ENDED`]); the messages, to wait for the next link
+    /// ([`HOLD_FOR`]).
+    fn abandon(&mut self, reason: &str) -> Vec<Ask> {
+        let waiting = std::mem::take(&mut self.held)
+            .into_iter()
+            .chain(std::mem::take(&mut self.waking).into_values().flatten());
+        let mut held = Vec::new();
+        let mut messages = Vec::new();
+        for ask in waiting {
+            match ask {
+                Ask::Start { id, reply, .. } => held.push((id, vec![reply])),
+                ask @ (Ask::Send { .. } | Ask::Edit { .. }) => messages.push(ask),
+                Ask::Answer { thread, ask, choice, intent, .. } => {
+                    answer_not_sent(&self.host, thread, (&ask, &choice), intent);
+                }
+                other => self.unanswered(other, reason),
+            }
+        }
         self.reopening.clear();
         for (id, (thread, waiting)) in self.forking.drain() {
             let outcome = once(&self.host, thread, id, refused(reason.to_owned()));
@@ -890,6 +1018,7 @@ impl Session {
                 let _gone = reply.send(outcome.clone());
             }
         }
+        messages
     }
 
     /// What it held of Codex's TUIs, for the next connection.
@@ -1009,10 +1138,8 @@ impl Session {
             Ask::Release { thread, id, reply } => {
                 let _gone = reply.send(self.tuis.refuse(&self.host, thread, id, reason));
             }
-            Ask::Send { thread, text, attachments, delivery, intent } => {
-                let pending =
-                    Pending { intent, text, attachments, delivery, state: PendingState::Sending };
-                self.not_sent(thread, pending, reason);
+            ask @ (Ask::Send { .. } | Ask::Edit { .. }) => {
+                message_not_sent(&self.host, ask, reason);
             }
             other => tracing::debug!(?other, "an ask of a Codex thread that did not come back"),
         }
@@ -1084,8 +1211,20 @@ impl Session {
             (Waiting::Loaded, Ok(result)) => {
                 let loaded = rpc::response::<p::ThreadLoadedListParams>(result)
                     .map_err(|e| e.to_string())?;
-                self.let_go_before(&loaded.data);
+                let followed = self.let_go_before(&loaded.data);
                 for native in loaded.data {
+                    // A message the worker kept while Codex was away waits for its thread's
+                    // resume, rather than finding it not followed yet.
+                    let thread = slopty_agent::codex::shared::thread_of(&native);
+                    if self.host.holds(thread) && !self.threads.contains_key(&native) {
+                        self.native.insert(thread, native.clone());
+                        self.waking.entry(native.clone()).or_default();
+                    }
+                    self.resume(native).await?;
+                }
+                for native in followed {
+                    // What is asked of it meanwhile waits for it, as for any thread let go.
+                    self.waking.entry(native.clone()).or_default();
                     self.resume(native).await?;
                 }
                 self.joined().await?;
@@ -1391,33 +1530,35 @@ impl Session {
     /// now, was let go before this link (by the worker before it restarted, or by Codex): it
     /// counts as let go, so a follow or a message takes it up again (`thread/resume`) rather
     /// than finding nothing to go to.
-    fn let_go_before(&mut self, loaded: &[String]) {
+    ///
+    /// Those someone follows now are returned, to take up again at once: a client watching a
+    /// thread while Codex restarts sees it go on, not stand still until it is followed again.
+    fn let_go_before(&mut self, loaded: &[String]) -> Vec<String> {
         let kept = self.host.visit(|state| {
             let native = &state.meta.native;
             (is_shared(state) && !native.is_empty() && !loaded.contains(native))
                 .then(|| (state.meta.id, native.clone()))
         });
+        let mut followed = Vec::new();
         for (thread, native) in kept {
             if self.threads.contains_key(&native) {
                 continue;
             }
             self.native.insert(thread, native.clone());
-            self.unloaded.insert(native);
+            if self.host.followers(thread) > 0 {
+                followed.push(native);
+            } else {
+                self.unloaded.insert(native);
+            }
         }
+        followed
     }
 
     /// A message for `thread` that could not go, for `reason`: it is held in the thread's
     /// list of messages on their way, saying why, for the person to send again, rather than
     /// lost.
     fn not_sent(&self, thread: ThreadId, pending: Pending, reason: &str) {
-        let Some((state, _)) = self.host.state(thread) else {
-            tracing::debug!(%thread, "a message for a thread the worker does not hold");
-            return;
-        };
-        let mut list = state.pending;
-        list.retain(|p| p.intent != pending.intent);
-        list.push(Pending { state: PendingState::Held { reason: reason.to_owned() }, ..pending });
-        self.host.apply(thread, vec![Action::PendingSet(list)]);
+        not_sent(&self.host, thread, pending, reason);
     }
 
     /// Host Codex thread `thread`, as it now stands.
@@ -1713,7 +1854,7 @@ impl Session {
                     }
                 }
             }
-            Ask::Answer { thread, ask, choice, by } => {
+            Ask::Answer { thread, ask, choice, by, .. } => {
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
                 let Some((id, result)) = followed.shared.answer(&ask, &choice, by) else {
                     tracing::debug!(%thread, ask = %ask.0, "no such Codex request or choice");

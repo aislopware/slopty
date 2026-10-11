@@ -14,7 +14,8 @@ mod codex {
     use slopty_core::SessionId;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Delivery, Fork, IntentId, ItemBody, ThreadId, ThreadMeta, ThreadState, TurnState,
+        AgentId, Answerer, AskId, Delivery, Fork, IntentId, ItemBody, PendingState, ThreadId,
+        ThreadMeta, ThreadState, TurnState,
     };
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
@@ -1324,5 +1325,126 @@ mod codex {
         cue.send("turn").unwrap();
         until_sent(&mut heard, "thread/backgroundTerminals/list").await;
         polled(&host, thread, |s| s.tasks.is_empty()).await;
+    }
+
+    /// A host in `dir` that keeps the recording's thread, as a worker does after Codex let it
+    /// go: one link to a stand-in that has it loaded, ended once the thread has its turns.
+    async fn kept_thread(dir: &Path, short: &Path) -> (Host, ThreadId) {
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let socket: PathBuf = short.join("before.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, _heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(unloader(listener, tx));
+        let host = host(dir);
+        let (_handle, asks) = Codex::channel();
+        let served = codex::spawn(host.clone(), socket, None, asks);
+        until(&host, thread, |s| !s.turns.is_empty()).await;
+        served.abort();
+        let _ended = served.await;
+        (host, thread)
+    }
+
+    /// A thread someone follows while Codex restarts is taken up again as soon as Codex is
+    /// joined, with nothing asked of it, so it goes on for whoever watches.
+    #[tokio::test]
+    async fn a_followed_thread_is_taken_up_again_once_codex_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let _watching = host.watch(thread).unwrap();
+        let socket: PathBuf = short.path().join("after.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(restarted(listener, tx));
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let sent = until_sent(&mut heard, "thread/resume").await;
+        let native = resumed()["result"]["thread"]["id"].clone();
+        assert_eq!(sent.last().unwrap()["params"]["threadId"], native);
+    }
+
+    /// Whether `state` holds the message `intent` back, saying `reason`.
+    fn held_back(state: &ThreadState, intent: IntentId, reason: &str) -> bool {
+        state.pending.iter().any(|p| {
+            p.intent == intent
+                && matches!(&p.state, PendingState::Held { reason: r } if r == reason)
+        })
+    }
+
+    /// A message written while Codex's app-server is away waits for it: once it is back, the
+    /// thread is taken up again and the message goes as its turn, never said not to have gone.
+    #[tokio::test]
+    async fn a_message_written_while_codex_is_away_goes_once_it_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let socket: PathBuf = short.path().join("after.sock");
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket.clone(), None, asks);
+        let intent = IntentId::new();
+        handle.send(thread, "Say hello.".to_owned(), Vec::new(), Delivery::Steer, intent);
+        // Away for a moment, as an app-server that restarts is.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(restarted(listener, tx));
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let methods: Vec<&str> = sent
+            .iter()
+            .filter_map(|m| m["method"].as_str())
+            .filter(|m| !matches!(*m, "initialize" | "initialized" | "model/list"))
+            .collect();
+        assert_eq!(methods, ["thread/loaded/list", "thread/resume", "turn/start"]);
+        assert_eq!(sent.last().unwrap()["params"]["input"][0]["text"], "Say hello.");
+        let (state, _) = host.state(thread).unwrap();
+        assert!(!state.pending.iter().any(|p| p.intent == intent), "{:?}", state.pending);
+    }
+
+    /// A message written while Codex's app-server is away, which does not come back within
+    /// [`codex::HOLD_FOR`], is held in the thread's list saying it did not go, for the person
+    /// to send again.
+    #[tokio::test]
+    async fn a_message_codex_does_not_come_back_for_is_said_not_to_have_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        // Half a minute of nobody answering, on a clock of the test's own.
+        tokio::time::pause();
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), short.path().join("gone.sock"), None, asks);
+        let intent = IntentId::new();
+        handle.send(thread, "Say hello.".to_owned(), Vec::new(), Delivery::Steer, intent);
+        let waited = tokio::time::timeout(codex::HOLD_FOR * 4, async {
+            loop {
+                if let Some((state, _)) = host.state(thread)
+                    && held_back(&state, intent, codex::NOT_BACK)
+                {
+                    return state;
+                }
+                tokio::time::sleep(codex::RETRY).await;
+            }
+        });
+        let state = waited.await.expect("said not to have gone");
+        let held = state.pending.iter().find(|p| p.intent == intent).unwrap();
+        assert_eq!(held.text, "Say hello.");
+    }
+
+    /// An answer given while Codex's app-server is away goes nowhere, as its request ended with
+    /// the app-server: the thread says so at once, under the answer's intent, in its choice's
+    /// words, rather than taking it as given.
+    #[tokio::test]
+    async fn an_answer_given_while_codex_is_away_is_said_not_to_have_gone_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), short.path().join("gone.sock"), None, asks);
+        let intent = IntentId::new();
+        let by = Answerer { client: None, name: "Slopty".to_owned() };
+        handle.answer(thread, AskId("0".to_owned()), "accept".to_owned(), by, intent);
+        let state = polled(&host, thread, |s| held_back(s, intent, codex::REQUEST_ENDED)).await;
+        let held = state.pending.iter().find(|p| p.intent == intent).unwrap();
+        assert_eq!(held.text, "accept", "the choice, as no request names it");
     }
 }

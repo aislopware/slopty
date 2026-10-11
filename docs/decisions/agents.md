@@ -2800,3 +2800,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_codex_goal_shows_as_codex_holds_it`. Reworked:
     `an_archived_thread_is_unarchived_and_taken_up_again` (`slopty-worker/tests/codex.rs`, no
     goal read on the resume).
+
+- ✅ **What is written to Codex while its app-server restarts waits for it** (2026-10-11, the
+  orchestrator-first study, item 24's first half).
+  - Before this, a message, an edit or an answer given while Codex's app-server was away was
+    dropped. So was one held on a link that went down. Each had already been answered done, so
+    the message vanished. And a thread a client was watching stood still after Codex came back
+    until it was followed again.
+  - **A message or an edit waits.** It is kept (`Parked`) and goes once Codex is back and has
+    taken its thread up again. The bound is `HOLD_FOR`, 30 s: an app-server that restarts is
+    back within seconds, and past that the person should know the message did not go. Past
+    the bound, or when the resume fails, it is held in the thread's list of messages on their
+    way with the reason (`NOT_BACK`, or the resume's words), for the person to send again.
+    That covers messages held on the link that went too.
+  - **An answer does not wait.** Its request ended with the app-server, so it is held at once in
+    the thread's list, under the answer's intent, in its choice's words (`REQUEST_ENDED`).
+    That way the person sees it did not go and can send it as a message if they still mean it.
+  - **A watched thread goes on.** On rejoining, a thread Codex no longer holds is taken up
+    again at once if anyone follows it (`Host::followers`). Others are taken up on the next
+    follow or message, as before. A thread Codex still holds waits for its resume too, so a
+    kept message cannot find it not yet followed.
+  - Not done: a message queued behind a running turn waits in the old link's queue
+    (`Shared`), and it goes with that link.
+  - Tests (`slopty-worker/tests/codex.rs`):
+    `a_message_written_while_codex_is_away_goes_once_it_is_back`,
+    `a_message_codex_does_not_come_back_for_is_said_not_to_have_gone` (on a paused clock),
+    `an_answer_given_while_codex_is_away_is_said_not_to_have_gone_at_once`,
+    `a_followed_thread_is_taken_up_again_once_codex_is_back`.

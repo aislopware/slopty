@@ -1149,7 +1149,7 @@ fn shared(
                 return refused("the answer does not answer each question".to_owned());
             }
             let by = Answerer { client: Some(who.client), name: "Slopty".to_owned() };
-            codex.answer(thread, ask.clone(), choice.clone(), by);
+            codex.answer(thread, ask.clone(), choice.clone(), by, id);
             if let Some(why) = message.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
                 codex.send(thread, why.to_owned(), Vec::new(), Delivery::Steer, id);
             }
