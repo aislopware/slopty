@@ -55,11 +55,15 @@ in it until checked here.
   the screen to control an agent, never types menu digits or cycles mode keys, and never
   answers for the person. It launches the user's own unmodified binary and never offers a login
   or touches a credential.
-- **Design.** Minimal and modern, in MonoCode's school: one ground, panes meeting at hairlines,
-  square where it is structure, rounding that grows with size. Every colour, size and spacing
-  comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/lints.rs` enforce
-  it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on
-  buttons.
+- **Design.** A clone of Zed and of Delta, Zed's agent app: Zed's design system and components,
+  Delta's thread, sidebar and review (`.research/zed-clone-2026-10-11.md`). Square where it is
+  structure (bars, tabs, panes, rows), 4 for controls, 6 for cards, 8 for floats. Three cool
+  planes (the work darkest, the sidebar a step up, floats a step more) parted by 1 px lines;
+  dense 24 px rows; IBM Plex Sans at 14, 12 and 10, Lilex for code and figures, two weights;
+  IBM Carbon icons at 16 with our own state marks in a hue per state. Every colour, size and
+  spacing comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/lints.rs`
+  enforce it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the
+  palette, not on buttons.
 - **Autonomy.** The user hands over whole goals and reviews only the results. Work
   continuously without asking. Research, measure and improve everything from the foundation to
   the UI, and keep looking for new ideas. A session resumes from the memory's progress notes.
