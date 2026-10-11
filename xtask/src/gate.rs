@@ -1894,8 +1894,8 @@ mod tests {
     fn ci_runs_the_linux_lane_on_linux() {
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
-        assert!(workflow.contains("cargo xtask gate --ci --lane linux"), "ci.yml runs it");
-        assert!(workflow.contains("cargo xtask setup --lane linux"), "with its tools");
+        assert!(workflow.contains("run: xtask gate --ci --lane linux"), "ci.yml runs it");
+        assert!(workflow.contains("run: xtask setup --lane linux"), "with its tools");
         assert!(workflow.contains("needs: [gate, linux]"), "and main waits for it");
         assert!(
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
@@ -1958,7 +1958,7 @@ mod tests {
             "only the test shards take one of the five macOS runners"
         );
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
-        assert!(e2e.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
+        assert!(e2e.contains("run: xtask e2e app --review"), "the app's e2e on CI");
         assert!(
             !e2e.contains("push:") && !e2e.contains("schedule:"),
             "never beside every land's run, and never on a schedule's stale commit"
@@ -1971,6 +1971,75 @@ mod tests {
         );
         assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));
         assert!(!workflow.contains("e2e app"), "in a workflow of its own, off the gate's queue");
+    }
+
+    /// Every workflow that runs xtask runs the binary it cached, under one key naming every
+    /// input of its build: its sources and its workspace dependencies', the manifests, the lock,
+    /// the toolchain and cargo's config. A missed input would run a stale xtask.
+    #[test]
+    fn xtask_s_cache_key_names_every_input() {
+        let root = repo_root().expect("repo root");
+        let sh = xshell::Shell::new().expect("a shell");
+        let metadata = xshell::cmd!(sh, "cargo metadata --format-version 1 --locked")
+            .quiet()
+            .read()
+            .expect("cargo metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("its JSON");
+        let local: std::collections::HashMap<&str, &str> = metadata["packages"]
+            .as_array()
+            .expect("packages")
+            .iter()
+            .filter(|p| p["source"].is_null())
+            .filter_map(|p| Some((p["id"].as_str()?, p["manifest_path"].as_str()?)))
+            .collect();
+        let nodes = metadata["resolve"]["nodes"].as_array().expect("the resolve graph");
+        let deps = |id: &str| -> Vec<String> {
+            let node = nodes.iter().find(|n| n["id"] == id).expect("a node per package");
+            let normal = |d: &&serde_json::Value| {
+                d["dep_kinds"].as_array().is_some_and(|kinds| {
+                    kinds.iter().any(|k| k["kind"].is_null() || k["kind"] == "build")
+                })
+            };
+            let all = node["deps"].as_array().expect("its dependencies");
+            all.iter().filter(normal).filter_map(|d| Some(d["pkg"].as_str()?.to_owned())).collect()
+        };
+        let xtask = local.iter().find(|(_, m)| m.ends_with("/xtask/Cargo.toml")).expect("xtask");
+        let (mut built, mut next) = (Vec::new(), vec![(*xtask.0).to_owned()]);
+        while let Some(id) = next.pop() {
+            if local.contains_key(id.as_str()) && !built.contains(&id) {
+                next.extend(deps(&id));
+                built.push(id);
+            }
+        }
+        let inputs: Vec<String> = built
+            .iter()
+            .map(|id| {
+                let manifest = camino::Utf8Path::new(local[id.as_str()]);
+                let dir = manifest.parent().expect("a package directory");
+                format!("'{}/**'", dir.strip_prefix(&root).expect("in the workspace"))
+            })
+            .chain(
+                ["'Cargo.toml'", "'Cargo.lock'", "'rust-toolchain.toml'", "'.cargo/*.toml'"]
+                    .map(str::to_owned),
+            )
+            .collect();
+        let mut keys = Vec::new();
+        for name in ["ci.yml", "check.yml", "e2e.yml"] {
+            let text = std::fs::read_to_string(root.join(".github/workflows").join(name))
+                .expect("a workflow");
+            let runs = text.contains("run: xtask ") || text.contains("\n          xtask ");
+            let restores = text.contains("path: ~/.cache/slopty-xtask\n          key: >-");
+            assert!(runs && restores, "{name} runs the cached xtask");
+            for after in text.split("key: >-\n            xtask-").skip(1) {
+                let (key, _) = after.split_once("}}\n").expect("the key's end");
+                keys.push(key.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+        }
+        let key = keys.first().expect("a key");
+        assert!(keys.iter().all(|k| k == key), "one key: {keys:#?}");
+        for input in &inputs {
+            assert!(key.contains(input.as_str()), "the key names {input}: {key}");
+        }
     }
 
     /// A shard builds the spawned binaries beside its own packages without the others' tests,

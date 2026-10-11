@@ -71,6 +71,10 @@ enum Cmd {
         /// Install only the tools this gate lane runs; repeat for several (a CI job per lane).
         #[arg(long = "lane", value_enum)]
         lanes: Vec<gate::LaneId>,
+        /// Install this tool (its crate) too; repeat for several. A remote check's lints run
+        /// two of the tools lane's, and taplo alone compiles for minutes on arm Linux.
+        #[arg(long = "tool")]
+        tools: Vec<String>,
     },
     /// What on this Mac slows every build and only you can fix: whether `XProtect` scans each new
     /// binary (the Developer Tools switch) and the free space the gate needs.
@@ -351,7 +355,7 @@ pub fn main() -> Result<()> {
     let sh = Shell::new()?;
     sh.change_dir(tools::repo_root()?);
     match cli.cmd {
-        Cmd::Setup { no_tools, lanes } => setup::run(&sh, no_tools, &lanes),
+        Cmd::Setup { no_tools, lanes, tools } => setup::run(&sh, no_tools, &lanes, &tools),
         Cmd::Doctor => doctor::run(&sh),
         #[cfg(target_os = "macos")]
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),

@@ -87,10 +87,35 @@ jobs:
       - working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      - run: cargo xtask setup --lane tests
+      # xtask built once per change to what it is built from, rather than in every job: 20-90 s
+      # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
+      # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
+      # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      - id: xtask
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
+      - run: |
+          echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+          echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
+      - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - run: cargo xtask e2e app --review
+      - run: xtask e2e app --review
       - if: always()
         uses: actions/upload-artifact@v4
         with:

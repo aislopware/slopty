@@ -4,8 +4,10 @@
 # the script never waits on the workspace's lock.
 experimental = [ "setup-scripts" ]
 
+# A runner names its cached xtask binary in `SLOPTY_XTASK` (.github/workflows), which `cargo xtask`
+# would rebuild here, its fingerprints being gone.
 [scripts.setup.spawned-bins]
-command = "cargo xtask spawned-bins"
+command = [ "sh", "-c", "exec ${SLOPTY_XTASK:-cargo xtask} spawned-bins" ]
 
 [profile.default]
 retries = 0

@@ -30,11 +30,19 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-fuzz", "0.13.2"),
 ];
 
-/// Install the tools and sync the submodules. Given `lanes`, only what those gate lanes run:
-/// a CI job runs one lane and needs neither the other lanes' tools nor `xcodegen`.
-pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
-    let everything = lanes.is_empty();
-    let wanted = |tool: &str| everything || lanes.iter().any(|lane| lane.tools().contains(&tool));
+/// Install the tools and sync the submodules. Given `lanes` or `tools`, only what those gate
+/// lanes run and those tools: a CI job runs one lane and needs neither the other lanes' tools
+/// nor `xcodegen`.
+pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Result<()> {
+    let everything = lanes.is_empty() && tools.is_empty();
+    let wanted = |tool: &str| {
+        everything
+            || lanes.iter().any(|lane| lane.tools().contains(&tool))
+            || tools.iter().any(|t| t == tool)
+    };
+    let unknown: Vec<&str> =
+        tools.iter().map(String::as_str).filter(|t| TOOLS.iter().all(|(k, _)| k != t)).collect();
+    anyhow::ensure!(unknown.is_empty(), "no such tool to install: {}", unknown.join(", "));
     if !no_tools {
         if !has(sh, "cargo-binstall") {
             step("install cargo-binstall", &cmd!(sh, "cargo install cargo-binstall --locked"))?;
