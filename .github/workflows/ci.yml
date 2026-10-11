@@ -217,17 +217,9 @@ jobs:
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
       # and fails on a leak, on more than its budget, or on running out.
-      # A trial (.research/ci-speed-2026-10-11.md item 7): six test threads on the three-core
-      # Mac, since the same tests took three to six times as long there as on Linux, more than
-      # the cores explain, so they mostly wait. Kept if nextest's wall time falls 20 % or more
-      # with no new timing failure over ten runs (docs/decisions/tooling.md, "Six test threads
-      # on a hosted Mac, on trial").
-      - run: |
-          if [ "${{ runner.os }}" = macOS ] && [ "${{ matrix.lane }}" = tests ]; then
-            export NEXTEST_TEST_THREADS=6
-          fi
-          xtask gate --ci --lane ${{ matrix.lane }} \
-            ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
+      - run: >-
+          xtask gate --ci --lane ${{ matrix.lane }}
+          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
