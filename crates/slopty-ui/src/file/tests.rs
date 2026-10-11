@@ -375,14 +375,14 @@ fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
     assert_eq!(saved.lines().nth(19_990), Some("// edited near the end"));
 }
 
-/// A file past [`COLOURED_BYTES`] is plain text: its whole-text parse would outlast the pauses
-/// in typing. One within it is coloured.
+/// A file past [`crate::highlight::COLOURED_BYTES`] is plain text: its whole-text parse would
+/// outlast the pauses in typing. One within it is coloured.
 #[gpui::test]
 fn a_file_past_the_colour_limit_is_plain(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/src/gen.rs");
     arrives(&view, cx, text_read("fn a() {}", true, 1));
     assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), Some("Rust"));
-    let long = format!("fn a() {{}}\n{}", "x".repeat(COLOURED_BYTES));
+    let long = format!("fn a() {{}}\n{}", "x".repeat(crate::highlight::COLOURED_BYTES));
     arrives(&view, cx, text_read(&long, true, 2));
     assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), None);
     assert_eq!(view.read_with(cx, FileView::line_count), 2, "and still editable text");

@@ -390,7 +390,7 @@ pub fn changes(theme: &Theme, added: u32, removed: u32) -> Option<Div> {
 /// gap spaces it.
 #[must_use]
 pub fn separator(theme: &Theme) -> Div {
-    div().flex_none().text_color(crate::palette::separator_ink(theme)).child("\u{b7}")
+    div().flex_none().text_color(separator_ink(theme)).child("\u{b7}")
 }
 
 /// A pill's height in points: T3's badge (`h-5`), a notch over Linear's 18.
@@ -1500,7 +1500,7 @@ pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
         .bg(hsla(s.selected))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_secondary))
-        .child(SharedString::from(crate::palette::drawn_keys(&keys.into())))
+        .child(SharedString::from(drawn_keys(&keys.into())))
 }
 
 /// What a bar button does, and the key that does it, shown after a pause on the pointer.
@@ -1611,7 +1611,7 @@ impl Render for Hint {
             .child(
                 div()
                     .text_color(hsla(s.text))
-                    .when(self.mono, |el| el.font_family(crate::palette::mono_family(theme)))
+                    .when(self.mono, |el| el.font_family(mono_family(theme)))
                     .child(self.what.clone()),
             )
             .when(!self.key.is_empty(), |el| {
@@ -1619,6 +1619,36 @@ impl Render for Hint {
             });
         fade_in(hint, "hint", cx)
     }
+}
+
+/// The ink of the dot between the facts of a meta line: the muted tone at the pressed step.
+///
+/// The dot divides the facts without reading as one of them (monocode's footer sets its dot
+/// at a quarter of the text). The hairline's own colour vanished on the light theme's `canvas`.
+#[must_use]
+pub fn separator_ink(theme: &Theme) -> Hsla {
+    hsla_alpha(theme.surfaces.text_muted, alpha::PRESSED)
+}
+
+/// The UI's monospace family: a port's number and the settings file are set in it. Paths in
+/// chrome are context, in the UI face.
+#[must_use]
+pub fn mono_family(theme: &Theme) -> SharedString {
+    theme.typography.mono_families.first().cloned().unwrap_or_default().into()
+}
+
+/// Keys as they are drawn, ↩ asking for its text form.
+///
+/// ↩ has an emoji form too, and a phone's font fallback picks it: a blue tile among plain
+/// glyphs. The text presentation selector after it asks for the glyph. Only the drawing
+/// carries the selector; what a screen reader gets keeps the bare key.
+#[must_use]
+pub fn drawn_keys(keys: &str) -> String {
+    const TEXT_PRESENTATION: char = '\u{FE0E}';
+    keys.chars()
+        .flat_map(|c| [Some(c), (c == '↩').then_some(TEXT_PRESENTATION)])
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]
@@ -1741,6 +1771,14 @@ mod tests {
     }
 
     /// The first line is the first with something on it, trimmed.
+    #[test]
+    fn return_is_drawn_as_text_not_as_an_emoji() {
+        assert_eq!(drawn_keys("⇧⌘↩"), "⇧⌘↩\u{FE0E}");
+        assert_eq!(drawn_keys("↩"), "↩\u{FE0E}");
+        assert_eq!(drawn_keys("⌘T"), "⌘T", "nothing else changes");
+        assert_eq!(drawn_keys("↑↓"), "↑↓", "the arrows have no emoji form");
+    }
+
     #[test]
     fn the_first_line_skips_blank_ones() {
         assert_eq!(first_line("\n  \n  cargo build  \nnext"), "cargo build");

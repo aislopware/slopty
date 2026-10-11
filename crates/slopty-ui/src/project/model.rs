@@ -199,6 +199,21 @@ impl Lane {
         Self::Merged,
     ];
 
+    /// Its stage, the one its head wears.
+    #[must_use]
+    pub const fn phase(self) -> crate::icons::Phase {
+        use crate::icons::Phase;
+        match self {
+            Self::NeedsYou => Phase::NeedsYou,
+            Self::Failed => Phase::Failed,
+            Self::Working => Phase::Working,
+            Self::UpNext => Phase::UpNext,
+            Self::Verifying => Phase::VERIFYING,
+            Self::ReadyToMerge => Phase::ReadyToMerge,
+            Self::Merged => Phase::Merged,
+        }
+    }
+
     /// The lane a task in `state` is in on its own.
     #[must_use]
     pub const fn of(state: TaskState) -> Self {

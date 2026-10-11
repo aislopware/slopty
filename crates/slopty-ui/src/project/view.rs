@@ -1799,7 +1799,7 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        let glyph = Phase::of(lane).glyph(theme, px(IconSize::beside_slot(theme, roles.metadata)));
+        let glyph = lane.phase().glyph(theme, px(IconSize::beside_slot(theme, roles.metadata)));
         let head = div()
             .id(SharedString::from(head_id.clone()))
             .debug_selector(move || selector)
@@ -2187,7 +2187,7 @@ impl ProjectView {
         // ring.
         let lane_phase = match card.state {
             TaskState::Waiting => Phase::Waiting,
-            state => Phase::of(Lane::of(state)),
+            state => Lane::of(state).phase(),
         };
         let agent = self.agent(board, node);
         let live = agent.map(|a| a.status);

@@ -162,19 +162,15 @@ pub(crate) const fn list_pad(theme: &Theme) -> f32 {
     theme.spacing.xs + theme.spacing.xxs
 }
 
-/// The ink of the dot between the facts of a meta line: the muted tone at the pressed step,
-/// so the dot divides the facts without reading as one of them (monocode's footer sets its
-/// dot at a quarter of the text). The hairline's own colour vanished on the light theme's `canvas`.
-pub(crate) fn separator_ink(theme: &Theme) -> gpui::Hsla {
-    crate::colors::hsla_alpha(theme.surfaces.text_muted, slopty_theme::alpha::PRESSED)
-}
-
 /// `text`, a meta line whose facts are joined by a spaced middle dot, with each dot in
-/// [`separator_ink`]: one run of text, so the line still ends in one ellipsis.
+/// [`crate::kit::separator_ink`]: one run of text, so the line still ends in one ellipsis.
 pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::StyledText {
     const SEPARATOR: &str = " \u{b7} ";
     let text: SharedString = text.into();
-    let ink = gpui::HighlightStyle { color: Some(separator_ink(theme)), ..Default::default() };
+    let ink = gpui::HighlightStyle {
+        color: Some(crate::kit::separator_ink(theme)),
+        ..Default::default()
+    };
     let dots: Vec<_> = text
         .match_indices(SEPARATOR)
         .map(|(at, _)| {
@@ -1217,12 +1213,6 @@ pub fn age_label(age: Duration) -> String {
     }
 }
 
-/// The UI's monospace family: a port's number and the settings file are set in it. Paths in
-/// chrome are context, in the UI face.
-pub(crate) fn mono_family(theme: &Theme) -> SharedString {
-    theme.typography.mono_families.first().cloned().unwrap_or_default().into()
-}
-
 /// The keys that run `action` in `bindings`, spelled as [`keys_label`] spells them.
 ///
 /// The first binding wins; empty when nothing binds it. The one way chrome learns a shortcut,
@@ -1273,20 +1263,6 @@ pub fn keys_label(keystroke: &gpui::Keystroke) -> String {
         key => out.extend(key.chars().flat_map(char::to_uppercase)),
     }
     out
-}
-
-/// Keys as they are drawn, ↩ asking for its text form.
-///
-/// ↩ has an emoji form too, and a phone's font fallback picks it: a blue tile among plain
-/// glyphs. The text presentation selector after it asks for the glyph. Only the drawing
-/// carries the selector; what a screen reader gets keeps the bare key.
-#[must_use]
-pub fn drawn_keys(keys: &str) -> String {
-    const TEXT_PRESENTATION: char = '\u{FE0E}';
-    keys.chars()
-        .flat_map(|c| [Some(c), (c == '↩').then_some(TEXT_PRESENTATION)])
-        .flatten()
-        .collect()
 }
 
 /// The path a query spells, when it is one.
@@ -1974,7 +1950,8 @@ impl CommandPalette {
             places.into_iter().filter_map(|(text, path)| Some((text?, path))).enumerate()
         {
             if n > 0 {
-                context = context.child(div().text_color(separator_ink(theme)).child("·"));
+                context =
+                    context.child(div().text_color(crate::kit::separator_ink(theme)).child("·"));
             }
             context = context.child(
                 // A path in the UI face, as every other context in the chrome is; mono is
@@ -2039,7 +2016,7 @@ impl CommandPalette {
                         .flex_none()
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(drawn_keys(&text)))
+                        .child(SharedString::from(crate::kit::drawn_keys(&text)))
                 } else {
                     crate::kit::meta(crate::kit::tabular(div()), theme)
                         .debug_selector(move || format!("palette-trailing-{ix}"))
@@ -2840,14 +2817,6 @@ mod tests {
         assert_eq!(age_label(s(3_600)), "1h");
         assert_eq!(age_label(s(86_399)), "23h");
         assert_eq!(age_label(s(86_400 * 3)), "3d");
-    }
-
-    #[test]
-    fn return_is_drawn_as_text_not_as_an_emoji() {
-        assert_eq!(drawn_keys("⇧⌘↩"), "⇧⌘↩\u{FE0E}");
-        assert_eq!(drawn_keys("↩"), "↩\u{FE0E}");
-        assert_eq!(drawn_keys("⌘T"), "⌘T", "nothing else changes");
-        assert_eq!(drawn_keys("↑↓"), "↑↓", "the arrows have no emoji form");
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub fn facts_row(id: impl Into<ElementId>, theme: &Theme) -> FactsRow {
         id: id.into(),
         style: StyleRefinement::default(),
         facts: Vec::new(),
-        dot: crate::palette::separator_ink(theme),
+        dot: super::separator_ink(theme),
     }
 }
 

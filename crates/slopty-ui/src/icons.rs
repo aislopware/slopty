@@ -781,21 +781,6 @@ impl Phase {
     /// How far a verifier is said to be along when nothing says: half.
     pub const VERIFYING: Self = Self::Verifying(0.5);
 
-    /// A lane's stage, the one its head wears.
-    #[must_use]
-    pub const fn of(lane: crate::project::model::Lane) -> Self {
-        use crate::project::model::Lane;
-        match lane {
-            Lane::NeedsYou => Self::NeedsYou,
-            Lane::Failed => Self::Failed,
-            Lane::Working => Self::Working,
-            Lane::UpNext => Self::UpNext,
-            Lane::Verifying => Self::VERIFYING,
-            Lane::ReadyToMerge => Self::ReadyToMerge,
-            Lane::Merged => Self::Merged,
-        }
-    }
-
     /// The stage a live agent's `status` puts a task it works on in: its own lane's, unless
     /// the agent says more.
     #[must_use]
@@ -1350,7 +1335,6 @@ mod tests {
             assert_eq!(Status::NeedsYou.word(&theme), s.text_muted);
             assert_eq!(Status::Failed.word(&theme), s.error);
             assert_eq!(Phase::Merged.ink(&theme), s.merged_fill);
-            assert_eq!(Phase::of(crate::project::model::Lane::Verifying), Phase::VERIFYING);
             assert_eq!(Phase::UpNext.with_agent(Status::Running), Phase::Waiting);
         }
     }

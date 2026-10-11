@@ -863,7 +863,7 @@ impl FolderView {
             if n > 0 {
                 trail = trail.child(
                     crate::icons::Drawn::disclosure(theme, Symbol::ChevronRight)
-                        .slot(px(theme.typography.icon()), crate::palette::separator_ink(theme)),
+                        .slot(px(theme.typography.icon()), crate::kit::separator_ink(theme)),
                 );
             }
             let here = n == last;

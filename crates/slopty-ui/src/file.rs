@@ -114,13 +114,6 @@ pub(crate) const OVERWRITE: &str = "Overwrite";
 /// What a file tile's bar says of a file that is not on disk: not made yet, or deleted under a
 /// tile that keeps its text.
 pub(crate) const NOT_ON_DISK: &str = "Not on disk: saving makes it";
-/// Text a file tile colours at most; a larger file is plain text.
-///
-/// The colours come from a parse of the whole text off the UI thread once typing pauses, about
-/// 80–160 µs a line (MEASUREMENTS, 2026-09-28): 3 s for 20 000 lines and 30 s for 200 000.
-/// A parse that has started runs to its end, so past this the pauses of ordinary typing would
-/// keep several cores parsing.
-pub const COLOURED_BYTES: usize = 2 << 20;
 /// What a file tile says while its first read is out, once the wait is worth a word.
 pub(crate) const READING: &str = "Reading…";
 /// The body of a file tile not read yet while its machine is away.
@@ -1048,7 +1041,7 @@ impl FileView {
         self.pending_line =
             self.changed.first().copied().or(if reload { None } else { self.focus });
         let first = incoming.text.split('\n').next().unwrap_or_default();
-        self.syntax = if incoming.text.len() <= COLOURED_BYTES {
+        self.syntax = if incoming.text.len() <= crate::highlight::COLOURED_BYTES {
             Syntax::for_path(&self.path, first)
         } else {
             None

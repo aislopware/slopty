@@ -455,7 +455,7 @@ mod tests {
     }
 
     /// What the kept parse holds for the largest file still coloured: Rust source cut to
-    /// [`crate::file::COLOURED_BYTES`], the process's resident size before and after the
+    /// [`crate::highlight::COLOURED_BYTES`], the process's resident size before and after the
     /// parse, and how many distinct line states it keeps. Run by hand.
     #[test]
     #[ignore = "measurement, run by hand with --ignored --nocapture"]
@@ -464,7 +464,7 @@ mod tests {
         let one = include_str!("../workspace.rs");
         let mut text = String::new();
         for line in one.lines().cycle() {
-            if text.len() + line.len() >= crate::file::COLOURED_BYTES {
+            if text.len() + line.len() >= crate::highlight::COLOURED_BYTES {
                 break;
             }
             text.push_str(line);

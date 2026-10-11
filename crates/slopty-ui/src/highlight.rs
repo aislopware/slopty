@@ -24,6 +24,14 @@ use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet
 
 use crate::colors::hsla;
 
+/// Text a file tile colours at most; a larger file is plain text.
+///
+/// The colours come from a parse of the whole text off the UI thread once typing pauses, about
+/// 80–160 µs a line (MEASUREMENTS, 2026-09-28): 3 s for 20 000 lines and 30 s for 200 000.
+/// A parse that has started runs to its end, so past this the pauses of ordinary typing would
+/// keep several cores parsing.
+pub const COLOURED_BYTES: usize = 2 << 20;
+
 pub mod editor;
 
 /// Lines longer than this are left plain: a minified bundle or a data line would cost
