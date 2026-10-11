@@ -249,7 +249,7 @@ async fn on_main<F: Factory, R: Send + 'static>(
     rx.await.ok()
 }
 
-/// Make every display in `store`'s list again, each tried [`RESTORE_TRIES`] times a second
+/// Make every display in `store`'s list again, each tried `RESTORE_TRIES` times a second
 /// apart while macOS still holds its identity for the holder before.
 pub async fn restore<F: Factory>(main: Arc<dyn Main<Holder<F>>>, store: &Path) {
     for (key, plan) in kept(store) {
