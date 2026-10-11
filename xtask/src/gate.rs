@@ -1892,6 +1892,37 @@ mod tests {
 
     /// CI runs the Linux lane on a Linux runner, apart from the gate's matrix until it is
     /// required; its tested crates all build for Linux and none is one the lane leaves untested.
+    /// Every toolchain a workflow names is `rust-toolchain.toml`'s, and the gate's workflows name
+    /// it in `RUSTUP_TOOLCHAIN`, so rustup never installs the file's every component and target
+    /// into a job.
+    #[test]
+    fn the_workflows_run_the_pinned_toolchain_by_name() {
+        let root = repo_root().expect("repo root");
+        let file = std::fs::read_to_string(root.join("rust-toolchain.toml")).expect("the file");
+        let channel = file
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .map(|value| value.trim_matches('"'))
+            .expect("a channel");
+        let workflows = root.join(".github/workflows");
+        for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
+            let text = std::fs::read_to_string(workflows.join(name)).expect("a workflow");
+            for line in text.lines().map(str::trim) {
+                let named = line
+                    .strip_prefix("toolchain: ")
+                    .filter(|value| value.starts_with("1."))
+                    .or_else(|| line.strip_prefix("RUSTUP_TOOLCHAIN: "));
+                if let Some(value) = named {
+                    assert_eq!(value, channel, "{name}: {line}");
+                }
+            }
+            if name != "deep.yml" {
+                let named = format!("\n  RUSTUP_TOOLCHAIN: {channel}\n");
+                assert!(text.contains(&named), "{name} names the toolchain for every job");
+            }
+        }
+    }
+
     /// Every job's zig is the pinned one, every sccache setup names its version, and the deep
     /// checks take only some of the macOS runners.
     #[test]

@@ -30,7 +30,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
+  # The pinned toolchain by name, in place of rust-toolchain.toml: from the file rustup installs
+  # every component and target it lists into each job on its first cargo call (llvm-tools,
+  # rust-analyzer, rust-src, the iOS and musl standard libraries; 1.9 GB on a runner). Each job
+  # installs what it uses (`dtolnay/rust-toolchain`), and `gate::tests` holds the version to
+  # the file's.
+  RUSTUP_TOOLCHAIN: 1.99.0
+  # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
+  # .github/actions/sccache's call.
   # `promote` dispatches this on `gate`, whose cache the test shards fill: a run on main read
   # main's, which nothing else fills, and built the app and daemons for 600 s
   # (.research/ci-speed-2026-10-11.md item 10). On R2 every ref shares one cache.
