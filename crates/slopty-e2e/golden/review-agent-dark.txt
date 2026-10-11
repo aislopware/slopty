@@ -5,6 +5,7 @@ Button │ Back
 Button │ Forward
 Button │ Navigator
 Button │ Search
+Button │ New goal
 Button │ New agent
 Heading │ To review
 Button │ Retry the refresh, Say that it retries three times with one key., Done

@@ -5,6 +5,7 @@ Button │ Back
 Button │ Forward
 Button │ Navigator
 Button │ Search
+Button │ New goal
 Button │ New agent
 Heading │ Ready to merge
 Button │ Mirror the merge queue, Ship the project board, Ready to merge
@@ -17,7 +18,7 @@ Button │ NOTES.md
 Button │ Close tile
 Button │ Ship the project board
 Button │ Fold
-Button │ Board, 1 needs you · 1 of 6 merged
+Button │ Board, 1 of 6 merged
 Image │ Needs you
 Button │ Orchestrator
 Image │ Claude Code

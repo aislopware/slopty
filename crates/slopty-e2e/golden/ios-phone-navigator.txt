@@ -11,6 +11,10 @@ MultilineTextInput │ Text of $SCRATCH/home/note-$MOMENT.md (focused)
 Status │ Markdown, Spaces: 4, Ln 1, Col 1
 Navigation │ Navigator
 TextInput │ Filter
+Button │ New goal
+Button │ New agent
+Group │ Notify me when an agent needs me
+Button │ Allow
 Button │ e2e-ios-worker
 Button │ Terminal
 Button │ Close tile

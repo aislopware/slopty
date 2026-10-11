@@ -16,6 +16,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker
 Group │ Do these steps in order with the named tools, then reply "done". 1) Read…

@@ -19,6 +19,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker, running
 Image │ Waiting

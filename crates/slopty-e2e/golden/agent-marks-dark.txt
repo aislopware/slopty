@@ -5,6 +5,7 @@ Button │ Back
 Button │ Forward
 Button │ Navigator
 Button │ Search
+Button │ New goal
 Button │ New agent
 Heading │ Needs you
 Button │ Claude Code, Wants to run a command, Needs you

@@ -14,6 +14,7 @@ Status │ 1 new
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker, 1 needs you
 Image │ Needs you

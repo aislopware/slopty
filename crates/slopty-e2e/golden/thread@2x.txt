@@ -5,6 +5,7 @@ Button │ Back
 Button │ Forward
 Button │ Navigator
 Button │ Search
+Button │ New goal
 Button │ New agent
 Heading │ Needs you
 Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Run touch refused.txt, Needs you

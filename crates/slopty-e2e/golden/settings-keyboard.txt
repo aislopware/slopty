@@ -12,6 +12,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker
 Group │ Settings
@@ -32,6 +33,8 @@ Button │ Back
 Heading │ Keyboard
 TabPanel │ Keyboard
 Heading │ General
+ListItem │ New goal… │ ⌘N
+Button │ Keys for New goal… │ ⌘N
 ListItem │ New agent │ ⌘T
 Button │ Keys for New agent │ ⌘T
 ListItem │ New terminal │ ⇧⌘T

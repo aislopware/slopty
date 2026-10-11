@@ -12,6 +12,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker
 Group │ Terminal
@@ -39,7 +40,7 @@ ListBoxOption │ New agent…
 ListBoxOption │ Split right with a terminal ⌘D
 ListBoxOption │ Split down with a terminal ⇧⌘D
 ListBoxOption │ Show or hide the tab's terminal ⌥⌘T
-ListBoxOption │ New goal…
+ListBoxOption │ New goal… ⌘N
 ListBoxOption │ New note ⇧⌘N
 ListBoxOption │ Add a window or display ⌘O
 ListBoxOption │ Open file… ⌘P

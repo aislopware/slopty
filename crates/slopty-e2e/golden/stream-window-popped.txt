@@ -12,6 +12,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-worker
 Group │ Synthetic editor
@@ -20,7 +21,6 @@ Tab │ Terminal
 Button │ Close tile
 Tab │ Synthetic editor
 Button │ Close tile
-Button │ Frames late
 Button │ Close tile
 Button │ Show its window
 Status │ In its own window
