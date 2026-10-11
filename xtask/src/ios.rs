@@ -130,6 +130,7 @@ impl Sdk {
 }
 
 pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
+    preflight(sh, matches!(cmd, IosCmd::Sim(_)))?;
     match cmd {
         IosCmd::Sim(opts) => {
             let app = build(sh, Sdk::Simulator, opts)?;
@@ -143,6 +144,29 @@ pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
                 run_device(sh, &app, opts)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// What building and running the app needs besides cargo, checked before anything compiles: a
+/// missing `xcodegen` failed a runner's iOS e2e after 30 minutes of build (run 38110033656).
+/// For the `simulator`, an iOS runtime at or above [`IOS_VERSION`] too.
+///
+/// # Errors
+///
+/// Naming what is missing and how to get it.
+pub fn preflight(sh: &Shell, simulator: bool) -> Result<()> {
+    if !crate::tools::has(sh, "xcodegen") {
+        bail!(
+            "xcodegen writes the app's Xcode project and is not on PATH: `brew install xcodegen` \
+             (CI installs the pinned release, check.yml)"
+        );
+    }
+    cmd!(sh, "xcodebuild -version").quiet().ignore_stdout().run().context(
+        "xcodebuild builds the app: is Xcode installed and selected (`xcode-select -p`)?",
+    )?;
+    if simulator {
+        sim_runtime(sh)?;
     }
     Ok(())
 }
