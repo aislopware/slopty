@@ -1191,11 +1191,12 @@ mod threads {
         elsewhere["session"] = "00000000-0000-4000-8000-000000000000".into();
         assert_eq!(post(&socket, &elsewhere).await, 404, "no such session here");
 
-        // What the model is writing: its answers, and the calls whose input still streams.
+        // What the model wrote: its answers, live or settled (an answer the transcript settles
+        // keeps its place and the id it was shown under), and the calls whose input still
+        // streams.
         let texts = |s: &ThreadState| -> Vec<String> {
             s.items
                 .iter()
-                .filter(|i| i.id.0.starts_with("live:"))
                 .filter_map(|i| match &i.body {
                     ItemBody::Text(text) => Some(text.text.clone()),
                     _ => None,
@@ -1213,7 +1214,6 @@ mod threads {
                 })
                 .collect()
         };
-        let live = |s: &ThreadState| texts(s).len() + streaming(s).len();
 
         // Written now, not when it was recorded: an entry stamped long before the follower saw
         // the block is an older one, so the stamps go.
@@ -1261,12 +1261,18 @@ mod threads {
         // Settled by the entries, well before the grace that clears a block nothing settles.
         let soon = slopty_agent::live::SETTLE_GRACE / 2;
         let written = append(before);
-        let answered = |s: &ThreadState| {
-            s.items
-                .iter()
-                .any(|i| !i.id.0.starts_with("live:") && matches!(i.body, ItemBody::Text(_)))
+        // The call's entry took its streaming input's place, and the answer's entry its live
+        // text's: once, where it stood.
+        let called = |s: &ThreadState| {
+            s.items.iter().any(
+                |i| matches!(&i.body, ItemBody::Tool(call) if call.state != ToolState::Streaming),
+            )
         };
-        a.until(|c| live(c.state()) == 0 && answered(c.state())).await;
+        a.until(|c| {
+            let s = c.state();
+            streaming(s).is_empty() && called(s) && texts(s) == ["Let me run it."]
+        })
+        .await;
         assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
 
         // The second step streams, and settles when the transcript has the rest.
@@ -1278,16 +1284,20 @@ mod threads {
             assert_eq!(post(&socket, batch).await, 204);
         }
         let written = append(after);
-        a.until(|c| live(c.state()) == 0).await;
+        let both = ["Let me run it.", "Done: the command said hi."];
+        a.until(|c| streaming(c.state()).is_empty() && texts(c.state()) == both).await;
         assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
         let whole = entries(&main);
-        // Every entry the transcript has, and nothing the mod wrote beside them.
+        // Every entry the transcript has, and nothing the mod wrote beside them: an answer
+        // shown live keeps the id it was shown under.
         let settled = |c: &Client| {
-            let mut now = ids(c.state());
-            let mut want = whole.clone();
-            now.sort();
-            want.sort();
-            now == want
+            let s = c.state();
+            s.items.len() == whole.len()
+                && s.items.iter().all(|i| {
+                    whole.contains(&i.id.0)
+                        || (i.id.0.starts_with("live:")
+                            && matches!(i.body, ItemBody::Text(_) | ItemBody::Reasoning(_)))
+                })
         };
         a.until(settled).await;
         a.until(|c| c.state().meters.context_window.is_some()).await;

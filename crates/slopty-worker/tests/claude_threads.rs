@@ -20,7 +20,7 @@ mod claude_threads {
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
     use slopty_proto::terminal::{SessionState, SessionSummary};
-    use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState};
+    use slopty_proto::thread::{Cap, ItemBody, Phase, ThreadId, ThreadState, ToolState};
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
     use slopty_worker::thread::Host;
@@ -436,8 +436,30 @@ mod claude_threads {
         assert!(matches!(state.items[0].body, ItemBody::User(_)), "{:?}", state.items);
         std::fs::write(&rig.main, records.concat()).unwrap();
         rig.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
-        let state = until(&host, thread, |s| live(s) == 0 && !s.items.is_empty()).await;
-        assert!(state.items.iter().all(|i| !i.id.0.starts_with("live:")));
+        // Settled: no call's input streams, and each answer is there once, where it was shown,
+        // under the id it was shown as.
+        let once = |s: &ThreadState, text: &str| {
+            s.items
+                .iter()
+                .filter(|i| matches!(&i.body, ItemBody::Text(t) if t.text == text))
+                .count()
+                == 1
+        };
+        let streaming = |s: &ThreadState| {
+            s.items.iter().any(
+                |i| matches!(&i.body, ItemBody::Tool(call) if call.state == ToolState::Streaming),
+            )
+        };
+        let settled = |s: &ThreadState| {
+            !streaming(s)
+                && s.items.iter().any(|i| matches!(i.body, ItemBody::Tool(_)))
+                && once(s, "Let me run it.")
+                && once(s, "Done: the command said hi.")
+        };
+        let state = until(&host, thread, settled).await;
+        let live: Vec<&ItemBody> =
+            state.items.iter().filter(|i| i.id.0.starts_with("live:")).map(|i| &i.body).collect();
+        assert!(live.iter().all(|b| matches!(b, ItemBody::Text(_))), "{live:?}");
     }
 
     /// A Claude Code started by hand, idle at its prompt with no session id yet, has a thread

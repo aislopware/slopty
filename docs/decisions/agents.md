@@ -2010,7 +2010,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `settle_by`, which says which entry settled each block), so it replaces the item where
     it stands and every later change to the entry goes to that item. No wire change: a tool
     call's block already had the call's own id. A thread read anew from the transcript gives
-    its items their entries' ids again, as it begins the thread over. Test:
+    its items their entries' ids again, as it begins the thread over. So a thread item's id
+    is its transcript entry's id only once the thread is read anew, and no client request
+    carries a thread `ItemId` (forks and `Seen` name turns, an expand a `ContentRef`). Test:
     `a_settled_live_text_keeps_its_place_before_a_later_call` (it fails without the change,
     the text after the call); the test below now compares items with the transcript alone but
     for those ids.
