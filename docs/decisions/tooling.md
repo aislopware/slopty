@@ -1503,6 +1503,14 @@ more full-window layer.
     run sets it only when the group runs apart, so a local gate's single run still codes. A
     session-making test outside the group now fails in seconds, naming the call, instead of
     one run in ten hanging (`docs/decisions/video.md`, the 1020th-client entry).
-  - **Next.** A watchdog that ends nextest once every remaining test is stuck exiting (fix 2).
+  - **And a run stuck exiting ends** (2026-10-11, fix 2). CI's main nextest run gets a
+    process group of its own. Every 30 s the watchdog looks at nextest's children, each a test
+    binary. Once every one of them has been in `E` (trying to exit) for four looks in a row,
+    it prints the `::error` line naming them, then each one's kernel stack (`sudo -n spindump`,
+    capped at 20 s, falling back to `sample`), and kills the group. The step fails as "tests
+    stuck exiting in the kernel" two to three minutes after the stick, not at the job's 45-minute
+    cancel. Daemons a test started are not counted, since they can outlive a stuck test. Tests:
+    `watchdog::tests::{a_run_whose_every_test_is_stuck_exiting_is_found,
+    the_run_is_ended_only_after_its_looks_stuck_in_a_row}` (`xtask`).
   - **Kept if** 25 worker jobs in a row finish without a cancel, with at least two of them
     wedged runs ending "⚠ videotoolbox … the runner's encoder stopped" and then "✓ nextest".

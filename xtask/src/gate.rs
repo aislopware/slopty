@@ -1172,16 +1172,41 @@ const NEXTEST_HANG_AFTER: Duration = Duration::from_mins(15);
 /// The tests lane's nextest run. On a runner it prints as it goes, so the profile's SLOW and
 /// TERMINATING lines are in the log while it runs, and the watchdog names what a run that
 /// outlives [`NEXTEST_HANG_AFTER`] waits on: a hung run once ended with the job's cancel and
-/// not a line about the test (run 37173900555). Here its output comes as one block.
+/// not a line about the test (run 37173900555). It runs in a process group of its own, which
+/// the watchdog kills once every test left is stuck exiting in the kernel, where no signal ends
+/// it (`.research/ci-vt-hang-2026-10-11.md`): the step fails in minutes, naming them, and not
+/// at the job's 45-minute cancel. Here its output comes as one block.
 fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
     if profile != NEXTEST_CI_PROFILE {
         return quiet_step("nextest", command);
     }
-    let watchdog =
-        crate::watchdog::Watchdog::start("nextest", std::process::id(), NEXTEST_HANG_AFTER);
-    let result = crate::tools::step("nextest", &command);
-    watchdog.finish();
-    result
+    println!("▶ nextest");
+    let started = Instant::now();
+    let mut command = std::process::Command::from(command);
+    command.process_group(0);
+    let mut child = command.spawn().context("start nextest")?;
+    let watchdog = crate::watchdog::Watchdog::start(
+        "nextest",
+        std::process::id(),
+        NEXTEST_HANG_AFTER,
+        Some(child.id()),
+    );
+    let status = child.wait();
+    let ended = watchdog.finish();
+    let took = started.elapsed();
+    if let Some(stuck) = ended {
+        println!("  ✘ nextest ({took:.1?}): ended, every test left stuck exiting");
+        anyhow::bail!(
+            "step failed: nextest: tests stuck exiting in the kernel ({})",
+            stuck.join(", ")
+        );
+    }
+    let passed = status.as_ref().is_ok_and(std::process::ExitStatus::success);
+    println!("  {} nextest ({took:.1?})", if passed { "✓" } else { "✘" });
+    anyhow::ensure!(passed, "step failed: nextest ({status:?})");
+    Ok(())
 }
 
 /// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`] and

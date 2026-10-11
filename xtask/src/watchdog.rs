@@ -8,6 +8,13 @@
 //! in the kernel can no longer be sampled), and past [`Watchdog::start`]'s bound it prints every
 //! process under the run with its state and age, sampling each leaf, then again every [`AGAIN`]
 //! until the run ends.
+//!
+//! A run handed a process group to end ([`Watchdog::start`]'s `end`) is ended when every test
+//! under it has been stuck exiting ([`STUCK_POLLS`] looks in a row): a process that opened
+//! VideoToolbox on a virtual Mac whose codec wedged cannot finish its exit, no signal ends it,
+//! and once such processes hold every test slot nextest waits for the job's cancel
+//! (`.research/ci-vt-hang-2026-10-11.md`). The run's tests are named and their kernel stacks
+//! printed first, and the run fails in minutes instead.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -28,6 +35,16 @@ const EARLY: Duration = Duration::from_secs(150);
 /// How many leaves are sampled per report: the stuck ones are among a few at most.
 const SAMPLED: usize = 6;
 
+/// How many looks in a row find every test stuck exiting before the run is ended: two minutes
+/// at [`POLL`], past any exit that only takes long. Nextest's own kill (180 s on CI) has then
+/// already failed to end them, or none of them is a test it still times.
+const STUCK_POLLS: u32 = 4;
+
+/// How long a kernel stack may take to read before the watchdog goes on without it, so the
+/// watchdog never becomes the hang itself.
+#[cfg(target_os = "macos")]
+const STACK_CAP: Duration = Duration::from_secs(20);
+
 /// How many lines of each sample's call graph are kept.
 #[cfg(target_os = "macos")]
 const SAMPLE_LINES: usize = 60;
@@ -36,37 +53,116 @@ const SAMPLE_LINES: usize = 60;
 #[derive(Debug)]
 pub struct Watchdog {
     stop: mpsc::Sender<()>,
-    thread: std::thread::JoinHandle<()>,
+    /// The tests the run was ended for, when it was.
+    thread: std::thread::JoinHandle<Option<Vec<String>>>,
 }
 
 impl Watchdog {
     /// Watch the processes under `root` (a pid), reporting on them once the run named `title`
-    /// has gone on for `after`.
-    pub fn start(title: &str, root: u32, after: Duration) -> Self {
+    /// has gone on for `after`. With `end`, the run's process group, the run is killed once
+    /// every test under it is stuck exiting ([`STUCK_POLLS`]).
+    pub fn start(title: &str, root: u32, after: Duration, end: Option<u32>) -> Self {
         let (stop, stopped) = mpsc::channel();
         let title = title.to_owned();
         let thread = std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let mut next = after;
             let mut sampled = HashSet::new();
+            let mut stuck = Stuck::default();
             while stopped.recv_timeout(POLL) == Err(mpsc::RecvTimeoutError::Timeout) {
                 let Some(procs) = listed() else { continue };
                 let under = descendants(&procs, root);
                 print!("{}", early(&under, &mut sampled));
+                if let Some(group) = end {
+                    let exiting = stuck_exiting(&under);
+                    if stuck.look(exiting.is_some())
+                        && let Some(tests) = exiting
+                    {
+                        let names: Vec<String> = tests.iter().map(|t| named(&t.command)).collect();
+                        print!("{}", ending(&title, &tests, &names));
+                        let _killed = Command::new("/bin/kill")
+                            .args(["-KILL", "--", &format!("-{group}")])
+                            .status();
+                        return Some(names);
+                    }
+                }
                 if started.elapsed() >= next {
                     print!("{}", report(&title, &under, next));
                     next = next.saturating_add(AGAIN);
                 }
             }
+            None
         });
         Self { stop, thread }
     }
 
-    /// Stop watching.
-    pub fn finish(self) {
+    /// Stop watching: the tests the run was ended for, when it was.
+    #[must_use]
+    pub fn finish(self) -> Option<Vec<String>> {
         let _sent = self.stop.send(());
-        let _joined = self.thread.join();
+        self.thread.join().ok().flatten()
     }
+}
+
+/// How many looks in a row found every test stuck exiting.
+#[derive(Debug, Default)]
+struct Stuck {
+    looks: u32,
+}
+
+impl Stuck {
+    /// Count a look that found every test stuck exiting (`all`), or none that did: whether the
+    /// run has now been stuck for [`STUCK_POLLS`] looks in a row.
+    const fn look(&mut self, all: bool) -> bool {
+        self.looks = if all { self.looks.saturating_add(1) } else { 0 };
+        self.looks >= STUCK_POLLS
+    }
+}
+
+/// The run's tests, when there is one and every one is stuck exiting (`E` in `ps`): the
+/// children of nextest, each a test binary (the runner execs it). What a test started is left
+/// out: a daemon can live on while the test that started it is stuck.
+fn stuck_exiting(under: &[Proc]) -> Option<Vec<&Proc>> {
+    let nextest: HashSet<u32> = under
+        .iter()
+        .filter(|proc| proc.command.contains("cargo-nextest"))
+        .map(|proc| proc.pid)
+        .collect();
+    let tests: Vec<&Proc> = under
+        .iter()
+        .filter(|proc| nextest.contains(&proc.ppid) && !nextest.contains(&proc.pid))
+        .collect();
+    let all = !tests.is_empty() && tests.iter().all(|test| test.stat.contains('E'));
+    all.then_some(tests)
+}
+
+/// A test process's name, from its command line: the test binary's file name and the test
+/// nextest asked it to run.
+fn named(command: &str) -> String {
+    let mut words = command.split_whitespace();
+    let binary = words.next().unwrap_or_default();
+    let binary = binary.rsplit('/').next().unwrap_or(binary);
+    match words.find(|word| !word.starts_with('-')) {
+        Some(test) => format!("{binary} {test}"),
+        None => binary.to_owned(),
+    }
+}
+
+/// What is said as the run is ended: the error line first, so CI keeps it whatever the
+/// teardown does, then each test's kernel stack.
+fn ending(title: &str, tests: &[&Proc], names: &[String]) -> String {
+    let mut text = format!(
+        "\n::error title={title}::tests stuck exiting in the kernel: {}\n⏱ {title}: every test \
+         has been stuck exiting for {} s, so the run is ended\n",
+        names.join(", "),
+        POLL.as_secs().saturating_mul(u64::from(STUCK_POLLS)),
+    );
+    for (test, name) in tests.iter().zip(names) {
+        let _written = writeln!(text, "  {} {} {} {name}", test.pid, test.stat, test.etime);
+        text.push_str(&sample(test));
+    }
+    text.push_str(&host());
+    text
 }
 
 /// A process as `ps` lists it.
@@ -179,9 +275,15 @@ fn leaves(under: &[Proc]) -> Vec<&Proc> {
         .collect()
 }
 
-/// What `leaf` is doing: on macOS, the head of a one-second `sample` call graph.
+/// What `leaf` is doing: on macOS, the head of a one-second `sample` call graph; for one stuck
+/// exiting, which `sample` cannot read, its kernel stack where it can be read.
 #[cfg(target_os = "macos")]
 fn sample(leaf: &Proc) -> String {
+    if leaf.stat.contains('E')
+        && let Some(stack) = kernel_stack(leaf.pid)
+    {
+        return stack;
+    }
     let file = std::env::temp_dir().join(format!("xtask-watchdog-{}.txt", leaf.pid));
     let ran = Command::new("sample")
         .args([&leaf.pid.to_string(), "1", "-mayDie", "-file"])
@@ -199,6 +301,42 @@ fn sample(leaf: &Proc) -> String {
     }
     let _removed = std::fs::remove_file(&file);
     text
+}
+
+/// The head of `pid`'s stacks, kernel frames included, as `spindump` reads them: it needs root,
+/// which a hosted runner grants without a password (`sudo -n`), so here it is `None` and the
+/// caller samples as before. A read past [`STACK_CAP`] is gone on from, left to finish alone.
+#[cfg(target_os = "macos")]
+fn kernel_stack(pid: u32) -> Option<String> {
+    let mut command = Command::new("sudo");
+    command
+        .args(["-n", "spindump", &pid.to_string(), "1", "-onlyTarget", "-stdout"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let child = command.spawn().ok()?;
+    let (done, read) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _sent = done.send(child.wait_with_output());
+    });
+    let output = match read.recv_timeout(STACK_CAP) {
+        Ok(Ok(output)) if output.status.success() => output,
+        Ok(_) => return None,
+        Err(_) => {
+            return Some(format!(
+                "  ── spindump of {pid} took over {} s; gone on without it\n",
+                STACK_CAP.as_secs()
+            ));
+        }
+    };
+    let report = String::from_utf8_lossy(&output.stdout);
+    let mut text = format!("  ── kernel stack of {pid} (spindump)\n");
+    // From the first thread's stack, or the whole report should its layout ever change.
+    let threads = report.lines().position(|line| line.trim_start().starts_with("Thread "));
+    for line in report.lines().skip(threads.unwrap_or(0)).take(SAMPLE_LINES) {
+        let _written = writeln!(text, "    {line}");
+    }
+    Some(text)
 }
 
 /// What the machine says of its video encoder. On a virtual Mac, each process that opened
@@ -285,7 +423,9 @@ fn sample(leaf: &Proc) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Proc, descendants, early, leaves, parse, seconds};
+    use super::{
+        Proc, STUCK_POLLS, Stuck, descendants, early, leaves, named, parse, seconds, stuck_exiting,
+    };
 
     fn proc(pid: u32, ppid: u32, command: &str) -> Proc {
         Proc {
@@ -337,6 +477,42 @@ mod tests {
         assert!(!first.contains("⏱ 11 "), "{first}");
         assert!(!first.contains("⏱ 13 "), "{first}");
         assert!(early(&under, &mut sampled).is_empty(), "sampled once");
+    }
+
+    /// The run's tests are found stuck only when there is one and every one is exiting; what a
+    /// test started does not count, and each is named by its binary and its test.
+    #[test]
+    fn a_run_whose_every_test_is_stuck_exiting_is_found() {
+        let exiting =
+            |pid, ppid, command: &str| Proc { stat: "UE".to_owned(), ..proc(pid, ppid, command) };
+        let nextest =
+            proc(11, 10, "/Users/runner/.cargo/bin/cargo-nextest nextest run --profile ci");
+        let a = exiting(12, 11, "/t/ci/run/domain-1f tests::a_drop_lands --exact --nocapture");
+        let b = exiting(13, 11, "/t/ci/run/threads-2e tests::an_ask_waits --exact --nocapture");
+        let daemon = proc(14, 12, "slopty-workerd --data-dir /tmp/x");
+        let under = vec![proc(10, 1, "xtask gate"), nextest.clone(), a.clone(), b, daemon];
+        let stuck = stuck_exiting(&under).expect("every test exiting");
+        let names: Vec<String> = stuck.iter().map(|t| named(&t.command)).collect();
+        assert_eq!(names, ["domain-1f tests::a_drop_lands", "threads-2e tests::an_ask_waits"]);
+
+        let running = proc(15, 11, "/t/ci/run/media-3d tests::paced --exact");
+        assert!(stuck_exiting(&[nextest.clone(), a, running]).is_none(), "one still runs");
+        assert!(stuck_exiting(&[nextest]).is_none(), "no test at all");
+    }
+
+    /// The run is ended only once every test has been stuck exiting for [`STUCK_POLLS`] looks in
+    /// a row: a look that finds one moving starts the count again.
+    #[test]
+    fn the_run_is_ended_only_after_its_looks_stuck_in_a_row() {
+        let mut stuck = Stuck::default();
+        for _ in 1..STUCK_POLLS {
+            assert!(!stuck.look(true));
+        }
+        assert!(!stuck.look(false), "one moved");
+        for _ in 1..STUCK_POLLS {
+            assert!(!stuck.look(true));
+        }
+        assert!(stuck.look(true), "stuck for every look in a row");
     }
 
     /// Only the run's own tree is reported, and its leaves are where it waits.

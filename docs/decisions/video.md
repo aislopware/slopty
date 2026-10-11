@@ -2798,6 +2798,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - Not proven: why that one test wedges the guest's codec. A second session in another
       process at the same moment may be part of it; the group now runs one at a time on CI to
       find out (`docs/decisions/tooling.md`).
+    - A wedge that still catches a run's tests in their exit now fails that run in minutes:
+      the watchdog ends nextest once every test left is stuck exiting
+      (`docs/decisions/tooling.md`, "And a run stuck exiting ends").
     - Test: `switch_tests::a_process_switched_off_has_its_sessions_refused` (`slopty-codec`).
   - Not taken: fewer VideoToolbox tests side by side. The limit is in processes, not in
     sessions at once, so it would only slow the shard.

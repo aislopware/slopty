@@ -418,8 +418,9 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         }
         println!("▶ {title}");
         let started = std::time::Instant::now();
-        let watchdog = on_ci()
-            .then(|| crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER));
+        let watchdog = on_ci().then(|| {
+            crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER, None)
+        });
         let ran = if suite.codes && cfg!(target_os = "macos") {
             coding_step(sh, command)
         } else {
@@ -431,7 +432,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             )
         };
         if let Some(watchdog) = watchdog {
-            watchdog.finish();
+            // Given no group to end, it ends nothing.
+            let _ended = watchdog.finish();
         }
         let outcome = match ran {
             Ran::Exited(Some(0)) | Ran::Excused => {
