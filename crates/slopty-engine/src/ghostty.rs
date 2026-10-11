@@ -14,6 +14,7 @@ use libghostty_vt::screen::{
     Cell as VtCell, CellContentTag, CellFields, CellLayout, CellSemanticContent, GridRef,
     RowSemanticPrompt, Screen as VtScreen, TrackedGridRef,
 };
+use libghostty_vt::selection::Selection;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
     ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
@@ -135,6 +136,11 @@ pub struct GhosttyEngine {
     generation: u64,
     /// The `generation` `primary_snapshot` was taken at.
     primary_at: u64,
+    /// The most bytes a checkpoint may take ([`Self::limit_checkpoints`]).
+    checkpoint_max: usize,
+    /// The history rows the last cut checkpoint kept, where the next one starts guessing
+    /// rather than format the whole history first; `None` while the whole fits.
+    last_kept: std::cell::Cell<Option<u64>>,
     /// Search's text of the rows that scrolled into history, and the last needle's hits.
     history: search::History,
     /// A write since the last colour check carried an OSC or a reset, and the next write
@@ -494,6 +500,8 @@ impl GhosttyEngine {
             primary_snapshot: None,
             generation: 0,
             primary_at: u64::MAX,
+            checkpoint_max: usize::MAX,
+            last_kept: std::cell::Cell::new(None),
             history: search::History::default(),
             colours_touched: false,
             alt_prefix: Vec::new(),
@@ -559,7 +567,9 @@ impl GhosttyEngine {
     /// followed by the alternate screen; a program that leaves the alternate screen after the
     /// replay finds its primary where it was.
     ///
-    /// The bytes are appended to `out`.
+    /// The bytes are appended to `out`. A screen whose bytes would go past the limit
+    /// ([`Self::limit_checkpoints`]) keeps its newest history, as much as fits, and loses its
+    /// oldest.
     ///
     /// # Errors
     ///
@@ -568,6 +578,22 @@ impl GhosttyEngine {
         self.screens(out)?;
         self.session_tail(out);
         Ok(())
+    }
+
+    /// Keep each checkpoint within about `max_bytes`: a primary screen whose history would take
+    /// more is formatted with its newest rows only, as many as fit in seven eighths of the
+    /// limit, the rest left for an alternate screen and the session's state. With no limit set,
+    /// a checkpoint holds the whole history.
+    pub fn limit_checkpoints(&mut self, max_bytes: usize) {
+        if self.checkpoint_max == max_bytes {
+            return;
+        }
+        self.checkpoint_max = max_bytes;
+        self.last_kept.set(None);
+        // On the alternate screen the snapshot is the only copy of the primary there is.
+        if !self.on_alt {
+            self.primary_snapshot = None;
+        }
     }
 
     /// The program's state no screen holds, which the session tells every viewer: the title,
@@ -670,6 +696,70 @@ impl GhosttyEngine {
     /// `DECSC` saved. Then come the content the cursor writes with, and the marks the engine
     /// keeps (see [`carried`]).
     fn format_active_screen(&self) -> Result<Vec<u8>, EngineError> {
+        let budget = self.screen_budget();
+        let history = self.term.scrollback_rows()? as u64;
+        // A history cut last time is past the limit still, unless it shrank (a clear) below
+        // what was kept: start from what was kept then, one format in the usual case.
+        if let Some(kept) = self.last_kept.get().filter(|&kept| kept < history) {
+            let blob = self.format_rows_from(history.saturating_sub(kept))?;
+            if blob.len() <= budget {
+                // Far under, the rows have thinned: the next one measures the whole again.
+                if blob.len() < budget.checked_div(2).unwrap_or(0) {
+                    self.last_kept.set(None);
+                }
+                return Ok(blob);
+            }
+            return self.format_within(budget, (kept, blob.len()));
+        }
+        let whole = self.format_rows_from(0)?;
+        if whole.len() <= budget {
+            self.last_kept.set(None);
+            return Ok(whole);
+        }
+        self.format_within(budget, (history, whole.len()))
+    }
+
+    /// The most bytes one screen's format may take: the limit less its
+    /// [`CHECKPOINT_RESERVE`] part.
+    fn screen_budget(&self) -> usize {
+        let reserve = self.checkpoint_max.checked_div(CHECKPOINT_RESERVE).unwrap_or(0);
+        self.checkpoint_max.saturating_sub(reserve)
+    }
+
+    /// The active screen with its newest history rows only, as many as fit in `budget` bytes,
+    /// given that `rows` of them took `took` bytes. The rows kept are guessed from the bytes a
+    /// row took, a tenth under, and each format that still does not fit guesses again from its
+    /// own size, so it takes one format more, rarely two. With no history left the screen goes
+    /// as it is.
+    fn format_within(
+        &self,
+        budget: usize,
+        (rows, took): (u64, usize),
+    ) -> Result<Vec<u8>, EngineError> {
+        let history = self.term.scrollback_rows()? as u64;
+        let mut keep = fitting(rows, budget, took);
+        loop {
+            let started = std::time::Instant::now();
+            let blob = self.format_rows_from(history.saturating_sub(keep))?;
+            tracing::debug!(
+                kept = keep,
+                of = history,
+                bytes = blob.len(),
+                budget,
+                format_us = started.elapsed().as_micros(),
+                "history cut to fit a checkpoint"
+            );
+            if blob.len() <= budget || keep == 0 {
+                self.last_kept.set(Some(keep));
+                return Ok(blob);
+            }
+            keep = fitting(keep, budget, blob.len()).min(keep.saturating_sub(1));
+        }
+    }
+
+    /// The active screen as [`Self::format_active_screen`] says, from screen row `first` (the
+    /// oldest is 0): the rows above it, and the marks only they held, are left out.
+    fn format_rows_from(&self, first: u64) -> Result<Vec<u8>, EngineError> {
         let options = FormatterOptions::new()
             .with_format(Format::Vt)
             .with_unwrap(true)
@@ -696,19 +786,52 @@ impl GhosttyEngine {
             // Every row's prompt flag and every cell's semantic content (OSC 133); the marks
             // the engine keeps of them follow in the payload.
             .with_semantic_prompt(true);
-        let mut formatter = Formatter::new(&self.term, options)?;
-        let bytes = formatter.format_alloc(None)?;
-        let mut out = colour_sets(&self.overrides);
-        out.reserve(bytes.len().saturating_add(128));
-        out.extend_from_slice(&bytes);
-        out.extend_from_slice(self.cursor_content()?);
-        let marks = carried::Payload {
-            base: self.base,
-            exit_marks: &self.exit_marks,
-            prompt_starts: &self.prompt_starts,
-            commands: &self.commands,
+        // From the first kept row to the last cell of the screen, inclusive. The cursor is
+        // written by its place on the active screen, which the replay's last rows are.
+        let selection = if first == 0 {
+            None
+        } else {
+            let last = self.total_rows()?.saturating_sub(1);
+            let row = |y: u64| u32::try_from(y).unwrap_or(u32::MAX);
+            let start =
+                self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y: row(first) }))?;
+            let right = self.term.cols()?.saturating_sub(1);
+            let end =
+                self.term.grid_ref(Point::Screen(PointCoordinate { x: right, y: row(last) }))?;
+            Some(Selection::new(start, end, false))
         };
-        out.extend_from_slice(marks.to_string().as_bytes());
+        let options = match &selection {
+            Some(selection) => options.with_selection(selection),
+            None => options,
+        };
+        let mut out = colour_sets(&self.overrides);
+        Formatter::new(&self.term, options)?.format_vec(&mut out)?;
+        out.extend_from_slice(self.cursor_content()?);
+        let base = self.base.saturating_add(first);
+        if first == 0 {
+            let marks = carried::Payload {
+                base,
+                exit_marks: &self.exit_marks,
+                prompt_starts: &self.prompt_starts,
+                commands: &self.commands,
+            };
+            out.extend_from_slice(marks.to_string().as_bytes());
+        } else {
+            // A block that ended above the first row went with its rows; one still open, or
+            // ended below, keeps its place, its prompt on the oldest row when that was cut.
+            let exit_marks = self.exit_marks.range(base..).map(|(&l, &e)| (l, e)).collect();
+            let prompt_starts = self.prompt_starts.range(base..).copied().collect();
+            let commands =
+                self.commands.iter().filter(|b| b.end.is_none_or(|e| e.line >= base)).copied();
+            let commands = commands.collect();
+            let marks = carried::Payload {
+                base,
+                exit_marks: &exit_marks,
+                prompt_starts: &prompt_starts,
+                commands: &commands,
+            };
+            out.extend_from_slice(marks.to_string().as_bytes());
+        }
         Ok(out)
     }
 
@@ -2488,6 +2611,19 @@ fn set_colors(term: &mut Terminal<'_, '_>, colors: &TermColors) -> Result<(), En
     }
     term.set_default_color_palette(Some(palette))?;
     Ok(())
+}
+
+/// The part of a checkpoint's limit one screen's format leaves, as its divisor (an eighth):
+/// room for an alternate screen on top of it (no history, so a screen's worth at most) and the
+/// session's state after both.
+const CHECKPOINT_RESERVE: usize = 8;
+
+/// How many of `rows` fit in `budget` bytes when all of them took `took`, a tenth under so one
+/// format more is enough.
+fn fitting(rows: u64, budget: usize, took: usize) -> u64 {
+    let wanted = u128::from(rows).saturating_mul(budget as u128).saturating_mul(9);
+    let scaled = wanted.checked_div((took.max(1) as u128).saturating_mul(10)).unwrap_or(0);
+    u64::try_from(scaled).unwrap_or(rows).min(rows)
 }
 
 /// The program's colour changes as the sequences that made them (OSC 10/11/12, OSC 4), so a
@@ -5828,6 +5964,150 @@ mod checkpoint_tests {
             let _pixels = e.drain_images();
         }
         changed.report().unwrap();
+    }
+
+    /// A history past a checkpoint's limit goes with its newest rows, as many as fit, and its
+    /// oldest go: the replay has the screen, the cursor and the newest history as they were,
+    /// and the command blocks still on them. Under the limit nothing is cut.
+    #[test]
+    fn a_checkpoint_past_its_limit_keeps_the_screen_and_the_newest_history() {
+        let mut a = engine(40, 5, 10_000);
+        command(&mut a, "make", "old output\r\n", Some(2));
+        for i in 0..2_000 {
+            a.write(
+                format!("\x1b[3{}mline {i:05}\x1b[0m and some more words\r\n", i % 8).as_bytes(),
+            );
+        }
+        command(&mut a, "false", "no\r\n", Some(1));
+        a.write(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls");
+        let whole = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
+        // Well within the limit, past the share a screen may take of it.
+        a.limit_checkpoints(whole.len() * 2);
+        let mut same = Vec::new();
+        a.checkpoint(&mut same).unwrap();
+        assert!(same == whole, "within its limit a checkpoint is whole");
+
+        let limit = whole.len() / 4;
+        a.limit_checkpoints(limit);
+        let mut cut = Vec::new();
+        a.checkpoint(&mut cut).unwrap();
+        assert!(cut.len() <= limit, "{} bytes past the limit of {limit}", cut.len());
+        let mut b = engine(40, 5, 10_000);
+        b.write(&cut);
+
+        let (all_a, all_b) = (all_text(&a), all_text(&b));
+        assert!(all_b.len() < all_a.len(), "the oldest rows went");
+        assert!(all_a.ends_with(&all_b), "the newest rows, as they were");
+        // A tenth under the guess, and the screen's share: well over half of what fits stays.
+        let fits = all_a.len() / 4;
+        assert!(all_b.len() > fits / 2, "{} rows kept of {} that fit", all_b.len(), fits);
+        assert_eq!(screen_lines(&mut b), screen_lines(&mut a), "the screen whole");
+        let (fa, fb) = (a.full_frame(0).unwrap(), b.full_frame(0).unwrap());
+        assert_eq!((fb.cursor.row, fb.cursor.col), (fa.cursor.row, fa.cursor.col));
+        // Blocks counted back from the newest line: the ones kept are where they were.
+        let from_end = |e: &GhosttyEngine| {
+            let total = e.total_lines().unwrap();
+            blocks(e).into_iter().map(|(p, _, done, exit)| (total - p, done, exit)).collect()
+        };
+        let (blocks_a, blocks_b): (Vec<_>, Vec<_>) = (from_end(&a), from_end(&b));
+        assert_eq!(blocks_b, blocks_a[blocks_a.len() - blocks_b.len()..], "{blocks_b:?}");
+        assert_eq!(blocks_b.first().map(|b| b.2), Some(Some(1)), "the newest ended command kept");
+    }
+
+    /// On the alternate screen the primary under it is cut as it would be on its own, and the
+    /// alternate screen goes whole.
+    #[test]
+    fn a_checkpoint_past_its_limit_on_the_alternate_screen_cuts_the_primary() {
+        let mut a = engine(40, 5, 10_000);
+        for i in 0..2_000 {
+            a.write(format!("line {i:05} with some words after it\r\n").as_bytes());
+        }
+        let whole = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
+        a.limit_checkpoints(whole.len() / 4);
+        a.write(b"\x1b[?1049h\x1b[H~ editor");
+        let mut cut = Vec::new();
+        a.checkpoint(&mut cut).unwrap();
+        assert!(cut.len() <= whole.len() / 4, "{} bytes", cut.len());
+        let mut b = engine(40, 5, 10_000);
+        b.write(&cut);
+        assert_eq!(screen_lines(&mut b), screen_lines(&mut a), "the alternate screen whole");
+        for e in [&mut a, &mut b] {
+            e.write(b"\x1b[?1049l");
+        }
+        let (all_a, all_b) = (all_text(&a), all_text(&b));
+        assert!(all_b.len() < all_a.len() && all_a.ends_with(&all_b), "the primary's newest");
+    }
+
+    /// What a checkpoint of a wide, coloured history past ptyd's limit costs: the whole one the
+    /// worker had to skip, against the one cut to fit (recorded in MEASUREMENTS). 200x50 with
+    /// the worker's 50 000 lines, every word in a colour of its own. `cargo xtask bench
+    /// --filter checkpoint_cut_cost` runs it.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn checkpoint_cut_cost() {
+        use std::fmt::Write as _;
+        // ptyd's limit as `slopty_pty::protocol::MAX_CHECKPOINT_BYTES` has it: a 16 MiB frame
+        // less a 4 MiB backlog and 4 KiB of envelope.
+        const PTYD_LIMIT: usize = (12 << 20) - (4 << 10);
+        let mut e = engine(200, 50, 50_000);
+        for i in 0..50_050_u32 {
+            let mut line = String::new();
+            for word in 0..20 {
+                let colour = (i + word) % 256;
+                write!(line, "\x1b[38;5;{colour}m{i:09} ").unwrap();
+            }
+            line.push_str("\x1b[0m\r\n");
+            e.write(line.as_bytes());
+        }
+        let bench = Bench::new("engine.checkpoint_cut_cost");
+        let mut whole = bench.series("format_whole");
+        let all = whole.time(|| {
+            let mut v = Vec::new();
+            e.checkpoint(&mut v).unwrap();
+            v
+        });
+        e.limit_checkpoints(PTYD_LIMIT);
+        let mut cut = bench.series("format_cut_to_fit");
+        let fitted = cut.time(|| {
+            let mut v = Vec::new();
+            e.checkpoint(&mut v).unwrap();
+            v
+        });
+        e.write(b"one more line\r\n");
+        let mut again = bench.series("format_cut_again");
+        let next = again.time(|| {
+            let mut v = Vec::new();
+            e.checkpoint(&mut v).unwrap();
+            v
+        });
+        assert!(next.len() <= PTYD_LIMIT);
+        let mut replay = bench.series("replay_cut");
+        let b = replay.time(|| {
+            let mut b = engine(200, 50, 50_000);
+            for chunk in fitted.chunks(65_536) {
+                b.write(chunk);
+            }
+            b
+        });
+        assert!(fitted.len() <= PTYD_LIMIT);
+        let kept = b.total_lines().unwrap();
+        eprintln!(
+            "checkpoint_cut_cost: {} lines; whole {} bytes; cut {} bytes keeping {kept} lines",
+            e.total_lines().unwrap(),
+            all.len(),
+            fitted.len()
+        );
+        for series in [whole, cut, again, replay] {
+            series.report().unwrap();
+        }
     }
 
     /// How long a checkpoint takes and how big it is at 80x24 with 10 000 lines of history,

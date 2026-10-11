@@ -1044,8 +1044,9 @@ const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
 const COMPRESS_AFTER: Duration = Duration::from_secs(2);
 /// Between two steps, for whatever else the actor has to do.
 const COMPRESS_STEP_GAP: Duration = Duration::from_millis(1);
-/// Larger states are not sent: ptyd hands the state and its ring over in one frame, and a
-/// state this size means a history far past any configured scrollback.
+/// Larger states are not sent: ptyd hands the state and its ring over in one frame. The engine
+/// keeps a checkpoint within it by leaving out the oldest history
+/// (`GhosttyEngine::limit_checkpoints`), so only an alternate screen past a frame is left out.
 const CHECKPOINT_MAX_BYTES: usize = slopty_pty::protocol::MAX_CHECKPOINT_BYTES;
 
 /// The repository `cwd` is in and the branch checked out there.
@@ -1077,6 +1078,8 @@ impl Actor {
             size: start.size,
             scrollback_lines: start.scrollback_lines,
         })?;
+        // A history past what ptyd keeps goes in with its newest rows, never not at all.
+        engine.limit_checkpoints(CHECKPOINT_MAX_BYTES);
         if !start.checkpoint.is_empty() {
             engine.write(&start.checkpoint);
         }
@@ -1599,8 +1602,9 @@ impl Actor {
         );
         self.checkpoint_bytes = state.len();
         if state.len() > CHECKPOINT_MAX_BYTES {
-            // ptyd would refuse the frame; keep the ring instead (it holds the output since
-            // the last checkpoint that did fit, and what fits of the output after it) and try
+            // ptyd would refuse the frame, which the engine's limit leaves to a screen past it
+            // with no history to cut; keep the ring instead (it holds the output since the
+            // last checkpoint that did fit, and what fits of the output after it) and try
             // again at the next quiet spell.
             if !std::mem::replace(&mut self.oversize, true) {
                 tracing::warn!(session = %self.id, bytes = state.len(), "checkpoint too large; skipped");

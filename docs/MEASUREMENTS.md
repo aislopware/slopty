@@ -15867,6 +15867,31 @@ profile, a `macos-26` GitHub runner (run 38117846929), one run of five opens.
 cargo nextest run -p slopty-worker --release --run-ignored only -E 'test(host_open_cost)' --no-capture
 ```
 
+## 2026-10-11 — a checkpoint past ptyd's limit, cut to fit
+
+A history whose checkpoint is bigger than ptyd keeps (`MAX_CHECKPOINT_BYTES`, about 12 MiB)
+used to be formatted at every quiet spell and then dropped, so an update lost the session's
+screen. Now the engine keeps the newest history that fits in seven eighths of the limit. The
+case is 200x50 with the worker's 50 000 lines, every word in a 256-colour of its own, on a
+`macos-26` runner in release (run 38127789183), one run of each.
+
+| what | before | after |
+| --- | --- | --- |
+| checkpoint size | 24.8 MB, never sent | 9.9 MB, 19 945 of 50 052 lines |
+| first checkpoint past the limit | 111–123 ms, then dropped | 183 ms (the whole, then the cut) |
+| each one after it | 111–123 ms, then dropped | 46 ms (one format, from the rows kept last) |
+| replaying it in a new worker | none (a stale checkpoint and a 4 MiB ring) | 80–116 ms |
+
+- **What it costs at a quiet spell went down.** The worker had been formatting the whole state
+  and throwing it away, every time. Now one format of the newest rows is all it does after the
+  first.
+- **The guess leaves room.** It keeps a tenth under the bytes a row took, so 9.9 MB was used of
+  the 11.0 MB a screen may take.
+
+```sh
+cargo nextest run -p slopty-engine --release --run-ignored only -E 'test(checkpoint_cut_cost)' --no-capture
+```
+
 ## 2026-10-11 — a worker's start over 2,000 kept threads, reading heads
 
 The same probe after the lazy open: each thread directory keeps a `head` beside its log (its

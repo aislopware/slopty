@@ -1211,7 +1211,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (7) **Keystroke latency is read at the glass** (revised 2026-09-25). Presentation is
   vsync-synced and the compositor adds about a refresh, so a paint reaches the display a
   refresh or more after its own clock. A paint that holds a waiting key hands the work to
-  `slopty_ui::shown::after_paint`, which runs it at `presented_at` of the first frame submitted
+  `slopty_kit::shown::after_paint`, which runs it at `presented_at` of the first frame submitted
   after the paint (`Window::on_frame_presented`, from the fork), and keeps the window's
   presentation reports on only while something waits. The next display tick, used before,
   read 15 ms low on this Mac (MEASUREMENTS 2026-09-25, "keystrokes timed at the glass"). The
@@ -1756,6 +1756,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   to 0.04–0.11 ms p50. Capping the history a checkpoint carries, or formatting only what changed,
   would let such a session be kept whole; both belong in `slopty-engine`. Test:
   `a_state_too_large_to_keep_is_not_formatted_for_every_read` (actor).
+  - **Superseded (2026-10-11): such a history goes with its newest rows.** The engine keeps a
+    checkpoint within a limit the worker sets (`GhosttyEngine::limit_checkpoints`, ptyd's
+    `MAX_CHECKPOINT_BYTES`). A primary screen whose format would take more than seven eighths of
+    it is formatted again from a later row, through libghostty's formatter with a selection
+    from that row to the screen's last cell. The rows kept are guessed from the bytes a row
+    took, a tenth under, and guessed again from each format that still does not fit. The
+    eighth left over is for an alternate screen on top and the session's state. The marks that
+    only cut rows held go with them; a command block still open, or one that ended below the
+    cut, keeps its place. The next checkpoint starts from the rows the last one kept, so a
+    session past the limit pays one format at a quiet spell, not two, and measures the whole
+    again only once the format comes out under half the limit. So an update or a crash brings
+    back the screen and the newest history rather than a stale checkpoint and a ring with a
+    hole. `oversize` now covers only a state no cut can fit. Numbers: MEASUREMENTS, "a
+    checkpoint past ptyd's limit, cut to fit" (the whole 24.8 MB format that was dropped, 111
+    to 123 ms, against a 9.9 MB cut taking 46 ms after the first). Tests:
+    `a_checkpoint_past_its_limit_keeps_the_screen_and_the_newest_history` and
+    `a_checkpoint_past_its_limit_on_the_alternate_screen_cuts_the_primary` (engine);
+    `a_history_past_the_checkpoint_limit_still_comes_back_with_its_screen` (actor).
 
 - ✅ **A line editor's prompt is guessed at, and guesses show from half a refresh**
   (2026-09-26), amending **The frames say when the tty stops echoing**. Two things kept every

@@ -573,6 +573,52 @@ mod actor {
 
     /// A restored session (a checkpoint from the last worker) tells its first attach the
     /// program's colours and the directory the replay carried, ahead of the frame.
+    /// A history whose checkpoint would be past what ptyd keeps is checkpointed all the same,
+    /// with its newest rows as many as fit, so a session started again from it (an update's
+    /// path) shows the screen it had. Every cell in colours of its own makes 15 000 rows of 40
+    /// columns well over ptyd's limit.
+    #[tokio::test]
+    async fn a_history_past_the_checkpoint_limit_still_comes_back_with_its_screen() {
+        let mut history = Vec::new();
+        for row in 0..15_000_u32 {
+            for col in 0..40_u32 {
+                let (r, g, b) = (row % 251, col * 6, (row + col) % 241);
+                let cell = format!("\x1b[38;2;{r};{g};{b};48;2;{b};{r};{g}m{}", col % 10);
+                history.extend_from_slice(cell.as_bytes());
+            }
+            history.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        history.extend_from_slice(b"screen-marker");
+        let (first, mut cat, mut taps) =
+            start_keeping(&["/bin/sh", "-c", "cat"], history, None, 20_000);
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+        let checkpoint = loop {
+            match tokio::time::timeout_at(deadline, taps.recv()).await.unwrap().unwrap() {
+                Tap::Checkpoint { state, .. } => break state,
+                Tap::Output(_) | Tap::Resize { .. } => {}
+            }
+        };
+        assert!(
+            checkpoint.len() <= slopty_pty::protocol::MAX_CHECKPOINT_BYTES,
+            "{} bytes",
+            checkpoint.len()
+        );
+        first.close();
+        let _ended = cat.kill().await;
+
+        let (next, mut cat2, _taps2) =
+            start_keeping(&["/bin/sh", "-c", "cat"], checkpoint, None, 20_000);
+        let (tx, mut rx) = viewer(64);
+        next.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let (_, screen) = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full))
+        })
+        .await;
+        assert!(text(&screen).contains("screen-marker"), "{}", text(&screen));
+        next.close();
+        let _ended = cat2.kill().await;
+    }
+
     #[tokio::test]
     async fn a_restored_session_tells_the_first_attach_what_the_replay_said() {
         let mut e = slopty_engine::GhosttyEngine::new(slopty_engine::EngineConfig {
