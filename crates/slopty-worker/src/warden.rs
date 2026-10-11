@@ -92,15 +92,26 @@ mod tests {
 
     use super::*;
 
-    /// `sh` waiting on a long `sleep`, leading a group of its own.
+    /// `sh` waiting on a long `sleep`, leading a group of its own, once the `sleep` runs.
+    ///
+    /// `sh` says the `sleep`'s pid once its fork returned, and nothing is killed before that: a
+    /// group killed while `sh` is still forking can miss the child the fork is making, which
+    /// then lives on in the group, orphaned.
     fn sleeping() -> std::process::Child {
+        use std::io::BufRead as _;
         use std::os::unix::process::CommandExt as _;
-        std::process::Command::new("/bin/sh")
-            .args(["-c", "/bin/sleep 600 & wait"])
-            .stdout(std::process::Stdio::null())
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "/bin/sleep 600 >/dev/null & echo $!; exec >&-; wait"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .process_group(0)
             .spawn()
-            .unwrap()
+            .unwrap();
+        let mut said = String::new();
+        let out = child.stdout.take().unwrap();
+        std::io::BufReader::new(out).read_line(&mut said).unwrap();
+        assert!(said.trim().parse::<u32>().is_ok(), "the sleep's pid, not {said:?}");
+        child
     }
 
     fn group_of(child: &std::process::Child) -> Pid {
@@ -128,8 +139,9 @@ mod tests {
         serve(said.as_bytes());
         assert!(gone(&mut listed).await, "the listed group was killed with what it started");
         let left = rustix::process::test_kill_process_group(group_of(&ended)).is_ok();
-        let _killed = kill_process_group(group_of(&ended), Signal::KILL);
-        assert!(gone(&mut ended).await);
+        let killed = kill_process_group(group_of(&ended), Signal::KILL);
+        assert_eq!(killed, Ok(()), "the test's own kill of the group said ended");
+        assert!(gone(&mut ended).await, "that group went too");
         assert!(left, "the group said ended was left alone");
     }
 }
