@@ -1772,3 +1772,12 @@ more full-window layer.
   It asks every minute and says why it waits; the lane keeps coding. A check that needs no Mac
   never waits. `check.yml`'s macOS jobs stop at 45 minutes, and an e2e case at 90: a probe that
   lost its runner held a slot for 79 minutes (run 38130090331).
+
+- ✅ **CI builds xtask unoptimised** (2026-10-11). On a change to what xtask is built from, each
+  macOS test shard built it before its tests could start: 58–79 s each on run 38139816197, all
+  three side by side, on the gate's critical path. xtask only orchestrates (the gate, its
+  pseudo-terminal sampler, prune), so its own crates, `slopty-crash` and `slopty-testkit` now
+  compile at opt-level 0 (`CARGO_PROFILE_DEV_OPT_LEVEL=0`); every dependency keeps its
+  opt-level 3 from `[profile.dev.package."*"]`, and with it its compile cache entries. Here the
+  xtask crate compiled in 7.0–7.4 s against 13.4–14.3 s. Local `cargo xtask` keeps the dev
+  profile.

@@ -186,6 +186,8 @@ jobs:
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
       # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
       # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
+      # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
         uses: actions/cache/restore@v4
         with:
@@ -196,7 +198,8 @@ jobs:
             'rust-toolchain.toml', '.cargo/*.toml') }}
       - if: steps.xtask.outputs.cache-hit != 'true'
         run: |
-          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --locked --quiet --target-dir target/xtask \
+            --package xtask
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
@@ -321,6 +324,8 @@ jobs:
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
       # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
       # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      # Unoptimised, its dependencies aside: it orchestrates, and its own crates compile in half
+      # the time (`docs/decisions/tooling.md`, "CI builds xtask unoptimised").
       - id: xtask
         uses: actions/cache/restore@v4
         with:
@@ -331,7 +336,8 @@ jobs:
             'rust-toolchain.toml', '.cargo/*.toml') }}
       - if: steps.xtask.outputs.cache-hit != 'true'
         run: |
-          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --locked --quiet --target-dir target/xtask \
+            --package xtask
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
       - if: steps.xtask.outputs.cache-hit != 'true'
