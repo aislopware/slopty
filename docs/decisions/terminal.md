@@ -267,8 +267,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   system bash 3.2 and Homebrew's 5.3. Verified on both by
   `an_interactive_bash_emits_prompt_marks_and_runs_the_users_bashrc` (A/B/C, `D;1` after
   `false`, `.bashrc` ran, `.bash_profile` did not, the `SLOPTY_BASH_*` variables gone) and
-  `a_login_bash_reads_its_profile_and_still_marks` (arg0 `-bash`: the profile ran, `.bashrc`
+  `a_login_bash_reads_its_profile_and_still_marks` (`bash -l`: the profile ran, `.bashrc`
   did not, still marks).
+  *bash login and `--norc` shells start in POSIX mode* (2026-10-11): the `--rcfile` route
+  broke two things. A Debian or Ubuntu bash is built with a system bashrc
+  (`-DSYS_BASHRC=/etc/bash.bashrc`), which bash reads before any `--rcfile`, and only `--norc`
+  stops it, but `--norc` also drops the rcfile; so `bash --norc` there still read
+  `/etc/bash.bashrc`. And a login shell had to stop being one (`shopt login_shell` off,
+  `logout` refused), and on Debian read `/etc/bash.bashrc` twice: once from bash and again from
+  `/etc/profile`, which sources it. bash's own source settles the way out (`run_startup_files`
+  in `shell.c`): in POSIX mode an interactive bash reads `$ENV` and no other startup file,
+  login or not. So a login or `--norc` shell is started as `bash --posix`, its login flag kept
+  (the dash of arg0, `-l`, `--login`), with `ENV` naming the bootstrap and
+  `SLOPTY_BASH_POSIX=1`; `--norc`/`--noprofile` still travel as variables. The bootstrap
+  leaves POSIX mode first (`set +o posix`, and `shopt -u inherit_errexit`, which leaving does
+  not undo), puts back the daemon's own `ENV` (`SLOPTY_BASH_USER_ENV`), and sets `HISTFILE`
+  back to `~/.bash_history` unless it came from the environment (exported), since POSIX mode
+  defaults it to `~/.sh_history`; bash loads the history after the startup files. Then it
+  reads the profiles or nothing, as before. Ghostty injects bash this way for every shell;
+  here a plain interactive shell keeps `--rcfile`, because then bash itself reads the system
+  bashrc it was built with, where guessing its path (`/etc/bash.bashrc`, `/etc/bash/bashrc`,
+  `/etc/bashrc`) would run Fedora's `/etc/bashrc` twice, once more from `~/.bashrc`. The
+  rcfile route stays for Apple's bash 3.2, whose POSIX mode reads no `ENV` (it has no system
+  bashrc to skip, but its login shell still runs as none), for a bare `bash` on a Mac (which
+  may be it), when the session's own variables carry an `ENV` (they come last and would
+  replace the bootstrap), and when the bootstrap's path is not plain, since bash expands
+  `ENV`. Verified by `a_login_or_norc_bash_starts_posix_with_the_bootstrap_as_env` and
+  `bash_gets_an_rcfile_and_its_login_flag_moves_to_the_environment` (both routes' argv and
+  variables), and on a real bash on macOS and Ubuntu by
+  `a_norc_bash_reads_no_startup_file_and_still_marks` (no `.bashrc`, bash's own `PS1` and
+  not Ubuntu's, out of POSIX mode, history file and `ENV` as bash's own) and
+  `a_login_bash_reads_its_profile_and_still_marks` (a login shell but on Apple's bash). That
+  test had been passing on a login variable its harness leaked into the session's own (it
+  called `apply` itself and passed the result on), and never on a login shell: its `-bash`
+  argv[0] never reached the spawn, which takes a given command's argv[0] as is. It now starts
+  `bash -l` through `spawn_with` alone.
   *fish* (2026-09-05): fish sources every `<dir>/fish/vendor_conf.d/*.fish` for each entry of
   `XDG_DATA_DIRS`, so `apply` prepends `<shell>/fish` to the session's (else the daemon's,
   else the `/usr/local/share:/usr/share` default) `XDG_DATA_DIRS`; the user's `config.fish`

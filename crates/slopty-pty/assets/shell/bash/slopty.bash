@@ -1,11 +1,18 @@
 # Slopty shell integration, bash bootstrap.
 #
 # slopty-ptyd starts an interactive bash with `--rcfile` pointing here, so this file runs instead
-# of ~/.bashrc. It first does what bash would have done on its own: for a login shell (the
-# daemon moved the `-l` / leading dash into SLOPTY_BASH_LOGIN, because bash ignores --rcfile for
-# login shells) /etc/profile and the first of ~/.bash_profile, ~/.bash_login, ~/.profile; for an
-# interactive shell ~/.bashrc. --noprofile / --norc travel the same way and are honoured. Then
-# it installs the OSC 133 marks:
+# of ~/.bashrc, after the system bashrc bash was built with (Debian's /etc/bash.bashrc). A login
+# or --norc shell instead starts as `bash --posix` with ENV naming this file (SLOPTY_BASH_POSIX
+# set), since bash ignores --rcfile for a login shell and --norc would drop it too; then bash
+# reads no startup file at all, and this file leaves POSIX mode first, puts back the ENV it
+# took the place of (SLOPTY_BASH_USER_ENV) and the history file POSIX mode chose
+# (~/.sh_history) unless the environment named one. Apple's bash 3.2 reads no ENV in POSIX
+# mode, so there a login shell runs as none, its login flag handed over.
+#
+# Then it does what bash would have done on its own: for a login shell (SLOPTY_BASH_LOGIN)
+# /etc/profile and the first of ~/.bash_profile, ~/.bash_login, ~/.profile; for an interactive
+# shell ~/.bashrc. --noprofile / --norc travel the same way and are honoured. Then it installs
+# the OSC 133 marks:
 #
 #   133;A / 133;B  around PS1 (inside \[ \], invisible to the width count); A;k=s / B around PS2.
 #                  `redraw=last`: after a resize readline redraws the prompt's last row only, so
@@ -22,6 +29,22 @@
 # If bash-preexec is loaded, its preexec_functions / precmd_functions are used instead of our
 # trap. Written by slopty-ptyd on every start; edits here are lost. Opt out with
 # SLOPTY_NO_SHELL_INTEGRATION=1. Works on bash 3.2 (macOS /bin/bash) and up.
+
+if [ -n "${SLOPTY_BASH_POSIX-}" ]; then
+    unset ENV SLOPTY_BASH_POSIX
+    if [ -n "${SLOPTY_BASH_USER_ENV+set}" ]; then
+        export ENV="$SLOPTY_BASH_USER_ENV"
+        unset SLOPTY_BASH_USER_ENV
+    fi
+    set +o posix
+    # POSIX mode turns this on, and leaving it does not turn it off (bash 4.4 and up).
+    shopt -u inherit_errexit 2>/dev/null
+    # A HISTFILE from the environment is exported; POSIX mode's own default is not.
+    case "$(declare -p HISTFILE 2>/dev/null)" in
+        'declare -x'*) ;;
+        *) HISTFILE="$HOME/.bash_history" ;;
+    esac
+fi
 
 # A tmux pane is no Slopty tile: its server may have started in another session, whose
 # presence file (held while a client looks at that tile) would silence this pane's agents.

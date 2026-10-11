@@ -1,8 +1,9 @@
 //! Shell integration: bundled scripts that make the shell emit OSC 133 prompt marks.
 //!
 //! Injected the way terminals do it, one hook per shell: a `ZDOTDIR` bootstrap for zsh, an
-//! `--rcfile` for bash, a vendor snippet on `XDG_DATA_DIRS` for fish; every bootstrap hands
-//! control straight back to the user's own files. The daemon writes the scripts under its data
+//! `--rcfile` for bash (or `--posix` and `ENV` for a login or `--norc` one), a vendor snippet
+//! on `XDG_DATA_DIRS` for fish; every bootstrap hands control straight back to the user's own
+//! files. The daemon writes the scripts under its data
 //! dir on every start so a running install never depends on the source tree.
 //!
 //! **Web pages and editors go to the client** ([`ShellIntegration::handoff_env`]). Every session,
@@ -30,7 +31,7 @@ use std::{fs, io};
 pub const ZSH_ZSHENV: &str = include_str!("../assets/shell/zsh/.zshenv");
 /// The zsh hooks, sourced by the bootstrap for interactive shells.
 pub const ZSH_INTEGRATION: &str = include_str!("../assets/shell/zsh/slopty-integration.zsh");
-/// bash bootstrap, passed with `--rcfile`: the user's files, then the hooks.
+/// bash bootstrap, passed with `--rcfile` or as `ENV`: the user's files, then the hooks.
 pub const BASH_RCFILE: &str = include_str!("../assets/shell/bash/slopty.bash");
 /// fish hooks, loaded from `<XDG_DATA_DIRS entry>/fish/vendor_conf.d`.
 pub const FISH_INTEGRATION: &str =
@@ -63,13 +64,17 @@ pub const CLIPBOARD_COMMANDS: [&str; 4] = ["xclip", "xsel", "wl-copy", "wl-paste
 pub const SHADOWS_CLIPBOARD: bool = cfg!(not(target_os = "macos"));
 /// Where the zsh bootstrap finds the user's original `ZDOTDIR`, when there was one.
 const ZSH_ORIGINAL_ZDOTDIR: &str = "SLOPTY_ZSH_ZDOTDIR";
-/// Tells the bash bootstrap the shell was asked to be a login shell (bash ignores `--rcfile`
-/// for real login shells, so the daemon takes the flag and the bootstrap reads the profiles).
+/// Tells the bash bootstrap the shell was asked to be a login shell, so it reads the profiles
+/// (bash reads no startup file of its own on either route for one).
 const BASH_LOGIN: &str = "SLOPTY_BASH_LOGIN";
 /// `--noprofile` travelled to the bootstrap.
 const BASH_NOPROFILE: &str = "SLOPTY_BASH_NOPROFILE";
 /// `--norc` travelled to the bootstrap.
 const BASH_NORC: &str = "SLOPTY_BASH_NORC";
+/// Tells the bash bootstrap it runs as `ENV` in a `bash --posix` that is to leave POSIX mode.
+const BASH_POSIX: &str = "SLOPTY_BASH_POSIX";
+/// The daemon's own `ENV`, which the bootstrap took the place of and puts back.
+const BASH_USER_ENV: &str = "SLOPTY_BASH_USER_ENV";
 /// fish's default when `XDG_DATA_DIRS` is unset; kept behind our entry so vendor snippets
 /// installed there still load.
 const XDG_DATA_DIRS_DEFAULT: &str = "/usr/local/share:/usr/share";
@@ -87,6 +92,8 @@ pub struct ShellIntegration {
     pub original_zdotdir: Option<String>,
     /// The daemon's own `XDG_DATA_DIRS`, kept behind ours for fish.
     pub original_xdg_data_dirs: Option<String>,
+    /// The daemon's own `ENV`, handed back to a bash started with `ENV` naming the bootstrap.
+    pub original_env: Option<String>,
     /// `false` when the daemon's environment carries [`OPT_OUT`]: no shell is touched.
     pub enabled: bool,
     /// The `slopty` CLI beside the daemon, handed to the shell as [`CLI`]; without it `ssh`
@@ -142,6 +149,7 @@ pub fn install(dir: &Path) -> io::Result<ShellIntegration> {
         fish_data_dir: fish,
         original_zdotdir: var("ZDOTDIR"),
         original_xdg_data_dirs: var("XDG_DATA_DIRS"),
+        original_env: var("ENV"),
         enabled: !std::env::var(OPT_OUT).is_ok_and(|v| opted_out(&v)),
         cli,
         bin,
@@ -282,7 +290,7 @@ impl ShellIntegration {
                 }
                 Some(Injection { env, ..untouched() })
             }
-            Some("bash") => self.bash(args, arg0),
+            Some("bash") => self.bash(program, args, arg0, extra),
             Some("fish") => {
                 let session = extra.iter().find(|(k, _)| k == "XDG_DATA_DIRS").map(|(_, v)| v);
                 let behind = session
@@ -347,13 +355,28 @@ impl ShellIntegration {
         self.bin.as_deref().filter(|_| self.enabled && !opted)
     }
 
-    /// The bash rewrite: `--rcfile` replaces the user's `~/.bashrc` for interactive shells
-    /// only, and bash ignores it for login shells, so `-l` / `--login` / a leading dash in
-    /// `argv[0]` are taken out and handed to the bootstrap as [`BASH_LOGIN`]; `--noprofile`
-    /// and `--norc` travel the same way. `None` when the shell would not be interactive.
-    fn bash(&self, args: &[String], arg0: Option<&str>) -> Option<Injection> {
+    /// The bash rewrite, by one of two routes. Both hand `-l` / `--login` / a leading dash in
+    /// `argv[0]`, `--noprofile` and `--norc` to the bootstrap as [`BASH_LOGIN`],
+    /// [`BASH_NOPROFILE`] and [`BASH_NORC`], which reads the startup files the way bash would
+    /// have. `None` when the shell would not be interactive.
+    ///
+    /// A plain interactive shell gets `--rcfile`, which bash reads *instead of* `~/.bashrc`,
+    /// after the system bashrc it was built with (Debian's `/etc/bash.bashrc`), so no guess at
+    /// that file's place is needed. A login or `--norc` shell takes the POSIX route
+    /// ([`Self::bash_posix`]) where it can: bash ignores `--rcfile` for a login shell, which
+    /// would have to stop being one, and `--norc` beside it would drop the bootstrap too,
+    /// while without it Debian's bash still reads `/etc/bash.bashrc`.
+    fn bash(
+        &self,
+        program: &str,
+        args: &[String],
+        arg0: Option<&str>,
+        extra: &[(String, String)],
+    ) -> Option<Injection> {
         // bash reads its GNU long options only at the front of argv, before the short ones.
-        let mut out: Vec<String> = vec!["--rcfile".to_owned(), lossy(&self.bash_rcfile)];
+        let mut longs: Vec<String> = Vec::new();
+        let mut shorts: Vec<String> = Vec::new();
+        let mut login_long = false;
         let mut login = arg0.is_some_and(|a| a.starts_with('-'));
         let mut noprofile = false;
         let mut norc = false;
@@ -365,28 +388,23 @@ impl ShellIntegration {
             }
             match arg.as_str() {
                 "--" => options_done = true,
-                "--login" => login = true,
+                "--login" => login_long = true,
                 "--noprofile" => noprofile = true,
                 "--norc" => norc = true,
                 "--rcfile" | "--init-file" | "--posix" => return None,
-                long if long.starts_with("--") => out.insert(0, long.to_owned()),
+                long if long.starts_with("--") => longs.push(long.to_owned()),
                 short => {
                     // A cluster such as `-lic` or `-il`; `-c` (and `-s` with a script) mean no
                     // prompt, `-l` is the login flag, the rest stays.
-                    let flags: String = short.chars().skip(1).collect();
-                    if flags.contains('c') || flags.contains('o') {
+                    if short.contains('c') || short.contains('o') {
                         return None;
                     }
-                    if flags.contains('l') {
-                        login = true;
-                    }
-                    let kept: String = flags.chars().filter(|&f| f != 'l').collect();
-                    if !kept.is_empty() {
-                        out.push(format!("-{kept}"));
-                    }
+                    login |= short.contains('l');
+                    shorts.push(short.to_owned());
                 }
             }
         }
+        login |= login_long;
         let mut env = Vec::new();
         if login {
             env.push((BASH_LOGIN.to_owned(), "1".to_owned()));
@@ -397,8 +415,52 @@ impl ShellIntegration {
         if norc {
             env.push((BASH_NORC.to_owned(), "1".to_owned()));
         }
+        if (login || norc) && self.posix_route(program, extra) {
+            let mut out = vec!["--posix".to_owned()];
+            out.extend(longs);
+            if login_long {
+                out.push("--login".to_owned());
+            }
+            out.extend(shorts);
+            env.extend(self.bash_posix());
+            return Some(Injection { args: out, arg0: arg0.map(str::to_owned), env });
+        }
+        let mut out = longs;
+        out.extend(["--rcfile".to_owned(), lossy(&self.bash_rcfile)]);
+        for short in shorts {
+            let kept: String = short.chars().skip(1).filter(|&f| f != 'l').collect();
+            if !kept.is_empty() {
+                out.push(format!("-{kept}"));
+            }
+        }
         let arg0 = arg0.map(|a| a.trim_start_matches('-').to_owned()).filter(|a| !a.is_empty());
         Some(Injection { args: out, arg0, env })
+    }
+
+    /// Whether `program` can take the POSIX route: not Apple's bash 3.2, whose `--posix` reads
+    /// no `ENV` (a bare `bash` on a Mac may be it), not when the session's own variables carry
+    /// an `ENV`, which come last and would replace the bootstrap, and only with a plain path to
+    /// the bootstrap ([`plain`]), since bash expands `ENV` before reading it.
+    fn posix_route(&self, program: &str, extra: &[(String, String)]) -> bool {
+        let apple = cfg!(target_os = "macos")
+            && (!program.starts_with('/') || Path::new(program) == Path::new("/bin/bash"));
+        !apple && plain(&self.bash_rcfile) && !extra.iter().any(|(k, _)| k == "ENV")
+    }
+
+    /// The POSIX route's variables. `bash --posix` reads no startup file but `$ENV`, which
+    /// points at the bootstrap; the bootstrap leaves POSIX mode, puts back the `ENV` it took
+    /// the place of ([`BASH_USER_ENV`]) and the history file POSIX mode moved, and reads the
+    /// startup files itself. The login flag stays bash's own, so `shopt login_shell` and
+    /// `logout` hold.
+    fn bash_posix(&self) -> Vec<(String, String)> {
+        let mut env = vec![
+            ("ENV".to_owned(), lossy(&self.bash_rcfile)),
+            (BASH_POSIX.to_owned(), "1".to_owned()),
+        ];
+        if let Some(user) = &self.original_env {
+            env.push((BASH_USER_ENV.to_owned(), user.clone()));
+        }
+        env
     }
 }
 
@@ -417,6 +479,7 @@ mod tests {
             fish_data_dir: PathBuf::from("/tmp/x/fish"),
             original_zdotdir: None,
             original_xdg_data_dirs: None,
+            original_env: None,
             enabled: true,
             cli: None,
             bin: None,
@@ -458,26 +521,33 @@ mod tests {
     fn bash_gets_an_rcfile_and_its_login_flag_moves_to_the_environment() {
         let si = integration();
         let rc = strings(&["--rcfile", "/tmp/x/bash/slopty.bash"]);
-        // The account's login shell: `-bash` as argv[0], no arguments.
-        let inj = si.apply("/bin/bash", &[], Some("-bash"), &[]);
-        assert_eq!((inj.args.clone(), inj.arg0.as_deref()), (rc.clone(), Some("bash")));
-        assert_eq!(inj.env, vec![pair("SLOPTY_BASH_LOGIN", "1")]);
-        // An explicit interactive login shell with clustered flags.
-        let inj = si.apply("bash", &strings(&["-il", "--noprofile"]), None, &[]);
-        assert_eq!(inj.args, [rc.clone(), strings(&["-i"])].concat(), "long options first");
-        assert_eq!(
-            inj.env,
-            vec![pair("SLOPTY_BASH_LOGIN", "1"), pair("SLOPTY_BASH_NOPROFILE", "1")]
-        );
-        let inj = si.apply("bash", &strings(&["--login", "--norc"]), None, &[]);
-        assert_eq!(inj.args, rc);
-        assert_eq!(inj.env, vec![pair("SLOPTY_BASH_LOGIN", "1"), pair("SLOPTY_BASH_NORC", "1")]);
         // Plain interactive: no login variable, just the rcfile.
         let inj = si.apply("/opt/homebrew/bin/bash", &strings(&["--noediting", "-i"]), None, &[]);
         assert_eq!(
             (inj.args, inj.env),
-            ([strings(&["--noediting"]), rc, strings(&["-i"])].concat(), vec![])
+            ([strings(&["--noediting"]), rc.clone(), strings(&["-i"])].concat(), vec![])
         );
+        // A login shell where the POSIX route is closed: the session names its own ENV. The
+        // flag moves to the environment and bash runs as no login shell.
+        let own_env = [pair("ENV", "/home/me/.shinit")];
+        let inj = si.apply("/usr/local/bin/bash", &[], Some("-bash"), &own_env);
+        assert_eq!((inj.args.clone(), inj.arg0.as_deref()), (rc.clone(), Some("bash")));
+        assert_eq!(inj.env, vec![pair("SLOPTY_BASH_LOGIN", "1")]);
+        let inj =
+            si.apply("/usr/local/bin/bash", &strings(&["-il", "--noprofile"]), None, &own_env);
+        assert_eq!(inj.args, [rc, strings(&["-i"])].concat(), "long options first");
+        assert_eq!(
+            inj.env,
+            vec![pair("SLOPTY_BASH_LOGIN", "1"), pair("SLOPTY_BASH_NOPROFILE", "1")]
+        );
+        // A bootstrap path bash would expand as `ENV` closes it too.
+        let odd = ShellIntegration {
+            bash_rcfile: PathBuf::from("/tmp/x $HOME/bash/slopty.bash"),
+            ..integration()
+        };
+        let inj = odd.apply("/usr/local/bin/bash", &strings(&["--norc"]), None, &[]);
+        assert_eq!(inj.args, strings(&["--rcfile", "/tmp/x $HOME/bash/slopty.bash"]));
+        assert_eq!(inj.env, vec![pair("SLOPTY_BASH_NORC", "1")]);
         // No prompt, no integration: `-c`, `-lic`, a script, `--posix`, a user rcfile.
         for args in [
             strings(&["-c", "true"]),
@@ -494,6 +564,65 @@ mod tests {
                 (args.clone(), Some("-bash"), vec![]),
                 "{args:?}"
             );
+        }
+    }
+
+    /// A login or `--norc` bash starts in POSIX mode with `ENV` naming the bootstrap: it stays
+    /// a login shell, and reads no system bashrc before the bootstrap.
+    #[test]
+    fn a_login_or_norc_bash_starts_posix_with_the_bootstrap_as_env() {
+        let si =
+            ShellIntegration { original_env: Some("/home/me/.shinit".into()), ..integration() };
+        let posix = |extra: &[(&str, &str)]| {
+            let mut env = extra.iter().map(|(k, v)| pair(k, v)).collect::<Vec<_>>();
+            env.extend([
+                pair("ENV", "/tmp/x/bash/slopty.bash"),
+                pair("SLOPTY_BASH_POSIX", "1"),
+                pair("SLOPTY_BASH_USER_ENV", "/home/me/.shinit"),
+            ]);
+            env
+        };
+        let inj = si.apply("/usr/local/bin/bash", &[], Some("-bash"), &[]);
+        assert_eq!(
+            inj,
+            Injection {
+                args: strings(&["--posix"]),
+                arg0: Some("-bash".into()),
+                env: posix(&[("SLOPTY_BASH_LOGIN", "1")]),
+            },
+            "the dash stays: bash is the login shell itself"
+        );
+        let inj = si.apply(
+            "/usr/bin/bash",
+            &strings(&["-il", "--noediting", "--login", "--noprofile"]),
+            None,
+            &[],
+        );
+        assert_eq!(
+            inj.args,
+            strings(&["--posix", "--noediting", "--login", "-il"]),
+            "long options first, the login flags kept, the startup ones taken"
+        );
+        assert_eq!(inj.env, posix(&[("SLOPTY_BASH_LOGIN", "1"), ("SLOPTY_BASH_NOPROFILE", "1")]));
+        let inj = si.apply("/usr/bin/bash", &strings(&["--norc", "-i"]), None, &[]);
+        assert_eq!(
+            (inj.args, inj.arg0, inj.env),
+            (strings(&["--posix", "-i"]), None, posix(&[("SLOPTY_BASH_NORC", "1")]))
+        );
+        // Apple's bash 3.2 reads no `ENV` in POSIX mode, and a bare `bash` may be it: the
+        // rcfile route, which its build reads no system bashrc on.
+        let apple = si.apply("/bin/bash", &strings(&["--norc"]), Some("-bash"), &[]);
+        let bare = si.apply("bash", &strings(&["--norc"]), Some("-bash"), &[]);
+        if cfg!(target_os = "macos") {
+            for inj in [apple, bare] {
+                assert_eq!(inj.args, strings(&["--rcfile", "/tmp/x/bash/slopty.bash"]));
+                assert_eq!(inj.arg0.as_deref(), Some("bash"));
+            }
+        } else {
+            for inj in [apple, bare] {
+                assert_eq!(inj.args, strings(&["--posix"]));
+                assert_eq!(inj.arg0.as_deref(), Some("-bash"));
+            }
         }
     }
 
@@ -578,19 +707,18 @@ mod tests {
         tag: &str,
         program: &str,
         args: &[&str],
-        arg0: Option<&str>,
         rc_files: &[(&str, &str)],
         input: &str,
     ) -> String {
-        run_shell_with(tag, Shell { program, args, arg0 }, rc_files, &[], input).await
+        run_shell_with(tag, Shell { program, args }, rc_files, &[], input).await
     }
 
-    /// A shell to start: the program, its arguments and its `argv[0]`.
+    /// A shell to start: the program and its arguments. `argv[0]` is the program's own, since
+    /// a command given to ptyd always is.
     #[derive(Clone, Copy)]
     struct Shell<'a> {
         program: &'a str,
         args: &'a [&'a str],
-        arg0: Option<&'a str>,
     }
 
     /// [`run_shell`], with `extra` variables in the session's environment, last.
@@ -613,13 +741,14 @@ mod tests {
         input: &str,
         bin: Option<&Path>,
     ) -> String {
-        let Shell { program, args, arg0 } = shell;
+        let Shell { program, args } = shell;
         let tmp = std::env::temp_dir().join(format!("slopty-shell-{tag}-{}", std::process::id()));
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         let si = install(&tmp.join("shell")).unwrap();
         let si = ShellIntegration {
             original_zdotdir: None,
             original_xdg_data_dirs: None,
+            original_env: None,
             enabled: true,
             cli: None,
             bin: bin.map(Path::to_path_buf),
@@ -638,7 +767,6 @@ mod tests {
         compile_terminfo(&terminfo).await;
         let size = TermSize { cols: 60, rows: 10, metrics: CellMetrics::default() };
         let pty = Pty::open(size).unwrap();
-        let injection = si.apply(program, &strings(args), arg0, &[]);
         // A daemon's PATH: none of the developer's Homebrew hooks (mise, direnv) in the way.
         // The terminal ptyd gives a shell once its database is compiled, whether or not this
         // machine has the entry: a TERM the shell cannot look up leaves readline on a dumb
@@ -653,9 +781,9 @@ mod tests {
             pair("TERM", crate::terminfo::NAMES[0]),
             pair("TERMINFO", &terminfo.to_string_lossy()),
         ];
-        env.extend(injection.env);
         env.extend(extra.iter().map(|(k, v)| pair(k, v)));
-        // Spawn exactly the way ptyd does, through `spawn_with`, so the rewrite is the real one.
+        // Spawn exactly the way ptyd does, through `spawn_with`, so the rewrite is the real one
+        // and its variables are not in the session's own as well.
         let spec = SpawnSpec {
             command: [vec![program.to_owned()], strings(args)].concat(),
             cwd: Some(home.clone()),
@@ -763,7 +891,6 @@ mod tests {
             "zsh",
             "/bin/zsh",
             &["-i"],
-            None,
             &[(".zshenv", "export SLOPTY_TEST_ZSHENV=ran\n")],
             // Two lines: the status of the first is reported by the precmd before the second.
             "mkdir -p ~/'a b%' && cd ~/'a b%'\necho zdotdir=$ZDOTDIR env=$SLOPTY_TEST_ZSHENV sudo=$(whence -w sudo); false\nexit\n",
@@ -791,7 +918,6 @@ mod tests {
             "zsh-theme",
             "/bin/zsh",
             &["-i"],
-            None,
             &[(".zshrc", "_theme_precmd() { PS1='%% ' }\nprecmd_functions+=(_theme_precmd)\n")],
             "false\nexit\n",
         )
@@ -827,7 +953,6 @@ mod tests {
                 "bash",
                 bash,
                 &["-i"],
-                None,
                 &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", "export SLOPTY_TEST_PROFILE=ran\n")],
                 "mkdir -p ~/'a b%' && cd ~/'a b%'\necho rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN sudo=$(type -t sudo); false\nexit\n",
             )
@@ -853,18 +978,55 @@ mod tests {
             let text = run_shell(
                 "bash-login",
                 bash,
-                &[],
-                Some("-bash"),
+                &["-l"],
                 &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", &profile)],
-                "echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN; false\nexit\n",
+                &format!("{BASH_STATE}echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN $(bash_state); false\nexit\n"),
+            )
+            .await;
+            assert_marks(&text, bash);
+            // Apple's bash takes the rcfile route, and runs as no login shell.
+            let login = if apple_bash(bash) { "no" } else { "yes" };
+            assert!(
+                text.contains(&format!("rc= profile=ran login= {}", state(login))),
+                "{bash}: profile only, env clean, a login shell out of POSIX mode: {text:?}"
+            );
+        }
+    }
+
+    /// `bash --norc` reads no startup file: not `~/.bashrc`, and not the system bashrc either
+    /// (Debian's `/etc/bash.bashrc`, which sets its own `PS1`), so the prompt is bash's own.
+    #[tokio::test]
+    async fn a_norc_bash_reads_no_startup_file_and_still_marks() {
+        for bash in bashes() {
+            let text = run_shell(
+                "bash-norc",
+                bash,
+                &["--norc"],
+                &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n")],
+                &format!("{BASH_STATE}echo rc=$SLOPTY_TEST_BASHRC norc=$SLOPTY_BASH_NORC ps1=$([[ $PS1 == *'\\s-\\v'* ]] && echo bash || echo system)s $(bash_state); false\nexit\n"),
             )
             .await;
             assert_marks(&text, bash);
             assert!(
-                text.contains("rc= profile=ran login="),
-                "{bash}: profile only, env clean: {text:?}"
+                text.contains(&format!("rc= norc= ps1=bashs {}", state("no"))),
+                "{bash}: no startup file, env clean, out of POSIX mode: {text:?}"
             );
         }
+    }
+
+    /// A shell function typed ahead of the input above, `bash_state`, that prints POSIX mode,
+    /// whether bash is a login shell, the history file's name and `ENV`.
+    const BASH_STATE: &str = "bash_state() { echo posix=$(shopt -oq posix && echo on || echo off) login_shell=$(shopt -q login_shell && echo yes || echo no) hist=${HISTFILE##*/} env=${ENV-none}.; }\n";
+
+    /// What `bash_state` prints for a shell out of POSIX mode with the history file bash's own
+    /// and no `ENV`, `login` saying whether it is a login shell.
+    fn state(login: &str) -> String {
+        format!("posix=off login_shell={login} hist=.bash_history env=none.")
+    }
+
+    /// Apple's bash 3.2, which takes the rcfile route.
+    fn apple_bash(bash: &str) -> bool {
+        cfg!(target_os = "macos") && bash == "/bin/bash"
     }
 
     #[tokio::test]
@@ -877,7 +1039,6 @@ mod tests {
             "fish",
             fish,
             &["-i"],
-            None,
             &[(".config/fish/config.fish", "set -gx SLOPTY_TEST_FISH ran\n")],
             "mkdir -p ~/'a b%'; and cd ~/'a b%'\necho cfg=$SLOPTY_TEST_FISH loaded=$__slopty_integrated sudo=(type -t sudo); false\nexit\n",
         )
@@ -938,7 +1099,7 @@ mod tests {
         );
         for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
             let tag = format!("claude-{n}");
-            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = || Shell { program: shell, args: &["-i"] };
             let text = run_shell_with(&tag, interactive(), &[], &env, input).await;
             assert!(text.contains("got[--wired][-p][a b][]hooks[1]"), "{shell}: {text:?}");
             assert!(text.contains("got[--refused][x]hooks[]"), "{shell}, refused: {text:?}");
@@ -982,7 +1143,7 @@ mod tests {
             fish.map(|f| (f, ".config/fish/config.fish", "alias codex 'command codex --mine'\n")),
         );
         for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
-            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = || Shell { program: shell, args: &["-i"] };
             let input = "codex resume 'a b'\nexit\n";
             let text = run_shell_with(&format!("codex-{n}"), interactive(), &[], &env, input).await;
             let ran = format!("codex[resume][a b] {unset} kept[yes]");
@@ -1018,7 +1179,7 @@ mod tests {
         let fish = fish();
         shells.extend(fish.map(|f| (f, ".config/fish/config.fish", "alias ssh 'echo mine'\n")));
         for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
-            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = || Shell { program: shell, args: &["-i"] };
             let input = "ssh -p 2222 'a b' -t htop\nexit\n";
             let text = run_shell_with(&format!("ssh-{n}"), interactive(), &[], &env, input).await;
             assert!(text.contains("cli[ssh -- -p 2222 a b -t htop]"), "{shell}: {text:?}");
@@ -1158,7 +1319,7 @@ mod tests {
             ] {
                 let rc_text = format!("{path}\n{line}\necho rc-ran\n");
                 let rc_files = [(rc, rc_text.as_str())];
-                let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+                let interactive = Shell { program: shell, args: &["-i"] };
                 let tag = format!("bin-{n}-{case}");
                 let text = run_shell_in(&tag, interactive, &rc_files, &[], input, Some(&bin)).await;
                 assert!(text.contains("rc-ran"), "{shell} {case}: {text:?}");
@@ -1180,7 +1341,7 @@ mod tests {
             shells.push(fish);
         }
         for (n, shell) in shells.into_iter().enumerate() {
-            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = Shell { program: shell, args: &["-i"] };
             let tmux = [presence, ("TMUX", "/tmp/tmux-501/default,1,0")];
             let text = run_shell_with(&format!("tmux-{n}"), interactive, &[], &tmux, input).await;
             assert!(text.contains("p=[]"), "{shell} in tmux: {text:?}");
@@ -1240,7 +1401,7 @@ mod tests {
     async fn every_shell_percent_encodes_its_directory() {
         let keep = format!("{ODD_DIR}/.keep");
         for (n, (shell, cd)) in every_shell().into_iter().enumerate() {
-            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = Shell { program: shell, args: &["-i"] };
             let input = format!("{cd}exit\n");
             let tag = format!("cwd-{n}");
             let text = run_shell_with(&tag, interactive, &[(keep.as_str(), "")], &[], &input).await;
@@ -1266,7 +1427,7 @@ mod tests {
         let socket = format!("{},1,0", tmp.path().join("no-tmux").display());
         let (wrap, st) = ("\x1bPtmux;\x1b\x1b]", "\x07\x1b\\");
         for (n, (shell, _)) in every_shell().into_iter().enumerate() {
-            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let interactive = Shell { program: shell, args: &["-i"] };
             let input = "false\nexit\n";
             let pane = [("TMUX", socket.as_str()), ("TERM_PROGRAM", "tmux")];
             let text = run_shell_with(&format!("pane-{n}"), interactive, &[], &pane, input).await;
