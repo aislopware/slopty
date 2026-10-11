@@ -1,7 +1,7 @@
 //! The process groups the worker runs commands in, ended with the worker however it ends.
 //!
 //! A command the worker runs for itself (a fact's probe, a worktree's setup) runs in a process
-//! group of its own, so that a timeout kills whatever it started as well ([`Group`]). Such a
+//! group of its own, so that a timeout kills whatever it started as well (`Group`). Such a
 //! group is not the worker's, so a worker killed outright (a crash, `SIGKILL`, a test's
 //! teardown) left its groups running, adopted by launchd. On a CI Mac the `rustup` and
 //! `xcodebuild` probes of killed workers held gigabytes for minutes.
