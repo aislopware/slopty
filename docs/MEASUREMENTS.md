@@ -16486,3 +16486,50 @@ gh run view 38161142392 --log | grep 'memory'
   `rustup` led every sample before at 1 300–2 460 MB. The largest of ours was a test's
   `slopty-worker`, 196–204 MB.
 - No process of ours outlived the tests. nextest ran 1 102 tests in 148 s.
+
+## 2026-10-12 — a person's window across a worker or holder restart
+
+The display holder's two open measurements (`docs/decisions/video.md`, "The displays made for
+clients outlive the worker"), as live tests on a `macos-26` runner (a VM, main display
+1024 × 768). Real displays, the worker's binary as the holder, and a stand-in app's window
+(`slopty-stub-window`, a titled AppKit window) on the display, its frame and screen read as
+AppKit says them every 10 ms. Probe runs 38172055846 and 38173169182:
+
+```sh
+cargo xtask remote --name W-holdprobe --runner macos-26 \
+  --probe 'cargo nextest run -p slopty-workerd --test holder --no-capture 2>&1 | grep MEASURE'
+```
+
+**A worker replaced** (an update's or a crash's path): the worker that made the display goes
+without letting it go, and the next one dials the holder 2 s later. Test
+`a_window_on_a_held_display_stays_put_while_its_worker_is_replaced`.
+
+| | run 38172055846 | run 38173169182 |
+| --- | --- | --- |
+| the window's moves, from the worker's end to 3 s after the next one took the display | 0 in 5.1 s | 0 in 5.2 s |
+| the next worker's dial, hello and list of what the holder holds | 3.9 ms | 1.3 ms |
+
+Without the holder the display left 160–590 ms after its owner died, and its windows moved to
+the main display (`.research/vdisplay-holder-2026-10-11.md`). With it, the client's display,
+and so its picture, has no gap of its own: what a client sees during an update is the
+worker's own restart.
+
+**The holder replaced** (another wire, or a crash): a 1536 × 1184 window, larger than the main
+display, on a 2048 × 1600 display. The holder quits, and the next is started as soon as the
+display has gone, as a worker does. Test
+`a_window_larger_than_the_main_display_comes_back_at_its_size_after_a_holder_restart`.
+
+| from the quit, s | run 38172055846 | run 38173169182 |
+| --- | --- | --- |
+| the window left the display | 0.17 | 0.21 |
+| the next holder had made the display again (the worker's list answered) | 0.92 | 0.69 |
+| the window was back on it | (not timed) | 0.54 |
+
+- While away, the window was on the main display, shrunk to fit it: 1024 × 659 at (0, 78).
+- It came back at 1536 × 1184, its own size, at (1940, −135), its exact place, both times. The
+  display came back with a new display id (3, then 4).
+- The window was back before the worker's list said so: the holder makes the display before it
+  answers, and macOS moved the window at once.
+- In the first run the test missed the moment it came back (its wait for the list swallowed
+  the frame), and the size and place are from 3 s later. The second run times it.
+

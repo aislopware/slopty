@@ -8440,7 +8440,9 @@ name = "slopty-testkit"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "rustix",
  "serde_json",
 ]
@@ -8596,6 +8598,7 @@ dependencies = [
  "noq",
  "objc2-application-services",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-core-video",
  "parking_lot",
  "serde_json",

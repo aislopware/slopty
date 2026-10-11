@@ -3083,10 +3083,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     asked to quit, and a new one is started. A new holder, or one started after a crash, makes
     every display in the list again under the same identity, trying for up to 16 s while
     macOS still holds one for the holder before. macOS brings their windows back to the
-    display, though not to their exact place (measured: every time, from 0.28 s to 30 s
-    after). A holder no worker has dialled for a minute (`ALONE_FOR`) ends, and its displays
-    with it: a worker launchd restarts is back within seconds, and one that is not was stopped
-    or removed.
+    display (measured: every time, from 0.28 s to 30 s after). A window larger than the main
+    display is shrunk to fit it while away, and comes back at its own size. In the live test
+    it came back to its exact place too, where an earlier small window came back a little
+    lower (`docs/MEASUREMENTS.md`, "a person's window across a worker or holder restart"). The
+    display made again has a new display id. A holder no worker has dialled for a minute
+    (`ALONE_FOR`) ends, and its displays with it: a worker launchd restarts is back within
+    seconds, and one that is not was stopped or removed.
   - **Started only when needed.** The first worker's first `OpenDisplay` starts the holder,
     over a socket pair on its standard input, so the first link needs no wait for it to
     listen. A worker that starts with no holder running starts one only when the list holds
@@ -3104,5 +3107,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Unix socket): `a_held_display_outlives_its_worker_and_its_client_takes_it_back`,
     `a_new_holder_makes_the_kept_displays_again`, and
     `a_holder_ends_alone_or_when_asked_to_quit`. On a Mac, with real displays and the worker's
-    binary as the holder: `holder::a_display_the_holder_made_outlives_the_worker_that_asked_for_it`
-    (`slopty-workerd`).
+    binary as the holder (`slopty-workerd`, `holder`):
+    `a_display_the_holder_made_outlives_the_worker_that_asked_for_it`, and, with a stand-in
+    app's window on the display (`slopty-stub-window`),
+    `a_window_on_a_held_display_stays_put_while_its_worker_is_replaced` and
+    `a_window_larger_than_the_main_display_comes_back_at_its_size_after_a_holder_restart`.

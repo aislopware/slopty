@@ -937,7 +937,7 @@ fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::NAMES`, each with the package that builds it.
-const SPAWNED_BINS: [(&str, &str); 8] = [
+const SPAWNED_BINS: [(&str, &str); 9] = [
     ("slopty-ptyd", "slopty-ptyd"),
     ("slopty-worker", "slopty-workerd"),
     ("slopty-server", "slopty-serverd"),
@@ -946,6 +946,7 @@ const SPAWNED_BINS: [(&str, &str); 8] = [
     ("slopty-stub-managed-claude", "slopty-testkit"),
     ("slopty-stub-pi", "slopty-testkit"),
     ("slopty-stub-acp", "slopty-testkit"),
+    ("slopty-stub-window", "slopty-testkit"),
 ];
 
 /// `--bin <name>` for each of [`SPAWNED_BINS`].

@@ -1,7 +1,8 @@
 //! The daemons and doubles a test spawns, from the same build as the test.
 //!
 //! A test that spawns `slopty-ptyd`, `slopty-worker`, `slopty-server`, `slopty` or the stand-ins
-//! for `claude`, a managed launcher, `pi` and an ACP agent finds each beside its own binary. Under
+//! for `claude`, a managed launcher, `pi`, an ACP agent and an app's window finds each beside its
+//! own binary. Under
 //! `cargo xtask` (the gate's tests, the e2e suites) they are built before any test starts, which
 //! sets [`FRESH`], so no test shells out to cargo: one that did would wait on cargo's locks for as
 //! long as any other build on the machine held them, inside its own timeout. A bare `cargo nextest
@@ -21,7 +22,7 @@ pub const FRESH: &str = "SLOPTY_BINS_FRESH";
 pub const BUILT: &str = "SLOPTY_BINS_BUILT";
 
 /// The binaries a test may spawn. `cargo xtask` builds the same list (`--bin`).
-pub const NAMES: [&str; 8] = [
+pub const NAMES: [&str; 9] = [
     "slopty-ptyd",
     "slopty-worker",
     "slopty-server",
@@ -30,6 +31,7 @@ pub const NAMES: [&str; 8] = [
     "slopty-stub-managed-claude",
     "slopty-stub-pi",
     "slopty-stub-acp",
+    "slopty-stub-window",
 ];
 
 /// The binary `name` from this build, beside `anchor`: a binary of the calling test's own

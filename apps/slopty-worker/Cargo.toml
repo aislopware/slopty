@@ -75,3 +75,6 @@ slopty-testkit.workspace = true
 objc2-application-services.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
+# The main display's size and a held display's, for the holder's window measurements
+# (`tests/holder.rs`).
+objc2-core-graphics.workspace = true
