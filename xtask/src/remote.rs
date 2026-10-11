@@ -345,6 +345,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         } else {
             snapshot(sh, &root, &dir, &opts.name, &opts.only)?
         };
+        actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha)?;
         // The tree as it was asked about, dispatched once a Mac is free for it.
         let macs = mac_jobs(opts);
         if macs > 0 {
@@ -501,6 +502,42 @@ fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) ->
     Ok(sha)
 }
 
+/// The local actions (`uses: ./<path>`) `workflow`'s text runs, by path.
+fn local_actions(workflow: &str) -> Vec<&str> {
+    let mut paths: Vec<&str> = workflow
+        .lines()
+        .filter_map(|line| line.trim_start().trim_start_matches("- ").strip_prefix("uses: ./"))
+        .map(str::trim)
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+/// Refuses a check whose snapshot `sha` lacks a local action that `on`'s [`WORKFLOW`] runs. The
+/// workflow comes from `on` and the actions from the snapshot, so a commit that removes one and
+/// is not on `on` yet failed every lane's check at setup (run 38153490688, the zig action).
+fn actions_present(sh: &Shell, on: &str, sha: &str) -> Result<()> {
+    cmd!(sh, "git fetch --quiet origin {on}").run().with_context(|| format!("fetching {on}"))?;
+    // The remote-tracking branch, not `FETCH_HEAD`, which another lane's fetch may replace.
+    let path = format!("origin/{on}:.github/workflows/{WORKFLOW}");
+    let workflow = cmd!(sh, "git show {path}").quiet().read()?;
+    let missing: Vec<&str> = local_actions(&workflow)
+        .into_iter()
+        .filter(|action| {
+            let file = format!("{sha}:{action}/action.yml");
+            cmd!(sh, "git cat-file -e {file}").quiet().ignore_stderr().run().is_err()
+        })
+        .collect();
+    ensure!(
+        missing.is_empty(),
+        "{on}'s {WORKFLOW} runs {}, which this tree lacks: land the change that removed it \
+         first, or try that change's workflow with --workflow-ref",
+        missing.iter().map(|m| format!("./{m}")).collect::<Vec<_>>().join(", ")
+    );
+    Ok(())
+}
+
 /// Start the workflow for `sha`, on [`REF`] unless `--workflow-ref` names a branch whose
 /// `check.yml` to try. An input goes only when it differs from the workflow's default, so a tree
 /// whose xtask knows an input `gate`'s `check.yml` does not yet have still dispatches.
@@ -655,6 +692,15 @@ mod tests {
         // An e2e run of its own workflow counts as outside the gate.
         let e2e = MacJob { gate: false, queued: false, check: None };
         assert!(mac_verdict(&[e2e, check("W-stream", false)], "A-cuts", 1).is_some());
+    }
+
+    #[test]
+    fn a_workflow_s_local_actions_are_read_from_its_steps() {
+        let workflow = "steps:\n      - uses: actions/checkout@v5\n      - uses: ./.github/actions/sccache\n        with:\n          x: 1\n      - if: a\n        uses: ./.github/actions/zig\n      - uses: ./.github/actions/sccache\n";
+        assert_eq!(
+            super::local_actions(workflow),
+            [".github/actions/sccache", ".github/actions/zig"]
+        );
     }
 
     #[test]
