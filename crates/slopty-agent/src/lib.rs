@@ -67,6 +67,7 @@ pub mod statusline;
 pub mod title;
 pub mod transcript;
 pub mod trust;
+pub mod typed;
 pub mod vouch;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

@@ -349,6 +349,13 @@ impl Worker {
         }
     }
 
+    /// The Codex or pi session the person typed into session `id`, as the daemon's agent tick
+    /// found it: `None` once no such agent runs there. Kept so a reboot takes it up again
+    /// ([`crate::restore`]).
+    pub fn keep_typed(&self, id: SessionId, typed: Option<slopty_agent::typed::Typed>) {
+        self.inner.keeper.typed(id, typed);
+    }
+
     /// Environment variables every future session is spawned with, in addition to the
     /// request's. The daemon uses this to tell sessions where its control socket is.
     pub fn set_session_env(&self, env: Vec<(String, String)>) {
@@ -434,6 +441,7 @@ impl Worker {
             saved_ms: WallMs::ZERO,
             restored: None,
             agent: None,
+            typed: None,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(id, recipe);

@@ -14,6 +14,10 @@
 //! back after a reboot"). The daemon's agent tick tells the keeper which conversation each session
 //! holds ([`Keeper::agent`]); a tile opened on `claude` runs it again resumed, and a shell the
 //! person typed `claude` into gets the resuming line typed at its first prompt.
+//! A Codex or pi the person typed into a terminal comes back the same way, with its own
+//! resuming line (`codex resume <id>`, `pi --session <id>`) typed at the first prompt in its
+//! folder, once the daemon's agent tick has found the session it holds ([`Keeper::typed`],
+//! `slopty_agent::typed`).
 //! A conversation Claude Code still runs in the background (`claude --bg`, in its session
 //! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
 //! A project task's Codex, its terminal's own command, comes back with `codex resume --last` in
@@ -31,6 +35,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use slopty_agent::resume::Resume;
+use slopty_agent::typed::Typed;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::project::PROJECT_ENV;
 use slopty_proto::terminal::{Restored, TermSize};
@@ -84,6 +89,8 @@ pub struct Recipe {
     pub restored: Option<Restored>,
     /// The Claude Code conversation running in it, to resume.
     pub agent: Option<Resume>,
+    /// The Codex or pi session running in it, typed there by the person, to take up again.
+    pub typed: Option<Typed>,
 }
 
 /// What an agent the worker resumes is given besides its own flags.
@@ -132,6 +139,7 @@ impl Recipe {
             saved_ms: WallMs::ZERO,
             restored: None,
             agent: None,
+            typed: None,
         }
     }
 
@@ -169,10 +177,15 @@ impl Recipe {
         });
         let Some((agent, cwd)) = agent else {
             let again = shell == self.command;
+            let typed = self.typed.as_ref().and_then(|typed| typed_again(id, typed));
+            let (cwd, launch) = match typed {
+                Some((cwd, line)) => (Some(cwd), Some(line)),
+                None => (self.cwd.as_deref().and_then(existing_dir), None),
+            };
             return Reopen {
                 command: shell,
-                cwd: self.cwd.as_deref().and_then(existing_dir),
-                launch: None,
+                cwd,
+                launch,
                 agent: None,
                 restored: self.restored(again),
                 codex: false,
@@ -319,6 +332,23 @@ impl Recipe {
     }
 }
 
+/// The folder and the line that take `typed` up again in a new shell there: none when the
+/// folder is gone, or when a word of the line has a control character, which the line editor
+/// would act on as it is typed (a kept recipe is a file anybody with the account can write).
+fn typed_again(id: SessionId, typed: &Typed) -> Option<(PathBuf, String)> {
+    let Some(cwd) = existing_dir(&typed.cwd) else {
+        tracing::info!(session = %id, cwd = %typed.cwd, "agent not resumed: its directory is gone");
+        return None;
+    };
+    let words = typed.words();
+    if !words.iter().all(|word| slopty_agent::resume::typeable(word)) {
+        tracing::warn!(session = %id, "agent not resumed: its line has a control character");
+        return None;
+    }
+    let words: Vec<String> = words.iter().map(|word| slopty_core::shell_quote(word)).collect();
+    Some((cwd, words.join(" ")))
+}
+
 /// Codex's program.
 const CODEX: &str = "codex";
 
@@ -414,6 +444,7 @@ enum Job {
     Opened(SessionId, Recipe),
     Checkpoint(SessionId, Vec<u8>, Place),
     Agent(SessionId, Option<Resume>),
+    Typed(SessionId, Option<Typed>),
     Forget(SessionId),
     Flush(oneshot::Sender<()>),
 }
@@ -480,6 +511,12 @@ impl Keeper {
     /// differs from the one kept.
     pub fn agent(&self, id: SessionId, agent: Option<Resume>) {
         let _sent = self.jobs.send(Job::Agent(id, agent));
+    }
+
+    /// The Codex or pi session, typed by the person, session `id` holds now, or none: written
+    /// at once when it differs from the one kept.
+    pub fn typed(&self, id: SessionId, typed: Option<Typed>) {
+        let _sent = self.jobs.send(Job::Typed(id, typed));
     }
 
     /// Session `id` was closed: nothing of it is kept.
@@ -576,6 +613,15 @@ async fn write_loop(
                     && recipe.agent != agent
                 {
                     recipe.agent = agent;
+                    let recipe = recipe.clone();
+                    write_recipe(&dir, id, &recipe).await;
+                }
+            }
+            Some(Job::Typed(id, typed)) => {
+                if let Some(recipe) = recipes.get_mut(&id)
+                    && recipe.typed != typed
+                {
+                    recipe.typed = typed;
                     let recipe = recipe.clone();
                     write_recipe(&dir, id, &recipe).await;
                 }
@@ -907,6 +953,34 @@ mod tests {
         let ended = AgentLaunch { background: vec!["other".to_owned()], ..launch };
         let resumed = at(&open(&["/bin/zsh"]), &ended);
         assert!(resumed.launch.unwrap().contains("--resume abc"), "resumed as before");
+    }
+
+    /// A Codex or pi the person typed into a shell comes back in a new shell in its folder with
+    /// its own resuming line typed at the first prompt. One whose folder is gone, or whose
+    /// session has a control character in it, leaves the shell alone in its last folder.
+    #[test]
+    fn a_typed_codex_or_pi_comes_back_with_its_own_line() {
+        use slopty_agent::typed::Agent;
+
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_string_lossy().into_owned();
+        let kept = |agent, session: &str, cwd: &str| Recipe {
+            typed: Some(Typed { agent, session: session.to_owned(), cwd: cwd.to_owned() }),
+            cwd: Some("/".to_owned()),
+            ..recipe(&["/bin/zsh"])
+        };
+        let id = "01a120d0-87f0-7cc3-b4dc-052b22902bc5";
+        let codex = reopen(&kept(Agent::Codex, id, &cwd));
+        assert_eq!(codex.command, ["/bin/zsh"], "the shell it ran in");
+        assert_eq!(codex.cwd.as_deref(), Some(project.path()), "in the agent's folder");
+        assert_eq!(codex.launch.as_deref(), Some(format!("codex resume {id}").as_str()));
+        let pi = reopen(&kept(Agent::Pi, "s-1", &cwd));
+        assert_eq!(pi.launch.as_deref(), Some("pi --session s-1"));
+
+        let gone = reopen(&kept(Agent::Pi, "s-1", "/nowhere/at/all"));
+        assert_eq!((gone.launch, gone.cwd.as_deref()), (None, Some(Path::new("/"))));
+        let tampered = reopen(&kept(Agent::Codex, "x\u{3}y", &cwd));
+        assert_eq!(tampered.launch, None, "a control character is never typed");
     }
 
     /// Claude Code's registry is read for the conversations it runs in the background only when

@@ -2156,6 +2156,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     was the shell), so the UI can offer the command again. The chain survives a second loss.
     A Claude Code conversation left running is the other exception: it comes back resumed
     (claude-code.md, "An agent comes back after a reboot").
+  - **A typed Codex or pi comes back too** (2026-10-11, readiness-w 10-12 rank 4). Only Claude
+    Code's conversation was kept, so a `codex` or `pi` the person ran in a tile came back as
+    a bare shell, and its conversation had to be found by hand. The daemon's agent tick now
+    also reads which of the two holds a terminal's foreground and which session it holds
+    (`slopty_agent::typed`). A command line that names the session says it: `codex resume
+    <id>`, `pi --session <id>` or `--session-id <id>`. Otherwise it is the one the process
+    began: the Codex thread on the person's daemon in the process's folder that began after
+    it started, or pi's session file in the folder's directory written after it started.
+    Clocks that count in whole seconds get a second of slack. It is looked for again every
+    six seconds until found, and never guessed: with two of the same agent in one folder, or
+    two threads begun since, nothing is kept. A process that keeps no session (`codex exec`,
+    `pi --print`, `--no-session`) is none of this. The session is kept in the recipe
+    (`Recipe::typed`), and dropped once the agent is no longer in the foreground. After a
+    loss, the new shell opens in the agent's folder with its own line typed at the first
+    prompt, as Claude Code's is: `codex resume <id>` or `pi --session <id>`. A folder that is
+    gone, or a line with a control character in it, leaves the shell alone. Tests:
+    `typed::tests` (slopty-agent: which process is which and what it holds, the session
+    begun) and `a_typed_codex_or_pi_comes_back_with_its_own_line` (`restore::tests`).
   - **Exited sessions come back as shells too.** An exited session stays until closed, and
     its record with it, so after a reboot it reopens as a live shell in its directory. The
     gap note's alternative, a read-only ended item with "Start a shell here", needs a session

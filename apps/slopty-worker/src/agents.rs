@@ -23,7 +23,10 @@
 //! Each tick also hands the worker the conversation each session holds
 //! (`AgentTable::resumable`), which it keeps so a reboot can resume it
 //! (`slopty_worker::restore`), and tells the sleep policy how many agents are working with
-//! their terminals still printing (`slopty_worker::wake`).
+//! their terminals still printing (`slopty_worker::wake`). A Codex or pi the person typed into
+//! a terminal is kept the same way: the session it holds, as its command line names it or as
+//! found among the daemon's Codex threads and pi's session files begun after it started
+//! (`slopty_agent::typed`).
 //!
 //! Once, shortly after the daemon starts, the agents it found already running (a worker
 //! restarted under its shells) get back what only hooks had said before the restart, from
@@ -36,6 +39,7 @@ use std::time::Duration;
 use slopty_agent::detect::Program;
 use slopty_agent::status::{AgentEvent, AgentStatus};
 use slopty_agent::transcript::{self, Tail};
+use slopty_agent::typed::{self, Holds, Typed};
 use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
 use slopty_worker::session::Probe;
@@ -58,6 +62,7 @@ const REDISCOVER_EVERY: u64 = 8;
 pub async fn watch(daemon: Daemon) -> ! {
     let home = slopty_platform::dirs::home();
     let mut tails: HashMap<SessionId, Tail> = HashMap::new();
+    let mut typed_seen = TypedSeen::new();
     let mut ticks: u64 = 0;
     let mut quiet = slopty_worker::wake::Quiet::default();
     let mut tick = tokio::time::interval(TICK);
@@ -65,6 +70,19 @@ pub async fn watch(daemon: Daemon) -> ! {
     loop {
         tick.tick().await;
         let live = daemon.worker.probe().await;
+        let typing: Vec<(SessionId, Option<Running>)> = live
+            .iter()
+            .map(|(id, probe)| {
+                let running = probe.foreground.as_ref().map(|fg| Running {
+                    pid: fg.pid,
+                    name: fg.name.clone(),
+                    argv: fg.argv.clone(),
+                    cwd: fg.cwd.clone(),
+                    started: fg.started,
+                });
+                (*id, running)
+            })
+            .collect();
         // Sessions the worker no longer runs are gone whatever their last signal said: an agent
         // whose terminal exited never reports a `SessionEnd` hook.
         let ids: Vec<SessionId> = live.iter().map(|(id, _probe)| *id).collect();
@@ -114,7 +132,125 @@ pub async fn watch(daemon: Daemon) -> ! {
             daemon.worker.keep_agent(session, agent);
         }
         follow(&daemon, &mut tails).await;
+        let again = ticks.is_multiple_of(REDISCOVER_EVERY);
+        keep_typed(&daemon, &mut typed_seen, typing, again).await;
     }
+}
+
+/// A terminal's foreground process, as the agent tick reads it for a typed Codex or pi.
+struct Running {
+    pid: i32,
+    name: String,
+    argv: Vec<String>,
+    cwd: Option<PathBuf>,
+    started: Option<std::time::SystemTime>,
+}
+
+/// Each terminal's Codex or pi as last found: the process it was found for, and the session it
+/// holds once found.
+type TypedSeen = HashMap<SessionId, (i32, Option<Typed>)>;
+
+/// How much earlier than its process's start a session may say it began, for clocks that
+/// count in whole seconds (Codex's thread times).
+const BEGUN_SLACK_MS: u64 = 1_000;
+
+/// Keep the session each terminal's Codex or pi holds, found once per process: at once when
+/// its command line names it, else among what was begun since it started, looked for again
+/// when `again` until found. A terminal whose agent is gone keeps none.
+async fn keep_typed(
+    daemon: &Daemon,
+    seen: &mut TypedSeen,
+    live: Vec<(SessionId, Option<Running>)>,
+    again: bool,
+) {
+    let running: HashSet<SessionId> = live.iter().map(|(id, _)| *id).collect();
+    seen.retain(|session, _| running.contains(session));
+    let agents: Vec<(SessionId, Running, typed::Agent, Holds)> = live
+        .into_iter()
+        .filter_map(|(session, fg)| {
+            let fg = fg?;
+            let (agent, holds) = typed::holds(&fg.name, &fg.argv)?;
+            Some((session, fg, agent, holds))
+        })
+        .filter(|(_, _, _, holds)| *holds != Holds::Nothing)
+        .collect();
+    let holding: HashSet<SessionId> = agents.iter().map(|(session, ..)| *session).collect();
+    let gone: Vec<SessionId> =
+        seen.keys().filter(|session| !holding.contains(session)).copied().collect();
+    for session in gone {
+        if let Some((_, Some(_))) = seen.remove(&session) {
+            daemon.worker.keep_typed(session, None);
+        }
+    }
+    for (session, fg, agent, holds) in &agents {
+        let known = seen.get(session).filter(|(pid, _)| *pid == fg.pid);
+        if known.is_some_and(|(_, typed)| typed.is_some() || !again) {
+            continue;
+        }
+        let Some(cwd) = fg.cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let found = match holds {
+            Holds::Named(session) => Some(session.clone()),
+            Holds::Begun => {
+                let others = agents
+                    .iter()
+                    .filter(|(other, o, a, _)| {
+                        other != session && a == agent && o.cwd.as_ref() == fg.cwd.as_ref()
+                    })
+                    .count();
+                begun(daemon, *agent, &cwd, fg.started, others).await
+            }
+            Holds::Nothing => None,
+        };
+        let typed = found.map(|found| Typed { agent: *agent, session: found, cwd });
+        if typed.is_some() {
+            tracing::info!(%session, agent = agent.program(), "a typed agent's session kept");
+            daemon.worker.keep_typed(*session, typed.clone());
+        }
+        seen.insert(*session, (fg.pid, typed));
+    }
+}
+
+/// The session `agent` began in `cwd` since its process started at `started`, as the daemon's
+/// Codex threads or pi's session files say; `None` while it is not known which.
+async fn begun(
+    daemon: &Daemon,
+    agent: typed::Agent,
+    cwd: &str,
+    started: Option<std::time::SystemTime>,
+    others: usize,
+) -> Option<String> {
+    let since = started?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let since = u64::try_from(since).ok()?.saturating_sub(BEGUN_SLACK_MS);
+    match agent {
+        typed::Agent::Codex => {
+            let codex = slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CODEX);
+            let threads = daemon.threads.as_ref()?.host().begun_in(&codex, cwd);
+            let threads: Vec<(String, u64)> =
+                threads.into_iter().map(|(id, at)| (id, at.as_millis())).collect();
+            typed::codex_begun(&threads, since, others)
+        }
+        typed::Agent::Pi => {
+            let agent_dir = slopty_agent::pi::sessions::agent_dir()?;
+            let dir = slopty_agent::pi::sessions::folder(&agent_dir, cwd);
+            let listed = tokio::task::spawn_blocking(move || written_in(&dir)).await.ok()?;
+            typed::pi_begun(&listed, since, others)
+        }
+    }
+}
+
+/// Each file in `dir` and when it was last written, in ms since the epoch. Blocking.
+fn written_in(dir: &std::path::Path) -> Vec<(String, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let written = entry.metadata().ok()?.modified().ok()?;
+            let ms = written.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+            Some((entry.file_name().to_string_lossy().into_owned(), u64::try_from(ms).ok()?))
+        })
+        .collect()
 }
 
 /// Tell the sleep policy how many agents are working (a turn, a tool, or background work out)

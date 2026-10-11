@@ -657,6 +657,19 @@ impl Host {
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
     }
 
+    /// `agent`'s threads in folder `cwd`, by their own sessions' ids, each with when it began:
+    /// as their heads say, so no log is opened.
+    #[must_use]
+    pub fn begun_in(&self, agent: &AgentId, cwd: &str) -> Vec<(String, WallMs)> {
+        let inner = self.inner.lock();
+        let open = inner.threads.values().map(|hosted| &hosted.log.state().meta);
+        let cold = inner.cold.values().map(|head| &head.state.meta);
+        open.chain(cold)
+            .filter(|meta| meta.agent == *agent && meta.cwd == cwd)
+            .map(|meta| (meta.native.clone(), meta.created_ms))
+            .collect()
+    }
+
     /// `thread`'s start is held at Claude Code's trust dialog: kept in its directory until it is
     /// taken ([`Self::take_held_start`]) or the thread goes. One that cannot be written is
     /// warned of, and is kept for this run alone.
