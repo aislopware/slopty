@@ -130,9 +130,36 @@ jobs:
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # xtask built once per change to what it is built from, rather than in every job: 20-90 s
+      # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
+      # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
+      # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      - id: xtask
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
+      - run: |
+          echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+          echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
+      # The lints run shear and typos of the tools lane's six: taplo has no build for arm Linux
+      # and compiled for 84 s (run 38115014839).
       - run: >-
-          cargo xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
-          --lane rustdoc
+          xtask setup --lane clippy-host --lane clippy-ios --lane clippy-linux --lane rustdoc
+          --tool cargo-shear --tool typos-cli
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
@@ -143,7 +170,7 @@ jobs:
           args=(--part lint)
           for p in $PACKAGES; do args+=(-p "$p"); done
           [ "$FULL" = yes ] || args+=(--quick)
-          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/lint.log
+          xtask check "${args[@]}" 2>&1 | tee target/remote/lint.log
       - if: always()
         run: $SCCACHE_PATH --show-stats
       - if: always()
@@ -220,7 +247,32 @@ jobs:
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      - run: cargo xtask setup --lane tests
+      # xtask built once per change to what it is built from, rather than in every job: 20-90 s
+      # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
+      # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
+      # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      - id: xtask
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
+      - run: |
+          echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+          echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
+      - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
@@ -232,7 +284,7 @@ jobs:
         run: |
           args=(--part tests)
           for p in $PACKAGES; do args+=(-p "$p"); done
-          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/test.log
+          xtask check "${args[@]}" 2>&1 | tee target/remote/test.log
       # The snapshots the tests wrote, as a patch on the commit checked, which `remote` applies
       # to the tree it came from. Only what an accept writes: anything else in the runner's tree
       # (zig's cache) is not ours to bring back, and `remote` refuses a patch with it.
@@ -328,8 +380,33 @@ jobs:
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
       - if: contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
         run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+      # xtask built once per change to what it is built from, rather than in every job: 20-90 s
+      # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
+      # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
+      # it through `SLOPTY_XTASK` (.config/nextest.toml), so cargo never rebuilds it there.
+      - id: xtask
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked --quiet --target-dir target/xtask --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
+      - run: |
+          echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+          echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
       - run: >-
-          cargo xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
+          xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
           --lane tests --lane rustdoc
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -349,7 +426,7 @@ jobs:
           [ -n "$FILTER" ] && args+=(-E "$FILTER")
           [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
           [ "$CASE" = ios ] && args+=(--sim "$SIM")
-          cargo xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
+          xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
       # The goldens and snapshots the run accepted, as a patch on the commit checked, which
       # `remote` applies to the tree it came from; nothing else of the runner's tree.
       - if: always()

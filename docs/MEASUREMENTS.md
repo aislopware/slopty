@@ -16001,3 +16001,35 @@ scripts' C. Cold: each runner's compile cache was empty (0 hits, 915 Rust misses
 cargo xtask remote --name <n> --runner ubuntu-24.04-arm --head --probe "$(cat probe.sh)"
 gh run view <id> --json jobs --jq '.jobs[0] | "\(.startedAt) \(.completedAt)"'
 ```
+
+## 2026-10-11 — The first gate run on Linux lints, a check's cache, the xtask binary
+
+- **The first gate run of the new layout** (38114630412, 79973fbf), against the last before it
+  (38112080050). Its compile cache was partly cold: the lints' Linux images and triples had no
+  entries yet, and the test shards missed a third (236 of 682 in ui), so its builds say nothing
+  yet. nextest's own run, which the cache does not touch, is the first of ten for the six-thread
+  trial (`NEXTEST_TEST_THREADS=6`):
+
+  | shard | nextest run before (s) | with six threads (s) |
+  | --- | --- | --- |
+  | ui | 76.2 | 65.4 |
+  | worker | 173.3 | 139.8 |
+  | rest | 120.5 | 81.0 |
+
+  The Mac jobs took 2290 s in three jobs against 2459 s in five, with 489–571 s more build on
+  the cold cache than a warm run.
+- **A check's compile cache (item 2).** The second check of `slopty-core` on the split
+  `check.yml` (38115310200) served 480 of 481 Rust compiles in its lint job from the cache the
+  gate's Apple lint jobs fill on the same image: 99.8 %, against 13.2 % (245 of 1859) for a
+  check before (38107906317).
+- **The xtask binary (item 4).** Building it took 44 s in the arm lint job, 74 s in the arm run
+  job and 96 s in the x86_64 test job (38115014839, 38115017093). Restored from the Actions
+  cache, the step is skipped and the test job took 93 s against 195 s (38115310200). The binary
+  is 5 MB in the cache.
+- **The tools a check's lint job installs.** `--lane tools` took 95 s on arm, 84 s of it taplo
+  compiling from source. With `--tool cargo-shear --tool typos-cli` it took 5 s (38115559100).
+
+```sh
+gh api "repos/aislopware/slopty/actions/runs/<id>/jobs" --jq '.jobs[] | .name as $n | .steps[] | "\($n) \(.name) \(.started_at) \(.completed_at)"'
+gh api --allow-escape-sequences "repos/aislopware/slopty/actions/jobs/<job>/logs" | grep -a 'Cache \(hits\|misses\) (Rust)\|✓ nextest'
+```

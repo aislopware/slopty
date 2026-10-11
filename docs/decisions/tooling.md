@@ -1220,7 +1220,8 @@ more full-window layer.
   - A job that waited inside itself for the gate to finish would hold its Mac while it waited.
 - ❌ **Not taken: caching the xtask binary across CI jobs** (2026-10-05, the same study's item 7).
   `target/xtask` is 1.3 GB, and the Actions cache's 10 GB holds sccache's units, which save more
-  per byte than the about 50 s each job spends compiling xtask.
+  per byte than the about 50 s each job spends compiling xtask. Superseded on 2026-10-11 for the
+  binary alone, 5 MB ("CI caches the xtask binary").
 
 - ✅ **A commit that changes a workflow is promoted from a checkout** (2026-10-05). GitHub never
   lets a run's own token create or update a file under `.github/workflows/`, so CI's `promote`
@@ -1661,3 +1662,18 @@ more full-window layer.
   and server daemons, which `slopty-core`'s tests never start, so a Linux check now builds them
   only when a test spawns one. `remote --workflow-ref <branch>` runs a branch's `check.yml`,
   to try it before it lands.
+
+- ✅ **CI caches the xtask binary** (2026-10-11, `.research/ci-speed-2026-10-11.md` item 4).
+  Every job compiled xtask before its first step, 39–98 s on a runner (`cargo xtask` is
+  `cargo run`), and a Mac test shard 72–87 s on a cold compile cache. The ruling of 2026-10-05
+  against caching it was about the 1.3 GB `target/xtask`; the binary alone is 5 MB in the
+  Actions cache. Each job restores it under a key that hashes everything its build reads (its
+  sources and its workspace dependencies', the manifests, the lock, the toolchain file and
+  cargo's config; a test checks the key against `cargo metadata`), builds it on a miss and saves
+  it, and runs it directly. `cargo xtask` would rebuild it there, since the target dir's
+  fingerprints are not cached, so nextest's setup script runs `$SLOPTY_XTASK`, which the job
+  sets, and falls back to `cargo xtask` anywhere else. Measured on one check of `slopty-core`:
+  the test job took 93 s with the binary cached against 195 s building it (runs 38115310200,
+  38115014839). A remote check's lint job also installs only the two tools of the tools lane it
+  runs (`xtask setup --tool`): taplo, which it never runs, has no build for arm Linux and
+  compiled for 84 s.
