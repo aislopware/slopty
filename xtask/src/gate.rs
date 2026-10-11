@@ -1966,10 +1966,8 @@ mod tests {
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
             "clippy for Linux takes a Linux runner, not one of the five Macs"
         );
-        let zig = std::fs::read_to_string(path.with_file_name("../actions/zig/action.yml"))
-            .expect("the zig action");
-        let pinned = format!("default: {}.", crate::tools::ZIG);
-        assert!(zig.contains(&pinned), "CI's zig is the one setup asks for");
+        let zig = format!("version: {}.", crate::tools::ZIG);
+        assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");
         let action = std::fs::read_to_string(path.with_file_name("../actions/sccache/action.yml"))
             .expect("the sccache action");
@@ -1980,7 +1978,6 @@ mod tests {
         for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
             let jobs = std::fs::read_to_string(path.with_file_name(name)).expect("a workflow");
             assert!(!jobs.contains("brew install zig"), "Homebrew's zig is whatever it is today");
-            assert!(!jobs.contains("setup-zig"), "{name}: zig through the one action");
             assert!(!jobs.contains("sccache-action@"), "{name}: sccache through the one action");
             assert!(!jobs.contains("SCCACHE_GHA_ENABLED"), "{name}: the action picks the backend");
             assert!(jobs.contains("uses: ./.github/actions/sccache"), "{name} caches its units");

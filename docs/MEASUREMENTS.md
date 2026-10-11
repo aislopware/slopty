@@ -16313,6 +16313,10 @@ cancelled lands with a later run, so its wait counts that one's too.
   a red lane's fix (963d71f2, 107 min; 7722cbef and 79973fbf, 88 min), or a newer push.
 - 14e3576a and 058d32be waited 41 and 39 min, while lane checks held all five macOS runners and
   the gate's test shards queued (gate run 38136668846), before `remote` yielded to the gate.
+- Again at 15:45 UTC (`cargo xtask gate-latency`, the 24 hours before): 63 pushes landed,
+  median 24 min, p90 60 min, max 107 min. The afternoon's toolchain, thread-count and Deep
+  changes each changed a workflow, so their runs waited for `cargo xtask promote` too: 4cb0c34c
+  76 min, bac92dd6 60 min, 8ac395d6 48 min.
 
 ## 2026-10-11 — a macOS test shard's timeline, and what of it is fixed
 
@@ -16336,10 +16340,14 @@ steps; the build's parts from the tests lane's `cargo-timing.html`.
   costs CPU here, not the network: sccache hashes each unit's sources and the dependencies it
   reads, then unpacks the object, so more jobs would not go faster. The rest is the workspace's
   test executables (225–358 CPU-seconds), which sccache never caches since they link.
-- setup-zig spent 9.5 of its 13 s unpacking the release's `.tar.xz` on one core. The unpacked
-  tree from the Actions cache (`.github/actions/zig`, 81 MB with zstd) took 4 s against 13 on a
-  miss, on arm Linux (trial runs 38146885080, 38146631447): 9 s off every job that builds with
-  zig, the three Mac shards' critical path among them.
+- setup-zig spent 9.5 of its 13 s unpacking the release's `.tar.xz`. Restoring the unpacked tree
+  from the Actions cache instead (b46e3559, reverted) saved almost nothing: on the Macs 8–15 s
+  a hit (median 10, runs 38148619897 and 38151148784) against setup-zig's median 12 over 87
+  shard jobs, since 6 s of it is still writing zig's 19 500 files (the download took 0.7 s);
+  on Linux 3–7 s against 4–5. Shipping the binary alone (22 MB; `zig version`, all the prebuilt
+  libghostty-vt's key asks of it, runs without its library) would take a second, but a key that
+  stopped matching (a new image's SDK) would then build libghostty-vt with no zig library and
+  fail the shard.
 - With the toolchain named in `RUSTUP_TOOLCHAIN` (8ac395d6), the registry cache's step took
   10–13 s against 31–33 s: rustup no longer installed `rust-toolchain.toml`'s every component
   and target on the job's first cargo call. The compile cache's misses per job, after one-time

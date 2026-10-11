@@ -128,7 +128,10 @@ jobs:
           cache-targets: false
           save-if: ${{ matrix.slug == 'coverage' }}
       - uses: cargo-bins/cargo-binstall@main
-      - uses: ./.github/actions/zig
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
       # As in the gate (`ci.yml`): Ghostty's zig packages fetched ahead of the build, with
       # retries and a bound. Left to the build script, a fetch that stalled held asan, loom and
       # coverage silent until their 240-minute timeout (run 37156507396).
@@ -213,7 +216,10 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - uses: cargo-bins/cargo-binstall@main
-      - uses: ./.github/actions/zig
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
       - uses: actions/cache@v4
         with:
           path: vendor/ghostty/zig-pkg

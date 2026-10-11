@@ -75,7 +75,10 @@ jobs:
       # As the gate's lanes compile them, so the compile cache's entries are theirs
       # (xtask/src/ci_profile.rs).
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      - uses: ./.github/actions/zig
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
       - id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
