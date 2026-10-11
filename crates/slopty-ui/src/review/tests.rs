@@ -94,7 +94,7 @@ fn tile_in<'a>(
     let into = Rc::clone(&sent);
     let hub = cx.update(|cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(crate::workspace::key_bindings());
+        cx.bind_keys(crate::workspace::key_bindings(cx));
         let hub = cx.new(|_| ThreadHub::new("studio".to_owned(), None));
         cx.subscribe(&hub, move |_hub, event: &HubEvent, _cx| {
             if let HubEvent::Send(msgs) = event {

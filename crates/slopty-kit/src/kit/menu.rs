@@ -32,13 +32,16 @@ use gpui::{
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
+use crate::icons::Symbol;
 
 /// Letters typed within this pause of each other make one prefix.
 pub const TYPING: Duration = Duration::from_millis(800);
 
-/// A menu's width: room for a row's words and its keys.
-pub const WIDTH: f32 = 260.0;
+/// The least a menu is wide, Zed's context menu's: it grows with its rows' words and keys.
+pub const MIN_WIDTH: f32 = 192.0;
+
+/// The most a menu is wide, Zed's `max_w_96`: a longer row ends in an ellipsis.
+pub const MAX_WIDTH: f32 = 384.0;
 
 /// What a row does when chosen.
 pub type Run = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -383,7 +386,7 @@ impl RenderOnce for MenuPanel {
                             .debug_selector(move || selector)
                             .flex_none()
                             .py(px(theme.spacing.xs))
-                            .child(super::rule(theme.surfaces.border))
+                            .child(super::rule(theme.surfaces.stroke))
                             .into_any_element(),
                     );
                 }
@@ -414,7 +417,8 @@ impl RenderOnce for MenuPanel {
             .role(Role::Menu)
             .aria_label(label)
             .occlude()
-            .w(px(WIDTH))
+            .min_w(px(MIN_WIDTH))
+            .max_w(px(MAX_WIDTH))
             .flex()
             .flex_col()
             .p(px(super::sheet_pad(&theme)))
@@ -533,7 +537,7 @@ fn row(
         .when_some(ticked, |el, on| {
             el.aria_toggled(if on { Toggled::True } else { Toggled::False })
         })
-        .gap(px(theme.spacing.md))
+        .gap(px(theme.spacing.xs + theme.spacing.xxs))
         .when(!disabled, gpui::Styled::cursor_pointer)
         .when(marked, |el| el.bg(hsla(s.selected)).aria_active_descendant())
         .on_mouse_move(move |_ev, _window, cx| {
@@ -546,9 +550,9 @@ fn row(
         })
         .on_click(move |_ev, window, cx| choose(&click_menu, n, &click_close, window, cx))
         .children(item.icon.map(|icon| {
-            // At the label's size, a tier under it; muted only with it, when disabled.
-            let tone = if disabled { s.text_muted } else { s.text_secondary };
-            crate::icons::icon(theme, icon, IconSize::Lead, hsla(tone)).flex_none()
+            // Zed's muted icon; the placeholder's tone with its words when disabled.
+            let tone = if disabled { s.text_muted } else { s.icon_muted };
+            crate::icons::icon(theme, icon, hsla(tone)).flex_none()
         }))
         .child(
             div()
@@ -565,20 +569,15 @@ fn row(
             el.child(
                 div()
                     .flex_none()
+                    .pl(px(theme.spacing.md))
                     .text_size(px(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
+                    .text_color(hsla(s.text_secondary))
                     .child(item.detail.clone()),
             )
         })
         .when(ticked == Some(true), |el| {
             el.child(
-                crate::icons::icon(
-                    theme,
-                    Symbol::Checkmark,
-                    IconSize::Inline,
-                    hsla(s.text_secondary),
-                )
-                .flex_none(),
+                crate::icons::icon(theme, Symbol::Checkmark, hsla(s.text_secondary)).flex_none(),
             )
         })
         .into_any_element()

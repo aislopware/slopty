@@ -43,19 +43,19 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, Keystroke, ParentElement as _, Render, ScrollHandle, SharedString, Stateful,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyDownEvent,
+    Keystroke, ParentElement as _, Render, ScrollHandle, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit::ButtonKind;
 use slopty_platform::login::Login;
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::{Choice, Kind};
-use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
+use slopty_theme::{Rgb, TerminalPalette, Theme};
 
 use crate::palette::PaletteItem;
 
@@ -366,7 +366,7 @@ impl SettingsForm {
             file_opens: false,
             keys: None,
             words: Vec::new(),
-            key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
+            key_handles: crate::keymap::current(cx).commands().iter().map(|_| handle(cx)).collect(),
             recording: None,
             thumbs: std::cell::RefCell::default(),
             login: None,
@@ -1005,12 +1005,7 @@ impl SettingsForm {
                     cx.stop_propagation();
                 }
             }))
-            .child(slopty_kit::icons::icon(
-                theme,
-                Symbol::Magnifyingglass,
-                IconSize::Inline,
-                hsla(s.text_muted),
-            ))
+            .child(slopty_kit::icons::icon(theme, Symbol::Magnifyingglass, hsla(s.text_muted)))
             .child(
                 div().flex_1().min_w_0().child(
                     Input::new(&self.search)
@@ -1050,9 +1045,7 @@ impl SettingsForm {
                     if selected {
                         // The sections lie on the chrome, so the one shown rises off it as a
                         // white plate in light, as the navigator's chosen row does.
-                        slopty_kit::kit::selected(el, theme, keyed)
-                            .text_color(hsla(s.text))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                        slopty_kit::kit::selected(el, theme, keyed).text_color(hsla(s.text))
                     } else {
                         el.text_color(hsla(s.text_secondary))
                             .map(slopty_kit::kit::eased)
@@ -1135,9 +1128,15 @@ impl SettingsForm {
                     .children(groups),
             )
             .children(self.file_opens.then(|| {
-                self.foot_row("settings-open-file", Symbol::Curlybraces, OPEN_FILE, cx, |cx| {
-                    cx.emit(SettingsFormEvent::OpenFile);
-                })
+                self.foot_row(
+                    "settings-open-file",
+                    Symbol::ChevronLeftForwardslashChevronRight,
+                    OPEN_FILE,
+                    cx,
+                    |cx| {
+                        cx.emit(SettingsFormEvent::OpenFile);
+                    },
+                )
             }))
             .child(self.foot_row("settings-back", Symbol::ArrowLeft, BACK, cx, |cx| {
                 cx.emit(SettingsFormEvent::Done);
@@ -1279,7 +1278,7 @@ impl SettingsForm {
                 let glyph = slopty_kit::kit::icon_button(
                     theme,
                     "settings-open-file-glyph",
-                    Symbol::Curlybraces,
+                    Symbol::ChevronLeftForwardslashChevronRight,
                     OPEN_FILE,
                 )
                 .on_click(cx.listener(open));
@@ -1305,11 +1304,11 @@ impl SettingsForm {
 
     /// The Keyboard page's lines for the form's text: the keymap in effect with the text's
     /// `[keys]` over it.
-    fn key_page(&mut self) -> &KeyPage {
+    fn key_page(&mut self, cx: &App) -> &KeyPage {
         if self.keys.as_ref().is_some_and(|page| page.text != self.text) {
             self.keys = None;
         }
-        self.keys.get_or_insert_with(|| KeyPage::read(&self.text, &self.words))
+        self.keys.get_or_insert_with(|| KeyPage::read(&self.text, &self.words, cx))
     }
 
     /// The app's own palette lines, so the Keyboard page names its commands as the palette
@@ -1375,7 +1374,7 @@ impl SettingsForm {
             "escape" if bare => None,
             "backspace" if bare => Some(edit::quoted("")),
             _ => {
-                let bare_ok = crate::keymap::current()
+                let bare_ok = crate::keymap::current(cx)
                     .commands()
                     .get(ix)
                     .is_some_and(crate::keymap::Command::takes_bare_keys);
@@ -1401,7 +1400,7 @@ impl SettingsForm {
         self.recording = None;
         match literal {
             Some(literal) => {
-                self.write_keys(ix, Some(&literal));
+                self.write_keys(ix, Some(&literal), cx);
                 self.apply(cx);
             }
             None => cx.notify(),
@@ -1411,13 +1410,13 @@ impl SettingsForm {
     /// Put command `ix`'s default chords back: its line leaves the file.
     fn reset_keys(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.recording = None;
-        self.write_keys(ix, None);
+        self.write_keys(ix, None, cx);
         self.apply(cx);
     }
 
     /// Set command `ix`'s chords in `[keys.<scope>]` to `literal`, or take its line out.
-    fn write_keys(&mut self, ix: usize, literal: Option<&str>) {
-        let keymap = crate::keymap::current();
+    fn write_keys(&mut self, ix: usize, literal: Option<&str>, cx: &App) {
+        let keymap = crate::keymap::current(cx);
         let Some(command) = keymap.commands().get(ix) else { return };
         let table = format!("keys.{}", command.scope().name());
         self.text = match literal {
@@ -1626,12 +1625,7 @@ impl SettingsForm {
                 .hover(gpui::Styled::underline)
                 .on_click(move |_ev, _window, _cx| slopty_platform::open_url(url))
                 .child(words)
-                .child(slopty_kit::icons::icon(
-                    theme,
-                    Symbol::ArrowUpRight,
-                    IconSize::Inline,
-                    hsla(s.text_muted),
-                ));
+                .child(slopty_kit::icons::icon(theme, Symbol::ArrowUpRight, hsla(s.text_muted)));
             children.push(slopty_kit::a11y::tab_stop(link, s.focus).into_any_element());
         }
     }
@@ -1643,11 +1637,11 @@ impl SettingsForm {
         let whole_keyboard = !searching && (self.narrow || self.section == Section::Keyboard);
         let (keyboard, said): (Vec<KeyRow>, Vec<String>) = if searching {
             let query = self.query.clone();
-            let page = self.key_page();
+            let page = self.key_page(cx);
             let found = page.rows.iter().filter(|r| crate::picker::matches(&query, &r.haystack()));
             (found.cloned().collect(), Vec::new())
         } else if whole_keyboard {
-            let page = self.key_page();
+            let page = self.key_page(cx);
             (page.rows.clone(), page.said.clone())
         } else {
             (Vec::new(), Vec::new())
@@ -1850,8 +1844,8 @@ impl SettingsForm {
         slopty_kit::a11y::tab_stop(el, self.theme.surfaces.focus)
     }
 
-    /// A switch: the neutral solid with its knob at its end when on, a quiet track when off. The
-    /// knob slides when it is turned, unless motion is reduced.
+    /// A switch: the accent with its knob at its end when on, as Zed's is, a quiet track when
+    /// off. The knob slides when it is turned, unless motion is reduced.
     fn switch(&self, ix: usize, row: &Row, on: bool, cx: &Context<Self>) -> AnyElement {
         let turned = self.moved.and_then(|(moved, turn)| (moved == ix).then_some(turn));
         let el = self
@@ -1882,7 +1876,7 @@ impl SettingsForm {
         let width = spacing.xl + spacing.xs;
         let travel = 2.0_f32.mul_add(-spacing.xxs, width - knob_size);
         let (track, ink) = if on {
-            (hsla(s.solid), hsla(s.solid_ink))
+            (hsla(s.accent_fill), hsla(s.accent_ink))
         } else {
             (hsla(s.selected), hsla(s.text_secondary))
         };
@@ -2038,7 +2032,7 @@ impl SettingsForm {
                         .hover(move |el| el.bg(hsla(s.hover)))
                         .on_click(cx.listener(move |this, _ev, _window, cx| this.nudge(ix, up, cx)))
                 })
-                .child(slopty_kit::icons::icon(theme, icon, IconSize::Inline, hsla(ink)))
+                .child(slopty_kit::icons::icon(theme, icon, hsla(ink)))
         };
         let el = well(theme)
             .id(("settings-stepper", ix))
@@ -2098,12 +2092,7 @@ impl SettingsForm {
                     .text_size(px(theme.typography.ui_size))
                     .child(family),
             )
-            .child(slopty_kit::icons::icon(
-                theme,
-                Symbol::ChevronDown,
-                IconSize::Inline,
-                hsla(s.text_muted),
-            ));
+            .child(slopty_kit::icons::icon(theme, Symbol::ChevronDown, hsla(s.text_muted)));
         self.stop(ix, row, el, cx).into_any_element()
     }
 
@@ -2139,12 +2128,7 @@ impl SettingsForm {
                 }))
                 .child(div().font_family(family.clone()).child(family.clone()))
                 .when(on, |el| {
-                    el.child(slopty_kit::icons::icon(
-                        theme,
-                        Symbol::Checkmark,
-                        IconSize::Inline,
-                        hsla(s.text),
-                    ))
+                    el.child(slopty_kit::icons::icon(theme, Symbol::Checkmark, hsla(s.text)))
                 })
         });
         div()
@@ -2286,7 +2270,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
     let (ring, rule) = (hsla(theme.surfaces.border), hsla(theme.surfaces.stroke));
     let (r, inset) = (px(theme.radii.lg), px(theme.spacing.lg));
-    let wash = hsla(theme.surfaces.card);
+    let wash = hsla(theme.surfaces.ground);
     parts
         .into_iter()
         .enumerate()
@@ -2346,10 +2330,10 @@ struct KeyPage {
 }
 
 impl KeyPage {
-    fn read(text: &str, words: &[PaletteItem]) -> Self {
+    fn read(text: &str, words: &[PaletteItem], cx: &App) -> Self {
         let keys = slopty_settings::Settings::parse(text).settings.keys;
-        let keymap = crate::keymap::current().with_keys(&keys);
-        let mut palette = crate::workspace::palette_items();
+        let keymap = crate::keymap::current(cx).with_keys(&keys);
+        let mut palette = crate::workspace::palette_items(cx);
         palette.extend_from_slice(words);
         let rows = schema::key_rows(&keymap, &palette);
         Self { text: text.to_owned(), rows, said: keymap.diagnostics().to_vec() }
@@ -2580,9 +2564,9 @@ mod tests {
         let filled = quads.iter().any(|q| {
             (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
                 && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
-                && q.background == gpui::Background::from(hsla(theme.surfaces.card))
+                && q.background == gpui::Background::from(hsla(theme.surfaces.ground))
         });
-        assert!(filled, "the card's wash under the ring");
+        assert!(filled, "the work's ground under the ring");
         // The ring bounds a region; the rules part rows inside it, a step quieter.
         let at_origin = |b: gpui::Bounds<gpui::Pixels>| {
             move |q: &&gpui::Quad| {
@@ -2689,9 +2673,6 @@ mod tests {
             cx.run_until_parked();
             (form, cx)
         }
-        /// How the stand-in login item stands, as a number: off, on, blocked, refusing.
-        static STATE: AtomicU8 = AtomicU8::new(0);
-        static SETS: AtomicUsize = AtomicUsize::new(0);
         const fn login(n: u8) -> Login {
             match n {
                 1 => Login::On,
@@ -2699,6 +2680,11 @@ mod tests {
                 _ => Login::Off,
             }
         }
+        // How the stand-in login item stands, as a number (off, on, blocked, refusing), and how
+        // often it was set: this run's own, so a run under another seed starts from off.
+        let (state, sets) = (Arc::new(AtomicU8::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (stands, set_by) = (Arc::clone(&state), Arc::clone(&state));
+        let counted = Arc::clone(&sets);
         cx.update(gpui_kit::init);
         let ix = rows().iter().position(|r| r.system == Some(System::OpenAtLogin));
         let Some(ix) = ix else { return };
@@ -2712,14 +2698,14 @@ mod tests {
         let seen = Rc::clone(&opened);
         cx.update(|cx| {
             cx.set_global(LoginItem {
-                read: Arc::new(|| login(STATE.load(Ordering::SeqCst))),
-                set: Arc::new(|on| {
-                    SETS.fetch_add(1, Ordering::SeqCst);
-                    match STATE.load(Ordering::SeqCst) {
+                read: Arc::new(move || login(stands.load(Ordering::SeqCst))),
+                set: Arc::new(move |on| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    match set_by.load(Ordering::SeqCst) {
                         3 => Err("Operation not permitted".to_owned()),
                         2 if on => Ok(Login::Blocked),
                         _ => {
-                            STATE.store(u8::from(on), Ordering::SeqCst);
+                            set_by.store(u8::from(on), Ordering::SeqCst);
                             Ok(login(u8::from(on)))
                         }
                     }
@@ -2736,11 +2722,11 @@ mod tests {
             cx.run_until_parked();
         };
         press(cx);
-        assert_eq!((on(cx), STATE.load(Ordering::SeqCst)), (Some(Login::On), 1), "turned on");
+        assert_eq!((on(cx), state.load(Ordering::SeqCst)), (Some(Login::On), 1), "turned on");
 
         // Turned off in Login Items: turning it on again is the system's to refuse.
         press(cx);
-        STATE.store(2, Ordering::SeqCst);
+        state.store(2, Ordering::SeqCst);
         press(cx);
         assert_eq!(on(cx), Some(Login::Blocked));
         assert_eq!(opened.get(), 1, "Login Items, where it is allowed again");
@@ -2748,12 +2734,12 @@ mod tests {
         assert!(cx.debug_bounds(meta).is_some());
         let said = form.read_with(cx, |f, _| rows().get(ix).map(|row| f.meta(row)));
         assert_eq!(said, Some(LOGIN_BLOCKED), "the row says where it is held off");
-        let sets = SETS.load(Ordering::SeqCst);
+        let before = sets.load(Ordering::SeqCst);
         press(cx);
-        assert_eq!((opened.get(), SETS.load(Ordering::SeqCst)), (2, sets), "only opened");
+        assert_eq!((opened.get(), sets.load(Ordering::SeqCst)), (2, before), "only opened");
 
         // The system refuses: the switch goes back and the row says why.
-        STATE.store(3, Ordering::SeqCst);
+        state.store(3, Ordering::SeqCst);
         form.update(cx, |f, _| f.login = Some(Login::Off));
         press(cx);
         assert_eq!(on(cx), Some(Login::Off), "back as it was");

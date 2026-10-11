@@ -31,15 +31,14 @@ use gpui::accesskit::{Role, Toggled};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
-    uniform_list,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, uniform_list,
 };
 use gpui_kit::component::input::{self, Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::threads::Mirror;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::RequestId;
 use slopty_proto::git::{
@@ -47,7 +46,7 @@ use slopty_proto::git::{
 };
 use slopty_proto::thread::wire::{Intent, PullSeen, PullStands, Review, ReviewScope};
 use slopty_proto::thread::{Cap, Delivery, IntentId, Liveness, ThreadId, TurnState};
-use slopty_theme::{Rgb, Theme, Typography, alpha};
+use slopty_theme::{Rgb, Theme, alpha};
 
 use super::git::{self, Method, Pull, Repo, Said};
 use super::hub::{HubEvent, ThreadHub};
@@ -602,7 +601,7 @@ impl CommitSheet {
     // ----- drawing: pieces -------------------------------------------------------------
 
     fn icon(&self, name: Symbol, tone: Rgb) -> Div {
-        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, hsla(tone))
             .size(px(self.theme.typography.icon()))
     }
 
@@ -807,7 +806,6 @@ impl CommitSheet {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     .child(SharedString::from(pull.title.clone())),
             )
             .child(
@@ -1055,7 +1053,7 @@ impl CommitSheet {
                     .on_click(cx.listener(|this, _ev, _w, cx| this.merge(cx))),
             )
             .child(
-                kit::solid_pressable(
+                kit::tinted_pressable(
                     div()
                         .id("commit-merge-methods")
                         .debug_selector(|| "commit-merge-methods".to_owned())
@@ -1071,7 +1069,7 @@ impl CommitSheet {
                         .cursor_pointer(),
                     theme,
                 )
-                .child(self.icon(Symbol::ChevronDown, s.solid_ink))
+                .child(self.icon(Symbol::ChevronDown, s.text))
                 .on_click(cx.listener(|this, _ev, _w, cx| {
                     this.methods_open = !this.methods_open;
                     cx.notify();

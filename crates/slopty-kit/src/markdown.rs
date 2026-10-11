@@ -16,7 +16,7 @@ use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconSize, Symbol};
+use crate::icons::Symbol;
 
 /// A piece of a Markdown text: prose for gpui-kit's `TextView`, or a fenced block drawn as
 /// its own element so it can carry buttons.
@@ -284,12 +284,13 @@ pub fn task_row(
         .items_center()
         .justify_center()
         .border(px(slopty_theme::stroke::LINE))
-        .border_color(if done { hsla(s.solid) } else { hsla(s.control) })
-        // A ticked box is the neutral solid with a drawn check in it, as `MonoCode`'s and
-        // zeron's are: green would make a done task read as a status, not a choice.
+        .border_color(hsla(s.border))
+        .bg(hsla(s.element))
+        // A ticked box is Zed's tinted check, the kit's tick box: green would make a done task
+        // read as a status, not a choice.
         .when(done, |b| {
-            crate::kit::solid(b, theme).child(
-                crate::icons::icon(theme, Symbol::Checkmark, IconSize::Inline, hsla(s.solid_ink))
+            crate::kit::tinted(b, theme).child(
+                crate::icons::icon(theme, Symbol::Checkmark, hsla(s.text))
                     .size(px((side - TASK_CHECK_INSET).max(1.0))),
             )
         });
@@ -354,7 +355,7 @@ pub fn style(theme: &Theme, mono: &str) -> TextViewStyle {
     let code_block = gpui::StyleRefinement::default()
         .font_family(mono.to_owned())
         .text_size(px(small))
-        .bg(hsla(theme.surfaces.card))
+        .bg(hsla(theme.surfaces.well))
         .rounded(px(theme.radii.sm))
         .px(px(theme.spacing.sm))
         .py(px(theme.spacing.xs));
@@ -779,21 +780,28 @@ mod tests {
             assert!((f32::from(b.size.width) - side).abs() < 0.5, "{side} pt: {b:?}");
         }
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let at = |b: gpui::Bounds<gpui::Pixels>| {
+        // The fill and the line may be painted as quads of their own on the same bounds.
+        let at = |b: gpui::Bounds<gpui::Pixels>| -> Vec<gpui::Quad> {
             quads
                 .iter()
-                .find(|q| {
+                .filter(|q| {
                     (q.bounds.origin.y.0 / scale - f32::from(b.top())).abs() < 0.5
                         && (q.bounds.size.width.0 / scale - f32::from(b.size.width)).abs() < 0.5
                 })
                 .copied()
-                .unwrap_or_else(|| panic!("a quad at {b:?}"))
+                .collect()
         };
         let (open_q, done_q) = (at(open), at(done));
         let s = &theme.surfaces;
-        assert_eq!(open_q.border_color, hsla(s.control), "a control's outline, read at 3:1");
-        assert!((open_q.corner_radii.top_left.0 / scale - theme.radii.xs).abs() < 0.01);
-        assert_eq!(done_q.background, gpui::Background::from(hsla(s.solid)), "the solid");
+        let lined = |qs: &[gpui::Quad], ink| {
+            qs.iter().any(|q| q.border_color == hsla(ink) && q.border_widths.top.0 > 0.0)
+        };
+        assert!(lined(&open_q, s.border), "a control's outline: {open_q:?}");
+        let square = |q: &gpui::Quad| (q.corner_radii.top_left.0 / scale - theme.radii.xs).abs();
+        assert!(open_q.iter().all(|q| square(q) < 0.01), "radius 2: {open_q:?}");
+        let tinted = gpui::Background::from(hsla(s.info_background));
+        assert!(done_q.iter().any(|q| q.background == tinted), "the tinted accent: {done_q:?}");
+        assert!(done_q.iter().any(|q| q.border_color == hsla(s.info_border)), "inside its line");
     }
 
     #[test]

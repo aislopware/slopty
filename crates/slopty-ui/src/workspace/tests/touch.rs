@@ -142,7 +142,7 @@ fn the_palettes_trackpad_mode_reaches_the_active_picture(cx: &mut TestAppContext
         v.toggle_trackpad(&crate::screen::ToggleTrackpad, window, cx);
     });
     assert!(!trackpad(cx), "and off again");
-    let listed = palette_items().iter().any(|i| i.label == "Trackpad mode");
+    let listed = cx.update(|_w, cx| palette_items(cx)).iter().any(|i| i.label == "Trackpad mode");
     assert!(listed, "the palette offers it");
 }
 
@@ -188,7 +188,10 @@ fn the_palettes_remote_gestures_reach_the_active_picture(cx: &mut TestAppContext
     assert!(remote(cx), "on");
     toggle(cx);
     assert!(!remote(cx), "and off again");
-    let listed = palette_items().iter().any(|i| i.label == crate::screen::REMOTE_GESTURES);
+    let listed = cx
+        .update(|_w, cx| palette_items(cx))
+        .iter()
+        .any(|i| i.label == crate::screen::REMOTE_GESTURES);
     assert!(listed, "the palette offers it");
 }
 

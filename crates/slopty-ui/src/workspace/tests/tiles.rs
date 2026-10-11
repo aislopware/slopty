@@ -205,7 +205,7 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
         assert!(row.is_empty(), "{tile:?}: the row lies on the pane's ground: {row:?}");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let line = slopty_kit::colors::hsla(theme.surfaces.stroke);
+        let line = slopty_kit::colors::hsla(theme.surfaces.border);
         let foot = quads.iter().any(|q| {
             fill(q) == Some(line)
                 && (q.bounds.bottom().0 / scale - f32::from(header.bottom())).abs() < 0.5
@@ -249,7 +249,11 @@ fn panes_meet_edge_to_edge_at_their_sash(cx: &mut TestAppContext) {
         let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
         area.contains(&at)
     };
-    let ringed = lines.iter().any(|q| inside(q) && q.border_color == border);
+    // A tab on show lines its own sides; a ring round a pane would span the pane.
+    let pane = f32::from(above.size.width) - 1.0;
+    let ringed = lines
+        .iter()
+        .any(|q| inside(q) && q.border_color == border && q.bounds.size.width.0 / scale >= pane);
     assert!(!ringed, "no hairline parts them");
 }
 
@@ -429,8 +433,10 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
         let theme = Theme::default();
         let s = theme.surfaces;
         let fill = q.background.as_solid();
-        [theme.content(), s.ground].iter().any(|c| fill == Some(slopty_kit::colors::hsla(*c)))
-            || fill == Some(slopty_kit::colors::hsla(s.stroke))
+        [theme.content(), s.ground, s.tab_bar]
+            .iter()
+            .any(|c| fill == Some(slopty_kit::colors::hsla(*c)))
+            || [s.stroke, s.border].iter().any(|l| fill == Some(slopty_kit::colors::hsla(*l)))
     };
     let fills: Vec<&gpui::Quad> = quads
         .iter()
@@ -972,13 +978,16 @@ fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     assert!(slot(cx, c).is_some_and(|w| w < px(1.0)), "it starts from nothing: {:?}", slot(cx, c));
     step(cx, grow.checked_div(2).unwrap_or_default());
     let half = slot(cx, c).expect("still growing");
-    assert!(half > px(1.0) && half < px(224.0), "growing: {half:?}");
+    let grown = bounds(cx, c).size.width;
+    assert!(half > px(1.0) && half <= grown, "growing: {half:?} of {grown:?}");
     step(cx, grow);
     assert!(slot(cx, c).is_none(), "grown");
-    assert_eq!(bounds(cx, c).size.width, px(224.0), "its slot once grown");
+    let width = bounds(cx, c).size.width;
+    assert!(width >= px(120.0) && width <= px(240.0), "its own width once grown: {width:?}");
 
     // Out to a split and back: the same pane's tabs, `a` now last.
-    let (was, place) = (bounds(cx, a).left(), bounds(cx, c).left());
+    // `a` goes last: the tabs after it close up by its width, and it ends where the last ended.
+    let (was, place) = (bounds(cx, a).left(), bounds(cx, c).right() - bounds(cx, a).size.width);
     view.update(cx, |v, cx| {
         let right = Some(slopty_client::layout::tree::Side::Right);
         assert!(v.layout.place(a, slopty_client::layout::Drop { pane, edge: right }));
@@ -996,7 +1005,7 @@ fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     let d = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
     one_pane(&view, cx, &[a, d]);
     assert!(slot(cx, d).is_none(), "no growing under Reduce Motion");
-    assert_eq!(bounds(cx, d).size.width, px(224.0), "whole at once");
+    assert!(bounds(cx, d).size.width >= px(120.0), "whole at once");
 }
 
 /// Whether `tab`'s tab lies wholly inside its pane's tile.

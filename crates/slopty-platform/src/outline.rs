@@ -1,30 +1,27 @@
 //! Vector outlines drawn by Core Graphics into one alpha byte per device pixel: an agent's mark
-//! beside its words, and the chrome's Tabler glyphs, crisp at 1x.
+//! beside its words, and the chrome's Carbon glyphs, crisp at 1x.
 //!
 //! An [`Outline`] is read from SVG path data (`M L H V C S A Z`, absolute and relative, the
-//! subset the marks' and Tabler's published files use), with its arcs turned into cubic
+//! subset the marks' and Carbon's published files use), with its arcs turned into cubic
 //! Béziers and its ink box worked out from the curves themselves rather than their control
 //! points. What keeps the edges at 1x is fitting the drawing to the device's pixels: a mark's
-//! ink box to whole pixels, a glyph's stroke width to whole pixels on a whole-pixel grid.
-//! GPUI's own SVG path fits nothing; it draws at twice the size and halves it, which is no
-//! crisper than drawing once at the size, so a 14 pt Tabler glyph through it lands softer at
-//! 1x than one drawn here (`docs/MEASUREMENTS.md`, "Tabler glyphs at 1x and 2x";
-//! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
+//! ink box to whole pixels, a glyph's grid to whole pixels, where Carbon's lines, drawn for 16
+//! and 32, land on whole ones (`docs/decisions/brand.md`, "Each agent wears its owner's mark";
+//! `docs/decisions/ui.md`, "The chrome's icons are IBM Carbon's at 16").
 //!
+//! Both fill with the non-zero rule, as SVG fills a path by default, into an alpha-only bitmap:
 //! - [`rasterize_outline`] scales an outline so its ink box's longer side is a whole number of
-//!   device pixels and fills it with the non-zero rule into an alpha-only bitmap the ink box's
-//!   size, so a caller centres the ink and not a padded box: a mark.
-//! - [`rasterize_on_grid`] draws an outline on its own square grid (Tabler's 24 units) scaled to a
-//!   whole number of device pixels, filled or stroked with round caps and joins, into a mask the
-//!   grid's size: a glyph, which is set by its grid and not its ink.
+//!   device pixels, into a mask the ink box's size, so a caller centres the ink and not a padded
+//!   box: a mark.
+//! - [`rasterize_on_grid`] draws an outline on its own square grid (Carbon's 32 units) scaled to a
+//!   whole number of device pixels, into a mask the grid's size: a glyph, which is set by its grid
+//!   and not its ink.
 
 use std::ffi::c_void;
 use std::fmt;
 
 use objc2_core_foundation::CGFloat;
-use objc2_core_graphics::{
-    CGBitmapContextCreate, CGContext, CGImageAlphaInfo, CGLineCap, CGLineJoin,
-};
+use objc2_core_graphics::{CGBitmapContextCreate, CGContext, CGImageAlphaInfo};
 
 /// An outline drawn at one size and display scale: one coverage byte per device pixel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,16 +91,6 @@ impl Outline {
     }
 }
 
-/// How an outline is inked: filled with the non-zero rule, or stroked `width` units wide (in
-/// the outline's own units) with round caps and joins, as Tabler's glyphs are drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Ink {
-    /// Filled, as SVG fills a path by default.
-    Fill,
-    /// Stroked along the path, this many of the outline's units wide.
-    Stroke(f64),
-}
-
 /// Draws `outline` with its ink box's longer side `ink_px` device pixels, into a mask the ink
 /// box's size, rounded to whole pixels.
 ///
@@ -117,49 +104,33 @@ pub fn rasterize_outline(outline: &Outline, ink_px: u32) -> Option<Mask> {
     }
     let scale = f64::from(ink_px) / longer;
     let [left, top, ..] = outline.ink;
-    draw_mask(outline, whole(ink_w * scale)?, whole(ink_h * scale)?, scale, (left, top), Ink::Fill)
+    draw_mask(outline, whole(ink_w * scale)?, whole(ink_h * scale)?, scale, (left, top))
 }
 
-/// Draws `outline` on its square grid `grid` units a side (Tabler's 24), the grid scaled to
-/// `side_px` device pixels, inked as `ink`, into a mask the grid's size.
+/// Draws `outline` on its square grid `grid` units a side (Carbon's 32), the grid scaled to
+/// `side_px` device pixels, into a mask the grid's size.
 ///
 /// What the grid holds keeps its place on it, so glyphs drawn at one size line up as their
-/// designer set them, and a caller centres the whole mask. A stroke lands on whole
-/// device pixels where it can: its width rounds to a whole count of them (never under one),
-/// and an odd count is drawn half a pixel over, so a line on a pixel's edge fills the pixels
-/// beside it rather than half of two.
+/// designer set them, and a caller centres the whole mask.
 ///
 /// `None` for an empty size or when Core Graphics makes no context.
 #[must_use]
-pub fn rasterize_on_grid(outline: &Outline, grid: f64, side_px: u32, ink: Ink) -> Option<Mask> {
+pub fn rasterize_on_grid(outline: &Outline, grid: f64, side_px: u32) -> Option<Mask> {
     if side_px == 0 || grid <= 0.0 {
         return None;
     }
     let side = usize::try_from(side_px).ok()?;
-    let scale = f64::from(side_px) / grid;
-    let (ink, origin) = match ink {
-        Ink::Fill => (Ink::Fill, (0.0, 0.0)),
-        Ink::Stroke(width) => {
-            let device = (width * scale).round().max(1.0);
-            // Centred on a pixel's edge, an odd width covers half of a pixel on each side;
-            // half a pixel over, it covers whole pixels.
-            let odd = device.rem_euclid(2.0) > 0.5;
-            let shift = if odd { -0.5 / scale } else { 0.0 };
-            (Ink::Stroke(device / scale), (shift, shift))
-        }
-    };
-    draw_mask(outline, side, side, scale, origin, ink)
+    draw_mask(outline, side, side, f64::from(side_px) / grid, (0.0, 0.0))
 }
 
 /// Draws `outline` into a `width` × `height` alpha mask, its units scaled by `scale` and
-/// `origin` (in its units) at the mask's top left, inked as `ink`.
+/// `origin` (in its units) at the mask's top left, filled with the non-zero rule.
 fn draw_mask(
     outline: &Outline,
     width: usize,
     height: usize,
     scale: f64,
     origin: Point,
-    ink: Ink,
 ) -> Option<Mask> {
     let mut alpha = vec![0_u8; width.checked_mul(height)?];
     // SAFETY: `CGBitmapContextCreate` (CGBitmapContext.h) draws into `data` for the context's
@@ -193,19 +164,8 @@ fn draw_mask(
             Seg::Close => CGContext::close_path(ctx),
         }
     }
-    match ink {
-        Ink::Fill => {
-            CGContext::set_gray_fill_color(ctx, 0.0, 1.0);
-            CGContext::fill_path(ctx);
-        }
-        Ink::Stroke(line) => {
-            CGContext::set_line_width(ctx, line);
-            CGContext::set_line_cap(ctx, CGLineCap::Round);
-            CGContext::set_line_join(ctx, CGLineJoin::Round);
-            CGContext::set_gray_stroke_color(ctx, 0.0, 1.0);
-            CGContext::stroke_path(ctx);
-        }
-    }
+    CGContext::set_gray_fill_color(ctx, 0.0, 1.0);
+    CGContext::fill_path(ctx);
     drop(context);
     Some(Mask { width: u32::try_from(width).ok()?, height: u32::try_from(height).ok()?, alpha })
 }
@@ -505,7 +465,7 @@ fn ink_box(segs: &[Seg]) -> Option<[f64; 4]> {
             Seg::Close => at = start,
         }
     }
-    // A straight stroke (Tabler's minus) has ink along one axis only, and is still a glyph.
+    // A path with extent along one axis only, a bare line, still has an ink box.
     ink.filter(|[l, t, r, b]| r > l || b > t)
 }
 
@@ -586,52 +546,22 @@ mod tests {
         assert!(rasterize_outline(&wide, 0).is_none());
     }
 
-    /// A glyph keeps its place on its grid: a stroke 2 units wide along the middle of a 24
-    /// grid drawn at 24 pixels inks the two middle columns and nothing at the edges; filled, a
-    /// closed shape fills; and an empty size draws nothing.
+    /// A glyph keeps its place on its grid: a bar two units wide down the middle of a 32 grid
+    /// drawn at 16 pixels fills the one column under it and nothing at the edges, twice as
+    /// wide at 2x; and an empty size draws nothing.
     #[test]
     fn a_glyph_is_drawn_on_its_grid() {
-        let line = Outline::parse(&["M12 4V20"]).unwrap();
-        let mask = rasterize_on_grid(&line, 24.0, 24, Ink::Stroke(2.0)).unwrap();
-        assert_eq!((mask.width, mask.height), (24, 24), "the grid's size, not the ink's");
-        let at = |x: usize, y: usize| mask.alpha[y * 24 + x];
-        assert_eq!((at(11, 12), at(12, 12)), (255, 255), "the line's two columns");
-        assert_eq!((at(9, 12), at(14, 12), at(12, 1)), (0, 0, 0), "nothing off the line");
-        // The cap is a half disc of the line's half width past the end: a quarter of it, about
-        // π/4 of a pixel, in each pixel under the end, where a square cap would fill both.
-        let cap = (at(11, 20), at(12, 20));
-        assert!((150..250).contains(&cap.0) && cap.0.abs_diff(cap.1) <= 2, "a round cap: {cap:?}");
-        assert_eq!(at(12, 21), 0, "and no further");
-        let doubled = rasterize_on_grid(&line, 24.0, 48, Ink::Stroke(2.0)).unwrap();
-        let wide = (0..48).filter(|&x| doubled.alpha[24 * 48 + x] == 255).count();
-        assert_eq!(wide, 4, "at 2x the line is four pixels");
-        let square = Outline::parse(&["M4 4H20V20H4Z"]).unwrap();
-        let filled = rasterize_on_grid(&square, 24.0, 24, Ink::Fill).unwrap();
-        assert_eq!(filled.alpha[12 * 24 + 12], 255, "filled inside");
-        assert!(rasterize_on_grid(&square, 24.0, 0, Ink::Fill).is_none());
-    }
-
-    /// A stroke's width lands on whole device pixels: Tabler's 1.75 at 24 pixels is two
-    /// columns whole, and at 12 pixels one, drawn half a pixel over so the line on the grid's
-    /// middle fills its column rather than half of two.
-    #[test]
-    fn a_stroke_lands_on_whole_pixels() {
-        let line = Outline::parse(&["M12 4V20"]).unwrap();
-        let row = |m: &Mask, y: usize| -> Vec<u8> {
-            let w = m.width as usize;
-            m.alpha[y * w..(y + 1) * w].to_vec()
-        };
-        let solid = |cut: &[u8]| -> Vec<usize> {
-            cut.iter().enumerate().filter(|(_, a)| **a == 255).map(|(x, _)| x).collect()
-        };
-        for (side, columns) in [(24, 11..13), (12, 6..7), (48, 22..26)] {
-            let mask = rasterize_on_grid(&line, 24.0, side, Ink::Stroke(1.75)).unwrap();
-            let cut = row(&mask, side as usize / 2);
-            assert_eq!(solid(&cut), columns.collect::<Vec<_>>(), "{side} px: {cut:?}");
-            assert!(cut.iter().all(|&a| a == 0 || a == 255), "{side} px, none half: {cut:?}");
-        }
-        let hair = rasterize_on_grid(&line, 24.0, 12, Ink::Stroke(0.5)).unwrap();
-        assert_eq!(solid(&row(&hair, 6)), [6], "never under one pixel");
+        let bar = Outline::parse(&["M16 4H18V28H16Z"]).unwrap();
+        let mask = rasterize_on_grid(&bar, 32.0, 16).unwrap();
+        assert_eq!((mask.width, mask.height), (16, 16), "the grid's size, not the ink's");
+        let at = |x: usize, y: usize| mask.alpha[y * 16 + x];
+        assert_eq!(at(8, 8), 255, "the bar's column");
+        assert_eq!((at(7, 8), at(9, 8), at(8, 1)), (0, 0, 0), "nothing off the bar");
+        assert!(mask.alpha.iter().all(|a| *a == 0 || *a == 255), "nothing half covered");
+        let doubled = rasterize_on_grid(&bar, 32.0, 32).unwrap();
+        let wide = (0..32).filter(|&x| doubled.alpha[16 * 32 + x] == 255).count();
+        assert_eq!(wide, 2, "at 2x the bar is two pixels");
+        assert!(rasterize_on_grid(&bar, 32.0, 0).is_none());
     }
 
     /// `S` draws the `C` whose first control point reflects the last one's, absolute and
@@ -640,7 +570,7 @@ mod tests {
     fn a_smooth_cubic_draws_its_spelled_out_cubic() {
         let drawn = |d: &str| {
             let outline = Outline::parse(&[d]).unwrap();
-            rasterize_on_grid(&outline, 24.0, 48, Ink::Stroke(1.75)).unwrap()
+            rasterize_on_grid(&outline, 24.0, 48).unwrap()
         };
         let spelled = drawn("M2 12C2 4 12 4 12 12C12 20 22 20 22 12");
         assert_eq!(drawn("M2 12C2 4 12 4 12 12S22 20 22 12"), spelled, "S");
@@ -648,94 +578,5 @@ mod tests {
         let after_line = drawn("M2 4L12 4C12 4 22 12 22 20");
         assert_eq!(drawn("M2 4L12 4S22 12 22 20"), after_line, "S after a line");
         assert_ne!(drawn("M2 12C2 4 12 4 12 12C12 4 22 20 22 12"), spelled, "the test can fail");
-    }
-
-    /// Four Tabler glyphs (v3.49.0, MIT) on their 24 grid: one with a circle, a branch of
-    /// circles and joins, a folder of arcs and a cross of diagonals.
-    const TABLER: [(&str, &[&str]); 4] = [
-        ("search", &["M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0", "M21 21l-6 -6"]),
-        (
-            "git-branch",
-            &[
-                "M5 18a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-                "M5 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-                "M15 6a2 2 0 1 0 4 0a2 2 0 1 0 -4 0",
-                "M7 8l0 8",
-                "M9 18h6a2 2 0 0 0 2 -2v-5",
-                "M14 14l3 -3l3 3",
-            ],
-        ),
-        (
-            "folder",
-            &["M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2"],
-        ),
-        ("x", &["M18 6l-12 12", "M6 6l12 12"]),
-    ];
-
-    /// Crisp (Σα²/Σα, 1 when every inked pixel is whole) and solid (the share of inked pixels
-    /// at α ≥ 0.9) of a coverage mask.
-    fn crispness(alpha: &[f64]) -> (f64, f64) {
-        let (mut a2, mut a1, mut inked, mut solid) = (0.0, 0.0, 0.0, 0.0);
-        for &a in alpha {
-            a2 = a.mul_add(a, a2);
-            a1 += a;
-            inked += f64::from(u8::from(a > 0.0));
-            solid += f64::from(u8::from(a >= 0.9));
-        }
-        (a2 / a1, solid / inked)
-    }
-
-    /// The glyph as GPUI's `svg()` draws it: the SVG at twice the device size with its own
-    /// 1.75 width, unsnapped, then sampled linearly into half the size, which on a sprite
-    /// laid on whole pixels is the mean of each 2 × 2 block.
-    #[expect(clippy::arithmetic_side_effects, reason = "indices into a mask 56 pixels a side")]
-    fn drawn_twice_and_halved(outline: &Outline, side: u32) -> Vec<f64> {
-        let big = (side * 2) as usize;
-        let scale = f64::from(side * 2) / 24.0;
-        let mask = draw_mask(outline, big, big, scale, (0.0, 0.0), Ink::Stroke(1.75)).unwrap();
-        let at = |x: usize, y: usize| f64::from(mask.alpha[y * big + x]) / 255.0;
-        let side = side as usize;
-        (0..side * side)
-            .map(|i| {
-                let (x, y) = (i % side * 2, i / side * 2);
-                (at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1)) / 4.0
-            })
-            .collect()
-    }
-
-    /// A 14 pt Tabler glyph drawn on its grid at the device's size, its width on whole
-    /// pixels, is crisper at 1x than the same glyph drawn twice the size and halved, as GPUI's
-    /// `svg()` draws it, and as crisp at 2x; `docs/MEASUREMENTS.md` keeps the figures, with
-    /// the glyph drawn once at the device's size with its width as published.
-    #[test]
-    fn a_glyph_on_its_grid_is_crisper_than_one_halved() {
-        let mut gain = 0.0;
-        for (name, data) in TABLER {
-            let outline = Outline::parse(data).unwrap();
-            for side in [14, 28] {
-                let unit = |m: &Mask| -> Vec<f64> {
-                    m.alpha.iter().map(|a| f64::from(*a) / 255.0).collect()
-                };
-                let ours = rasterize_on_grid(&outline, 24.0, side, Ink::Stroke(1.75)).unwrap();
-                let (crisp, solid) = crispness(&unit(&ours));
-                let (halved, halved_solid) = crispness(&drawn_twice_and_halved(&outline, side));
-                let wide = side as usize;
-                let scale = f64::from(side) / 24.0;
-                let once = draw_mask(&outline, wide, wide, scale, (0.0, 0.0), Ink::Stroke(1.75));
-                let (once, once_solid) = crispness(&unit(&once.unwrap()));
-                eprintln!(
-                    "{name} {side} px: grid {crisp:.3} / {solid:.2}, halved {halved:.3} / \
-                     {halved_solid:.2}, once unsnapped {once:.3} / {once_solid:.2}"
-                );
-                if side == 14 {
-                    // A diagonal is never whole, so a cross gains whole pixels, not crispness.
-                    assert!(crisp > halved - 0.01 && solid >= halved_solid, "{name} at 1x");
-                    gain += crisp - halved;
-                } else {
-                    assert!((crisp - halved).abs() < 0.02, "{name} at 2x");
-                }
-            }
-        }
-        assert!(gain / 4.0 > 0.05, "crisper at 1x by {:.3} on the mean", gain / 4.0);
     }
 }

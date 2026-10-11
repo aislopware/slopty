@@ -425,7 +425,7 @@ fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("picker").is_none());
 }
 
-/// On a desktop the palette hangs near the top ([`crate::palette::LIST_ANCHOR`] down), at most
+/// On a desktop the palette hangs near the top ([`crate::palette::LIST_TOP`] down), at most
 /// [`crate::palette::LIST_WIDTH`] wide, and takes at most three fifths of the window's height
 /// under its ceiling, shorter still when it lists less. On a phone it is a sheet from the bottom,
 /// the window's width, from under the status bar down to the keyboard, its field at its foot above
@@ -443,10 +443,10 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     open_palette(cx);
     let (w, h) = VIEWPORT;
     let brief = cx.debug_bounds("palette").expect("drawn");
-    let near = h * crate::palette::LIST_ANCHOR;
+    let near = crate::palette::LIST_TOP;
     assert!((f32::from(brief.top()) - near).abs() < 0.5, "near the top: {brief:?}");
     let wide = crate::palette::LIST_WIDTH;
-    assert!((f32::from(brief.size.width) - wide).abs() < 0.5, "Warp's width: {brief:?}");
+    assert!((f32::from(brief.size.width) - wide).abs() < 0.5, "Zed's width: {brief:?}");
     cx.simulate_input("e");
     cx.run_until_parked();
     let full = cx.debug_bounds("palette").expect("drawn");

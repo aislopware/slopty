@@ -17,7 +17,7 @@ use gpui::{
 };
 use gpui_kit::base::text::TextViewDefaults;
 use gpui_kit::component::{Theme as KitTheme, ThemeMode};
-use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha, stroke};
+use slopty_theme::{Motion, Rgb, Theme, Variant, alpha, stroke};
 
 use crate::colors::{hsla, hsla_alpha};
 
@@ -215,10 +215,10 @@ where
 
 /// `el`'s fill and hairline following its states as a native control's do.
 ///
-/// Into a hover or a press and back to rest over [`Motion::feedback`], eased out. Only colours
-/// ease; the state itself, and layout, change at once, and under Reduce Motion GPUI applies every
-/// change at once. Every kit control that answers the pointer wears it, so the durations live here
-/// and nowhere else.
+/// Into a hover or a press and back to rest over [`Motion::feedback`], eased out; Zed's land at
+/// once, so with no time to take nothing is eased. Only colours ease; the state itself, and
+/// layout, change at once, and under Reduce Motion GPUI applies every change at once. Every kit
+/// control that answers the pointer wears it, so the durations live here and nowhere else.
 ///
 /// Not on the rows of a list GPUI composites as a scroll layer (the navigator's): a fill easing
 /// out under rows that scroll past the pointer repaints the layer, and measured headless it
@@ -226,6 +226,9 @@ where
 /// (`nav_list::a_scroll_of_the_navigator_composites_its_layer`).
 pub fn eased<E: gpui::StatefulInteractiveElement>(el: E) -> E {
     let m = Motion::DEFAULT;
+    if m.feedback.is_zero() {
+        return el;
+    }
     el.transition(gpui::StateTransition::new(m.feedback).enter(m.feedback).with_easing(ease_out()))
 }
 
@@ -349,13 +352,15 @@ pub fn changes_text(added: u32, removed: u32) -> Option<String> {
     }
 }
 
-/// A diff's size, `+12 ‒3`: only the signs in the diff's tones, the figures in
-/// `text_secondary` and tabular, the side that is zero left out, the two sides a thin space
-/// apart. `None` for no change.
+/// A diff's size, `+12 ‒3`, Delta's: in the monospace face, each side in its tone. `None` for
+/// no change.
+///
+/// What was added is in `success` and what was taken in `error`; the side that is zero is left
+/// out, and the two sides are a thin space apart.
 ///
 /// The one way a count of changed lines is drawn: in a tile's header, a diff's head, a fold, a
-/// navigator row and the breadcrumb. A figure all in red read as an error, and a red "‒0" as
-/// an error about nothing. The caller sets the size and adds an identity and a spoken label.
+/// navigator row and the breadcrumb. A zero side is never drawn, so no red "‒0" says an error
+/// about nothing. The caller sets the size and adds an identity and a spoken label.
 ///
 /// Its parts are text, the thin space between the sides included, so they take the size the
 /// caller sets.
@@ -363,20 +368,16 @@ pub fn changes_text(added: u32, removed: u32) -> Option<String> {
 pub fn changes(theme: &Theme, added: u32, removed: u32) -> Option<Div> {
     let s = &theme.surfaces;
     let side = |sign: &'static str, tone: Rgb, n: u32| {
-        (n > 0).then(|| {
-            div()
-                .flex()
-                .child(div().text_color(hsla(tone)).child(sign))
-                .child(SharedString::from(n.to_string()))
-        })
+        (n > 0)
+            .then(|| div().text_color(hsla(tone)).child(SharedString::from(format!("{sign}{n}"))))
     };
     (added > 0 || removed > 0).then(|| {
-        tabular(div())
+        div()
             .flex_none()
             .flex()
             .items_center()
             .whitespace_nowrap()
-            .text_color(hsla(s.text_secondary))
+            .font_family(mono_family(theme))
             .children(side("+", s.success, added))
             .when(added > 0 && removed > 0, |el| el.child(SIDES_APART))
             .children(side(REMOVED_SIGN, s.error, removed))
@@ -419,27 +420,13 @@ pub fn pill_frame(theme: &Theme) -> Div {
         .text_size(px(theme.typography.small()))
 }
 
-/// A state's pill: [`pill_frame`] filled with `tone` at
-/// [`pill_fill`], its words in `tone` at the medium weight.
+/// A state's pill: [`pill_frame`] filled with `tone` at [`alpha::FAINT`], its words in `tone`.
 ///
 /// A header holds one of these at most, the state's (an agent waiting, working), so it is the
 /// one shape there that stands out. The caller adds the identity, the role and the words.
 #[must_use]
 pub fn pill(theme: &Theme, tone: Rgb) -> Div {
-    pill_frame(theme)
-        .bg(hsla_alpha(tone, pill_fill(theme)))
-        .text_color(hsla(tone))
-        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-}
-
-/// How strongly a pill's tone fills it: [`alpha::FAINT`], or [`alpha::FAINT_ON_PAPER`] in
-/// light, where a saturated tone reads heavier on white.
-#[must_use]
-pub const fn pill_fill(theme: &Theme) -> f32 {
-    match theme.variant() {
-        Variant::Dark => alpha::FAINT,
-        Variant::Light => alpha::FAINT_ON_PAPER,
-    }
+    pill_frame(theme).bg(hsla_alpha(tone, alpha::FAINT)).text_color(hsla(tone))
 }
 
 /// How long something took or has run, the one way chrome says it: "850 ms", "6.2 s" (the
@@ -561,8 +548,8 @@ const SUNK_DEPTH: f32 = 1.0;
 /// `el` raised off its plane at rest: what stands up from where it lies (a card, a tray's head,
 /// a notice's disc, a chip over a body).
 ///
-/// The card's wash (ink at [`alpha::CARD`]) inside the `border` line, with no shadow: on one
-/// neutral ground a resting thing is told by its edge, as `MonoCode`'s cards are. A hover or
+/// The work's ground inside the `border` line, with no shadow: a resting thing is told by its
+/// edge, as Zed's cards rest on the editor's background. A hover or
 /// selection wash is never a resting surface, so the kit lint `a_resting_fill_is_raised_or_sunk`
 /// keeps the washes to the pointer and the selection. The caller keeps its own radius.
 #[must_use]
@@ -574,25 +561,25 @@ pub fn raised<E: Styled>(el: E, theme: &Theme) -> E {
 /// the bottom one. In order the parts read as one.
 #[must_use]
 pub fn raised_part<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
-    let el = el.bg(hsla(theme.surfaces.card)).border_l(HAIR).border_r(HAIR);
+    let el = el.bg(hsla(theme.surfaces.ground)).border_l(HAIR).border_r(HAIR);
     let el = if first { el.border_t(HAIR) } else { el };
     let el = if last { el.border_b(HAIR) } else { el };
     el.border_color(hsla(theme.surfaces.border))
 }
 
 /// `el` set into its plane as a quiet well: code, a command's output, an attachment's chip, the
-/// person's own message, the foot of a sheet. The card's wash, with no edge.
+/// person's own message, the foot of a sheet. Delta's well, with no edge of its own.
 #[must_use]
 pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
-    el.bg(hsla(theme.surfaces.card))
+    el.bg(hsla(theme.surfaces.well))
 }
 
-/// `el` drawn as a field's ground: the card's wash inside the `border` line, sunk ([`sunk`]) so
-/// it reads as somewhere to type rather than something to press.
+/// `el` drawn as a field's ground: the work's ground inside the `border` line, sunk ([`sunk`])
+/// so it reads as somewhere to type rather than something to press.
 #[must_use]
 pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
     let el =
-        el.bg(hsla(theme.surfaces.card)).border(HAIR).border_color(hsla(theme.surfaces.border));
+        el.bg(hsla(theme.surfaces.ground)).border(HAIR).border_color(hsla(theme.surfaces.border));
     sunk(el, theme, stroke::LINE)
 }
 
@@ -618,12 +605,7 @@ pub fn search_field(theme: &Theme, focused: bool) -> Div {
         .items_center()
         .gap(px(spacing.xs + spacing.xxs))
         .rounded(px(theme.radii.sm))
-        .child(crate::icons::icon(
-            theme,
-            crate::icons::Symbol::Magnifyingglass,
-            crate::icons::IconSize::Inline,
-            hsla(s.text_muted),
-        ))
+        .child(crate::icons::icon(theme, crate::icons::Symbol::Magnifyingglass, hsla(s.text_muted)))
 }
 
 /// A card: [`raised`] at `radii.md`, Zed's resting card's 6, the caller adding the identity and
@@ -663,8 +645,11 @@ pub fn sunk<E: Styled>(el: E, theme: &Theme, border: f32) -> E {
     }])
 }
 
-/// A segmented control's track, `MonoCode`'s: the `border` ring at `radii.sm` on its plane, its
-/// options held [`TRACK_PAD`] in. The thumb ([`paint_thumb`]) rides in it.
+/// A segmented control's track, Zed's toggle button group: the `border` ring at `radii.sm` on
+/// its plane.
+///
+/// Its options are joined edge to edge inside it ([`TRACK_PAD`] is none). The thumb
+/// ([`paint_thumb`]) rides in it.
 #[must_use]
 pub fn track(theme: &Theme) -> Div {
     div()
@@ -677,10 +662,11 @@ pub fn track(theme: &Theme) -> Div {
         .rounded(px(theme.radii.sm))
 }
 
-/// How far a segmented control's track holds its options in from its edge.
-pub const TRACK_PAD: f32 = 2.0;
+/// How far a segmented control's track holds its options in from its edge: none, as Zed's
+/// group joins its buttons inside its ring.
+pub const TRACK_PAD: f32 = 0.0;
 
-/// A segmented control's thumb at `bounds`: the selected wash, `MonoCode`'s chosen segment,
+/// A segmented control's thumb at `bounds`: the selected wash, Zed's chosen button in a group,
 /// with no ring and nothing raised.
 ///
 /// At [`thumb_radius`]. The selection plate paints it as it slides from option to option.
@@ -689,22 +675,24 @@ pub fn paint_thumb(theme: &Theme, bounds: gpui::Bounds<gpui::Pixels>, window: &m
     window.paint_quad(gpui::fill(bounds, hsla(theme.surfaces.selected)).corner_radii(radius));
 }
 
-/// A segmented thumb's radius: the least, 4, inside its track's 6 (`MonoCode`'s 5).
+/// A segmented thumb's radius: the track's `radii.sm` less its line, so a thumb at either end
+/// fills the track's corner, and one between reads as joined.
 #[must_use]
-pub const fn thumb_radius(theme: &Theme) -> f32 {
-    theme.radii.xs
+pub fn thumb_radius(theme: &Theme) -> f32 {
+    slopty_theme::Radii::nested(theme.radii.sm, stroke::LINE, TRACK_PAD)
 }
 
-/// `el` lifted off the chrome: the `elevated` surface, the `border` line and the float's shadow.
+/// `el` lifted off the chrome, Zed's elevated surface: the `elevated` plane inside the lighter
+/// `stroke` line (Zed's `border.variant`) under the float's shadow.
 ///
 /// Everything that floats wears it: the palette, a menu, a popover, a hint, a find bar, a chip
-/// over a body. The caller keeps its own radius: `radii.lg` for a menu, a popover or a toast,
-/// the control's own for a hint or a chip. A dialog takes [`dialog`].
+/// over a body. The caller keeps its own radius: `radii.lg` for a menu, a popover, a hint or a
+/// toast, the control's own for a chip. A dialog takes [`dialog`].
 #[must_use]
 pub fn elevate<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.elevated))
         .border(HAIR)
-        .border_color(hsla(theme.surfaces.border))
+        .border_color(hsla(theme.surfaces.stroke))
         .shadow(elevation(theme))
 }
 
@@ -791,30 +779,30 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
-/// A dialog's or a panel's title: the panel title role (15/20 at the strong weight), in `text`.
+/// A dialog's or a panel's title: the panel title role (16/22 at the strong weight), in `text`.
 ///
 /// The strong weight is for titles like this one and for headings; a row, a tab or a name that
-/// has to stand out takes the medium weight.
+/// has to stand out says so by its tone, as Zed's do.
 #[must_use]
 pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
     typed(div(), theme.roles().panel_title).text_color(hsla(theme.surfaces.text)).child(text.into())
 }
 
-/// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
-/// a fill would crowd a bar.
+/// How loud a [`button`] is, Zed's button styles. One primary per surface; the rest are
+/// secondary, or ghost where a ring would crowd a bar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonKind {
-    /// The one action the surface is for: the neutral [`solid`], white on dark and near-black
-    /// on light, as `MonoCode`'s stop and Commit buttons are.
+    /// The one action the surface is for: Zed's tinted accent, the accent's quiet ground inside
+    /// its line under the text's words ([`tinted`]). Zed has no white or black solid.
     Primary,
-    /// The press that removes or ends something for good (Remove a machine): the
-    /// [`destructive`] red under the solid's ink, behind a confirm. Never a surface's only way
-    /// on, and never beside a [`Self::Primary`].
+    /// The press that removes or ends something for good (Remove a machine): Zed's tinted
+    /// error ([`destructive`]), behind a confirm. Never a surface's only way on, and never
+    /// beside a [`Self::Primary`].
     Destructive,
-    /// Another way on: a neutral fill, the hover step, with no hairline. A row of bordered
-    /// boxes beside the primary read as a form.
+    /// Another way on: Zed's outlined, clear inside the lighter line, the heavier one under
+    /// the pointer.
     Secondary,
-    /// A way out (Cancel): text only until the pointer is on it.
+    /// A way out (Cancel): Zed's subtle, words only until the pointer is on it.
     Ghost,
     /// A way aside (the other way in, Open in editor): the text's own tone with no pad and no
     /// fill, so its words start on the same edge as the text above them; underlined under
@@ -822,60 +810,73 @@ pub enum ButtonKind {
     Link,
 }
 
-/// `el` filled with the neutral solid, its words in the solid's ink: a primary button, the
-/// send and stop square, a ticked box, a switch that is on, a key that is armed.
+/// `el` tinted as the one action a surface is for, Zed's tinted accent: the accent's quiet
+/// ground inside its line, the text's words on it.
 ///
-/// One per surface at most: two solids side by side leave nothing to say which leads.
-pub fn solid<E: Styled>(el: E, theme: &Theme) -> E {
+/// Also what is on (a ticked box, an armed key, the send and stop square). The theme's tests
+/// hold the words to AA on that ground over every plane.
+pub fn tinted<E: Styled>(el: E, theme: &Theme) -> E {
     let s = theme.surfaces;
-    el.bg(hsla(s.solid)).text_color(hsla(s.solid_ink))
+    el.bg(hsla(s.info_background))
+        .border(HAIR)
+        .border_color(hsla(s.info_border))
+        .text_color(hsla(s.text))
 }
 
-/// [`solid`] that answers the pointer, flat: under the pointer the solid gives a little toward
-/// the content and while pressed more, with no shadow and no scale, as `MonoCode`'s are.
-pub fn solid_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
-    let (hovered, pressed) = solid_states(theme);
-    eased(solid(el, theme))
+/// [`tinted`] that answers the pointer, flat: its ground a shade stronger under the pointer
+/// and stronger again while pressed, Zed's tinted hover.
+pub fn tinted_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
+    let (hovered, pressed) = tinted_states(theme);
+    eased(tinted(el, theme))
         .hover(move |el| el.bg(hsla(hovered)))
         .active(move |el| el.bg(hsla(pressed)))
 }
 
-/// The solid under the pointer and pressed: given [`alpha::FAINT`] and [`alpha::DIM`] toward
-/// the content. The theme's tests hold the solid's ink to AA on the pressed one.
-fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
-    let (solid, content) = (theme.surfaces.solid, theme.content());
-    (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
+/// The accent's quiet ground under the pointer and pressed: its ink moved [`alpha::FAINT`] and
+/// [`alpha::DIM`] toward the accent's mark, and half as much more opacity where it is a wash.
+fn tinted_states(theme: &Theme) -> (slopty_theme::Tint, slopty_theme::Tint) {
+    let s = theme.surfaces;
+    let ground = s.info_background;
+    let deeper = |by: f32| slopty_theme::Tint {
+        ink: ground.ink.mix(s.accent_fill, by),
+        alpha: ground.alpha.saturating_add(slopty_theme::Tint::of(s.accent_fill, by).alpha / 2),
+    };
+    (deeper(alpha::FAINT), deeper(alpha::DIM))
 }
 
 /// `el` tinted as the one press that removes or ends something for good.
 ///
-/// The error's wash at [`alpha::TINTED`] under the error's word, as `MonoCode`'s destructive
-/// buttons are. The theme's tests hold the word to AA on the wash over every plane.
+/// The error's quiet ground inside its line under the error's word, as Zed's tinted error
+/// button is. The theme's tests hold the word to AA on that ground over every plane.
 pub fn destructive<E: Styled>(el: E, theme: &Theme) -> E {
     let s = theme.surfaces;
-    el.bg(hsla_alpha(s.error_fill, alpha::TINTED)).text_color(hsla(s.error))
+    el.bg(hsla(s.error_background))
+        .border(HAIR)
+        .border_color(hsla(s.error_border))
+        .text_color(hsla(s.error))
 }
 
-/// [`destructive`] that answers the pointer: the wash deepens to [`alpha::TINTED_HOVER`] under
-/// the pointer and while pressed, flat as the solid is.
+/// [`destructive`] that answers the pointer: its line takes the error's mark under the pointer
+/// and while pressed, its ground and word unchanged.
 pub fn destructive_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
     let fill = theme.surfaces.error_fill;
     eased(destructive(el, theme))
-        .hover(move |el| el.bg(hsla_alpha(fill, alpha::TINTED_HOVER)))
-        .active(move |el| el.bg(hsla_alpha(fill, alpha::TINTED_HOVER)))
+        .hover(move |el| el.border_color(hsla(fill)))
+        .active(move |el| el.border_color(hsla(fill)))
 }
 
-/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): clear at rest inside the
-/// `border` line, the selected wash under the pointer, the pressed one while held, so a press
-/// reads apart from a hover.
+/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]), Zed's outlined.
+///
+/// Clear at rest inside the lighter `stroke` line, the heavier `border` and the hover wash
+/// under the pointer, the pressed one while held, so a press reads apart from a hover.
 pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
     eased(el)
         .border(HAIR)
-        .border_color(hsla(s.border))
+        .border_color(hsla(s.stroke))
         .text_color(hsla(s.text))
-        .hover(move |el| el.bg(hsla(s.selected)))
-        .active(move |el| el.bg(hsla(s.pressed)))
+        .hover(move |el| el.bg(hsla(s.hover)).border_color(hsla(s.border)))
+        .active(move |el| el.bg(hsla(s.pressed)).border_color(hsla(s.border)))
 }
 
 /// `el` drawn as the selected row of a list, live while that list has the keyboard.
@@ -935,8 +936,8 @@ fn ring_inside(color: Rgb) -> BoxShadow {
 /// Four had been written by hand, and the secondary among them filled itself with `raised`,
 /// which on the light theme's `canvas` is one step from `canvas` itself: "Add a window" and
 /// the phone's "Paste" were words floating on a smudge. Every kind stands the density's
-/// control height, so they line up side by side and fill a row. Its words are at the medium
-/// weight: a button is an action, and its label reads as one against the prose round it.
+/// control height, so they line up side by side and fill a row. Its words are at the regular
+/// weight, Zed's: the style, not the weight, says it is a button.
 #[must_use]
 pub fn button(
     theme: &Theme,
@@ -959,15 +960,14 @@ pub fn button(
         .when(kind != ButtonKind::Link, |el| el.px(px(theme.spacing.md)))
         .rounded(px(theme.radii.sm))
         .text_size(px(theme.roles().action.size))
-        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .cursor_pointer()
         .child(label);
     let el = match kind {
-        ButtonKind::Primary => solid_pressable(el, theme),
+        ButtonKind::Primary => tinted_pressable(el, theme),
         ButtonKind::Destructive => destructive_pressable(el, theme),
         ButtonKind::Secondary => secondary(el, theme),
         ButtonKind::Ghost => eased(el)
-            .text_color(hsla(s.text_secondary))
+            .text_color(hsla(s.text))
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .active(move |el| el.bg(hsla(s.pressed))),
         ButtonKind::Link => el.text_color(hsla(s.text)).hover(Styled::underline),
@@ -975,8 +975,8 @@ pub fn button(
     crate::a11y::tab_stop(el, s.focus)
 }
 
-/// The side of an [`icon_button`]: the density's button, `MonoCode`'s 26 pt square round a
-/// 14 pt glyph.
+/// The side of an [`icon_button`]: the density's button, Zed's 22 pt square round the
+/// 16 pt icon.
 ///
 /// It is never under the density's hit target, so a finger gets 44 pt round the same icon.
 /// A strip that holds icon buttons in turn with something else sizes itself from it.
@@ -1005,12 +1005,12 @@ impl Row {
     }
 }
 
-/// A list row: its density's height, starting on the edge grid ([`inset_x`]) and ending
-/// half as far in ([`slopty_theme::Spacing::inset_trailing`]), its parts centred.
+/// A list row, Zed's list item: its density's height, starting on the edge grid ([`inset_x`])
+/// and ending 6 in ([`slopty_theme::Spacing::inset_trailing`]), its parts centred.
 ///
-/// Its parts sit a base unit apart. The navigator, the palette, the inbox and the menus draw
-/// their rows from it, so one density switch moves them all. The trailing end is usually an
-/// icon button or a count, which brings its own room.
+/// Its parts sit [`slopty_theme::Spacing::xs`] apart, Zed's `gap_1`. The navigator, the palette,
+/// the inbox and the menus draw their rows from it, so one density switch moves them all. The
+/// trailing end is usually an icon button or a count, which brings its own room.
 #[must_use]
 pub fn row(theme: &Theme, lines: Row) -> Div {
     div()
@@ -1019,7 +1019,7 @@ pub fn row(theme: &Theme, lines: Row) -> Div {
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(theme.spacing.sm))
+        .gap(px(theme.spacing.xs))
         .h(px(lines.height(theme)))
 }
 
@@ -1052,22 +1052,15 @@ pub fn rule(tint: slopty_theme::Tint) -> Div {
     div().flex_none().w_full().border_t(HAIR).border_color(hsla(tint))
 }
 
-/// A rule parting a list's or a menu's groups.
-///
-/// A [`rule`] in `stroke` that fades out over its last
-/// [`spacing.xl`](slopty_theme::Spacing::xl) at each end, a base unit above and below it, so it
-/// reads as a pause between groups rather than a line drawn across (Raycast's list separators). The
-/// fade is GPUI's per-pixel `edge_fade` on the rule alone, never a gradient wash.
+/// A rule parting a list's or a menu's groups, Zed's list separator: a [`rule`] in `stroke`
+/// (`border.variant`) across the list, [`slopty_theme::Spacing::xs`] above and below it.
 #[must_use]
 pub fn list_rule(theme: &Theme) -> gpui::AnyElement {
     div()
         .flex_none()
         .w_full()
         .py(px(theme.spacing.xs))
-        .child(gpui::edge_fade(
-            rule(theme.surfaces.stroke),
-            gpui::EdgeFade::x(px(theme.spacing.xl)),
-        ))
+        .child(rule(theme.surfaces.stroke))
         .into_any_element()
 }
 
@@ -1077,8 +1070,8 @@ pub fn rule_v(tint: slopty_theme::Tint) -> Div {
     div().flex_none().h_full().border_l(HAIR).border_color(hsla(tint))
 }
 
-/// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox):
-/// `MonoCode`'s `p-1`, 4.
+/// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox): Zed's
+/// `p_1`, 4.
 #[must_use]
 pub const fn sheet_pad(theme: &Theme) -> f32 {
     theme.spacing.xs
@@ -1086,13 +1079,13 @@ pub const fn sheet_pad(theme: &Theme) -> f32 {
 
 /// A row inside a floating sheet padded by [`sheet_pad`].
 ///
-/// A [`row`] whose fill (hover, selection) is rounded at [`slopty_theme::Radii::md`], 8 inside
-/// the sheet's 12, as `MonoCode`'s menu rows are; its leading words still on the edge grid
-/// measured from the sheet's own edge, and its trailing end a row's trailing inset in.
+/// A [`row`] whose fill (hover, selection) is rounded at [`slopty_theme::Radii::sm`], 4 inside
+/// the sheet's 8, as Zed's menu entries are; its leading words still on the edge grid measured
+/// from the sheet's own edge, and its trailing end a row's trailing inset in.
 #[must_use]
 pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
     let pad = sheet_pad(theme);
-    row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(theme.radii.md))
+    row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(theme.radii.sm))
 }
 
 /// `el` padded in to the one edge grid on both sides: [`slopty_theme::Spacing::inset`]. A
@@ -1117,25 +1110,23 @@ pub fn meta<E: Styled>(el: E, theme: &Theme) -> E {
 
 /// A section's label: a group's head that the rows under it still lead, as Linear's are.
 ///
-/// The metadata role's size (12, a finger's 13) at the medium weight in `text_secondary`, never
-/// upper case. Muted and regular, it
-/// sank to the level of the facts on the rows and every section read as one run; the strong
-/// weight stays for one thing per region, so a head never rivals the names under it.
+/// The metadata role's size (12, a finger's 13) in `text_secondary`, never upper case, Zed's
+/// list header; the strong weight stays for one thing per region, so a head never rivals the
+/// names under it.
 #[must_use]
 pub fn label(theme: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .flex_none()
         .text_size(px(theme.roles().metadata.size))
-        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .text_color(hsla(theme.surfaces.text_secondary))
         .child(text.into())
 }
 
 /// A square button around one icon: a bar's actions, a tile's close and split.
 ///
-/// `MonoCode`'s icon button: a 26 pt square at [`slopty_theme::Radii::sm`] round a 14 pt glyph
-/// in `text_secondary`, lifting to `text` over the strong hover. `label` is its accessible
-/// name and its hint, since the icon alone names nothing to a screen reader.
+/// Zed's icon button: the density's button square (22) at [`slopty_theme::Radii::sm`] round
+/// the 16 pt icon in `icon_muted`, the hover wash under the pointer and the ink unchanged. `label`
+/// is its accessible name and its hint, since the icon alone names nothing to a screen reader.
 #[must_use]
 pub fn icon_button(
     theme: &Theme,
@@ -1144,8 +1135,8 @@ pub fn icon_button(
     label: &'static str,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, s.text_secondary))
-        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+    eased(square_icon(theme, id.into(), icon, label, s.icon_muted))
+        .hover(move |el| el.bg(hsla(s.hover)))
 }
 
 /// A tab's close: `MonoCode`'s 20 pt box at [`slopty_theme::Radii::xs`], its cross drawn on a
@@ -1190,10 +1181,10 @@ pub fn small_box(
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::Drawn::disclosure(theme, glyph)
-                .slot(px(crate::icons::IconSize::Inline.slot(theme)), hsla(s.text_secondary)),
+                .slot(px(theme.typography.icon()), hsla(s.text_secondary)),
         );
     eased(crate::a11y::tab_stop(el, s.focus))
-        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
 /// The side of [`close_box`] at a pointer's density: `MonoCode`'s `size-5`.
@@ -1210,8 +1201,7 @@ pub fn icon_button_inked(
     ink: Rgb,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    eased(square_icon(theme, id.into(), icon, label, ink))
-        .hover(move |el| el.bg(hsla(s.hover_strong)))
+    eased(square_icon(theme, id.into(), icon, label, ink)).hover(move |el| el.bg(hsla(s.hover)))
 }
 
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
@@ -1239,10 +1229,7 @@ fn square_icon(
         .cursor_pointer()
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(
-            crate::icons::Drawn::new(theme, icon, crate::icons::IconSize::Inline)
-                .slot(px(crate::icons::IconSize::Inline.slot(theme)), hsla(ink)),
-        );
+        .child(crate::icons::Drawn::new(theme, icon).slot(px(theme.typography.icon()), hsla(ink)));
     crate::a11y::tab_stop(el, s.focus)
 }
 
@@ -1274,7 +1261,7 @@ pub fn icon_toggle(
 /// a find's match case, whole word and pattern, the way Xcode and the terminals label them.
 ///
 /// A glyph for "case sensitive" or "regex" has to be learnt; the letters say it. The face is at
-/// the caption size and the medium weight, in the secondary ink until on, when it takes the text
+/// the caption size, in the secondary ink until on, when it takes the text
 /// and the selected wash as [`icon_toggle`] does. Its name, said to a screen reader and in its
 /// hint, is `label`.
 #[must_use]
@@ -1308,7 +1295,6 @@ pub fn text_toggle(
         .cursor_pointer()
         .font_family(theme.typography.ui_family.clone())
         .text_size(px(theme.typography.caption()))
-        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(face);
@@ -1320,10 +1306,10 @@ pub fn text_toggle(
     }
 }
 
-/// A tick box the size of an inline icon.
+/// A tick box, Zed's checkbox: 16 pt at radius 2.
 ///
-/// A sunk hairline square while off, the neutral [`solid`] with its tick while on, as macOS
-/// draws one. The caller makes it, or the row it leads, the thing pressed, with
+/// The control's ground inside the `border` line while off, [`tinted`] with its check in the
+/// text's ink while on. The caller makes it, or the row it leads, the thing pressed, with
 /// `Role::CheckBox` and `aria_toggled`.
 #[must_use]
 pub fn tick_box(theme: &Theme, on: bool) -> Div {
@@ -1335,20 +1321,14 @@ pub fn tick_box(theme: &Theme, on: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(theme.radii.xs))
-        .border(HAIR);
+        .rounded(px(theme.radii.xs));
     if on {
-        solid(el, theme).border_color(hsla(s.solid)).child(
-            crate::icons::icon(
-                theme,
-                crate::icons::Symbol::Checkmark,
-                crate::icons::IconSize::Inline,
-                hsla(s.solid_ink),
-            )
-            .size(px(theme.typography.small())),
+        tinted(el, theme).child(
+            crate::icons::icon(theme, crate::icons::Symbol::Checkmark, hsla(s.text))
+                .size(px(theme.typography.small())),
         )
     } else {
-        sunk(el.border_color(hsla(s.border)), theme, stroke::LINE)
+        el.bg(hsla(s.element)).border(HAIR).border_color(hsla(s.border))
     }
 }
 
@@ -1525,6 +1505,9 @@ pub struct Hint {
     wait: Option<gpui::Task<()>>,
 }
 
+/// How wide a hint's words grow before they wrap: Zed's tooltip's `max_w_72`, 288.
+pub const HINT_MEASURE: f32 = 288.0;
+
 /// How long the pointer rests on a control before the first hint shows.
 pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
@@ -1600,14 +1583,15 @@ impl Render for Hint {
             .debug_selector(|| "hint".to_owned())
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm))
+            .gap(px(theme.spacing.lg))
             .px(px(theme.spacing.sm))
-            .py(px(theme.spacing.xxs))
-            .rounded(px(theme.radii.sm))
-            .text_size(px(theme.typography.small()))
+            .py(px(theme.spacing.xs))
+            .rounded(px(theme.radii.lg))
+            .text_size(px(theme.roles().chrome.size))
             .font_family(theme.typography.ui_family.clone())
             .child(
                 div()
+                    .max_w(px(HINT_MEASURE))
                     .text_color(hsla(s.text))
                     .when(self.mono, |el| el.font_family(mono_family(theme)))
                     .child(self.what.clone()),
@@ -1675,6 +1659,9 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     KitTheme::change(mode, None, cx);
     let s = &theme.surfaces;
     let kit = KitTheme::global_mut(cx);
+    // Its fields, tooltips, editors and diffs set the bundled faces, as the chrome does.
+    kit.font_family = theme.typography.ui_family.clone().into();
+    kit.mono_font_family = mono_family(theme);
     let c = &mut kit.colors;
     c.background = hsla(s.ground);
     c.foreground = hsla(s.text);
@@ -1696,12 +1683,13 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.secondary_foreground = hsla(s.text);
     c.secondary_hover = hsla(s.selected);
     c.secondary_active = hsla(s.pressed);
-    // gpui-kit's primary (its buttons, switches, checkboxes) is Slopty's: the neutral solid.
-    let (hovered, pressed) = solid_states(theme);
-    c.primary = hsla(s.solid);
-    c.primary_hover = hsla(hovered);
-    c.primary_active = hsla(pressed);
-    c.primary_foreground = hsla(s.solid_ink);
+    // gpui-kit's primary (its switches, checkboxes and radios) is the accent's mark, as a Zed
+    // switch is on, given a little toward the content under the pointer and more when pressed.
+    let content = theme.content();
+    c.primary = hsla(s.accent_fill);
+    c.primary_hover = hsla(s.accent_fill.mix(content, alpha::FAINT));
+    c.primary_active = hsla(s.accent_fill.mix(content, alpha::DIM));
+    c.primary_foreground = hsla(s.accent_ink);
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
@@ -1793,9 +1781,11 @@ mod tests {
                 assert_eq!(kit.mode.is_dark(), variant == Variant::Dark);
                 assert_eq!(kit.colors.background, hsla(theme.surfaces.ground));
                 assert_eq!(kit.colors.foreground, hsla(theme.surfaces.text));
-                assert_eq!(kit.colors.primary, hsla(theme.surfaces.solid), "the neutral solid");
-                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.solid_ink));
+                assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "the accent");
+                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_ink));
                 assert_eq!(kit.colors.caret, hsla(theme.surfaces.text), "a neutral caret");
+                assert_eq!(kit.font_family.as_ref(), crate::fonts::UI_FAMILY, "the bundled faces");
+                assert_eq!(kit.mono_font_family.as_ref(), crate::fonts::MONO_FAMILY);
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
                 for bar in [kit.colors.title_bar, kit.colors.tab_bar, kit.colors.status_bar] {
@@ -1817,12 +1807,10 @@ mod tests {
     }
 
     /// A pill is its fixed height and a chip at `radii.sm`, and the state's pill is the frame
-    /// filled at the faint step, a notch fainter on white.
+    /// filled at the faint step.
     #[test]
     fn a_pill_is_a_twenty_point_chip() {
-        for (variant, step) in
-            [(Variant::Dark, alpha::FAINT), (Variant::Light, alpha::FAINT_ON_PAPER)]
-        {
+        for (variant, step) in [(Variant::Dark, alpha::FAINT), (Variant::Light, alpha::FAINT)] {
             let theme = Theme::new(variant);
             let mut frame = pill_frame(&theme);
             let height = frame.style().size.height;
@@ -1854,22 +1842,25 @@ mod tests {
         assert_eq!(on.style().size.width, off.style().size.width, "one size either way");
     }
 
-    /// The primary is the neutral solid, the destructive the error's wash, the secondary clear
-    /// inside the border line and the rest bare, all one control's height, in both variants: no
-    /// button wears the accent. A selection where the keyboard is is the keyed wash with the
-    /// focus green's line inside it, and elsewhere the selected wash alone.
+    /// Zed's styles: the primary the accent's quiet ground in its line, the destructive the
+    /// error's, the secondary clear inside the lighter line and the rest bare, all one
+    /// control's height and flat, in both variants. A selection where the keyboard is is the
+    /// keyed wash with the focus line inside it, and elsewhere the selected wash alone.
     #[test]
-    fn a_button_is_neutral_and_one_height() {
+    fn a_button_is_zeds_and_one_height() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             let fill = |kind| button(&theme, "b", "Go", kind).style().background.clone();
-            assert_eq!(fill(ButtonKind::Primary), Some(gpui::Fill::from(hsla(s.solid))));
-            let red = Some(gpui::Fill::from(hsla_alpha(s.error_fill, alpha::TINTED)));
+            let blue = Some(gpui::Fill::from(hsla(s.info_background)));
+            assert_eq!(fill(ButtonKind::Primary), blue, "{variant:?}: tinted accent");
+            let mut primary = button(&theme, "b", "Go", ButtonKind::Primary);
+            assert_eq!(primary.style().border_color, Some(hsla(s.info_border)), "{variant:?}");
+            let red = Some(gpui::Fill::from(hsla(s.error_background)));
             assert_eq!(fill(ButtonKind::Destructive), red);
             assert_eq!(fill(ButtonKind::Secondary), None, "{variant:?}: clear at rest");
             let mut second = button(&theme, "b", "Go", ButtonKind::Secondary);
-            assert_eq!(second.style().border_color, Some(hsla(s.border)), "{variant:?}");
+            assert_eq!(second.style().border_color, Some(hsla(s.stroke)), "{variant:?}");
             assert_eq!(fill(ButtonKind::Ghost), None);
             assert_eq!(fill(ButtonKind::Link), None);
             for kind in [
@@ -1899,19 +1890,16 @@ mod tests {
         }
     }
 
-    /// The destructive button's word reads AA on its wash at rest and under the pointer, over
-    /// the ground and over a float, in both variants.
+    /// The destructive button's word reads AA on its ground, over the work and over a float,
+    /// in both variants.
     #[test]
     fn the_destructive_button_reads_in_every_state() {
         for variant in [Variant::Light, Variant::Dark] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             for plane in [theme.content(), s.elevated] {
-                for (state, share) in [("rest", alpha::TINTED), ("hover", alpha::TINTED_HOVER)] {
-                    let wash = slopty_theme::Tint::of(s.error_fill, share).over(plane);
-                    let ratio = s.error.contrast(wash);
-                    assert!(ratio >= 4.5, "{variant:?} {state}: the word reads {ratio:.2}");
-                }
+                let ratio = s.error.contrast(s.error_background.over(plane));
+                assert!(ratio >= 4.5, "{variant:?}: the word reads {ratio:.2}");
             }
         }
     }
@@ -1959,13 +1947,13 @@ mod tests {
     }
 
     /// Under the touch density an icon button is a finger's 44 pt round the same icon, and the
-    /// rows grow with it; under the compact one nothing moved from the sizes it replaced.
+    /// rows grow with it; under the compact one they are Zed's: a 22 pt button, 24 pt rows.
     #[test]
     fn density_sizes_the_targets_not_the_icons() {
         let mut theme = Theme::default();
-        assert!((icon_button_side(&theme) - 26.0).abs() < f32::EPSILON, "compact: MonoCode's 26");
-        assert!((Row::One.height(&theme) - 28.0).abs() < f32::EPSILON);
-        assert!((Row::Two.height(&theme) - 40.0).abs() < f32::EPSILON);
+        assert!((icon_button_side(&theme) - 22.0).abs() < f32::EPSILON, "compact: Zed's 22");
+        assert!((Row::One.height(&theme) - 24.0).abs() < f32::EPSILON);
+        assert!((Row::Two.height(&theme) - 42.0).abs() < f32::EPSILON);
         theme.density = slopty_theme::Density::TOUCH;
         assert!(icon_button_side(&theme) >= 44.0, "touch: a finger's target");
         assert!(Row::One.height(&theme) >= 44.0 && Row::Two.height(&theme) > 44.0);
@@ -1996,7 +1984,7 @@ mod tests {
         }
     }
 
-    /// A card rests on its edge: the card's wash inside the `border` line, with no shadow, in
+    /// A card rests on its edge: the work's ground inside the `border` line, with no shadow, in
     /// both variants. A card cut into parts takes its top line on the first part and its bottom
     /// one on the last.
     #[test]
@@ -2006,7 +1994,7 @@ mod tests {
             let s = theme.surfaces;
             let mut whole = card(&theme);
             let style = whole.style();
-            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.card))), "{variant:?}");
+            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.ground))), "{variant:?}");
             assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: the border line");
             assert!(style.box_shadow.is_none(), "{variant:?}: no shadow at rest");
             let edges = |first, last| {
@@ -2021,7 +2009,8 @@ mod tests {
     }
 
     /// What is sunk holds shade inside its top edge, a point past any border; the segmented
-    /// track is not sunk but ringed, `MonoCode`'s, on its plane.
+    /// track is not sunk but ringed, Zed's toggle group, on its plane, its thumb filling its
+    /// corner.
     #[test]
     fn a_field_sinks_where_a_card_rises() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2035,10 +2024,33 @@ mod tests {
             assert!(tracked.box_shadow.is_none(), "{variant:?}: the track is not sunk");
             assert!(tracked.background.is_none(), "{variant:?}: nor washed");
             assert_eq!(tracked.border_color, Some(hsla(theme.surfaces.border)), "{variant:?}");
+            let corner = theme.radii.sm - stroke::LINE;
+            assert!((thumb_radius(&theme) - corner).abs() < f32::EPSILON, "{variant:?}");
         }
     }
 
-    /// A field stands off the page in both modes by the `border` line round the card's wash.
+    /// A float is Zed's elevated surface: the elevated plane inside the lighter `stroke` line
+    /// (`border.variant`) under the shadow. Its rows are Zed's list items: 24 pt, their parts
+    /// 4 apart, rounded 4 inside the float's 8, and its groups parted by a plain rule.
+    #[test]
+    fn a_float_and_its_rows_are_zeds() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let style = elevate(div(), &theme).style().clone();
+            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.elevated))), "{variant:?}");
+            assert_eq!(style.border_color, Some(hsla(s.stroke)), "{variant:?}: border.variant");
+            assert!(style.box_shadow.is_some_and(|l| l.len() == 2), "{variant:?}: two layers");
+            let mut sheet = sheet_row(&theme, Row::One);
+            let row = sheet.style();
+            let radius = px(theme.radii.sm);
+            assert_eq!(row.corner_radii.top_left, Some(radius.into()), "{variant:?}");
+            assert_eq!(row.gap.width, Some(px(theme.spacing.xs).into()), "{variant:?}");
+            assert_eq!(row.size.height, Some(px(24.0).into()), "{variant:?}");
+        }
+    }
+
+    /// A field stands off the page in both modes by the `border` line round the work's ground.
     #[test]
     fn a_field_is_seen_on_its_page() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2047,7 +2059,7 @@ mod tests {
             let edged = style.border_widths.top.is_some_and(|w| w != px(0.0).into());
             assert!(edged, "{variant:?}: edged");
             assert_eq!(style.border_color, Some(hsla(theme.surfaces.border)), "{variant:?}");
-            assert_eq!(style.background, Some(gpui::Fill::from(hsla(theme.surfaces.card))));
+            assert_eq!(style.background, Some(gpui::Fill::from(hsla(theme.surfaces.ground))));
             assert!(style.box_shadow.is_some_and(|l| l.iter().all(|l| l.inset)), "{variant:?}");
         }
     }
@@ -2261,10 +2273,11 @@ mod tests {
         assert_eq!(Pace::Exit.curve(), m.ease_out);
         assert_eq!((Pace::Pane.duration(), Pace::Pane.curve()), (m.pane, m.ease_out));
         assert_eq!((Pace::Reveal.duration(), Pace::Reveal.curve()), (m.reveal, m.ease_out));
-        assert!(Pace::Sheet.duration() < Pace::Pane.duration(), "a pane travels further");
+        // Zed's two paces: fast for a fade or a settle, slow for what travels.
+        assert!(Pace::Sheet.duration() <= Pace::Pane.duration(), "a pane travels as far");
         assert!(Pace::Exit.duration() < Pace::Fade.duration(), "out quicker than in");
-        assert!(Pace::Fade.duration() < Pace::Settle.duration());
-        assert!(Pace::Settle.duration() < Pace::Sheet.duration());
+        assert_eq!(Pace::Fade.duration(), Pace::Settle.duration(), "Zed's fast");
+        assert!(Pace::Settle.duration() < Pace::Sheet.duration(), "Zed's slow");
     }
 
     /// A diff's size leaves out the side that is zero, and says nothing for no change.
@@ -2276,7 +2289,9 @@ mod tests {
         assert_eq!(changes_text(0, 0), None);
         let theme = Theme::default();
         assert!(changes(&theme, 0, 0).is_none(), "nothing drawn for no change");
-        assert!(changes(&theme, 1, 0).is_some());
+        let mut drawn = changes(&theme, 1, 0).unwrap_or_else(|| panic!("a change is drawn"));
+        let family = drawn.style().text.font_family.clone();
+        assert_eq!(family, Some(mono_family(&theme)), "Delta's stat is in Lilex");
     }
 
     /// The two overlay sizes differ in both directions, and a list is the smaller of them: a

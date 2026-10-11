@@ -66,7 +66,7 @@ use slopty_proto::server::Liveness;
 use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
 use slopty_terminal::{TerminalView, TerminalViewEvent};
-use slopty_theme::{Density, Spacing, Theme, Typography};
+use slopty_theme::{Density, Spacing, Theme};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::workspace::attention::Attention;
@@ -893,7 +893,7 @@ impl Workspace {
         let editor = cx.new(|cx| SettingsEditor::new(&text, theme, window, cx));
         let opens = self.this_mac_worker.is_some();
         editor.update(cx, |e, cx| {
-            e.set_palette_words(app_palette_items(), cx);
+            e.set_palette_words(app_palette_items(cx), cx);
             e.set_file_opens(opens, cx);
         });
         self.settings_editor_events =
@@ -1081,7 +1081,7 @@ impl Workspace {
     /// menus' chords from it: the "…" menu's, and the menu bar's, whose key equivalents AppKit
     /// runs itself. The palette reads it when it opens.
     fn apply_keymap(&self, keymap: slopty_ui::keymap::Keymap, cx: &mut Context<Self>) {
-        if keymap.binds_as(&slopty_ui::keymap::current()) {
+        if keymap.binds_as(&slopty_ui::keymap::current(cx)) {
             return;
         }
         tracing::info!(said = keymap.diagnostics().len(), "keys rebound");
@@ -1237,7 +1237,7 @@ impl Workspace {
     fn refresh_menu(&self, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let mut entries = Vec::new();
-        let bindings = app_key_bindings();
+        let bindings = app_key_bindings(cx);
         let hint = |action: &dyn gpui::Action| {
             if cfg!(target_os = "macos") {
                 slopty_ui::palette::keys_for(action, &bindings)
@@ -2885,7 +2885,7 @@ impl Workspace {
     /// only what can be chosen stands on a step, and a status on one with a magnifier read as
     /// a search field to type in.
     fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
-        use slopty_kit::icons::{IconSize, Status, Symbol, icon, status_icon};
+        use slopty_kit::icons::{Status, Symbol, icon, status_icon};
         let theme = &self.theme;
         let (s, spacing, ty) = (theme.surfaces, theme.spacing, &theme.typography);
         let section = div().id("add-worker-tailnet").flex().flex_col().gap(px(spacing.sm));
@@ -2899,15 +2899,11 @@ impl Workspace {
                     status_icon(theme, Status::Running, size, hsla(s.text_muted)).into_any_element()
                 }
                 Search::Answered { running: false, .. } => {
-                    icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted))
-                        .size(size)
-                        .into_any_element()
+                    icon(theme, Symbol::WifiSlash, hsla(s.text_muted)).size(size).into_any_element()
                 }
-                Search::Answered { .. } => {
-                    icon(theme, Symbol::Magnifyingglass, IconSize::Inline, hsla(s.text_muted))
-                        .size(size)
-                        .into_any_element()
-                }
+                Search::Answered { .. } => icon(theme, Symbol::Magnifyingglass, hsla(s.text_muted))
+                    .size(size)
+                    .into_any_element(),
             };
             let step = search.next_step(mode);
             let again = (*search != Search::Looking).then(|| {
@@ -3111,7 +3107,6 @@ impl Workspace {
                         div()
                             .min_w_0()
                             .text_size(px(theme.typography.ui_size))
-                            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(if muted { s.text_secondary } else { s.text }))
                             .child(check.title()),
                     )
@@ -3261,10 +3256,9 @@ impl Workspace {
             .rounded(px(self.theme.radii.sm))
             // A glyph cap at a title's size, a word cap at the metadata's.
             .text_size(px(if word { ty.small() } else { self.theme.roles().panel_title.size }))
-            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .map(|el| {
                 if lit {
-                    kit::solid(el, &self.theme)
+                    kit::tinted(el, &self.theme)
                 } else {
                     kit::raised(el.text_color(hsla(s.text)), &self.theme)
                 }
@@ -3834,7 +3828,7 @@ fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpu
 /// A server or a worker the tailnet found, as a row to press, the palette's: its kind's glyph,
 /// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
-    use slopty_kit::icons::{Drawn, Symbol, beside};
+    use slopty_kit::icons::{Drawn, Symbol, icon};
     use slopty_net::discover::Answer;
     let s = theme.surfaces;
     let (glyph, what, verb) = match host {
@@ -3864,7 +3858,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         .map(kit::eased)
         .hover(move |el| el.bg(hsla(s.hover)))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(beside(theme, glyph, theme.roles().action, hsla(s.text_secondary)))
+        .child(icon(theme, glyph, hsla(s.text_secondary)))
         .child(
             div()
                 .flex_1()
@@ -3874,7 +3868,6 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                 .child(
                     div()
                         .text_size(px(theme.typography.ui_size))
-                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .overflow_hidden()
                         .text_ellipsis()
@@ -3953,7 +3946,7 @@ fn entry_row_saying(
     title: &'static str,
     line: gpui::Div,
 ) -> gpui::Stateful<gpui::Div> {
-    use slopty_kit::icons::{Drawn, Symbol, beside};
+    use slopty_kit::icons::{Drawn, Symbol, icon};
     let s = theme.surfaces;
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
@@ -3967,7 +3960,7 @@ fn entry_row_saying(
         .map(kit::eased)
         .hover(move |el| el.bg(hsla(s.hover)))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(beside(theme, glyph, theme.roles().action, hsla(s.text_secondary)))
+        .child(icon(theme, glyph, hsla(s.text_secondary)))
         .child(
             div()
                 .flex_1()
@@ -3977,7 +3970,6 @@ fn entry_row_saying(
                 .child(
                     div()
                         .text_size(px(theme.typography.ui_size))
-                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .child(title),
                 )
@@ -4016,8 +4008,8 @@ fn keymap_for(keys: &slopty_settings::KeySettings) -> slopty_ui::keymap::Keymap 
 }
 
 /// The app's own bindings in effect.
-fn app_key_bindings() -> Vec<gpui::KeyBinding> {
-    slopty_ui::keymap::current().bindings(|scope| scope == slopty_ui::keymap::Scope::App)
+fn app_key_bindings(cx: &App) -> Vec<gpui::KeyBinding> {
+    slopty_ui::keymap::current(cx).bindings(|scope| scope == slopty_ui::keymap::Scope::App)
 }
 
 /// The palette's way to the keyboard shortcuts: the Mac's Help menu has it, an iPad with a
@@ -4030,14 +4022,21 @@ const ABOUT: &str = "About Slopty";
 /// [`app_palette_items`] and the line that opens a tile in the person's editor, named for it
 /// ([`editors::palette_line`]).
 fn app_palette(cx: &App) -> Vec<slopty_ui::palette::PaletteItem> {
-    let mut items = app_palette_items();
+    let mut items = app_palette_items(cx);
     items.extend(editors::palette_line(cx));
     items
 }
 
-/// The app's lines for the command palette, after the workspace's.
-fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
-    let bindings = app_key_bindings();
+/// The app's lines for the command palette, after the workspace's, with the keys in effect.
+fn app_palette_items(cx: &App) -> Vec<slopty_ui::palette::PaletteItem> {
+    app_palette_items_of(&slopty_ui::keymap::current(cx))
+}
+
+/// The app's lines for the command palette with `keymap`'s keys.
+fn app_palette_items_of(
+    keymap: &slopty_ui::keymap::Keymap,
+) -> Vec<slopty_ui::palette::PaletteItem> {
+    let bindings = keymap.bindings(|scope| scope == slopty_ui::keymap::Scope::App);
     let item = |label: &str, action: Box<dyn gpui::Action>| {
         slopty_ui::palette::PaletteItem::new(label, action, &bindings)
     };
@@ -4068,8 +4067,11 @@ fn layout_path() -> std::path::PathBuf {
     slopty_platform::dirs::data_dir().join("layout.json")
 }
 
+/// What builds the app's menu bar from the keys in effect.
+type BuildMenus = dyn Fn(&App) -> Vec<gpui::Menu>;
+
 /// What builds the app's menu bar, kept so a rebinding rebuilds it.
-struct AppMenus(Rc<dyn Fn() -> Vec<gpui::Menu>>);
+struct AppMenus(Rc<BuildMenus>);
 
 impl gpui::Global for AppMenus {}
 
@@ -4077,7 +4079,7 @@ impl gpui::Global for AppMenus {}
 ///
 /// A menu's key equivalents are the chords bound when it is set, and AppKit runs them before
 /// any binding sees the key, so a menu built once would keep a chord the file took away.
-pub fn set_app_menus(cx: &mut App, build: impl Fn() -> Vec<gpui::Menu> + 'static) {
+pub fn set_app_menus(cx: &mut App, build: impl Fn(&App) -> Vec<gpui::Menu> + 'static) {
     cx.set_global(AppMenus(Rc::new(build)));
     rebuild_app_menus(cx);
 }
@@ -4085,7 +4087,7 @@ pub fn set_app_menus(cx: &mut App, build: impl Fn() -> Vec<gpui::Menu> + 'static
 /// The menu bar again, from the keys bound now.
 fn rebuild_app_menus(cx: &App) {
     if let Some(build) = cx.try_global::<AppMenus>().map(|menus| Rc::clone(&menus.0)) {
-        cx.set_menus(build());
+        cx.set_menus(build(cx));
     }
 }
 
@@ -4191,7 +4193,7 @@ pub fn open_workspace(
     }
     // The chrome's glyphs read and drawn on a background thread while the window is made, so
     // the first frame does not pay for Core Graphics' first context (docs/MEASUREMENTS.md,
-    // "Tabler glyphs drawn on demand").
+    // "Carbon glyphs drawn on demand").
     slopty_kit::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
@@ -4231,7 +4233,7 @@ pub fn open_workspace(
         if unreadable {
             view.show_notice(slopty_ui::workspace::LAYOUT_SET_ASIDE.to_owned(), cx);
         }
-        view.extend_palette(app_palette_items());
+        view.extend_palette(app_palette_items(cx));
         view.set_layout_path(layout_path());
         // Beside the layout: the file tiles' edits not yet saved, taken back after a quit or a
         // crash.
@@ -4510,6 +4512,11 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext, point, size};
 
     use super::*;
+
+    /// The app's palette lines with the table's own keys.
+    fn app_lines() -> Vec<slopty_ui::palette::PaletteItem> {
+        app_palette_items_of(&keymap_for(&slopty_settings::KeySettings::default()))
+    }
 
     #[test]
     fn the_key_bar_is_for_glass_without_a_keyboard() {
@@ -5049,7 +5056,7 @@ mod tests {
         let about = tree.iter().find(|n| n.is("Group", Some("About"))).expect("the About page");
         let said = about.description.as_deref().unwrap_or_default();
         assert!(said.contains(env!("CARGO_PKG_VERSION")), "{said}");
-        assert!(app_palette_items().iter().any(|item| item.label == ABOUT), "the palette's line");
+        assert!(app_lines().iter().any(|item| item.label == ABOUT), "the palette's line");
     }
 
     /// The Keyboard page names the app's own commands as its palette does ("Update all
@@ -5613,7 +5620,8 @@ mod tests {
         });
         cx.run_until_parked();
         let title = cx.debug_bounds("add-worker-title");
-        assert!(title.is_some_and(|t| t.size.height >= px(32.0)), "26/32 heading: {title:?}");
+        let line = px(Theme::default().roles().first_run.line);
+        assert!(title.is_some_and(|t| t.size.height >= line), "the first run's heading: {title:?}");
         let entry = cx.debug_bounds("use-this-mac").expect("the entry");
         cx.simulate_click(entry.center(), gpui::Modifiers::none());
         let none = net::Tailnet { running: true, ..net::Tailnet::default() };
@@ -5905,7 +5913,7 @@ mod tests {
     /// The keyboard shortcuts are a palette line on every device, not only in a Mac's Help menu.
     #[test]
     fn the_palette_offers_the_keyboard_shortcuts() {
-        let offered = app_palette_items().iter().any(|item| item.label == KEYBOARD_SHORTCUTS);
+        let offered = app_lines().iter().any(|item| item.label == KEYBOARD_SHORTCUTS);
         assert!(offered);
     }
 
@@ -5913,7 +5921,7 @@ mod tests {
     /// one line for them.
     #[test]
     fn the_palette_adds_a_machine_in_one_line() {
-        let labels: Vec<_> = app_palette_items().into_iter().map(|item| item.label).collect();
+        let labels: Vec<_> = app_lines().into_iter().map(|item| item.label).collect();
         assert!(labels.iter().any(|l| l == "Add a machine\u{2026}"), "{labels:?}");
         let rows = [this_mac::TITLE, ssh::TITLE];
         assert!(!labels.iter().any(|l| rows.contains(&l.as_str())), "rows only: {labels:?}");
@@ -5923,7 +5931,7 @@ mod tests {
     /// commands the keymap can bind, only where the app can run it: on a Mac, never on a phone.
     #[test]
     fn the_palette_offers_updates_only_where_ssh_runs() {
-        let labels: Vec<_> = app_palette_items().into_iter().map(|item| item.label).collect();
+        let labels: Vec<_> = app_lines().into_iter().map(|item| item.label).collect();
         for line in [ssh::UPDATE_ALL, server::UPDATE_SERVER] {
             assert_eq!(labels.iter().any(|l| l == line), ssh::OFFERED, "{line}: {labels:?}");
         }
@@ -5936,7 +5944,7 @@ mod tests {
     /// The palette offers the workers in Finder on a Mac, under a command the keymap can bind.
     #[test]
     fn the_palette_offers_the_workers_in_finder_on_a_mac() {
-        let offered = app_palette_items().iter().any(|item| item.label == finder::TITLE);
+        let offered = app_lines().iter().any(|item| item.label == finder::TITLE);
         assert_eq!(offered, finder::OFFERED);
         let bindable = app_commands().iter().any(|c| c.name() == "show_workers_in_finder");
         assert_eq!(bindable, finder::OFFERED);
@@ -6088,8 +6096,8 @@ mod tests {
         let built = Rc::new(std::cell::RefCell::new(Vec::new()));
         let seen = Rc::clone(&built);
         cx.update(|cx| {
-            set_app_menus(cx, move || {
-                let keys = slopty_ui::keymap::current().label_of(&NewTerminal).to_owned();
+            set_app_menus(cx, move |cx| {
+                let keys = slopty_ui::keymap::current(cx).label_of(&NewTerminal).to_owned();
                 seen.borrow_mut().push(keys);
                 vec![
                     gpui::Menu::new("File")
@@ -6131,17 +6139,17 @@ mod tests {
         };
         let said =
             |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
-        let note_keys = || {
-            let keymap = slopty_ui::keymap::current();
+        let note_keys = |cx: &mut VisualTestContext| {
+            let keymap = cx.update(|_window, cx| slopty_ui::keymap::current(cx));
             let ix = keymap.find(slopty_ui::keymap::Scope::Workspace, "new_note");
             keymap.chords(ix.unwrap_or_default()).to_vec()
         };
 
         load(cx, "[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
-        assert_eq!(note_keys(), ["alt-cmd-n"], "the file's keys");
+        assert_eq!(note_keys(cx), ["alt-cmd-n"], "the file's keys");
         load(cx, "[keys.workspace\nnew_note = ");
         assert!(said(cx).is_some_and(|t| t.starts_with("Settings: ")), "{:?}", said(cx));
-        assert_eq!(note_keys(), ["alt-cmd-n"], "the keys last applied");
+        assert_eq!(note_keys(cx), ["alt-cmd-n"], "the keys last applied");
     }
 
     /// A change from the settings form writes the file and applies it with the page still

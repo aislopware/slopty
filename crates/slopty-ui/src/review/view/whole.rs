@@ -15,7 +15,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_proto::git::GitOp;
 
 use super::{ReviewView, Row};
@@ -163,13 +163,8 @@ impl ReviewView {
                         .text_color(hsla(s.text_secondary))
                         .hover(move |el| el.text_color(hsla(s.text)))
                         .child(
-                            slopty_kit::icons::icon(
-                                theme,
-                                Symbol::Unfold,
-                                IconSize::Inline,
-                                hsla(s.text_muted),
-                            )
-                            .size(px(theme.typography.icon())),
+                            slopty_kit::icons::icon(theme, Symbol::Unfold, hsla(s.text_muted))
+                                .size(px(theme.typography.icon())),
                         )
                         .child(press)
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.ask_whole(at, cx))),

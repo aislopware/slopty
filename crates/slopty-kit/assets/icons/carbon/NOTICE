@@ -1,0 +1,97 @@
+IBM Carbon icons, @carbon/icons 11.90.0 (https://github.com/carbon-design-system/carbon,
+packages/icons, the 32-unit SVGs in svg/32/), Apache License 2.0, LICENSE beside this file.
+Copyright IBM Corp. Only the glyphs the chrome draws are kept. Each file was changed from the
+published one: its <title>, its transparent box and any knocked-out inner path (fill="none")
+are dropped, its circles and transformed shapes are turned into plain path data with the
+transforms applied, its numbers are rounded to four places, and its markup is put on one line.
+The drawing is otherwise Carbon's.
+
+What each glyph stands for, by the name the chrome knows it under:
+
+AiAgent                              ai-agent.svg
+ArrowClockwise                       renew.svg
+ArrowDown                            arrow--down.svg
+ArrowDownToLine                      down-to-bottom.svg
+ArrowLeft                            arrow--left.svg
+ArrowRight                           arrow--right.svg
+ArrowTriangleBranch                  branch.svg
+ArrowTriangleMerge                   merge.svg
+ArrowTrianglePull                    pull-request.svg
+ArrowUp                              arrow--up.svg
+ArrowUpAndDown                       arrows--vertical.svg
+ArrowUpRight                         arrow--up-right.svg
+ArrowUpToLine                        up-to-top.svg
+ArrowUturnBackward                   undo.svg
+Bell                                 notification.svg
+BellBadge                            notification--new.svg
+BellSlash                            notification--off.svg
+CharacterCursorIbeam                 pointer-text.svg
+Checklist                            list--checked.svg
+Checkmark                            checkmark.svg
+CheckmarkCircle                      checkmark--outline.svg
+CheckmarkCircleFill                  checkmark--filled.svg
+ChevronDown                          chevron--down.svg
+ChevronLeft                          chevron--left.svg
+ChevronLeftForwardslashChevronRight  code.svg
+ChevronRight                         chevron--right.svg
+ChevronUp                            chevron--up.svg
+Circle                               circle--outline.svg
+CircleDashed                         circle-dash.svg
+CircleInsetFilled                    radio-button--checked.svg
+Clock                                time.svg
+Command                              mac--command.svg
+Cursorarrow                          cursor--1.svg
+Display                              screen.svg
+Doc                                  document--blank.svg
+DocBadgePlus                         document--add.svg
+DocOnClipboard                       copy--to-clipboard.svg
+DocOnDoc                             copy.svg
+DocText                              document.svg
+Ellipsis                             overflow-menu--horizontal.svg
+ExclamationmarkTriangle              warning--alt.svg
+ExclamationmarkTriangleFill          warning--alt--filled.svg
+Eye                                  view.svg
+EyeSlash                             view--off.svg
+Flag                                 flag.svg
+Fold                                 row--collapse.svg
+Folder                               folder.svg
+FolderBadgePlus                      folder--add.svg
+Globe                                globe.svg
+InfoCircle                           information.svg
+Iphone                               mobile.svg
+Keyboard                             keyboard.svg
+Laptopcomputer                       laptop.svg
+Link                                 link.svg
+Lock                                 locked.svg
+Macwindow                            application.svg
+Magnifyingglass                      search.svg
+Minus                                subtract.svg
+Paperclip                            attachment.svg
+Palette                              color-palette.svg
+PauseCircle                          pause--outline.svg
+Pencil                               edit.svg
+Photo                                image.svg
+Pin                                  pin.svg
+Plus                                 add.svg
+PlusForwardslashMinus                compare.svg
+Power                                power.svg
+PuzzlepieceExtension                 plug.svg
+QuestionmarkBubble                   help.svg
+RectangleSplit3x1                    split-screen.svg
+Scissors                             cut.svg
+ServerRack                           bare-metal-server.svg
+SidebarLeft                          side-panel--open.svg
+SpeakerSlash                         volume--mute.svg
+SpeakerWave2                         volume--up.svg
+SquareGrid2x2                        grid.svg
+StopFill                             stop--filled.svg
+Terminal                             terminal.svg
+TextBubble                           chat.svg
+Trash                                trash-can.svg
+Unfold                               row--expand.svg
+WifiSlash                            wifi--off.svg
+WrenchAndScrewdriver                 tool-kit.svg
+Xmark                                close.svg
+XmarkCircle                          close--outline.svg
+GitCommit                            commit.svg
+GitRepo                              git--repo.svg

@@ -4,10 +4,10 @@
 //! A tab leads with one mark: a mark for each agent in it that works or has finished
 //! (`MonoCode`'s `TabHarnesses`, up to three, then a count), else what its focused work is. Then
 //! the title of its focused work, and its close under the pointer. They are drawn as every tab
-//! is ([`super::tab_look`]): pills of one width on the bar's ground, the one on show on the
-//! selected wash. Tabs that do not fit scroll, sideways under a vertical wheel too, and a
-//! chevron floats over each end past which tabs lie, a press on it scrolling the row by most of
-//! its width (`MonoCode`'s title strip).
+//! is ([`super::tab_look`]): Zed's square cells the bar's height, bare on the bar's plane, the
+//! one on show on the work's ground. Tabs that do not fit scroll, sideways under a vertical
+//! wheel too, and a chevron floats over each end past which tabs lie, a press on it scrolling
+//! the row by most of its width (`MonoCode`'s title strip).
 //!
 //! A tab that closes folds its width away over 200 ms (`MonoCode`'s tab close, on
 //! [`Curve::TAB`]) while the tabs after it close the gap, a tab that opens grows from nothing to
@@ -182,7 +182,8 @@ impl Folding {
                 }
                 let Some((_, at)) = widths.iter().find(|(t, _)| t == id) else { continue };
                 let before = self.titles.iter().skip(i).map(|(t, _)| *t).find(|t| stays(*t));
-                let (title, width) = (title.clone(), at.size.width);
+                // The spot lies inside the tab's two side lines; the ghost takes the whole cell.
+                let (title, width) = (title.clone(), at.size.width + kit::HAIR * 2.0);
                 self.ghosts.push(Ghost { before, title, width, start: clock.now });
             }
         } else {
@@ -190,8 +191,8 @@ impl Folding {
         }
         self.titles = tabs.iter().map(|t| (t.id, t.title.clone())).collect();
         let ids: Vec<TabId> = tabs.iter().map(|t| t.id).collect();
-        let left = |id: TabId| widths.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
-        let moved = self.motion.step(&ids, left, clock);
+        let place = |id: TabId| widths.iter().find(|(t, _)| *t == id).map(|(_, b)| *b);
+        let moved = self.motion.step(&ids, place, clock);
         let length = Pace::Sheet.duration();
         let gone = |start: Instant| clock.now.saturating_duration_since(start);
         self.ghosts.retain(|g| clock.moves && gone(g.start) < length);
@@ -235,7 +236,7 @@ fn tab_lead(theme: &Theme, tab: &TitleTab) -> gpui::AnyElement {
             .debug_selector(move || format!("title-tab-lead-{n}"))
             .into_any_element();
     }
-    let slot = slopty_kit::icons::IconSize::Inline.slot(theme);
+    let slot = theme.typography.icon();
     // Each mark under an id of its own: every one is a "status" image to the a11y tree.
     let marks = tab.marks.iter().take(MARKS_SHOWN).enumerate().map(|(i, st)| {
         div()
@@ -268,9 +269,9 @@ fn tab_lead(theme: &Theme, tab: &TitleTab) -> gpui::AnyElement {
         .into_any_element()
 }
 
-/// The chevron over the strip's `end` while tabs lie past it: a 26 pt square on the strong
-/// hover's wash that scrolls the row by [`SCROLL_SHARE`] of its width, never less than
-/// [`SCROLL_LEAST`].
+/// The chevron over the strip's `end` while tabs lie past it: an icon button's square on the
+/// bar's plane over the tabs, washed under the pointer, that scrolls the row by
+/// [`SCROLL_SHARE`] of its width, never less than [`SCROLL_LEAST`].
 fn chevron<V: TitleTabsHost>(
     theme: &Theme,
     scroll: &ScrollHandle,
@@ -284,7 +285,6 @@ fn chevron<V: TitleTabsHost>(
         ("title-tabs-back", Symbol::ChevronLeft, "Scroll tabs back")
     };
     let side = px(kit::icon_button_side(theme));
-    let glyph = slopty_kit::icons::IconSize::Inline;
     let handle = scroll.clone();
     let button = div()
         .id(id)
@@ -296,14 +296,14 @@ fn chevron<V: TitleTabsHost>(
         .items_center()
         .justify_center()
         .rounded(px(theme.radii.sm))
-        .bg(hsla(s.hover_strong))
+        .bg(hsla(s.sidebar))
         .text_color(hsla(s.text_secondary))
         .cursor_pointer()
         .child(
-            slopty_kit::icons::Drawn::new(theme, icon, glyph)
-                .slot(px(glyph.slot(theme)), hsla(s.text_secondary)),
+            slopty_kit::icons::Drawn::new(theme, icon)
+                .slot(px(theme.typography.icon()), hsla(s.text_secondary)),
         )
-        .hover(move |el| el.bg(hsla(s.pressed)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(move |_this: &mut V, _ev, _window, cx| {
             let width = f32::from(handle.bounds().size.width);

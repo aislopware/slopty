@@ -334,7 +334,7 @@ impl WorkspaceView {
                 }),
             ));
         }
-        let bindings = super::key_bindings();
+        let bindings = super::key_bindings(cx);
         rows.into_iter()
             .map(|(group, label, bound, run)| {
                 let detail = match bound {

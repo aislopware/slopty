@@ -395,7 +395,6 @@ impl WorkspaceView {
                 .px(px(theme.spacing.xs))
                 .rounded(px(theme.radii.xs))
                 .text_color(hsla(s.text))
-                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .hover(gpui::Styled::underline)
                 .child(label);
@@ -543,7 +542,7 @@ impl WorkspaceView {
                 if in_bar {
                     slopty_kit::kit::typed(el, theme.roles().metadata)
                         .text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 } else {
                     slopty_kit::kit::raised(el, theme).text_color(hsla(s.text))
                 }
@@ -723,10 +722,9 @@ impl WorkspaceView {
                 .items_center()
                 .px(px(theme.spacing.sm))
                 .when(place.is_some(), |el| slopty_kit::kit::raised(el, theme))
-                .when(place.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover_strong))))
+                .when(place.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover))))
                 .rounded(px(theme.radii.sm))
                 .text_color(hsla(s.text_secondary))
-                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .occlude()
                 .on_click(cx.listener(move |this, _ev, _w, cx| {

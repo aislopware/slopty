@@ -1,10 +1,10 @@
-//! What a file is, at a glance: its type's Material Icon Theme icon, in its own colours.
+//! What a file is, at a glance: its type's shape from Material Icon Theme, drawn in one ink.
 //!
-//! The file icons are Material Icon Theme's (`assets/icons/files/`, MIT, credited in its
-//! `NOTICE`), as `MonoCode` draws them beside the Tabler chrome: the colour carries a file's kind
-//! at a glance in trees, tabs and tool rows (`docs/decisions/ui.md`, "The chrome's icons are
-//! Tabler's, and a file's are Material's"). A type whose icon is drawn for a dark ground has the
-//! theme's light variant beside it (`<name>_light.svg`), taken on a light ground.
+//! The file icons are Material Icon Theme's shapes (`assets/icons/files/`, MIT, credited in its
+//! `NOTICE`), drawn as Zed and Delta draw a file's icon: one silhouette in the ink beside it,
+//! never in the theme's colours (`docs/decisions/ui.md`, "The chrome's icons are IBM Carbon's
+//! at 16"). An icon whose figure is a second colour over its first would read as a blob in one
+//! ink, so none is kept; its type is code or the plain document.
 //!
 //! A file is known as Material knows it: by its whole name first (`Dockerfile`, `README.md`,
 //! `package.json`), then by its extension. A language with no icon kept here is known as code
@@ -32,8 +32,9 @@ macro_rules! file_types {
                 }
             }
 
-            /// Its icon's markup, for a dark ground.
-            const fn dark_svg(self) -> &'static str {
+            /// Its icon's markup.
+            #[must_use]
+            pub const fn svg(self) -> &'static str {
                 match self {
                     $(Self::$variant => include_str!(
                         concat!("../assets/icons/files/", $file, ".svg")
@@ -46,15 +47,12 @@ macro_rules! file_types {
 
 file_types! {
     Audio => "audio",
-    Bun => "bun",
     C => "c",
     Certificate => "certificate",
-    Cmake => "cmake",
     Console => "console",
     Cpp => "cpp",
     Csharp => "csharp",
     Css => "css",
-    Dart => "dart",
     Database => "database",
     Deno => "deno",
     Docker => "docker",
@@ -85,7 +83,6 @@ file_types! {
     Npm => "npm",
     Pdf => "pdf",
     Php => "php",
-    Proto => "proto",
     Python => "python",
     React => "react",
     ReactTs => "react_ts",
@@ -116,18 +113,6 @@ impl FileType {
         let name = file_name(path);
         by_name(&name).or_else(|| by_extension(extension(&name)?))
     }
-
-    /// Its icon's markup for a ground that is `light` or dark: the light variant where
-    /// Material draws one, else the one icon.
-    #[must_use]
-    pub const fn svg(self, light: bool) -> &'static str {
-        match (self, light) {
-            (Self::Bun, true) => include_str!("../assets/icons/files/bun_light.svg"),
-            (Self::Deno, true) => include_str!("../assets/icons/files/deno_light.svg"),
-            (Self::Toml, true) => include_str!("../assets/icons/files/toml_light.svg"),
-            _ => self.dark_svg(),
-        }
-    }
 }
 
 /// Whether the file at `path` is code in a language with no icon kept here, which the chrome
@@ -135,9 +120,24 @@ impl FileType {
 #[must_use]
 pub fn code(path: &str) -> bool {
     let name = file_name(path);
-    extension(&name).is_some_and(|ext| {
-        matches!(ext, "graphql" | "gql" | "ps1" | "mm" | "m" | "less" | "scala" | "ml" | "clj")
-    })
+    name == "cmakelists.txt"
+        || extension(&name).is_some_and(|ext| {
+            matches!(
+                ext,
+                "graphql"
+                    | "gql"
+                    | "ps1"
+                    | "mm"
+                    | "m"
+                    | "less"
+                    | "scala"
+                    | "ml"
+                    | "clj"
+                    | "dart"
+                    | "proto"
+                    | "cmake"
+            )
+        })
 }
 
 /// The last component of `path`, lowercased.
@@ -162,7 +162,6 @@ fn by_name(name: &str) -> Option<FileType> {
             FileType::Docker
         }
         "makefile" | "gnumakefile" | "kbuild" => FileType::Makefile,
-        "cmakelists.txt" | "cmakecache.txt" | "cmakepresets.json" => FileType::Cmake,
         "justfile" | ".justfile" | ".envrc" | ".bashrc" | ".bash_profile" | ".zshrc"
         | ".zprofile" | ".zshenv" | ".zlogin" | ".profile" | "pkgbuild" | "apkbuild"
         | "pre-commit" | "commit-msg" | "pre-push" => FileType::Console,
@@ -179,7 +178,8 @@ fn by_name(name: &str) -> Option<FileType> {
         | "git-rebase-todo" => FileType::Git,
         "package.json" | "package-lock.json" | ".nvmrc" | ".node-version" => FileType::Nodejs,
         ".npmrc" | ".npmignore" => FileType::Npm,
-        "bun.lock" | "bun.lockb" | "bunfig.toml" | ".bun-version" => FileType::Bun,
+        "bun.lock" | "bun.lockb" => FileType::Lock,
+        ".bun-version" => FileType::Settings,
         "deno.json" | "deno.jsonc" | "deno.lock" => FileType::Deno,
         "tsconfig.json" => FileType::Tsconfig,
         _ if name.starts_with("tsconfig.") && extension(name) == Some("json") => FileType::Tsconfig,
@@ -239,12 +239,9 @@ fn by_extension(ext: &str) -> Option<FileType> {
         "cs" | "csx" => FileType::Csharp,
         "hs" | "lhs" => FileType::Haskell,
         "ex" | "exs" | "eex" | "heex" | "leex" => FileType::Elixir,
-        "dart" => FileType::Dart,
         "vue" => FileType::Vue,
         "svelte" => FileType::Svelte,
-        "proto" => FileType::Proto,
         "mk" => FileType::Makefile,
-        "cmake" => FileType::Cmake,
         "gradle" => FileType::Gradle,
         "md" | "mdx" | "markdown" | "mdown" | "mkd" | "rst" => FileType::Markdown,
         "txt" | "text" | "rtf" => FileType::Document,
@@ -298,12 +295,14 @@ mod tests {
         assert_eq!(FileType::of("/w/notes"), None);
         assert_eq!(FileType::of("/w/.notes"), None, "a dotfile is not an extension");
         assert!(code("/w/schema.graphql") && FileType::of("/w/schema.graphql").is_none());
+        assert!(code("/w/CMakeLists.txt"), "CMake's list is code, though it ends in .txt");
+        assert!(code("/w/main.dart") && code("/w/api.proto"), "their icons blob in one ink");
+        assert_eq!(FileType::of("/w/bun.lock"), Some(FileType::Lock));
         assert!(!code("/w/notes.unknown"));
     }
 
     /// A lint as a test: every icon kept under `assets/icons/files/` is some type's, so no file
-    /// is shipped that nothing draws, and every type's icon is markup with a view box. A light
-    /// variant is kept only beside its dark one.
+    /// is shipped that nothing draws, and every type's icon is markup with a view box.
     #[test]
     fn every_file_icon_is_drawn_and_none_is_left_over() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/files");
@@ -316,22 +315,12 @@ mod tests {
             })
             .unwrap_or_default();
         kept.sort();
-        let mut drawn: Vec<String> = FileType::ALL
-            .iter()
-            .flat_map(|t| {
-                let light = (t.svg(true) != t.svg(false)).then(|| format!("{}_light", t.name()));
-                std::iter::once(t.name().to_owned()).chain(light)
-            })
-            .collect();
+        let mut drawn: Vec<String> = FileType::ALL.iter().map(|t| t.name().to_owned()).collect();
         drawn.sort();
         assert_eq!(kept, drawn, "the icons kept and the icons drawn");
-        let notice = include_str!("../assets/icons/files/NOTICE");
-        assert!(notice.contains("_light"), "the NOTICE names the light variants");
         for t in FileType::ALL {
-            for light in [false, true] {
-                let svg = t.svg(light);
-                assert!(svg.starts_with("<svg") && svg.contains("viewBox"), "{t:?}");
-            }
+            let svg = t.svg();
+            assert!(svg.starts_with("<svg") && svg.contains("viewBox"), "{t:?}");
         }
     }
 }

@@ -145,7 +145,7 @@ fn a_reason_keeps_its_lines(cx: &mut TestAppContext) {
     );
 }
 
-/// An approval is one decision: Deny and Allow side by side a base unit apart, the solid last;
+/// An approval is one decision: Deny and Allow side by side a base unit apart, the primary last;
 /// "Deny and stop" waits behind the deny's chevron and answers from there, and so does
 /// answering in the terminal; the standing grant leads the same row from its other end, one
 /// button with its reach in it.
@@ -208,7 +208,7 @@ fn an_approval_is_allow_and_deny_with_the_rest_set_apart(cx: &mut TestAppContext
 }
 
 /// Auto mode's decline put to the person is two answers, the agent's own words on them: "Let it
-/// try again" the solid, "Keep it declined" beside it. Neither a reason nor the agent's terminal
+/// try again" the primary, "Keep it declined" beside it. Neither a reason nor the agent's terminal
 /// waits behind the keep, since a reason reaches nobody and the terminal asks nothing.
 #[gpui::test]
 fn auto_modes_decline_is_let_try_again_or_kept(cx: &mut TestAppContext) {
@@ -240,7 +240,7 @@ fn auto_modes_decline_is_let_try_again_or_kept(cx: &mut TestAppContext) {
 
     let (keep, again) = (cx.debug_bounds("answer-r-deny"), cx.debug_bounds("answer-r-allow"));
     let (keep, again) = (keep.expect("Keep it declined"), again.expect("Let it try again"));
-    assert!(keep.right() < again.left(), "keep, then the solid");
+    assert!(keep.right() < again.left(), "keep, then the primary");
     assert!(cx.debug_bounds("denials-r").is_none(), "nothing waits behind the keep");
     assert!(cx.debug_bounds("release-r").is_none(), "no prompt in the terminal");
     click(cx, "answer-r-allow");
@@ -252,7 +252,7 @@ fn auto_modes_decline_is_let_try_again_or_kept(cx: &mut TestAppContext) {
 }
 
 /// In a column beside a board (312 pt) long answers wrap among themselves rather than push
-/// the primary out of the card: every answer stands inside the card, and the one solid ends
+/// the primary out of the card: every answer stands inside the card, and the one primary ends
 /// the last line.
 #[gpui::test]
 fn long_answers_wrap_inside_a_narrow_card(cx: &mut TestAppContext) {
@@ -469,7 +469,7 @@ fn every_button_of_the_thread_is_an_action_while_it_shows(cx: &mut TestAppContex
 }
 
 /// A Claude Code start held at its trust dialog offers to trust the folder, a grant that
-/// lasts: quiet, its folder written out, while answering in the terminal stays the solid way.
+/// lasts: quiet, its folder written out, while answering in the terminal stays the primary way.
 /// The press answers the request with the trust; a refusal says why, and the card is back with
 /// the way to the terminal.
 #[gpui::test]

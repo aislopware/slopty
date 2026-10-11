@@ -34,7 +34,7 @@ use slopty_client::update::Release;
 use slopty_kit::a11y::tab_stop;
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{IconSize, Symbol, icon};
+use slopty_kit::icons::{Symbol, icon};
 use slopty_kit::kit::{self, meta, separator, tabular};
 use slopty_platform::notify::Alerts;
 use slopty_theme::Theme;
@@ -213,7 +213,7 @@ impl WorkspaceView {
                 .aria_expanded(self.menu == Some(super::titlebar::MenuKind::Server))
                 .text_color(hsla(s.text_secondary))
                 .child(measure)
-                .child(icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted)))
+                .child(icon(theme, Symbol::WifiSlash, hsla(s.text_muted)))
                 .child(text)
                 .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
@@ -635,7 +635,7 @@ impl WorkspaceView {
                 .px(px(theme.spacing.inset()))
                 .py(px(theme.spacing.xxs))
                 .text_size(px(theme.typography.small()))
-                .child(icon(theme, Symbol::WifiSlash, IconSize::Inline, hsla(s.text_muted)))
+                .child(icon(theme, Symbol::WifiSlash, hsla(s.text_muted)))
                 .child(
                     div()
                         .flex_1()
@@ -694,7 +694,7 @@ impl WorkspaceView {
                 .px(px(theme.spacing.inset()))
                 .py(px(theme.spacing.xxs))
                 .text_size(px(theme.typography.small()))
-                .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)))
+                .child(icon(theme, glyph, hsla(s.text_muted)))
                 .child(
                     div()
                         .flex_1()
@@ -823,7 +823,7 @@ pub(super) fn button(selector: &'static str, text: SharedString, theme: &Theme) 
         .rounded(px(theme.radii.xs))
         .cursor_pointer()
         .map(kit::eased)
-        .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
 #[cfg(test)]

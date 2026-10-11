@@ -383,7 +383,7 @@ mod tests {
         assert!(role.ends_with("TextInput"), "{role}");
         assert_eq!(label.as_deref(), Some(crate::settings_form::SEARCH_PLACEHOLDER));
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("System"));
-        assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("13 pt"));
+        assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("14 pt"));
         // The section shown wears the selected wash, as the navigator's chosen row does
         // where the keyboard is not: here it is in the search.
         let theme = Theme::default();
@@ -584,7 +584,7 @@ mod tests {
         press(cx, "right");
         press(cx, "right");
         press(cx, "left");
-        assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("14 pt"));
+        assert_eq!(value_of(cx, "SpinButton", "Text size").as_deref(), Some("15 pt"));
 
         let form = view.read_with(cx, |v, _| v.form.clone());
         cx.update(|window, cx| {
@@ -606,7 +606,7 @@ mod tests {
             panic!("{events:?}")
         };
         assert!(last.contains("appearance = \"light\""), "{last}");
-        assert!(last.contains("ui_size = 14.0"), "{last}");
+        assert!(last.contains("ui_size = 15.0"), "{last}");
         assert!(last.contains("ligatures = false"), "{last}");
     }
 
@@ -786,7 +786,7 @@ mod tests {
         });
         let (_view, events, cx) = editor(cx, "");
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
-        let keymap = crate::keymap::current();
+        let keymap = crate::keymap::Keymap::default();
         let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
         let chords = leak(format!("settings-chord-{note}"));
         let applied = |events: &Rc<RefCell<Vec<SettingsEditorEvent>>>| match events.borrow().last()
@@ -847,7 +847,7 @@ mod tests {
         use crate::settings_form::{CANT_BIND, NEEDS_MODIFIER};
         let (_view, events, cx) = editor(cx, "");
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
-        let keymap = crate::keymap::current();
+        let keymap = crate::keymap::Keymap::default();
         let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
         let chords = leak(format!("settings-chord-{note}"));
         let label = "Keys for New note";
@@ -889,7 +889,8 @@ mod tests {
         let (_view, events, cx) = editor(cx, "");
         cx.simulate_input("folder.open");
         cx.run_until_parked();
-        let open = crate::keymap::current().find(Scope::Folder, "open").expect("the command");
+        let open =
+            crate::keymap::Keymap::default().find(Scope::Folder, "open").expect("the command");
         click(cx, leak(format!("settings-chord-{open}")));
         cx.simulate_keystrokes("right");
         assert_eq!(

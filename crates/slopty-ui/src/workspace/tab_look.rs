@@ -1,14 +1,12 @@
-//! The one look of a tab, the title bar's and a pane's alike, and of the rows and menu items
-//! that choose as tabs do: `MonoCode`'s pill (`.research/monocode-anatomy-2026-10-10.md`, §0
-//! and §1a).
+//! The one look of a tab, the title bar's and a pane's alike: Zed's tab
+//! (`.research/zed-clone-2026-10-11.md` §3.4 and §5.1).
 //!
-//! A row of tabs lies on its bar's own plane, the ground, with the one line along its foot.
-//! Every tab is a 30 pt pill at [`slopty_theme::Radii::sm`] standing inside the bar with air
-//! above and below it, in slots of one width that shrink alike. It has no border and no edge
-//! of colour, and its words never change weight: the tab on show is the `selected` wash and
-//! the text's full tone, the rest are bare words in `text_secondary` that take the hover wash
-//! and the full tone under the pointer. A tab leads with one 14 pt mark, and ends in a 20 pt
-//! close laid over its end.
+//! A row of tabs is Zed's tab bar: the tab bar's plane with the `border` line along its foot.
+//! Every tab is a square cell the bar's full height, as wide as its title between
+//! [`TAB_FLOOR`] and [`TAB_SLOT`]. The tab on show is the work's ground, the `border` line on
+//! its two sides and none under it, so it opens into the pane below; the rest are bare words
+//! in `text_secondary` that take the hover wash and the full tone under the pointer. Its words
+//! never change weight. A tab leads with one 16 pt mark, and ends in a close laid over its end.
 //!
 //! A row's tabs move alike ([`Motion`]): one that opens grows from nothing to its slot over
 //! 200 ms on [`Curve::TAB`] (`MonoCode`'s `tab-opening`), and tabs put in another order slide to
@@ -18,105 +16,94 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Div, ElementId, InteractiveElement as _, ParentElement as _, Pixels, Stateful,
+    Bounds, Div, ElementId, InteractiveElement as _, ParentElement as _, Pixels, Stateful,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::Mark;
 use slopty_kit::kit::{self, Pace};
-use slopty_theme::{Curve, Theme, alpha};
+use slopty_theme::{Curve, Theme, alpha, stroke};
 
-/// Every tab's slot, in points: `MonoCode`'s `w-56`, the same for every tab whatever its words.
-pub(super) const TAB_SLOT: f32 = 224.0;
+/// The widest a tab grows with its title: Zed's tabs end near 240.
+pub(super) const TAB_SLOT: f32 = 240.0;
 
-/// The least a tab's slot shrinks to while the row runs out of room: `MonoCode`'s `min-w-28`.
-pub(super) const TAB_FLOOR: f32 = 112.0;
+/// The least a tab gives way to while the row runs out of room.
+pub(super) const TAB_FLOOR: f32 = 120.0;
 
-/// The gap between a tab's lead, its title and what follows: `MonoCode`'s `gap-1.5`.
-pub(super) const TAB_GAP: f32 = 6.0;
+/// The gap between a tab's lead, its title and what follows: Zed's tab's `gap_1`.
+pub(super) const TAB_GAP: f32 = 4.0;
 
-/// How far a tab's title fades out over its end while it is cut: `MonoCode`'s `TabLabel` mask,
-/// 2.5 rem.
+/// How far a tab's title fades out over its end while it is cut.
 pub(super) const TITLE_FADE: f32 = 40.0;
 
-/// The side of the dot that says a pane of a split has the keyboard: `MonoCode`'s `size-2`.
-pub(super) const FOCUS_DOT: f32 = 8.0;
+/// The side of the dot that says a pane of a split has the keyboard: Zed's indicator dot.
+pub(super) const FOCUS_DOT: f32 = 6.0;
 
-/// The side of the dot that says a file has an edit not yet on disk: `MonoCode`'s `size-1.5`.
+/// The side of the dot that says a file has an edit not yet on disk: Zed's indicator dot.
 const EDITED_DOT: f32 = 6.0;
 
-/// `row`, a row of tabs or a bar that tabs stand in: on its own plane, with no fill, and the
-/// one line along its foot. The line is the row's first child and lies inside it, so what is
-/// added after it paints over it.
+/// `row`, a row of tabs or a bar that tabs stand in, with Zed's tab bar's `border` line along
+/// its foot; the caller lays its plane (the tab bar's where tabs stand). The line is the row's
+/// first child and lies inside it, so what is added after it (the tab on show) paints over it.
 #[must_use]
 pub(super) fn row<E: gpui::Styled + gpui::ParentElement>(theme: &Theme, row: E) -> E {
-    let foot =
-        div().absolute().left_0().right_0().bottom_0().h(kit::HAIR).bg(hsla(theme.surfaces.stroke));
+    let s = theme.surfaces;
+    let foot = div().absolute().left_0().right_0().bottom_0().h(kit::HAIR).bg(hsla(s.border));
     row.relative().child(foot)
 }
 
-/// `el` laid out as a strip of tabs: `MonoCode`'s `pl-1.5 pr-2.5 gap-0.5`, the tabs centred in
-/// the bar's height.
+/// `el` laid out as a strip of tabs: Zed's, the cells edge to edge from the bar's start, the
+/// full height of the bar.
 #[must_use]
-pub(super) fn strip<E: gpui::Styled>(theme: &Theme, el: E) -> E {
-    let spacing = theme.spacing;
-    el.flex()
-        .items_center()
-        .gap(px(spacing.xxs))
-        .pl(px(spacing.xs + spacing.xxs))
-        .pr(px(spacing.sm + spacing.xxs))
+pub(super) fn strip<E: gpui::Styled>(_theme: &Theme, el: E) -> E {
+    el.flex().items_stretch()
 }
 
 /// Where a pane's header starts its lead with no tab to stand in: where a first tab's lead
-/// stands, past the strip's start and the tab's own, so the mark keeps its place as a pane
-/// gains its second tab or loses it.
+/// stands, past the tab's own start, so the mark keeps its place as a pane gains its second
+/// tab or loses it.
 #[must_use]
 pub(super) const fn lone_inset(theme: &Theme) -> f32 {
-    let spacing = theme.spacing;
-    spacing.xs + spacing.xxs + spacing.sm
+    theme.spacing.sm
 }
 
-/// `tab` as a pill: [`slopty_theme::Density::tab`] tall at [`slopty_theme::Radii::sm`], in a
-/// slot [`TAB_SLOT`] wide that gives way alike down to [`TAB_FLOOR`], its words at the chrome
-/// role. `closable` leaves room at its end for the close [`close`] lays over it. The caller
-/// gives it its identity and its children.
+/// `tab` as Zed's tab: a square cell its bar's full height, as wide as its title
+/// between [`TAB_FLOOR`] and [`TAB_SLOT`], its words at the chrome role. On show it is the
+/// work's ground with the `border` line on its two sides and none under it, so it opens into
+/// the pane; at rest it is bare, in `text_secondary`. Its lead stands [`lone_inset`] in, past
+/// its side line, where a lone tile's does. `closable` leaves room at its end for the close
+/// [`close`] lays over it. The caller gives it its identity and its children.
 #[must_use]
 pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool) -> Stateful<Div> {
     let s = theme.surfaces;
     let spacing = theme.spacing;
-    let end = if closable {
-        2.0_f32.mul_add(spacing.xs, kit::CLOSE_BOX)
-    } else {
-        spacing.sm + spacing.xxs
-    };
+    let end = if closable { 2.0_f32.mul_add(spacing.xs, kit::CLOSE_BOX) } else { spacing.sm };
     let tab = kit::typed(tab, theme.roles().chrome)
         .relative()
         .flex_initial()
         .flex_shrink(1.0)
-        .w(px(TAB_SLOT))
+        .max_w(px(TAB_SLOT))
         .min_w(px(TAB_FLOOR))
-        .h(px(theme.density.tab))
+        .h_full()
         .flex()
         .items_center()
         .gap(px(TAB_GAP))
-        .pl(px(spacing.sm))
+        .pl(px(lone_inset(theme) - stroke::LINE))
         .pr(px(end))
-        .rounded(px(theme.radii.sm))
+        .border_l(kit::HAIR)
+        .border_r(kit::HAIR)
         .whitespace_nowrap();
     let tab = kit::eased(tab);
     if shown {
-        tab.bg(hsla(s.selected)).text_color(hsla(s.text))
+        tab.bg(hsla(s.ground)).border_color(hsla(s.border)).text_color(hsla(s.text))
     } else {
-        tab.text_color(hsla(s.text_secondary))
+        tab.border_color(gpui::transparent_black())
+            .text_color(hsla(s.text_secondary))
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
     }
 }
 
-/// A pane's tab: [`tab`], a level under the title bar's. The one on show carries no fill, only
-/// the text's full tone (and its close), where a title tab wears `selected`, so a tab of several
-/// tiles never reads as the same pill twice, its title tab over the pane tab of its focused
-/// tile (`MonoCode`'s split header names its pane the same way). Slots, words and close are a
-/// title tab's, and every pane tab takes the hover's wash under the pointer.
+/// A pane's tab: [`tab`], as Zed draws a pane's tabs and the title bar's alike.
 #[must_use]
 pub(super) fn pane_tab(
     theme: &Theme,
@@ -124,24 +111,18 @@ pub(super) fn pane_tab(
     shown: bool,
     closable: bool,
 ) -> Stateful<Div> {
-    let el = tab(theme, el, false, closable);
-    if shown { el.text_color(hsla(theme.surfaces.text)) } else { el }
+    tab(theme, el, shown, closable)
 }
 
-/// A tab's lead: `mark` in one 14 pt slot, in the text's tone on the tab on show and at
+/// A tab's lead: `mark` in one 16 pt slot, in the text's tone on the tab on show and at
 /// [`alpha::STRONG`] of `ink` on the rest, so a resting tab's mark recedes with its words and
 /// still reads AA.
 #[must_use]
 pub(super) fn lead(theme: &Theme, mark: impl Into<Mark>, shown: bool) -> Stateful<Div> {
     let s = theme.surfaces;
     let ink = if shown { s.text } else { s.text_secondary };
-    crate::palette::lead_mark(
-        theme,
-        mark,
-        hsla(ink),
-        slopty_kit::icons::IconSize::Inline.slot(theme),
-    )
-    .when(!shown, |el| el.opacity(alpha::STRONG))
+    crate::palette::lead_mark(theme, mark, hsla(ink), theme.typography.icon())
+        .when(!shown, |el| el.opacity(alpha::STRONG))
 }
 
 /// `close`, a tab's [`kit::close_box`], laid over the tab's end, [`slopty_theme::Spacing::xs`]
@@ -167,7 +148,7 @@ pub(super) fn close(
 }
 
 /// The dot after a file's title that says it has an edit not yet on disk, named "Edited" to a
-/// screen reader: `MonoCode`'s dirty dot, in `text_secondary`.
+/// screen reader: Zed's dirty indicator, 6 pt in the accent's fill.
 #[must_use]
 pub(super) fn edited(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
     div()
@@ -177,12 +158,12 @@ pub(super) fn edited(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .flex_none()
         .size(px(EDITED_DOT))
         .rounded(px(theme.radii.full))
-        .bg(hsla(theme.surfaces.text_secondary))
+        .bg(hsla(theme.surfaces.accent_fill))
 }
 
-/// The dot that leads a pane's row while the tab on show holds two panes or more: the accent's
-/// mark on the pane with the keyboard, empty elsewhere, keeping its place so nothing after it
-/// moves as the keyboard goes between panes (`MonoCode`'s split header).
+/// The dot that leads a pane's row while the tab on show holds two panes or more: Zed's 6 pt
+/// indicator in the accent on the pane with the keyboard, empty elsewhere, keeping its place
+/// so nothing after it moves as the keyboard goes between panes.
 #[must_use]
 pub(super) fn focus_dot(theme: &Theme, focused: bool) -> Div {
     div()
@@ -193,8 +174,8 @@ pub(super) fn focus_dot(theme: &Theme, focused: bool) -> Div {
 }
 
 /// A pane's one tile's title where it has no tab to stand in (a split's pane, or a pane that
-/// waits on its worker): no pill, but in a split the focus dot, then `mark` in its 14 pt slot
-/// and `title`, `MonoCode`'s split header. `focused` is whether the pane has the keyboard and
+/// waits on its worker): no cell, but in a split the focus dot, then `mark` in its 16 pt slot
+/// and `title`. `focused` is whether the pane has the keyboard and
 /// `shared` whether the tab on show holds two panes or more.
 #[must_use]
 pub(super) fn lone(
@@ -205,7 +186,7 @@ pub(super) fn lone(
     shared: bool,
 ) -> Stateful<Div> {
     let ink = if focused { theme.surfaces.text } else { theme.surfaces.text_secondary };
-    let slot = slopty_kit::icons::IconSize::Inline.slot(theme);
+    let slot = theme.typography.icon();
     div()
         .id("lone-title")
         .min_w_0()
@@ -286,16 +267,16 @@ impl<K: Copy + PartialEq> Motion<K> {
         if self.row == Some(clock.row) { &self.last } else { &[] }
     }
 
-    /// How the row moves at `clock.now` with tabs `now`, `left` saying where each lay last
-    /// frame.
+    /// How the row moves at `clock.now` with tabs `now`, `place` saying where each lay last
+    /// frame (inside its two side lines).
     pub fn step(
         &mut self,
         now: &[K],
-        left: impl Fn(K) -> Option<Pixels>,
+        place: impl Fn(K) -> Option<Bounds<Pixels>>,
         clock: Clock,
     ) -> Moves<K> {
         if self.row == Some(clock.row) && clock.moves {
-            self.start(now, left, clock.now);
+            self.start(now, place, clock.now);
         } else {
             self.opening.clear();
             self.slides.clear();
@@ -328,8 +309,9 @@ impl<K: Copy + PartialEq> Motion<K> {
 
     /// Start what `now` moves against the tabs drawn last: a tab new since grows, and when the
     /// tabs on both lists stand in another order, each that moved slides from where it stood
-    /// (by `left`, last frame's) to the place of the tab that stood there before.
-    fn start(&mut self, now: &[K], left: impl Fn(K) -> Option<Pixels>, at: Instant) {
+    /// (by `place`, last frame's) to where it lands: the row's first place, then each tab
+    /// before it at its own width, as tabs are as wide as their titles.
+    fn start(&mut self, now: &[K], place: impl Fn(K) -> Option<Bounds<Pixels>>, at: Instant) {
         let had = |id: K| self.last.contains(&id);
         // A first frame has nothing it grew from.
         if !self.last.is_empty() {
@@ -341,11 +323,13 @@ impl<K: Copy + PartialEq> Motion<K> {
         if before == after {
             return;
         }
-        for (i, id) in after.iter().enumerate() {
-            let (Some(from), Some(to)) = (left(*id), before.get(i).and_then(|t| left(*t))) else {
-                continue;
-            };
-            let dx = from - to;
+        let first = before.iter().filter_map(|t| place(*t)).map(|b| b.left()).reduce(Pixels::min);
+        let Some(mut lands) = first else { return };
+        for id in &after {
+            let Some(from) = place(*id) else { continue };
+            let dx = from.left() - lands;
+            // The next lands past this one's cell: its spot and its two side lines.
+            lands += from.size.width + kit::HAIR * 2.0;
             if dx != px(0.0) {
                 self.slides.retain(|(t, ..)| t != id);
                 self.slides.push((*id, dx, at));
@@ -354,16 +338,18 @@ impl<K: Copy + PartialEq> Motion<K> {
     }
 }
 
-/// `el`, a tab opened `growth` of the way (0 to 1): inside a slot that widens round the whole
-/// tab from nothing to [`TAB_SLOT`], its floor growing with it, while the tab keeps its own
-/// width inside (`MonoCode`'s `tab-opening`).
+/// `el`, a tab opened `growth` of the way (0 to 1): inside a slot whose ceiling widens from
+/// nothing to [`TAB_SLOT`], its floor growing with it, while the tab keeps its own width
+/// inside; the slot stops at the tab's own width.
 #[must_use]
 pub(super) fn growing(el: impl gpui::IntoElement, growth: f32) -> Div {
     div()
+        .flex()
         .flex_initial()
         .flex_shrink(1.0)
-        .w(px(TAB_SLOT * growth))
+        .max_w(px(TAB_SLOT * growth))
         .min_w(px(TAB_FLOOR * growth))
+        .h_full()
         .overflow_hidden()
         .child(el)
 }
@@ -376,46 +362,37 @@ mod tests {
 
     use super::{TAB_FLOOR, TAB_SLOT, pane_tab, tab};
 
-    /// The shown tab is a selected pill in the text's tone; the rest are bare words in the
-    /// secondary tone. Both are the density's tab tall at the small radius, in a slot of one
-    /// width, with no border and the regular weight.
-    #[test]
-    fn the_shown_tab_is_a_selected_pill_and_the_rest_bare() {
-        for variant in [Variant::Dark, Variant::Light] {
-            let theme = Theme::new(variant);
-            let s = theme.surfaces;
-            let mut shown = tab(&theme, div().id("a"), true, true);
-            let style = shown.style();
-            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.selected))), "{variant:?}");
-            assert_eq!(style.text.color, Some(hsla(s.text)), "{variant:?}");
-            assert_eq!(style.corner_radii.top_left, Some(px(theme.radii.sm).into()));
-            assert_eq!(style.size.height, Some(px(theme.density.tab).into()));
-            assert_eq!(style.size.width, Some(px(TAB_SLOT).into()), "one slot");
-            assert_eq!(style.min_size.width, Some(px(TAB_FLOOR).into()), "one floor");
-            assert!(style.border_widths.left.is_none(), "{variant:?}: no border");
-            assert_eq!(style.text.font_weight, Some(gpui::FontWeight(400.0)), "never heavier");
-            let mut rest = tab(&theme, div().id("b"), false, false);
-            let style = rest.style();
-            assert!(style.background.is_none(), "{variant:?}: bare");
-            assert_eq!(style.text.color, Some(hsla(s.text_secondary)), "{variant:?}: receded");
-            assert_eq!(style.text.font_weight, Some(gpui::FontWeight(400.0)));
-        }
-    }
+    /// A way to draw a tab: [`tab`] or [`pane_tab`].
+    type Look = fn(&Theme, gpui::Stateful<gpui::Div>, bool, bool) -> gpui::Stateful<gpui::Div>;
 
-    /// A pane's tab on show is a level under a title tab's: no fill, the text's full tone; one
-    /// not on show is bare in the secondary tone, as a title tab's is.
+    /// Zed's tab: the one on show is the work's ground with the `border` line on its sides,
+    /// the rest bare words in the secondary tone. Both are square, the density's tab tall, as
+    /// wide as their words within one floor and one ceiling, at the regular weight; a pane's
+    /// tab is the same.
     #[test]
-    fn a_pane_tab_on_show_is_a_level_under_a_title_tab() {
+    fn the_shown_tab_opens_into_its_pane_and_the_rest_are_bare() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
-            let mut shown = pane_tab(&theme, div().id("a"), true, true);
-            let style = shown.style();
-            assert!(style.background.is_none(), "{variant:?}: no fill");
-            assert_eq!(style.text.color, Some(hsla(s.text)), "{variant:?}");
-            let mut rest = pane_tab(&theme, div().id("b"), false, true);
-            assert_eq!(rest.style().text.color, Some(hsla(s.text_secondary)), "{variant:?}");
-            assert!(rest.style().background.is_none(), "{variant:?}: bare");
+            let draws: [Look; 2] = [tab, pane_tab];
+            for draw in draws {
+                let mut shown = draw(&theme, div().id("a"), true, true);
+                let style = shown.style();
+                assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.ground))), "{variant:?}");
+                assert_eq!(style.text.color, Some(hsla(s.text)), "{variant:?}");
+                assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: its sides");
+                assert!(style.border_widths.bottom.is_none(), "{variant:?}: open below");
+                assert!(style.corner_radii.top_left.is_none(), "{variant:?}: square");
+                assert_eq!(style.size.height, Some(gpui::relative(1.0).into()), "its bar's height");
+                assert_eq!(style.max_size.width, Some(px(TAB_SLOT).into()), "one ceiling");
+                assert_eq!(style.min_size.width, Some(px(TAB_FLOOR).into()), "one floor");
+                assert_eq!(style.text.font_weight, Some(gpui::FontWeight(400.0)), "never heavier");
+                let mut rest = draw(&theme, div().id("b"), false, false);
+                let style = rest.style();
+                assert!(style.background.is_none(), "{variant:?}: bare");
+                assert_eq!(style.text.color, Some(hsla(s.text_secondary)), "{variant:?}: receded");
+                assert_eq!(style.text.font_weight, Some(gpui::FontWeight(400.0)));
+            }
         }
     }
 }

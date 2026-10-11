@@ -5,7 +5,7 @@
 //! A row of five like buttons ("Always allow edits in /work this session", "Deny", "Deny…", "Deny
 //! and stop", "Allow") made the person read every one to find the two that matter, and put a
 //! standing grant at the same weight as this once. Now the usual answers are the row's last two,
-//! the solid one last as a dialog's default is, a base unit apart. What turns the request down
+//! the primary one last as a dialog's default is, a base unit apart. What turns the request down
 //! some other way waits behind the deny's chevron, and so does answering in the terminal, which
 //! sat on the title's line as a third choice. A grant that holds past this once never sits
 //! beside them: it leads the row from the other end, in a quiet button whose reach follows in
@@ -52,7 +52,7 @@ pub(super) struct Arranged<'a> {
     pub standing: Vec<&'a Choice>,
 }
 
-/// Where each of `options` goes. The plain allow leads as the neutral solid; a grant that reaches
+/// Where each of `options` goes. The plain allow leads as the tinted primary; a grant that reaches
 /// past this once never does, nor ever sits in the row, so the card never leads the person to
 /// a standing grant.
 pub(super) fn arrange(options: &[Choice]) -> Arranged<'_> {
@@ -379,7 +379,7 @@ mod tests {
         choices.into_iter().map(|c| c.id.as_str()).collect()
     }
 
-    /// Claude Code's five answers: the row is Deny then Allow, the solid last; "Deny and stop"
+    /// Claude Code's five answers: the row is Deny then Allow, the primary last; "Deny and stop"
     /// waits behind the deny's chevron; the standing grant stands under the row.
     #[test]
     fn allow_and_deny_lead_and_the_rest_go_where_they_belong() {
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(ids(a.standing), ["always"]);
     }
 
-    /// An ACP agent may offer "always" first: the plain allow still leads as the solid, a
+    /// An ACP agent may offer "always" first: the plain allow still leads as the primary, a
     /// standing deny is one of the other denials, and the row never holds a standing grant.
     #[test]
     fn a_standing_grant_never_leads_or_sits_in_the_row() {

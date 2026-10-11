@@ -3,7 +3,7 @@
 //!
 //! Its top row says where the agent works (the checkout, its branch); then the menu, the chips,
 //! the field; then a row with the way to attach, the model and how hard it thinks, the mode, how
-//! full the context is, and at the right the one solid: send, or stop while a turn runs and
+//! full the context is, and at the right the one primary: send, or stop while a turn runs and
 //! nothing is typed. While the agent's own TUI holds the session, a strip saying so stands in
 //! its place.
 
@@ -16,7 +16,7 @@ use gpui::{
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::thread::{Cap, Delivery};
 use slopty_theme::{Rgb, Theme};
@@ -269,7 +269,7 @@ impl ThreadView {
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(
                     slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                        .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                        .slot(px(theme.typography.icon()), hsla(s.text_muted)),
                 )
                 .on_click(click),
             s.focus,
@@ -305,7 +305,7 @@ impl ThreadView {
                     .cursor_pointer()
                     .child(
                         slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                            .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                            .slot(px(theme.typography.icon()), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
                 s.focus,
@@ -355,7 +355,7 @@ impl ThreadView {
                         .cursor_pointer()
                         .child(
                             slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                                .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
+                                .slot(px(theme.typography.icon()), hsla(s.text_muted)),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
                     s.focus,
@@ -420,7 +420,7 @@ impl ThreadView {
         )
     }
 
-    /// The square at the foot's end, in the neutral solid: stop the turn while one runs and
+    /// The square at the foot's end, in the tinted primary: stop the turn while one runs and
     /// nothing is typed; otherwise what ↵ will do with the draft, in its glyph and its name:
     /// Update a waiting message being changed, Steer into the turn under way, Queue after it
     /// (an agent that takes no steer), or Send.
@@ -605,12 +605,7 @@ impl ThreadView {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .child(slopty_kit::icons::icon(
-                    theme,
-                    icon,
-                    IconSize::Inline,
-                    hsla(s.text_secondary),
-                )),
+                .child(slopty_kit::icons::icon(theme, icon, hsla(s.text_secondary))),
             s.focus,
         )
     }
@@ -628,7 +623,7 @@ fn squared(el: gpui::Stateful<Div>, theme: &Theme, open: bool) -> gpui::Stateful
 }
 
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
-/// The "+" holds what leaves, and the send is the one solid; neither ever leaves.
+/// The "+" holds what leaves, and the send is the one primary; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
 /// The model.
 const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));

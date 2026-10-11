@@ -1,10 +1,13 @@
 //! Bundled fonts.
 //!
-//! The terminal face and the symbol fallback ship inside the binary so every client (macOS,
-//! iOS) renders the same cell geometry and the same powerline/devicon glyphs, whatever the
-//! system has installed.
+//! The interface face, the code face and the symbol fallback ship inside the binary, so every
+//! client (macOS, iOS) sets the same words and the same cell geometry, with the same
+//! powerline and devicon glyphs, whatever the system has installed. They are Zed's two faces.
 //!
-//! * `JetBrains Mono` 2.304 — SIL OFL 1.1 (`assets/fonts/LICENSE-JetBrainsMono.txt`).
+//! * `IBM Plex Sans` 3.005, Regular, Italic, `SemiBold` and `SemiBold` Italic, the four weights Zed
+//!   bundles — SIL OFL 1.1 (`assets/fonts/LICENSE-IBMPlexSans.txt`).
+//! * `Lilex` 2.630 (IBM Plex Mono with ligatures), Regular, Bold and their italics — SIL OFL 1.1
+//!   (`assets/fonts/LICENSE-Lilex.txt`).
 //! * `Symbols Nerd Font Mono` 3.x — MIT + per-glyph-set licences
 //!   (`assets/fonts/LICENSE-SymbolsNerdFont.txt`).
 
@@ -13,8 +16,10 @@ use std::sync::Arc;
 
 use gpui::{App, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight};
 
-/// The bundled monospace family.
-pub const MONO_FAMILY: &str = "JetBrains Mono";
+/// The bundled interface family.
+pub const UI_FAMILY: &str = "IBM Plex Sans";
+/// The bundled monospace family, for terminals and code.
+pub const MONO_FAMILY: &str = "Lilex";
 /// The bundled symbol family (powerline, devicons, box drawing extras).
 pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 
@@ -22,11 +27,15 @@ pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
     clippy::large_include_file,
     reason = "the symbol font is 2.6 MB by nature; bundled on purpose"
 )]
-const FILES: [&[u8]; 5] = [
-    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMono-Italic.ttf"),
-    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
+const FILES: [&[u8]; 9] = [
+    include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-SemiBoldItalic.ttf"),
+    include_bytes!("../assets/fonts/Lilex-Regular.ttf"),
+    include_bytes!("../assets/fonts/Lilex-Bold.ttf"),
+    include_bytes!("../assets/fonts/Lilex-Italic.ttf"),
+    include_bytes!("../assets/fonts/Lilex-BoldItalic.ttf"),
     include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf"),
 ];
 
@@ -66,140 +75,251 @@ pub fn terminal_font(family: &str, bold: bool, italic: bool, ligatures: bool) ->
     }
 }
 
-/// Whether GPUI sets the system face as the system sets it: its optical size (Text under 20 pt,
-/// Display from 20) and its size-specific tracking. Measured against Core Text's own UI font,
-/// which applies both (`docs/decisions/ui.md`, "SF's optical size and tracking, measured").
+/// Every bundled face is the one a run asks for: the family resolves to our file at each weight
+/// and slant, not to a system face or a synthesised one (`docs/decisions/ui.md`, "Fonts are
+/// bundled, never system-resolved").
 #[cfg(test)]
-mod optical_size {
-    use std::ffi::c_void;
+mod bundled {
+    use std::borrow::Cow;
 
-    use core_foundation::attributed_string::CFMutableAttributedString;
-    use core_foundation::base::{CFRange, CFRelease, CFType, TCFType as _};
-    use core_foundation::string::{CFString, CFStringRef};
-    use gpui::{FontRun, px};
+    use gpui::{Font, FontFeatures, FontStyle, FontWeight};
 
-    /// A Core Text font or line, by its opaque reference.
-    type CtRef = *const c_void;
+    use super::{FILES, MONO_FAMILY, UI_FAMILY};
 
-    /// `kCTFontUIFontSystem` in `CTFontUIFontType` (`CoreText/CTFont.h`).
-    const UI_FONT_SYSTEM: u32 = 2;
-
-    #[link(name = "CoreText", kind = "framework")]
-    unsafe extern "C" {
-        static kCTFontAttributeName: CFStringRef;
-        fn CTFontCreateUIFontForLanguage(kind: u32, size: f64, language: CFStringRef) -> CtRef;
-        fn CTFontCreateCopyWithAttributes(
-            font: CtRef,
-            size: f64,
-            matrix: *const c_void,
-            attributes: *const c_void,
-        ) -> CtRef;
-        fn CTFontCopyPostScriptName(font: CtRef) -> CFStringRef;
-        fn CTLineCreateWithAttributedString(string: *const c_void) -> CtRef;
-        fn CTLineGetTypographicBounds(
-            line: CtRef,
-            ascent: *mut f64,
-            descent: *mut f64,
-            leading: *mut f64,
-        ) -> f64;
+    /// One face as its font tables say (per 1000 units): `M`'s advance and its ink's left and
+    /// right edges, which tell the weights and slants apart, then the `hhea` ascent and
+    /// descent and the `post` underline position and thickness.
+    struct Tables {
+        family: &'static str,
+        weight: FontWeight,
+        italic: bool,
+        advance: f32,
+        ink: (f32, f32),
+        ascent: f32,
+        descent: f32,
+        underline: (f32, f32),
     }
 
-    /// A Core Text font's PostScript name and the width it sets `text` at.
-    fn core_text(font: CtRef, text: &str) -> (String, f64) {
-        // SAFETY: `font` is a live CTFont (released by the caller); the name comes back under
-        // the Create Rule.
-        let name = unsafe { CTFontCopyPostScriptName(font) };
-        // SAFETY: `name` was returned under the Create Rule and is wrapped once, which releases
-        // it (Core Foundation's ownership rules).
-        let name = unsafe { CFString::wrap_under_create_rule(name) };
-        let mut string = CFMutableAttributedString::new();
-        string.replace_str(&CFString::new(text), CFRange::init(0, 0));
-        // SAFETY: `font` is a live CF object; the Get Rule wrap retains it for the string.
-        let font_value = unsafe { CFType::wrap_under_get_rule(font.cast()) };
-        // SAFETY: a CFStringRef static exported by Core Text, valid for the process.
-        let key = unsafe { kCTFontAttributeName };
-        string.set_attribute(CFRange::init(0, string.char_len()), key, &font_value);
-        // SAFETY: the attributed string is live for the call; the line comes back under the
-        // Create Rule and is released below.
-        let line = unsafe { CTLineCreateWithAttributedString(string.as_concrete_TypeRef().cast()) };
-        let none = std::ptr::null_mut();
-        // SAFETY: `line` is a live CTLine; the three out-pointers may be null (CTLine.h).
-        let width = unsafe { CTLineGetTypographicBounds(line, none, none, none) };
-        // SAFETY: `line` was made under the Create Rule above and is released once.
-        unsafe {
-            CFRelease(line);
-        }
-        (name.to_string(), width)
-    }
+    /// Read from the bundled files with fontTools (`hmtx`, `glyf`, `hhea`, `post`).
+    const FACES: [Tables; 8] = [
+        Tables {
+            family: UI_FAMILY,
+            weight: FontWeight::NORMAL,
+            italic: false,
+            advance: 812.0,
+            ink: (93.0, 719.0),
+            ascent: 1025.0,
+            descent: -275.0,
+            underline: (-95.0, 60.0),
+        },
+        Tables {
+            family: UI_FAMILY,
+            weight: FontWeight::NORMAL,
+            italic: true,
+            advance: 784.0,
+            ink: (39.0, 781.0),
+            ascent: 1025.0,
+            descent: -275.0,
+            underline: (-95.0, 60.0),
+        },
+        Tables {
+            family: UI_FAMILY,
+            weight: FontWeight::SEMIBOLD,
+            italic: false,
+            advance: 816.0,
+            ink: (82.0, 734.0),
+            ascent: 1025.0,
+            descent: -275.0,
+            underline: (-75.0, 88.0),
+        },
+        Tables {
+            family: UI_FAMILY,
+            weight: FontWeight::SEMIBOLD,
+            italic: true,
+            advance: 796.0,
+            ink: (27.0, 804.0),
+            ascent: 1025.0,
+            descent: -275.0,
+            underline: (-74.0, 88.0),
+        },
+        Tables {
+            family: MONO_FAMILY,
+            weight: FontWeight::NORMAL,
+            italic: false,
+            advance: 600.0,
+            ink: (68.0, 532.0),
+            ascent: 999.0,
+            descent: -301.0,
+            underline: (-140.0, 60.0),
+        },
+        Tables {
+            family: MONO_FAMILY,
+            weight: FontWeight::NORMAL,
+            italic: true,
+            advance: 600.0,
+            ink: (26.0, 605.0),
+            ascent: 999.0,
+            descent: -301.0,
+            underline: (-140.0, 60.0),
+        },
+        Tables {
+            family: MONO_FAMILY,
+            weight: FontWeight::BOLD,
+            italic: false,
+            advance: 600.0,
+            ink: (39.0, 561.0),
+            ascent: 999.0,
+            descent: -301.0,
+            underline: (-140.0, 60.0),
+        },
+        Tables {
+            family: MONO_FAMILY,
+            weight: FontWeight::BOLD,
+            italic: true,
+            advance: 600.0,
+            ink: (-2.0, 635.0),
+            ascent: 999.0,
+            descent: -301.0,
+            underline: (-140.0, 60.0),
+        },
+    ];
 
-    /// The UI font at `size` as the system makes it, or, with `from`, made at `from` and
-    /// copied to `size`, as GPUI keeps one font and copies it to each size it draws.
-    fn ui_font(size: f64, from: Option<f64>) -> CtRef {
-        // SAFETY: Core Text's UI font constructor takes no ownership of its null language and
-        // returns under the Create Rule.
-        let made = unsafe {
-            CTFontCreateUIFontForLanguage(UI_FONT_SYSTEM, from.unwrap_or(size), std::ptr::null())
-        };
-        if from.is_none() {
-            return made;
-        }
-        // SAFETY: `made` is live; the copy takes no ownership of it or of its null matrix and
-        // attributes, and returns under the Create Rule.
-        let copy = unsafe {
-            CTFontCreateCopyWithAttributes(made, size, std::ptr::null(), std::ptr::null())
-        };
-        // SAFETY: `made` was created under the Create Rule above and is released once.
-        unsafe {
-            CFRelease(made);
-        }
-        copy
-    }
-
-    /// GPUI's width for `text` in the system face at `size`, shaped by its Core Text backend.
-    fn gpui_width(text: &str, size: f32) -> f32 {
-        let system = gpui_platform::text_system();
-        let font_id =
-            system.font_id(&gpui::font(".SystemUIFont")).unwrap_or_else(|e| panic!("{e}"));
-        let runs = [FontRun { len: text.len(), font_id }];
-        f32::from(system.layout_line(text, px(size), &runs).width)
-    }
-
-    /// Measured 2026-10-03 on macOS 27 ("Connect to a server"): Core Text's UI font sets it
-    /// 119.13 / 171.43 / 217.56 pt wide at 13 / 20 / 26 pt, all `.SFNS-Regular`, the one
-    /// variable face whose optical size and tracking Core Text applies at each size; set in
-    /// proportion to 13 pt the 26 pt line would be 238.26. A copy of a font made at another size
-    /// carries the new size's tracking, so GPUI keeping one font and copying it to each size
-    /// loses nothing: it sets the same widths. It set 171.61 at 20 pt until gpui-fast#25, from
-    /// shaping alternate runs a float step over the size, which crossed SF's step there. So
-    /// GPUI needs no tracking of its own (study §3 #12).
     #[test]
-    fn gpui_sets_the_system_face_at_its_optical_size_and_tracking() {
-        const TEXT: &str = "Connect to a server";
-        let mut per_point = Vec::new();
-        for size in [13.0_f32, 20.0, 26.0] {
-            let measure = |at: f64, from: Option<f64>| {
-                let font = ui_font(at, from);
-                let measured = core_text(font, TEXT);
-                // SAFETY: made under the Create Rule by `ui_font` and measured; released once.
-                unsafe {
-                    CFRelease(font);
-                }
-                measured
+    fn each_family_weight_and_slant_is_the_bundled_face() {
+        let system = gpui_platform::text_system();
+        system
+            .add_fonts(FILES.iter().map(|f| Cow::Borrowed(*f)).collect())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let near = |a: f32, b: f32| (a - b).abs() < 1.0;
+        for face in &FACES {
+            let font = Font {
+                family: face.family.into(),
+                features: FontFeatures::default(),
+                fallbacks: None,
+                weight: face.weight,
+                style: if face.italic { FontStyle::Italic } else { FontStyle::Normal },
             };
-            let (name, system) = measure(f64::from(size), None);
-            assert!(name.starts_with(".SFNS"), "{size} pt: the system face, not {name}");
-            let (_, copied) = measure(f64::from(size), Some(13.0));
-            assert!((copied - system).abs() < 0.01, "{size} pt: a copy keeps the size's tracking");
-            let gpui = f64::from(gpui_width(TEXT, size));
+            let name = format!("{} {:?} italic {}", face.family, face.weight, face.italic);
+            let id = system.font_id(&font).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let m = system.font_metrics(id);
+            assert_eq!(m.units_per_em, 1000, "{name}");
+            assert!(near(m.ascent, face.ascent) && near(m.descent, face.descent), "{name}: {m:?}");
             assert!(
-                (gpui - system).abs() < 0.01,
-                "{size} pt: GPUI {gpui:.2}, Core Text {system:.2}"
+                near(m.underline_position, face.underline.0)
+                    && near(m.underline_thickness, face.underline.1),
+                "{name}: {m:?}"
             );
-            per_point.push(system / f64::from(size));
+            let glyph = system.glyph_for_char(id, 'M').unwrap_or_else(|| panic!("{name}: no M"));
+            let advance = system.advance(id, glyph).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(near(advance.width, face.advance), "{name}: advance {advance:?}");
+            let ink =
+                system.typographic_bounds(id, glyph).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (left, right) = (ink.origin.x, ink.origin.x + ink.size.width);
+            assert!(near(left, face.ink.0) && near(right, face.ink.1), "{name}: ink {ink:?}");
         }
-        assert!(
-            per_point.windows(2).all(|w| w[1] < w[0] * 0.98),
-            "SF tightens as it grows: {per_point:?}"
-        );
+    }
+}
+
+/// What the terminal face costs where it meets the frame path, on the platform's own text
+/// system (Core Text).
+#[cfg(test)]
+mod cost {
+    use std::borrow::Cow;
+    use std::time::{Duration, Instant};
+
+    use gpui::{FontRun, Point, RenderGlyphParams, SUBPIXEL_VARIANTS_X, px};
+
+    use super::{FILES, MONO_FAMILY, terminal_font};
+
+    /// Dense code with the operators a ligature face joins.
+    const CODE: &str = "    let frame = view.update(cx, |v, cx| v.apply(&batch, cx)) => Ok(()); \
+                        // != <= >= -> :: www 0x1f ";
+
+    /// A 200-column line of code shaped with ligatures on, and every printable ASCII glyph
+    /// rasterised at 13 pt on a 2× display in each subpixel offset, with the bytes those
+    /// rasters take in the atlas and the face's cell metrics per em. Prints the numbers
+    /// MEASUREMENTS records; run by hand in release, naming another face to set beside it:
+    /// `SLOPTY_OTHER_FACE=<ttf> SLOPTY_OTHER_FAMILY=<family> cargo test -p slopty-kit --release
+    /// --lib fonts::cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn the_terminal_face_shaped_and_rasterised() {
+        const SHAPES: u32 = 500;
+        const ROUNDS: u32 = 20;
+        let system = gpui_platform::text_system();
+        system.add_fonts(FILES.iter().map(|f| Cow::Borrowed(*f)).collect()).unwrap();
+        let mut families = vec![MONO_FAMILY.to_owned()];
+        if let (Ok(path), Ok(family)) =
+            (std::env::var("SLOPTY_OTHER_FACE"), std::env::var("SLOPTY_OTHER_FAMILY"))
+        {
+            system.add_fonts(vec![Cow::Owned(std::fs::read(&path).unwrap())]).unwrap();
+            families.push(family);
+        }
+        let mut line = String::new();
+        while line.len() < 200 {
+            line.push_str(CODE);
+        }
+        line.truncate(200);
+        for family in &families {
+            let id = system.font_id(&terminal_font(family, false, false, true)).unwrap();
+            let runs = [FontRun { len: line.len(), font_id: id }];
+            let mut glyphs = 0;
+            let mut shape = Vec::new();
+            for _ in 0..SHAPES {
+                let started = Instant::now();
+                let layout = system.layout_line(&line, px(13.0), &runs);
+                shape.push(started.elapsed());
+                glyphs = layout.runs.iter().map(|r| r.glyphs.len()).sum::<usize>();
+            }
+            shape.sort_unstable();
+            let ascii: Vec<_> = (' '..='~').filter_map(|c| system.glyph_for_char(id, c)).collect();
+            let (mut rasters, mut bytes) = (0_usize, 0_usize);
+            let mut raster = Vec::new();
+            for round in 0..ROUNDS {
+                let started = Instant::now();
+                for glyph in &ascii {
+                    for x in 0..SUBPIXEL_VARIANTS_X {
+                        let params = RenderGlyphParams {
+                            font_id: id,
+                            glyph_id: *glyph,
+                            font_size: px(13.0),
+                            subpixel_variant: Point { x, y: 0 },
+                            scale_factor: 2.0,
+                            is_emoji: false,
+                            subpixel_rendering: false,
+                            dilation: 0,
+                        };
+                        let bounds = system.glyph_raster_bounds(&params).unwrap();
+                        if bounds.size.width.0 > 0 && bounds.size.height.0 > 0 {
+                            let (_, data) = system.rasterize_glyph(&params, bounds).unwrap();
+                            if round == 0 {
+                                rasters += 1;
+                                bytes += data.len();
+                            }
+                        }
+                    }
+                }
+                raster.push(started.elapsed());
+            }
+            raster.sort_unstable();
+            let m = system.font_metrics(id);
+            let em = |v: f32| f64::from(v) / f64::from(m.units_per_em);
+            let advance = system.advance(id, ascii[33]).unwrap().width;
+            let at = |all: &[Duration], q: usize| all[all.len() * q / 100];
+            println!(
+                "MEASURE {family} 13 pt at 2×: a 200-column line shaped p50 {:?} p95 {:?} \
+                 ({glyphs} glyphs); {rasters} ASCII rasters in {SUBPIXEL_VARIANTS_X} offsets, \
+                 all of them p50 {:?} p95 {:?}, {bytes} atlas bytes; per em advance {} \
+                 ascent {} descent {} gap {}",
+                at(&shape, 50),
+                at(&shape, 95),
+                at(&raster, 50),
+                at(&raster, 95),
+                em(advance),
+                em(m.ascent),
+                em(m.descent),
+                em(m.line_gap),
+            );
+        }
     }
 }

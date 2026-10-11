@@ -297,8 +297,8 @@ mod tests {
     /// The marks are crisp at 1x through Core Graphics: crisp (Σα²/Σα, 1 when every inked
     /// pixel is whole) and solid (the share of inked pixels at α ≥ 0.9) at the sizes they are
     /// drawn at, printed for `docs/MEASUREMENTS.md`. The spark at its row size is about as crisp
-    /// as the Tabler glyphs beside it (0.73 to 0.77 at 14 px), the Blossom's thin inner strokes
-    /// a little softer, and pi whole.
+    /// as the Tabler glyphs that stood beside it (0.73 to 0.77 at 14 px), the Blossom's thin inner
+    /// strokes a little softer, and pi whole.
     #[test]
     fn the_marks_are_crisp_at_1x() {
         let measure = |m: &Mask| {

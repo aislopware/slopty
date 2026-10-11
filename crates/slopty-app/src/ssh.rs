@@ -1243,7 +1243,7 @@ impl Workspace {
     /// toggle, and whether to add the person's key so the machine stops asking.
     fn password_well(&self, sheet: &Sheet, cx: &Context<Self>) -> gpui::Div {
         let theme = &self.theme;
-        let (s, spacing) = (theme.surfaces, theme.spacing);
+        let spacing = theme.spacing;
         let host = sheet.target(cx).map(|t| t.host).unwrap_or_default();
         let field = div()
             .id("ssh-password")
@@ -1259,24 +1259,7 @@ impl Workspace {
                 Input::new(&sheet.password).appearance(false).mask_toggle().aria_label("Password"),
             );
         let on = sheet.add_key;
-        let side = theme.typography.icon();
-        let tick = div()
-            .flex_none()
-            .size(px(side))
-            .rounded(px(theme.radii.xs))
-            .flex()
-            .items_center()
-            .justify_center()
-            .border(px(slopty_theme::stroke::LINE))
-            .border_color(if on { hsla(s.solid) } else { hsla(s.control) })
-            .when(on, |b| {
-                kit::solid(b, theme).child(slopty_kit::icons::icon(
-                    theme,
-                    slopty_kit::icons::Symbol::Checkmark,
-                    slopty_kit::icons::IconSize::Inline,
-                    hsla(s.solid_ink),
-                ))
-            });
+        let tick = kit::tick_box(theme, on);
         let words = format!("Add your key so {host} stops asking");
         let key = div()
             .id("ssh-add-key")

@@ -235,7 +235,7 @@ fn run() {
         // After `open_workspace`, as on the Mac: the menus read their chords from the keymap
         // the workspace fills in. An iPad with a keyboard shows them in its menu bar and in
         // the sheet a held ⌘ brings up.
-        slopty_app::set_app_menus(cx, || slopty_app::menus::menus(Vec::new(), true));
+        slopty_app::set_app_menus(cx, |_| slopty_app::menus::menus(Vec::new(), true));
     }));
     ffi::run_app_with_assets(gpui_kit::assets::Assets);
 }

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement as _,
+    AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_kit::colors::hsla;
@@ -25,7 +25,6 @@ use slopty_kit::kit;
 use slopty_proto::git::{
     Forge, GitOp, LineSide, PullComments, PullThread, REVIEW_NOTES_MAX, ReviewNote, ReviewVerdict,
 };
-use slopty_theme::Typography;
 
 use super::{Came, ReviewView, Row, Side, on};
 use crate::conversation::diff::{Block, Line};
@@ -163,10 +162,7 @@ impl ReviewView {
                 .gap(px(theme.spacing.xxs))
                 .when(n > 0, |el| el.pt(px(theme.spacing.xs)))
                 .child(
-                    div()
-                        .text_color(hsla(s.text))
-                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        .child(SharedString::from(note.author.clone())),
+                    div().text_color(hsla(s.text)).child(SharedString::from(note.author.clone())),
                 )
                 .child(
                     div()

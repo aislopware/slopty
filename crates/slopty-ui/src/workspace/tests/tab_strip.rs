@@ -148,11 +148,11 @@ fn the_title_bar_shows_the_projects_tabs_and_their_agents(cx: &mut TestAppContex
     assert_eq!(focused(&view, cx), Some(first));
 }
 
-/// The title bar lies on the ground with nothing of its own but the line along its foot. The tab
-/// on show is a selected pill the density's tab tall at radius 6, with air above and below it;
-/// a tab not on show draws no fill at rest.
+/// The title bar lies on the panel's plane with the line along its foot. The tab on show is
+/// Zed's: a square cell the bar's height on the work's ground, the `border` line on its sides;
+/// a tab not on show draws no fill at rest, so the bar's plane shows through it.
 #[gpui::test]
-fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
+fn the_shown_title_tab_is_a_cell_open_to_the_work(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -175,34 +175,40 @@ fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
     };
     let bar = bounds(cx, "titlebar".to_owned());
     let tab = bounds(cx, format!("title-tab-{on}"));
-    let theme_tab = px(Theme::default().density.tab);
-    assert_eq!(tab.size.height, theme_tab, "a pill the density's tab tall: {tab:?}");
-    assert!(tab.top() > bar.top() && tab.bottom() < bar.bottom(), "air round it: {tab:?} {bar:?}");
+    assert!((tab.bottom() - bar.bottom()).abs() < px(0.5), "down to the bar's foot: {tab:?}");
+    assert!(tab.size.height >= px(Theme::default().density.tab), "the bar's height: {tab:?}");
     let theme = Theme::default();
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let at = |b: Bounds<Pixels>, q: &gpui::Quad| {
         let near = |a: f32, p: Pixels| f32::from(p).mul_add(-scale, a).abs() < 1.0;
         near(q.bounds.origin.x.0, b.origin.x) && near(q.bounds.size.width.0, b.size.width)
     };
-    let selected = slopty_kit::colors::hsla(theme.surfaces.selected);
+    let (ground, border) = (theme.surfaces.ground, theme.surfaces.border);
+    let (ground, border) = (slopty_kit::colors::hsla(ground), slopty_kit::colors::hsla(border));
     let fill = |q: &gpui::Quad| {
         (!q.background.is_transparent()).then(|| q.background.as_solid()).flatten()
     };
+    // Its fill and its lines may be painted as quads of their own on its bounds.
+    let cell: Vec<_> = quads.iter().filter(|q| at(tab, q)).collect();
+    assert!(cell.iter().any(|q| fill(q) == Some(ground)), "on the ground: {cell:?}");
     assert!(
-        quads.iter().any(|q| at(tab, q)
-            && fill(q) == Some(selected)
-            && q.corner_radii.top_left.0 / scale - theme.radii.sm < 0.5),
-        "the shown tab a selected pill"
+        cell.iter().any(|q| q.border_color == border
+            && q.border_widths.left.0 > 0.0
+            && q.border_widths.bottom.0 == 0.0),
+        "its sides lined, open below: {cell:?}"
     );
+    assert!(cell.iter().all(|q| q.corner_radii.top_left.0 == 0.0), "square: {cell:?}");
     let rest = bounds(cx, format!("title-tab-{off}"));
     assert!(!quads.iter().any(|q| at(rest, q) && fill(q).is_some()), "a tab not shown is bare");
-    // The bar paints nothing of its own over the ground but the one line along its foot.
+    // The bar's own plane is the panel's, as the navigator's and the foot bar's are.
     let band = |q: &gpui::Quad| {
         let top = q.bounds.origin.y.0 / scale;
         top < f32::from(bar.bottom()) - 0.5
             && q.bounds.size.height.0 / scale > f32::from(slopty_kit::kit::HAIR)
     };
-    assert!(!quads.iter().any(|q| at(bar, q) && band(q) && fill(q).is_some()), "on the ground");
+    let sidebar = slopty_kit::colors::hsla(theme.surfaces.sidebar);
+    let plane: Vec<_> = quads.iter().filter(|q| at(bar, q) && band(q)).filter_map(fill).collect();
+    assert_eq!(plane, [sidebar], "on the panel's plane");
     // Each tab's words are set on the chrome's line, not the window's 16 pt one.
     let line = px(theme.roles().chrome.line);
     for n in [on, off] {
@@ -309,10 +315,12 @@ fn an_opened_tab_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     let start = Pace::Sheet.duration();
     step(cx, start.saturating_add(start.checked_div(2).unwrap_or_default()));
     let half = slot(cx).expect("still growing");
-    assert!(half > px(1.0) && half < px(224.0), "growing: {half:?}");
+    let grown = bounds(cx, new).size.width;
+    assert!(half > px(1.0) && half <= grown, "growing: {half:?} of {grown:?}");
     step(cx, start.saturating_mul(2));
     assert!(slot(cx).is_none(), "grown");
-    assert_eq!(bounds(cx, new).size.width, px(224.0), "its slot once grown");
+    let width = bounds(cx, new).size.width;
+    assert!(width >= px(120.0) && width <= px(240.0), "its own width once grown: {width:?}");
 
     let old = tabs(cx)[0];
     let (was, place) = (bounds(cx, new).left(), bounds(cx, old).left());
@@ -332,5 +340,6 @@ fn an_opened_tab_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     let fourth = opens(&view, cx, &studio, SessionId::new(), studio.me, 4);
     on_new_tab(&view, cx, fourth);
     let newest = *tabs(cx).last().expect("the newest tab");
-    assert_eq!(bounds(cx, newest).size.width, px(224.0), "whole at once under Reduce Motion");
+    let width = bounds(cx, newest).size.width;
+    assert!(width >= px(120.0), "whole at once under Reduce Motion: {width:?}");
 }

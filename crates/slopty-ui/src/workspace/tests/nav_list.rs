@@ -193,7 +193,9 @@ fn needs_you_lists_a_waiting_tile_scrolled_out_of_view(cx: &mut TestAppContext) 
         cx.run_until_parked();
     };
     redraw(cx);
-    assert!(in_view(&view, cx, waiting), "focused, its row came into view");
+    let list = view.read_with(cx, |v, _| v.navigator_list_bounds());
+    let row = drawn(cx, waiting);
+    assert!(in_view(&view, cx, waiting), "focused, its row came into view: {row:?} in {list:?}");
     assert!(cx.debug_bounds("nav-needs-you").is_none(), "its own row says it");
 
     scroll_list(&view, cx, 100_000.0);
@@ -259,6 +261,37 @@ fn a_tiles_glyph_sits_under_its_workers_name(cx: &mut TestAppContext) {
     assert!(f32::from(kind.left() - name.left()).abs() < 0.5, "{kind:?} under {name:?}");
 }
 
+/// A tile's row hangs from its worker's head by Delta's indent guide: the hairline in
+/// `indent_guide` the row's full height, down the middle of the head's glyph.
+#[gpui::test]
+fn a_tiles_row_hangs_from_its_head_by_the_indent_guide(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let row = cx.debug_bounds(selector("nav-tile", shell.item)).expect("the row");
+    let name = format!("nav-worker-name-{}", studio.key);
+    let name = cx.debug_bounds(Box::leak(name.into_boxed_str())).expect("the head's name");
+    let theme = Theme::default();
+    let guide = slopty_kit::colors::hsla(theme.surfaces.indent_guide);
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let lines: Vec<_> = quads
+        .iter()
+        .filter(|q| q.background.as_solid() == Some(guide))
+        .map(|q| {
+            let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
+            (x, y, q.bounds.size.width.0 / scale, q.bounds.size.height.0 / scale)
+        })
+        .filter(|(_, y, _, h)| (y - f32::from(row.top())).abs() < 0.5 && *h > 1.0)
+        .collect();
+    let [(x, _, w, h)] = lines.as_slice() else { panic!("one guide down the row: {lines:?}") };
+    // The head's glyph ends one gap before its name; the guide runs down its middle.
+    let gap = theme.spacing.xs + theme.spacing.xxs;
+    let middle = f32::from(name.left()) - gap - theme.typography.icon() / 2.0;
+    assert!((x + w / 2.0 - middle).abs() < 1.0, "down the glyph's middle: {x} vs {middle}");
+    assert!((w - f32::from(slopty_kit::kit::HAIR)).abs() < 0.5, "a hairline: {w}");
+    assert!((h - f32::from(row.size.height)).abs() < 0.5, "the row's height: {h}");
+}
+
 /// The home indicator's band under the workspace, as the app lays it out on a phone.
 const BAND: f32 = 34.0;
 
@@ -297,8 +330,8 @@ fn the_overlaid_navigator_runs_through_the_home_indicator_band(cx: &mut TestAppC
 fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navigator::Mode) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(key_bindings());
-        cx.bind_keys(terminal_key_bindings());
+        cx.bind_keys(key_bindings(cx));
+        cx.bind_keys(terminal_key_bindings(cx));
     });
     let (host, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {

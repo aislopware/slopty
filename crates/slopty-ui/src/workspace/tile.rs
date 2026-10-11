@@ -19,7 +19,7 @@ use slopty_kit::a11y::tab_stop;
 use slopty_kit::chrome_text::ChromeText;
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{GitGlyph, IconSize, Mark, Status, Symbol};
+use slopty_kit::icons::{GitGlyph, Mark, Status, Symbol};
 use slopty_kit::kit;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::Worktree;
@@ -1155,9 +1155,9 @@ impl WorkspaceView {
         let kind = self.spoken_kind(item);
         let ink = title_ink(theme, focused);
         let heading = SharedString::from(spoken_heading(&kind, &title));
-        // A pane's header is its tab row (`tab_look`): on the pane's own ground with the one
-        // line along its foot, its tabs pills standing in it. A lone tile's header is its title
-        // with no pill. The foot is drawn first, so what follows paints over it.
+        // A pane's header is its tab row (`tab_look`), the one line along its foot: Zed's tab
+        // bar with its cells where the pane holds tabs, and a lone tile's title on the pane's
+        // own ground. The foot is drawn first, so what follows paints over it.
         let fills = !self.phone;
         let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx);
         let header = tab_look::row(theme, header)
@@ -1239,7 +1239,7 @@ impl WorkspaceView {
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
             let figure =
                 kit::progress::Progress::Share(upload.fraction()).figure().unwrap_or_default();
-            let side = px(IconSize::Inline.slot(theme));
+            let side = px(theme.typography.icon());
             let ring = kit::progress::ring(
                 theme,
                 SharedString::from(format!("upload-ring-{}", id.as_uuid())),
@@ -1248,13 +1248,8 @@ impl WorkspaceView {
                 side,
             );
             let touch = theme.density == slopty_theme::Density::TOUCH;
-            let stop = slopty_kit::icons::icon(
-                theme,
-                Symbol::Xmark,
-                IconSize::Inline,
-                hsla(s.text_secondary),
-            )
-            .size(side);
+            let stop =
+                slopty_kit::icons::icon(theme, Symbol::Xmark, hsla(s.text_secondary)).size(side);
             let mark = div()
                 .relative()
                 .flex_none()
@@ -1476,8 +1471,7 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs))
                 .text_color(muted)
                 .child(
-                    slopty_kit::icons::icon(theme, machine, IconSize::Inline, tint)
-                        .size(px(IconSize::Inline.slot(theme))),
+                    slopty_kit::icons::icon(theme, machine, tint).size(px(theme.typography.icon())),
                 )
                 .child(ChromeText::new(name, px(theme.typography.small())).fill())
         });
@@ -1562,18 +1556,24 @@ impl WorkspaceView {
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
             // In a split, a dot leads the row: the accent's on the pane with the keyboard. It
-            // stands where a lone header's does, so the first tab's mark lands on the same
-            // edge as a lone tile's beside it.
+            // stands in so far that the first tab's mark, past the tab's own inset, lands on the
+            // same edge as a lone tile's beside it (its dot, then the gap, then its mark).
             let dot = placed.shared.then(|| {
                 div()
                     .flex_none()
                     .h_full()
                     .flex()
                     .items_center()
-                    .pl(px(theme.spacing.xs + theme.spacing.xxs))
+                    .pl(px(tab_look::TAB_GAP))
                     .child(tab_look::focus_dot(theme, placed.focused))
             });
-            header.border_b_0().children(dot).child(tabs).child(rest)
+            // Zed's tab bar: its own plane, the tab on show opening out of it into the pane.
+            header
+                .border_b_0()
+                .bg(hsla(theme.surfaces.tab_bar))
+                .children(dot)
+                .child(tabs)
+                .child(rest)
         } else {
             self.header_row(
                 HeaderParts {
@@ -1616,7 +1616,7 @@ impl WorkspaceView {
         // weight, any other's secondary tone at the regular.
         let ink = title_ink(&self.theme, focused);
         let glyph = self.kind_glyph(item);
-        let side = IconSize::Inline.slot(&self.theme);
+        let side = self.theme.typography.icon();
         let slot = crate::palette::lead_mark(&self.theme, glyph, hsla(ink), side)
             .debug_selector(move || format!("kind-{}", id.as_uuid()))
             .into_any_element();
@@ -1816,8 +1816,8 @@ impl WorkspaceView {
             };
             let ids: Vec<ItemId> = column.iter().map(|t| t.item).collect();
             let mut spots = row.spots.borrow_mut();
-            let left = |id: ItemId| spots.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
-            let moves = row.motion.step(&ids, left, clock);
+            let place = |id: ItemId| spots.iter().find(|(t, _)| *t == id).map(|(_, b)| *b);
+            let moves = row.motion.step(&ids, place, clock);
             spots.retain(|(t, _)| ids.contains(t));
             drop(spots);
             (moves, std::rc::Rc::clone(&row.spots))
@@ -1840,7 +1840,7 @@ impl WorkspaceView {
                     Some(st) => div()
                         .id("tab-status")
                         .flex_none()
-                        .size(px(IconSize::Inline.slot(theme)))
+                        .size(px(theme.typography.icon()))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -2087,8 +2087,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .text_color(muted)
                 .children(glyph.map(|glyph| {
-                    slopty_kit::icons::icon(theme, glyph, IconSize::Inline, muted)
-                        .size(px(IconSize::Inline.slot(theme)))
+                    slopty_kit::icons::icon(theme, glyph, muted).size(px(theme.typography.icon()))
                 }))
                 .child(ChromeText::new(words, px(theme.typography.small())).fill());
             if !at.commits {
@@ -2160,8 +2159,8 @@ impl WorkspaceView {
                 cx.new(|_| kit::Hint::new(hint, path, theme)).into()
             })
             .child(
-                slopty_kit::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
-                    .size(px(IconSize::Inline.slot(theme))),
+                slopty_kit::icons::icon(theme, GitGlyph::Branch, muted)
+                    .size(px(theme.typography.icon())),
             )
             .child(ChromeText::new(tree.name.clone(), px(theme.typography.small())).fill())
             .into_any_element();
@@ -2218,8 +2217,8 @@ impl WorkspaceView {
                 cx.new(|_| kit::Hint::new(line, title, theme)).into()
             })
             .child(
-                slopty_kit::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
-                    .size(px(IconSize::Inline.slot(theme))),
+                slopty_kit::icons::icon(theme, glyph, hsla(glyph_ink))
+                    .size(px(theme.typography.icon())),
             )
             .child(ChromeText::new(pull.named(), px(theme.typography.small())));
         let chip = tab_stop(chip, s.focus).on_click(move |_ev, _window, cx| cx.open_url(&url));
@@ -2676,7 +2675,7 @@ impl WorkspaceView {
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs + theme.spacing.xxs))
+            .gap(px(tab_look::TAB_GAP))
             .map(|el| {
                 if address_title {
                     el.cursor_text().on_mouse_down(
@@ -3187,7 +3186,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(theme.typography.icon_large()))
+            .size(px(theme.typography.icon()))
             .rounded(px(theme.radii.xs))
             .hover(|s| s.bg(hsla(theme.surfaces.hover)))
             .cursor_grab()
@@ -3315,13 +3314,8 @@ impl WorkspaceView {
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(
-                slopty_kit::icons::icon(
-                    theme,
-                    Symbol::ExclamationmarkTriangle,
-                    IconSize::Inline,
-                    hsla(s.text_muted),
-                )
-                .flex_none(),
+                slopty_kit::icons::icon(theme, Symbol::ExclamationmarkTriangle, hsla(s.text_muted))
+                    .flex_none(),
             )
             .child(div().min_w_0().child(said))
             .into_any_element()
@@ -3507,13 +3501,8 @@ impl WorkspaceView {
             .font_family(ty.ui_family.clone())
             .text_center()
             .child(
-                slopty_kit::icons::icon(
-                    theme,
-                    Symbol::ExclamationmarkTriangle,
-                    IconSize::Inline,
-                    hsla(s.error),
-                )
-                .size(px(ty.icon_large())),
+                slopty_kit::icons::icon(theme, Symbol::ExclamationmarkTriangle, hsla(s.error))
+                    .size(px(ty.icon())),
             )
             .child(
                 kit::typed(div(), roles.task_title)

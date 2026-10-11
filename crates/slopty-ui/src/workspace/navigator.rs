@@ -83,7 +83,7 @@ use slopty_core::WallMs;
 use slopty_kit::a11y::tab_stop;
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark};
+use slopty_kit::icons::{GitGlyph, Mark, Status, Symbol, icon, status_mark};
 use slopty_kit::kit::{self, meta, tabular};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::project::{ProjectId, TaskId};
@@ -105,7 +105,7 @@ use super::faces::ThreadStand;
 use super::grouping::{Grouping, group_glyph, parent_of, section_name};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
-use super::{WorkerStatus, WorkspaceView};
+use super::{WorkerStatus, WorkspaceView, tab_look};
 use crate::palette::Plate;
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
@@ -119,6 +119,9 @@ pub(super) const HANDLE_W: f32 = 12.0;
 /// The rail's width, where the navigator is hidden: `MonoCode`'s compact rail, a 32 pt button
 /// and 8 pt either side.
 pub(super) const RAIL_W: f32 = 48.0;
+
+/// The width of a project's colour bar down its row's leading edge: Delta's 2.
+const IDENTITY_BAR: f32 = 2.0;
 
 /// How a rail button that is not on show rests: `MonoCode`'s 65 % opacity, whole under the
 /// pointer.
@@ -253,6 +256,9 @@ pub(super) struct NavList {
     /// The tile being revealed this frame: its row, once laid out, asks the list to scroll it
     /// fully into view.
     autoscroll: Cell<Option<TileRef>>,
+    /// The focused row was wholly in view and changed its shape this frame (a line came or
+    /// went): it asks the list to keep it whole in view, as a reveal does.
+    hold: Cell<bool>,
     /// The fill under the selected row.
     plate: Plate,
 }
@@ -265,7 +271,8 @@ impl Default for NavList {
             selected: Cell::default(),
             revealed: Cell::default(),
             autoscroll: Cell::default(),
-            plate: Plate::default(),
+            hold: Cell::default(),
+            plate: Plate::square(),
         }
     }
 }
@@ -299,6 +306,7 @@ impl NavList {
             let tail = tail.count();
             let added = head..rows.len().saturating_sub(tail);
             let changed = head..old.saturating_sub(tail);
+            self.hold.set(self.regrown_in_view(&was, &rows));
             // The first row at or under the view's top that is known again by what it shows,
             // and where the view stood in it when it is that very row.
             let anchor = (!at_top && changed.contains(&scrolled.item_ix))
@@ -325,14 +333,40 @@ impl NavList {
         *was = rows;
     }
 
+    /// Whether the focused row was drawn wholly in the list's view and its shape changes
+    /// between `was` and `rows`: an agent asking grows its row a line, which would otherwise
+    /// push the row's foot under the list's edge.
+    fn regrown_in_view(&self, was: &[NavRow], rows: &[NavRow]) -> bool {
+        let Some(tile) = self.selected.get().filter(|_| self.revealed.get() == self.selected.get())
+        else {
+            return false;
+        };
+        let at = |rows: &[NavRow]| {
+            rows.iter().position(|r| matches!(r, NavRow::Tile(t) if t.tile == tile))
+        };
+        let (Some(old), Some(new)) = (at(was), at(rows)) else { return false };
+        let reshaped = was.get(old).map(NavRow::shape) != rows.get(new).map(NavRow::shape);
+        let view = self.state.viewport_bounds();
+        reshaped
+            && self
+                .state
+                .bounds_for_item(old)
+                .is_some_and(|row| row.top() >= view.top() && row.bottom() <= view.bottom())
+    }
+
     /// Scroll the selected tile's row into view if the focus moved to it since the last reveal.
     /// The list places it by the heights it has measured, and a row added this frame has none
     /// yet, so the row also asks for the rest once it is laid out, in the same frame. Before the
-    /// list's first layout there is no height to place it by, and the reveal waits a frame.
+    /// list's first layout there is no height to place it by, and the reveal waits a frame. A
+    /// focused row in view that grows a line asks the same, so its foot stays in view.
     fn reveal_selected(&self, window: &Window) {
+        let hold = self.hold.take();
         self.autoscroll.set(None);
         let selected = self.selected.get();
         if selected == self.revealed.get() {
+            if hold {
+                self.autoscroll.set(selected);
+            }
             return;
         }
         let row = self
@@ -555,12 +589,11 @@ fn now_ms(cx: &gpui::App) -> u64 {
     slopty_kit::clock::now(cx).as_millis()
 }
 
-/// One row of the navigator's list, `MonoCode`'s pill as a tab is one
-/// ([`super::tab_look`]): the density's item tall (two lines' height for two), a base unit in
-/// from the panel's edges and padded a base unit, at the small radius, a tab stop named
-/// `label`, its id and its test selector the one `selector`. Its words rest in the secondary
-/// tone and lift to the text's under the pointer's wash; the selected row sits in the text's
-/// tone on the list's plate, which settles from row to row. The weight never changes.
+/// One row of the navigator's list, Zed's sidebar row: the density's item tall (two lines'
+/// height for two), square and edge to edge, padded a base unit, its parts 6 apart, a tab stop
+/// named `label`, its id and its test selector the one `selector`. Its words are in the text's
+/// tone, the pointer's wash under them; the selected row lies on the list's square plate,
+/// which settles from row to row. The weight never changes.
 pub(super) fn row(
     theme: &Theme,
     lines: kit::Row,
@@ -577,15 +610,13 @@ pub(super) fn row(
         .aria_label(label)
         .flex_none()
         .h(px(row_height(theme, lines)))
-        .mx(px(spacing.sm))
         .px(px(spacing.sm))
         .flex()
         .items_center()
-        .gap(px(spacing.sm))
-        .rounded(px(theme.radii.sm))
+        .gap(px(spacing.xs + spacing.xxs))
         .cursor_pointer()
-        .text_color(hsla(if selected { s.text } else { s.text_secondary }))
-        .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text))));
+        .text_color(hsla(s.text))
+        .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
     tab_stop(el, s.focus)
 }
 
@@ -598,16 +629,13 @@ pub(super) const fn row_height(theme: &Theme, lines: kit::Row) -> f32 {
     }
 }
 
-/// A row's title, cut with an ellipsis.
-pub(super) fn title(text: impl Into<SharedString>, color: gpui::Hsla) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .text_color(color)
-        .child(text.into())
+/// A row's title at the chrome's size, faded over its last 40 pt while it is cut, as Zed's
+/// sidebar cuts a title, rather than losing its last letters to an ellipsis.
+pub(super) fn title(theme: &Theme, text: impl Into<SharedString>, color: gpui::Hsla) -> Div {
+    let size = px(theme.roles().chrome.size);
+    div().flex_1().min_w_0().overflow_hidden().text_color(color).child(
+        slopty_kit::chrome_text::ChromeText::new(text, size).fill_fading(px(tab_look::TITLE_FADE)),
+    )
 }
 
 /// Meta text on the right of a row's line, in tabular figures: an age, a turn's time or a
@@ -633,58 +661,18 @@ fn group_ink(theme: &Theme, key: &GroupKey) -> Rgb {
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
 fn disclosure(theme: &Theme, chevron: Symbol, ink: Rgb) -> Div {
     slopty_kit::icons::Drawn::disclosure(theme, chevron)
-        .slot(px(IconSize::Inline.slot(theme)), hsla(ink))
+        .slot(px(theme.typography.icon()), hsla(ink))
 }
 
 /// A square of the leading slot's side around `child`, so every row's title starts on one edge.
 fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
     div()
         .flex_none()
-        .size(px(theme.typography.icon_large()))
+        .size(px(theme.typography.icon()))
         .flex()
         .items_center()
         .justify_center()
         .child(child)
-}
-
-/// One of the navigator's standing actions under its lights row, `MonoCode`'s `RailAction`: a
-/// row a navigator row tall at the small radius, a 16 pt glyph and `label` in the secondary
-/// tone, and the keys that do the same at its end. The caller adds its press and its edge or
-/// hover.
-fn rail_action(
-    theme: &Theme,
-    id: &'static str,
-    glyph: Symbol,
-    label: &'static str,
-    keys: String,
-) -> Stateful<Div> {
-    let s = theme.surfaces;
-    let spacing = theme.spacing;
-    let keys = (!keys.is_empty()).then(|| {
-        kit::typed(div(), theme.roles().caption)
-            .ml_auto()
-            .flex_none()
-            .text_color(hsla(s.text_muted))
-            .child(keys)
-    });
-    let row = kit::typed(div(), theme.roles().chrome)
-        .id(id)
-        .debug_selector(move || id.to_owned())
-        .role(Role::Button)
-        .aria_label(label)
-        .flex_none()
-        .h(px(theme.density.item))
-        .flex()
-        .items_center()
-        .gap(px(spacing.sm))
-        .px(px(spacing.sm))
-        .rounded(px(theme.radii.sm))
-        .cursor_pointer()
-        .text_color(hsla(s.text_secondary))
-        .child(icon(theme, glyph, IconSize::Lead, hsla(s.text_secondary)))
-        .child(label)
-        .children(keys);
-    tab_stop(row, s.focus)
 }
 
 /// The height of a row's first and second lines, the navigator's and the inbox's alike.
@@ -784,7 +772,21 @@ const fn has_figure(progress: Progress) -> bool {
 /// tile's glyph starts under its group's title. No guide line is drawn down a nested row: the
 /// indent alone says it.
 fn nest_step(theme: &Theme) -> f32 {
-    LEAD_SLOT + theme.spacing.sm
+    LEAD_SLOT + theme.spacing.xs + theme.spacing.xxs
+}
+
+/// The tree's line down a nested row at `depth`, Delta's indent guide: the hairline in
+/// `indent_guide` down the middle of the lead slot of the row it hangs from, the row's full
+/// height, so the guides of the rows under one header meet in one line.
+pub(super) fn indent_guide(theme: &Theme, depth: u8) -> Div {
+    let x = f32::from(depth).mul_add(nest_step(theme), theme.spacing.sm + LEAD_SLOT / 2.0);
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(x))
+        .w(kit::HAIR)
+        .bg(hsla(theme.surfaces.indent_guide))
 }
 
 /// A group's tiles with each orchestrator's helpers set in right under it (`MonoCode`'s
@@ -2305,8 +2307,8 @@ impl WorkspaceView {
         })
     }
 
-    /// The navigator's top, `MonoCode`'s rail header: the lights row, then the Search row (or
-    /// the filter in its place while it shows) and the New agent row.
+    /// The navigator's top, Zed's sidebar header: the lights row, then one row of the filter
+    /// (or "Search", the way to it) with New goal and New agent as icon buttons at its end.
     ///
     /// The lights row is the title bar's height, with no line under it, and holds the traffic
     /// lights on a Mac and, pushed to its end, back and forward through the tabs visited and the
@@ -2314,11 +2316,12 @@ impl WorkspaceView {
     /// bar holds the tabs alone. A phone's home has no such row: below the status bar its filter
     /// is its first row, as an iOS list opens on its search field.
     ///
-    /// The Search row is a box a row tall in the border's ring: a press, ⌘F with the keyboard
-    /// in the navigator, ⌘⇧E, or typing while a row holds the keyboard puts the filter in its
-    /// place with the keyboard, settling in over [`kit::Pace::Settle`], at once under Reduce
-    /// Motion. Esc, or the keyboard leaving it empty, gives the row back. A phone's home keeps
-    /// the filter always. The New agent row under it starts "New agent…".
+    /// "Search" is unboxed, the search glyph and the word in the placeholder's tone: a press,
+    /// ⌘F with the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard
+    /// puts the filter in its place with the keyboard, settling in over
+    /// [`kit::Pace::Settle`], at once under Reduce Motion. Esc, or the keyboard leaving it
+    /// empty, gives the word back. A phone's home keeps the filter always. The row ends on the
+    /// lighter `stroke` line.
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2370,14 +2373,14 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label("Clear filter")
                 .flex_none()
-                .size(px(theme.typography.icon_large()))
+                .size(px(theme.typography.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted)))
+                .child(icon(theme, Symbol::Xmark, hsla(s.text_muted)))
                 .on_click(
                     cx.listener(|this, _ev, window, cx| this.clear_navigator_filter(window, cx)),
                 );
@@ -2395,75 +2398,93 @@ impl WorkspaceView {
                 .max_w(px(self.navigator_width() / 2.0))
                 .child(SharedString::from(name))
         });
-        let field = kit::search_field(theme, focused)
+        // Zed's inline filter: the search glyph and an unboxed field, the focus line under the
+        // header saying where the keys go.
+        let field = div()
             .id("nav-filter-field")
             .debug_selector(|| "nav-filter-field".to_owned())
-            .w_full()
+            .flex_1()
             .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs + spacing.xxs))
+            .when(focused, |el| el.border_b(kit::HAIR).border_color(hsla(s.focus)))
+            .child(icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
             .children(scope)
             .children(input)
             .children(clear);
-        let row = div()
-            .flex_none()
-            .px(px(spacing.sm))
-            .when(home, |row| row.pt(px(spacing.sm)))
-            .child(field);
         let reveals = self.nav.filter.reveals;
-        let filter = self.navigator_filter_shown().then(|| {
+        let mut filter = self.navigator_filter_shown().then(|| {
             if home || reveals == 0 || !kit::motion(cx) {
-                return row.into_any_element();
+                return field.into_any_element();
             }
             // Only its opacity moves, so it takes the pointer and the keys from its first
             // frame, as the kit's fades do.
             let key = ElementId::Name(SharedString::from(format!("nav-filter-reveal-{reveals}")));
-            row.with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
+            field
+                .with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
                 .into_any_element()
         });
-        // A phone's home keeps its filter always, so it has no Search row, but it starts an
-        // agent as every navigator does: the home goes first, so what starts shows.
+        // Zed's sidebar header row: the filter (or the way to it, "Search"), then New goal and
+        // New agent as icon buttons at its end. A phone's home keeps its filter always, and
+        // starts a goal and an agent as every navigator does.
         let actions = (!self.workers.is_empty()).then(|| {
-            let bindings = super::key_bindings();
+            let hint_theme = Rc::new(theme.clone());
             let search = (!home && filter.is_none()).then(|| {
-                let keys = crate::palette::keys_for(&super::actions::FilterNavigator, &bindings);
-                rail_action(
-                    theme,
-                    "nav-search",
-                    Symbol::Magnifyingglass,
-                    super::titlebar::SEARCH,
-                    keys,
-                )
-                .border(kit::HAIR)
-                .border_color(hsla(s.border))
-                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)))
+                let el = div()
+                    .id("nav-search")
+                    .debug_selector(|| "nav-search".to_owned())
+                    .role(Role::Button)
+                    .aria_label(super::titlebar::SEARCH)
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.xs + spacing.xxs))
+                    .cursor_text()
+                    .text_color(hsla(s.text_muted))
+                    .child(icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
+                    .child(super::titlebar::SEARCH)
+                    .on_click(
+                        cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)),
+                    );
+                tab_stop(el, s.focus)
             });
-            // A phone has no keys to name.
-            let keys_of = |action: &dyn gpui::Action| {
-                if home { String::new() } else { crate::palette::keys_for(action, &bindings) }
+            let start = |id: &'static str,
+                         glyph: Symbol,
+                         label: &'static str,
+                         action: &'static dyn gpui::Action| {
+                let hint_theme = Rc::clone(&hint_theme);
+                let el = kit::icon_button(theme, id, glyph, label);
+                if home {
+                    return el;
+                }
+                kit::hint_timing(el).tooltip(move |_window, cx| {
+                    let keys = crate::palette::keys_for(action, &super::key_bindings(cx));
+                    cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
+                })
             };
             // A goal is the usual start, so it leads; an agent of one's own follows.
-            let new_goal = rail_action(
-                theme,
+            let new_goal = start(
                 "nav-new-goal",
                 Symbol::Flag,
                 super::titlebar::NEW_GOAL,
-                keys_of(&super::actions::NewGoal),
+                &super::actions::NewGoal,
             )
-            .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 if home {
                     this.navigated();
                 }
                 this.new_goal(&super::actions::NewGoal, window, cx);
             }));
-            let new_agent = rail_action(
-                theme,
+            let new_agent = start(
                 "nav-new-agent",
-                Symbol::SquareAndPencil,
+                Symbol::Pencil,
                 super::titlebar::NEW_AGENT,
-                keys_of(&super::actions::NewAgent),
+                &super::actions::NewAgent,
             )
-            .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
             .on_click(cx.listener(move |this, _ev, window, cx| {
                 if home {
                     this.navigated();
@@ -2472,13 +2493,16 @@ impl WorkspaceView {
             }));
             div()
                 .flex_none()
+                .h(px(theme.density.title))
                 .flex()
-                .flex_col()
+                .items_center()
                 .gap(px(spacing.xxs))
-                .px(px(spacing.sm))
-                .pt(px(spacing.xxs))
-                .pb(px(spacing.sm))
+                .pl(px(spacing.sm))
+                .pr(px(spacing.xs))
+                .border_b(kit::HAIR)
+                .border_color(hsla(s.stroke))
                 .children(search)
+                .children(filter.take())
                 .child(new_goal)
                 .child(new_agent)
         });
@@ -2878,13 +2902,12 @@ impl WorkspaceView {
                     if chosen {
                         el.bg(hsla(s.selected))
                     } else {
-                        el.opacity(RAIL_REST)
-                            .hover(move |el| el.bg(hsla(s.hover_strong)).opacity(1.0))
+                        el.opacity(RAIL_REST).hover(move |el| el.bg(hsla(s.hover)).opacity(1.0))
                     }
                 })
                 .child(
-                    slopty_kit::icons::Drawn::new(theme, glyph, IconSize::Lead)
-                        .slot(px(IconSize::Lead.slot(theme)), hsla(ink)),
+                    slopty_kit::icons::Drawn::new(theme, glyph)
+                        .slot(px(theme.typography.icon()), hsla(ink)),
                 );
             tab_stop(el, s.focus)
         };
@@ -2918,7 +2941,7 @@ impl WorkspaceView {
         let new_agent = square(
             "nav-rail-new-agent".to_owned(),
             super::titlebar::NEW_AGENT.to_owned(),
-            Symbol::SquareAndPencil.into(),
+            Symbol::Pencil.into(),
             s.text_secondary,
             false,
         )
@@ -3125,7 +3148,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs))
             // At rest a tier under the content, as every row is: its glyph keeps the urgency.
-            .child(title(agent.title.clone(), hsla(s.text_secondary)))
+            .child(title(theme, agent.title.clone(), hsla(s.text_secondary)))
             .children(time);
         // The agent's words, then where it runs, as a tile's second line reads: one line joined
         // by the same separator, so the place is what gives way first and is never pressed to a
@@ -3204,12 +3227,11 @@ impl WorkspaceView {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
-        let line1 = div()
-            .h(px(first))
-            .line_height(px(first))
-            .flex()
-            .items_center()
-            .child(title(ready.title.clone(), hsla(s.text_secondary)));
+        let line1 = div().h(px(first)).line_height(px(first)).flex().items_center().child(title(
+            theme,
+            ready.title.clone(),
+            hsla(s.text_secondary),
+        ));
         let words = {
             let key = key.clone();
             div()
@@ -3353,15 +3375,10 @@ impl WorkspaceView {
                         .role(Role::Image)
                         .aria_label(CLIPBOARD_OFF)
                         .flex_none()
-                        .child(icon(
-                            theme,
-                            Symbol::DocOnClipboard,
-                            IconSize::Inline,
-                            hsla(s.text_muted),
-                        ))
+                        .child(icon(theme, Symbol::DocOnClipboard, hsla(s.text_muted)))
                 }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
-        let side = theme.typography.icon_large();
+        let side = theme.typography.icon();
         let touch = theme.density == slopty_theme::Density::TOUCH;
         // A worker on another build: Update in place of its readouts, at rest too, since it
         // links again only once updated.
@@ -3401,7 +3418,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Plus, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();
@@ -3441,7 +3458,7 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(measure)
-                .child(icon(theme, Symbol::Ellipsis, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Ellipsis, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     cx.stop_propagation();
@@ -3560,7 +3577,7 @@ impl WorkspaceView {
             if group.muted { ", muted" } else { "" },
             if folded { ", folded" } else { "" }
         ));
-        // The name at the medium weight, its glyph beside it.
+        // The name at the action role's weight, its glyph beside it.
         let named = theme.roles().action.weight;
         let glyph = crate::palette::lead_mark(
             theme,
@@ -3589,7 +3606,7 @@ impl WorkspaceView {
                 div()
                     .debug_selector(move || format!("nav-group-{what}-{mark_key}"))
                     .flex_none()
-                    .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)))
+                    .child(icon(theme, glyph, hsla(s.text_muted)))
             })
             .collect::<Vec<_>>();
         let hover_group = SharedString::from(format!("nav-group-hover-{key}"));
@@ -3628,7 +3645,7 @@ impl WorkspaceView {
                     .child(SharedString::from(place))
             }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
-        let side = theme.typography.icon_large();
+        let side = theme.typography.icon();
         let add = group.new_shell.clone().filter(|_| !touch).map(|(worker, cwd)| {
             let add_key = key.clone();
             let el = div()
@@ -3644,7 +3661,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
-                .child(icon(theme, Symbol::Plus, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Plus, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();
@@ -3730,11 +3747,26 @@ impl WorkspaceView {
                     .inset_0()
                     .bg(super::panes::drop_ink(theme))
             });
+        // Delta's colour bar: a project that wears a colour of its own says it down the row's
+        // leading edge too, two points wide.
+        let bar = crate::identity::wears_identity(&key).then(|| {
+            let bar_key = key.clone();
+            div()
+                .debug_selector(move || format!("nav-group-bar-{bar_key}"))
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(IDENTITY_BAR))
+                .bg(hsla(group_ink(theme, &key)))
+        });
         let row = row(theme, kit::Row::One, format!("nav-group-{key}"), label, false);
         Self::project_menu_press(row, key, group.new_shell.clone(), cx)
+            .relative()
             .group(hover_group)
             .child(spot)
             .children(wash)
+            .children(bar)
             .child(lead)
             .child(name)
             .children(marks)
@@ -3781,7 +3813,7 @@ impl WorkspaceView {
             .items_center()
             .min_w_0()
             // "Board" is one short word and stays whole; the words beside it give way instead.
-            .child(title(BOARD, hsla(s.text_secondary)).flex_none())
+            .child(div().flex_none().text_color(hsla(s.text_secondary)).child(BOARD))
             .child(
                 tabular(meta(div(), theme))
                     .flex_1()
@@ -3847,7 +3879,7 @@ impl WorkspaceView {
             .pl(px(theme.spacing.sm + nest_step(theme)))
             .child(lead)
             .child(
-                title(t.title.clone(), hsla(ink))
+                title(theme, t.title.clone(), hsla(ink))
                     .group_hover(row_group, move |st| st.text_color(hsla(s.text))),
             )
             .children(t.word.map(|word| readout(theme, word)))
@@ -3987,7 +4019,7 @@ impl WorkspaceView {
         let close = div()
             .relative()
             .flex_none()
-            .min_w(px(theme.typography.icon_large()))
+            .min_w(px(theme.typography.icon()))
             .h(px(first))
             .flex()
             .items_center()
@@ -4002,7 +4034,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .child(
-                title(t.title.clone(), hsla(ink))
+                title(theme, t.title.clone(), hsla(ink))
                     .group_hover(row_group.clone(), move |st| st.text_color(hsla(s.text))),
             )
             .child(close);
@@ -4040,7 +4072,7 @@ impl WorkspaceView {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xxs))
-                .child(icon(theme, GitGlyph::of_stands(pull.stands), IconSize::Inline, hsla(ink)))
+                .child(icon(theme, GitGlyph::of_stands(pull.stands), hsla(ink)))
                 .child(SharedString::from(pull.named()))
         });
         let line2 = t.two_lines().then(|| {
@@ -4070,6 +4102,8 @@ impl WorkspaceView {
                 .children(end)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
+        // Under its header, and once more under the lead it helps.
+        let depth = 1_u8.saturating_add(u8::from(t.nested));
         let row = row(theme, lines, format!("nav-tile-{id}"), label.into(), selected)
             // Pressed and moved, the row carries its tile; a finger's move scrolls the list.
             .when(theme.density != slopty_theme::Density::TOUCH, |row| {
@@ -4088,8 +4122,9 @@ impl WorkspaceView {
             .items_center()
             // The kind's glyph under the worker's name, past its icon and the gap after it: the
             // slot is wider than the glyph centred in it, so it starts that margin to the left.
-            .pl(px(f32::from(1_u8.saturating_add(u8::from(t.nested)))
-                .mul_add(nest_step(theme), theme.spacing.sm)))
+            .pl(px(f32::from(depth).mul_add(nest_step(theme), theme.spacing.sm)))
+            .relative()
+            .children((0..depth).map(|guide| indent_guide(theme, guide)))
             .child(
                 div()
                     .debug_selector(move || format!("nav-lines-{id}"))
@@ -4264,8 +4299,8 @@ fn within(repo: &str, cwd: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
-/// A section's heading, as every list in the frame heads its sections: the quiet label, a large
-/// step below the rows before it unless it is the list's `first` row.
+/// A section's heading, as every list in the frame heads its sections: the quiet label a row
+/// tall, a small step below the rows before it. `first` is the list's first row.
 fn heading(
     theme: &Theme,
     selector: SharedString,
@@ -4274,26 +4309,30 @@ fn heading(
 ) -> Stateful<Div> {
     let id = selector.clone();
     let spacing = theme.spacing;
-    // A tier under the rows it heads, `MonoCode`'s section header: its words 16 in from the
-    // panel's edge (the list's 8 and a row's 8), 4 over them and 6 under, sections a base unit
-    // apart.
+    // Zed's sidebar section head: a row's height, Small in `text_secondary` on the rows' edge
+    // grid, 6 above it. The same box wherever it falls: the list measures a row once, and a
+    // head that rose to the top or left it keeps its shape and its measured height.
+    let above = spacing.xs + spacing.xxs;
     crate::palette::section_heading(theme, id.into(), text, first)
-        .text_color(hsla(theme.surfaces.text_muted))
-        .px(px(spacing.lg))
-        .pt(px(if first { spacing.xs } else { spacing.sm + spacing.xs }))
-        .pb(px(spacing.xs + spacing.xxs))
+        .text_color(hsla(theme.surfaces.text_secondary))
+        .px(px(spacing.sm))
+        .pt(px(above))
+        .pb_0()
+        .h(px(theme.density.row + above))
+        .flex()
+        .items_center()
         .debug_selector(move || selector.to_string())
 }
 
 /// The least the worker header's trailing part takes: the chevron and "+" side by side.
 fn header_actions_width(theme: &Theme) -> f32 {
-    theme.typography.icon_large().mul_add(2.0, theme.spacing.xxs)
+    theme.typography.icon().mul_add(2.0, theme.spacing.xxs)
 }
 
 /// The least a machine's header's trailing part takes: "+" and "…" side by side (the chevron
 /// stands in its glyph's place).
 fn machine_actions_width(theme: &Theme) -> f32 {
-    theme.typography.icon_large().mul_add(2.0, theme.spacing.xxs)
+    theme.typography.icon().mul_add(2.0, theme.spacing.xxs)
 }
 
 #[cfg(test)]

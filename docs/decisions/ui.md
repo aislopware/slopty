@@ -402,11 +402,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Continuous redraw model.** GPUI is reactive; video surfaces call
   `Window::request_animation_frame()` every frame, as zed's GIF and LiveKit views do.
 
-- ✅ **Fonts are bundled, never system-resolved.** JetBrains Mono 2.304 (OFL) + Symbols Nerd Font
-  Mono (MIT) ship inside `slopty-ui` and are registered with `TextSystem::add_fonts` at startup;
-  every run carries a `FontFallbacks` chain (symbols → Menlo → Apple Color Emoji). Evidence
-  2026-09-04: "JetBrains Mono" was not installed on the dev Mac and GPUI silently resolved a
-  proportional face, producing broken cell alignment. Bundling also makes iOS identical.
+- ✅ **Fonts are bundled, never system-resolved.** IBM Plex Sans and Lilex (both OFL, since
+  2026-10-12; JetBrains Mono 2.304 before, and the system face for the chrome) + Symbols Nerd
+  Font Mono (MIT) ship inside `slopty-kit` and are registered with `TextSystem::add_fonts` at
+  startup; every terminal run carries a `FontFallbacks` chain (symbols → Menlo → Apple Color
+  Emoji). Evidence 2026-09-04: "JetBrains Mono" was not installed on the dev Mac and GPUI
+  silently resolved a proportional face, producing broken cell alignment. Bundling also makes
+  iOS identical.
 
 - ✅ **Terminal zoom scales paint, not the grid.** `TerminalElement::zoom` derives cols×rows from
   the *unscaled* item rect and paints at `font_size × zoom`; zooming never resizes the PTY. Shaped
@@ -2929,8 +2931,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `.research/design-critique-round2-2026-09-27.md` §2 #1, #2, #5, #12, #15, #16, #22 and §3).
   What several surfaces draw is drawn once, in `kit`, and a lint keeps it there.
   - **A diff's size is `kit::changes`** (`changes_at` at a zoom; `changes_text` for a line of
-    plain text). Only the signs take the diff's tones; the figures are `text_secondary`,
-    tabular; a side that is zero is left out, and no change draws nothing. The header chip
+    plain text; its tones amended 2026-10-12 by **The kit's pieces are Zed's**, each side
+    wholly in its tone in Lilex). Only the signs take the diff's tones; the figures are
+    `text_secondary`, tabular; a side that is zero is left out, and no change draws nothing. The header chip
     coloured the signs while the diff head, the fold and "Changed 1 file" coloured the whole
     figure, and a red "−0" read as an error about nothing. Amp's fold sets its counts plain.
   - **The one gradient is `kit::edge_fade(edge, surface, depth)`**, a mask from clear to the
@@ -4769,6 +4772,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_kit_theme_follows_the_tokens`, `the_accent_is_never_a_control`,
     `chrome_has_no_colour_literals`, `chrome_sizes_come_from_the_scale`,
     `chrome_holds_still_under_reduce_motion`; `markdown::tests::a_task_box_is_drawn_not_typed`.
+  (Superseded 2026-10-12 by **The design system is Zed's, with Delta's values**.)
 
 - ✅ **Text at the weight it is set in** (2026-10-02, design checkpoint 0). macOS's font smoothing
   thickens a glyph by the luminance of its colour, and GPUI copied it, so the dark theme's light
@@ -5696,7 +5700,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     landed, then went: the person ruled every surface solid, in "The design system starts from
     MonoCode's".)
 
-- ✅ **SF's optical size and tracking, measured** (2026-10-03, study §3 #12). The study asked
+- ✅ **SF's optical size and tracking, measured** (2026-10-03, study §3 #12). (Superseded
+  2026-10-12: the chrome sets the bundled IBM Plex Sans, a static face with no optical sizes, so
+  the test went with SF; **The design system is Zed's, with Delta's values**.) The study asked
   whether GPUI sets the system face as Core Text does. A test lays out "Connect to a server"
   at 13, 20 and 26 pt through GPUI and through a Core Text line from `NSAttributedString`
   and compares the advances and the face. Both name `.SFNS-Regular` at every size, and the
@@ -7961,7 +7967,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `icons::git::tests::{every_git_glyph_reads, a_git_glyph_is_drawn_at_its_words_size,
     the_git_glyphs_are_crisp_at_1x}`.
 
-- ✅ **The working mark is a braille cell** (2026-10-06). Overrules the twelve spokes of "The
+- ✅ **The working mark is a braille cell** (Superseded 2026-10-12 by **The state marks are
+  Zed's geometry**; 2026-10-06). Overrules the twelve spokes of "The
   chrome's icons are SF Symbols" and "State is a glyph". The person found the spokes ugly and
   dated: Apple's activity indicator from the Aqua years, and pale, because eleven of its twelve
   spokes were faded copies of the hue. The bar is MonoCode and T3 Code.
@@ -8741,13 +8748,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `workspace::tab_look::tests`, `kit::message::tests`,
       `conversation::thread::tests::face::the_composer_bleeds_in_a_narrow_pane`,
       `conversation::thread::tests::face::the_one_solid_stops_a_turn_or_sends_the_draft`.
+  (Superseded 2026-10-12 by **The design system is Zed's, with Delta's values**.)
 
-- ✅ **The chrome's icons are Tabler's, and a file's are Material's** (2026-10-07, the person's
-  pick in `.research/tabler-palette-2026-10-06.md`, the stroke and the ladder from
-  `.research/monocode-system-2026-10-06.md` §(f) and `.research/zed-warp-system-2026-10-06.md`
-  item 15). Supersedes "The chrome's icons are SF Symbols" and the Octicons of "An icon takes
-  its words' size, weight and tier". One icon family on every platform, in place of the OS's
-  catalogue and a second set for git.
+- ✅ **The chrome's icons are Tabler's, and a file's are Material's** (Superseded 2026-10-12 by
+  **The chrome's icons are IBM Carbon's at 16**, the file icons now one silhouette in
+  one ink; 2026-10-07, the person's pick in `.research/tabler-palette-2026-10-06.md`, the
+  stroke and the ladder from `.research/monocode-system-2026-10-06.md` §(f) and
+  `.research/zed-warp-system-2026-10-06.md` item 15). Supersedes "The chrome's icons are SF
+  Symbols" and the Octicons of "An icon takes its words' size, weight and tier". One icon
+  family on every platform, in place of the OS's catalogue and a second set for git.
   - **Tabler, drawn by us on whole pixels.** Each glyph is a vendored Tabler file
     (`assets/icons/tabler/`, v3.49.0, MIT, stroked at 1.75 in place of 2), read into an outline
     and drawn on its 24 grid by `slopty_platform::outline::rasterize_on_grid`: the grid scaled
@@ -8983,6 +8992,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     take `Pace::Pane` and `Pace::Sheet` as they come to it.
   - Tests: `slopty_theme::tests::a_curve_runs_from_rest_to_landed` and
     `kit::tests::the_paces_are_the_motion_tokens`.
+  (Superseded 2026-10-12 by **The design system is Zed's, with Delta's values**.)
 
 - ✅ **A pane of tabs names no place, and alike files by their folders** (2026-10-07, golden
   review). A pane of tabs put the shown tile's place after its tabs, so a terminal's row ended
@@ -10626,3 +10636,212 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The lints** sweep `slopty-terminal/src` with the rest of `CHROME`.
     `overflow::the_sweeps_flag_the_terminal` holds that a check reads the terminal's view.
   - Numbers: `docs/MEASUREMENTS.md`, "slopty-ui split, step 2".
+
+- ✅ **The design system is Zed's, with Delta's values** (2026-10-12,
+  `.research/zed-clone-2026-10-11.md`, as ruled; supersedes "The design system starts from
+  MonoCode's", "MonoCode's calm, the brand's green, a neutral primary" and "Motion's numbers are
+  MonoCode's", and is amended as each step of the port lands). The person found the window
+  dated after the MonoCode port and ruled that Slopty clones Zed's interface and Delta, Zed
+  Industries' agent app: square, technical and modern. Zed's design system and components are
+  taken from its source as values and anatomy, never code (its UI crates are GPL); Delta is
+  closed, so its values come from the theme tokens its public page carries.
+  - **Three cool planes.** The work is darkest (`ground`, Delta's `editor.background`
+    `#191c1f`), the navigator a step up (`sidebar`, `#202327`), and what floats a step more
+    (`elevated`, `#22252a`). New planes: `tab_bar` (`#21242a`), a column's `header`
+    (`#1b1e21`), a `well` for code and commands (`#16191b`) and a call card's `card_head`
+    (`#25282e`). Light is One Light (`#fafafa` work, `#ebebec` panels and floats). The planes
+    carry a small blue chroma, hue about 215°, where the MonoCode greys were true neutrals.
+  - **Opaque lines and states.** `stroke` is Zed's `border.variant` and `border` its `border`,
+    in two weights (1.22 and 1.41 against the dark work). One hover and one selection, the same
+    opaque tone on every plane (`#272a2f` and `#2c2f35`); `keyed` and `pressed` are the
+    selection, told apart by the keyboard's border. The 7 % and 10 % ink tints, the strong
+    hover, the 3 % card wash and the 3:1 control outline are gone: a card rests on the work's
+    ground inside its `border`, a well on `well`, a field on the ground, and an unticked box is
+    outlined in `border`. `Tint` stays for the real washes: a selection over text, the quiet
+    status grounds, a diff's changed words, the indent guide in light and the drop target.
+  - **Colour is state and the accent.** The accent is Zed's blue (`docs/decisions/brand.md`,
+    "Green is the mark's and success's"), working is the accent, merged Zed's violet player,
+    and Zed's status grounds and lines (`info_*`, `success_*`, `warning_*`, `error_*`), diff
+    bands (`vc_*`) and line numbers join the tokens. The identity hues move to 57, 162, 184,
+    206, 228, 292.5 and 350 degrees (and the sand) to keep 20 degrees from every state now
+    that the accent is blue and success sits at 130 to 140.
+  - **Text is lifted, not redrawn.** Text, secondary and muted start from Zed's `text`,
+    `text.muted` and `text.placeholder` and are lifted toward white or black only as far as WCAG
+    AA and APCA's floors need on every plane and on a hovered or selected row: dark muted moves
+    from `#878a98` to about `#9b9ea9`, and One Light's words, which read 2.3 to 3.8 on paper, to
+    `#465bac`, `#44693b` and `#725f11`. Light's red word is One Light's darkened a quarter,
+    `#74352d`: at the lift's `#9b473c` a deuteranope saw it 0.03 Oklab from the green and the
+    amber (`vision`).
+  - **The focus border** is Zed's `border.focused`, 1 pt all round with 2 on a keyed row's right
+    edge, moved toward the accent until it stands 3:1 off every plane and row it rings; Zed's
+    own read 2.4 on a selected row.
+  - **Zed's sizes.** Radii 2, 4, 6 and 8, with dialogs at 8 as every float. A pointer's density
+    is a 34 pt title bar, 32 pt tab bars whose tabs fill them, 24 pt rows, 22 pt buttons, chips
+    and controls, a 30 pt status bar and a 4 pt sash. The chrome label is 14 (the setting's
+    default moves from 13), with 12 and 10 under it and 16 pt icons; prose is 14 on Delta's
+    1.625. Every role is the regular weight but a panel's and a page's title: the medium weight
+    is gone, and chosen is said by tone. The row inset is 8, the trailing 6.
+  - **Zed's motion.** A hover or a press lands at once; fast is 150 ms and slow 300, on the same
+    ease-out quint; the live pulse breathes over 2 s.
+  - **The terminal** takes One Dark's colours on the new ground (its bright black lifted to
+    read AA), the accent's blue caret and a blue selection; light keeps the generated ANSI, since
+    One Light's yellow and white read under 2:1 on paper.
+  - **Zed's two faces, bundled** (step 2). The interface is IBM Plex Sans 3.005 (`.ZedSans`) in
+    the four weights Zed ships, Regular, Italic, SemiBold and SemiBold Italic, and code and the
+    terminal are Lilex 2.630 (`.ZedMono`, Plex Mono with ligatures) in Regular, Bold and their
+    italics. Both are OFL and ship in `slopty-kit/assets/fonts` with their licences; JetBrains
+    Mono and the system face go. gpui-kit's theme takes both families, so its fields, tooltips
+    and editors match the chrome. Lilex at 13 pt makes the same 8 by 17 cell JetBrains Mono did
+    (`hhea` 999 and −301 against 1020 and −300), so the terminal's grid keeps its size; at 2× the
+    baseline lands one device pixel lower.
+  - Tests: `slopty-theme` `tests` and `vision`, `slopty-kit`
+    `fonts::bundled::each_family_weight_and_slant_is_the_bundled_face`, `slopty-terminal`
+    `metrics`, the e2e `check_lilex_face`, and every golden, retaken.
+
+- ✅ **The chrome's icons are IBM Carbon's at 16** (2026-10-12, `.research/zed-clone-2026-10-11.md`
+  §4, step 3 of the Zed port; supersedes the chrome's half of "The chrome's icons are Tabler's,
+  and a file's are Material's"). The person read Tabler's round 24-grid strokes, the Lucide
+  family, as dated. Zed's own icons are GPL and cannot ship in Slopty, so the set is IBM
+  Carbon (`@carbon/icons` 11.90.0, Apache-2.0): IBM Plex's companion, square terminals, lines
+  of two units on a 32 grid, a figure 24 of 32 units, about Zed's visual size at 16.
+  - **Vendored as path data.** `assets/icons/carbon/` keeps the 87 files the chrome draws with
+    Carbon's licence and a `NOTICE` that pairs each `icons::Symbol` with its file and says what
+    was changed: titles, transparent boxes and knocked-out inner paths dropped, circles and
+    transforms turned into path data. A glyph is filled on its 32 grid scaled to whole device
+    pixels (`rasterize_on_grid`), so at 16 pt a line is one device pixel at 1x and two at 2x
+    with nothing to snap. The stroked path, `outline::Ink`, went with Tabler.
+  - **One slot, 16.** `Typography::icon` is every icon's slot, a row's lead, a bar's button, a
+    status mark, beside any words, on a pointer and a finger alike; `IconSize`, its 14 and 20 pt
+    slots, `icons::beside` and `Typography::icon_large` are deleted. A disclosure chevron stays
+    on the 12 pt grid, Zed's extra-small icon.
+  - **Fewer names.** Carbon has one glyph where Tabler had two, so the duplicates went: the
+    braces are the code glyph, the text search the search, the new agent's square-and-pencil
+    the pencil, and a draft or closed pull request is the pull request in its state's ink. An
+    agent with no mark of its own wears Carbon's `ai-agent`. Six glyphs nothing drew went.
+  - **A file's icon is one silhouette** (supersedes the file half of the Tabler entry). Zed and
+    Delta draw a file's type as a single-colour glyph, so Material's shapes stay but are drawn
+    as their coverage in the ink beside them, the colours dropped, through the same mask path as
+    a glyph. The light variants (Bun, Deno, TOML) went with the colours. An icon whose figure is
+    a second colour drawn over its first reads as a blob in one ink: measured as colour edges
+    between solid pixels against its outline's edges at 32 px, Bun's face lost 0.87 of its
+    figure, Dart's 0.78, CMake's 0.49 and Protobuf's 0.29, where Vue lost 0.09, the TypeScript
+    config 0.05 and every other none. Those four went; Dart, Protobuf and CMake files take the
+    code glyph and Bun's lock is a lock.
+  - Tests: `slopty-kit` `icons::glyphs::tests` (every glyph reads on the 32 grid and is drawn
+    at 16, the folder and the terminal on whole pixels at 1x),
+    `icons::tests::an_icon_fills_its_slot_of_sixteen`,
+    `icons::git::tests::each_git_glyph_is_carbons`,
+    `icons::tests::a_file_icon_is_one_silhouette_at_its_size`,
+    `file_types::tests::a_file_is_known_by_its_name_then_its_extension`, `slopty-platform`
+    `outline::tests::a_glyph_is_drawn_on_its_grid`, and the goldens.
+
+- ✅ **The state marks are Zed's geometry** (2026-10-12, `.research/zed-clone-2026-10-11.md` §4.3,
+  step 3 of the Zed port; amends "State is a glyph" and supersedes "The working mark is a
+  braille cell"). Carbon's own status circles are 28 of 32 units, larger than Zed's, so a state
+  is drawn by us (`icons::Ring`) as one family at Zed's size: a figure 10 points across in the
+  16 point slot, its line a device pixel at 1x and two at 2x, its edge on the pixel grid.
+  - **The family.** Idle and up next an empty ring; waiting a ring of six dashes; verifying a
+    ring with a pie of its share; ready to merge a ring holding a check. Needs you, failed, a
+    finish not yet seen and merged are filled discs with `!`, `×` or a check knocked out, in
+    `warn_fill`, `error_fill`, `success_fill` and `merged_fill`. Away stays a glyph, Carbon's
+    `wifi--off`. The holes are cut by GPUI's even-odd fill: each figure is one simple outline,
+    the cross a twelve-sided plus turned an eighth, and the exclamation mark's bar and dot are an
+    even count of device pixels about the centre, which lies on a pixel's edge.
+  - **Working is Zed's turning circle**: a quarter arc in `working_fill` going round a track of
+    the same ink at a quarter, one turn in two seconds, stepped two dozen times a turn on the spin
+    clock, so a window with an agent at work still draws twelve frames a second for it. Under
+    Reduce Motion it stands still as a quarter pie and wakes nothing, where the braille cell
+    breathed five frames a second; the breath and the cell's dots are deleted.
+  - Tests: `slopty-kit` `icons::ring::tests` (ten points and a pixel at 1x, the dashes' gaps,
+    the pie, the turning arc, each disc's figure inside its edge and on whole pixels, the ready
+    ring's check), `icons::tests::each_status_has_its_own_mark`,
+    `the_working_mark_steps_two_dozen_times_a_turn_and_stands_under_reduce_motion`,
+    `a_pinned_or_still_mark_wakes_nothing`, and `slopty-ui`
+    `a_working_mark_draws_twelve_frames_a_second_and_none_at_rest`.
+
+- ✅ **The kit's pieces are Zed's** (2026-10-12, `.research/zed-clone-2026-10-11.md` §3.2,
+  §3.4 and §5.5, step 4 of the Zed port; amends "Design critique round two, wave A" on a
+  diff's size and the Raycast fade on a list's rule). Each piece every surface draws from
+  `kit` takes Zed's anatomy, so the surfaces that follow inherit it.
+  - **Buttons** are Zed's styles: the primary Tinted Accent (`info_background` inside
+    `info_border`, the words in `text`), the secondary Outlined (`stroke` ring, `border` under
+    the pointer), the quiet Subtle, the destructive Tinted Error. The white or black solid is
+    deleted with its tokens. An icon button is the density's 22 pt square at 4 round the
+    16 pt icon in `icon_muted`; the pointer washes it and leaves its ink.
+  - **Rows** are Zed's list item: 24 pt, their parts 4 apart (`gap_1`), 8 in and 6 from the
+    end; inside a float they round at 4, inside its 8.
+  - **Floats** are Zed's elevated surface: the `elevated` plane inside `stroke` (Zed's
+    `border.variant`), not `border`. A menu is 192 to 384 wide by its rows, its entries'
+    icons `icon_muted`, its keys in `text_secondary` Small, its separators `stroke`. A hint is
+    a float too, rounded 8, 4 by 8 inside, its words at the chrome size up to 288 wide, its
+    keys 16 after them. A list's rule is a plain `stroke` line, the fade at its ends gone.
+  - **A segmented control** is Zed's toggle button group: its options joined inside the
+    `border` ring with no pad, the chosen one's wash filling the ring's corner.
+  - **The pane divider** is `border`, Zed's, where it was `stroke`; its hit stays 4.
+  - **A diff's size is Delta's**: Lilex, each side wholly in its tone (`success`, `error`), the
+    zero side still left out, so no red "‒0" can say an error about nothing.
+  - Tests: `slopty-kit` `kit::tests::a_float_and_its_rows_are_zeds`,
+    `density_sizes_the_targets_not_the_icons`, `a_field_sinks_where_a_card_rises` (the
+    thumb's corner), `a_diff_size_drops_its_zero_side`, `a_button_is_zeds_and_one_height`,
+    `kit::pane::tests::a_sash_is_the_one_line`; `slopty-ui`
+    `lints::a_floating_surface_is_rounded_lg` (the hint).
+
+- ✅ **Tabs are Zed's cells, the foot Zed's status bar** (2026-10-12,
+  `.research/zed-clone-2026-10-11.md` §3.4, §5.1, §5.2 and §5.4, step 5 of the Zed port;
+  supersedes the pill tabs of "The one look of a tab" from MonoCode's anatomy).
+  - **A tab is a square cell** its bar's full height, as wide as its title from 120 to 240 pt
+    (the title faded over its last 40 when cut). The tab on show is the work's ground with the
+    `border` line on its sides and none under it, so it opens into the pane; the rest are bare
+    words in `text_secondary`, washed under the pointer. A pane's tabs and the title bar's are
+    the one look; the pane tab "a level under" went. A pane that holds tabs is Zed's tab bar,
+    the `tab_bar` plane with the `border` line along its foot; a lone tile's header stays on its
+    pane's ground. The edited dot and the split's focus dot are Zed's 6 pt indicator in the
+    accent. A tab opening grows its slot's ceiling from nothing, stopping at its own width.
+  - **The foot is Zed's status bar**: 30 pt on the panel's plane (`sidebar`) under the lighter
+    `stroke` line, 4 in at its ends, its parts 8 apart, its words Small (12) in
+    `text_secondary`. The tab's terminal toggle is an icon button, on while the terminal shows,
+    its hint naming it and its keys; the word "Terminal" went.
+  - **The title bar is Zed's**: the title height on the panel's plane, as the navigator and the
+    foot are, so the tab on show is the one cell on the work's ground. The breadcrumb's
+    segments are Zed's title-bar project and branch buttons, a button tall and 6 in, their
+    words Small. While the navigator is docked it names the project, and the bar keeps neither
+    the breadcrumb nor the bell, where Zed's keeps its project buttons: the same name twice a
+    few points apart is noise.
+  - Tests: `slopty-ui`
+    `workspace::tab_look::tests::the_shown_tab_opens_into_its_pane_and_the_rest_are_bare`,
+    `workspace::tests::tab_strip::the_shown_title_tab_is_a_cell_open_to_the_work`, the growth
+    tests in `tab_strip` and `tiles`,
+    `workspace::tests::foot::the_foot_bar_runs_along_the_windows_foot`.
+
+- ✅ **The navigator is Zed's sidebar** (2026-10-12, `.research/zed-clone-2026-10-11.md` §5.3,
+  step 6 of the Zed port; supersedes the pill rows and the rail actions taken from MonoCode).
+  - **Rows run square, edge to edge**: the density's 24 pt (42 for two lines), 8 in, their
+    parts 6 apart, their words in `text`; the pointer's wash under them and the selection's
+    plate square (`Plate::square`, the file tree's too), where a float's rows keep `radii.sm`.
+  - **Section heads** are a row tall, Small in `text_secondary` on the rows' edge grid, 6 above
+    each. A head is the same box wherever it falls, as the list measures a row once and keeps
+    its height while its shape holds.
+  - **A focused row that grows a line stays whole in view.** The list reveals the focused row
+    once per move of the focus; an agent asking then grows its row by the second line (18 pt),
+    which pushed its foot past the list's 12 pt foot pad. A focused row wholly in view that
+    changes its shape asks the list to keep it in view, as a reveal does; one scrolled away
+    stays where the person left it.
+  - **Titles fade** over their last 40 pt while cut, as the tabs' do, rather than ending in an
+    ellipsis.
+  - **Indent guides**: a tile's row draws Delta's hairline in `indent_guide` down the middle of
+    its head's glyph, the row's full height, so the rows under one head meet in one line.
+  - **No foot row.** Delta's sidebar foot names the server and holds the settings; here a
+    healthy link says nothing (the title bar's readout speaks only while the server does not
+    answer) and the settings are in "…", so a foot row would say only what needs no saying.
+  - **The header is one row** under the lights row, ending on the lighter `stroke` line: the
+    unboxed filter (the search glyph in `icon_muted` and "Search" in the placeholder's tone,
+    the field in its place while it shows) with New goal and New agent as icon buttons at its
+    end, their hints naming their keys. The boxed Search row and the two action rows went.
+  - **A project's colour** runs down its row's leading edge as Delta's 2 pt bar, beside its
+    glyph's.
+  - Tests: `slopty-ui`
+    `workspace::tests::nav_rows::the_filter_waits_hidden_until_search_its_keys_or_typing`,
+    the phone home's test in `nav_rows`,
+    `workspace::tests::nav_list::needs_you_lists_a_waiting_tile_scrolled_out_of_view`,
+    `workspace::tests::nav_list::a_tiles_row_hangs_from_its_head_by_the_indent_guide` and
+    `lints::a_tabs_title_fades_over_its_end`.

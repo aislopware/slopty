@@ -30,7 +30,7 @@ use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Status, Symbol};
+use slopty_kit::icons::{Status, Symbol};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
@@ -1231,7 +1231,7 @@ impl ThreadView {
     }
 
     fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
-        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, hsla(tone))
             .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
@@ -1302,12 +1302,11 @@ impl ThreadView {
             .border(kit::HAIR)
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer();
-        // The kinds as `kit::button` draws them; the hairline is the solid's own or none, so a
+        // The kinds as `kit::button` draws them; the hairline is the tinted one's own or none, so a
         // row of them keeps one height.
         let el = match kind {
-            ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
+            ButtonKind::Primary => kit::tinted_pressable(el, theme),
             ButtonKind::Destructive => {
                 kit::destructive_pressable(el.border_color(gpui::transparent_black()), theme)
             }
@@ -1349,13 +1348,8 @@ impl ThreadView {
                 .text_color(hsla(s.text_muted))
                 .hover(move |el| el.text_color(hsla(s.text)))
                 .child(
-                    slopty_kit::icons::icon(
-                        &self.theme,
-                        icon,
-                        IconSize::Inline,
-                        hsla(s.text_muted),
-                    )
-                    .size(px(self.theme.typography.icon())),
+                    slopty_kit::icons::icon(&self.theme, icon, hsla(s.text_muted))
+                        .size(px(self.theme.typography.icon())),
                 ),
             s.focus,
         )
@@ -1636,7 +1630,7 @@ impl ThreadView {
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .size(px(theme.typography.icon_large()))
+                .size(px(theme.typography.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2235,7 +2229,6 @@ impl ThreadView {
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .text_size(px(theme.typography.small()))
-                                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                                 .text_color(hsla(s.text))
                                 .child(SharedString::from(title)),
                         )
@@ -2862,7 +2855,7 @@ fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyEl
                 .id("copy")
                 .role(Role::Button)
                 .aria_label("Copy code")
-                .size(px(theme.typography.icon_large()))
+                .size(px(theme.typography.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2870,13 +2863,8 @@ fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyEl
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
-                    slopty_kit::icons::icon(
-                        theme,
-                        Symbol::DocOnDoc,
-                        IconSize::Inline,
-                        hsla(s.text_muted),
-                    )
-                    .size(px(theme.typography.icon())),
+                    slopty_kit::icons::icon(theme, Symbol::DocOnDoc, hsla(s.text_muted))
+                        .size(px(theme.typography.icon())),
                 )
                 .on_click(move |_ev, _window, cx| {
                     cx.stop_propagation();

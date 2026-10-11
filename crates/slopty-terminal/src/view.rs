@@ -1148,7 +1148,7 @@ impl TerminalView {
                 .py(px(spacing.xxs))
                 .rounded(px(radii.xs))
                 .cursor_pointer()
-                .when(accent, |el| slopty_kit::kit::solid(el, theme))
+                .when(accent, |el| slopty_kit::kit::tinted(el, theme))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
@@ -1427,10 +1427,11 @@ impl TerminalView {
 
     /// The selected text: trailing blanks trimmed per line, lines joined with newlines. A run
     /// joins a soft-wrapped row to the one before it with nothing between, so a long line or a
-    /// wrapped word copies whole. Lines not in the scrollback cache come out empty.
+    /// wrapped word copies whole. Either half of a wide character at an end copies the
+    /// character. Lines not in the scrollback cache come out empty.
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
-        let selection = self.selection?;
+        let selection = self.copied(self.selection?);
         let (start, end) = selection.ordered();
         let cols = self.state.size().cols;
         let mut text = SelectionText::new(selection);
@@ -1440,23 +1441,40 @@ impl TerminalView {
         Some(text.finish())
     }
 
+    /// What a copy of `selection` takes: a run that ends on the spacer a wide character left at
+    /// the right edge, when the terminal wrapped the character onto the next row, ends on that
+    /// character instead, as Ghostty copies it (ghostty-org/ghostty#14632). A start on a
+    /// tail is [`copied_cells`]'s. A block's rows stand apart, so its ends stay.
+    fn copied(&self, selection: Selection) -> Selection {
+        if selection.block {
+            return selection;
+        }
+        let (start, (index, col)) = selection.ordered();
+        let on_head = self
+            .state
+            .line(index)
+            .and_then(|line| line.cells.get(usize::from(col)))
+            .is_some_and(|cell| cell.width == CellWidth::SpacerHead);
+        let below = index.next();
+        let carried = self.state.line(below).is_some_and(|line| {
+            line.flags.contains(LineFlags::WRAPPED)
+                && line.cells.first().is_some_and(|cell| cell.width == CellWidth::Wide)
+        });
+        if on_head && carried { Selection::run(start, (below, 1)) } else { selection }
+    }
+
     /// Whether the selection covers any text: what the block menu's Copy needs, without
     /// building the text on every frame the menu is drawn.
     fn selection_has_text(&self) -> bool {
-        let Some(selection) = self.selection else { return false };
+        let Some(selection) = self.selection.map(|s| self.copied(s)) else { return false };
         let (start, end) = selection.ordered();
         let cols = self.state.size().cols;
         (start.0.0..=end.0.0).any(|index| {
             let index = LineIndex(index);
-            selection.columns(index, cols).zip(self.state.line(index)).is_some_and(
-                |(range, line)| {
-                    line.cells
-                        .iter()
-                        .skip(usize::from(range.start))
-                        .take(range.len())
-                        .any(|cell| !cell.text.as_str().trim().is_empty())
-                },
-            )
+            self.state.line(index).is_some_and(|line| {
+                copied_cells(selection, index, line, cols)
+                    .any(|cell| !cell.text.as_str().trim().is_empty())
+            })
         })
     }
 
@@ -1516,7 +1534,7 @@ impl TerminalView {
 
     /// The selection to the clipboard, once the history it covers is in.
     fn copy_selection(&mut self, cx: &Context<Self>) {
-        let Some(selection) = self.selection else { return };
+        let Some(selection) = self.selection.map(|s| self.copied(s)) else { return };
         let (start, end) = selection.ordered();
         self.copying = Some(Copying {
             epoch: self.state.epoch(),
@@ -1901,10 +1919,9 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let facts = self.block_facts(prompt);
-        let line = self
-            .metrics
-            .map_or_else(|| theme.typography.icon_large(), |m| f32::from(m.line_height));
-        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
+        let line =
+            self.metrics.map_or_else(|| theme.typography.icon(), |m| f32::from(m.line_height));
+        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon());
         // No taller than the line it ends.
         let more = slopty_kit::kit::icon_button(
             theme,
@@ -1957,7 +1974,8 @@ impl TerminalView {
         let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
         let inset = px(theme.spacing.inset());
         // Over a failed block's head the facts sit on its wash itself: a chip of its own there
-        // would be a lighter patch cut out of the one mark that says the command failed.
+        // would be a patch cut out of the one mark that says the command failed. Elsewhere they
+        // sit on an element's fill, which stands off the grid's own ground.
         let on_band = self.state.block_exit(prompt).is_some_and(|code| code != 0);
         Some(
             div()
@@ -1971,7 +1989,9 @@ impl TerminalView {
                 .occlude()
                 .pr(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.xs))
-                .when(!on_band, |el| slopty_kit::kit::raised(el, theme))
+                .when(!on_band, |el| {
+                    slopty_kit::kit::raised(el, theme).bg(hsla(theme.surfaces.element))
+                })
                 .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
         )
@@ -2969,13 +2989,8 @@ impl TerminalView {
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)))
             .child(
-                slopty_kit::icons::icon(
-                    theme,
-                    pill.icon,
-                    slopty_kit::icons::IconSize::Inline,
-                    hsla(s.text_secondary),
-                )
-                .size(px(theme.typography.icon())),
+                slopty_kit::icons::icon(theme, pill.icon, hsla(s.text_secondary))
+                    .size(px(theme.typography.icon())),
             )
             .child(slopty_kit::chrome_text::ChromeText::new(pill.words, small))
             .child(
@@ -4392,6 +4407,23 @@ enum Under {
     Path(url::PathSpan),
 }
 
+/// The cells of line `index` a copy of `selection` takes: its columns there, and the wide
+/// character whose tail they start on, which either half stands for.
+fn copied_cells(
+    selection: Selection,
+    index: LineIndex,
+    line: &slopty_grid::Line,
+    cols: u16,
+) -> impl Iterator<Item = &slopty_grid::Cell> {
+    let range = selection.columns(index, cols).unwrap_or(0..0);
+    let on_tail = line
+        .cells
+        .get(usize::from(range.start))
+        .is_some_and(|cell| cell.width == CellWidth::SpacerTail);
+    let from = if on_tail { range.start.saturating_sub(1) } else { range.start };
+    line.cells.iter().take(usize::from(range.end)).skip(usize::from(from))
+}
+
 /// A selection's text, built a line at a time in reading order: soft-wrapped rows join
 /// without a break, and a row's trailing blanks go unless the next row carries it on.
 struct SelectionText {
@@ -4420,10 +4452,8 @@ impl SelectionText {
             }
         }
         let mut text = String::new();
-        if let Some(range) = self.selection.columns(index, cols)
-            && let Some(line) = line
-        {
-            for cell in line.cells.iter().skip(usize::from(range.start)).take(range.len()) {
+        if let Some(line) = line {
+            for cell in copied_cells(self.selection, index, line, cols) {
                 if cell.width.draws_text() {
                     text.push_str(if cell.text.is_empty() { " " } else { cell.text.as_str() });
                 }
@@ -5844,14 +5874,14 @@ mod tests {
             .collect()
     }
 
-    /// A hovered block's facts sit on a raised chip (the card's wash), except over a failed
+    /// A hovered block's facts sit on a raised chip (an element's fill), except over a failed
     /// block, where they sit on the band itself: a lighter patch there would cut into the one
     /// mark that says the command failed.
     #[gpui::test]
     fn a_failed_blocks_facts_sit_on_its_band_without_a_chip(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let hover = hsla(Theme::default().surfaces.card);
+        let hover = hsla(Theme::default().surfaces.element);
         let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
         let chip_fill = |cx: &mut VisualTestContext, row: f32| {
             let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));
@@ -6662,6 +6692,58 @@ mod tests {
             assert_eq!(word(view, 102, 2), space(2), "the space's head is blank");
             assert_eq!(word(view, 102, 3), space(3), "and so is its tail");
             assert_eq!(word(view, 102, 5), Some(((LineIndex(102), 4), (LineIndex(102), 5))));
+        });
+    }
+
+    /// A copy takes a wide character whole from either end of the selection, as Ghostty does
+    /// (ghostty-org/ghostty#14632): a run ending on the spacer a wrapped one left at the edge
+    /// takes it from the next row, and a row's selection starting on a tail takes its head.
+    /// A block's rows stand apart, so its right edge takes nothing from the row below.
+    #[gpui::test]
+    fn a_copy_takes_a_wide_character_whole_from_either_end(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let wide =
+            |text: &str| [Cell::wide(text, Style::DEFAULT), Cell::spacer_tail(Style::DEFAULT)];
+        let mut f = history_frame(100, &["", "", ""]);
+        if let TermEvent::Frame(frame) = &mut f {
+            // `ab日本語x` and a spacer head, wrapped onto `文 d`.
+            let first = &mut Arc::make_mut(&mut frame.updates[0].line).cells;
+            first[0] = Cell::narrow('a', Style::DEFAULT);
+            first[1] = Cell::narrow('b', Style::DEFAULT);
+            first[2..4].clone_from_slice(&wide("日"));
+            first[4..6].clone_from_slice(&wide("本"));
+            first[6..8].clone_from_slice(&wide("語"));
+            first[8] = Cell::narrow('x', Style::DEFAULT);
+            first[9] = Cell { width: CellWidth::SpacerHead, ..Cell::BLANK };
+            let second = Arc::make_mut(&mut frame.updates[1].line);
+            second.flags |= LineFlags::WRAPPED;
+            second.cells[0..2].clone_from_slice(&wide("文"));
+            second.cells[3] = Cell::narrow('d', Style::DEFAULT);
+        }
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(f, cx);
+            let copy = |view: &mut TerminalView, selection: Selection| {
+                view.selection = Some(selection);
+                (view.selected_text(), view.selection_has_text())
+            };
+            let run = |from: (u64, u16), to: (u64, u16)| {
+                Selection::run((LineIndex(from.0), from.1), (LineIndex(to.0), to.1))
+            };
+            let said = |text: &str| (Some(text.to_owned()), true);
+            assert_eq!(copy(view, run((100, 8), (100, 9))), said("x文"), "the end on the spacer");
+            assert_eq!(copy(view, run((100, 9), (100, 8))), said("x文"), "dragged backwards");
+            assert_eq!(copy(view, run((100, 9), (100, 9))), said("文"), "the spacer alone");
+            assert_eq!(copy(view, run((100, 3), (100, 4))), said("日本"), "a tail and a head");
+            assert_eq!(copy(view, run((101, 1), (101, 3))), said("文 d"), "the wrapped one's tail");
+            assert_eq!(copy(view, run((100, 7), (100, 7))), said("語"), "a tail alone");
+            let block = |from: (u64, u16), to: (u64, u16)| Selection {
+                anchor: (LineIndex(from.0), from.1),
+                head: (LineIndex(to.0), to.1),
+                block: true,
+            };
+            assert_eq!(copy(view, block((100, 3), (101, 4))), said("日本\nd"), "a block's tails");
+            let (text, any) = copy(view, block((100, 9), (101, 9)));
+            assert!(!any && text.is_some_and(|t| t.trim().is_empty()), "nothing from below");
         });
     }
 

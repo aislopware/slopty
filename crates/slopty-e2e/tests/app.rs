@@ -170,7 +170,7 @@ mod tests {
         assert!(!dump.lines_containing("echo e2e-").is_empty(), "{dump:#?}");
         let cursor = dump.terminals[0].cursor;
         assert!(cursor[1] >= 2, "cursor moved below the output: {cursor:?}");
-        slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
+        slopty_e2e::harness::check_lilex_face(dump.terminals[0].face.as_ref()).unwrap();
 
         drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
         // The bar zle sets comes after the prompt, in a write of its own.

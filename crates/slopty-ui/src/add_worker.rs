@@ -20,7 +20,7 @@ use gpui::{
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::{Status, status_mark};
 use slopty_kit::kit;
-use slopty_theme::{Theme, Typography};
+use slopty_theme::Theme;
 
 /// The tile's button that updates a worker on a different build.
 pub const UPDATE: &str = "Update";
@@ -186,7 +186,6 @@ fn step_line(theme: &Theme, line: &StepLine) -> gpui::Stateful<Div> {
                     div()
                         .flex_none()
                         .text_size(px(theme.typography.ui_size))
-                        .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(if waiting { s.text_muted } else { s.text }))
                         .child(SharedString::from(line.title.clone())),
                 )
@@ -254,7 +253,6 @@ pub fn failure(theme: &Theme, failed: &Failed) -> gpui::Stateful<Div> {
         .child(
             div()
                 .text_size(px(theme.typography.ui_size))
-                .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                 .text_color(hsla(s.error))
                 .child(SharedString::from(failed.title.clone())),
         )

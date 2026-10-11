@@ -137,7 +137,8 @@ fn installing_rebinds_in_place(cx: &mut TestAppContext) {
     let changed = Keymap::new(&keys("[keys.workspace]\nnew_note = \"cmd-alt-n\"\n"), Vec::new());
     cx.update(|cx| install(changed, cx));
     assert_eq!(chord_for(cx, &ws::NewNote), ["alt-cmd-n"]);
-    assert!(current().is_set(current().find(Scope::Workspace, "new_note").unwrap_or_default()));
+    let now = cx.update(|cx| current(cx));
+    assert!(now.is_set(now.find(Scope::Workspace, "new_note").unwrap_or_default()));
 
     cx.update(|cx| install(Keymap::default(), cx));
     assert_eq!(chord_for(cx, &ws::NewNote), ["cmd-shift-n"], "the default again, alone");
@@ -155,7 +156,7 @@ fn installing_rebinds_in_place(cx: &mut TestAppContext) {
 #[gpui::test]
 fn the_palette_shows_the_chord_in_effect(cx: &TestAppContext) {
     let keys_of = |label: &str| {
-        crate::workspace::palette_items()
+        cx.update(|cx| crate::workspace::palette_items(cx))
             .into_iter()
             .find(|item| item.label == label)
             .map_or_else(|| panic!("{label}"), |item| item.keys)

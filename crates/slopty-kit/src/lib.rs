@@ -7,7 +7,7 @@
 //! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
 //! * [`highlight`] — syntax colouring for a file and a fenced code block.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
-//! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
+//! * [`fonts`] — bundled `IBM Plex Sans`, `Lilex` and Nerd symbols, registered at startup.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`draw`] — a view's elements built from another entity's state, read and never written.

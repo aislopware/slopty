@@ -1,5 +1,5 @@
 //! The thread's face: a request answered where its call is, the composer's chips and its one
-//! solid, the way down to the newest row, and an answer's new words lifting in.
+//! primary, the way down to the newest row, and an answer's new words lifting in.
 
 use gpui::{
     Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
@@ -311,10 +311,10 @@ fn disc(
 }
 
 /// The composer's square stops the turn while it runs and nothing is typed and sends what is
-/// typed, in the neutral solid either way: 26 pt at a control's radius, never a disc, never
+/// typed, Zed's tinted accent either way: a square at a control's radius, never a disc, never
 /// the green.
 #[gpui::test]
-fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
+fn the_one_tinted_square_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -327,18 +327,18 @@ fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let theme = slopty_theme::Theme::default();
-    let fill = |c| gpui::Background::from(slopty_kit::colors::hsla(c));
+    let fill = |c: slopty_theme::Tint| gpui::Background::from(slopty_kit::colors::hsla(c));
     let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
     let square = theme.radii.sm / slopty_kit::kit::message::SEND;
     assert!((f32::from(stop.size.width) - slopty_kit::kit::message::SEND).abs() < 0.5, "{stop:?}");
     let (painted, round) = disc(cx, stop).expect("the stop's square");
-    assert_eq!(painted, fill(theme.surfaces.solid), "stopping is the solid");
+    assert_eq!(painted, fill(theme.surfaces.info_background), "stopping is tinted");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     cx.simulate_input("And the docs");
     let send = cx.debug_bounds("thread-send").expect("typed: send");
     let (painted, round) = disc(cx, send).expect("the send's square");
-    assert_eq!(painted, fill(theme.surfaces.solid), "sending is the solid too");
+    assert_eq!(painted, fill(theme.surfaces.info_background), "sending too");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     let send = send.center();
     cx.simulate_click(send, Modifiers::none());

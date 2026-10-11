@@ -1,41 +1,39 @@
-//! The chrome's glyphs: Tabler's outline icons (`assets/icons/tabler/`, MIT, credited in its
-//! `NOTICE`), one family on every platform (`docs/decisions/ui.md`, "The chrome's icons are
-//! Tabler's, and a file's are Material's").
+//! The chrome's glyphs: IBM Carbon's icons (`assets/icons/carbon/`, Apache-2.0, credited in its
+//! `NOTICE`), one family on every platform, the companion of the IBM Plex the chrome is set in
+//! (`docs/decisions/ui.md`, "The chrome's icons are IBM Carbon's at 16").
 //!
 //! A glyph is drawn by us from its outline ([`slopty_platform::outline::rasterize_on_grid`]):
-//! its 24-unit grid scaled to a whole number of device pixels, an outline glyph stroked at its
-//! file's 1.75 units rounded to whole pixels, a filled one (`-filled`) filled. Each becomes an
-//! alpha mask painted in the ink of the words beside it. Through GPUI's `svg()` the same glyph
-//! lands softer at 1x, since nothing there fits a stroke to the pixels (`docs/MEASUREMENTS.md`,
-//! "Tabler glyphs at 1x and 2x").
+//! its 32-unit grid scaled to a whole number of device pixels and filled, since Carbon draws
+//! its two-unit lines as shapes. At the 16 pt slot a line is one device pixel at 1x and two at
+//! 2x, on the pixel grid. Each becomes an alpha mask painted in the ink of the words beside it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 use gpui::SharedString;
 use parking_lot::RwLock;
-use slopty_platform::outline::{Ink, Outline, rasterize_on_grid};
+use slopty_platform::outline::{Outline, rasterize_on_grid};
 
 use super::Kept;
 
-/// Declares [`Symbol`] and the Tabler file that draws each in one list.
+/// Declares [`Symbol`] and the Carbon file that draws each in one list.
 macro_rules! glyphs {
     ($($variant:ident => $file:literal,)+) => {
-        /// One glyph the chrome draws, by the name the chrome knows it under; its Tabler file is
+        /// One glyph the chrome draws, by the name the chrome knows it under; its Carbon file is
         /// [`Symbol::name`], and the `NOTICE` beside the files lists the pairs.
         ///
         /// The list is closed: a glyph the chrome draws is added here with its file, and
         /// `every_glyph_reads` checks each one reads and every file is drawn.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Symbol {
-            $(#[doc = concat!("Tabler's `", $file, "`.")] $variant,)+
+            $(#[doc = concat!("Carbon's `", $file, "`.")] $variant,)+
         }
 
         impl Symbol {
             /// Every glyph, in declaration order.
             pub const ALL: &[Self] = &[$(Self::$variant,)+];
 
-            /// Its Tabler file's name, which names its atlas key.
+            /// Its Carbon file's name, which names its atlas key.
             #[must_use]
             pub const fn name(self) -> &'static str {
                 match self {
@@ -47,7 +45,7 @@ macro_rules! glyphs {
             const fn svg(self) -> &'static str {
                 match self {
                     $(Self::$variant => include_str!(
-                        concat!("../../assets/icons/tabler/", $file, ".svg")
+                        concat!("../../assets/icons/carbon/", $file, ".svg")
                     ),)+
                 }
             }
@@ -56,114 +54,100 @@ macro_rules! glyphs {
 }
 
 glyphs! {
-    ArrowClockwise => "refresh",
-    ArrowDown => "arrow-down",
-    ArrowDownToLine => "arrow-bar-to-down",
-    ArrowLeft => "arrow-left",
-    ArrowRight => "arrow-right",
-    ArrowTriangleBranch => "git-branch",
-    ArrowTriangleMerge => "git-merge",
-    ArrowTrianglePull => "git-pull-request",
-    ArrowUp => "arrow-up",
-    ArrowUpAndDown => "arrows-vertical",
-    ArrowUpRight => "arrow-up-right",
-    ArrowUpToLine => "arrow-bar-to-up",
-    ArrowUturnBackward => "arrow-back-up",
-    Bell => "bell",
-    BellBadge => "bell-ringing",
-    BellSlash => "bell-off",
-    CharacterCursorIbeam => "cursor-text",
-    Checklist => "list-check",
-    Checkmark => "check",
-    CheckmarkCircle => "circle-check",
-    CheckmarkCircleFill => "circle-check-filled",
-    ChevronDown => "chevron-down",
-    ChevronLeft => "chevron-left",
+    AiAgent => "ai-agent",
+    ArrowClockwise => "renew",
+    ArrowDown => "arrow--down",
+    ArrowDownToLine => "down-to-bottom",
+    ArrowLeft => "arrow--left",
+    ArrowRight => "arrow--right",
+    ArrowTriangleBranch => "branch",
+    ArrowTriangleMerge => "merge",
+    ArrowTrianglePull => "pull-request",
+    ArrowUp => "arrow--up",
+    ArrowUpAndDown => "arrows--vertical",
+    ArrowUpRight => "arrow--up-right",
+    ArrowUpToLine => "up-to-top",
+    ArrowUturnBackward => "undo",
+    Bell => "notification",
+    BellBadge => "notification--new",
+    BellSlash => "notification--off",
+    CharacterCursorIbeam => "pointer-text",
+    Checklist => "list--checked",
+    Checkmark => "checkmark",
+    CheckmarkCircle => "checkmark--outline",
+    CheckmarkCircleFill => "checkmark--filled",
+    ChevronDown => "chevron--down",
+    ChevronLeft => "chevron--left",
     ChevronLeftForwardslashChevronRight => "code",
-    ChevronRight => "chevron-right",
-    ChevronUp => "chevron-up",
-    Circle => "circle",
-    CircleDashed => "circle-dashed",
-    CircleInsetFilled => "circle-dot",
-    Clock => "clock",
-    Command => "command",
-    Curlybraces => "braces",
-    Cursorarrow => "pointer",
-    Display => "device-desktop",
-    Doc => "file",
-    DocBadgePlus => "file-plus",
-    DocOnClipboard => "clipboard-copy",
+    ChevronRight => "chevron--right",
+    ChevronUp => "chevron--up",
+    Circle => "circle--outline",
+    CircleDashed => "circle-dash",
+    CircleInsetFilled => "radio-button--checked",
+    Clock => "time",
+    Command => "mac--command",
+    Cursorarrow => "cursor--1",
+    Display => "screen",
+    Doc => "document--blank",
+    DocBadgePlus => "document--add",
+    DocOnClipboard => "copy--to-clipboard",
     DocOnDoc => "copy",
-    DocRichtext => "file-text",
-    DocText => "file-text",
-    DocZipper => "file-zip",
-    Ellipsis => "dots",
-    ExclamationmarkCircleFill => "alert-circle-filled",
-    ExclamationmarkTriangle => "alert-triangle",
-    ExclamationmarkTriangleFill => "alert-triangle-filled",
-    Eye => "eye",
-    EyeSlash => "eye-off",
-    Film => "movie",
+    DocText => "document",
+    Ellipsis => "overflow-menu--horizontal",
+    ExclamationmarkTriangle => "warning--alt",
+    ExclamationmarkTriangleFill => "warning--alt--filled",
+    Eye => "view",
+    EyeSlash => "view--off",
     Flag => "flag",
-    Fold => "fold",
+    Fold => "row--collapse",
     Folder => "folder",
-    FolderBadgePlus => "folder-plus",
-    Gearshape => "settings",
-    Globe => "world",
-    InfoCircle => "info-circle",
-    Iphone => "device-mobile",
+    FolderBadgePlus => "folder--add",
+    Globe => "globe",
+    InfoCircle => "information",
+    Iphone => "mobile",
     Keyboard => "keyboard",
-    Laptopcomputer => "device-laptop",
+    Laptopcomputer => "laptop",
     Link => "link",
-    Lock => "lock",
-    LockDoc => "file-certificate",
-    Macwindow => "app-window",
+    Lock => "locked",
+    Macwindow => "application",
     Magnifyingglass => "search",
-    Minus => "minus",
-    Paperclip => "paperclip",
-    Palette => "palette",
-    PauseCircle => "player-pause",
-    Pencil => "pencil",
-    Photo => "photo",
+    Minus => "subtract",
+    Paperclip => "attachment",
+    Palette => "color-palette",
+    PauseCircle => "pause--outline",
+    Pencil => "edit",
+    Photo => "image",
     Pin => "pin",
-    Plus => "plus",
-    PlusForwardslashMinus => "plus-minus",
+    Plus => "add",
+    PlusForwardslashMinus => "compare",
     Power => "power",
-    PuzzlepieceExtension => "puzzle",
-    QuestionmarkBubble => "message-question",
-    RectangleSplit3x1 => "layout-columns",
-    Scissors => "scissors",
-    ServerRack => "server",
-    SidebarLeft => "layout-sidebar",
-    SpeakerSlash => "volume-off",
-    SpeakerWave2 => "volume",
-    SquareAndPencil => "edit",
-    SquareGrid2x2 => "layout-grid",
-    StopFill => "player-stop-filled",
-    Terminal => "terminal-2",
-    TextBubble => "message",
-    TextMagnifyingglass => "file-search",
-    Trash => "trash",
-    Unfold => "arrows-move-vertical",
-    Waveform => "wave-sine",
-    WifiSlash => "wifi-off",
-    WrenchAndScrewdriver => "tool",
-    Xmark => "x",
-    XmarkCircle => "circle-x",
-    XmarkCircleFill => "circle-x-filled",
-    GitCommit => "git-commit",
-    GitPullRequestDraft => "git-pull-request-draft",
-    GitPullRequestClosed => "git-pull-request-closed",
-    GitRepo => "book-2",
+    PuzzlepieceExtension => "plug",
+    QuestionmarkBubble => "help",
+    RectangleSplit3x1 => "split-screen",
+    Scissors => "cut",
+    ServerRack => "bare-metal-server",
+    SidebarLeft => "side-panel--open",
+    SpeakerSlash => "volume--mute",
+    SpeakerWave2 => "volume--up",
+    SquareGrid2x2 => "grid",
+    StopFill => "stop--filled",
+    Terminal => "terminal",
+    TextBubble => "chat",
+    Trash => "trash-can",
+    Unfold => "row--expand",
+    WifiSlash => "wifi--off",
+    WrenchAndScrewdriver => "tool-kit",
+    Xmark => "close",
+    XmarkCircle => "close--outline",
+    GitCommit => "commit",
+    GitRepo => "git--repo",
 }
 
-/// A glyph's drawing as its file has it: the outline, the side of its grid in its own units,
-/// and how it is inked.
+/// A glyph's drawing as its file has it: the outline and the side of its grid in its own units.
 #[derive(Debug)]
 struct Drawing {
     outline: Outline,
     grid: f64,
-    ink: Ink,
 }
 
 /// The value of `name="…"` in `tag`.
@@ -171,21 +155,14 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     tag.split(&format!(" {name}=\"")).nth(1)?.split('"').next()
 }
 
-/// Reads a Tabler file: its view box's side, filled where its root fills with the text's
-/// colour, else stroked at its root's stroke width.
+/// Reads a Carbon file: its view box's side and its paths, which are filled.
 fn read(svg: &str) -> Result<Drawing, String> {
     let root = svg.split('>').next().unwrap_or_default();
     let grid = attribute(root, "viewBox")
         .and_then(|b| b.split_whitespace().nth(2)?.parse::<f64>().ok())
         .ok_or("no view box")?;
-    let ink = if attribute(root, "fill") == Some("currentColor") {
-        Ink::Fill
-    } else {
-        let width = attribute(root, "stroke-width").and_then(|w| w.parse::<f64>().ok());
-        Ink::Stroke(width.ok_or("neither filled nor a stroke width")?)
-    };
     let outline = Outline::parse(&super::marks::path_data(svg)).map_err(|e| e.to_string())?;
-    Ok(Drawing { outline, grid, ink })
+    Ok(Drawing { outline, grid })
 }
 
 /// Every glyph's drawing, read once from its file; a file that does not read is a miss, said
@@ -218,7 +195,7 @@ pub(super) fn mask(symbol: Symbol, side: u32) -> Kept {
         return kept.clone();
     }
     let drawing = DRAWINGS.get(&symbol)?;
-    let kept = rasterize_on_grid(&drawing.outline, drawing.grid, side, drawing.ink)
+    let kept = rasterize_on_grid(&drawing.outline, drawing.grid, side)
         .map(|m| (Arc::new(m), SharedString::from(format!("glyph:{}:{side}", symbol.name()))));
     KEPT.write().entry(at).or_insert(kept).clone()
 }
@@ -227,20 +204,17 @@ pub(super) fn mask(symbol: Symbol, side: u32) -> Kept {
 mod tests {
     use super::*;
 
-    /// A lint as a test: every glyph's file reads on Tabler's 24 grid, filled where its name
-    /// says so and stroked at the chrome's 1.75 otherwise, and draws ink at a row's 14 px; every
-    /// file kept is some glyph's, and the `NOTICE` names each glyph with its file.
+    /// A lint as a test: every glyph's file reads on Carbon's 32 grid and draws ink at the
+    /// 16 px slot; every file kept is some glyph's, and the `NOTICE` names each glyph with its
+    /// file.
     #[test]
     fn every_glyph_reads() {
-        let notice = include_str!("../../assets/icons/tabler/NOTICE");
+        let notice = include_str!("../../assets/icons/carbon/NOTICE");
         for &symbol in Symbol::ALL {
             let drawing = read(symbol.svg()).unwrap_or_else(|e| panic!("{symbol:?}: {e}"));
-            assert!((drawing.grid - 24.0).abs() < f64::EPSILON, "{symbol:?} on the 24 grid");
-            let filled = symbol.name().ends_with("-filled");
-            let want = if filled { Ink::Fill } else { Ink::Stroke(1.75) };
-            assert_eq!(drawing.ink, want, "{symbol:?}");
-            let (m, _) = mask(symbol, 14).unwrap_or_else(|| panic!("{symbol:?} is drawn"));
-            assert_eq!((m.width, m.height), (14, 14), "{symbol:?} is its grid's size");
+            assert!((drawing.grid - 32.0).abs() < f64::EPSILON, "{symbol:?} on the 32 grid");
+            let (m, _) = mask(symbol, 16).unwrap_or_else(|| panic!("{symbol:?} is drawn"));
+            assert_eq!((m.width, m.height), (16, 16), "{symbol:?} is its grid's size");
             assert!(m.alpha.iter().any(|a| *a > 0), "{symbol:?} has ink");
             let listed = notice.lines().any(|line| {
                 let mut words = line.split_whitespace();
@@ -249,7 +223,7 @@ mod tests {
             });
             assert!(listed, "the NOTICE names {symbol:?} with {}.svg", symbol.name());
         }
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/tabler");
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/carbon");
         let files: Vec<String> = std::fs::read_dir(dir)
             .map(|entries| {
                 entries
@@ -264,26 +238,29 @@ mod tests {
         }
     }
 
-    /// A glyph's grid is a whole number of device pixels, twice as many at 2x. At 1x a stroke
-    /// of 1.75 on a 14 px grid is one pixel wide, so the folder's straight sides, which land on
-    /// whole columns and rows, are whole pixels.
+    /// A glyph's grid is a whole number of device pixels, twice as many at 2x. At 1x Carbon's
+    /// two-unit line on a 16 px grid is one pixel wide and lands on whole columns and rows, so
+    /// the folder's straight sides and the terminal's frame are solid pixels.
     #[test]
     fn a_glyph_is_drawn_on_whole_pixels() {
         for symbol in [Symbol::Folder, Symbol::Terminal, Symbol::ArrowTriangleBranch] {
-            let (one, _) = mask(symbol, 14).unwrap_or_else(|| panic!("{symbol:?} at 1x"));
-            let (two, _) = mask(symbol, 28).unwrap_or_else(|| panic!("{symbol:?} at 2x"));
-            assert_eq!((one.width, two.width), (14, 28), "{symbol:?}");
+            let (one, _) = mask(symbol, 16).unwrap_or_else(|| panic!("{symbol:?} at 1x"));
+            let (two, _) = mask(symbol, 32).unwrap_or_else(|| panic!("{symbol:?} at 2x"));
+            assert_eq!((one.width, two.width), (16, 32), "{symbol:?}");
         }
-        let (folder, _) = mask(Symbol::Folder, 14).unwrap_or_else(|| panic!("the folder at 1x"));
-        let solid = folder.alpha.iter().filter(|a| **a >= 230).count();
-        assert!(solid >= 8, "the folder at 1x has {solid} whole pixels");
+        for symbol in [Symbol::Folder, Symbol::Terminal] {
+            let (m, _) = mask(symbol, 16).unwrap_or_else(|| panic!("{symbol:?} at 1x"));
+            let solid = m.alpha.iter().filter(|a| **a >= 230).count();
+            let soft = m.alpha.iter().filter(|a| (40..230).contains(*a)).count();
+            assert!(solid >= 30 && soft < solid, "{symbol:?} at 1x: {solid} solid, {soft} soft");
+        }
         assert!(mask(Symbol::Folder, 0).is_none(), "no size, no mask");
     }
 
     /// What a first frame pays to draw its glyphs, so none is drawn ahead of it: every glyph
-    /// read and drawn uncached at a row's 14 and a lead's 16 pt, at 1x and 2x, printed for
-    /// `docs/MEASUREMENTS.md` ("Tabler glyphs drawn on demand"). A screen of chrome draws a few
-    /// dozen.
+    /// read and drawn uncached at 14 and the slot's 16 pt, at 1x and 2x, printed for
+    /// `docs/MEASUREMENTS.md` ("Tabler glyphs drawn on demand", "Carbon glyphs drawn on
+    /// demand"). A screen of chrome draws a few dozen.
     #[test]
     fn a_glyph_is_cheap_to_draw_on_demand() {
         let started = std::time::Instant::now();
@@ -294,7 +271,7 @@ mod tests {
         for drawing in &drawings {
             for side in [14, 16, 28, 32] {
                 let at = std::time::Instant::now();
-                let drawn = rasterize_on_grid(&drawing.outline, drawing.grid, side, drawing.ink);
+                let drawn = rasterize_on_grid(&drawing.outline, drawing.grid, side);
                 each.push(at.elapsed());
                 assert!(drawn.is_some());
             }

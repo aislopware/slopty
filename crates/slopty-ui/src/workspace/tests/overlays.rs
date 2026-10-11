@@ -123,9 +123,8 @@ fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette").is_none(), "gone in the same frame");
 }
 
-/// What floats as a sheet holds its rows in from its edge: a menu's rows sit the sheet's
-/// hairline and its 4 pt pad in, `MonoCode`'s `p-1`, and the palette's its hairline and 6 pt
-/// list pad, `MonoCode`'s `px-1.5`.
+/// What floats as a sheet holds its rows in from its edge: a menu's rows and the palette's sit
+/// the sheet's hairline and its 4 pt pad in, Zed's `p_1`.
 #[gpui::test]
 fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);

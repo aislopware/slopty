@@ -377,15 +377,15 @@ fn a_percent_sits_against_its_figure() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// The destructive wash is a control's fill only through [`ButtonKind::Destructive`]: drawn
+/// The error's quiet ground is a control's fill only through [`ButtonKind::Destructive`]: drawn
 /// here, and where the thread's answer row draws the kinds itself.
 #[test]
 fn the_destructive_red_is_the_kits() {
     const RULED: [&str; 1] = ["slopty-ui/src/conversation/thread/view.rs"];
     let red = |line: &str| {
         let code = !line.trim_start().starts_with("//");
-        (code && line.contains("alpha::TINTED"))
-            .then_some("the destructive wash outside `ButtonKind::Destructive`")
+        (code && line.contains("error_background"))
+            .then_some("the destructive ground outside `ButtonKind::Destructive`")
     };
     let wrong = flagged(&RULED, red);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -464,12 +464,12 @@ fn the_accent_text_tone_is_never_a_fill() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// A control in the green: words or a glyph in `accent_ink`, which only a green fill
-/// carries, so the line paints a button, a ticked box, a switch or a key green.
+/// A control in the accent: words or a glyph in `accent_ink`, which only the accent's fill
+/// carries, so the line paints a button, a ticked box or a key in it.
 fn green_control(line: &str) -> Option<&'static str> {
     let code = !line.trim_start().starts_with("//");
     (code && line.contains("accent_ink"))
-        .then_some("a control in the accent; a primary or an on state takes `kit::solid`")
+        .then_some("a control in the accent; a primary or an on state takes `kit::tinted`")
 }
 
 #[test]
@@ -477,19 +477,19 @@ fn the_green_control_check_knows_a_control_from_a_mark() {
     assert!(green_control(".bg(hsla(s.accent_fill)).text_color(hsla(s.accent_ink))").is_some());
     assert!(green_control("if lit { (s.accent_fill, s.accent_ink) } else { x }").is_some());
     assert!(green_control(".size(px(dot)).rounded_full().bg(hsla(s.accent_fill))").is_none());
-    assert!(green_control("kit::solid(el, theme)").is_none());
+    assert!(green_control("kit::tinted(el, theme)").is_none());
     assert!(green_control("// `accent_ink` was the ink").is_none(), "a comment");
 }
 
-/// The accent is a mark, never a control's fill: the primary action, a ticked box, a
-/// switch that is on and an armed key take the neutral [`solid`]. Green on a control read
-/// as a second brand colour, and made green mean "press here" as well as "live, chosen,
-/// done". The one green that carries words is a badge's count (the inbox bell's, for
-/// what finished).
+/// The accent is a mark, never a control's fill: the primary action, a ticked box and an armed
+/// key take Zed's tinted accent ([`slopty_kit::kit::tinted`]), its quiet ground inside its
+/// line. The accent's fill carries words only on a badge's count (the title bar's) and a
+/// switch that is on, which Zed fills with it (the settings form's).
 #[test]
 fn the_accent_is_never_a_control() {
-    const RULED: [&str; 1] = ["slopty-ui/src/workspace/titlebar.rs"];
-    // Call sites whose owners move them onto `kit::solid` in their next change.
+    const RULED: [&str; 2] =
+        ["slopty-ui/src/workspace/titlebar.rs", "slopty-ui/src/settings_form.rs"];
+    // Call sites whose owners move them onto `kit::tinted` in their next change.
     const AWAITING: [&str; 0] = [];
     let waived: Vec<&str> = RULED.iter().chain(&AWAITING).copied().collect();
     let wrong = flagged(&waived, green_control);
@@ -634,9 +634,9 @@ fn glyph_in_text_tone(call: &str) -> Option<&'static str> {
 #[test]
 fn the_glyph_tone_check_knows_a_fill_from_a_text_tone() {
     assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(s.warn))").is_some());
-    assert!(glyph_in_text_tone("icon(theme,Symbol::XmarkCircleFill,size,hsla(s.error))").is_some());
+    assert!(glyph_in_text_tone("icon(theme,Symbol::XmarkCircleFill,hsla(s.error))").is_some());
     assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(s.warn_fill))").is_none());
-    assert!(glyph_in_text_tone("icon(theme,Symbol::Bell,size,hsla(s.warn))").is_none());
+    assert!(glyph_in_text_tone("icon(theme,Symbol::Bell,hsla(s.warn))").is_none());
     assert!(glyph_in_text_tone("status_icon(theme,status,side,hsla(ink))").is_none());
 }
 
@@ -785,7 +785,7 @@ fn in_a_state(line: &str, before: &[&str]) -> bool {
 fn the_wash_check_knows_a_state_from_a_surface() {
     assert!(washes("            .bg(hsla(s.hover))"));
     assert!(washes(".bg(hsla(theme.surfaces.selected))"));
-    assert!(!washes(".bg(hsla(s.card))"), "a well");
+    assert!(!washes(".bg(hsla(s.well))"), "a well");
     assert!(!washes("// .bg(hsla(s.hover)) once filled it"), "a comment");
     assert!(in_a_state(".hover(move |el| el.bg(hsla(s.hover)))", &[]));
     assert!(in_a_state("el.bg(hsla(s.hover))", &["        if shown {"]));
@@ -844,13 +844,13 @@ fn the_work_wears_no_card() {
 }
 
 /// Everything that rests in the thread's column wears one card (`docs/decisions/ui.md`,
-/// "The thread is one card language"): the card's wash and its ring through
-/// [`super::raised`], or the wash alone through [`super::inset`]. No part names the
-/// `elevated` plane, which is the floats' ([`super::elevate`]), nor lays the card's wash by
-/// hand, so no part grows a surface of its own again.
+/// "The thread is one card language"): the work's ground and its ring through
+/// [`super::raised`], or the well alone through [`super::inset`]. No part names the
+/// `elevated` plane, which is the floats' ([`super::elevate`]), nor lays the well by hand, so
+/// no part grows a surface of its own again.
 #[test]
 fn the_thread_rests_on_one_card() {
-    const PLANES: [&str; 3] = ["elevated", "surfaces.card)", "s.card)"];
+    const PLANES: [&str; 3] = ["elevated", "surfaces.well)", "s.well)"];
     let mut wrong = Vec::new();
     for (file, no, line) in ui_lines() {
         let code = !line.trim_start().starts_with("//");
@@ -872,7 +872,7 @@ fn the_thread_rests_on_one_card() {
 fn a_command_is_its_words() {
     const THINGS: [&str; 2] = ["workspace/agent_start.rs", "workspace/clone_here.rs"];
     let bindings: Vec<gpui::KeyBinding> = Vec::new();
-    let lines = crate::workspace::palette_items()
+    let lines = crate::workspace::palette_items_of(&crate::keymap::Keymap::default())
         .into_iter()
         .chain(crate::conversation::palette_items(&bindings))
         .chain(crate::project::palette_items(&bindings))
@@ -989,12 +989,14 @@ fn chrome_sizes_come_from_the_scale() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// What floats as a sheet (a menu, a popover, a toast) is rounded at `radii.lg`; a modal (a
-/// dialog, the add-worker panel, through [`modal`]) is larger and rounds at `radii.xl`. A hint
-/// and a chip keep their control's radius: at 12 a 20 pt hint is a lozenge.
+/// What floats (a menu, a popover, a hint, a toast) is rounded at `radii.lg`, Zed's elevated
+/// surfaces' 8; a modal (a dialog, the add-worker panel, through [`modal`]) rounds at
+/// `radii.xl`, the same 8, as Zed's modals are floats like the rest. A chip keeps its
+/// control's radius.
 #[test]
 fn a_floating_surface_is_rounded_lg() {
-    const SHEETS: [(&str, &str); 3] = [
+    const SHEETS: [(&str, &str); 4] = [
+        ("slopty-kit/src/kit.rs", "let hint = elevate(div(), theme)"),
         ("slopty-kit/src/kit/find.rs", "super::elevate(div(), &theme)"),
         ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
         ("slopty-kit/src/kit/menu.rs", "super::elevate(div(), &theme)"),
@@ -1017,9 +1019,9 @@ fn a_floating_surface_is_rounded_lg() {
 
 /// The strong weight is for titles: a dialog's or a panel's (`kit::title` or the title
 /// size), a page's heading, and the first run's wordmark. A name, a row or a tab that has
-/// to stand out takes the medium weight; with 600 on the workspace's name, the worker's name
-/// and the overview's names, nothing between a label and the loudest line could say
-/// "this one".
+/// to stand out says so by its tone, as Zed's do; with 600 on the workspace's name, the
+/// worker's name and the overview's names, nothing between a label and the loudest line could
+/// say "this one".
 #[test]
 fn strong_weight_is_for_titles() {
     let mut wrong = Vec::new();
@@ -1112,8 +1114,8 @@ fn a_tile_stands_on_a_panel() {
 
 /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a
 /// row's second line) is in the UI face. The mono face is for an address read to judge it
-/// (a held-back page's hint), and nothing else in the chrome calls for it: the settings
-/// file is a file tile's text.
+/// (a held-back page's hint) and a diff's size, Delta's (`kit::changes`), both drawn in the
+/// kit, and nothing else in the chrome calls for it: the settings file is a file tile's text.
 #[test]
 fn the_mono_face_is_for_addresses() {
     let uses: Vec<String> = CHROME
@@ -1122,16 +1124,18 @@ fn the_mono_face_is_for_addresses() {
         .filter(|(_, _, line)| line.contains("mono_family(") && !line.contains("fn mono_family"))
         .map(|(file, line_no, _)| format!("{file}:{line_no}"))
         .collect();
+    let kit = |at: &String| at.contains("slopty-kit/src/kit.rs");
     assert!(
-        matches!(uses.as_slice(), [at] if at.contains("slopty-kit/src/kit.rs")),
-        "mono outside the addresses: {uses:#?}"
+        uses.len() == 2 && uses.iter().all(kit),
+        "mono outside the addresses and the diff's size: {uses:#?}"
     );
 }
 
 /// A tab's title, the title bar's and a pane's alike (and the lone header's, which is a
 /// pane's), fades over its last 40 pt while it is cut, as `MonoCode`'s `TabLabel` does,
-/// rather than losing its last letters to an ellipsis: the one fill that fades
-/// (`ChromeText::fill_fading`, whose own test holds when it fades).
+/// rather than losing its last letters to an ellipsis, and so does a navigator row's title, as
+/// Zed's sidebar cuts one: the one fill that fades (`ChromeText::fill_fading`, whose own test
+/// holds when it fades).
 #[test]
 fn a_tabs_title_fades_over_its_end() {
     let fades = |file: &str| {
@@ -1144,6 +1148,7 @@ fn a_tabs_title_fades_over_its_end() {
     };
     assert_eq!(fades("workspace/title_tabs.rs"), 1, "the title tab's");
     assert_eq!(fades("workspace/tile.rs"), 1, "the pane tab's and the lone header's");
+    assert_eq!(fades("workspace/navigator.rs"), 1, "a navigator row's");
 }
 
 /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that
@@ -1480,9 +1485,10 @@ fn the_spacing_check_knows_a_pad_from_a_measurement() {
     assert!(literal_spacing("something.expr(px(4.0))").is_none());
 }
 
-/// The chrome draws its icons one way (`docs/decisions/ui.md`, "The chrome's icons are
-/// Tabler's, and a file's are Material's"): no SVG is drawn in the app's own code but the
-/// app's mark and the icon modules, and no icon name of another set is left.
+/// The chrome draws its icons one way (`docs/decisions/ui.md`, "The chrome's icons are IBM
+/// Carbon's at 16"): no SVG is drawn in the app's own code but the app's mark and the icon
+/// modules, no icon name of another set is left, and a file's icon is a mask in the words' ink,
+/// never a picture in its own colours.
 #[test]
 fn the_chrome_draws_its_own_icons() {
     let mut stray = Vec::new();
@@ -1490,8 +1496,8 @@ fn the_chrome_draws_its_own_icons() {
         for (file, line, text) in chrome_lines(dir) {
             let code = text.split("//").next().unwrap_or_default();
             // The app's mark is a drawing of ours (`brand`), `icons.rs` names the kit's
-            // drawings it stands glyphs in for and draws the files' icons, `icons/glyphs.rs`
-            // and `icons/marks.rs` read Tabler's and the agents' owners' outlines into masks,
+            // drawings it stands glyphs in for and masks the files' icons, `icons/glyphs.rs`
+            // and `icons/marks.rs` read Carbon's and the agents' owners' outlines into masks,
             // and `file_types.rs` keeps Material's files. A git glyph (`GitGlyph::`) is one
             // of the glyphs.
             let mark = code.contains("assets/icon.svg")
@@ -1507,6 +1513,8 @@ fn the_chrome_draws_its_own_icons() {
         }
     }
     assert!(stray.is_empty(), "an icon drawn another way:\n{}", stray.join("\n"));
+    let icons = include_str!("../../slopty-kit/src/icons.rs");
+    assert!(!icons.contains("paint_image("), "a file's icon is painted as a mask, in one ink");
 }
 
 /// An agent's mark wears no colour of its own (`docs/decisions/brand.md`, "Each agent
@@ -1545,7 +1553,7 @@ fn an_agents_mark_wears_no_colour_of_its_own() {
 }
 
 /// An icon takes its words' size: a symbol is sized only in `icons.rs`, from the type
-/// scale ([`slopty_kit::icons::IconSize`], [`slopty_kit::icons::Drawn`]), and painted only there,
+/// scale ([`slopty_kit::icons::Drawn`], the one icon slot), and painted only there,
 /// so no call site picks a point size of its own.
 #[test]
 fn an_icon_takes_its_words_size() {

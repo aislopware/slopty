@@ -20,7 +20,7 @@ use regex::{Regex, RegexBuilder};
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
+use crate::icons::Symbol;
 
 /// What a find bar says before anything is typed.
 pub const PLACEHOLDER: &str = "Find";
@@ -301,7 +301,7 @@ impl RenderOnce for FindBar {
                 })
         };
         let lead = |icon| {
-            crate::icons::icon(&theme, icon, IconSize::Inline, hsla(s.text_muted))
+            crate::icons::icon(&theme, icon, hsla(s.text_muted))
                 .flex_none()
                 .size(px(theme.typography.icon()))
         };
@@ -358,7 +358,6 @@ impl RenderOnce for FindBar {
                         .items_center()
                         .rounded(px(theme.radii.sm))
                         .text_size(px(theme.typography.small()))
-                        .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text_secondary))
                         .cursor_pointer()
                         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))

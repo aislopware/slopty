@@ -25,7 +25,7 @@ fn hub(cx: &TestAppContext, cache: Option<Cache>) -> (Entity<ThreadHub>, Sent) {
     let sent: Sent = Rc::default();
     let hub = cx.update(|cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(crate::workspace::key_bindings());
+        cx.bind_keys(crate::workspace::key_bindings(cx));
         let hub = cx.new(|_| ThreadHub::new("studio".to_owned(), cache));
         let into = Rc::clone(&sent);
         cx.subscribe(&hub, move |_hub, event: &HubEvent, _cx| {

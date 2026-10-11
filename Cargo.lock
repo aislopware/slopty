@@ -8116,7 +8116,6 @@ name = "slopty-kit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "core-foundation 0.10.1",
  "gpui",
  "gpui-kit",
  "gpui_platform",

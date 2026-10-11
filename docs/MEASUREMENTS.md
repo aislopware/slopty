@@ -16274,6 +16274,46 @@ A key to the glass, scenario (d), 60 keys, p50 / p95 ms (before: run 38135246342
 submitted → glass 16.1 / 22.4. With prediction always on, the runner's tail (echo p95 95.7)
 is the shared Mac's, not the app's.
 
+After, the same probe on another runner (run 38158935501, fat LTO), p50 / p95 µs:
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed |
+| --- | --- | --- | --- | --- |
+| unchanged | 223.4 / 360.1 | 24.0 / 30.2 | 833.8 / 2376.7 | 147.7 / 168.6 |
+| a key echoed | 238.6 / 779.9 | 30.8 / 42.5 | 745.0 / 1854.6 | 158.0 / 214.5 |
+| a line of output a frame | 320.6 / 429.8 | 125.6 / 156.5 | 811.9 / 1057.5 | 439.4 / 774.8 |
+| scrolling a line a frame | 305.6 / 355.0 | 118.2 / 404.8 | 864.0 / 1081.8 | 400.7 / 1100.6 |
+
+Two runners apart, the p50s moved −5 to +26 % and some p95s two to three times, too far apart to
+read. So the two trees were then built and run on one runner, alternating, three rounds each
+(run 38163636259): 00ad3956 (the terminal in `slopty-ui`) against ada3cd02 (in
+`slopty-terminal`). Both arms were built with `CARGO_PROFILE_RELEASE_LTO=thin` and 16 codegen
+units, since the fat-LTO build of `slopty-ui`'s test binary did not finish within the job (run
+38160393834, cancelled at 46 min). Thin LTO still inlines across crates, as the shipped build's
+fat LTO does, so a crate boundary costs neither build a call. The least p50 of the three rounds,
+before / after, µs:
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed |
+| --- | --- | --- | --- | --- |
+| unchanged | 241.8 / 220.1 | 30.0 / 29.4 | 859.1 / 912.3 | 188.1 / 181.1 |
+| a key echoed | 241.2 / 239.4 | 39.0 / 41.5 | 907.2 / 938.8 | 194.6 / 184.7 |
+| a line of output a frame | 359.1 / 337.1 | 151.5 / 170.8 | 1063.2 / 1035.0 | 531.6 / 505.3 |
+| scrolling a line a frame | 317.8 / 341.8 | 132.3 / 130.0 | 1031.3 / 1047.2 | 481.6 / 514.2 |
+
+No regression past noise. The differences run both ways, −9 to +13 %, with no case worse in
+every configuration. They sit inside each arm's own spread from round to round: the medians of
+one arm's three rounds differ by up to 60 % on the shared runner.
+
+```
+# the same-runner A/B, as the probe ran it (cargo xtask remote --name A-ab --head --probe '…')
+export CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+git fetch --depth=1 origin 00ad3956… ada3cd02…
+git worktree add --detach ../before 00ad3956…; git worktree add --detach ../after ada3cd02…
+(cd ../before && cargo test -p slopty-ui --release --lib --no-run)
+(cd ../after && cargo test -p slopty-terminal --release --lib --no-run)
+# then, three rounds, each binary in turn:
+<test binary> terminal_frames_cost --ignored --nocapture --test-threads 1
+```
+
 ## 2026-10-11 — the wire stamp recompiled the workspace on every gate run
 
 `slopty-proto`'s build script stamped `BUILD` with the goldens' last commit, which a shallow

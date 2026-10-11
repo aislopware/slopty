@@ -22,7 +22,7 @@ use gpui::{
 use slopty_theme::{Density, Theme};
 
 use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
+use crate::icons::Symbol;
 
 /// The send control's side at a pointer's density: Zed's and Warp's 26 pt square.
 pub const SEND: f32 = 26.0;
@@ -32,7 +32,7 @@ pub const SEND: f32 = 26.0;
 pub struct Frame {
     /// Something stands on it as its head (a thread's tray), so only its foot's corners round.
     pub capped: bool,
-    /// The keyboard is in it: its ring a step firmer.
+    /// The keyboard is in it: its ring the keyboard's blue.
     pub focused: bool,
     /// The pane is narrow: edge to edge with no ring and no radius, the line along its top.
     pub bleeds: bool,
@@ -47,14 +47,14 @@ pub fn shell<E: Styled>(el: E, theme: &Theme, frame: Frame) -> E {
     let el = super::inset(el, theme);
     let r = px(theme.radii.md);
     let el = if frame.capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
-    let ring = if frame.focused { s.keyed } else { s.border };
-    el.border(super::HAIR).border_color(hsla(ring))
+    let ring = if frame.focused { hsla(s.focus) } else { hsla(s.border) };
+    el.border(super::HAIR).border_color(ring)
 }
 
 /// The send control under `id`, named `label` and drawn as `glyph`.
 ///
-/// A [`SEND`] square at `radii.sm` in the neutral solid with its ink, whether it sends work on
-/// or stops a turn; the glyph says which. The caller says what a click does.
+/// A [`SEND`] square at `radii.sm`, Zed's tinted accent, whether it sends work on or stops a
+/// turn; the glyph says which. The caller says what a click does.
 #[must_use]
 pub fn send_control(
     theme: &Theme,
@@ -76,11 +76,8 @@ pub fn send_control(
         .justify_center()
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        .child(
-            crate::icons::icon(theme, glyph, IconSize::Inline, hsla(s.solid_ink))
-                .size(px(theme.typography.icon())),
-        );
-    super::solid_pressable(el, theme)
+        .child(crate::icons::icon(theme, glyph, hsla(s.text)).size(px(theme.typography.icon())));
+    super::tinted_pressable(el, theme)
 }
 
 #[cfg(test)]
@@ -106,12 +103,16 @@ mod tests {
             let r = Some(gpui::px(theme.radii.md).into());
             assert_eq!(style.corner_radii.top_left, r, "{variant:?}: a card's radius");
             assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: the ring");
-            let card = Some(gpui::Fill::from(hsla(s.card)));
-            assert_eq!(style.background, card, "{variant:?}: the card's wash");
+            let well = Some(gpui::Fill::from(hsla(s.well)));
+            assert_eq!(style.background, well, "{variant:?}: a well's ground");
             let focus = Frame { focused: true, ..Frame::default() };
             let mut held = shell(div(), &theme, focus);
             let held = held.style().clone();
-            assert_eq!(held.border_color, Some(hsla(s.keyed)), "{variant:?}: the ring steps");
+            assert_eq!(
+                held.border_color,
+                Some(hsla(s.focus)),
+                "{variant:?}: the keyboard's border"
+            );
             assert_eq!(held.background, style.background, "{variant:?}: no second fill");
             let capped = Frame { capped: true, ..Frame::default() };
             let mut under = shell(div(), &theme, capped);
@@ -130,7 +131,7 @@ mod tests {
 
     /// Send is a 26 pt square at a control's radius in the neutral solid, stopping or sending.
     #[test]
-    fn send_is_a_neutral_square() {
+    fn send_is_a_tinted_square() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             for glyph in [Symbol::ArrowUp, Symbol::StopFill] {
@@ -139,8 +140,8 @@ mod tests {
                 assert_eq!(style.size.width, Some(gpui::px(SEND).into()), "{variant:?}");
                 let r = Some(gpui::px(theme.radii.sm).into());
                 assert_eq!(style.corner_radii.top_left, r, "{variant:?}: square at 4");
-                let solid = Some(gpui::Fill::from(hsla(theme.surfaces.solid)));
-                assert_eq!(style.background, solid, "{variant:?}: the neutral solid");
+                let tinted = Some(gpui::Fill::from(hsla(theme.surfaces.info_background)));
+                assert_eq!(style.background, tinted, "{variant:?}: the tinted accent");
             }
         }
     }

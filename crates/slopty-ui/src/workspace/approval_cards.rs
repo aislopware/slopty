@@ -23,7 +23,7 @@ use gpui::{
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{Drawn, IconSize};
+use slopty_kit::icons::Drawn;
 use slopty_kit::kit::{self, ButtonKind, Pace};
 use slopty_proto::thread::wire::RequestCard;
 use slopty_proto::thread::{AskId, ThreadId};
@@ -186,9 +186,8 @@ impl WorkspaceView {
         };
         let title = self.thread_title(thread);
         let word = if answer.is_some() { APPROVAL } else { QUESTION };
-        let role = theme.roles().chrome;
-        let mark = Drawn::beside(theme, self.thread_mark(thread), role)
-            .slot(px(IconSize::beside_slot(theme, role)), hsla(s.text_secondary));
+        let mark = Drawn::new(theme, self.thread_mark(thread))
+            .slot(px(theme.typography.icon()), hsla(s.text_secondary));
         let ask = request.id.clone();
         let close = kit::close_box(theme, format!("card-close-{of}"), PUT_AWAY)
             .debug_selector({

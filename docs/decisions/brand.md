@@ -304,3 +304,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     an_outline_lands_on_the_pixels_it_covers}`, and the `agent-marks` golden, light and dark
     (`slopty-e2e` `marks::each_agent_wears_its_mark_in_the_navigator`). Where the mark stands
     in a row is `ui.md`, "Identity leads, state trails".
+
+- ✅ **Green is the mark's and success's; the chrome's accent is Zed's blue** (2026-10-12,
+  `.research/zed-clone-2026-10-11.md` §0 and §6, as ruled; amends the first entry here and
+  supersedes "MonoCode's calm, the brand's green, a neutral primary" in `ui.md`). The person
+  ruled that Slopty clones Zed and Delta, whose planes carry a small blue chroma and whose accent
+  is blue, with green kept for what went well. A green focus border and green links beside
+  green "done" marks spent one hue on two meanings.
+  - **The mark keeps the brand's green**, OKLCH 0.72 0.16 150 (`slopty_theme::BRAND`), on the
+    icon and wherever the mark is drawn. The chrome never paints with it.
+  - **Success is Zed's green**, `#a1c181` as a mark in dark (`#a9c68b` as a word, kept apart
+    from the red for a deuteranope) and One Light's `#58884c` as a mark in light, lifted to
+    `#44693b` as a word. Its hue sits at 130 to 140, within 20 degrees of the brand's.
+  - **The accent is Zed's blue**, `#74ade8` in dark and One Light's `#5c78e2` as a mark in
+    light, lifted to `#465bac` as a word: links, the unread dot, the working mark, the caret,
+    and the keyboard's border in its focused tone.
+  - Tests: `slopty-theme` `tests::{the_accent_is_zeds_blue_and_green_is_success,
+    one_hue_per_meaning_across_modes, the_brand_in_oklch_is_the_brand}`.

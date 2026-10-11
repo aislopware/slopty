@@ -21,7 +21,7 @@ use gpui::{
     StyledImage as _, div, img, px,
 };
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{FileDiff, FileKind, Modes};
@@ -295,13 +295,8 @@ impl ReviewView {
                     .hover(gpui::Styled::underline)
                     .child(OPEN_WHOLE)
                     .child(
-                        slopty_kit::icons::icon(
-                            theme,
-                            Symbol::ArrowUpRight,
-                            IconSize::Inline,
-                            hsla(s.text_muted),
-                        )
-                        .size(px(theme.typography.icon())),
+                        slopty_kit::icons::icon(theme, Symbol::ArrowUpRight, hsla(s.text_muted))
+                            .size(px(theme.typography.icon())),
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         if let Some(path) = this.whole_path(at, cx) {

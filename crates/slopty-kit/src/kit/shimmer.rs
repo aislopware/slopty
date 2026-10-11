@@ -15,8 +15,8 @@ use slopty_theme::Rgb;
 use crate::colors::hsla;
 use crate::icons::{SPIN_STEP, SPIN_STEPS};
 
-/// One sweep of the band: two turns of the working mark.
-pub(crate) const SWEEP: Duration = SPIN_STEP.saturating_mul(2 * SPIN_STEPS);
+/// One sweep of the band: a turn of the working mark, two seconds.
+pub(crate) const SWEEP: Duration = SPIN_STEP.saturating_mul(SPIN_STEPS);
 
 /// The band's half-width as a share of the words, never under a character and a half.
 const SPREAD: f32 = 0.3;

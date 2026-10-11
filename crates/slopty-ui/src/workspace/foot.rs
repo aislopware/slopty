@@ -1,6 +1,7 @@
-//! The foot bar: a bar the status height (28 pt) along the window's foot, under the panes, on
-//! the window's ground with the one line along its top (`MonoCode`'s `UsageFooter`, audit row
-//! 3): its words at the caption role in the secondary tone, its chips 20 pt tall.
+//! The foot bar, Zed's status bar: the status height (30 pt) along the window's foot, under the
+//! panes, on the panel's plane with the lighter `stroke` line along its top, 4 pt in at its ends
+//! and its parts 8 apart; its words Small (12) in `text_secondary`, its chips Zed's ghost
+//! buttons the density's chip tall.
 //!
 //! It holds what is always worth a glance and never a warning. On the left, the plan's usage on
 //! the focused tile's machine and agent (`Plan 5h 23% · 7d 41%`, in `warn` once a window is 80 %
@@ -8,8 +9,8 @@
 //! tile header's alone, so the foot does not say it again. On the right, the ports forwarded here,
 //! the transfers in flight, a chip for each shell of the project on show whose command runs out of
 //! sight (in another tab, behind a pane's other tab, or in the tab's terminal put away; a click
-//! goes to it), and the toggle of the tab's terminal, a chip that says "Terminal" (⌘⌥T, which the
-//! palette names), in the accent while the terminal shows. A shell on show
+//! goes to it), and the toggle of the tab's terminal, an icon button whose hint names it and its
+//! keys (⌘⌥T), on while the terminal shows. A shell on show
 //! says its command in its own header, so it has no chip. The title bar keeps only the readouts
 //! that warn: the server out of reach, a link on a relay, a newer build. The frame time is the
 //! stream stats overlay's (⌘⇧I), not a readout.
@@ -19,18 +20,18 @@
 
 use std::cell::Cell;
 
-use gpui::accesskit::{Role, Toggled};
+use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    AppContext as _, Bounds, InteractiveElement as _, IntoElement as _, ParentElement as _, Pixels,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_client::layout::TileRef;
 use slopty_core::SessionId;
 use slopty_kit::a11y::tab_stop;
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{Drawn, IconSize, Symbol};
+use slopty_kit::icons::{Drawn, Symbol};
 use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 
@@ -46,9 +47,6 @@ pub(super) const HIDE_TERMINAL: &str = "Hide the tab's terminal";
 /// The widest a shell's chip grows before its command is cut: a long command line must not
 /// push the rest of the bar away.
 const CHIP_MAX: f32 = 160.0;
-
-/// The word on the toggle of the tab's terminal.
-const TERMINAL_WORD: &str = "Terminal";
 
 /// The foot bar's own state: where it was laid out, which its popovers rise from, and the
 /// shells its chips name as last drawn.
@@ -117,7 +115,7 @@ impl WorkspaceView {
             gpui::canvas(move |bounds, _window, _cx| at.set(Some(bounds)), |_, (), _, _| {})
                 .absolute()
                 .inset_0();
-        let gap = spacing.xs + spacing.xxs;
+        let gap = spacing.sm;
         let leading = div()
             .flex_1()
             .min_w_0()
@@ -145,8 +143,8 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(gap))
-            .px(px(spacing.md - spacing.xs - spacing.xxs))
-            .bg(hsla(s.ground))
+            .px(px(spacing.xs))
+            .bg(hsla(s.sidebar))
             .border_t(kit::HAIR)
             .border_color(hsla(s.stroke))
             .font_family(theme.typography.ui_family.clone())
@@ -160,7 +158,7 @@ impl WorkspaceView {
         let transfer_list = (self.readouts.shown(super::readouts::Popover::Transfers)
             && self.transfers_in_flight())
         .then(|| self.render_transfers(window, cx));
-        kit::typed(bar, theme.roles().caption)
+        kit::typed(bar, theme.roles().metadata)
             .text_color(hsla(s.text_secondary))
             .children(plans)
             .children(transfer_list)
@@ -182,7 +180,7 @@ impl WorkspaceView {
             .or_else(|| self.item(tile).map(|i| self.tile_title(i)))
             .unwrap_or_default();
         let mark = Drawn::disclosure(theme, Symbol::Terminal)
-            .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted));
+            .slot(px(theme.typography.icon()), hsla(s.text_muted));
         let el = div()
             .id(SharedString::from(format!("foot-shell-{session}")))
             .debug_selector(move || format!("foot-shell-{session}"))
@@ -199,7 +197,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .text_color(hsla(s.text_secondary))
             .map(kit::eased)
-            .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .child(mark)
             .child(div().min_w_0().truncate().child(SharedString::from(words)));
         tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -207,43 +205,24 @@ impl WorkspaceView {
         }))
     }
 
-    /// The toggle of the tab's terminal, `MonoCode`'s footer "Terminal" button: a chip with the
-    /// terminal's glyph and the word, quiet at rest and in the accent while the terminal shows.
+    /// The toggle of the tab's terminal: Zed's dock toggle, an icon button with the terminal's
+    /// glyph, on (the selected wash, the text's ink) while the terminal shows; its hint names
+    /// it and its keys.
     fn terminal_toggle(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
-        let s = theme.surfaces;
         let shows = self.layout.shown_tab().is_some_and(|tab| {
             tab.terminal().and_then(|id| tab.pane(id)).is_some_and(|pane| !pane.hidden())
         });
         let label = if shows { HIDE_TERMINAL } else { SHOW_TERMINAL };
-        let ink = if shows { s.accent } else { s.text_muted };
-        let glyph = IconSize::Inline;
-        let el = div()
-            .id("foot-terminal")
-            .debug_selector(|| "foot-terminal".to_owned())
-            .role(Role::Button)
-            .aria_label(label)
-            .aria_toggled(if shows { Toggled::True } else { Toggled::False })
-            .flex_none()
-            .h(px(theme.density.chip))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs + theme.spacing.xxs))
-            .px(px(theme.spacing.xs + theme.spacing.xxs))
-            .rounded(px(theme.radii.xs))
-            .cursor_pointer()
-            .text_color(hsla(ink))
-            .map(kit::eased)
-            .hover(move |el| {
-                let words = if shows { s.accent } else { s.text };
-                el.bg(hsla(s.hover_strong)).text_color(hsla(words))
+        let hint_theme = std::rc::Rc::new(theme.clone());
+        let el = kit::icon_toggle(theme, "foot-terminal", Symbol::Terminal, label, shows);
+        kit::hint_timing(el)
+            .tooltip(move |_window, cx| {
+                let keys = crate::palette::keys_for(&TabTerminal, &super::key_bindings(cx));
+                cx.new(|_| kit::Hint::new(label, keys, std::rc::Rc::clone(&hint_theme))).into()
             })
-            .child(
-                Drawn::new(theme, Symbol::Terminal, glyph).slot(px(glyph.slot(theme)), hsla(ink)),
-            )
-            .child(TERMINAL_WORD);
-        tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
-            this.tab_terminal(&TabTerminal, window, cx);
-        }))
+            .on_click(cx.listener(|this, _ev, window, cx| {
+                this.tab_terminal(&TabTerminal, window, cx);
+            }))
     }
 }

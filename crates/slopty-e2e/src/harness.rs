@@ -480,7 +480,11 @@ const REAP: Duration = Duration::from_secs(10);
 async fn reap(child: &mut Child, what: &str) {
     let pid = child.id();
     let _killed = child.start_kill();
-    if tokio::time::timeout(REAP, child.wait()).await.is_ok() {
+    // A daemon leads a group of its own: the group ends with it, then leaves the warden's care.
+    let ended = slopty_testkit::group::end(std::slice::from_mut(child), Child::id, |child| {
+        child.try_wait().is_ok_and(|status| status.is_some())
+    });
+    if ended || tokio::time::timeout(REAP, child.wait()).await.is_ok() {
         return;
     }
     let Some(pid) = pid else { return };
@@ -669,8 +673,10 @@ async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Chil
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()
         .context("spawn slopty-ptyd")?;
+    slopty_testkit::group::ward(ptyd.id());
     wait_for_path(&ptyd_sock, &mut ptyd, "slopty-ptyd").await?;
     Ok(ptyd)
 }
@@ -713,8 +719,10 @@ async fn spawn_worker(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()
         .context("spawn slopty-worker")?;
+    slopty_testkit::group::ward(worker.id());
     let stdout = worker.stdout.take().context("worker stdout")?;
     let mut listen = String::new();
     tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut listen))
@@ -818,8 +826,10 @@ async fn spawn_app(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn()
         .context("spawn slopty-app")?;
+    slopty_testkit::group::ward(app.id());
     wait_for_path(&app_sock, &mut app, "slopty-app").await?;
     let driver = connect_with_retry(&app_sock, &mut app).await?;
     Ok((app, driver))
@@ -1551,8 +1561,10 @@ impl Stack {
             .arg(&title)
             .stdin(Stdio::null())
             .kill_on_drop(true)
+            .process_group(0)
             .spawn()
             .context("spawn slopty-idle-window")?;
+        slopty_testkit::group::ward(child.id());
         self.children.push(child);
         let ready = markers.join("ready");
         let deadline = std::time::Instant::now()
@@ -1705,25 +1717,28 @@ impl Pair {
 impl Drop for Stack {
     fn drop(&mut self) {
         for child in &mut self.children {
+            if let Some(group) = child.id() {
+                slopty_testkit::group::kill(group);
+            }
             let _killed = child.start_kill();
         }
     }
 }
 
-/// Check that the terminal face is the bundled `JetBrains Mono` as its tables say.
+/// Check that the terminal face is the bundled `Lilex` as its tables say.
 ///
-/// Measured through the platform text system: no line gap, the underline 0.155 em below the
-/// baseline and 0.05 em thick (`post`), so the app derives the cell from the font, not from
-/// ghostty's estimates. Same on macOS and iOS.
+/// Measured through the platform text system: ascent 0.999 and descent 0.301 em (`hhea`), no
+/// line gap, the underline 0.14 em below the baseline and 0.06 em thick (`post`), so the app
+/// derives the cell from the font, not from ghostty's estimates. Same on macOS and iOS.
 ///
 /// # Errors
 /// When the grid has not been laid out or the face carries an estimate instead of the font.
-pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
+pub fn check_lilex_face(face: Option<&crate::FaceInfo>) -> Result<()> {
     let Some(face) = face else { bail!("the grid has not been laid out: no face") };
     ensure!(face.size > 0.0, "{face:?}");
     let em = |v: f32| v / face.size;
-    ensure!((em(face.ascent) - 1.020).abs() < 0.01, "hhea ascender 1020: {face:?}");
-    ensure!((em(face.descent) + 0.300).abs() < 0.01, "hhea descender -300: {face:?}");
+    ensure!((em(face.ascent) - 0.999).abs() < 0.005, "hhea ascender 999: {face:?}");
+    ensure!((em(face.descent) + 0.301).abs() < 0.005, "hhea descender -301: {face:?}");
     ensure!(face.line_gap.abs() < f32::EPSILON, "no line gap: {face:?}");
     let Some(position) = face.underline_position else {
         bail!("post underlinePosition not read: {face:?}")
@@ -1731,8 +1746,8 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
     let Some(thickness) = face.underline_thickness else {
         bail!("post underlineThickness not read: {face:?}")
     };
-    ensure!((em(position) + 0.155).abs() < 0.005, "post underlinePosition -155: {face:?}");
-    ensure!((em(thickness) - 0.050).abs() < 0.005, "post underlineThickness 50: {face:?}");
+    ensure!((em(position) + 0.140).abs() < 0.005, "post underlinePosition -140: {face:?}");
+    ensure!((em(thickness) - 0.060).abs() < 0.005, "post underlineThickness 60: {face:?}");
     Ok(())
 }
 
@@ -1877,8 +1892,10 @@ impl ServerDaemon {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
+            .process_group(0)
             .spawn()
             .context("spawn slopty-server")?;
+        slopty_testkit::group::ward(child.id());
         let stdout = child.stdout.take().context("slopty-server stdout")?;
         let mut line = String::new();
         tokio::time::timeout(STARTUP, BufReader::new(stdout).read_line(&mut line))

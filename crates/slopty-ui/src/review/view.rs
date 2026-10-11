@@ -33,14 +33,14 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, SharedString,
+    Focusable, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use slopty_client::threads::Mirror;
 use slopty_kit::colors::{hsla, hsla_alpha};
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::RequestId;
 use slopty_proto::git::GitOp;
@@ -48,7 +48,7 @@ use slopty_proto::thread::wire::{Intent, Review, ReviewScope};
 use slopty_proto::thread::{
     AgentId, Cap, Delivery, IntentId, ItemBody, Phase, ThreadId, ThreadState, TurnId, TurnState,
 };
-use slopty_theme::{Theme, Typography};
+use slopty_theme::Theme;
 
 use super::findings::{self, Finding};
 use super::model::{self, Comment, Model, Note, Scope, Side};
@@ -1550,7 +1550,7 @@ impl ReviewView {
     }
 
     fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
-        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, hsla(tone))
             .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
@@ -1577,11 +1577,10 @@ impl ReviewView {
             .border(kit::HAIR)
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer()
             .child(label);
         let el = if primary {
-            kit::solid_pressable(el.border_color(hsla(s.solid)), theme)
+            kit::tinted_pressable(el, theme)
         } else {
             el.border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
@@ -1816,7 +1815,6 @@ impl ReviewView {
             .px(px(theme.spacing.sm))
             .py(px(theme.spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
@@ -2045,7 +2043,6 @@ impl ReviewView {
                     .child(
                         div()
                             .whitespace_normal()
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(s.text))
                             .child(SharedString::from(finding.title.clone())),
                     )
@@ -2329,7 +2326,6 @@ impl ReviewView {
                 .text_ellipsis()
                 .whitespace_nowrap()
                 .text_color(hsla(s.text))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .child(SharedString::from(name.to_owned())),
         )
         .child(
@@ -2539,12 +2535,7 @@ impl ReviewView {
                     .gap(px(theme.spacing.xxs))
                     .whitespace_normal()
                     .child(
-                        div()
-                            .text_color(hsla(s.text))
-                            .when(comment.by.is_some(), |el| {
-                                el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                            })
-                            .child(SharedString::from(title.to_owned())),
+                        div().text_color(hsla(s.text)).child(SharedString::from(title.to_owned())),
                     )
                     .when(!rest.trim().is_empty(), |el| {
                         el.child(
@@ -2634,8 +2625,7 @@ impl ReviewView {
                 .px(px(theme.spacing.md))
                 .py(px(theme.spacing.xs))
                 .rounded(px(theme.radii.sm))
-                .map(|el| kit::solid_pressable(el, theme))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .map(|el| kit::tinted_pressable(el, theme))
                 .cursor_pointer()
                 .child(SharedString::from(send_words))
                 .on_click(cx.listener(move |this, _ev, _w, cx| match (goal, folder) {

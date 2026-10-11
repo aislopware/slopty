@@ -20,7 +20,7 @@ use gpui::{
 use slopty_client::server::ServerCaller;
 use slopty_core::WorkerId;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::settings::{DaemonSettings, SettingEdit};
 
@@ -369,12 +369,7 @@ impl SettingsForm {
             .text_color(hsla(s.text))
             .cursor_pointer()
             .child(SharedString::from(name))
-            .child(slopty_kit::icons::icon(
-                theme,
-                Symbol::ChevronDown,
-                IconSize::Inline,
-                hsla(s.text_muted),
-            ))
+            .child(slopty_kit::icons::icon(theme, Symbol::ChevronDown, hsla(s.text_muted)))
             .on_click(cx.listener(|this, _ev, _w, cx| {
                 this.machines.open = !this.machines.open;
                 cx.notify();

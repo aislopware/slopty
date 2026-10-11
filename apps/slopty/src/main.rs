@@ -99,7 +99,7 @@ pub fn main() -> Result<()> {
         }
         // After `open_workspace`: the menu reads its shortcut labels from the keymap, which the
         // workspace fills in, and it is built again whenever the keys are rebound.
-        slopty_app::set_app_menus(cx, menus);
+        slopty_app::set_app_menus(cx, |_| menus());
         if !slopty_app::self_test() {
             cx.activate(true);
         }
@@ -127,7 +127,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let palette = slopty_ui::workspace::palette_items();
+        let palette = slopty_ui::workspace::palette_items_of(&slopty_ui::keymap::Keymap::default());
         let labels = [
             "Open file…",
             "Open folder…",

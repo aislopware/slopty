@@ -36,7 +36,7 @@ use slopty_client::folders::FolderPages;
 use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_proto::ClientMsg;
 use slopty_proto::folder::{After, FolderEntry, FsOp, Listing};
 use slopty_proto::orchestration::FileKind;
@@ -233,7 +233,7 @@ impl FolderView {
             theme,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
-            plate: Plate::default(),
+            plate: Plate::square(),
         }
     }
 
@@ -671,9 +671,7 @@ impl FolderView {
     /// A row's lead: `symbol` beside the row's name at its size and weight.
     fn lead(&self, mark: impl Into<slopty_kit::icons::Mark>, ink: gpui::Hsla) -> gpui::Div {
         let theme = &self.theme;
-        let chrome = theme.roles().chrome;
-        slopty_kit::icons::beside(theme, mark, chrome, ink)
-            .size(px(IconSize::beside_slot(theme, chrome)))
+        slopty_kit::icons::icon(theme, mark, ink)
     }
 
     /// Over the rows, a folder asked for here and not yet listed, drawn as made.
@@ -1065,21 +1063,13 @@ impl FolderView {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_color(hsla(ink.name))
-                    .when(chosen, |el| {
-                        el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
-                    })
                     .child(SharedString::from(shown_name))
                     .into_any_element()
             }))
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
-                    slopty_kit::icons::icon(
-                        theme,
-                        Symbol::Link,
-                        IconSize::Inline,
-                        hsla(s.text_muted),
-                    )
-                    .size(px(IconSize::Inline.slot(theme))),
+                    slopty_kit::icons::icon(theme, Symbol::Link, hsla(s.text_muted))
+                        .size(px(theme.typography.icon())),
                 )
             })
             .child(column(detail, SIZE_W))
@@ -1195,7 +1185,7 @@ impl Render for FolderView {
             None => vec![self.notice(Symbol::Folder, crate::file::READING, None, None)],
             Some(Listing::NotFolder) => vec![self.notice(Symbol::Doc, NOT_A_FOLDER, None, None)],
             Some(Listing::Missing { error }) => vec![self.notice(
-                Symbol::TextMagnifyingglass,
+                Symbol::Magnifyingglass,
                 CANNOT_LIST,
                 Some(SharedString::from(error.clone())),
                 None,
@@ -1418,8 +1408,8 @@ const HIDDEN: f32 = slopty_theme::alpha::STRONG;
 /// A row a change was asked of, drawn as done before the worker's listing says it is.
 const ASKED: f32 = slopty_theme::alpha::STRONG;
 /// A row on its way out of the folder: still there until the listing drops it, faded to the
-/// edge of being seen.
-const LEAVING: f32 = slopty_theme::alpha::RING;
+/// edge of being seen, as a tint that has to be seen is.
+const LEAVING: f32 = slopty_theme::alpha::TINT;
 
 /// An element id for the `n`th of a kind.
 fn numbered(kind: &'static str, n: usize) -> gpui::ElementId {

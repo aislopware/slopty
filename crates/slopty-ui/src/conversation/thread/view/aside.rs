@@ -177,7 +177,6 @@ impl ThreadView {
                 div()
                     .flex_1()
                     .text_size(px(theme.typography.small()))
-                    .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text_secondary))
                     .child("Aside"),
             )

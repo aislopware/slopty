@@ -221,9 +221,9 @@ mod tests {
         let mut s = Settings::default();
         "Fira Code".clone_into(&mut s.font.mono_family);
         let t = theme_for(&s, true);
-        assert_eq!(t.typography.mono_families, ["Fira Code", "JetBrains Mono", "SF Mono", "Menlo"]);
+        assert_eq!(t.typography.mono_families, ["Fira Code", "Lilex"]);
         let t = theme_for(&Settings::default(), true);
-        assert_eq!(t.typography.mono_families, ["JetBrains Mono", "SF Mono", "Menlo"]);
+        assert_eq!(t.typography.mono_families, ["Lilex"]);
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod tests {
         s.font.ui_size = f32::NAN;
         let t = theme_for(&s, true);
         assert_eq!(t.typography.mono_size, 13.0);
-        assert_eq!(t.typography.ui_size, 13.0);
+        assert_eq!(t.typography.ui_size, 14.0);
         s.font.mono_size = 16.0;
         assert_eq!(theme_for(&s, true).typography.mono_size, 16.0);
         s.font.mono_line_height = 1.2;
@@ -370,7 +370,7 @@ mod tests {
         let mut s = Settings::default();
         s.font.prose_size = 20.0;
         let typography = theme_for(&s, true).typography;
-        assert_eq!((typography.prose(), typography.ui_size), (20.0, 13.0), "the chrome stays");
+        assert_eq!((typography.prose(), typography.ui_size), (20.0, 14.0), "the chrome stays");
         s.font.prose_size = 2.0;
         assert_eq!(theme_for(&s, true).typography.prose(), 14.0);
     }

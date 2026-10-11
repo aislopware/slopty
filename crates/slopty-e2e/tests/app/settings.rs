@@ -81,7 +81,7 @@ async fn the_settings_form_edits_the_file() {
         .unwrap();
     assert_eq!(
         dump.a11y_node("ComboBox", Some("Family")).and_then(|n| n.value.as_deref()),
-        Some("JetBrains Mono"),
+        Some("Lilex"),
         "{:#?}",
         dump.a11y
     );

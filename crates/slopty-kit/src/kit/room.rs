@@ -3,20 +3,21 @@
 //! ([`room_query`]), never by the window's (`docs/decisions/ui.md`, "How surfaces adapt to
 //! their room").
 //!
-//! The classes are set by text, so they are written at the default 13 pt chrome and grow and
-//! shrink with the chrome size setting: a larger chrome needs more room for the same words.
+//! The classes are set by text, so they are written at the default 14 pt chrome, Zed's default
+//! label, and grow and shrink with the chrome size setting: a larger chrome needs more room for
+//! the same words.
 
 use gpui::{App, IntoElement, Pixels, Size, Window, container_query};
 use slopty_theme::Theme;
 
-/// The chrome size the rooms are written at.
-const WRITTEN_AT: f32 = 13.0;
+/// The chrome size the rooms are written at: the default, Zed's 14 pt label.
+const WRITTEN_AT: f32 = 14.0;
 
-/// Under this, written at a 13 pt chrome, a surface is [`Room::Narrow`]: a column beside a
+/// Under this, written at the default chrome, a surface is [`Room::Narrow`]: a column beside a
 /// board or a review (312 pt), a phone's.
 const NARROW_BELOW: f32 = 420.0;
 
-/// From this, written at a 13 pt chrome, a surface is [`Room::Wide`]: wide work's own column
+/// From this, written at the default chrome, a surface is [`Room::Wide`]: wide work's own column
 /// (`WIDE_LEAST` in the layout), where a review shows its file list.
 const WIDE_FROM: f32 = 720.0;
 
@@ -108,7 +109,7 @@ mod tests {
         assert_eq!(Room::of(719.0, &theme), Room::Regular);
         assert_eq!(Room::of(720.0, &theme), Room::Wide);
         let mut larger = Theme::default();
-        larger.typography.ui_size = 15.0;
+        larger.typography.ui_size = 18.0;
         assert_eq!(Room::of(440.0, &larger), Room::Narrow, "larger words need more room");
         assert!(Room::wide_from(&larger) > Room::wide_from(&theme));
     }

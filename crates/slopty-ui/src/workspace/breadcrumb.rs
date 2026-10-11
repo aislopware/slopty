@@ -5,7 +5,10 @@
 //! project (`slopty ▾ / devbox ▾ / main`), with the menu of the project's clones on every
 //! machine when there are several, so one project on three machines never reads as one.
 //!
-//! The project on show leads in the medium weight: its name, and a menu of every project,
+//! Its segments are Zed's title-bar project and branch buttons: subtle buttons a button tall,
+//! their words Small (12), the project's in the text's tone and the rest in `text_secondary`.
+//!
+//! The project on show leads: its name, and a menu of every project,
 //! which is how the bar switches between them. What waits anywhere is the bell's and the
 //! navigator's one list, so this segment carries no count of its own. The checkout is the focused
 //! shell's repository (else its directory), with a menu of the same repository's other
@@ -26,11 +29,10 @@ use slopty_kit::a11y::tab_stop;
 use slopty_kit::chrome_text::ChromeText;
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{Drawn, GitGlyph, IconSize, Symbol, icon};
+use slopty_kit::icons::{Drawn, GitGlyph, Symbol, icon};
 use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::{RepoChanges, RepoId};
-use slopty_theme::Typography;
 
 use super::tile::place_name;
 use super::titlebar::MenuKind;
@@ -140,18 +142,17 @@ impl WorkspaceView {
                     .debug_selector(|| "crumb-project-name".to_owned())
                     .min_w_0()
                     .max_w(px(theme.typography.ui_size * PROJECT_NAME_EM))
-                    .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
-                    .child(ChromeText::new(name.clone(), px(theme.typography.ui_size)).fill()),
+                    .child(ChromeText::new(name.clone(), px(theme.roles().metadata.size)).fill()),
             )
             .child(self.chevron());
         let mut row = kit::priority_row("breadcrumb")
             .fit_content()
             .flex_initial()
             .min_w_0()
-            .h(px(theme.density.row))
+            .h(px(theme.density.button))
             .gap(px(spacing.xxs))
-            .text_size(px(theme.typography.ui_size))
+            .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(s.text_secondary))
             .item("project", kit::Priority::ESSENTIAL, project);
         // A project on more than one worker names the focused tile's, so three machines'
@@ -172,9 +173,7 @@ impl WorkspaceView {
                 self.words("crumb-worker", label)
             }
             .gap(px(spacing.xs))
-            .child(
-                icon(theme, glyph, IconSize::Inline, hsla(tint)).size(px(theme.typography.icon())),
-            )
+            .child(icon(theme, glyph, hsla(tint)).size(px(theme.typography.icon())))
             .child(SharedString::from(worker))
             .when(more, |el| el.child(self.chevron()));
             row = row.item("worker", kit::Priority::LOW, stepped(segment.into_any_element()));
@@ -203,13 +202,13 @@ impl WorkspaceView {
                 .flex_initial()
                 .gap(px(spacing.xs))
                 .child(
-                    icon(theme, GitGlyph::Branch, IconSize::Inline, hsla(s.text_muted))
+                    icon(theme, GitGlyph::Branch, hsla(s.text_muted))
                         .size(px(theme.typography.icon())),
                 )
                 .child(
                     div()
                         .min_w_0()
-                        .child(ChromeText::new(branch, px(theme.typography.ui_size)).fill()),
+                        .child(ChromeText::new(branch, px(theme.roles().metadata.size)).fill()),
                 )
                 .when_some(changes, |el, size| {
                     el.child(
@@ -240,8 +239,9 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A segment that opens `which`: a quiet button a row tall, hovered as a row is, its left
-    /// edge noted for the menu to hang from.
+    /// A segment that opens `which`: Zed's subtle title-bar button, a button tall and 6 in at
+    /// its ends, washed under the pointer and while its menu is up, its left edge noted for
+    /// the menu to hang from.
     fn crumb(
         &self,
         which: MenuKind,
@@ -269,8 +269,8 @@ impl WorkspaceView {
             .relative()
             .flex_none()
             .min_w_0()
-            .h(px(theme.density.row))
-            .px(px(theme.spacing.sm))
+            .h(px(theme.density.button))
+            .px(px(theme.spacing.xs + theme.spacing.xxs))
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
@@ -297,8 +297,8 @@ impl WorkspaceView {
             .aria_label(label)
             .flex_none()
             .min_w_0()
-            .h(px(theme.density.row))
-            .px(px(theme.spacing.sm))
+            .h(px(theme.density.button))
+            .px(px(theme.spacing.xs + theme.spacing.xxs))
             .flex()
             .items_center()
             .whitespace_nowrap()
@@ -308,7 +308,7 @@ impl WorkspaceView {
     pub(super) fn chevron(&self) -> gpui::Div {
         let theme = &self.theme;
         Drawn::disclosure(theme, Symbol::ChevronDown)
-            .slot(px(IconSize::Inline.slot(theme)), hsla(theme.surfaces.text_muted))
+            .slot(px(theme.typography.icon()), hsla(theme.surfaces.text_muted))
     }
 
     /// The project segment's menu: every project, the one on show ticked, the others saying

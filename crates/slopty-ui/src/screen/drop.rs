@@ -23,7 +23,7 @@ use gpui::{
 use slopty_client::dnd::out::{Outgoing, Shared};
 use slopty_client::dnd::{Hover, Outcome, Phase, Read};
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Status, Symbol, icon, status_icon};
+use slopty_kit::icons::{Status, Symbol, icon, status_icon};
 use slopty_kit::kit;
 use slopty_proto::drag::{DragEvent, DragId, DragInput, DragItem, DragOp, DragOps, Promised};
 use slopty_proto::screen::ScreenInput;
@@ -224,7 +224,7 @@ impl ScreenView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(theme, name, IconSize::Inline, ink))
+                .child(icon(theme, name, ink))
         });
         let more = taking.items.len().saturating_sub(ICONS);
         let count = (more > 0).then(|| {

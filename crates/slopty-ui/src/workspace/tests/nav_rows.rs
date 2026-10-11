@@ -102,9 +102,10 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
     for b in [search, goal, new] {
         assert!(b.top() >= lights.bottom(), "under the lights row: {b:?}");
         assert!(b.left() > nav.left() && b.right() < nav.right(), "across the panel: {b:?}");
+        assert!((b.center().y - search.center().y).abs() < px(0.5), "one row: {b:?}");
     }
-    assert!(search.bottom() <= goal.top(), "in order: {search:?} {goal:?}");
-    assert!(goal.bottom() <= new.top(), "a goal first: {goal:?} {new:?}");
+    assert!(search.right() <= goal.left(), "in order: {search:?} {goal:?}");
+    assert!(goal.right() <= new.left(), "a goal first: {goal:?} {new:?}");
     assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
 
     click(cx, "nav-search");
@@ -648,7 +649,7 @@ fn a_rows_two_lines_sit_in_its_middle(cx: &mut TestAppContext) {
     let tile = in_repo(&view, cx, &studio, 1, ("/w/oss/app", "/w/oss/app/src", "main"));
     let id = tile.item.as_uuid();
     for (density, height) in
-        [(slopty_theme::Density::COMPACT, 40.0), (slopty_theme::Density::TOUCH, 56.0)]
+        [(slopty_theme::Density::COMPACT, 42.0), (slopty_theme::Density::TOUCH, 56.0)]
     {
         let theme = Theme { density, ..Theme::default() };
         view.update(cx, |v, cx| v.set_theme(theme, cx));
@@ -811,11 +812,11 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     let needs = cx.debug_bounds("nav-needs-you").expect("what waits on the person");
     assert!(field.top() < needs.top(), "the field first: {field:?} {needs:?}");
     assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "its row");
-    // It starts a goal and an agent as every navigator does, under its field; the field is its
-    // search.
+    // It starts a goal and an agent as every navigator does, at its field's end; the field is
+    // its search.
     let goal = cx.debug_bounds("nav-new-goal").expect("New goal on the home");
     let start = cx.debug_bounds("nav-new-agent").expect("New agent on the home");
-    assert!(field.bottom() <= goal.top() && goal.bottom() <= start.top(), "{goal:?} {start:?}");
+    assert!(field.right() <= goal.left() && goal.right() <= start.left(), "{goal:?} {start:?}");
     assert!(start.bottom() <= needs.top(), "{start:?}");
     assert!(!shown(cx, "nav-search"), "no Search row: the field is always there");
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the machine");

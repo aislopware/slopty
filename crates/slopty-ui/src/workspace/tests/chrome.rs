@@ -576,11 +576,10 @@ fn the_project_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     assert!(tree.iter().any(|n| n.is("Button", Some("studio"))), "{tree:#?}");
     let name = cx.debug_bounds("crumb-project-name").expect("the name");
     let whole = cx.update(|window, _cx| {
-        let mut style = window.text_style();
-        style.font_weight = gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT);
+        let style = window.text_style();
         let text = "studio";
         let run = style.to_run(text.len());
-        let size = px(Theme::default().typography.ui_size);
+        let size = px(Theme::default().roles().metadata.size);
         window.text_system().shape_line(text.into(), size, &[run], None).width
     });
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");

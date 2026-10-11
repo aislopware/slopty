@@ -622,8 +622,8 @@ allow = [
         let set = write(FILE, "font", "mono_size", "15.0");
         assert_eq!(set, FILE.replace("mono_size = 13.0 # mine", "mono_size = 15.0 # mine"));
 
-        let added = write(FILE, "font", "ui_size", "14.0");
-        assert!(added.contains("ligatures = true\nui_size = 14.0\n\n[terminal]"), "{added}");
+        let added = write(FILE, "font", "ui_size", "15.0");
+        assert!(added.contains("ligatures = true\nui_size = 15.0\n\n[terminal]"), "{added}");
 
         let table = write(FILE, "remote", "fps", "30");
         assert!(table.ends_with("]\n\n[remote]\nfps = 30\n"), "{table}");

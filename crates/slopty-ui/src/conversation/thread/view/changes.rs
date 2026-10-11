@@ -153,7 +153,6 @@ impl ThreadView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .map(|el| kit::typed(el, theme.roles().chrome))
-                            .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(s.text))
                             .child(SharedString::from(words.clone())),
                     )

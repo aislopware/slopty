@@ -997,7 +997,7 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
 #[gpui::test]
 fn a_focused_needs_you_row_answers_by_its_keys(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    cx.update(|_w, cx| cx.bind_keys(crate::workspace::key_bindings()));
+    cx.update(|_w, cx| cx.bind_keys(crate::workspace::key_bindings(cx)));
     let (session, other) = (SessionId::new(), SessionId::new());
     let key = WorkerKey::new(7);
     let (tiles, mut link) = worker(&view, cx, key, "mini", &[session, other]);

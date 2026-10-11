@@ -22,7 +22,7 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::layout::WorkerKey;
 use slopty_kit::a11y::tab_stop;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol, icon};
+use slopty_kit::icons::{Symbol, icon};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::project::Autonomy;
 use slopty_proto::thread::AgentId;
@@ -318,7 +318,7 @@ impl GoalSheet {
                 .overflow_hidden()
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .child(icon(theme, Symbol::Folder, IconSize::Inline, hsla(s.text_secondary)))
+                .child(icon(theme, Symbol::Folder, hsla(s.text_secondary)))
                 .child(div().min_w_0().truncate().child(SharedString::from(words)));
             tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, window, cx| {
                 this.pick_place(&picked, window, cx);
@@ -481,9 +481,9 @@ impl Render for GoalSheet {
             .cursor_pointer()
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
-            .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .child(MORE)
-            .child(icon(theme, chevron, IconSize::Inline, hsla(s.text_secondary)));
+            .child(icon(theme, chevron, hsla(s.text_secondary)));
         let more = tab_stop(more, s.focus).on_click(cx.listener(|this, _ev, _w, cx| {
             this.more = !this.more;
             cx.notify();

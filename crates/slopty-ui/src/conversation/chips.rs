@@ -15,7 +15,7 @@ use gpui::{
     StyledImage as _, Window, div, img, px,
 };
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_theme::Theme;
 
@@ -85,7 +85,7 @@ fn remove_button(theme: &Theme, chip: &Attachment, side: Pixels, remove: Remove)
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(remove)
         .child(
-            slopty_kit::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
+            slopty_kit::icons::icon(theme, Symbol::Xmark, hsla(s.text_muted))
                 .size(px(theme.typography.icon())),
         );
     slopty_kit::a11y::tab_stop(button, s.focus).into_any_element()
@@ -107,7 +107,7 @@ fn picture_chip(
         .rounded(px(theme.radii.xs))
         .overflow_hidden()
         .hover(move |el| el.bg(hsla(s.hover)))
-        .child(remove_button(theme, chip, px(theme.typography.icon_large()), remove));
+        .child(remove_button(theme, chip, px(theme.typography.icon()), remove));
     // How far it got, as the kit's capsule along the picture's foot, held in from its edges.
     let progress = (!chip.landed()).then(|| {
         div()
@@ -152,7 +152,7 @@ fn file_chip(theme: &Theme, chip: &Attachment, remove: Remove) -> AnyElement {
     let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
     // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
     let mark = if chip.landed() {
-        slopty_kit::icons::icon(theme, Symbol::Doc, IconSize::Inline, hsla(s.text_muted))
+        slopty_kit::icons::icon(theme, Symbol::Doc, hsla(s.text_muted))
             .size(px(theme.typography.icon()))
             .into_any_element()
     } else {

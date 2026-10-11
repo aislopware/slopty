@@ -1,5 +1,6 @@
-//! The bar across the top, `MonoCode`'s title bar: 40 pt on the window's ground, the one line
-//! along its foot, from the navigator's right edge to the window's.
+//! The bar across the top, Zed's title bar: the title height (34) on the panel's plane, as the
+//! navigator and the foot bar are, the `border` line along its foot, from the navigator's right
+//! edge to the window's. The tab on show is the one cell on the work's ground, open into it.
 //!
 //! While the navigator is docked it holds the project's tabs (`title_tabs.rs`), then, only while
 //! there is something to say, the tab's one tile's header (`tile_strip`), the notices that are
@@ -327,7 +328,7 @@ impl WorkspaceView {
         let hint_theme = Rc::new(theme.clone());
         kit::icon_button(theme, id, icon, label).when(SHORTCUT_HINTS, |el| {
             kit::hint_timing(el).tooltip(move |_window, cx| {
-                let keys = crate::palette::keys_for(action, &super::key_bindings());
+                let keys = crate::palette::keys_for(action, &super::key_bindings(cx));
                 cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
             })
         })
@@ -398,7 +399,7 @@ impl WorkspaceView {
         id: &'static str,
         cx: &Draw<'_, Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        self.leading_button(id, Symbol::SquareAndPencil, NEW_AGENT, &NewAgent)
+        self.leading_button(id, Symbol::Pencil, NEW_AGENT, &NewAgent)
             .on_click(cx.listener(|this, _ev, window, cx| this.new_agent(&NewAgent, window, cx)))
     }
 
@@ -523,6 +524,7 @@ impl WorkspaceView {
                 cx.listener(|this, _ev, _window, _cx| this.title_press = false),
             )
             .map(|el| super::tab_look::row(theme, el))
+            .bg(hsla(s.sidebar))
             .size_full()
             .pt(safe.top)
             .flex()
@@ -722,7 +724,7 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let entity = cx.entity().downgrade();
-        let bindings = super::key_bindings();
+        let bindings = super::key_bindings(cx);
         // The row's keys come from the binding table, spelled as the palette spells them; a
         // phone's menu shows none, as its bar shows no hints.
         let entry =

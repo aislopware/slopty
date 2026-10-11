@@ -33,7 +33,7 @@ Button │ Back
 Heading │ Terminal
 TabPanel │ Terminal
 Heading │ Font
-ComboBox │ Family │ JetBrains Mono
+ComboBox │ Family │ Lilex
 SpinButton │ Size │ 13 pt
 Button │ Decrease
 Button │ Increase

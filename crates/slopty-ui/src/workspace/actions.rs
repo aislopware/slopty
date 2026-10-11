@@ -3,7 +3,7 @@
 
 #![expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 
-use gpui::{Action, KeyBinding, actions};
+use gpui::{Action, App, KeyBinding, actions};
 
 use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
 use crate::keymap::Scope;
@@ -385,26 +385,39 @@ pub(crate) const CLOSING_CTX: &str = "ClosingOffered";
 /// The workspace's key bindings in effect: every scope of the keymap but the terminal's and the
 /// app's ([`crate::keymap`], where the table is).
 #[must_use]
-pub fn key_bindings() -> Vec<KeyBinding> {
-    crate::keymap::current().bindings(|scope| !matches!(scope, Scope::Terminal | Scope::App))
+pub fn key_bindings(cx: &App) -> Vec<KeyBinding> {
+    key_bindings_of(&crate::keymap::current(cx))
+}
+
+/// The workspace's key bindings in `keymap`: every scope but the terminal's and the app's.
+#[must_use]
+pub fn key_bindings_of(keymap: &crate::keymap::Keymap) -> Vec<KeyBinding> {
+    keymap.bindings(|scope| !matches!(scope, Scope::Terminal | Scope::App))
 }
 
 /// A terminal's key bindings in effect: the keymap's terminal scope, the terminal's own commands
 /// ([`slopty_terminal::commands`]) with the file's `[keys.terminal]` over them.
 #[must_use]
-pub fn terminal_key_bindings() -> Vec<KeyBinding> {
-    crate::keymap::current().bindings(|scope| scope == Scope::Terminal)
+pub fn terminal_key_bindings(cx: &App) -> Vec<KeyBinding> {
+    crate::keymap::current(cx).bindings(|scope| scope == Scope::Terminal)
 }
 
-/// The palette's lines for the workspace's and the terminal's actions, with their keys.
+/// The palette's lines for the workspace's and the terminal's actions, with the keys of the
+/// keymap in effect.
 #[must_use]
-pub fn palette_items() -> Vec<PaletteItem> {
+pub fn palette_items(cx: &App) -> Vec<PaletteItem> {
+    palette_items_of(&crate::keymap::current(cx))
+}
+
+/// The palette's lines for the workspace's and the terminal's actions, with `keymap`'s keys.
+#[must_use]
+pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
     use slopty_terminal::{
         ClearScreen, CopyBlockOutput, CopyLastOutput, CopyMode, Find, NextPrompt, PrevPrompt,
         RerunLast,
     };
-    let workspace = key_bindings();
-    let terminal = terminal_key_bindings();
+    let workspace = key_bindings_of(keymap);
+    let terminal = keymap.bindings(|scope| scope == Scope::Terminal);
     let w = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &workspace);
     let t = |label: &str, action: Box<dyn Action>| PaletteItem::new(label, action, &terminal);
     let mut items = vec![
@@ -505,12 +518,12 @@ impl super::WorkspaceView {
     /// "Attach block to agent", and "Attach selection to agent" while text is selected, when the
     /// focused terminal has an agent to go to ([`super::WorkspaceView::block_target`]): the
     /// palette offers no line that would do nothing.
-    pub(super) fn attach_lines(&self, cx: &gpui::App) -> Vec<PaletteItem> {
+    pub(super) fn attach_lines(&self, cx: &App) -> Vec<PaletteItem> {
         let Some(session) = self.focused_session() else { return Vec::new() };
         if self.block_target(session).is_none() {
             return Vec::new();
         }
-        let terminal = terminal_key_bindings();
+        let terminal = terminal_key_bindings(cx);
         let block = Box::new(slopty_terminal::AttachBlock);
         let mut lines = vec![PaletteItem::new("Attach block to agent", block, &terminal)];
         if self.terminals.get(&session).is_some_and(|t| t.read(cx).has_selection()) {

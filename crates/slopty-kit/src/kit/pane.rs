@@ -1,9 +1,9 @@
 //! Tiling's two pieces: a pane's surface and the sash between two panes.
 //!
-//! Panes meet edge to edge on the window's one ground, parted by the one 1 pt line, 7 % of the
-//! ink (`docs/decisions/workspace.md`, tiling). A pane is square and wears nothing of its own: no
-//! stand, no ring, no shadow. The line between two is the sash, which the pointer finds across
-//! a hit area wider than the line and drags to resize the two.
+//! Panes meet edge to edge on the window's one ground, parted by the one 1 pt line in `border`,
+//! Zed's pane divider (`docs/decisions/workspace.md`, tiling). A pane is square and wears nothing
+//! of its own: no stand, no ring, no shadow. The line between two is the sash, which the pointer
+//! finds across a hit area wider than the line and drags to resize the two.
 
 use gpui::{
     Axis, Bounds, Div, ElementId, InteractiveElement as _, ParentElement as _, Pixels, Stateful,
@@ -29,9 +29,9 @@ pub fn pane_surface(theme: &Theme) -> Div {
 /// dragged up and down under the row-resize cursor.
 ///
 /// What comes back is the hit area, laid absolute and centred on the line,
-/// [`slopty_theme::Density::sash`] across; the caller adds the mouse handlers. It paints the one
-/// line ([`slopty_theme::Surfaces::stroke`]) at rest, under the pointer and while dragged alike,
-/// as `MonoCode`'s does: the resize cursor says it can be dragged.
+/// [`slopty_theme::Density::sash`] across (4, Zed's); the caller adds the mouse handlers. It
+/// paints the one line ([`slopty_theme::Surfaces::border`]) at rest, under the pointer and while
+/// dragged alike, as Zed's divider does: the resize cursor says it can be dragged.
 #[must_use]
 pub fn sash(
     id: impl Into<ElementId>,
@@ -43,7 +43,7 @@ pub fn sash(
     let across = px(theme.density.sash);
     let centre = line.center();
     let area = div().id(id).absolute().flex().justify_center().items_center();
-    let mark = div().flex_none().bg(hsla(theme.surfaces.stroke));
+    let mark = div().flex_none().bg(hsla(theme.surfaces.border));
     match axis {
         Axis::Vertical => area
             .left(centre.x - across / 2.0)
@@ -119,12 +119,12 @@ mod tests {
     fn a_sash_is_the_one_line(cx: &mut TestAppContext) {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
-            let stroke = hsla(theme.surfaces.stroke);
+            let border = hsla(theme.surfaces.border);
             for axis in [Axis::Vertical, Axis::Horizontal] {
                 let (scale, quads) = drawn(cx, variant, axis);
                 let line = quads
                     .iter()
-                    .find(|q| q.background.as_solid() == Some(stroke))
+                    .find(|q| q.background.as_solid() == Some(border))
                     .unwrap_or_else(|| panic!("{variant:?} {axis:?}: the line"));
                 let (across, start) = match axis {
                     Axis::Vertical => (line.bounds.size.width.0, line.bounds.origin.x.0),

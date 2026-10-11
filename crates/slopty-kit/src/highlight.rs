@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn runs_cover_the_line_exactly_with_the_theme_colours() {
         let theme = Theme::default();
-        let font = gpui::font("JetBrains Mono");
+        let font = gpui::font(crate::fonts::MONO_FAMILY);
         let spans = [
             Span { len: 2, token: Token::Keyword, italic: false, bold: false },
             Span { len: 3, token: Token::Comment, italic: true, bold: false },

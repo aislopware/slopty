@@ -21,7 +21,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown
 use slopty_core::SessionId;
 use slopty_kit::colors::hsla;
 use slopty_kit::fuzzy::{Fuzzy, Rank, best_first};
-use slopty_kit::icons::{self, IconSize, Mark, Status, Symbol};
+use slopty_kit::icons::{self, Mark, Status, Symbol};
 use slopty_kit::kit::Pace;
 use slopty_kit::layer::Layer;
 use slopty_theme::Theme;
@@ -90,29 +90,27 @@ pub(crate) fn quiet_line(
 }
 
 /// The height of a line in a list that floats (the palette's, a picker's): the density's item,
-/// 32 on the Mac, `MonoCode`'s quick-open rows.
+/// 24 on the Mac, Zed's picker rows.
 pub(crate) const fn line_height(theme: &Theme) -> f32 {
     theme.density.item
 }
 
-/// How wide a list typed at grows on a desktop (the palette, a picker): `MonoCode`'s quick open,
-/// 560.
-pub(crate) const LIST_WIDTH: f32 = 560.0;
+/// How wide a list typed at grows on a desktop (the palette, a picker): Zed's command palette,
+/// 38 rem.
+pub(crate) const LIST_WIDTH: f32 = 608.0;
 
-/// How far down the window a list typed at opens on a desktop: 12 % of its height, as
-/// `MonoCode`'s quick open does, so the eye drops a short way to it and the rows have room
-/// under it.
-pub(crate) const LIST_ANCHOR: f32 = 0.12;
+/// How far down the window a list typed at opens on a desktop: Zed's modal layer's `top_20`,
+/// 80 pt, so the eye drops a short way to it and the rows have room under it.
+pub(crate) const LIST_TOP: f32 = 80.0;
 
 /// The layer a list typed at is laid out on: [`slopty_kit::kit::anchor`]'s, the list
-/// [`LIST_ANCHOR`] down the window rather than a dialog's way down.
+/// [`LIST_TOP`] down the window rather than a dialog's way down.
 pub(crate) fn list_anchor(theme: &Theme, window: &Window) -> gpui::Div {
-    let height = f32::from(window.viewport_size().height);
     let safe_top = window.insets().effective().top;
-    slopty_kit::kit::anchor(theme, window).pt(px(height * LIST_ANCHOR) + safe_top)
+    slopty_kit::kit::anchor(theme, window).pt(px(LIST_TOP) + safe_top)
 }
 
-/// The height of a floating list's query row: 40 on the Mac, `MonoCode`'s quick-open input.
+/// The height of a floating list's query row: the title's, 34 on the Mac, Zed's picker editor.
 pub(crate) const fn query_height(theme: &Theme) -> f32 {
     theme.density.title
 }
@@ -121,13 +119,13 @@ pub(crate) const fn query_height(theme: &Theme) -> f32 {
 /// gap after it ([`field_row`]).
 fn field_text_start(theme: &Theme) -> f32 {
     let spacing = theme.spacing;
-    spacing.sm + spacing.xxs + IconSize::Inline.slot(theme) + spacing.sm
+    spacing.sm + spacing.xxs + theme.typography.icon() + spacing.sm
 }
 
 /// The pad round a floating list's rows: their fills sit this far in from the sheet's sides
-/// and foot, `MonoCode`'s `px-1.5 pb-1.5`.
+/// and foot, Zed's `p_1`.
 pub(crate) const fn list_pad(theme: &Theme) -> f32 {
-    theme.spacing.xs + theme.spacing.xxs
+    theme.spacing.xs
 }
 
 /// `text`, a meta line whose facts are joined by a spaced middle dot, with each dot in
@@ -149,10 +147,9 @@ pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::Styl
     gpui::StyledText::new(text).with_highlights(dots)
 }
 
-/// A floating list's field row, `MonoCode`'s quick-open input: a 14 pt magnifier in the
-/// secondary tone, then the query bare at the chrome role, in a [`query_height`] row over the
-/// one line that parts it from the rows. The field wears no frame and no fill: the sheet is its
-/// frame.
+/// A floating list's field row, Zed's picker editor: the 16 pt magnifier in `icon_muted`, then the
+/// query bare at the chrome role, in a [`query_height`] row over the one line that parts it from
+/// the rows. The field wears no frame and no fill: the sheet is its frame.
 pub(crate) fn field_row(
     theme: &Theme,
     input: &Entity<InputState>,
@@ -169,12 +166,7 @@ pub(crate) fn field_row(
         .flex()
         .items_center()
         .gap(px(theme.spacing.sm))
-        .child(icons::icon(
-            theme,
-            Symbol::Magnifyingglass,
-            IconSize::Inline,
-            hsla(s.text_secondary),
-        ))
+        .child(icons::icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
         .child(
             Input::new(input)
                 .appearance(false)
@@ -216,6 +208,17 @@ impl Plate {
         Self(Rc::new(RefCell::new(Glide { plain: true, ..Glide::default() })))
     }
 
+    /// The plate of a panel's list, whose rows run square from edge to edge (the navigator's,
+    /// Zed's sidebar): square, where a float's rows round at `radii.sm`.
+    pub(crate) fn square() -> Self {
+        Self(Rc::new(RefCell::new(Glide { square: true, ..Glide::default() })))
+    }
+
+    /// The plate's radius: none for a panel's list, `radii.sm` inside a float.
+    fn radius(&self, theme: &Theme) -> Pixels {
+        if self.0.borrow().square { px(0.0) } else { px(theme.radii.sm) }
+    }
+
     /// Whether the keyboard is in the list (as it is unless said otherwise): the plate is then
     /// the keyed wash with the focus line, the keyboard's cursor, and else the selected wash
     /// ([`slopty_kit::kit::selected`]).
@@ -254,7 +257,7 @@ impl Plate {
         let glide = Rc::clone(&self.0);
         let key = key_of(key);
         let theme = theme.clone();
-        let radius = px(theme.radii.sm);
+        let radius = self.radius(&theme);
         row.child(
             gpui::canvas(
                 {
@@ -295,7 +298,7 @@ impl Plate {
         now: Option<Instant>,
     ) -> impl IntoElement + use<> {
         let theme = theme.clone();
-        let radius = px(theme.radii.sm);
+        let radius = self.radius(&theme);
         // Read now: the glide is held while the plate paints.
         let (keyed, plain) = {
             let glide = self.0.borrow();
@@ -394,6 +397,8 @@ struct Glide {
     away: bool,
     /// The plate is the keyed wash alone, with no focus line: a list a field steers.
     plain: bool,
+    /// The plate is square: a panel's list, whose rows run edge to edge, as Zed's do.
+    square: bool,
 }
 
 /// A move in flight: how far off the row the plate started, when, and how long it takes.
@@ -1105,7 +1110,7 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
         .flex()
         .items_center()
         .justify_center()
-        .child(icons::icon(theme, name, IconSize::Inline, color))
+        .child(icons::icon(theme, name, color))
 }
 
 /// A row's leading slot, one fixed square for every list (the palette, the pickers, the
@@ -1115,29 +1120,26 @@ pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui:
 /// ([`icons::status_mark`]), never on the mark (`docs/decisions/brand.md`, "Each agent wears
 /// its owner's mark").
 ///
-/// Every mark is drawn across the whole slot ([`IconSize::Lead`]) at the one stroke, whatever
-/// the title's weight, as Zed and `MonoCode` draw theirs. An agent's mark names its agent to a
-/// screen reader.
+/// Every mark is drawn across the whole icon slot at the one line, whatever the title's weight,
+/// as Zed draws its icons. An agent's mark names its agent to a screen reader.
 pub(crate) fn lead_slot(
     theme: &Theme,
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    let large = IconSize::Lead.slot(theme);
-    lead_drawn(theme, mark.into(), ink, large, large)
+    let slot = theme.typography.icon();
+    lead_drawn(theme, mark.into(), ink, slot, slot)
 }
 
-/// A chrome row's or a tab's lead: `mark` at the inline size (14 pt), as `MonoCode` draws a
-/// tab's mark and a folder's glyph, centred in a slot `side` square (the tab's own 14, a
-/// navigator row's 16), so a tile's mark is one size in its row and in its tab.
+/// A chrome row's or a tab's lead: `mark` in the icon slot (16 pt), centred in a slot `side`
+/// square, so a tile's mark is one size in its row and in its tab.
 pub(crate) fn lead_mark(
     theme: &Theme,
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
     side: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    let inline = IconSize::Inline.slot(theme);
-    lead_drawn(theme, mark.into(), ink, inline, side)
+    lead_drawn(theme, mark.into(), ink, theme.typography.icon(), side)
 }
 
 /// `mark` drawn across a slot `drawn` square, centred in a slot `side` square, named to a
@@ -1149,8 +1151,7 @@ fn lead_drawn(
     drawn: f32,
     side: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    let size = if drawn > IconSize::Inline.slot(theme) { IconSize::Lead } else { IconSize::Inline };
-    let drawn = icons::Drawn::new(theme, mark, size).slot(px(drawn), ink);
+    let drawn = icons::Drawn::new(theme, mark).slot(px(drawn), ink);
     div()
         .id("lead")
         .flex_none()
@@ -1166,7 +1167,7 @@ fn lead_drawn(
 
 /// A status slot holding nothing: a command's, beside lines that lead with a mark.
 fn empty_slot(theme: &Theme) -> gpui::Div {
-    div().flex_none().size(px(theme.typography.icon_large()))
+    div().flex_none().size(px(theme.typography.icon()))
 }
 
 /// An age as the inbox, the palette and the navigator print it: `now` under a minute, then
@@ -1970,9 +1971,6 @@ impl CommandPalette {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_color(hsla(s.text))
-                    .when(chosen, |el| {
-                        el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
-                    })
                     .child(self.label(ix, &item.label)),
             )
             .child(context)
@@ -2865,7 +2863,7 @@ mod tests {
     #[test]
     #[ignore = "measurement: cargo test -p slopty-ui --lib -- --ignored palette_scoring --nocapture"]
     fn palette_scoring_on_the_real_commands() {
-        let items = crate::workspace::palette_items();
+        let items = crate::workspace::palette_items_of(&crate::keymap::Keymap::default());
         let mut queries: Vec<String> = items
             .iter()
             .flat_map(|i| {

@@ -84,7 +84,7 @@ pub(super) enum Shown {
 
 /// The slot's width: a mark and a count of two figures beside it.
 pub(super) fn slot_width(theme: &Theme) -> f32 {
-    theme.typography.icon_large() + theme.spacing.md
+    theme.typography.icon() + theme.spacing.md
 }
 
 /// A rollup's mark: `status`'s glyph at the small size, in its ink, named `label` for a screen

@@ -1,20 +1,19 @@
-//! The icons the chrome draws: Tabler's glyphs ([`Symbol`]), drawn by us on whole device pixels
-//! in the ink of the words beside them, and a file's type in Material's own colours
-//! ([`FileType`]).
+//! The icons the chrome draws: IBM Carbon's glyphs ([`Symbol`]) and a file's type
+//! ([`FileType`], Material's shapes), each drawn on whole device pixels in one ink, the words'
+//! beside them, as Zed draws its icons.
 //!
-//! A [`Symbol`] is one of a closed list. Git is Tabler's git glyphs ([`GitGlyph`]). An agent
+//! A [`Symbol`] is one of a closed list. Git is Carbon's git glyphs ([`GitGlyph`]). An agent
 //! wears its owner's mark ([`AgentMark`]), drawn by us from the owner's outline into the same
 //! kind of mask, and an agent with none the neutral [`AGENT`]. Nothing else is drawn by us but
-//! the working mark's cell of dots and the rings of a state ([`Ring`]) (`docs/decisions/ui.md`,
-//! "The chrome's icons are Tabler's, and a file's are Material's" and "State is a glyph";
+//! the marks of a state ([`Ring`]) (`docs/decisions/ui.md`,
+//! "The chrome's icons are IBM Carbon's at 16" and "State is a glyph";
 //! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
 //!
-//! An icon fills its slot: Tabler's 24 grid and Material's view box span the slot's side, as
-//! Zed and `MonoCode` set their icons. [`IconSize::Lead`] leads a row or stands alone in
-//! [`slopty_theme::Typography::icon_large`] (16 pt); [`IconSize::Inline`] sits in
-//! [`slopty_theme::Typography::icon`] (14 pt) beside a row's facts and in bars and buttons. A
-//! slot sized again draws its icon larger or smaller with it, so an icon never parts from its
-//! words' size.
+//! An icon fills its slot: Carbon's 32 grid and Material's view box span the slot's side. Every
+//! icon stands in one slot, [`slopty_theme::Typography::icon`] (16 pt), where Carbon's two-unit
+//! line is one whole device pixel at 1x and two at 2x, beside a row's words, in bars and in
+//! buttons alike, as Zed sets its icons; only a disclosure's chevron is drawn smaller
+//! ([`Drawn::disclosure`]). A slot sized again draws its icon larger or smaller with it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -30,7 +29,7 @@ use gpui::{
 };
 use parking_lot::RwLock;
 use slopty_platform::outline::Mask;
-use slopty_theme::{Rgb, Theme, TypeRole};
+use slopty_theme::{Rgb, Theme};
 
 use crate::colors::hsla;
 pub use crate::file_types::FileType;
@@ -43,11 +42,11 @@ mod ring;
 pub use git::GitGlyph;
 pub use glyphs::Symbol;
 pub use marks::AgentMark;
-pub use ring::Ring;
+pub use ring::{Knock, Ring};
 
 /// The thread of an agent with no mark of its own ([`AgentMark::Neutral`]), an ACP agent's:
-/// one neutral mark in the ink beside it, a conversation, its agent named in words.
-pub const AGENT: Symbol = Symbol::TextBubble;
+/// one neutral mark in the ink beside it, Carbon's agent, its agent named in words.
+pub const AGENT: Symbol = Symbol::AiAgent;
 
 /// What leads a row: a glyph for what a thing is, the mark of the agent it runs, or a file's
 /// type.
@@ -59,7 +58,7 @@ pub enum Mark {
     Agent(AgentMark),
     /// A git glyph.
     Git(GitGlyph),
-    /// A file's type, in its icon's own colours.
+    /// A file's type, its icon's silhouette in the ink beside it.
     File(FileType),
 }
 
@@ -109,21 +108,15 @@ impl Mark {
     }
 }
 
-/// The mark for the file at `path`: its type's icon; else the code glyph for code in a
-/// language with no icon, or the plain document.
+/// The mark for the file at `path`: the code glyph for code in a language with no icon (asked
+/// first, so `CMakeLists.txt` is code and not text); else its type's icon, or the plain
+/// document.
 #[must_use]
 pub fn file_mark(path: &str) -> Mark {
-    FileType::of(path).map_or_else(
-        || {
-            let glyph = if crate::file_types::code(path) {
-                Symbol::ChevronLeftForwardslashChevronRight
-            } else {
-                Symbol::Doc
-            };
-            Mark::Symbol(glyph)
-        },
-        Mark::File,
-    )
+    if crate::file_types::code(path) {
+        return Mark::Symbol(Symbol::ChevronLeftForwardslashChevronRight);
+    }
+    FileType::of(path).map_or(Mark::Symbol(Symbol::Doc), Mark::File)
 }
 
 /// The glyph a machine wears, by its form.
@@ -156,6 +149,7 @@ pub fn kit_symbol(path: &str) -> Option<Symbol> {
         "plus" => Symbol::Plus,
         "search" => Symbol::Magnifyingglass,
         "eye" => Symbol::Eye,
+        "eye-off" => Symbol::EyeSlash,
         "copy" => Symbol::DocOnDoc,
         "info" => Symbol::InfoCircle,
         "circle-x" => Symbol::XmarkCircle,
@@ -166,98 +160,34 @@ pub fn kit_symbol(path: &str) -> Option<Symbol> {
     })
 }
 
-/// How large an icon is drawn, by the words it sits beside.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IconSize {
-    /// Beside a row's facts, in bars and in buttons: [`slopty_theme::Typography::icon`]'s slot,
-    /// the metadata role's size and the room round it.
-    Inline,
-    /// A row's lead, or standing alone or beside a title: the chrome role's size in a slot as
-    /// much past it as [`slopty_theme::Typography::icon_large`] is past the chrome size. A
-    /// finger's chrome is 17 pt, so on touch a lead's slot is 20 pt, as an iOS row's symbol is
-    /// its body text's size.
-    Lead,
-}
-
-impl IconSize {
-    /// The size for an icon beside words of `role`: [`Self::Lead`] beside the chrome's size or
-    /// larger, [`Self::Inline`] beside smaller.
-    #[must_use]
-    pub fn beside(theme: &Theme, role: TypeRole) -> Self {
-        if role.size >= theme.typography.ui_size { Self::Lead } else { Self::Inline }
-    }
-
-    /// The side of the slot an icon beside words of `role` stands in: the words' size and the
-    /// room a lead or an inline icon keeps round it, so a finger's larger words get a larger
-    /// slot as a pointer's do.
-    #[must_use]
-    pub fn beside_slot(theme: &Theme, role: TypeRole) -> f32 {
-        let ty = &theme.typography;
-        let room = match Self::beside(theme, role) {
-            Self::Lead => ty.icon_large() - ty.ui_size,
-            Self::Inline => ty.icon() - ty.small(),
-        };
-        role.size + room
-    }
-
-    /// The slot's side in points.
-    #[must_use]
-    pub fn slot(self, theme: &Theme) -> f32 {
-        let ty = &theme.typography;
-        match self {
-            Self::Inline => theme.roles().metadata.size + (ty.icon() - ty.small()),
-            Self::Lead => theme.roles().chrome.size + (ty.icon_large() - ty.ui_size),
-        }
-    }
-}
-
 /// How a mark is drawn in a slot.
 ///
 /// A glyph or a file's icon spans `share` of the slot's side, a glyph turned by `turn` radians;
-/// an agent's mark has its ink box `ink` of the side; a file's icon is in its variant for a
-/// light ground or a dark one.
+/// an agent's mark has its ink box `ink` of the side.
 #[derive(Clone, Copy, Debug)]
 pub struct Drawn {
     mark: Mark,
     share: f32,
     ink: f32,
     turn: f32,
-    light: bool,
 }
 
 impl Drawn {
-    /// `mark` in a slot of `size`: a glyph across the whole slot, an agent's mark with its ink
+    /// `mark` in the icon slot: a glyph across the whole slot, an agent's mark with its ink
     /// box [`slopty_theme::Spacing::xxs`] short of it.
     #[must_use]
-    pub fn new(theme: &Theme, mark: impl Into<Mark>, size: IconSize) -> Self {
-        let slot = size.slot(theme);
-        Self {
-            mark: mark.into(),
-            share: 1.0,
-            ink: (slot - theme.spacing.xxs) / slot,
-            turn: 0.0,
-            light: theme.surfaces.ground.is_light(),
-        }
-    }
-
-    /// `mark` beside words of `role`, in a slot [`IconSize::beside_slot`] square.
-    #[must_use]
-    pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole) -> Self {
-        let slot = IconSize::beside_slot(theme, role);
-        Self {
-            ink: (slot - theme.spacing.xxs) / slot,
-            ..Self::new(theme, mark, IconSize::beside(theme, role))
-        }
+    pub fn new(theme: &Theme, mark: impl Into<Mark>) -> Self {
+        let slot = theme.typography.icon();
+        Self { mark: mark.into(), share: 1.0, ink: (slot - theme.spacing.xxs) / slot, turn: 0.0 }
     }
 
     /// A disclosure chevron's drawing: on the grid of the chrome's smaller size
-    /// ([`slopty_theme::Typography::small`], 12 pt) in the inline slot, the size Zed and the
-    /// references give a tree's chevron.
+    /// ([`slopty_theme::Typography::small`], 12 pt) in the icon slot, Zed's extra-small icon.
     #[must_use]
     pub fn disclosure(theme: &Theme, symbol: Symbol) -> Self {
         Self {
-            share: theme.typography.small() / IconSize::Inline.slot(theme),
-            ..Self::new(theme, symbol, IconSize::Inline)
+            share: theme.typography.small() / theme.typography.icon(),
+            ..Self::new(theme, symbol)
         }
     }
 
@@ -266,10 +196,7 @@ impl Drawn {
     #[must_use]
     pub fn notice(theme: &Theme, mark: impl Into<Mark>) -> Self {
         let slot = crate::kit::NOTICE_MARK;
-        Self {
-            ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot,
-            ..Self::new(theme, mark, IconSize::Lead)
-        }
+        Self { ink: theme.spacing.xxs.mul_add(-2.0, slot) / slot, ..Self::new(theme, mark) }
     }
 
     /// The ink box an agent's mark is drawn with in a slot `side` points square, in points.
@@ -294,7 +221,7 @@ impl Drawn {
 
     /// The slot, `side` square, its mark in `color`. The slot can be sized again
     /// (`.size(..)`), and the mark is drawn larger or smaller by as much; a glyph's ink is the
-    /// slot's text colour, so `.text_color(..)` recolours it. A file's icon keeps its colours.
+    /// slot's text colour, so `.text_color(..)` recolours it, a file's icon too.
     #[must_use]
     pub fn slot(self, side: Pixels, color: Hsla) -> Div {
         div().flex_none().size(side).text_color(color).child(
@@ -351,30 +278,14 @@ impl Drawn {
         paint_centred(&mask, key, bounds, unit, window, || format!("{mark:?}"));
     }
 
-    /// Paints a file's icon in its colours with its view box centred in `bounds`, drawn at the
-    /// device's size, its origin on a whole device pixel.
+    /// Paints a file's icon as one silhouette in the text's ink, its view box centred in
+    /// `bounds`, drawn at the device's size, its origin on a whole device pixel.
     fn paint_file(self, file: FileType, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
-        let pixels = self.pixels(bounds, window);
-        let Some(image) = file_image(file, self.light, pixels, cx) else {
+        let Some((mask, key)) = file_mask(file, self.pixels(bounds, window), cx) else {
             return;
         };
-        let device = window.scale_factor();
-        #[expect(clippy::cast_precision_loss, reason = "an icon is a few dozen pixels")]
-        let extent = pixels as f32;
-        let at = place(bounds, extent, extent, device);
-        let size = px(extent / device);
-        let image_bounds = Bounds { origin: at, size: gpui::size(size, size) };
-        let painted = window.paint_image(
-            image_bounds,
-            image_bounds,
-            gpui::Corners::default(),
-            image,
-            0,
-            false,
-        );
-        if let Err(error) = painted {
-            tracing::warn!(%error, file = file.name(), "a file's icon was not painted");
-        }
+        let unit = TransformationMatrix::unit();
+        paint_centred(&mask, key, bounds, unit, window, || file.name().to_owned());
     }
 }
 
@@ -424,53 +335,62 @@ fn paint_centred(
 /// A drawn mask with the key the atlas keeps it under.
 type Kept = Option<(Arc<Mask>, SharedString)>;
 
-/// A file's icon by type, ground and side in device pixels, drawn or a miss.
-type FileImages = HashMap<(FileType, bool, u32), Option<Arc<RenderImage>>>;
+/// The file icons drawn so far, by type and side in device pixels; one that does not draw is
+/// kept as a miss, said once.
+static FILE_MASKS: LazyLock<RwLock<HashMap<(FileType, u32), Kept>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
-/// The file icons drawn so far; one that does not draw is kept as a miss, said once.
-static FILE_IMAGES: LazyLock<RwLock<FileImages>> = LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// `file`'s icon for a `light` ground or a dark one, its view box `pixels` device pixels
-/// square: drawn by GPUI's SVG renderer at that size and no other, so nothing is resampled.
-fn file_image(file: FileType, light: bool, pixels: u32, cx: &App) -> Option<Arc<RenderImage>> {
-    if pixels == 0 {
-        return None;
-    }
-    let at = (file, light, pixels);
-    if let Some(kept) = FILE_IMAGES.read().get(&at) {
-        return kept.clone();
-    }
+/// `file`'s icon in its own colours, its view box `pixels` device pixels square: drawn by
+/// GPUI's SVG renderer at that size and no other, so nothing is resampled.
+fn file_render(file: FileType, pixels: u32, cx: &App) -> Option<Arc<RenderImage>> {
     let side = DevicePixels(i32::try_from(pixels).ok()?);
     let renderer = cx.svg_renderer();
-    let drawn = renderer
-        .parse_svg(file.svg(light).as_bytes())
+    renderer
+        .parse_svg(file.svg().as_bytes())
         .and_then(|svg| renderer.render_parsed(&svg, SvgSize::Size(gpui::size(side, side))))
         .inspect_err(
             |error| tracing::warn!(%error, file = file.name(), "a file's icon did not draw"),
         )
-        .ok();
-    FILE_IMAGES.write().entry(at).or_insert(drawn).clone()
+        .ok()
+}
+
+/// `file`'s icon as its silhouette, `pixels` device pixels square: the coverage of its drawing,
+/// its colours dropped, so it is painted in the ink beside it as a glyph is.
+fn file_mask(file: FileType, pixels: u32, cx: &App) -> Kept {
+    if pixels == 0 {
+        return None;
+    }
+    let at = (file, pixels);
+    if let Some(kept) = FILE_MASKS.read().get(&at) {
+        return kept.clone();
+    }
+    let kept = file_render(file, pixels, cx).and_then(|image| {
+        let size = image.size(0);
+        let alpha = image.as_bytes(0)?.as_chunks::<4>().0.iter().map(|&[.., a]| a).collect();
+        let mask = Mask {
+            width: u32::try_from(size.width.0).ok()?,
+            height: u32::try_from(size.height.0).ok()?,
+            alpha,
+        };
+        Some((Arc::new(mask), SharedString::from(format!("file:{}:{pixels}", file.name()))))
+    });
+    FILE_MASKS.write().entry(at).or_insert(kept).clone()
 }
 
 /// The display scales a window of this platform is likely shown at.
 const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 2.0] };
 
-/// Reads every glyph, and draws the glyphs at a row's and a lead's slot and the agents' marks
-/// at theirs, on a background thread while the first window is made. Start it before the first
-/// window.
+/// Reads every glyph, and draws the glyphs at the icon slot and the agents' marks at theirs, on
+/// a background thread while the first window is made. Start it before the first window.
 ///
 /// A glyph costs microseconds to draw, but the first frame would otherwise pay to read every
 /// glyph's file and Core Graphics' first context, about 6 ms together (`docs/MEASUREMENTS.md`,
-/// "Tabler glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
+/// "Carbon glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
 pub fn prewarm(theme: &Theme) {
-    let sides: Vec<u32> = [IconSize::Inline, IconSize::Lead]
-        .iter()
-        .flat_map(|size| SCALES.iter().map(move |scale| (size.slot(theme), scale)))
-        .map(|(slot, scale)| whole_pixels(slot * scale))
-        .collect();
+    let slot = theme.typography.icon();
+    let sides: Vec<u32> = SCALES.iter().map(|scale| whole_pixels(slot * scale)).collect();
     let inks = [
-        Drawn::new(theme, AGENT, IconSize::Lead).ink(IconSize::Lead.slot(theme)),
-        Drawn::new(theme, AGENT, IconSize::Inline).ink(IconSize::Inline.slot(theme)),
+        Drawn::new(theme, AGENT).ink(slot),
         Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
     ];
     let warmed = std::thread::Builder::new().name("icons-prewarm".into()).spawn(move || {
@@ -490,23 +410,16 @@ pub fn prewarm(theme: &Theme) {
     }
 }
 
-/// `symbol` at `size`, in `color`: a slot of the size's side.
+/// `symbol` in the icon slot, in `color`; a slot sized again draws the mark at its size.
 #[must_use]
-pub fn icon(theme: &Theme, symbol: impl Into<Mark>, size: IconSize, color: Hsla) -> Div {
-    Drawn::new(theme, symbol, size).slot(px(size.slot(theme)), color)
-}
-
-/// `mark` beside words of `role`, in `ink`, in a slot of [`IconSize::beside_slot`]; a slot
-/// sized again draws the mark at its size.
-#[must_use]
-pub fn beside(theme: &Theme, mark: impl Into<Mark>, role: TypeRole, ink: Hsla) -> Div {
-    Drawn::beside(theme, mark, role).slot(px(IconSize::beside_slot(theme, role)), ink)
+pub fn icon(theme: &Theme, symbol: impl Into<Mark>, color: Hsla) -> Div {
+    Drawn::new(theme, symbol).slot(px(theme.typography.icon()), color)
 }
 
 /// `symbol` in a slot `side` square, in `ink`: a row's lead at whatever size.
 #[must_use]
 pub fn symbol(theme: &Theme, symbol: impl Into<Mark>, side: Pixels, ink: Hsla) -> AnyElement {
-    Drawn::new(theme, symbol, IconSize::Inline).slot(side, ink).into_any_element()
+    Drawn::new(theme, symbol).slot(side, ink).into_any_element()
 }
 
 /// The one vocabulary for how a thing is doing, wherever it is shown: a tile's header, a
@@ -538,17 +451,29 @@ pub enum Status {
 }
 
 impl Status {
-    /// The symbol that marks it; `None` for the marks drawn by us, the working mark's dots
-    /// and the rings of idle and waiting ([`status_icon`]). The three that carry colour are
-    /// filled, so the colour has a body at 1x.
+    /// The mark drawn by us for it ([`status_icon`]): a ring for idle, a dashed ring for
+    /// waiting, the turning arc for working, and a disc with its figure knocked out for the
+    /// three that carry colour, so the colour has a body at 1x. `None` for away, which is
+    /// Carbon's glyph ([`Self::symbol`]).
+    #[must_use]
+    pub const fn ring(self) -> Option<Ring> {
+        match self {
+            Self::Idle => Some(Ring::Empty),
+            Self::Running => Some(Ring::Dashed),
+            Self::Working => Some(Ring::Turning(0)),
+            Self::NeedsYou => Some(Ring::Disc(Knock::Bang)),
+            Self::Done => Some(Ring::Disc(Knock::Check)),
+            Self::Failed => Some(Ring::Disc(Knock::Cross)),
+            Self::Away => None,
+        }
+    }
+
+    /// The glyph that marks it where no mark of ours does: a worker out of reach.
     #[must_use]
     pub const fn symbol(self) -> Option<Symbol> {
         match self {
-            Self::Idle | Self::Working | Self::Running => None,
-            Self::NeedsYou => Some(Symbol::ExclamationmarkCircleFill),
-            Self::Done => Some(Symbol::CheckmarkCircleFill),
-            Self::Failed => Some(Symbol::XmarkCircleFill),
             Self::Away => Some(Symbol::WifiSlash),
+            _ => None,
         }
     }
 
@@ -602,7 +527,7 @@ impl Status {
     }
 }
 
-/// `status` in a fixed square slot, the width of a large icon.
+/// `status` in a fixed square slot, the icon slot.
 ///
 /// Rows that carry a mark and rows that do not keep their titles on one edge. A mark is an
 /// image named by [`Status::label`]; an empty slot is nothing to a screen reader.
@@ -611,7 +536,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>) -> Stateful<Div> {
     let slot = div()
         .id("status")
         .flex_shrink_0()
-        .size(px(theme.typography.icon_large()))
+        .size(px(theme.typography.icon()))
         .flex()
         .items_center()
         .justify_center();
@@ -719,8 +644,8 @@ impl Element for Arrive {
 
 /// `status` as an empty state's mark, in `color`.
 ///
-/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and the working cell or a
-/// ring at the heading's size, so a tile's state reads at the size of the notice it heads.
+/// Its symbol is drawn as [`Drawn::notice`] in the notice's slot, and a mark of ours at the
+/// heading's size, so a tile's state reads at the size of the notice it heads.
 #[must_use]
 pub fn notice_status(theme: &Theme, status: Status, color: Hsla) -> AnyElement {
     match status.symbol() {
@@ -733,22 +658,17 @@ pub fn notice_status(theme: &Theme, status: Status, color: Hsla) -> AnyElement {
 
 /// `status`'s icon, `side` square, in `color`.
 ///
-/// [`Status::Working`]'s dots go round ([`spin_step`]), the only mark that moves;
+/// [`Status::Working`]'s arc goes round ([`spin_step`]), the only mark that moves;
 /// [`Status::Running`] (waiting on its own background work) is a still dashed ring, since a mark
 /// that moves says work is in progress; [`Status::Idle`] is an empty ring, for the places a mark
-/// is required. The rest are their symbols.
+/// is required. The rest are their marks, and away its glyph.
 #[must_use]
 pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> AnyElement {
-    match status {
-        Status::Working => Spinner { side, color, inner: None }.into_any_element(),
-        Status::Idle => Ring::Empty.draw(side, color),
-        Status::Running => Ring::Dashed.draw(side, color),
-        _ => match status.symbol() {
-            Some(symbol) => {
-                icon(theme, symbol, IconSize::Inline, color).size(side).into_any_element()
-            }
-            None => div().flex_none().size(side).into_any_element(),
-        },
+    match (status, status.ring(), status.symbol()) {
+        (Status::Working, ..) => Spinner { side, color, inner: None }.into_any_element(),
+        (_, Some(ring), _) => ring.draw(side, color),
+        (_, None, Some(symbol)) => icon(theme, symbol, color).size(side).into_any_element(),
+        (_, None, None) => div().flex_none().size(side).into_any_element(),
     }
 }
 
@@ -827,18 +747,15 @@ impl Phase {
     #[must_use]
     pub fn glyph(self, theme: &Theme, side: Pixels) -> AnyElement {
         let ink = hsla(self.ink(theme));
-        let symbol = |symbol: Symbol| {
-            icon(theme, symbol, IconSize::Inline, ink).size(side).into_any_element()
-        };
         match self {
-            Self::NeedsYou => symbol(Symbol::ExclamationmarkCircleFill),
-            Self::Failed => symbol(Symbol::XmarkCircleFill),
+            Self::NeedsYou => Ring::Disc(Knock::Bang).draw(side, ink),
+            Self::Failed => Ring::Disc(Knock::Cross).draw(side, ink),
             Self::Working => status_icon(theme, Status::Working, side, ink),
             Self::Waiting => Ring::Dashed.draw(side, ink),
             Self::UpNext => Ring::Empty.draw(side, ink),
             Self::Verifying(share) => Ring::Pie(share).draw(side, ink),
-            Self::ReadyToMerge => symbol(Symbol::CheckmarkCircle),
-            Self::Merged => symbol(Symbol::CheckmarkCircleFill),
+            Self::ReadyToMerge => Ring::Checked.draw(side, ink),
+            Self::Merged => Ring::Disc(Knock::Check).draw(side, ink),
         }
     }
 }
@@ -849,39 +766,17 @@ pub fn until_next_second(since: Duration) -> Duration {
     Duration::from_secs(1).saturating_sub(Duration::from_nanos(u64::from(since.subsec_nanos())))
 }
 
-/// The steps in one turn of the working mark, which makes one turn a second.
-pub const SPIN_STEPS: u32 = 12;
+/// The steps in one turn of the working mark, which makes one turn in two seconds, as Zed's
+/// turning circle does.
+pub const SPIN_STEPS: u32 = 24;
 
 /// How long the working mark holds each step: a twelfth of a second. It steps rather than
 /// glides, so a window with an agent at work draws twelve frames a second for it, not one on
 /// every display refresh.
 pub const SPIN_STEP: Duration = Duration::from_nanos(83_333_333);
 
-/// How long the working mark holds each step of its breath under Reduce Motion.
-///
-/// A fifth of a second, twelve to a breath, so a breathing mark draws under half the frames a
-/// turning one does and every breath ends on a step.
-pub const BREATH_STEP: Duration = Duration::from_millis(200);
-
-/// The least opacity of a breath: the mark never fades past it, so it is always found.
-const BREATH_LOW: f32 = 0.6;
-
-/// The opacity the working mark shows `since` the spin clock started under Reduce Motion.
-///
-/// It breathes from `BREATH_LOW` to whole and back over [`slopty_theme::Motion::breath`], in
-/// steps of [`BREATH_STEP`], upright. Opacity only: nothing travels, turns or scales.
-#[must_use]
-pub fn breath(since: Duration) -> f32 {
-    let (step, period) = (BREATH_STEP.as_nanos(), slopty_theme::Motion::DEFAULT.breath.as_nanos());
-    let stepped = since.as_nanos().checked_div(step).unwrap_or(0).saturating_mul(step);
-    #[expect(clippy::cast_precision_loss, reason = "a phase within one breath")]
-    let phase = stepped.checked_rem(period).unwrap_or(0) as f32 / period as f32;
-    let wave = (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0;
-    (1.0 - BREATH_LOW).mul_add(wave, BREATH_LOW)
-}
-
 /// The step of its turn the working mark shows `since` the spin clock started: always the
-/// first under Reduce Motion, where it stays upright and breathes instead ([`breath`]).
+/// first under Reduce Motion, where it stands still as a quarter pie.
 #[must_use]
 pub fn spin_step(since: Duration, reduce_motion: bool) -> u32 {
     if reduce_motion {
@@ -918,7 +813,7 @@ fn until_next(since: Duration, step: Duration) -> Duration {
 struct SpinClock {
     /// The executor's clock when the first mark was drawn; the test executor's is simulated.
     epoch: Instant,
-    /// How long after `epoch` the marks were last woken. Every mark draws the step and breath
+    /// How long after `epoch` the marks were last woken. Every mark draws the step
     /// of that moment, not of the moment it is drawn, so a frame drawn again from scratch draws
     /// what the frame shown drew until the views showing marks are woken together.
     shown: Duration,
@@ -1007,11 +902,11 @@ impl SpinClock {
         }
     }
 
-    /// The step and the breath every mark drawn now shows: those of the clock's last wake.
-    fn drawn(cx: &mut App) -> (u32, f32) {
+    /// The step every mark drawn now shows: that of the clock's last wake.
+    fn drawn(cx: &mut App) -> u32 {
         let reduce = cx.reduce_motion();
         let shown = Self::get(cx).shown;
-        (spin_step(shown, reduce), breath(shown))
+        spin_step(shown, reduce)
     }
 
     /// Wake every view that painted a mark since the last step.
@@ -1049,12 +944,12 @@ pub fn release_steps(cx: &mut App) {
     }
 }
 
-/// A moment the working mark stands upright at the top of its breath: six turns, two and a half
-/// breaths. The marks are pinned to it while the readouts' clock is ([`crate::clock::pin`]).
+/// A moment the working mark stands on its first step: three turns. The marks are pinned to it
+/// while the readouts' clock is ([`crate::clock::pin`]).
 pub const PINNED_STEPS: Duration = Duration::from_secs(6);
 
-/// Every mark shows the step and breath of `at` (time since the spin clock's start) from now on,
-/// whenever it is drawn, and no step falls due; `None` lets the clock run again.
+/// Every mark shows the step of `at` (time since the spin clock's start) from now on, whenever
+/// it is drawn, and no step falls due; `None` lets the clock run again.
 pub fn pin_steps(at: Option<Duration>, cx: &mut App) {
     SpinClock::get(cx).pinned = at;
     SpinClock::wake(cx);
@@ -1062,31 +957,16 @@ pub fn pin_steps(at: Option<Duration>, cx: &mut App) {
 
 /// GPUI's Reduce Motion flag changed: every view showing a mark draws again.
 ///
-/// A mark that was turning stands upright and breathes at once, and one that breathed turns. The
-/// marks read the flag itself as they are drawn, so nothing here keeps a copy of it.
+/// A mark that was turning stands still at once, and one that stood still turns. The marks read
+/// the flag itself as they are drawn, so nothing here keeps a copy of it.
 pub fn motion_setting_changed(cx: &mut App) {
     SpinClock::wake(cx);
 }
 
-/// The working mark's dot and the pitch from one dot's edge to the next, as shares of its
-/// slot's side: at a row's 14 pt slot a dot is 2.4 pt and the pitch 3.8, the dots of a
-/// braille cell set at 12.5 pt, rounded to whole device pixels (2 and 4 at 1x, 5 and 8 at 2x).
-const DOT: f32 = 0.17;
-const DOT_PITCH: f32 = 0.27;
-
-/// How much of the mark's ink the dots at rest keep: a faint track, so the cell holds one
-/// shape while the lit dots go round it.
-const DOT_TRACK: f32 = 0.22;
-
-/// The cell's six dots, two columns of three, in the order the lit ones go round: clockwise
-/// from the top left.
-const DOT_RING: [(u8, u8); 6] = [(0, 0), (1, 0), (1, 1), (1, 2), (0, 2), (0, 1)];
-
-/// The working mark: a braille cell of six dots round which three lit dots go, a fourth lit on
-/// every other step as the head moves on, twelve frames a turn on the spin clock: the spinner a
-/// terminal draws, and `MonoCode`'s (`docs/decisions/ui.md`, "The working mark is a braille
-/// cell"). Drawn by us on whole device pixels, in the working hue, the dots at rest a faint
-/// track. Under Reduce Motion it stands on its first step and breathes.
+/// The working mark: a quarter of the ring going round a faint track, two dozen frames a turn
+/// on the spin clock, Zed's turning circle (`docs/decisions/ui.md`, "State is a glyph"). Drawn
+/// by us on whole device pixels in the working hue. Under Reduce Motion it stands still as a
+/// quarter pie and wakes nothing.
 struct Spinner {
     side: Pixels,
     color: Hsla,
@@ -1098,49 +978,6 @@ impl IntoElement for Spinner {
 
     fn into_element(self) -> Self::Element {
         self
-    }
-}
-
-/// Which of [`DOT_RING`]'s dots `step` lights: the three ending at the head, which moves on
-/// every second step, and on the step between, the next one too.
-fn lit_dots(step: u32) -> [bool; 6] {
-    const RING: u32 = 6;
-    // The head starts a dot in, so the first frame, the one Reduce Motion stands on, is ⠋ and
-    // not a column of three, which would read as a menu's "⋮".
-    let head = step.wrapping_div(2).wrapping_add(1) % RING;
-    let half = step % 2 == 1;
-    let mut lit = [false; 6];
-    for (at, dot) in (0..RING).zip(lit.iter_mut()) {
-        let behind = head.wrapping_add(RING).wrapping_sub(at) % RING;
-        *dot = behind < 3 || (half && behind == RING.wrapping_sub(1));
-    }
-    lit
-}
-
-/// A dot's side and the pitch between dots, in whole device pixels, for a slot `side` points
-/// square on a display of `device` pixels to the point; the pitch leaves a pixel at least.
-fn dot_cell(side: f32, device: f32) -> (f32, f32) {
-    let dot = (DOT * side * device).round().max(1.0);
-    (dot, (DOT_PITCH * side * device).round().max(dot + 1.0))
-}
-
-/// Paints the working mark's cell centred in `bounds` at `step`: each dot a whole number of
-/// device pixels across, on a whole-pixel pitch, so every dot is the same and sharp at 1x.
-fn paint_dots(bounds: Bounds<Pixels>, step: u32, color: Hsla, window: &mut Window) {
-    let side = f32::from(bounds.size.width.min(bounds.size.height));
-    let device = window.scale_factor();
-    let (dot, pitch) = dot_cell(side, device);
-    let centre = bounds.center().scale(device);
-    let left = (centre.x.0 - f32::midpoint(dot, pitch)).round();
-    let top = pitch.mul_add(-1.0, centre.y.0 - dot / 2.0).round();
-    let lit = lit_dots(step);
-    for (&(column, row), on) in DOT_RING.iter().zip(lit) {
-        let x = f32::from(column).mul_add(pitch, left) / device;
-        let y = f32::from(row).mul_add(pitch, top) / device;
-        let size = px(dot / device);
-        let ink = if on { color } else { color.opacity(DOT_TRACK) };
-        let dot = Bounds { origin: point(px(x), px(y)), size: gpui::size(size, size) };
-        window.paint_quad(gpui::fill(dot, ink).corner_radii(size / 2.0));
     }
 }
 
@@ -1163,18 +1000,9 @@ impl Element for Spinner {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let reduce = cx.reduce_motion();
-        let (step, breath) = SpinClock::drawn(cx);
-        let color = if reduce { self.color.opacity(breath) } else { self.color };
-        let mut inner = canvas(
-            |_, _, _| {},
-            move |bounds, (), window, _cx| {
-                paint_dots(bounds, step, color, window);
-            },
-        )
-        .flex_none()
-        .size(self.side)
-        .into_any_element();
+        let mark =
+            if cx.reduce_motion() { Ring::Pie(0.25) } else { Ring::Turning(SpinClock::drawn(cx)) };
+        let mut inner = mark.draw(self.side, self.color);
         let layout = inner.request_layout(window, cx);
         self.inner = Some(inner);
         (layout, ())
@@ -1207,7 +1035,9 @@ impl Element for Spinner {
         if let Some(inner) = &mut self.inner {
             inner.paint(window, cx);
         }
-        wake_at_next_step(window, cx);
+        if !cx.reduce_motion() {
+            wake_at_next_step(window, cx);
+        }
     }
 }
 
@@ -1219,9 +1049,8 @@ pub(crate) fn steps_shown(cx: &mut App) -> Duration {
 }
 
 /// The view being painted draws again at the spin clock's next step, as one painting a
-/// working mark does: a step under Reduce Motion is a breath's.
+/// working mark does. Nothing calls it under Reduce Motion, where nothing steps.
 pub(crate) fn wake_at_next_step(window: &Window, cx: &mut App) {
-    let reduce = cx.reduce_motion();
     let now = cx.background_executor().now();
     let view = window.current_view();
     let clock = SpinClock::get(cx);
@@ -1231,8 +1060,7 @@ pub(crate) fn wake_at_next_step(window: &Window, cx: &mut App) {
     if clock.armed.is_some() || clock.pinned.is_some() {
         return;
     }
-    let step = if reduce { BREATH_STEP } else { SPIN_STEP };
-    let wait = until_next(now.saturating_duration_since(clock.epoch), step);
+    let wait = until_next(now.saturating_duration_since(clock.epoch), SPIN_STEP);
     SpinClock::arm(cx, Timer::Step, wait);
 }
 
@@ -1260,62 +1088,96 @@ mod tests {
         assert_eq!(file_mark("/w/README.md"), Mark::File(FileType::Readme));
         assert_eq!(file_mark("/w/q.graphql"), Symbol::ChevronLeftForwardslashChevronRight.into());
         assert_eq!(file_mark("/w/notes"), Mark::Symbol(Symbol::Doc));
-        assert_eq!(AGENT, Symbol::TextBubble, "a conversation, not the cliched sparkles");
+        let cmake = file_mark("/w/CMakeLists.txt");
+        assert_eq!(cmake, Symbol::ChevronLeftForwardslashChevronRight.into(), "code, not text");
+        assert_eq!(AGENT, Symbol::AiAgent, "Carbon's agent, not the cliched sparkles");
     }
 
-    /// An icon fills its slot, the ladder's 14 pt inline and 16 pt lead, a lead beside the
-    /// chrome's words and an inline one beside a fact's; a disclosure chevron is on the 12 pt
-    /// grid in the inline slot.
+    /// An icon fills its slot, 16 pt, where Carbon's 32 grid lands on whole device pixels at
+    /// 1x and 2x, on a pointer and a finger alike; a disclosure chevron is on the 12 pt grid
+    /// in the same slot.
     #[test]
-    fn an_icon_fills_its_slot_on_the_ladder() {
-        let theme = Theme::default();
-        let roles = theme.typography.roles(false);
-        let (inline, lead) = (IconSize::Inline.slot(&theme), IconSize::Lead.slot(&theme));
-        assert!((inline - 14.0).abs() < 1e-3 && (lead - 16.0).abs() < 1e-3, "{inline} {lead}");
-        let grid = Drawn::new(&theme, Symbol::Doc, IconSize::Lead).grid(lead);
-        assert!((grid - lead).abs() < 1e-3, "a glyph's grid is its slot");
-        assert_eq!(IconSize::beside(&theme, roles.chrome), IconSize::Lead);
-        assert_eq!(IconSize::beside(&theme, roles.metadata), IconSize::Inline);
-        let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(inline);
-        assert!((chevron - 12.0).abs() < 1e-3, "the chevron's grid: {chevron}");
-        assert_eq!(whole_pixels(14.0 * 2.0), 28);
+    fn an_icon_fills_its_slot_of_sixteen() {
+        for touch in [false, true] {
+            let mut theme = Theme::default();
+            if touch {
+                theme.density = slopty_theme::Density::TOUCH;
+            }
+            let slot = theme.typography.icon();
+            assert!((slot - 16.0).abs() < 1e-3, "touch {touch}: {slot}");
+            let grid = Drawn::new(&theme, Symbol::Doc).grid(slot);
+            assert!((grid - slot).abs() < 1e-3, "a glyph's grid is its slot");
+            let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(slot);
+            assert!((chevron - 12.0).abs() < 1e-3, "the chevron's grid: {chevron}");
+        }
+        assert_eq!(whole_pixels(16.0 * 2.0), 32);
         assert_eq!(whole_pixels(f32::NAN), 0);
     }
 
-    /// A file's icon draws at the size it is painted at and no other, in its own colours, and
-    /// a light ground takes the light variant where there is one.
+    /// A file's icon draws at the size it is painted at and no other, as one silhouette.
+    /// A lint as a test: no kept icon loses its figure in one ink, so none leans on a second
+    /// colour drawn over its first. A colour edge inside the silhouette is a figure the ink
+    /// would lose; Bun's face, Dart's, `CMake`'s and Protobuf's lost a third or more of theirs
+    /// against their outline and went (`docs/decisions/ui.md`, "The chrome's icons are IBM
+    /// Carbon's at 16").
     #[gpui::test]
-    fn a_file_icon_is_drawn_at_its_size_in_colour(cx: &gpui::TestAppContext) {
+    fn a_file_icon_is_one_silhouette_at_its_size(cx: &gpui::TestAppContext) {
         cx.update(|cx| {
             for file in FileType::ALL {
-                let image = file_image(*file, false, 28, cx);
-                let image = image.unwrap_or_else(|| panic!("{file:?} draws"));
-                assert_eq!(image.size(0), gpui::size(DevicePixels(28), DevicePixels(28)));
-                let bytes = image.as_bytes(0).unwrap_or_default();
-                let coloured =
-                    bytes.chunks(4).any(|p| p.iter().take(3).any(|c| Some(c) != p.first()));
-                assert!(coloured, "{file:?} is drawn in colour");
+                let (mask, _) = file_mask(*file, 28, cx).unwrap_or_else(|| panic!("{file:?}"));
+                assert_eq!((mask.width, mask.height), (28, 28), "{file:?}");
+                assert!(mask.alpha.iter().any(|a| *a > 0), "{file:?} has ink");
+                let image = file_render(*file, 32, cx).unwrap_or_else(|| panic!("{file:?}"));
+                let lost = lost_figure(image.as_bytes(0).unwrap_or_default(), 32);
+                assert!(lost < 0.2, "{file:?} loses {lost:.2} of its figure in one ink");
             }
-            let dark = file_image(FileType::Toml, false, 16, cx);
-            let light = file_image(FileType::Toml, true, 16, cx);
-            let (Some(dark), Some(light)) = (dark, light) else { panic!("toml draws") };
-            assert_ne!(dark.as_bytes(0), light.as_bytes(0), "toml's light variant");
         });
     }
 
-    /// Each status a glyph marks has its own, and the three that carry colour are filled;
-    /// working's dots and the idle and waiting rings are drawn as marks of their own.
+    /// The share of a drawing's figure one ink loses: its colour edges between two solid
+    /// pixels, against the edges of its silhouette (BGRA, `side` pixels to a row).
+    fn lost_figure(bgra: &[u8], side: usize) -> f32 {
+        let pixels: Vec<[u8; 4]> = bgra.as_chunks::<4>().0.to_vec();
+        let rows: Vec<&[[u8; 4]]> = pixels.chunks(side).collect();
+        let across = rows.iter().flat_map(|row| row.iter().zip(row.iter().skip(1)));
+        let down = rows.iter().zip(rows.iter().skip(1)).flat_map(|(a, b)| a.iter().zip(b.iter()));
+        let pairs: Vec<(&[u8; 4], &[u8; 4])> = across.chain(down).collect();
+        let outline = pairs.iter().filter(|(p, n)| p[3].abs_diff(n[3]) > 128).count();
+        let inner = pairs
+            .iter()
+            .filter(|(p, n)| {
+                let apart = p.iter().zip(n.iter()).take(3);
+                let apart = apart.map(|(c, d)| f32::from(c.abs_diff(*d)).powi(2)).sum::<f32>();
+                p[3] > 230 && n[3] > 230 && apart.sqrt() > 80.0
+            })
+            .count();
+        #[expect(clippy::cast_precision_loss, reason = "a few hundred edges")]
+        let share = inner as f32 / outline.max(1) as f32;
+        share
+    }
+
+    /// Each status has its own mark, the three that carry colour a disc with their own figure
+    /// knocked out; only away is a glyph, Carbon's.
     #[test]
     fn each_status_has_its_own_mark() {
-        let all = [Status::NeedsYou, Status::Done, Status::Failed, Status::Away];
-        let symbols: std::collections::HashSet<_> = all.iter().filter_map(|s| s.symbol()).collect();
-        assert_eq!(symbols.len(), all.len());
-        assert_eq!(Status::NeedsYou.symbol(), Some(Symbol::ExclamationmarkCircleFill));
-        assert_eq!(Status::Done.symbol(), Some(Symbol::CheckmarkCircleFill));
-        assert_eq!(Status::Failed.symbol(), Some(Symbol::XmarkCircleFill));
-        for ours in [Status::Idle, Status::Working, Status::Running] {
-            assert_eq!(ours.symbol(), None, "{ours:?} is drawn by us");
+        let all = [
+            Status::Idle,
+            Status::Working,
+            Status::Running,
+            Status::NeedsYou,
+            Status::Done,
+            Status::Failed,
+        ];
+        let rings: Vec<Ring> = all.iter().filter_map(|s| s.ring()).collect();
+        assert_eq!(rings.len(), all.len());
+        for (i, a) in rings.iter().enumerate() {
+            assert!(rings.iter().skip(i.saturating_add(1)).all(|b| a != b), "{a:?} twice");
         }
+        assert_eq!(Status::NeedsYou.ring(), Some(Ring::Disc(Knock::Bang)));
+        assert_eq!(Status::Done.ring(), Some(Ring::Disc(Knock::Check)));
+        assert_eq!(Status::Failed.ring(), Some(Ring::Disc(Knock::Cross)));
+        assert_eq!((Status::Away.ring(), Status::Away.symbol()), (None, Some(Symbol::WifiSlash)));
+        assert!(all.iter().all(|s| s.symbol().is_none()), "the rest are drawn by us");
     }
 
     /// A glyph wears its hue's mark step, and grey where it says nothing needs a look; working
@@ -1339,57 +1201,17 @@ mod tests {
         }
     }
 
-    /// Twelve steps make one turn a second, each held a twelfth of a second, and the timer
-    /// always waits for the next step's start. Under Reduce Motion the mark stands on its
-    /// first step whatever the time, and breathes: whole and faint by turns over the breath,
-    /// never under its floor.
-    /// The working mark's cell goes round in twelve frames, one a step: three dots lit, then
-    /// four as the head moves on, every frame unlike the one before, so a turn reads in a
-    /// second with nothing turning.
+    /// Two dozen steps make one turn in two seconds, each held a twelfth of a second, and the
+    /// timer always waits for the next step's start. Under Reduce Motion the mark stands on its
+    /// first step whatever the time.
     #[test]
-    fn the_working_cell_goes_round_in_twelve_frames() {
-        let count = |lit: [bool; 6]| lit.iter().filter(|on| **on).count();
-        let frames: Vec<[bool; 6]> = (0..SPIN_STEPS).map(lit_dots).collect();
-        for (step, lit) in frames.iter().enumerate() {
-            assert_eq!(count(*lit), if step % 2 == 0 { 3 } else { 4 }, "step {step}");
-        }
-        for pair in frames.windows(2) {
-            assert_ne!(pair.first(), pair.get(1), "each step moves");
-        }
-        assert_eq!(lit_dots(SPIN_STEPS), lit_dots(0), "a turn is twelve steps");
-        assert_eq!(
-            lit_dots(0),
-            [true, true, false, false, false, true],
-            "the first frame is ⠋, never a column"
-        );
-        assert_eq!(DOT_RING.len(), 6);
-    }
-
-    /// The cell's dots are whole device pixels on a whole-pixel pitch with a gap between, at a
-    /// row's slot and at a notice's, at 1x and 2x, so each dot is sharp and alike.
-    #[test]
-    fn the_working_cell_sits_on_whole_pixels() {
-        let theme = Theme::default();
-        assert_eq!(dot_cell(theme.typography.icon(), 1.0), (2.0, 4.0), "a row at 1x");
-        assert_eq!(dot_cell(theme.typography.icon(), 2.0), (5.0, 8.0), "a row at 2x");
-        for side in [theme.typography.icon(), theme.typography.icon_large(), 20.0, 8.0] {
-            for device in [1.0, 2.0, 3.0] {
-                let (dot, pitch) = dot_cell(side, device);
-                assert!(dot >= 1.0 && pitch > dot, "{side} pt at {device}x: {dot} {pitch}");
-                assert!(dot.fract() == 0.0 && pitch.fract() == 0.0, "{side} at {device}x");
-                assert!(2.0_f32.mul_add(pitch, dot) <= (side * device).ceil(), "inside its slot");
-            }
-        }
-    }
-
-    #[test]
-    fn the_working_mark_steps_twelve_times_a_turn_and_stands_under_reduce_motion() {
+    fn the_working_mark_steps_two_dozen_times_a_turn_and_stands_under_reduce_motion() {
         let ms = Duration::from_millis;
         assert_eq!(spin_step(ms(0), false), 0);
         assert_eq!(spin_step(ms(80), false), 0, "still the first step");
         assert_eq!(spin_step(ms(90), false), 1);
-        assert_eq!(spin_step(ms(990), false), 11);
-        assert_eq!(spin_step(ms(1_000), false), 0, "one turn a second");
+        assert_eq!(spin_step(ms(1_990), false), 23);
+        assert_eq!(spin_step(ms(2_000), false), 0, "one turn in two seconds");
         assert_eq!(spin_step(ms(2_500), false), 6);
         for at in [0, 90, 500, 990, 12_345] {
             assert_eq!(spin_step(ms(at), true), 0, "Reduce Motion at {at} ms");
@@ -1399,17 +1221,7 @@ mod tests {
         let next = ms(90).saturating_add(until_next_step(ms(90)));
         assert_eq!(spin_step(next, false), 2, "the timer lands on the next step");
         let turn = SPIN_STEP.checked_mul(SPIN_STEPS).unwrap_or_default();
-        assert!(ms(1_000).saturating_sub(turn) < Duration::from_micros(1), "{turn:?}");
-        assert!((breath(ms(0)) - BREATH_LOW).abs() < 1e-4, "it starts at its faintest");
-        assert!((breath(ms(1_200)) - 1.0).abs() < 1e-3, "whole half a breath in");
-        assert!((breath(ms(2_400)) - BREATH_LOW).abs() < 1e-4, "one breath a period");
-        assert_eq!(breath(ms(150)), breath(ms(0)), "held for a step");
-        let breath_ns = slopty_theme::Motion::DEFAULT.breath.as_nanos();
-        assert_eq!(breath_ns.checked_rem(BREATH_STEP.as_nanos()), Some(0), "steps fill a breath");
-        for at in (0..2_400).step_by(50) {
-            let b = breath(ms(at));
-            assert!((BREATH_LOW..=1.0).contains(&b), "{at} ms: {b}");
-        }
+        assert!(ms(2_000).saturating_sub(turn) < Duration::from_micros(1), "{turn:?}");
     }
 
     /// A mark is an image named by its status; an empty slot is nothing to a
@@ -1470,51 +1282,53 @@ mod tests {
         view.read_with(cx, |v, _| v.renders).saturating_sub(before)
     }
 
-    /// A breathing mark draws the breath of the clock's last wake, not of the moment it is
-    /// drawn: with a step held back for a key's echo, a mark drawn anew (a frame from scratch)
-    /// shows the breath the frame shown does, and the wake that ends the hold moves both.
+    /// A turning mark draws the step of the clock's last wake, not of the moment it is drawn:
+    /// with a step held back for a key's echo, a mark drawn anew (a frame from scratch) shows
+    /// the step the frame shown does, and the wake that ends the hold moves both.
     #[gpui::test]
-    fn a_breath_held_back_is_drawn_from_scratch_as_it_shows(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| cx.set_reduce_motion(true));
+    fn a_step_held_back_is_drawn_from_scratch_as_it_shows(cx: &mut gpui::TestAppContext) {
         let (view, cx) =
             cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
         cx.run_until_parked();
         let drawn = cx.update(|_w, cx| SpinClock::drawn(cx));
-        let held = cx.executor().now().checked_add(BREATH_STEP.saturating_mul(3));
+        let held = cx.executor().now().checked_add(SPIN_STEP.saturating_mul(3));
         cx.update(|_w, cx| hold_steps(cx, held.unwrap_or_else(|| cx.background_executor().now())));
         let before = view.read_with(cx, |v, _| v.renders);
-        cx.executor().advance_clock(BREATH_STEP.saturating_add(BREATH_STEP.div_f32(2.0)));
+        cx.executor().advance_clock(SPIN_STEP.saturating_add(SPIN_STEP.div_f32(2.0)));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.renders), before, "the step waits on the echo");
         assert_eq!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "drawn anew as it shows");
         cx.update(|_w, cx| release_steps(cx));
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.renders) > before, "the echo's frame moves it");
-        assert_ne!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "a breath further on");
+        assert_ne!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "a step further on");
     }
 
-    /// Pinned, every mark stands upright at the top of its breath whenever it is drawn, and
-    /// wakes nothing; let go, it breathes again.
+    /// Pinned, every mark stands on its first step whenever it is drawn, and wakes nothing;
+    /// let go, it turns again. Under Reduce Motion it stands still and wakes nothing at all.
     #[gpui::test]
-    fn a_pinned_mark_holds_still_until_let_go(cx: &mut gpui::TestAppContext) {
-        assert_eq!(spin_step(PINNED_STEPS, false), 0, "upright");
-        assert!((breath(PINNED_STEPS) - 1.0).abs() < f32::EPSILON, "whole");
-        cx.update(|cx| cx.set_reduce_motion(true));
+    fn a_pinned_or_still_mark_wakes_nothing(cx: &mut gpui::TestAppContext) {
+        assert_eq!(spin_step(PINNED_STEPS, false), 0, "on its first step");
         let (view, cx) =
             cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
         cx.run_until_parked();
         cx.update(|_w, cx| pin_steps(Some(PINNED_STEPS), cx));
         cx.run_until_parked();
-        assert_eq!(cx.update(|_w, cx| SpinClock::drawn(cx)), (0, 1.0), "the pinned moment");
+        assert_eq!(cx.update(|_w, cx| SpinClock::drawn(cx)), 0, "the pinned moment");
         assert!(renders_over(&view, cx, Duration::from_secs(1)) <= 1, "the step already due");
         assert_eq!(renders_over(&view, cx, Duration::from_secs(1)), 0, "pinned, nothing wakes");
         cx.update(|_w, cx| pin_steps(None, cx));
         cx.run_until_parked();
-        assert!(renders_over(&view, cx, Duration::from_secs(1)) >= 4, "let go, it breathes");
+        assert!(renders_over(&view, cx, Duration::from_secs(1)) >= 11, "let go, it turns");
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(renders_over(&view, cx, Duration::from_secs(1)) <= 1, "the step already due");
+        assert_eq!(renders_over(&view, cx, Duration::from_secs(1)), 0, "still, nothing wakes");
     }
 
     /// The mark wakes the view it was painted in once a step while it shows, and not once it
-    /// is gone; under Reduce Motion once a breath's step, under half as often.
+    /// is gone.
     #[gpui::test]
     fn a_working_mark_wakes_its_view_only_while_it_shows(cx: &mut gpui::TestAppContext) {
         let (view, cx) =
@@ -1529,14 +1343,6 @@ mod tests {
         cx.run_until_parked();
         assert!(renders_in_a_second(&view, cx) <= 1, "the step already due at most");
         assert_eq!(renders_in_a_second(&view, cx), 0, "gone, it wakes nothing");
-        cx.update(|_w, cx| cx.set_reduce_motion(true));
-        view.update(cx, |v, cx| {
-            v.shown = true;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let breathing = renders_in_a_second(&view, cx);
-        assert!((4..=6).contains(&breathing), "Reduce Motion: it breathes, {breathing} a second");
     }
 
     /// Waiting is a still dashed ring: drawn once, it wakes its view for nothing, so two frames

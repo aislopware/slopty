@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-core-foundation.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 # The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).

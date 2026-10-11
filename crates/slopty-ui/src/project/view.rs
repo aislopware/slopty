@@ -15,16 +15,16 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px, relative,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, px, relative,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_kit::a11y::tab_stop;
 use slopty_kit::colors::hsla;
-use slopty_kit::icons::{GitGlyph, IconSize, Mark, Phase, Status, Symbol, icon, status_icon};
+use slopty_kit::icons::{GitGlyph, Mark, Phase, Status, Symbol, icon, status_icon};
 use slopty_kit::kit::progress::Progress;
 use slopty_kit::kit::{ButtonKind, Priority};
 use slopty_platform::notify::Pressed;
@@ -35,7 +35,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::thread::AskId;
 use slopty_proto::thread::wire::PullStands;
-use slopty_theme::{Theme, Typography, alpha};
+use slopty_theme::{Theme, alpha};
 
 use super::model::{
     Board, Lane, Place, PlaceHow, Stage, StageKind, TaskAction, os_name, pull_words, queue_words,
@@ -1094,12 +1094,7 @@ impl ProjectView {
                 .items_center()
                 .gap(px(sp.xs))
                 .text_color(hsla(s.success))
-                .child(icon(
-                    theme,
-                    Symbol::CheckmarkCircleFill,
-                    IconSize::Inline,
-                    hsla(s.success_fill),
-                ))
+                .child(icon(theme, Symbol::CheckmarkCircleFill, hsla(s.success_fill)))
                 .child(GOAL_MET)
         });
         let summary = slopty_kit::kit::typed(div(), roles.chrome)
@@ -1163,7 +1158,7 @@ impl ProjectView {
                 .cursor_pointer()
                 .text_color(hsla(tone))
                 .hover(gpui::Styled::underline)
-                .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
+                .child(icon(theme, glyph, hsla(ink)))
                 .child(div().min_w_0().truncate().child(words))
                 .on_click(move |_ev, _w, cx| cx.open_url(&url))
         });
@@ -1259,7 +1254,7 @@ impl ProjectView {
                         .flex()
                         .items_center()
                         .gap(px(sp.xs))
-                        .child(icon(theme, Symbol::StopFill, IconSize::Inline, hsla(s.text_muted)))
+                        .child(icon(theme, Symbol::StopFill, hsla(s.text_muted)))
                         .child(ORCHESTRATOR_ENDED),
                 )
                 .child(open)
@@ -1291,7 +1286,6 @@ impl ProjectView {
             .px(px(sp.sm))
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer()
             .child(TaskAction::Push.label());
         let push = tab_stop(slopty_kit::kit::secondary(push, theme), s.focus).on_click(
@@ -1323,8 +1317,8 @@ impl ProjectView {
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
     /// on the task the board stands on its controls after them, quieter ([`Board::controls`]).
     /// On a task `held` up (a stage of its way holds, or its verifier failed) the first is the
-    /// solid, the one move that frees it; the rest stay secondary, so a lane of cards ready to
-    /// merge is not a column of solids.
+    /// primary, the one move that frees it; the rest stay secondary, so a lane of cards ready to
+    /// merge is not a column of primaries.
     fn actions(
         &self,
         board: &Board,
@@ -1372,14 +1366,13 @@ impl ProjectView {
                 .px(px(sp.sm))
                 .rounded(px(theme.radii.sm))
                 .text_size(px(theme.typography.small()))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(action.label());
             let el = if control {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             } else if held && ix == 0 {
-                slopty_kit::kit::solid_pressable(el, theme)
+                slopty_kit::kit::tinted_pressable(el, theme)
             } else if ix == 0 {
                 slopty_kit::kit::secondary(el, theme)
             } else {
@@ -1527,11 +1520,7 @@ impl ProjectView {
             .px(px(theme.spacing.inset()))
             .py(px(theme.spacing.xxs))
             .min_w_0()
-            .child(
-                icon(theme, glyph, IconSize::Inline, hsla(tone))
-                    .flex_none()
-                    .size(px(theme.typography.icon())),
-            )
+            .child(icon(theme, glyph, hsla(tone)).flex_none().size(px(theme.typography.icon())))
             .child(
                 div()
                     .flex_1()
@@ -1551,7 +1540,7 @@ impl ProjectView {
         let theme = &self.theme;
         let slot = div()
             .flex_none()
-            .size(px(theme.typography.icon_large()))
+            .size(px(theme.typography.icon()))
             .flex()
             .items_center()
             .justify_center();
@@ -1564,13 +1553,8 @@ impl ProjectView {
                     .child(phase.glyph(theme, px(theme.typography.icon()))),
             ),
             None => slot.child(
-                icon(
-                    theme,
-                    slopty_kit::icons::AGENT,
-                    IconSize::Inline,
-                    hsla(theme.surfaces.text_secondary),
-                )
-                .size(px(theme.typography.icon())),
+                icon(theme, slopty_kit::icons::AGENT, hsla(theme.surfaces.text_secondary))
+                    .size(px(theme.typography.icon())),
             ),
         }
     }
@@ -1682,7 +1666,7 @@ impl ProjectView {
             .gap(px(sp.xs))
             .min_w_0()
             .child(
-                icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(s.error_fill))
+                icon(theme, Symbol::XmarkCircle, hsla(s.error_fill))
                     .size(px(theme.typography.icon())),
             )
             .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
@@ -1809,7 +1793,7 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        let glyph = lane.phase().glyph(theme, px(IconSize::beside_slot(theme, roles.metadata)));
+        let glyph = lane.phase().glyph(theme, px(theme.typography.icon()));
         let head = div()
             .id(SharedString::from(head_id.clone()))
             .debug_selector(move || selector)
@@ -1935,7 +1919,7 @@ impl ProjectView {
     fn slot(&self) -> Div {
         div()
             .flex_none()
-            .size(px(self.theme.typography.icon_large()))
+            .size(px(self.theme.typography.icon()))
             .flex()
             .items_center()
             .justify_center()
@@ -1985,7 +1969,7 @@ impl ProjectView {
                 .flex_col()
                 .gap(px(sp.xs))
                 .min_w_0()
-                .pl(px(theme.typography.icon_large() + sp.sm))
+                .pl(px(theme.typography.icon() + sp.sm))
                 .pb(px(sp.sm))
                 .children(parts)
         })
@@ -2034,13 +2018,12 @@ impl ProjectView {
                 .px(px(sp.sm))
                 .rounded(px(theme.radii.sm))
                 .text_size(px(theme.typography.small()))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(SharedString::from(words));
-            // The first is the move that frees the task, solid as a held card's first action;
+            // The first is the move that frees the task, primary as a held card's first action;
             // the rest are controls beside it.
             let el = if ix == 0 {
-                slopty_kit::kit::solid_pressable(el, theme)
+                slopty_kit::kit::tinted_pressable(el, theme)
             } else {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
@@ -2108,10 +2091,7 @@ impl ProjectView {
             .whitespace_nowrap()
             .text_size(px(roles.metadata.size))
             .text_color(hsla(s.text_muted))
-            .children(glyph.map(|glyph| {
-                slopty_kit::icons::beside(theme, glyph, roles.metadata, hsla(s.text_secondary))
-                    .size(px(IconSize::beside_slot(theme, roles.metadata)))
-            }))
+            .children(glyph.map(|glyph| icon(theme, glyph, hsla(s.text_secondary))))
             .child(SharedString::from(words))
     }
 
@@ -2172,7 +2152,7 @@ impl ProjectView {
             .text_color(hsla(s.text_muted))
             .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
             .child(
-                icon(theme, Symbol::Terminal, IconSize::Inline, hsla(s.text_secondary))
+                icon(theme, Symbol::Terminal, hsla(s.text_secondary))
                     .size(px(theme.typography.icon())),
             )
             .child("Output");
@@ -2449,7 +2429,6 @@ impl ProjectView {
                 .h(px(theme.density.control))
                 .px(px(sp.md))
                 .rounded(px(theme.radii.sm))
-                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(text)
         };
@@ -2458,7 +2437,7 @@ impl ProjectView {
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         let cancel = tab_stop(cancel, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.close_checks(window, cx)));
-        let save = slopty_kit::kit::solid_pressable(button("project-checks-save", "Save"), theme);
+        let save = slopty_kit::kit::tinted_pressable(button("project-checks-save", "Save"), theme);
         let save = tab_stop(save, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.save_checks(window, cx)));
         let panel = div()
@@ -2567,7 +2546,7 @@ impl ProjectView {
                 s.text_secondary
             };
             let mark = stage.failed.then(|| {
-                icon(theme, Symbol::XmarkCircle, IconSize::Inline, hsla(ink))
+                icon(theme, Symbol::XmarkCircle, hsla(ink))
                     .flex_none()
                     .size(px(theme.typography.icon()))
             });

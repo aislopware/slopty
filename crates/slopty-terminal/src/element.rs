@@ -2718,7 +2718,7 @@ mod tests {
 
     use super::*;
 
-    /// The metrics of a grid laid out at `scale`, `JetBrains Mono` 13 pt: an 8 × 17
+    /// The metrics of a grid laid out at `scale`, `Lilex` 13 pt: an 8 × 17
     /// device-pixel cell, so 8/scale × 17/scale points.
     fn metrics(scale: f32) -> CellMetrics {
         CellMetrics {

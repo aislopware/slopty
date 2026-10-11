@@ -250,10 +250,10 @@ pub struct Palette {
 #[serde(default)]
 #[schemars(title = "Font")]
 pub struct Font {
-    /// Any monospace; `JetBrains Mono` is built in.
+    /// Any monospace; Lilex is built in.
     ///
-    /// Monospace family for terminals. The bundled face is `JetBrains Mono`; any installed
-    /// family works, with `SF Mono` and `Menlo` as fallbacks when it is missing.
+    /// Monospace family for terminals and code. The bundled face is `Lilex`; any installed
+    /// family works, with `Lilex` standing in when it is missing.
     #[schemars(title = "Family", extend("format" = schema::FONT_FAMILY))]
     pub mono_family: String,
     /// Zooming a tile changes it for that tile only.
@@ -292,11 +292,11 @@ pub struct Font {
 impl Default for Font {
     fn default() -> Self {
         Self {
-            mono_family: "JetBrains Mono".to_owned(),
+            mono_family: "Lilex".to_owned(),
             mono_size: 13.0,
             mono_line_height: 1.0,
             ligatures: true,
-            ui_size: 13.0,
+            ui_size: 14.0,
             prose_size: 14.0,
         }
     }
@@ -854,8 +854,8 @@ impl Settings {
 # and the defaults apply until the next save.
 
 [font]
-# Terminal family. \"JetBrains Mono\" ships with the app; any installed
-# family works (SF Mono and Menlo fill in when it is missing).
+# Terminal and code family. \"Lilex\" ships with the app; any installed
+# family works (Lilex fills in when it is missing).
 mono_family = {mono_family}
 # Terminal size in points.
 mono_size = {mono_size}
@@ -1141,10 +1141,10 @@ mod tests {
     #[test]
     fn defaults_match_the_brief() {
         let d = Settings::default();
-        assert_eq!(d.font.mono_family, "JetBrains Mono");
+        assert_eq!(d.font.mono_family, "Lilex");
         assert_eq!(d.font.mono_size, 13.0);
         assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
-        assert_eq!(d.font.ui_size, 13.0);
+        assert_eq!(d.font.ui_size, 14.0);
         assert_eq!(d.theme.appearance, Appearance::System);
         assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
@@ -1319,7 +1319,7 @@ mod tests {
         let loaded = Settings::parse("[font]\nmono_size = 15.5\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(loaded.settings.font.mono_size, 15.5);
-        assert_eq!(loaded.settings.font.mono_family, "JetBrains Mono");
+        assert_eq!(loaded.settings.font.mono_family, "Lilex");
         assert_eq!(loaded.settings.theme.appearance, Appearance::System);
     }
 

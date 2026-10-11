@@ -16,11 +16,10 @@
 //!
 //! [`install`] binds a keymap in GPUI in place of the one before, keeping every binding that is
 //! not the keymap's (gpui-kit's text fields, the app menu's), so a saved `settings.toml` rebinds
-//! the keys at once. The map in effect is kept for this thread, GPUI's, so what shows a chord
-//! (the palette, a menu, a hint) reads it through [`current`] without a context to hand.
+//! the keys at once. The map in effect is kept by the app, so what shows a chord (the palette, a
+//! menu, a hint) reads it through [`current`].
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex};
@@ -814,15 +813,22 @@ pub fn label(chord: &str) -> String {
         .map_or_else(|_| chord.to_owned(), |k| crate::palette::keys_label(&k))
 }
 
+/// The keymap [`install`] bound in an app: kept by the app, so another app (a test's next run on
+/// the same thread) starts from the table's defaults.
+struct Installed(Rc<Keymap>);
+
+impl gpui::Global for Installed {}
+
 thread_local! {
-    /// The keymap bound in GPUI on this thread, GPUI's.
-    static CURRENT: RefCell<Option<Rc<Keymap>>> = const { RefCell::new(None) };
+    /// The table's defaults, built once a thread: the same for every app, and never changed.
+    static DEFAULTS: Rc<Keymap> = Rc::new(Keymap::default());
 }
 
-/// The keymap in effect: the one [`install`] bound last, else the table's defaults.
+/// The keymap in effect in `cx`: the one [`install`] bound last, else the table's defaults.
 #[must_use]
-pub fn current() -> Rc<Keymap> {
-    CURRENT.with(|current| Rc::clone(current.borrow_mut().get_or_insert_with(Rc::default)))
+pub fn current(cx: &App) -> Rc<Keymap> {
+    cx.try_global::<Installed>()
+        .map_or_else(|| DEFAULTS.with(Rc::clone), |installed| Rc::clone(&installed.0))
 }
 
 /// Bind `keymap` in GPUI in place of the keymap bound before.
@@ -837,7 +843,7 @@ pub fn install(keymap: Keymap, cx: &mut App) {
     cx.bind_keys(others);
     cx.bind_keys(keymap.bindings(|_| true));
     cx.bind_keys(released);
-    CURRENT.with(|current| *current.borrow_mut() = Some(Rc::new(keymap)));
+    cx.set_global(Installed(Rc::new(keymap)));
 }
 
 /// gpui-kit's window root (`gpui_base::Root`), the context around every view. The kit binds

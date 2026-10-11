@@ -524,7 +524,7 @@ impl ThreadView {
         self.show_terminal(cx);
     }
 
-    /// [`Self::release_words`] as a button: the one solid when nothing else answers the
+    /// [`Self::release_words`] as a button: the one primary when nothing else answers the
     /// request here.
     pub(super) fn release_button(
         &self,
@@ -537,7 +537,7 @@ impl ThreadView {
         }
         let words = self.release_words(cx)?;
         // A grant that lasts (trusting a folder for good) is never the one the card leads to:
-        // with no other answer, the way back to the agent's own prompt stays the solid one.
+        // with no other answer, the way back to the agent's own prompt stays the primary one.
         let only_way = super::decision::arrange(&request.options).front.is_empty()
             && request.questions.is_empty();
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };

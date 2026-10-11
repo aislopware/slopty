@@ -54,7 +54,7 @@ use slopty_client::unsaved::Unsaved;
 use slopty_core::{ItemId, WallMs};
 use slopty_kit::colors::{hsla, hsla_alpha};
 use slopty_kit::highlight::Syntax;
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit::{ButtonKind, size_label};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
@@ -1567,8 +1567,7 @@ impl FileView {
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .child(
-                slopty_kit::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
-                    .size(px(theme.typography.icon())),
+                slopty_kit::icons::icon(theme, icon, hsla(tone)).size(px(theme.typography.icon())),
             )
             .child(div().flex_1().min_w_0().overflow_hidden().text_color(hsla(s.text)).child(text))
             .children(actions)

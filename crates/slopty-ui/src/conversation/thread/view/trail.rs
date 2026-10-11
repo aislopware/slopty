@@ -6,15 +6,14 @@ use std::collections::HashSet;
 
 use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, App, Context, FollowMode, FontWeight, InteractiveElement as _, IntoElement as _,
-    ListOffset, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    AnyElement, App, Context, FollowMode, InteractiveElement as _, IntoElement as _, ListOffset,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    px,
 };
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::thread::{ItemId, ThreadId, TurnId};
-use slopty_theme::Typography;
 
 use super::ThreadView;
 
@@ -152,7 +151,6 @@ impl ThreadView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .text_size(px(theme.typography.small()))
-                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .child(SharedString::from(title)),
                 )

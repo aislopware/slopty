@@ -479,9 +479,6 @@ impl WindowPicker {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_color(hsla(s.text))
-                    .when(chosen, |el| {
-                        el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
-                    })
                     .child(SharedString::from(primary)),
             )
             // Where it is, as the palette's context column says it: meta text, muted.

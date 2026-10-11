@@ -123,7 +123,7 @@ impl WorkspaceView {
         items.extend(self.wake_lines());
         items.extend(self.closed_lines());
         items.extend(
-            super::actions::palette_items().into_iter().map(|line| self.sound_line(line, cx)),
+            super::actions::palette_items(cx).into_iter().map(|line| self.sound_line(line, cx)),
         );
         items.extend(self.attach_lines(cx));
         items.extend(self.scope_lines());

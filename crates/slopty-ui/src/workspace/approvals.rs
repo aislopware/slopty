@@ -693,8 +693,8 @@ impl WorkspaceView {
     }
 }
 /// The tone and weight of a row's "Deny" and "Allow": neutral, as every answer is, since green
-/// says done and an approval is not done yet. The yes leads in the text's tone at the
-/// action's weight, the no a tier back at the metadata's.
+/// says done and an approval is not done yet. The yes leads in the text's tone, the no a tier
+/// back; both at the regular weight, as Zed sets every label.
 fn answer_inks(theme: &slopty_theme::Theme) -> [(slopty_theme::Rgb, f32); 2] {
     let (s, roles) = (&theme.surfaces, theme.roles());
     [(s.text_secondary, roles.metadata.weight), (s.text, roles.action.weight)]
@@ -705,7 +705,7 @@ mod tests {
     use slopty_theme::{Theme, Variant};
 
     /// A row's answers are neutral in both modes: never the accent's green, which says done.
-    /// The yes leads the no by its tone and weight.
+    /// The yes leads the no by its tone, never by weight.
     #[test]
     fn an_answer_is_neutral_and_the_yes_leads() {
         for theme in [Theme::new(Variant::Light), Theme::new(Variant::Dark)] {
@@ -715,7 +715,8 @@ mod tests {
                 assert!(ink != s.accent && ink != s.success, "no green on an answer");
             }
             assert_eq!(allow, s.text, "the yes in the text's tone");
-            assert!(allow_weight > deny_weight, "and a step heavier than the no");
+            assert_eq!(deny, s.text_secondary, "the no a tier back");
+            assert!((allow_weight - deny_weight).abs() < f32::EPSILON, "one weight");
         }
     }
 }

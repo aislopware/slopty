@@ -1461,13 +1461,8 @@ impl ScreenView {
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_secondary))
             .child(
-                slopty_kit::icons::icon(
-                    theme,
-                    glyph,
-                    slopty_kit::icons::IconSize::Inline,
-                    hsla(ink),
-                )
-                .size(px(theme.typography.icon() * k)),
+                slopty_kit::icons::icon(theme, glyph, hsla(ink))
+                    .size(px(theme.typography.icon() * k)),
             )
             .child(health.word());
         Some(
@@ -3575,7 +3570,6 @@ impl ScreenView {
                 slopty_kit::icons::icon(
                     theme,
                     slopty_kit::icons::Symbol::Lock,
-                    slopty_kit::icons::IconSize::Inline,
                     hsla(theme.surfaces.text_muted),
                 )
                 .size(px(theme.typography.icon())),

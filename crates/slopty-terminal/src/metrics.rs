@@ -363,17 +363,15 @@ mod tests {
         }
     }
 
-    /// `JetBrains Mono` 2.304, the bundled face, exactly as GPUI reports it (Core Text's
-    /// adjusted values, not the `hhea` table's): 1000 units per em, advance 600, ascent 1025,
-    /// descent -275, cap height 698, ex height 516. GPUI exposes neither the line gap nor the
-    /// `post` underline metrics, so those are `None` and ghostty's estimates stand in — which
-    /// is what the element passes in production.
-    fn jetbrains_mono(size: f64) -> Face {
+    /// `Lilex` 2.630, the bundled face, from its tables as GPUI reports them: 1000 units per
+    /// em, advance 600, ascent 999, descent -301 (`hhea`), no line gap, cap height 698, ex
+    /// height 516. The `post` underline is left out, so the rows check ghostty's estimates.
+    fn lilex(size: f64) -> Face {
         let em = |units: f64| units / 1000.0 * size;
         Face {
             cell_width: em(600.0),
-            ascent: em(1025.0),
-            descent: em(-275.0),
+            ascent: em(999.0),
+            descent: em(-301.0),
             line_gap: 0.0,
             cap_height: Some(em(698.0)),
             ex_height: Some(em(516.0)),
@@ -381,16 +379,15 @@ mod tests {
         }
     }
 
-    /// `JetBrains Mono` with what its `post` table says about the underline: position −155,
-    /// thickness 50 (per 1000). Core Text reports both, so this is the face the element
-    /// measures in the app; the plain [`jetbrains_mono`] rows are the estimate a font without
-    /// a `post` table gets.
-    fn jetbrains_mono_tables(size: f64) -> Face {
+    /// `Lilex` with what its `post` table says about the underline: position −140, thickness
+    /// 60 (per 1000). Core Text reports both, so this is the face the element measures in the
+    /// app; the plain [`lilex`] rows are the estimate a font without a `post` table gets.
+    fn lilex_tables(size: f64) -> Face {
         let em = |units: f64| units / 1000.0 * size;
         Face {
-            underline_position: Some(em(-155.0)),
-            underline_thickness: Some(em(50.0)),
-            ..jetbrains_mono(size)
+            underline_position: Some(em(-140.0)),
+            underline_thickness: Some(em(60.0)),
+            ..lilex(size)
         }
     }
 
@@ -529,18 +526,18 @@ mod tests {
     fn two_fonts_two_sizes_two_displays_match_ghostty() {
         type Row = (fn(f64) -> Face, f64, f64, [u32; 7]);
         let table: [Row; 12] = [
-            (jetbrains_mono, 13.0, 1.0, [8, 17, 4, 14, 2, 9, 2]),
-            (jetbrains_mono, 13.0, 2.0, [16, 34, 7, 29, 3, 19, 3]),
-            (jetbrains_mono, 15.0, 1.0, [9, 20, 4, 17, 2, 12, 2]),
-            (jetbrains_mono, 15.0, 2.0, [18, 39, 8, 33, 3, 22, 3]),
-            // The font says so: the stroke sits 0.155 em below the baseline (2.0 px at 13 pt,
-            // where the estimate put it 1.0 px down) and is 0.05 em thick (0.65 px → 1, where
+            (lilex, 13.0, 1.0, [8, 17, 4, 14, 2, 9, 2]),
+            (lilex, 13.0, 2.0, [16, 34, 8, 28, 3, 18, 3]),
+            (lilex, 15.0, 1.0, [9, 20, 4, 17, 2, 12, 2]),
+            (lilex, 15.0, 2.0, [18, 39, 9, 32, 3, 21, 3]),
+            // The font says so: the stroke sits 0.14 em below the baseline (1.82 px at 13 pt,
+            // where the estimate put it 1.0 px down) and is 0.06 em thick (0.78 px → 1, where
             // the estimate's 0.15 × ex = 1.006 → 2); the strikethrough, still estimated, is
             // centred on the ex height with the thinner stroke and takes its thickness.
-            (jetbrains_mono_tables, 13.0, 1.0, [8, 17, 4, 15, 1, 9, 1]),
-            (jetbrains_mono_tables, 13.0, 2.0, [16, 34, 7, 31, 2, 20, 2]),
-            (jetbrains_mono_tables, 15.0, 1.0, [9, 20, 4, 18, 1, 12, 1]),
-            (jetbrains_mono_tables, 15.0, 2.0, [18, 39, 8, 36, 2, 23, 2]),
+            (lilex_tables, 13.0, 1.0, [8, 17, 4, 15, 1, 9, 1]),
+            (lilex_tables, 13.0, 2.0, [16, 34, 8, 30, 2, 19, 2]),
+            (lilex_tables, 15.0, 1.0, [9, 20, 4, 18, 1, 12, 1]),
+            (lilex_tables, 15.0, 2.0, [18, 39, 9, 34, 2, 21, 2]),
             (menlo, 13.0, 1.0, [8, 15, 3, 13, 1, 8, 1]),
             (menlo, 13.0, 2.0, [16, 30, 6, 26, 2, 16, 2]),
             (menlo, 15.0, 1.0, [9, 17, 4, 14, 1, 9, 1]),
@@ -568,10 +565,10 @@ mod tests {
     fn the_line_height_is_ghosttys_for_the_same_font_and_size() {
         type Row = (fn(f64) -> Face, f64, f64, Pixels);
         let table: [Row; 8] = [
-            (jetbrains_mono, 13.0, 1.0, px(17.0)),
-            (jetbrains_mono, 13.0, 2.0, px(17.0)),
-            (jetbrains_mono, 15.0, 1.0, px(20.0)),
-            (jetbrains_mono, 15.0, 2.0, px(19.5)),
+            (lilex, 13.0, 1.0, px(17.0)),
+            (lilex, 13.0, 2.0, px(17.0)),
+            (lilex, 15.0, 1.0, px(20.0)),
+            (lilex, 15.0, 2.0, px(19.5)),
             (menlo, 13.0, 1.0, px(15.0)),
             (menlo, 13.0, 2.0, px(15.0)),
             (menlo, 15.0, 1.0, px(17.0)),

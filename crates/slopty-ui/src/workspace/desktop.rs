@@ -290,7 +290,7 @@ impl WorkspaceView {
     pub(super) fn screen_lines(&self, cx: &gpui::App) -> Vec<PaletteItem> {
         let Some(tile) = self.focused() else { return Vec::new() };
         let Some(item) = self.item(tile) else { return Vec::new() };
-        let bindings = super::actions::key_bindings();
+        let bindings = super::actions::key_bindings(cx);
         let line =
             |label: &str, action: Box<dyn gpui::Action>| PaletteItem::new(label, action, &bindings);
         let mut lines = Vec::new();

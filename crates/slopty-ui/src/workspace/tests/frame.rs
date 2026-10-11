@@ -543,7 +543,7 @@ fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) 
 
 /// A working agent in view turns its mark twelve steps a second, and the workspace draws
 /// twelve frames a second for it, not one per display refresh. With nothing at work it draws
-/// none, and under Reduce Motion the mark stands upright and breathes, five frames a second.
+/// none, and under Reduce Motion the mark stands still as a quarter pie and draws none.
 #[gpui::test]
 fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -568,8 +568,8 @@ fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestApp
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     view.update_in(cx, |v, _w, cx| v.agent_event(working, cx));
     cx.run_until_parked();
-    let breathing = frames_in_a_second(&view, cx);
-    assert!((4..=6).contains(&breathing), "Reduce Motion: {breathing} breaths in a second");
+    assert!(frames_in_a_second(&view, cx) <= 1, "Reduce Motion: the step already due at most");
+    assert_eq!(frames_in_a_second(&view, cx), 0, "Reduce Motion: it stands still");
 }
 
 /// The app holding the workspace in less than its window, as an iPad's Split View does in the
@@ -593,8 +593,8 @@ const NARROW: f32 = 500.0;
 fn the_frame_fits_the_workspace_not_the_window(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(key_bindings());
-        cx.bind_keys(terminal_key_bindings());
+        cx.bind_keys(key_bindings(cx));
+        cx.bind_keys(terminal_key_bindings(cx));
     });
     let (host, cx) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
@@ -654,9 +654,10 @@ fn a_slow_round_trip_shows_on_the_right_edge_and_holds_still(cx: &mut TestAppCon
     assert!(cx.debug_bounds(leak(format!("nav-count-{slow}"))).is_none(), "the rows count");
     let rtt = at(cx, "nav-rtt", slow);
     let header = at(cx, "nav-worker", slow);
-    // The row's wash sits a base unit in from the panel; its content ends on the edge grid.
-    let pad = theme().spacing.inset() - theme().spacing.xs;
-    near(f32::from(rtt.right()), f32::from(header.right()) - pad);
+    // The row's content ends between its trailing inset and the edge grid.
+    let end = f32::from(header.right() - rtt.right());
+    let spacing = theme().spacing;
+    assert!(end >= spacing.inset_trailing() - 0.5 && end <= spacing.inset() + 0.5, "{end}");
 
     cx.simulate_mouse_move(header.center(), None, Modifiers::default());
     cx.run_until_parked();

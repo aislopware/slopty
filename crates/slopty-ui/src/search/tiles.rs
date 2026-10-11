@@ -263,12 +263,7 @@ impl ProjectSearch {
                 this.tiles.at = ix;
                 this.open_tile(cx);
             }))
-            .child(slopty_kit::icons::icon(
-                theme,
-                icon,
-                slopty_kit::icons::IconSize::Inline,
-                hsla(s.text_muted),
-            ))
+            .child(slopty_kit::icons::icon(theme, icon, hsla(s.text_muted)))
             .child(
                 div()
                     .flex_1()

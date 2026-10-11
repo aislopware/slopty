@@ -9,15 +9,14 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
-    relative,
+    AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::Symbol;
 use slopty_kit::kit;
 use slopty_proto::thread::{Clipped, ItemId, ToolCall, ToolState};
-use slopty_theme::{Rgb, Surfaces, Typography};
+use slopty_theme::{Rgb, Surfaces};
 
 use super::ThreadView;
 
@@ -114,7 +113,6 @@ impl ThreadView {
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .child(SharedString::from(title.clone()));
         let open_more = more.then(|| {
             let item = id.clone();

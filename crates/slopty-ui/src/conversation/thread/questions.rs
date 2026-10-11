@@ -318,13 +318,12 @@ impl Questions {
 }
 
 /// `el` as one answer to a question: a pill at a field's radius in the `border` ring, padded
-/// 8 by 6, on the card it sits in. Chosen, it takes the selection's wash and its ring steps to
-/// the control's, which reads 3:1 (`docs/decisions/ui.md`, "The thread is one card language").
+/// 8 by 6, on the card it sits in. Chosen, it takes the selection and Zed's selected line.
 /// The kit's own look laid a resting wash in dark and a tinted ring on the chosen one.
 fn option<E: gpui::Styled>(el: E, theme: &Theme, chosen: bool) -> E {
     let s = theme.surfaces;
     let (ring, fill) = if chosen {
-        (hsla(s.control), hsla(s.selected))
+        (hsla(s.selected_border), hsla(s.selected))
     } else {
         (hsla(s.border), gpui::transparent_black())
     };
@@ -358,7 +357,7 @@ mod tests {
     }
 
     /// An answer is a pill in the card's ring at a field's radius, on nothing at rest; chosen,
-    /// it takes the selection's wash and the control's ring, in both modes.
+    /// it takes the selection and the selected line, in both modes.
     #[test]
     fn an_answer_is_a_pill_and_chosen_is_the_selection() {
         use slopty_theme::Variant;
@@ -374,7 +373,11 @@ mod tests {
             assert_eq!(rest.background, clear, "{variant:?}: no wash at rest");
             let mut chosen = option(div(), &theme, true);
             let chosen = chosen.style();
-            assert_eq!(chosen.border_color, Some(hsla(s.control)), "{variant:?}: a 3:1 ring");
+            assert_eq!(
+                chosen.border_color,
+                Some(hsla(s.selected_border)),
+                "{variant:?}: the selected line"
+            );
             let picked = Some(gpui::Fill::from(hsla(s.selected)));
             assert_eq!(chosen.background, picked, "{variant:?}: the selection's wash");
         }

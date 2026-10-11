@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(field("colors.light", "cursor").table_title, "Light terminal colours");
         assert_eq!(field("colors.dark", "cursor").table_title, "Dark terminal colours");
         assert_eq!(field("font", "mono_family").kind, Kind::Font);
-        assert_eq!(field("font", "mono_family").default, Value::Str("JetBrains Mono".to_owned()));
+        assert_eq!(field("font", "mono_family").default, Value::Str("Lilex".to_owned()));
         let shared = field("clipboard", "workers");
         assert_eq!(
             (&shared.kind, &shared.default),

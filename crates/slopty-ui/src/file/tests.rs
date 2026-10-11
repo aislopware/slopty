@@ -36,7 +36,7 @@ fn tile<'a>(
 ) -> (Entity<FileView>, Events, &'a mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        cx.bind_keys(crate::workspace::key_bindings());
+        cx.bind_keys(crate::workspace::key_bindings(cx));
     });
     let path = path.to_owned();
     let (view, cx) = cx.add_window_view(|window, cx| {

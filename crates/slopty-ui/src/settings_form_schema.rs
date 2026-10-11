@@ -196,7 +196,7 @@ const FOOTERS: &[(&str, &str)] = &[
         "Dark terminal colours",
         "An empty colour keeps the theme's own; these colour the terminal alone",
     ),
-    ("Font", "JetBrains Mono is built in. Zooming a tile changes its size for that tile only"),
+    ("Font", "Lilex is built in. Zooming a tile changes its size for that tile only"),
     ("Text", "Text under the minimum contrast moves toward black or white; 1 keeps every colour"),
     ("Behaviour", "When hidden, the alert sounds only while Slopty is behind other windows"),
     ("Keys", "Secure keyboard entry keeps passwords typed here from other apps, as Terminal does"),
@@ -728,7 +728,7 @@ mod tests {
                 .settings
                 .keys;
         let keymap = Keymap::new(&keys, Vec::new());
-        let listed = key_rows(&keymap, &crate::workspace::palette_items());
+        let listed = key_rows(&keymap, &crate::workspace::palette_items_of(&Keymap::default()));
         assert_eq!(listed.len(), keymap.commands().len(), "a line a command");
         let line =
             |key: &str| listed.iter().find(|r| r.key == key).unwrap_or_else(|| panic!("{key}"));

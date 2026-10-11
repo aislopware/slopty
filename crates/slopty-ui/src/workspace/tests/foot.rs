@@ -38,8 +38,9 @@ fn window(name: &str, used_bp: u32) -> Limit {
     Limit { name: name.to_owned(), used_bp, resets_ms: None }
 }
 
-/// The bar runs along the window's foot under the panes, the status step tall, on the ground
-/// with the one line over it, beside the navigator rather than under it. A phone has none.
+/// The bar runs along the window's foot under the panes, the status step tall, on the panel's
+/// plane with the one line over it, as Zed's status bar, beside the navigator rather than under it.
+/// A phone has none.
 #[gpui::test]
 fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -60,15 +61,15 @@ fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
         assert!(area.bottom() <= foot.top() + px(0.5), "the panes end over it");
     }
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let ground = slopty_kit::colors::hsla(theme.surfaces.ground);
+    let plane = slopty_kit::colors::hsla(theme.surfaces.sidebar);
     let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
     // A translucent line is painted as a quad of its own over the fill.
     let over = |q: &&gpui::Quad| {
         near(q.bounds.origin.y.0, foot.top()) && near(q.bounds.size.height.0, foot.size.height)
     };
     assert!(
-        quads.iter().filter(over).any(|q| q.background.as_solid() == Some(ground)),
-        "on the ground"
+        quads.iter().filter(over).any(|q| q.background.as_solid() == Some(plane)),
+        "on the panel's plane"
     );
     let stroke = slopty_kit::colors::hsla(theme.surfaces.stroke);
     assert!(

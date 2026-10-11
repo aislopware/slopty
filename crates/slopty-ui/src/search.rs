@@ -40,12 +40,12 @@ use gpui_kit::component::input::{
 };
 use slopty_client::search::{Row, SearchResults, SearchState};
 use slopty_kit::colors::{hsla, hsla_alpha};
-use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::icons::Symbol;
 use slopty_kit::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
 use slopty_kit::layer::Layer;
 use slopty_proto::search::{ContextLine, FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery};
 use slopty_proto::{ClientMsg, RequestId};
-use slopty_theme::{Theme, Typography, alpha};
+use slopty_theme::{Theme, alpha};
 pub use tiles::{SearchScope, TileHit, TileOpen};
 
 use crate::palette::Plate;
@@ -604,7 +604,7 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .child(slopty_kit::icons::icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
+            .child(slopty_kit::icons::icon(theme, chevron, hsla(s.text_muted)))
             .child(
                 div()
                     .flex_none()
@@ -612,7 +612,6 @@ impl ProjectSearch {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     .text_color(hsla(s.text))
                     .child(SharedString::from(name.to_owned())),
             )
@@ -654,7 +653,6 @@ impl ProjectSearch {
         let found = HighlightStyle {
             color: Some(hsla(s.text)),
             background_color: Some(hsla_alpha(s.warn, alpha::FAINT)),
-            font_weight: Some(gpui::FontWeight(Typography::MEDIUM_WEIGHT)),
             ..HighlightStyle::default()
         };
         let highlights: Vec<_> = marks.into_iter().map(|range| (range, found)).collect();
