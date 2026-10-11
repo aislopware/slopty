@@ -30,6 +30,9 @@ on:
       sim:
         description: The simulator the ios case uses
         default: iphone
+      snapshots:
+        description: "What the tests do with insta snapshots: compare, accept"
+        default: compare
 
 run-name: check ${{ inputs.name }} ${{ inputs.sha }}
 
@@ -104,13 +107,17 @@ jobs:
           --lane tests --lane rustdoc
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - run: mkdir -p target/remote
       - if: inputs.packages != ''
         env:
           PACKAGES: ${{ inputs.packages }}
+          # An accept writes every changed snapshot and lets its assertion pass.
+          INSTA_UPDATE: ${{ inputs.snapshots == 'accept' && 'always' || 'no' }}
+          INSTA_FORCE_PASS: ${{ inputs.snapshots == 'accept' && '1' || '0' }}
         run: |
           args=()
           for p in $PACKAGES; do args+=(-p "$p"); done
-          cargo xtask check "${args[@]}" 2>&1 | tee check.log
+          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/check.log
       - if: ${{ !cancelled() && inputs.e2e != '' }}
         env:
           CASE: ${{ inputs.e2e }}
@@ -122,16 +129,13 @@ jobs:
           [ -n "$FILTER" ] && args+=(-E "$FILTER")
           [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
           [ "$CASE" = ios ] && args+=(--sim "$SIM")
-          cargo xtask e2e "${args[@]}" 2>&1 | tee e2e.log
-      # The goldens as the run left them, which `remote` copies back over the tree's after an
-      # accept, and the renders and diffs of every changed frame.
-      - if: ${{ always() && inputs.e2e != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: goldens
-          path: crates/slopty-e2e/golden
-          if-no-files-found: ignore
-          retention-days: 3
+          cargo xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
+      # What the run wrote into the tree (accepted goldens and snapshots), as a patch on the
+      # commit checked, which `remote` applies to the tree it came from.
+      - if: always()
+        run: |
+          git add --intent-to-add --all
+          git diff --binary --ignore-submodules=all > target/remote/changes.patch
       - if: ${{ always() && inputs.e2e != '' }}
         uses: actions/upload-artifact@v4
         with:
@@ -143,8 +147,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs
-          path: |
-            check.log
-            e2e.log
+          path: target/remote
           if-no-files-found: ignore
           retention-days: 3

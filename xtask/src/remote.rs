@@ -5,7 +5,8 @@
 //! tree as it is, staged or not, beside the real index, pushes that commit to `check/<name>`,
 //! and starts `.github/workflows/check.yml` on it: `cargo xtask check -p …` for the crates
 //! named, and an `xtask e2e` case. It waits for the run, prints what failed, and after an e2e
-//! case that accepts goldens copies the run's goldens over the tree's. The real index, `HEAD`
+//! case that accepts goldens, or a check that accepts snapshots, applies what the run wrote to the
+//! tree. The real index, `HEAD`
 //! and the tree are never touched, so lanes editing this checkout keep working meanwhile.
 //!
 //! The run is dispatched on `gate`, so it reads and fills the compile cache the gate's lanes
@@ -77,12 +78,19 @@ pub struct RemoteOpts {
     /// The e2e case's nextest filterset, such as `test(a_folder_tile_browses_the_worker)`.
     #[arg(short = 'E', long, requires = "e2e")]
     pub filter: Option<String>,
-    /// What the e2e case does with the goldens; an accept copies the run's back into the tree.
+    /// What the e2e case does with the goldens; an accept applies the run's to the tree.
     #[arg(long, value_enum, default_value_t, requires = "e2e")]
     pub goldens: Goldens,
     /// The simulator the ios case uses: iphone or ipad.
     #[arg(long, default_value = "iphone", requires = "e2e")]
     pub sim: String,
+    /// Accept every insta snapshot the tests change, and apply them to the tree.
+    #[arg(long)]
+    pub accept_snapshots: bool,
+    /// Check `HEAD` as committed, without the tree's edits: other lanes' unfinished work stays
+    /// out of it.
+    #[arg(long)]
+    pub head: bool,
 }
 
 /// A run as `gh run list` describes it.
@@ -109,7 +117,11 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let dir = root.join("target").join("remote").join(&opts.name);
     std::fs::create_dir_all(&dir)?;
     let started = Instant::now();
-    let sha = snapshot(sh, &root, &dir, &opts.name)?;
+    let sha = if opts.head {
+        cmd!(sh, "git rev-parse HEAD").read()?
+    } else {
+        snapshot(sh, &root, &dir, &opts.name)?
+    };
     let short = sha.get(..10).unwrap_or(&sha);
     let branch = format!("check/{}", opts.name);
     cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/{branch}")
@@ -134,12 +146,20 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         if download(sh, run.id, "renders", &renders).is_some() {
             println!("  renders and diffs of changed frames: {renders}");
         }
-        if matches!(opts.goldens, Goldens::Accept | Goldens::AcceptAll) {
-            let golden = root.join("crates").join("slopty-e2e").join("golden");
-            let fetched = download(sh, run.id, "goldens", &dir.join("goldens"))
-                .context("the run left no goldens to bring back")?;
-            let copied = copy_changed(&fetched, &golden)?;
-            println!("  {copied} goldens brought back into crates/slopty-e2e/golden");
+    }
+    let accepts =
+        opts.accept_snapshots || matches!(opts.goldens, Goldens::Accept | Goldens::AcceptAll);
+    if accepts {
+        let patch = logs.as_deref().map(|l| l.join("changes.patch")).filter(|p| p.exists());
+        let patch = patch.context("the run left no patch of what it accepted")?;
+        if std::fs::metadata(&patch)?.len() == 0 {
+            println!("  the run accepted nothing new");
+        } else {
+            let files = cmd!(sh, "git apply --numstat {patch}").read()?.lines().count();
+            cmd!(sh, "git apply --binary {patch}")
+                .run()
+                .context("applying what the run accepted to the tree")?;
+            println!("  {files} accepted files applied to the tree");
         }
     }
     let took = started.elapsed().as_secs();
@@ -198,6 +218,7 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         format!("filter={}", opts.filter.as_deref().unwrap_or_default()),
         format!("goldens={}", opts.goldens.input()),
         format!("sim={}", opts.sim),
+        format!("snapshots={}", if opts.accept_snapshots { "accept" } else { "compare" }),
     ];
     let args: Vec<String> = fields.iter().flat_map(|f| ["-f".to_owned(), f.clone()]).collect();
     cmd!(sh, "gh workflow run {WORKFLOW} --ref {REF} {args...}")
@@ -273,24 +294,6 @@ fn download(sh: &Shell, id: u64, name: &str, into: &Path) -> Option<PathBuf> {
         .run()
         .ok()?;
     Some(into.to_path_buf())
-}
-
-/// Copy every file of `from` whose bytes differ from its namesake in `to`; how many went.
-fn copy_changed(from: &Path, to: &Path) -> Result<usize> {
-    let mut copied: usize = 0;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            continue;
-        }
-        let target = to.as_std_path().join(entry.file_name());
-        let new = std::fs::read(entry.path())?;
-        if std::fs::read(&target).ok().as_deref() != Some(new.as_slice()) {
-            std::fs::write(&target, new)?;
-            copied = copied.saturating_add(1);
-        }
-    }
-    Ok(copied)
 }
 
 /// The end of a failed log, without the build's progress lines.

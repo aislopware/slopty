@@ -31,8 +31,9 @@ zed itself so it is never behind zed while longbridge lags.
   `cargo xtask check` for those crates on a GitHub macOS runner (`check.yml`): fmt, clippy for
   the host, iOS and Linux, nextest, rustdoc, shear, typos. It waits, prints the failed log's
   end and keeps every log under `target/remote/<name>/`. `--e2e app -E '<filterset>'` adds an
-  e2e case; `--goldens accept` (or `accept-all`) copies the run's goldens back over the tree's,
-  and `--goldens review` brings every changed frame's render and diff to
+  e2e case; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
+  `--accept-snapshots` does its insta snapshots, `--head` checks the commit without the tree's
+  edits, and `--goldens review` brings every changed frame's render and diff to
   `target/e2e/artifacts/`. A newer check of the same name cancels the older one. Only the quick
   gate (tools, seconds) and xtask itself build here.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then

@@ -1526,8 +1526,10 @@ more full-window layer.
     `.github/workflows/check.yml` on `gate` with that commit: `cargo xtask check -p …` for the
     crates named, and an `xtask e2e` case with its goldens compared, accepted or reviewed. It
     waits, prints the end of a failed log without cargo's progress lines, and keeps the logs
-    under `target/remote/<name>/`. An accept copies the run's goldens back over the tree's,
-    and the renders and diffs of changed frames land in `target/e2e/artifacts/`.
+    under `target/remote/<name>/`. What the run wrote into its checkout (accepted goldens, or
+    insta snapshots with `--accept-snapshots`) comes back as a binary patch that `remote`
+    applies to the tree, and the renders and diffs of changed frames land in
+    `target/e2e/artifacts/`. `--head` checks the commit alone, without the lanes' edits.
   - **Dispatched on `gate`, checked out at the snapshot.** A run reads the Actions cache of its
     own ref and of main only, so a run on `check/<name>` would compile cold every time. On `gate`
     it shares the gate lanes' sccache entries, the registry entry (read only) and their

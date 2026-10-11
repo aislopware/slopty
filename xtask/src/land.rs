@@ -148,9 +148,7 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         .quiet()
         .read()
         .unwrap_or_default();
-    if !opts.check {
-        println!("  no checks before the push: CI alone decides");
-    } else {
+    if opts.check {
         // What `gate` already holds is CI's to check, so a land on top of one still running is
         // checked for its own commits alone: from main, a lockfile change in the earlier land
         // left every later one unchecked.
@@ -158,6 +156,8 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
             && cmd!(sh, "git merge-base --is-ancestor origin/main {leased}").quiet().run().is_ok()
             && cmd!(sh, "git merge-base --is-ancestor {leased} HEAD").quiet().run().is_ok();
         crate::gate::land_checks(if pushed { &leased } else { "origin/main" }, opts.full)?;
+    } else {
+        println!("  no checks before the push: CI alone decides");
     }
     let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{leased}");
     cmd!(sh, "git push --quiet {lease} origin HEAD:refs/heads/{BRANCH}").run()?;
