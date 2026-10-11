@@ -19,7 +19,6 @@ gpui-kit.workspace = true
 nucleo-matcher.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
-slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true

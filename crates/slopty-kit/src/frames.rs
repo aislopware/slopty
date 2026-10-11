@@ -27,7 +27,6 @@ use gpui::{
     AnyView, App, Context, IntoElement, ParentElement as _, Render, Styled as _, Window, canvas,
     div,
 };
-use slopty_client::pacing::percentile;
 
 /// Frames kept for the percentiles: sixteen seconds at 60 Hz, eight at 120 Hz.
 pub const RING: usize = 1024;
@@ -277,6 +276,13 @@ fn probe() -> gpui::AnyElement {
         .absolute()
         .size_0()
         .into_any_element()
+}
+
+/// The `p`th percentile of `sorted` by nearest rank, zero for none: the definition the
+/// stream's pacing reports use (`slopty_client::pacing::percentile`), so the two read alike.
+fn percentile(sorted: &[Duration], p: usize) -> Duration {
+    let rank = p.saturating_mul(sorted.len()).div_ceil(100).max(1);
+    sorted.get(rank.saturating_sub(1)).copied().unwrap_or_default()
 }
 
 /// One line for the stats overlay: draw percentiles, cadence and the two counters.

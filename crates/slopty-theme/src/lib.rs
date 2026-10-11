@@ -968,7 +968,7 @@ pub struct Surfaces {
     /// GitHub's merged is.
     pub merged_fill: Rgb,
     /// A machine's or a project's own colour, on its glyph alone, picked by a hash of its id
-    /// (`slopty_kit::kit::identity_ink`). Eight hues near the status fills' lightness at under
+    /// (`slopty_ui::identity::identity_ink`). Eight hues near the status fills' lightness at under
     /// half their chroma (0.06 dark, 0.07 light), each kept clear of every status hue: a tint that
     /// tells machines apart side by side and never competes with a state.
     pub identity: [Rgb; IDENTITY_HUES],

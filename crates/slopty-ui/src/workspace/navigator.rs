@@ -620,11 +620,11 @@ pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
 }
 
 /// The ink a group's glyph wears: a project's, a repository's or a folder's own colour
-/// ([`kit::identity_ink`]), the same on every client, so a project is found by its colour in
-/// every list; any other grouping's (a branch, an agent, a label) the lead's tier.
+/// ([`crate::identity::identity_ink`]), the same on every client, so a project is found by its
+/// colour in every list; any other grouping's (a branch, an agent, a label) the lead's tier.
 fn group_ink(theme: &Theme, key: &GroupKey) -> Rgb {
-    if kit::wears_identity(key) {
-        kit::identity_ink(theme, key)
+    if crate::identity::wears_identity(key) {
+        crate::identity::identity_ink(theme, key)
     } else {
         theme.surfaces.text_secondary
     }
@@ -2977,7 +2977,8 @@ impl WorkspaceView {
                 return None;
             }
             let glyph = Mark::from(self.machine_glyph(key));
-            let ink = kit::machine_ink(theme, key, matches!(health, Some((Status::Away, _))));
+            let ink =
+                crate::identity::machine_ink(theme, key, matches!(health, Some((Status::Away, _))));
             let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
             let chosen = home.as_ref().and_then(GroupKey::worker) == Some(key);
             let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup, chosen).on_click(
@@ -3295,8 +3296,8 @@ impl WorkspaceView {
             crate::palette::lead_mark(theme, self.machine_glyph(key), hsla(ink), LEAD_SLOT)
         };
         let lead = match worker.health {
-            None => machine(kit::machine_ink(theme, key, false)).into_any_element(),
-            Some((Status::Away, _)) => machine(kit::machine_ink(theme, key, true))
+            None => machine(crate::identity::machine_ink(theme, key, false)).into_any_element(),
+            Some((Status::Away, _)) => machine(crate::identity::machine_ink(theme, key, true))
                 .child(div().id("away").role(Role::Image).aria_label(Status::Away.label()))
                 .into_any_element(),
             Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark))).into_any_element(),
@@ -3770,7 +3771,7 @@ impl WorkspaceView {
         let state = board.status.filter(|m| *m != Status::Idle);
         // The board wears its project's own colour, as the project's head above it does.
         let project_key = GroupKey::new(fact::PROJECT, board.project.as_str());
-        let ink = kit::identity_ink(theme, &project_key);
+        let ink = crate::identity::identity_ink(theme, &project_key);
         let lead =
             crate::palette::lead_mark(theme, Symbol::RectangleSplit3x1, hsla(ink), LEAD_SLOT);
         let words_id = id.clone();

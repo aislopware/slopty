@@ -12,8 +12,7 @@
 //! * [`shown`] — work timed at the instant a paint reached the display.
 //! * [`draw`] — a view's elements built from another entity's state, read and never written.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
-//! * [`clock`], [`fuzzy`], [`chrome_text`], [`file_types`], [`window_frame`] — the small pieces the
-//!   views share.
+//! * [`clock`], [`fuzzy`], [`chrome_text`], [`file_types`] — the small pieces the views share.
 //! * `retained` — the oracle: the frame shown against the same state drawn from scratch (tests).
 //!
 //! The views (`slopty-ui`) sit on it; nothing here reaches up to them
@@ -42,4 +41,3 @@ pub mod markdown;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;
 pub mod shown;
-pub mod window_frame;

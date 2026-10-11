@@ -138,7 +138,7 @@ impl WorkspaceView {
         let Some(tile) = self.tile_of(item) else { return };
         let Some(at) = self.restore.popouts.iter().position(|p| p.tile == tile) else { return };
         let saved = self.restore.popouts.remove(at);
-        let placed = slopty_kit::window_frame::bounds(&saved.frame, cx);
+        let placed = crate::window_frame::bounds(&saved.frame, cx);
         self.pop_out_at(item, placed, cx);
     }
 

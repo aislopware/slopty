@@ -670,7 +670,7 @@ fn identity_colour_stays_on_its_glyph() {
     // "Premium foundations"): a palette row, a tile's header, the breadcrumb and the empty
     // workspace draw a machine in its words' tier.
     const GLYPHS: [&str; 3] = [
-        "slopty-kit/src/kit/identity.rs",
+        "slopty-ui/src/identity.rs",
         "slopty-ui/src/workspace/navigator.rs",
         // Until the board's task meta goes to its words' tier (lane A, the same ruling).
         "slopty-ui/src/project/view.rs",
@@ -680,7 +680,7 @@ fn identity_colour_stays_on_its_glyph() {
         let code = line.split("//").next().unwrap_or_default();
         let hues = code.contains("surfaces.identity") || code.contains("s.identity");
         let ink = code.contains("identity_ink(") || code.contains("machine_ink(");
-        let mine = file.ends_with("slopty-kit/src/kit/identity.rs");
+        let mine = file.ends_with("slopty-ui/src/identity.rs");
         if (hues && !mine) || (ink && !GLYPHS.iter().any(|f| file.ends_with(f))) {
             wrong.push(format!("{file}:{line_no}: {}", line.trim()));
         }

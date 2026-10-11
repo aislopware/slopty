@@ -32,6 +32,7 @@ pub mod clipboard;
 pub mod conversation;
 pub mod file;
 pub mod folder;
+pub mod identity;
 pub mod keymap;
 #[cfg(test)]
 mod lints;
@@ -50,6 +51,7 @@ pub mod search;
 pub mod settings_editor;
 pub mod settings_form;
 pub mod terminal;
+pub mod window_frame;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

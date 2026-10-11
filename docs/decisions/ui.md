@@ -10571,11 +10571,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The layout.** `slopty-kit` holds what every surface is drawn with and nothing that
     draws a surface of its own: `kit`, `icons`, `colors`, `a11y`, `highlight`, `markdown`,
     `fonts`, `frames`, `shown`, `draw`, `keys`, `clock`, `fuzzy`, `chrome_text`,
-    `file_types`, `window_frame`, the test oracle `retained`, and the bundled assets. The
+    `file_types`, the test oracle `retained`, and the bundled assets. The
     views (`slopty-ui`) sit on it, and the kit never reaches up to them. Three helpers that
     did were moved down first (`separator_ink`, `mono_family` and `drawn_keys` into `kit`,
     `COLOURED_BYTES` into `highlight`, a lane's phase onto `Lane`). Paths are rewritten to
     `slopty_kit::…` everywhere, with no re-exports kept.
+  - **What the kit stands on.** Below the views means below the client too: the kit does not
+    depend on `slopty-client`. A machine's and a project's colour (`identity`) is keyed by the
+    client's group keys, and a window's saved frame (`window_frame`) is the client's layout
+    type, so both stay in `slopty-ui`; the frame probe reads its percentiles by its own
+    nearest rank. What the kit does read is data and drawing below every view: `slopty-proto`
+    for what a glyph or a key names (an agent, a pull request's standing, a machine's form, a
+    key event), `slopty-core` for the wall clock, `slopty-platform` for the outline
+    rasterizer, and `slopty-theme`.
   - **The lints.** The chrome's source lints scan every crate the chrome is drawn in, so they
     live in the top crate as `slopty-ui/src/lints.rs` (with `lints/overflow.rs`) and sweep
     `CHROME`: `slopty-kit/src`, `slopty-ui/src` and `slopty-app/src`. Their own files are not

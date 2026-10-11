@@ -8122,7 +8122,6 @@ dependencies = [
  "nucleo-matcher",
  "parking_lot",
  "regex",
- "slopty-client",
  "slopty-core",
  "slopty-platform",
  "slopty-proto",
