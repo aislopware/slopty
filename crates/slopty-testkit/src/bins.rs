@@ -67,10 +67,59 @@ fn build(anchor: &Path) {
     // The test's own profile, whose units its build already holds: plain `cargo build` is
     // `dev`, which optimises the workspace crates `test` leaves unoptimised.
     build.args(if release { ["--release"].as_slice() } else { ["--profile", "test"].as_slice() });
+    // Into the target directory the test runs from. A tool may have named it to cargo with
+    // `--target-dir` while this process's environment names another: `cargo llvm-cov` runs the
+    // tests from `llvm-cov-target`, and a build that followed `CARGO_TARGET_DIR` left every
+    // binary somewhere else, so an ACP test found no agent (Deep run 38001943825).
+    if let Some((dir, triple)) = anchor.parent().and_then(target_of) {
+        build.arg("--target-dir").arg(dir);
+        if let Some(triple) = triple {
+            build.arg("--target").arg(triple);
+        }
+    }
     let status = build.status();
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "build the binaries tests spawn ({}): {status:?}",
         NAMES.join(", ")
     );
+}
+
+/// The target directory a profile directory `profile` is in, and the target triple between them
+/// when there is one (`<target>/<triple>/debug`). Cargo marks a target directory's root with
+/// `CACHEDIR.TAG`.
+fn target_of(profile: &Path) -> Option<(&Path, Option<&std::ffi::OsStr>)> {
+    let above = profile.parent()?;
+    if above.join("CACHEDIR.TAG").is_file() {
+        return Some((above, None));
+    }
+    let root = above.parent()?;
+    root.join("CACHEDIR.TAG").is_file().then_some((root, above.file_name()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::target_of;
+
+    /// A profile directory's target directory is the one marked as cargo marks it, with the
+    /// triple between them when the build named one, and none when nothing is marked.
+    #[test]
+    fn a_profile_directory_names_its_target_directory() {
+        let dir = std::env::temp_dir().join(format!("slopty-testkit-bins-{}", std::process::id()));
+        let root = dir.join("llvm-cov-target");
+        let plain = root.join("debug");
+        let crossed = root.join("aarch64-apple-darwin").join("debug");
+        for made in [&plain, &crossed] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        assert_eq!(target_of(&plain), None, "no CACHEDIR.TAG yet");
+        std::fs::write(root.join("CACHEDIR.TAG"), "").unwrap();
+        assert_eq!(target_of(&plain), Some((root.as_path(), None)));
+        let triple = Some(std::ffi::OsStr::new("aarch64-apple-darwin"));
+        assert_eq!(target_of(&crossed), Some((root.as_path(), triple)));
+        assert_eq!(target_of(Path::new("/")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
