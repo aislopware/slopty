@@ -16533,3 +16533,50 @@ display has gone, as a worker does. Test
 - In the first run the test missed the moment it came back (its wait for the list swallowed
   the frame), and the size and place are from 3 s later. The second run times it.
 
+
+## 2026-10-12 — the terminal face: Lilex against JetBrains Mono
+
+Each face at 13 pt on a 2× display, in the release `slopty-kit` lib test binary on a macos-26
+runner (run 38176047490): a 200-column line of code shaped with ligatures on (500 shapes), and
+the 95 printable ASCII glyphs rasterised in each of the 4 subpixel offsets (20 rounds), with
+the atlas bytes those rasters take and the cell metrics per em. JetBrains Mono is the file the
+tree bundled before the Zed port, read from the commit's parent.
+
+| | Lilex | JetBrains Mono |
+| --- | --- | --- |
+| a 200-column line shaped, p50 / p95 | 184 / 226 µs | 290 / 708 µs |
+| 380 ASCII rasters, all of them, p50 / p95 | 2.55 / 21.5 ms | 3.16 / 9.14 ms |
+| atlas bytes for them | 112 474 | 112 085 |
+| advance / ascent / descent / gap, per em | 0.6 / 0.999 / −0.301 / 0 | 0.6 / 1.020 / −0.300 / 0 |
+
+- Lilex costs no more than JetBrains Mono: the line shapes faster and the rasters take the same
+  atlas room. The rasters' p95 is one round each on a shared runner, so their spread says
+  nothing; the p50s agree within a quarter.
+- The cell is the same width (0.6 em), so a terminal at 13 pt holds the same columns, and its
+  ascent plus descent is 1.300 em against 1.320, 1.5 % shorter.
+
+```sh
+SLOPTY_OTHER_FACE=<JetBrainsMono-Regular.ttf> SLOPTY_OTHER_FAMILY="JetBrains Mono" \
+  cargo test -p slopty-kit --release --lib fonts::cost -- --ignored --nocapture --test-threads 1
+```
+
+## 2026-10-12 — Carbon glyphs drawn on demand
+
+Every chrome glyph (87 Carbon files on the 32 grid) read from its markup and drawn uncached by
+`rasterize_on_grid` at 14, 16, 28 and 32 device pixels, in the `slopty-kit` lib test binary
+(the dev profile) on a macos-26 runner, one cold run (run 38176047490).
+
+| read all 87 | 348 draws, total | p50 | p99 | max |
+| --- | --- | --- | --- | --- |
+| 1.59 ms | 20.5 ms | 10.1 µs | 103 µs | 15.2 ms |
+
+- As with Tabler's (2026-10-07), the maximum is the process's first draw, which makes Core
+  Graphics' first bitmap context; without it the 347 others take about 5 ms, some 15 µs each.
+  A screen of chrome draws its few dozen glyphs in well under a millisecond.
+- Carbon's filled shapes draw no slower than Tabler's strokes did: p50 10 µs against 8 to 17 µs
+  on this Mac. `icons::prewarm` still pays the first context on a thread while the window is
+  made.
+
+```sh
+cargo test -p slopty-kit --lib icons::glyphs::tests::a_glyph_is_cheap_to_draw_on_demand -- --nocapture
+```
