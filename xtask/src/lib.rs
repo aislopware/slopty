@@ -43,6 +43,7 @@ mod sign;
 mod soak;
 mod symbolicate;
 mod tailnet;
+mod toolchain;
 mod tools;
 mod upstream;
 mod vault;
@@ -148,6 +149,12 @@ enum Cmd {
         /// Pushes since this time (`2026-10-11T00:00:00Z`); the last day by default.
         #[arg(long)]
         since: Option<String>,
+    },
+    /// Pin a Rust toolchain (the newest stable rustup has, by default) in `rust-toolchain.toml`
+    /// and every workflow that names the pinned one.
+    Toolchain {
+        /// The release to pin, `1.x.y`.
+        version: Option<String>,
     },
     /// nextest's setup script: build every binary a test spawns before the first test starts.
     SpawnedBins,
@@ -389,6 +396,7 @@ pub fn main() -> Result<()> {
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
         Cmd::GateLatency { since } => latency::run(&sh, since.as_deref()),
+        Cmd::Toolchain { version } => toolchain::run(&sh, version.as_deref()),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),
         Cmd::CiProfile => ci_profile::write(&sh),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {

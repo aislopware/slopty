@@ -15,11 +15,13 @@ zed itself so it is never behind zed while longbridge lags.
 
 ## Dev loop
 - Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever
-  is behind (the four forks and zed; ghostty is `vendor/ghostty`), `rustup update`, `cargo update -w`, and
+  is behind (the four forks and zed; ghostty is `vendor/ghostty`), `rustup update` and, when
+  `upstream check` says stable moved, `cargo xtask toolchain` (it pins the newest stable in
+  `rust-toolchain.toml` and every workflow that names it), `cargo update -w`, and
   `cargo binstall -y <tool>` for any gate tool `cargo info <tool>` shows behind. A lockfile
   change that adds or drops a proc-macro dependency also needs `cargo xtask ci-profile`, which
-  rewrites `.cargo/ci-profile.toml` (CI compiles the proc macros unoptimised; an xtask test
-  fails while the file is stale).
+  rewrites `.cargo/ci-profile.toml` (CI compiles the proc macros unoptimised; the gate's tools
+  lane fails while the file is stale, and `cargo gate --fix` rewrites it).
 - `cargo xtask setup` installs tools (binstall) and initialises submodules, then runs
   `cargo xtask doctor`: it times the first launch of fresh binaries, and when `XProtect` scans
   them it names the app to switch on under System Settings → Privacy & Security → Developer

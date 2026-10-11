@@ -360,6 +360,7 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
                 }
             }
             claude_check(&root);
+            toolchain_check(sh, &root);
             Ok(())
         }
         UpstreamCmd::Watch { interval, once } => {
@@ -373,6 +374,23 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
 
 /// Print the newest Claude Code on npm beside the one the mod was recorded on. A registry that
 /// does not answer is said, not failed on: the forks' report stands without it.
+/// The pinned toolchain against the newest stable rustup has (after `rustup update`).
+fn toolchain_check(sh: &Shell, root: &Utf8Path) {
+    let file = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap_or_default();
+    let Some(pinned) = crate::toolchain::pinned(&file) else {
+        println!("rust: rust-toolchain.toml pins no channel");
+        return;
+    };
+    match crate::toolchain::stable(sh) {
+        Ok(stable) if stable == pinned => println!("rust: {pinned} pinned, the newest stable"),
+        Ok(stable) => println!(
+            "rust: {pinned} pinned, {stable} is stable; pin it everywhere with \
+             `cargo xtask toolchain`"
+        ),
+        Err(e) => println!("rust: {pinned} pinned; no stable toolchain to compare ({e:#})"),
+    }
+}
+
 fn claude_check(root: &Utf8Path) {
     let recorded =
         std::fs::read_to_string(root.join("crates/slopty-agent/tests/fixtures/mod/recorded.json"))
