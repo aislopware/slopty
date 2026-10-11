@@ -105,6 +105,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -222,6 +223,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -347,6 +349,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main

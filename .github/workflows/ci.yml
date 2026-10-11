@@ -107,11 +107,16 @@ jobs:
       # since the compile cache moved to R2. Saved on failure too: a red lane is no reason to
       # download it all again. On a Mac the save takes two minutes (cleaning, then a slow tar),
       # so the shard with the most slack does it: the UI's, since xtask's build left it
-      # (`docs/decisions/tooling.md`, "The registry cache renews with the lock").
+      # (`docs/decisions/tooling.md`, "The registry cache renews with the lock"). Not keyed by
+      # the toolchains a job has installed, which nothing cached depends on: the tools lane's
+      # nightly gave its entry a key the other x86_64 Linux jobs never matched, so they cloned
+      # every git dependency on every run, and one clone's TLS error failed the gate (run
+      # 38144514113).
       - id: rust-cache
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           cache-on-failure: true
           save-if: >-
@@ -301,6 +306,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -449,6 +455,11 @@ jobs:
     needs: gate
     if: github.ref_type == 'tag'
     runs-on: macos-26
+    # `bash` named, so a step runs with pipefail: GitHub's default shell runs without it, and
+    # `dist … | tee` or `curl … | sh` would pass with the command before the pipe failed.
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: write
     env:
@@ -474,6 +485,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main

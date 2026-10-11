@@ -11,6 +11,12 @@
 //! Cargo reads package overrides from config files but not from the environment, so each CI job
 //! copies the file to `$CARGO_HOME/config.toml`. Here the macros compile once per target dir,
 //! and the file is not read.
+//!
+//! The file also carries CI's network settings. Cargo's own git (libgit2) failed a gate run on
+//! "SSL error: unknown error; class=Ssl (16)" cloning a git dependency (run 38144514113), and
+//! cargo retries no libgit2 error of that class. The `git` command's failures are retried, and
+//! five times rather than three. They live here, not in `CARGO_NET_*` variables, because sccache
+//! hashes every `CARGO_*` variable into each unit's key: a new one would recompile every lane.
 
 use std::collections::BTreeSet;
 
@@ -53,7 +59,8 @@ pub fn render(names: &BTreeSet<String>) -> String {
     let mut text = String::from(
         "# Written by `cargo xtask ci-profile` (xtask/src/ci_profile.rs): every proc-macro \
          dependency\n# unoptimised on CI, where sccache cannot cache one. CI copies this to \
-         `$CARGO_HOME/config.toml`.\n",
+         `$CARGO_HOME/config.toml`.\n\n# Git dependencies fetched by the git command, whose \
+         failures cargo retries.\n[net]\ngit-fetch-with-cli = true\nretry = 5\n",
     );
     for name in names {
         text.push_str("\n[profile.dev.package.");
