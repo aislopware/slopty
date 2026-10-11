@@ -377,6 +377,45 @@ fn a_click_opens_a_nodes_agent_or_says_why_not(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some("#3 has no agent yet"));
 }
 
+/// A task whose agent runs as a thread (pi's, Codex's) has a seat and no terminal: a click on
+/// its card opens its thread on its machine, rather than saying it has no tile.
+#[gpui::test]
+fn a_seated_tasks_card_opens_its_thread(cx: &mut TestAppContext) {
+    use slopty_proto::thread::ThreadId;
+
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
+    let worker = WorkerId::new();
+    let mut fake = connect_as(&view, cx, worker, "studio");
+    let thread = ThreadId::new();
+    let mut seated = on(card(1, "Port the parser", TaskState::Running), worker, SessionId::new());
+    if let Some(seat) = seated.assignment.as_mut() {
+        seat.thread = Some(thread);
+    }
+    let record = project("board", Some(TermRef { worker, session: SessionId::new() }));
+    let created = vec![entry(1, None, Moment::Created)];
+    view.update_in(cx, |v, _w, cx| {
+        v.projects_part(snapshot(10, vec![status(record, vec![seated], created)]), cx);
+        v.open_project(&fixtures::id("board"), cx);
+    });
+    cx.run_until_parked();
+    let _earlier = fake.drain();
+    click(cx, "project-card-1");
+    let ops: Vec<ItemOp> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(op) => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, ItemOp::Add(item) if item.kind == ItemKind::Thread { thread })),
+        "its thread opens on its machine: {ops:?}"
+    );
+}
+
 /// The board follows the server: a change after the snapshot lands, one the snapshot held is
 /// dropped, and the board is drawn again only for what it shows. What the window shows after
 /// each is what the same state drawn from scratch shows.

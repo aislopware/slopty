@@ -10521,3 +10521,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   you" to a screen reader) and the Needs you section's row. So the words are now the merged
   count alone, "1 of 6 merged", or "No tasks yet".
   - Test: `workspace::tests::nav_projects::a_projects_board_heads_its_group`.
+
+- ✅ **A seated task's card opens its thread** (2026-10-11). A task whose agent runs as a
+  thread (pi's today, Codex's once W's seat lands) has a seat for its Slopty tools and no
+  terminal. A click on its card looked for the seat's terminal tile, found none, and said
+  "#N's agent has no tile here". Its assignment names its thread (`Assignment::thread`), so the
+  click now opens that thread on its machine: its tile if one is up, its live terminal's if it
+  has one, else a thread tile of its own. A task in a terminal opens its terminal as before.
+  - Test: `workspace::tests::projects::a_seated_tasks_card_opens_its_thread`.

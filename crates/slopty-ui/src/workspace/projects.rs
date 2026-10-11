@@ -437,10 +437,21 @@ impl WorkspaceView {
         self.reveal_session(session, cx);
     }
 
-    /// A board's row asked for its agent: its tile, focused with the keyboard in it. The
-    /// orchestrator's own row turns its tile back to the terminal.
+    /// A board's row asked for its agent: its tile, focused with the keyboard in it, or for an
+    /// agent that runs as a thread, its thread's. The orchestrator's own row turns its tile back
+    /// to the terminal.
     fn open_node(&mut self, project: &ProjectId, node: Node, cx: &mut Context<Self>) {
         let Some(board) = self.projects.mirror.get(project) else { return };
+        // A task whose agent runs as a thread (pi's, Codex's) has a seat and no terminal: its
+        // thread opens, in its terminal's tile where it has one.
+        let seated = node
+            .and_then(|task| board.tasks.get(&task)?.assignment.as_ref())
+            .filter(|a| a.open())
+            .and_then(|a| Some((worker_key(a.term.worker), a.thread?)));
+        if let Some((key, thread)) = seated {
+            self.open_thread(key, thread, cx);
+            return;
+        }
         let who = node.map_or_else(|| "The orchestrator".to_owned(), |task| format!("#{task}"));
         let Some((_, session)) = board.terminal(node) else {
             let why = match node.and_then(|t| board.tasks.get(&t)) {
