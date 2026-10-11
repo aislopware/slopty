@@ -1778,7 +1778,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     encoder now answers refreshes for `KEYFRAME_IN_FLIGHT_US` (400 ms). The client gives a new
     stream's first keyframe `FIRST_KEYFRAME_WAIT` (400 ms, `Config::first_repeat_after`) before
     it asks again, and no repeat goes out while a keyframe (or a refresh frame, when that is
-    awaited) is still arriving.
+    awaited) is still arriving. (The wait is superseded 2026-10-11: "A new stream asks for its
+    first picture only once the worker says it went out".)
   - The reassembler counted a frame's deadline from its first fragment. A keyframe crossing a
     connection whose send window was still opening took longer than that, so it was given up on
     half-way (the "one frame lost with 116 datagrams" on a lossless link). Its stragglers then
@@ -2974,3 +2975,87 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       and state, which the keyboard toggles below the tap, change under a held curtain. And
       whether Secure Event Input (a password field focused at the desk) lets keys past the
       tap.
+
+- ✅ **A new stream asks for its first picture only once the worker says it went out**
+  (2026-10-11). This replaces the client's `FIRST_KEYFRAME_WAIT`. Before a new stream's first
+  video datagram, the client waited 400 ms and then asked for a keyframe again. On a loaded
+  `macos-26` runner the first keyframe took longer than that: stream#1 opened at 17.809, the
+  re-ask went at 18.251 and frame 0's 138 datagrams arrived from 18.258 (W-stream run
+  38135181590). The spurious re-ask counted as a refresh, which failed the app's stream tests
+  with "a refresh or a stall on loopback" and nothing lost. It also had the worker encode a
+  second keyframe behind the first. The wait was a guess at how long the encoder takes, and no
+  guess is right on every machine.
+  - **The worker's word instead.** A heartbeat's `frame` field now names the next video frame
+    the stream's top coder will send, zero until the first picture. It used to be a counter
+    that served only traces. The worker beats after `HEARTBEAT_AFTER` (25 ms) with nothing
+    sent, from the stream's opening on. A receiver that has none of the stream's video:
+    - asks for nothing while the beats say zero, however long the first keyframe takes;
+    - asks at once when a beat names a later frame, since the first picture was then lost
+      whole (`Reassembler::first_lost`). After that, repeats run on the usual backoff.
+    `Config::first_repeat_after` and `FIRST_KEYFRAME_WAIT` are deleted.
+  - **A silent wire change.** The header's shape is unchanged, so no golden moved. The meaning
+    of a heartbeat's `frame` changed, and a client and worker of different builds would
+    disagree on it. Every binary is rebuilt together, as for any wire change.
+  - **No slower on a lossy link.** With a still source, a first picture lost whole is asked
+    for one beat after it went out: 25 ms after its last datagram, plus the beat's crossing.
+    The timer asked 400 ms after the stream's opening, which was 270–340 ms after the picture
+    went out at the usual 60–130 ms encode. With a moving source, the next frame arrives
+    before any beat, and the receiver is past its first datagram. A non-keyframe there leaves
+    it waiting on a keyframe, asked for on the usual backoff (`refresh_repeat` plus two round
+    trips from the opening), as before. A first picture that came in part is past its first
+    datagram too. Its missing fragments are NACKed, and it is given up on and asked for again
+    as any other frame (`max_hold` from its latest fragment). This change leaves that path as
+    it was.
+  - **A target that never draws** is asked nothing. The beats stay at zero, and the worker's
+    `Source { Idle }` says why, where the timer used to ask for a keyframe nobody could make.
+  - Tests: `the_first_picture_is_asked_for_only_once_the_worker_says_it_went_out`, which
+    covers the two seconds of zero beats, the beat that names a lost frame, and the frame that
+    came in part and is NACKed rather than asked for (`slopty-media/tests/pipeline.rs`). The
+    repeat, cap and idle tests now start from a first picture lost whole (`Harness::lose_first`).
+
+- ✅ **A refresh asked again backs off while frames flow, and counts once** (2026-10-11). The
+  VT group's `quality_changes_decode_without_a_refresh` failed on the gate (run 38143863116):
+  one decode error, status -19092, and six refreshes. The headers don't name the status, and
+  it has been seen only on CI's hosted guests under load (the clock test's failure, 2026-10-02,
+  was another). The worker answered with no extra frame (its LTR refresh counts stayed at 0,
+  and a keyframe in flight answers a repeat). Each of the six was the same refresh asked again.
+  The receiver's backoff exponent was its give-up count, and any datagram reset that count.
+  Frames predicted from before the failure kept arriving while the answer was made, so it
+  re-asked every 100 ms plus two round trips for as long as the answer took.
+  - **The backoff keeps its own count** (`Reassembler::refresh_backoff`). Only the answer (a
+    restart delivered), a new refresh, or the worker saying its source draws again starts it
+    over. The give-up count (`refresh_repeats`, `Config::refresh_max_repeats`) still starts
+    over on any datagram, since that proves the worker is there. The repeats now go 100, 200,
+    400 ms… plus two round trips, up to `refresh_repeat_max`.
+  - **A refresh is counted once.** `ReassemblerStats` and the client's `ScreenStats` count
+    `refreshes`, one each time a lane comes to need a picture to restart from, apart from
+    `refresh_repeats`, the same one asked again. The client reads both from its reassemblers
+    (top and lower lanes) and no longer counts actions. The app's `assert_clean` and the
+    worker's lossless-path tests still demand zero refreshes, which now means no restart was
+    needed.
+  - **The test holds the stream to its recovery, not the guest to its health.** The ruling: a
+    hosted VM's decoder may fail a frame. `quality_changes_decode_without_a_refresh` now
+    asserts nothing lost, at most one refresh per frame the decoder failed, and a picture
+    after the last change. A quality change that made frames the decoder rejects would fail
+    every session, and with them both of those. The test installs a debug subscriber for the
+    stream's two ends (`trace_the_stream`), which nextest shows only on a failure. The next
+    -19092 will then say which call returned it: "decode refused" at submission, or "decoder
+    returned no picture" from the callback.
+  - The gate's second failure there (run 38145075245, attempt 1) was one refresh with no
+    decode error: the first keyframe took 410 ms, and `FIRST_KEYFRAME_WAIT` asked again at
+    400 ms. That is the entry above, "A new stream asks for its first picture only once the
+    worker says it went out".
+  - Tests: `refresh_requests_repeat_until_a_refresh_frame_arrives`, which counts one refresh
+    and its repeats (`slopty-media/tests/pipeline.rs`), and the VT test above.
+
+- ✅ **A frame delivered once is stale in every state** (2026-10-11, the Deep fuzz run
+  38001943825, target `reassemble`, two crashes). While the receiver waited on a keyframe or a
+  refresh, it checked a frame against delivery order only when it needed a numbered frame. A
+  repeated datagram, or a retransmission, of a keyframe it had already delivered made that
+  frame whole again. It was then taken as the restart it waited for and delivered a second
+  time, behind a newer one. Over the network that is a duplicate or a late copy. The decoder
+  would have been handed a picture older than the one on screen, and its references would have
+  been out of order. Now a frame at or before the last one delivered is `Ignored::Stale`,
+  whatever is needed. Tests: `a_frame_delivered_is_stale_while_a_restart_is_awaited`
+  (`pipeline.rs`), and the two inputs, kept as
+  `fuzz/regressions/reassemble/frame-delivered-again-while-a-restart-is-awaited-{1,2}`.

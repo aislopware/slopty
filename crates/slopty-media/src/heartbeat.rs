@@ -25,13 +25,17 @@ pub const HEARTBEAT_AFTER: Duration = match STALL_GAP.checked_div(2) {
     None => STALL_GAP,
 };
 
-/// Build a heartbeat datagram. `seq` only distinguishes them in a trace.
+/// Build a heartbeat datagram, naming `next_frame`: the number of the next video frame the
+/// stream (its top stripe, when it is striped) will send, so zero until its first picture.
+///
+/// A receiver that has seen none of the stream's video learns from it whether the first picture
+/// is still being made or was lost whole on the link, and asks for another only then.
 #[must_use]
-pub fn heartbeat_datagram(stream: StreamId, seq: u32, send_ms_lo: u8) -> Bytes {
+pub fn heartbeat_datagram(stream: StreamId, next_frame: u32, send_ms_lo: u8) -> Bytes {
     let header = MediaHeader {
         channel: Channel::Media as u8,
         stream: U32::new(stream.0),
-        frame: U32::new(seq),
+        frame: U32::new(next_frame),
         index: U16::new(0),
         data_count: U16::new(0),
         parity_count: 0,

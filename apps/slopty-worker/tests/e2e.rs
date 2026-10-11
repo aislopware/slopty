@@ -2491,11 +2491,11 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         let quiet = screen.stats();
         let cap = u64::from(slopty_media::Config::default().refresh_max_repeats);
-        eprintln!("idle window: {} refreshes, cap {cap}", quiet.refreshes);
+        let asked = quiet.refreshes.saturating_add(quiet.refresh_repeats);
+        eprintln!("idle window: {asked} refresh requests, cap {cap}");
         assert!(
-            quiet.refreshes <= cap,
-            "{} refresh requests for a source that cannot answer one (cap {cap})",
-            quiet.refreshes
+            asked <= cap,
+            "{asked} refresh requests for a source that cannot answer one (cap {cap})"
         );
         assert_eq!(quiet.frames, 0, "an ordered-out window produced pictures");
 

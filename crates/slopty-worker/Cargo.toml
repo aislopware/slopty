@@ -80,3 +80,5 @@ notify.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true
+# The stream's debug log in a synthetic stream test (macOS), shown when the test fails.
+tracing-subscriber.workspace = true

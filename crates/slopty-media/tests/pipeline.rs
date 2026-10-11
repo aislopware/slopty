@@ -115,6 +115,19 @@ mod tests {
             self.tx.packetize(&frame, stamp, |_| {}).unwrap().clone()
         }
 
+        /// The worker's heartbeat now: it names the next frame the worker will send.
+        fn beat(&mut self) -> Ingest {
+            let beat = heartbeat_datagram(STREAM, self.tx.next_frame(), self.send_ms_lo());
+            self.rx.ingest(&beat, self.now)
+        }
+
+        /// The stream's first picture lost whole on the link, and the worker's next beat saying
+        /// it went out.
+        fn lose_first(&mut self) {
+            let _lost = self.send(&frame_bytes(0, 6_000), true, false);
+            assert_eq!(self.beat(), Ingest::Heartbeat);
+        }
+
         /// Feed datagrams. Parity arriving after its frame completed is a duplicate, and after
         /// the frame was delivered it is stale; both are fine.
         fn deliver(&mut self, datagrams: &[Bytes]) {
@@ -257,34 +270,47 @@ mod tests {
         assert_eq!(h.rx.stats().frames_lost, 1);
     }
 
-    /// A receiver told to give a new stream time for its first keyframe does not ask again
-    /// before it while nothing of the stream's video has come. Once part of the keyframe has come,
-    /// it is waited on until it is given up on.
+    /// A new stream asks for nothing while the worker is still making its first picture, however
+    /// long that takes: the worker's beats say no frame went out yet. A beat that says one went
+    /// out with none of it here is a first picture lost whole, asked for at once. One that came in
+    /// part is the NACKs' to mend, and given up on as any other frame.
     #[test]
-    fn the_first_keyframe_is_given_its_time_before_it_is_asked_for_again() {
-        let first = Duration::from_millis(400);
-        let config = Config { first_repeat_after: first, ..cfg() };
+    fn the_first_picture_is_asked_for_only_once_the_worker_says_it_went_out() {
         let mut h = Harness::new();
-        h.rx = Reassembler::new(STREAM, config, h.now);
-        h.advance(cfg().refresh_repeat + RTT * 2);
-        assert!(h.tick().is_empty(), "the worker is still encoding it");
-        h.advance(first.saturating_sub(cfg().refresh_repeat + RTT * 2));
-        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
+        let mut asked = Vec::new();
+        for _ in 0..80 {
+            h.advance(HEARTBEAT_AFTER);
+            assert_eq!(h.beat(), Ingest::Heartbeat);
+            asked.extend(h.tick());
+        }
+        assert_eq!(asked, [], "two seconds of the worker making the first keyframe");
+
+        let s0 = h.send(&frame_bytes(1, 6_000), true, false);
+        h.advance(HEARTBEAT_AFTER);
+        assert!(h.tick().is_empty(), "the keyframe went out; nothing says yet that it was lost");
+        assert_eq!(h.beat(), Ingest::Heartbeat);
+        assert_eq!(
+            h.tick(),
+            vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }],
+            "the first beat after it, HEARTBEAT_AFTER of quiet later, with none of it here: \
+             asked for at once (the timer this replaced asked 400 ms after the opening)"
+        );
+        let s1 = h.send(&frame_bytes(2, 6_000), true, false);
+        h.deliver(&s1.datagrams);
+        h.deliver(&s0.datagrams);
+        assert_eq!(h.drain().iter().map(|f| f.info.frame).collect::<Vec<_>>(), [1]);
 
         let mut h = Harness::new();
-        h.rx = Reassembler::new(STREAM, config, h.now);
         let s0 = h.send(&frame_bytes(1, 6_000), true, false);
         h.deliver(&s0.datagrams[..1]);
-        h.advance(cfg().refresh_repeat + RTT * 2);
+        h.advance(HEARTBEAT_AFTER);
+        assert_eq!(h.beat(), Ingest::Heartbeat);
+        let actions = h.tick();
         assert!(
-            !h.tick().iter().any(|a| matches!(a, Action::RequestRefresh { .. })),
-            "a keyframe coming in part is still on its way"
+            !actions.iter().any(|a| matches!(a, Action::RequestRefresh { .. })),
+            "a keyframe come in part is mended, not asked for again: {actions:?}"
         );
-        h.advance(cfg().max_hold);
-        assert!(
-            h.tick().iter().any(|a| matches!(a, Action::RequestRefresh { keyframe: true, .. })),
-            "a keyframe that came in part and stopped is asked for again once given up on"
-        );
+        assert!(actions.iter().any(|a| matches!(a, Action::Nack { frame: 0, .. })), "{actions:?}");
     }
 
     /// A keyframe crossing slower than the refresh repeat, its fragments still coming in, is
@@ -307,6 +333,28 @@ mod tests {
             actions.iter().filter(|a| matches!(a, Action::RequestRefresh { .. })).collect();
         assert_eq!(refreshes, Vec::<&Action>::new(), "no keyframe asked for");
         assert_eq!(h.drain().len(), 1);
+    }
+
+    /// A frame delivered once is never delivered again. Waiting on a keyframe or a refresh,
+    /// the receiver took a repeated keyframe, or its retransmission, as the restart it waited
+    /// for and delivered it a second time, behind the frame after it (fuzz `reassemble`,
+    /// `regressions/reassemble/crash-*`).
+    #[test]
+    fn a_frame_delivered_is_stale_while_a_restart_is_awaited() {
+        for keyframe in [true, false] {
+            let mut h = Harness::new();
+            let s0 = h.send(&frame_bytes(1, 2_000), true, false);
+            h.deliver(&s0.datagrams);
+            let s1 = h.send(&frame_bytes(2, 2_000), false, false);
+            h.deliver(&s1.datagrams);
+            assert_eq!(h.drain().iter().map(|f| f.info.frame).collect::<Vec<_>>(), [0, 1]);
+            h.rx.force_refresh(h.now, keyframe);
+            for datagram in &s0.datagrams {
+                assert_eq!(h.rx.ingest(datagram, h.now), Ingest::Ignored(Ignored::Stale));
+            }
+            assert_eq!(h.drain(), [], "frame 0 again, waiting on a keyframe: {keyframe}");
+            assert!(h.rx.awaiting_refresh(), "still waiting on the restart it asked for");
+        }
     }
 
     #[test]
@@ -1064,9 +1112,8 @@ mod tests {
     #[test]
     fn refresh_requests_repeat_until_a_refresh_frame_arrives() {
         let mut h = Harness::new();
-        // Nothing has arrived; the reassembler nudges the worker for an IDR periodically.
-        assert!(h.tick().is_empty(), "the constructor counts as the first request");
-        h.advance(cfg().refresh_repeat + RTT * 2);
+        // The first picture was lost; the reassembler nudges the worker for an IDR periodically.
+        h.lose_first();
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
         assert_eq!(h.tick(), []);
         // Each unanswered repeat doubles the wait: the second one is not due one period later.
@@ -1085,7 +1132,12 @@ mod tests {
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
         h.deliver(&s0.datagrams);
         assert_eq!(h.drain().len(), 1);
-        assert_eq!(h.rx.stats().refreshes, 2 + u64::try_from(sent).unwrap());
+        let stats = h.rx.stats();
+        assert_eq!(
+            (stats.refreshes, stats.refresh_repeats),
+            (1, 1 + u64::try_from(sent).unwrap()),
+            "one refresh, asked again while it went unanswered"
+        );
     }
 
     /// The worker says the capture source has produced nothing yet: asking it for a refresh
@@ -1095,8 +1147,7 @@ mod tests {
     #[test]
     fn an_idle_source_stops_the_refresh_requests() {
         let mut h = Harness::new();
-        assert!(h.tick().is_empty(), "the constructor counts as the first request");
-        h.advance(cfg().refresh_repeat + RTT * 2);
+        h.lose_first();
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
 
         h.rx.set_source_live(false);
@@ -1184,6 +1235,7 @@ mod tests {
     #[test]
     fn refresh_requests_give_up_after_the_cap() {
         let mut h = Harness::new();
+        h.lose_first();
         let mut sent = 0;
         for _ in 0..6000 {
             h.advance(Duration::from_millis(10));
@@ -1192,17 +1244,18 @@ mod tests {
         let cap = usize::try_from(cfg().refresh_max_repeats).unwrap();
         assert_eq!(sent, cap, "{sent} requests in a minute of silence, cap {cap}");
 
-        // A frame arriving is what restarts it: the stream is alive again.
-        let s0 = h.send(&frame_bytes(1, 2_000), true, false);
-        h.deliver(&s0.datagrams);
+        // A frame arriving is what restarts it: the stream is alive again. It is frame 1, the
+        // lost first picture being frame 0.
+        let s1 = h.send(&frame_bytes(1, 2_000), true, false);
+        h.deliver(&s1.datagrams);
         assert_eq!(h.drain().len(), 1);
-        let s1 = h.send(&frame_bytes(2, 6_000), false, false);
-        h.deliver(&s1.datagrams[..3]);
+        let s2 = h.send(&frame_bytes(2, 6_000), false, false);
+        h.deliver(&s2.datagrams[..3]);
         h.advance(cfg().max_hold);
         let actions = h.tick();
         assert_eq!(
             actions.last(),
-            Some(&Action::RequestRefresh { last_good_frame: 0, keyframe: false }),
+            Some(&Action::RequestRefresh { last_good_frame: 1, keyframe: false }),
             "{actions:?}"
         );
     }

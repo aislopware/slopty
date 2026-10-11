@@ -47,7 +47,8 @@ pub enum Kind {
     Cursor = 3,
     /// Nothing to show: the source is quiet, the link is not. Header only, sent when no other
     /// datagram left for a while, so the receiver's stall clock keeps running on silence from
-    /// the link alone.
+    /// the link alone. Its `frame` is the next video frame the stream will send, so a receiver
+    /// that has none yet can tell a first picture still being made from one lost.
     Heartbeat = 4,
     /// The answer to a clock probe ([`crate::screen::Feedback::Clock`]): a [`ClockEcho`].
     Clock = 5,
@@ -100,7 +101,8 @@ pub struct MediaHeader {
     pub channel: u8,
     /// Stream this belongs to (matches `StreamId`).
     pub stream: U32,
-    /// Frame number within the stream (video), packet number (audio), or update seq (cursor).
+    /// Frame number within the stream (video), packet number (audio), update seq (cursor), or
+    /// the next video frame the stream will send (heartbeat).
     pub frame: U32,
     /// Fragment index within the frame. For parity, `data_count + parity index`.
     pub index: U16,

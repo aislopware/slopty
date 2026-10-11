@@ -123,10 +123,6 @@ pub struct Config {
     pub refresh_repeat: Duration,
     /// Longest wait between refresh repeats.
     pub refresh_repeat_max: Duration,
-    /// Before the stream's first video datagram, the shortest wait for a refresh repeat: until
-    /// then the worker is still encoding the keyframe that starts the stream, and a repeat only
-    /// has it encode a second one. Zero repeats on the usual backoff from the start.
-    pub first_repeat_after: Duration,
     /// Unanswered refresh repeats before the receiver stops asking altogether, until something
     /// arrives on the stream again. The worker's
     /// [`SourceState`](slopty_proto::screen::SourceState) hint is the real answer to a target
@@ -161,7 +157,6 @@ impl Default for Config {
             max_pending: 64,
             refresh_repeat: Duration::from_millis(100),
             refresh_repeat_max: Duration::from_secs(2),
-            first_repeat_after: Duration::ZERO,
             refresh_max_repeats: 12,
             max_hold: Duration::from_millis(500),
             stall_gap: STALL_GAP,
@@ -354,8 +349,11 @@ pub struct ReassemblerStats {
     pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
-    /// Refresh requests sent.
+    /// Refreshes asked for: one each time the stream comes to need a picture to restart from,
+    /// however often that one is asked again.
     pub refreshes: u64,
+    /// A refresh asked again while it went unanswered ([`Config::refresh_repeat`]).
+    pub refresh_repeats: u64,
     /// Stalls that released (silence past the stall gap, then datagrams again).
     pub stalls: u64,
     /// Time spent stalled, in milliseconds (released stalls plus the one in progress, if any).
@@ -504,8 +502,14 @@ pub struct Reassembler {
     decoder: Option<ReedSolomonDecoder>,
     actions: Vec<Action>,
     refresh_requested_at: Option<Instant>,
-    /// Unanswered refresh repeats in a row (backoff exponent, and the give-up count).
+    /// Unanswered refresh repeats in a row since the last datagram of any kind: the give-up
+    /// count ([`Config::refresh_max_repeats`]).
     refresh_repeats: u32,
+    /// Repeats of the refresh being asked for: the backoff's exponent. Only an answer, or the
+    /// worker saying its source draws again, starts it over. A datagram does not, since frames
+    /// predicted from before the loss keep coming while the answer is made, and a backoff they
+    /// reset asked again every 100 ms for as long as the answer took.
+    refresh_backoff: u32,
     /// What the worker last said its capture target is doing. `false` means the target has drawn
     /// nothing at all, so no refresh can produce a frame and asking is pure noise.
     source_live: bool,
@@ -520,6 +524,11 @@ pub struct Reassembler {
     /// A video datagram of this stream has arrived at least once; before that, silence is the
     /// stream starting up (the cursor arrives before the first frame), not a stall.
     any_arrived: bool,
+    /// A heartbeat said the worker sent a picture before any of the stream's video came: the
+    /// first picture was lost whole. Until then a new stream asks for nothing, since the worker
+    /// is still making the keyframe that starts it, and a question would only have it make a
+    /// second (`heartbeat_datagram` names the next frame the worker will send).
+    first_lost: bool,
     /// The worker's send stamp on the last datagram that carried a fresh one, so the silence the
     /// worker made itself can be told from the silence the link made (see `link_gap`).
     last_send_ms_lo: Option<u8>,
@@ -582,6 +591,7 @@ impl Reassembler {
             actions: Vec::new(),
             refresh_requested_at: Some(now),
             refresh_repeats: 0,
+            refresh_backoff: 0,
             source_live: true,
             stats: ReassemblerStats::default(),
             window: Window::default(),
@@ -590,6 +600,7 @@ impl Reassembler {
             arrived_at: now,
             stall_charged_to: now,
             any_arrived: false,
+            first_lost: false,
             last_send_ms_lo: None,
             last_tick_at: now,
             dozed_since_arrival: Duration::ZERO,
@@ -632,6 +643,7 @@ impl Reassembler {
             self.source_live = live;
             if live {
                 self.refresh_repeats = 0;
+                self.refresh_backoff = 0;
                 self.refresh_requested_at = None;
             }
         }
@@ -688,7 +700,8 @@ impl Reassembler {
         }
         if !waiting {
             self.refresh_requested_at = None;
-            self.request_refresh(now);
+            self.refresh_backoff = 0;
+            self.request_refresh(now, false);
         }
     }
 
@@ -781,8 +794,17 @@ impl Reassembler {
                     None => Ingest::Ignored(Ignored::Malformed),
                 }
             }
+            // A beat names the next frame the worker will send: past zero with none of the
+            // stream's video seen, the first picture was lost whole, and is asked for at once.
+            Some(Kind::Heartbeat) => {
+                if !self.any_arrived && !self.first_lost && header.frame.get() != 0 {
+                    self.first_lost = true;
+                    self.refresh_requested_at = None;
+                }
+                Ingest::Heartbeat
+            }
             // A clock echo is the client's to read before this; here it only says the link is up.
-            Some(Kind::Heartbeat | Kind::Clock) => Ingest::Heartbeat,
+            Some(Kind::Clock) => Ingest::Heartbeat,
             Some(Kind::Cursor) => {
                 parse_cursor(&payload).map_or(Ingest::Ignored(Ignored::Malformed), |update| {
                     Ingest::Cursor { seq: header.frame.get(), update }
@@ -810,7 +832,10 @@ impl Reassembler {
         if !valid {
             return Ingest::Ignored(Ignored::Malformed);
         }
-        if self.given_up.contains(&frame) {
+        // A frame already delivered is stale whatever is needed now. Waiting on a keyframe or a
+        // refresh, a repeat or a retransmission of one delivered before made it whole again,
+        // and it was delivered a second time, behind a newer one (fuzz, `reassemble`).
+        if self.given_up.contains(&frame) || self.last_good.is_some_and(|good| frame <= good) {
             return Ingest::Ignored(Ignored::Stale);
         }
         if let Need::Frame(next) = self.need {
@@ -929,7 +954,7 @@ impl Reassembler {
         self.count_lost_datagrams(missing);
         match self.need {
             Need::Frame(_) => self.enter_refresh(now),
-            Need::Keyframe | Need::Refresh => self.request_refresh(now),
+            Need::Keyframe | Need::Refresh => self.request_refresh(now, true),
         }
     }
 
@@ -953,12 +978,27 @@ impl Reassembler {
     fn enter_refresh(&mut self, now: Instant) {
         self.need = Need::Refresh;
         self.refresh_requested_at = None;
-        self.request_refresh(now);
+        self.refresh_backoff = 0;
+        self.request_refresh(now, false);
     }
 
-    fn request_refresh(&mut self, now: Instant) {
+    /// Ask the worker for a picture to restart from; `again` when it is the one already asked
+    /// for, unanswered.
+    fn request_refresh(&mut self, now: Instant, again: bool) {
+        tracing::debug!(
+            stream = %self.stream,
+            need = ?self.need,
+            arrived = self.any_arrived,
+            again,
+            backoff = self.refresh_backoff,
+            "a picture asked for"
+        );
         self.refresh_requested_at = Some(now);
-        self.stats.refreshes = self.stats.refreshes.saturating_add(1);
+        if again {
+            self.stats.refresh_repeats = self.stats.refresh_repeats.saturating_add(1);
+        } else {
+            self.stats.refreshes = self.stats.refreshes.saturating_add(1);
+        }
         self.actions.push(Action::RequestRefresh {
             last_good_frame: self.last_good.unwrap_or(0),
             keyframe: self.need == Need::Keyframe,
@@ -1000,6 +1040,7 @@ impl Reassembler {
                     let Some(f) = found else { break };
                     self.frames.retain(|k, _| *k >= f);
                     self.refresh_requested_at = None;
+                    self.refresh_backoff = 0;
                     f
                 }
             };
@@ -1387,24 +1428,30 @@ impl Reassembler {
             .frames
             .values()
             .any(|slot| matches!(slot, Slot::Partial(p) if p.restartable(accept_refresh)));
+        // Before the stream's first video, only the worker's word that a picture went out
+        // makes one worth asking for (`first_lost`).
         if !in_order
             && !answer_arriving
+            && (self.any_arrived || self.first_lost)
             && self.source_live
             && self.refresh_repeats < self.cfg.refresh_max_repeats
         {
             let backoff = self
                 .cfg
                 .refresh_repeat
-                .saturating_mul(1_u32 << self.refresh_repeats.min(16))
+                .saturating_mul(1_u32 << self.refresh_backoff.min(16))
                 .min(self.cfg.refresh_repeat_max);
-            let mut repeat = backoff.saturating_add(rtt.saturating_mul(2));
-            if !self.any_arrived {
-                repeat = repeat.max(self.cfg.first_repeat_after);
-            }
-            if self.refresh_requested_at.is_none_or(|t| now.saturating_duration_since(t) >= repeat)
-            {
+            let repeat = backoff.saturating_add(rtt.saturating_mul(2));
+            // Nothing asked yet (a first picture lost whole, or a source drawing again) is a
+            // refresh of its own; anything else is the one asked for, asked again.
+            let again = match self.refresh_requested_at {
+                None => Some(false),
+                Some(asked) => (now.saturating_duration_since(asked) >= repeat).then_some(true),
+            };
+            if let Some(again) = again {
                 self.refresh_repeats = self.refresh_repeats.saturating_add(1);
-                self.request_refresh(now);
+                self.refresh_backoff = self.refresh_backoff.saturating_add(1);
+                self.request_refresh(now, again);
             }
         }
         self.drain(now);

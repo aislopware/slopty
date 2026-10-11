@@ -5467,7 +5467,10 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
             }
         }
         last_beat_us = Some(now);
-        shared.send(&[heartbeat_datagram(shared.id, beats, send_ms_lo(now))]);
+        // The beat names the next picture the top coder sends, so a client with none yet tells
+        // one still being made from one the link lost (`Reassembler`'s `first_lost`).
+        let next_frame = shared.top.packetizer.lock().next_frame();
+        shared.send(&[heartbeat_datagram(shared.id, next_frame, send_ms_lo(now))]);
     }
 }
 

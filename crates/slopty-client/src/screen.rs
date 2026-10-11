@@ -54,16 +54,6 @@ const TICK: Duration = Duration::from_millis(2);
 /// looks exactly as often as a stall is long cannot tell one it watched from one it missed.
 const IDLE_TICK: Duration = Duration::from_millis(25);
 
-/// How long a new stream waits for its first video datagram before it asks for a keyframe again.
-///
-/// The worker opens a stream once its encoder is built, and the session's first frame takes
-/// 60–130 ms more at 3024 × 1964, longer than the usual first repeat (100 ms and two round trips):
-/// asked again, it made a second full keyframe behind the first. The worker's own word on a target
-/// that draws nothing comes at this age (`ScreenEvent::Source`, the worker's `SOURCE_IDLE_AFTER`),
-/// which is where waiting on a first picture stops being the expected thing (MEASUREMENTS.md, "a
-/// refresh asked for while the keyframe is encoded").
-const FIRST_KEYFRAME_WAIT: Duration = Duration::from_millis(400);
-
 /// Clock probes sent one a report at the start of a stream, so the first pictures are timed
 /// from their capture within a few round trips; after these, one every [`PROBE_EVERY`] reports.
 const PROBES_AT_ONCE: u64 = 8;
@@ -536,8 +526,11 @@ pub struct ScreenStats {
     pub parity_shards: u64,
     /// NACKs sent.
     pub nacks: u64,
-    /// Refresh requests sent.
+    /// Refreshes asked for: one each time a lane came to need a picture to restart from, however
+    /// often it asked again ([`Self::refresh_repeats`]).
     pub refreshes: u64,
+    /// Refresh requests sent again while the refresh they asked for went unanswered.
+    pub refresh_repeats: u64,
     /// Decoder rejections, and frames dropped for a decoder a whole queue behind.
     pub decode_errors: u64,
     /// VideoToolbox's status for the newest rejection (zero for a frame it dropped without
@@ -1325,11 +1318,7 @@ impl Lane {
             // a runtime that did not run this task.
             reassembler: Reassembler::new(
                 media,
-                Config {
-                    tick_period: IDLE_TICK,
-                    first_repeat_after: FIRST_KEYFRAME_WAIT,
-                    ..Config::default()
-                },
+                Config { tick_period: IDLE_TICK, ..Config::default() },
                 Instant::now(),
             ),
             decoder: DecodeThread::start(media, codec, &outcomes),
@@ -1688,7 +1677,6 @@ impl Worker {
                         Feedback::Nack { stream: media, frame, fragments }
                     }
                     Action::RequestRefresh { last_good_frame, keyframe } => {
-                        self.counters.refreshes = self.counters.refreshes.saturating_add(1);
                         Feedback::Refresh { stream: media, last_good_frame, keyframe }
                     }
                 };
@@ -1719,6 +1707,8 @@ impl Worker {
         self.counters.frames_retransmit =
             stats.frames_retransmit.saturating_add(lower.frames_retransmit);
         self.counters.frames_lost = stats.frames_lost.saturating_add(lower.frames_lost);
+        self.counters.refreshes = stats.refreshes.saturating_add(lower.refreshes);
+        self.counters.refresh_repeats = stats.refresh_repeats.saturating_add(lower.refresh_repeats);
         self.counters.frames_skipped = stats.frames_skipped.saturating_add(lower.frames_skipped);
         self.counters.datagrams_lost = stats.datagrams_lost.saturating_add(lower.datagrams_lost);
         self.counters.parity_permille = observed_parity(&stats);
@@ -2685,7 +2675,7 @@ mod worker_tests {
         // queue's places, and one frame more than the test means is dropped (CI run
         // 37351025187, on a busy three-core runner).
         h.wait_for("the decode thread holding it", FOR_THE_MACHINE, |_| hold::waiting(HELD));
-        let refreshes = h.handle.stats().refreshes;
+        let asked = h.handle.stats();
         let queue = u64::try_from(DECODE_QUEUE).unwrap_or(u64::MAX);
         for n in 0..queue + OVER {
             let at = u32::try_from(n).unwrap_or(0).saturating_mul(16_667).saturating_add(2_000);
@@ -2697,7 +2687,11 @@ mod worker_tests {
         assert_eq!(settled.frames, 1 + queue + OVER, "every frame read: {settled:?}");
         assert_eq!(settled.decoding, 1 + queue, "in hand and queued: {settled:?}");
         assert_eq!(settled.decode_errors, OVER, "what did not fit is dropped: {settled:?}");
-        assert_eq!(settled.refreshes, refreshes, "and nothing asked for: {settled:?}");
+        assert_eq!(
+            (settled.refreshes, settled.refresh_repeats),
+            (asked.refreshes, asked.refresh_repeats),
+            "and nothing asked for: {settled:?}"
+        );
         assert_eq!(settled.decoders_replaced, 0, "{settled:?}");
         let reported = settled.reported_at;
         h.wait_for("a report after the hold", 3, |handle| handle.stats().reported_at > reported);
