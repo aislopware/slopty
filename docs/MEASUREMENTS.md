@@ -16110,3 +16110,25 @@ gh api --allow-escape-sequences "repos/aislopware/slopty/actions/jobs/<job>/logs
   tests run on Linux too"), 614 passed in 41 s of nextest, against 140 s for the worker shard's
   run on the Mac (six threads). The whole Linux lane with them took 313 s, 2499 tests, on a
   fresh runner (38119296064). `slopty-deploy`'s 39 tests passed there too (38117710882).
+
+## 2026-10-11 — sccache on R2 against the Actions cache
+
+A pull request's runs (ci/r2): the first wrote to an empty bucket, the second read it
+(38123898200, 38124633888), against the gate's last run on the Actions cache (38121577149).
+The pull request's scope missed the xtask binary and the registry cache, so job totals are not
+comparable; the gate steps are.
+
+| job | hits / misses, R2 cold | R2 warm | write errors, R2 | write errors, Actions cache | read hit (s), R2 / Actions | step (s), R2 warm / Actions |
+| --- | --- | --- | --- | --- | --- | --- |
+| iOS clippy | 78 / 1143 | 1216 / 5 | 0 | 293–916 | 0.188 / – | 137.6 / 127.4 |
+| host clippy | 252 / 623 | 866 / 9 | 0 | 137–459 | 0.228 / – | 136.0 / 144.8 |
+| rustdoc | 407 / 393 | 776 / 24 | 0 | 110–510 | 0.152 / – | 108.0 / 119.4 |
+| Linux clippy | 69 / 986 | 1050 / 5 | 0 | 264–668 | 0.189 / – | 113.6 / 166.4 (with tests) |
+| linux (tests) | 105 / 330 | 414 / 21 | 0 | off | 0.270 / – | build 227.5 / 355.4 |
+| rest (Mac) | – | 433 / 42 | 0 | 46–121 | 0.158 / 0.077 | – |
+
+- The Mac shards' second run was not warm: the first run's Mac jobs were cancelled by the
+  pull request's next push before they wrote all their units (ui 442 / 230).
+- A hit costs about twice as long on R2 from a Mac (0.158 s against 0.077 s); with three
+  compiles at a time that is about 12 s a shard of 430 hits.
+- Writes: 0.2–0.44 s on R2 against 0.3 s on the Actions cache, with no write lost.

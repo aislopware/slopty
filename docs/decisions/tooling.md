@@ -1701,3 +1701,23 @@ more full-window layer.
   xtask's took 37.6 core-seconds. Its icon test still needs a Mac (`xcrun actool`, about 148 s
   of waiting beside the other tests), so the rest shard's run may grow by up to that, which
   leaves it still the shortest: judged on the next gate runs by which job finishes last.
+
+- ✅ **sccache lives on R2** (2026-10-11). The Actions cache held sccache's units in a 10 GB
+  quota per repository, full, whose least recently read entry was an hour old, and took 200
+  uploads a minute, so a cold run lost most of its writes (iOS clippy: 916 write errors of 1191
+  misses). The units now sit in a Cloudflare R2 bucket of the person's (`slopty-ci-sccache`,
+  eastern US, objects dropped after 21 days), one prefix per runner OS and architecture; inside
+  a prefix the key sccache hashes tells targets and flags apart, so every job of an image, gate
+  or check, shares one key space. `.github/actions/sccache` is the one place that decides: R2
+  when the job has the bucket's credentials (two repository secrets, a token for that bucket
+  alone), the Actions cache otherwise, which is what a pull request from a fork gets.
+  - The first runs on R2 wrote every miss (0 write errors, against 479–916 a job on the Actions
+    cache), and the second served 95–99.6 % of the Linux jobs' compiles (run 38124633888).
+  - A hit reads in 0.15–0.27 s against 0.06–0.28 s from the Actions cache. On the lint jobs
+    the difference is within a run's noise: iOS clippy 137.6 s against 127.4 s, host clippy
+    136.0 against 144.8, rustdoc 108.0 against 119.4.
+  - The Linux job now caches too (it compiled everything on the runner, for want of quota): its
+    build took 227.5 s against 355.4 s.
+  - Freed of sccache, the Actions cache keys the registry and git checkouts by the manifests
+    and the lock again (`add-rust-environment-hash-key`): its single entry had stayed nine days
+    stale, and every Mac job downloaded what came since.

@@ -1900,12 +1900,18 @@ mod tests {
         let zig = format!("version: {}.", crate::tools::ZIG);
         assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");
-        for jobs in [&workflow, &deep] {
+        let action = std::fs::read_to_string(path.with_file_name("../actions/sccache/action.yml"))
+            .expect("the sccache action");
+        assert!(
+            action.contains("sccache-action@v0.0.11\n      with:\n        version: v"),
+            "the sccache setup names its version, or asks the API"
+        );
+        for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
+            let jobs = std::fs::read_to_string(path.with_file_name(name)).expect("a workflow");
             assert!(!jobs.contains("brew install zig"), "Homebrew's zig is whatever it is today");
-            let sccache = jobs.matches("sccache-action@").count();
-            let named =
-                jobs.matches("sccache-action@v0.0.11\n        with:\n          version: v").count();
-            assert_eq!(named, sccache, "every sccache setup names its version, or asks the API");
+            assert!(!jobs.contains("sccache-action@"), "{name}: sccache through the one action");
+            assert!(!jobs.contains("SCCACHE_GHA_ENABLED"), "{name}: the action picks the backend");
+            assert!(jobs.contains("uses: ./.github/actions/sccache"), "{name} caches its units");
         }
         assert!(deep.contains("max-parallel: 1"), "the deep checks leave the gate macOS runners");
         let tested = super::linux_tested();
@@ -1975,42 +1981,37 @@ mod tests {
     fn xtask_s_cache_key_names_every_input() {
         let root = repo_root().expect("repo root");
         let sh = xshell::Shell::new().expect("a shell");
-        let metadata = xshell::cmd!(sh, "cargo metadata --format-version 1 --locked")
+        // The workspace's own manifests alone: a path dependency is all the key needs, and
+        // `--no-deps` reads no registry (the full graph downloaded every crate a Mac shard's
+        // build had not, 28 s in the rest shard).
+        let metadata = xshell::cmd!(sh, "cargo metadata --format-version 1 --no-deps --locked")
             .quiet()
             .read()
             .expect("cargo metadata");
         let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("its JSON");
-        let local: std::collections::HashMap<&str, &str> = metadata["packages"]
-            .as_array()
-            .expect("packages")
-            .iter()
-            .filter(|p| p["source"].is_null())
-            .filter_map(|p| Some((p["id"].as_str()?, p["manifest_path"].as_str()?)))
-            .collect();
-        let nodes = metadata["resolve"]["nodes"].as_array().expect("the resolve graph");
-        let deps = |id: &str| -> Vec<String> {
-            let node = nodes.iter().find(|n| n["id"] == id).expect("a node per package");
-            let normal = |d: &&serde_json::Value| {
-                d["dep_kinds"].as_array().is_some_and(|kinds| {
-                    kinds.iter().any(|k| k["kind"].is_null() || k["kind"] == "build")
-                })
-            };
-            let all = node["deps"].as_array().expect("its dependencies");
-            all.iter().filter(normal).filter_map(|d| Some(d["pkg"].as_str()?.to_owned())).collect()
+        let members = metadata["packages"].as_array().expect("packages");
+        let dir_of = |name: &str| -> Option<camino::Utf8PathBuf> {
+            let member = members.iter().find(|p| p["name"] == name)?;
+            let manifest = camino::Utf8Path::new(member["manifest_path"].as_str()?);
+            Some(manifest.parent()?.to_owned())
         };
-        let xtask = local.iter().find(|(_, m)| m.ends_with("/xtask/Cargo.toml")).expect("xtask");
-        let (mut built, mut next) = (Vec::new(), vec![(*xtask.0).to_owned()]);
-        while let Some(id) = next.pop() {
-            if local.contains_key(id.as_str()) && !built.contains(&id) {
-                next.extend(deps(&id));
-                built.push(id);
+        let (mut built, mut next) = (Vec::<String>::new(), vec!["xtask".to_owned()]);
+        while let Some(name) = next.pop() {
+            if built.contains(&name) {
+                continue;
             }
+            let member = members.iter().find(|p| p["name"] == name.as_str()).expect("a member");
+            let deps = member["dependencies"].as_array().expect("its dependencies");
+            let built_from = deps.iter().filter(|d| {
+                d.get("path").is_some() && (d["kind"].is_null() || d["kind"] == "build")
+            });
+            next.extend(built_from.filter_map(|d| Some(d["name"].as_str()?.to_owned())));
+            built.push(name);
         }
         let inputs: Vec<String> = built
             .iter()
-            .map(|id| {
-                let manifest = camino::Utf8Path::new(local[id.as_str()]);
-                let dir = manifest.parent().expect("a package directory");
+            .map(|name| {
+                let dir = dir_of(name).expect("a member's directory");
                 format!("'{}/**'", dir.strip_prefix(&root).expect("in the workspace"))
             })
             .chain(

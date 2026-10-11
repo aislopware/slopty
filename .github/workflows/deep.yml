@@ -26,8 +26,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
-  SCCACHE_GHA_ENABLED: "true"
+  # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
+  # .github/actions/sccache's call.
 
 jobs:
   # What needs macOS: the sanitized crates call Apple's frameworks, the loom model and the
@@ -63,11 +63,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      # A named version: without one the action asks the GitHub API for the latest release,
-      # and that call timing out failed whole runs.
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -82,7 +82,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: ${{ matrix.slug == 'features' }}
       # What the fuzzers found interesting grows from night to night: restored from the last run,
@@ -140,9 +139,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -186,9 +187,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0

@@ -33,8 +33,7 @@ env:
   # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
   # `promote` dispatches this on `gate`, whose cache the test shards fill: a run on main read
   # main's, which nothing else fills, and built the app and daemons for 600 s
-  # (.research/ci-speed-2026-10-11.md item 10).
-  SCCACHE_GHA_ENABLED: "true"
+  # (.research/ci-speed-2026-10-11.md item 10). On R2 every ref shares one cache.
   # The server stays up to the end, so the last step's statistics count the run: idle for ten
   # minutes while the tests ran, it had exited and shown none.
   SCCACHE_IDLE_TIMEOUT: "0"
@@ -50,9 +49,11 @@ jobs:
         with:
           ref: ${{ inputs.sha || github.sha }}
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -60,7 +61,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main

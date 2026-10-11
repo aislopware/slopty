@@ -22,8 +22,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
-  SCCACHE_GHA_ENABLED: "true"
+  # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
+  # .github/actions/sccache's call.
 
 jobs:
   # `cargo gate --full`, one lane per runner. A hosted Mac has three cores and 7 GB: the five lanes
@@ -74,11 +74,11 @@ jobs:
           submodules: recursive
           # `committed` lints every commit since the last tag; the other lanes read the tree.
           fetch-depth: ${{ matrix.lane != 'tools' && 1 || 0 }}
-      # A named version: without one the action asks the GitHub API for the latest release,
-      # and that call timing out failed whole runs.
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       # Each lane's own triples, and clippy only where it lints: a test shard needs neither.
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -91,18 +91,18 @@ jobs:
         with:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
-      # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. The action keys an entry by the runner's OS and architecture, so there are three:
-      # the tools lane saves x86_64 Linux's, host clippy arm Linux's and the worker shard the
-      # Macs', each after `cargo fetch` (below) has every package in it. A cache is read by its own branch and the
-      # ones based on main, so the Deep workflow saves its own on main. The toolchains are left
-      # out of the key, since none of this depends on them. A key per lane saved 5 × 270 MB on
-      # each lockfile change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS
-      # 2026-10-01). Saved on failure too: a red lane is no reason to download it all again.
+      # installed tools. The action keys an entry by the runner's OS and architecture, so there
+      # are three: the tools lane saves x86_64 Linux's, host clippy arm Linux's and the worker
+      # shard the Macs', each after `cargo fetch` (below) has every package in it. A cache is read
+      # by its own branch and the ones based on main, so the Deep workflow saves its own on main.
+      # Keyed by the manifests and the lock too, so an entry is renewed when they change: one
+      # entry for ever went nine days stale, and every Mac job downloaded what came since and
+      # `cargo metadata` 95 crates more (22.8 s, run 38123134797). The Actions cache has the room
+      # since the compile cache moved to R2. Saved on failure too: a red lane is no reason to
+      # download it all again.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           cache-on-failure: true
           save-if: >-
@@ -238,8 +238,7 @@ jobs:
   # The Linux worker on Linux: its ptyd, the CLI and the server built natively, and the tests of
   # every crate of theirs that builds there (`cargo xtask gate --lane linux`), beside the gate on
   # a free Linux runner, so the run takes no longer. `promote` needs it as it needs the gate. Its
-  # compile cache stays on the runner: the Actions cache is at its 10 GB quota, and Linux units
-  # there would evict the Mac lanes' (MEASUREMENTS 2026-10-03, "a Linux lane in CI").
+  # compile cache is on R2 with the others' (docs/decisions/tooling.md, "sccache lives on R2").
   linux:
     name: gate (linux)
     runs-on: ubuntu-24.04
@@ -248,7 +247,6 @@ jobs:
       contents: read
       actions: write
     env:
-      SCCACHE_GHA_ENABLED: "false"
       SLOPTY_DISK_FLOOR_GB: 5
     steps:
       # The shells whose integration the PTY tests check besides the image's bash, tmux for the
@@ -264,16 +262,19 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          # Without R2 the Linux units stay off the Actions cache, whose 10 GB the Mac lanes fill.
+          actions-cache: "false"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -334,6 +335,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: xtask gate --ci --lane linux
+      - if: always()
+        run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -427,9 +430,11 @@ jobs:
           submodules: recursive
           fetch-depth: 0
       # `.cargo/config.toml` wraps rustc in sccache here too.
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -440,7 +445,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main

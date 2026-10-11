@@ -1,0 +1,55 @@
+# sccache for a job, and the one place that decides where it keeps its units
+# (docs/decisions/tooling.md, "sccache lives on R2"): Cloudflare R2 when the job has the R2
+# credentials, the Actions cache otherwise (a pull request from a fork gets no secrets).
+#
+# R2 has neither the Actions cache's 10 GB quota, which evicted the gate's units within an hour,
+# nor its 200 uploads a minute per repository, which dropped most of a cold run's writes. The
+# units sit under one prefix per OS and architecture; the key sccache hashes already tells
+# targets, compilers and flags apart, so every job of an image shares one key space.
+name: sccache
+description: Install sccache and point it at R2, or at the Actions cache without R2 credentials.
+inputs:
+  r2-access-key-id:
+    description: The bucket's S3 access key id (`secrets.SCCACHE_R2_ACCESS_KEY_ID`); empty without it.
+    required: false
+    default: ""
+  r2-secret-access-key:
+    description: Its secret (`secrets.SCCACHE_R2_SECRET_ACCESS_KEY`).
+    required: false
+    default: ""
+  actions-cache:
+    description: Without R2, whether to use the Actions cache ("true") or only the runner's disk.
+    required: false
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # A named version: without one the action asks the GitHub API for the latest release, and
+    # that call timing out failed whole runs.
+    - uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: v0.18.0
+    - shell: bash
+      env:
+        KEY_ID: ${{ inputs.r2-access-key-id }}
+        SECRET: ${{ inputs.r2-secret-access-key }}
+        ACTIONS_CACHE: ${{ inputs.actions-cache }}
+        PREFIX: ${{ runner.os }}-${{ runner.arch }}
+      run: |
+        if [ -n "$KEY_ID" ] && [ -n "$SECRET" ]; then
+          echo "::add-mask::$KEY_ID"
+          echo "::add-mask::$SECRET"
+          {
+            echo "SCCACHE_GHA_ENABLED=false"
+            echo "SCCACHE_BUCKET=slopty-ci-sccache"
+            echo "SCCACHE_ENDPOINT=https://aaa05f0153bcd0fc4c7efb7f785401c8.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_S3_KEY_PREFIX=$PREFIX/"
+            echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+            echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+          } >> "$GITHUB_ENV"
+          echo "sccache: R2, prefix $PREFIX/"
+        else
+          echo "SCCACHE_GHA_ENABLED=$ACTIONS_CACHE" >> "$GITHUB_ENV"
+          echo "sccache: no R2 credentials; Actions cache: $ACTIONS_CACHE"
+        fi
