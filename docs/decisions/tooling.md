@@ -1693,3 +1693,11 @@ more full-window layer.
   With those fixed all 614 passed in 41 s of nextest (run 38118844337), and `LINUX_UNRUN` is
   gone: the Linux lane runs them beside the other crates. They stay in the worker shard on the
   Mac too, since the worker ships for macOS, where its PTY, process and clipboard paths differ.
+
+- ✅ **xtask's tests go back to the rest shard** (2026-10-11, `.research/ui-test-compile-2026-10-11.md`).
+  They moved to the ui shard on 2026-10-05, when the rest was the longer one. Since the pure
+  crates went to Linux, the rest is the shortest Mac shard (349 s against 606 s for ui on run
+  38118291368), and the ui shard is the critical path, its build CPU-bound on three cores, where
+  xtask's took 37.6 core-seconds. Its icon test still needs a Mac (`xcrun actool`, about 148 s
+  of waiting beside the other tests), so the rest shard's run may grow by up to that, which
+  leaves it still the shortest: judged on the next gate runs by which job finishes last.

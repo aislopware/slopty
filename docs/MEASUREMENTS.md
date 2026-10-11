@@ -15845,6 +15845,28 @@ times the whole review, which includes cutting the hunks. It then reads the same
 cargo test -p slopty-worker --release --test review -- --ignored --nocapture review_read_cost
 ```
 
+## 2026-10-11 — a worker's start over 2,000 kept threads
+
+`Host::open` opens and replays every thread directory the worker ever kept, and nothing prunes
+them (readiness-w 10-11 rank 7). The test writes 2,000 threads of 20 turns each, every turn with
+an answer of about 2 KB, then opens the host again five times and times each open. Release
+profile, a `macos-26` GitHub runner (run 38117846929), one run of five opens.
+
+| what | value |
+| --- | --- |
+| on disk | 76 MiB |
+| open, median of five | 431 ms |
+| open, worst of five | 732 ms |
+
+- **It grows with every thread ever kept.** About 0.2 ms a thread, paid at every worker start
+  before any thread is served, with every state held in memory after. A person with a few
+  thousand old threads waits about half a second for their worker; one with ten thousand, two
+  or more. Worth fixing at the root: a start reads only what it needs, and old logs go.
+
+```sh
+cargo nextest run -p slopty-worker --release --run-ignored only -E 'test(host_open_cost)' --no-capture
+```
+
 ## 2026-10-10 — CI with the proc macros unoptimised and no doctest step
 
 The first gate run with `.cargo/ci-profile.toml` (every proc-macro dependency at opt-level 0)

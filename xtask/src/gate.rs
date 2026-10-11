@@ -135,12 +135,12 @@ impl LaneId {
 /// its own packages (`docs/decisions/tooling.md`, "The tests lane runs in three shards").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Shard {
-    /// The client: the UI, the apps over it, and what only they use; and xtask.
+    /// The client: the UI, the apps over it, and what only they use.
     Ui,
     /// The worker daemon and what it stands on: sessions, the terminal engine, capture, codecs,
     /// input, files.
     Worker,
-    /// The rest: the server, the CLI, the wire, the client core.
+    /// The rest: the server, the CLI, the wire, the client core; and xtask.
     Rest,
 }
 
@@ -171,9 +171,6 @@ impl Shard {
                 "slopty-theme",
                 "slopty-ios",
                 "slopty-notify",
-                // Here, not in the rest: its icon test waits on actool for minutes, and the rest
-                // was the longer shard (.research/dev-speed-2026-10-05.md).
-                "xtask",
             ],
             Self::Worker => &[
                 "slopty-workerd",
@@ -209,6 +206,10 @@ impl Shard {
                 "slopty-core",
                 "slopty-platform",
                 "slopty-testkit",
+                // Here, not with the UI: the UI's shard is the critical path and CPU-bound on its
+                // three cores, which xtask's build took 38 s of, and the rest has the most slack
+                // since its pure crates went to Linux (.research/ui-test-compile-2026-10-11.md).
+                "xtask",
             ],
         }
     }
