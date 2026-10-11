@@ -20,12 +20,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use parking_lot::Mutex;
 use slopty_agent::acp::registry;
 use slopty_agent::managed::{self, Launcher};
+use slopty_core::WallMs;
 use slopty_proto::project::{Fact, Facts};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::watch;
@@ -591,17 +593,45 @@ async fn launcher(search: &SearchPath, program: &Path) -> Launcher {
 ///
 /// A daemon launchd started has little on its `PATH`, so a git hook, git-lfs, a signing helper
 /// or a pre-commit tool installed by Homebrew, mise or npm is found only on the login shell's.
-/// The login shell is read once for the worker's life; while it does not answer, the daemon's
-/// own `PATH` stands in and it is asked again next time.
+/// The login shell is read once for the worker's life. While it does not answer, the daemon's
+/// own `PATH` stands in, and it is asked again only [`LOGIN_RETRY`] after it last failed: each
+/// ask waits up to [`LOGIN_WAIT`], which a commit or a push would otherwise wait every time.
 pub async fn person_path() -> OsString {
     static READ: tokio::sync::OnceCell<OsString> = tokio::sync::OnceCell::const_new();
+    static FAILED_MS: AtomicU64 = AtomicU64::new(0);
+    let own = || std::env::var_os("PATH").unwrap_or_default();
+    if let Some(read) = READ.get() {
+        return read.clone();
+    }
+    let failed = WallMs::from_millis(FAILED_MS.load(Ordering::Relaxed));
+    if !ask_login_again(failed, WallMs::now()) {
+        return own();
+    }
     let read = READ
         .get_or_try_init(async || {
             let login = login_path().await.ok_or(())?;
             Ok::<_, ()>(SearchPath::of(std::env::var_os("PATH").into_iter().chain([login])).joined)
         })
         .await;
-    read.map_or_else(|()| std::env::var_os("PATH").unwrap_or_default(), Clone::clone)
+    if let Ok(read) = read {
+        return read.clone();
+    }
+    if FAILED_MS.swap(WallMs::now().as_millis(), Ordering::Relaxed) == 0 {
+        tracing::warn!(
+            "the login shell did not say its PATH within {LOGIN_WAIT:?}: git runs on the \
+             daemon's own, and the shell is asked again in {LOGIN_RETRY:?}"
+        );
+    }
+    own()
+}
+
+/// How long a login shell that did not say its `PATH` is left before it is asked again.
+const LOGIN_RETRY: Duration = Duration::from_mins(1);
+
+/// Whether the login shell is asked again at `now`, having last failed at `failed` (zero when
+/// it never has).
+fn ask_login_again(failed: WallMs, now: WallMs) -> bool {
+    failed.is_zero() || now.since(failed) >= LOGIN_RETRY
 }
 
 /// The person's login shell's `PATH`, as it stands once their profile and rc files ran.
@@ -760,6 +790,18 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    /// A login shell that did not answer is asked again only once a minute has passed, and one
+    /// that never failed is always asked.
+    #[test]
+    fn a_login_shell_that_failed_is_left_a_minute() {
+        let at =
+            |s: u64| WallMs::from_millis(1_790_000_000_000).saturating_add(Duration::from_secs(s));
+        assert!(ask_login_again(WallMs::ZERO, at(0)), "never failed");
+        assert!(!ask_login_again(at(0), at(1)), "failed a second ago");
+        assert!(!ask_login_again(at(0), at(59)));
+        assert!(ask_login_again(at(0), at(60)), "a minute on");
+    }
 
     fn here() -> SearchPath {
         SearchPath::of(std::env::var_os("PATH"))
