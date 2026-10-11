@@ -10168,7 +10168,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `workspace::tests::projects::the_board_says_where_the_goal_stands`.
 
 - ✅ **The board's head sets the project's autonomy** (2026-10-11, the orchestrator-first study,
-  item 10, the UI's half). At the end of the place line, a segmented track names how far the
+  item 10, the UI's half). At the end of the place line (since 2026-10-11 on a line of its own
+  under it, with the review limit: "The board's head sets the review limit"), a segmented
+  track names how far the
   project's agents go before they ask: Ask, Edits, Own, the level now on the selected wash. A
   press of another level is `ProjectSet { autonomy }`, the person's word; a press of the level
   already set says nothing. At Own a muted line under it says a managed Claude Code with auto
@@ -10374,9 +10376,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `LimitsChange { review }` and nothing sent it. And a person back from a while away found
   several tasks finished and verified, each merged by its own card's button, one press per task.
   Ruled:
-  - **A stepper in the head's track.** After the place line, before the autonomy track, in the
-    same `kit::track`: a step down, the number in tabular figures at the metadata role, a step
-    up (Tabler minus and plus, icon buttons a chip tall). Each step sends `ProjectSet` with
+  - **A stepper in the head's track.** On a line of their own under the place line, after the
+    autonomy track (beside the place they cut it to a few letters in a board beside its
+    orchestrator), a `kit::track` of its own: its name, "Review limit", muted at the metadata role with what it holds
+    to as its hint (a bare number read as a count of what waits now), a step down, the number
+    in tabular figures, a step up (Tabler minus and plus, icon buttons a chip tall). Each step sends `ProjectSet` with
     `LimitsChange { review }` alone. It never goes under one, since none would stop the project
     for good: at one the step down keeps its place and does not show, so nothing moves. Said to
     a screen reader as "Review limit: N", with what it holds to as its description.
@@ -10432,3 +10436,88 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::questions::tests::an_answer_is_a_pill_and_chosen_is_the_selection`,
     `conversation::thread::tests::proposed`; goldens `thread*`, `wide-reading-thread`,
     `review-agent*`, `agent-*` and `empty-workspace` (its composer).
+
+- ✅ **A met goal opens its pull request; an ended orchestrator opens by its thread**
+  (2026-10-11, the board's half of `Verb::ProjectLand` and `Project::orchestrator_thread`;
+  the server's half is in `docs/decisions/projects.md`).
+  - **Open pull request.** Once the orchestrator says the goal is met, the standing under the
+    board's head ends with "Open pull request", the solid button, the one thing left for the
+    person to do. Beside it, in the metadata role, "into {base}" while the server knows the
+    branch the goal's own branch was made from (`Project::base`); a target the person named
+    says nothing more. A press sends `ProjectLand { into: None }` and says "Opening pull
+    request…" in its place at once. The answer's pull request then stands there as a link
+    with the pull request glyph, "Pull request #N", opening its page. A refusal is said in
+    the server's words and the button comes back. No branch picker: naming another branch is
+    rare, and the server's refusal says to name one.
+  - **The orchestrator stopped.** While its machine is linked and lists its terminal no more,
+    and the server knows its thread, the head says "The orchestrator has stopped" with a
+    secondary "Open its thread". The press opens the thread on its machine (its face, or a
+    tile of its own), whose Resume starts the agent again; the server then follows it to its
+    new terminal and the line goes. A machine away says nothing of it: its tiles say away.
+    Meanwhile the board's line to the orchestrator goes, since words typed there would wait for
+    nobody, and the board's "message the orchestrator" key opens the thread instead
+    (`.research/readiness-a-2026-10-11.md` item 6).
+  - Tests: `workspace::tests::projects::a_met_goal_opens_its_pull_request`,
+    `workspace::tests::projects::an_ended_orchestrator_is_opened_by_its_thread`.
+
+- ✅ **A settings field's share is its row's** (2026-10-11, the design pass). Every typed field
+  (a colour, a path, a list) was drawn at 60 % of its own width: its share was set on the field
+  inside a wrapper that took its size from the field, so a colour's 140 pt field drew at 84 and
+  cut every hex ("#1c1c1"), and the ANSI band and a key's path were cut too. The share now sits
+  on the wrapper, a share of the row, and the field fills up to it.
+  - Tests: `settings_form::tests::the_ansi_row_shows_its_sixteen_colours` (a colour's field at
+    its whole width), `…::the_agents_page_writes_the_projects_and_the_notes_tables` (a path's).
+
+- ✅ **A phone's home starts an agent** (2026-10-11, the design pass). The home kept its filter
+  and dropped the navigator's action rows with the Search row, so a phone could reach "New agent"
+  only from a tile's "…" menu: the home it opens on could not start the work it watches. Its
+  field stays its search; under it now stands the navigator's "New agent" row, without a key,
+  since a phone has none to name. A press puts the home away first, so the palette's picker
+  and the tile it starts show over the workspace.
+  - Test: `workspace::tests::nav_rows::a_phone_home_is_the_whole_screen_with_what_waits_first`.
+
+- ✅ **A goal has a door wherever a start does** (2026-10-11, `.research/readiness-a-2026-10-11.md`
+  item 1). Amends "The navigator's top row ends in Search and New agent". The app is
+  orchestrator-first and a project begins as a goal. Yet "New goal…" was reachable only from
+  the palette and the empty page: it had no command in the keymap, so no key could be bound to
+  it, no line in the File menu, no navigator row, and nothing on a phone's home.
+  - **The key.** `new_goal` is ⌘N in the workspace, which nothing there held (the app's ⌘N
+    shows a window only outside it). A review tile's ⌘N still puts a change back there, a
+    deeper context winning as everywhere.
+  - **The menu.** "New Goal…" leads the File menu, over the two agent starts.
+  - **The navigator.** Its action rows are "Search", "New goal" (Tabler's `flag`) and then
+    "New agent". The rail's squares and the bar's leading cluster, with the navigator hidden,
+    follow the same order. A phone's home has both starts under its field, keyless, and each
+    press puts the home away first.
+  - Tests: `workspace::tests::nav_rows::a_goal_starts_from_its_key_the_navigator_and_the_rail`,
+    `the_filter_waits_hidden_until_search_its_keys_or_typing`,
+    `a_phone_home_is_the_whole_screen_with_what_waits_first`,
+    `keymap::tests::a_chords_words_come_with_the_keymap`, and the app's
+    `menus::tests::an_ipads_menus_are_the_macs_without_the_macs_own`.
+
+- ✅ **A goal starts in the latest repository, and the sheet offers the others** (2026-10-11,
+  `.research/readiness-a-2026-10-11.md` item 2). A goal's folder came from the focus, else the
+  last start, else the home. A first goal therefore went to `~` (the empty page's foot read
+  "studio · ~ · Claude Code"), a folder in no repository, which the server's branch-off then
+  refused. The sheet's folder field suggested nothing, though New agent's folder step already
+  listed the recent places.
+  - **The default.** The focus, else the last start, else the latest repository work stood in on
+    the machine that starts it (`recent_places`, kept to those `repo_at` knows as
+    repositories). The home is used only where there is none.
+  - **The chips.** Under the folder field wait up to four recent repositories, on machines that
+    can start one of the sheet's agents, but for the one the field holds. Each is a quiet,
+    hairline chip with a folder glyph and the repository's name, plus its machine's name while
+    the chips span more than one machine. A press moves the folder there and the machine with
+    it. The agent stays if it can start there, else the first agent that can takes it. Chips,
+    not a list that drops down while the field has the keyboard: a list that leaves on blur
+    would leave before the press that picks from it lands.
+  - Test: `workspace::tests::projects::a_goal_starts_in_the_latest_repository_and_offers_the_others`.
+
+- ✅ **A board's navigator row says how far the work is in, and its mark says what waits**
+  (2026-10-11, `.research/readiness-a-2026-10-11.md` item 3). Amends "Declared projects in the
+  navigator", whose row read "1 needs you · 3 of 5 merged". At the navigator's usual width that
+  cut to "1 needs you · 1 of…" (the `project-lanes` golden), losing the count it was for. What
+  waits on the person is already the row's mark (the most urgent lane's glyph, named "Needs
+  you" to a screen reader) and the Needs you section's row. So the words are now the merged
+  count alone, "1 of 6 merged", or "No tasks yet".
+  - Test: `workspace::tests::nav_projects::a_projects_board_heads_its_group`.

@@ -341,6 +341,25 @@ fn only_needs_you_breaks_through_a_focus() {
     assert_eq!(urgent, [true, false, false, false, true, false], "the server's, by their kind");
 }
 
+/// A goal met, the server's to say here, offers to land it where the note is: "Open pull
+/// request", naming its project. The project's other notes carry no button.
+#[test]
+fn a_goal_met_note_offers_its_pull_request() {
+    use slopty_platform::notify::LANDING;
+    use slopty_platform::notify::info::PROJECT;
+    let (mut led, memory) = attention();
+    led.set_server_led(true);
+    led.set_active(false);
+    for (kind, id) in [(NoticeKind::GoalDone, "s1"), (NoticeKind::Project, "s2")] {
+        let stack = Some(Stack { id: id.into(), project: "store".into() });
+        let (title, body) = ("t".into(), "b".into());
+        led.notice(&Heard { route: route(5), kind, title, body, stack });
+    }
+    let buttons: Vec<_> =
+        memory.posted().into_iter().map(|n| (n.category, n.info.get(PROJECT).cloned())).collect();
+    assert_eq!(buttons, [(Some(LANDING), Some("store".to_owned())), (None, None)]);
+}
+
 /// With notifications off, a note that goes out while the app is away reaches nobody: back in
 /// front, the app says so, once a run. Nothing is said while they are on, nor when nothing went
 /// unsaid, nor a second time.

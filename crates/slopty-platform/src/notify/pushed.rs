@@ -95,6 +95,9 @@ pub fn note_of(body: &PushBody) -> Note {
         keys.insert(info::PROJECT.to_owned(), project.to_string());
         keys.insert(info::TASK.to_owned(), task.0.to_string());
     }
+    if let (NoticeKind::GoalDone, Subject::Project { project, .. }) = (notice.kind, &notice.about) {
+        keys.insert(info::PROJECT.to_owned(), project.to_string());
+    }
     let title = Some(notice.title.trim())
         .filter(|t| !t.is_empty())
         .map_or_else(|| slopty_push::apns::TITLE.to_owned(), str::to_owned);
@@ -120,14 +123,19 @@ pub fn note_of(body: &PushBody) -> Note {
 /// The buttons a pushed note carries: a question's options are its picks ([`Note::picking`]),
 /// which take a category of their own; else Allow and Deny on a yes or no, else a reply on an
 /// agent's own moment (one that needs the person, failed or finished), else Merge on a
-/// project's work ready to merge that names the task to merge ([`PushBody::merges`]). A
-/// program's record and a project's other notices have none.
+/// project's work ready to merge that names the task to merge ([`PushBody::merges`]), else
+/// "Open pull request" on a project's goal met. A program's record and a project's other
+/// notices have none.
 fn category_of(body: &PushBody) -> Option<super::Category> {
     if body.ask.is_some() && !body.picks.is_empty() {
         return None;
     }
     if body.merges.is_some() && matches!(body.notice.about, Subject::Project { .. }) {
         return Some(super::MERGING);
+    }
+    let project = matches!(body.notice.about, Subject::Project { .. });
+    if project && body.notice.kind == NoticeKind::GoalDone {
+        return Some(super::LANDING);
     }
     if body.ask.is_some() {
         return Some(APPROVAL);
@@ -474,6 +482,40 @@ mod tests {
         let unnamed = note_of(&PushBody { merges: None, ..body });
         assert_eq!(unnamed.category, None, "no task, no Merge");
         assert!(!unnamed.info.contains_key(info::TASK));
+    }
+
+    /// A goal met carries "Open pull request" with the project whose goal it lands, which a
+    /// press hands back with no round trip; the project's other notices carry none.
+    #[test]
+    fn a_goal_met_note_opens_its_pull_request() {
+        let project = ProjectId::new("store").expect("a name");
+        let about = Subject::Project { project: project.clone(), entry: 9 };
+        let body = PushBody {
+            notice: notice(NoticeKind::GoalDone, about, None),
+            ask: None,
+            picks: Vec::new(),
+            quiet: false,
+            merges: None,
+        };
+        let note = note_of(&body);
+        assert_eq!(note.category, Some(super::super::LANDING));
+        assert_eq!(note.info.get(info::PROJECT), Some(&"store".to_owned()));
+        let tap = super::super::Tap {
+            id: note.id.clone(),
+            info: note.info,
+            action: Some(super::super::LAND.to_owned()),
+            text: None,
+        };
+        assert_eq!(super::super::land_of(&tap), Some(project), "a press lands the goal it names");
+        assert!(tap.finished_later(), "answered where the note is");
+        let shown = super::super::Tap { action: Some(super::super::SHOW.to_owned()), ..tap };
+        assert_eq!(super::super::land_of(&shown), None, "Show only opens");
+
+        let mut other = body.notice.clone();
+        other.kind = NoticeKind::Project;
+        let plain = note_of(&PushBody { notice: other, ..body });
+        assert_eq!(plain.category, None, "a project's other notice has no button");
+        assert!(!plain.info.contains_key(info::PROJECT));
     }
 
     /// A thread at a terminal is that terminal's note, with its worker and session for the

@@ -28,7 +28,7 @@ use slopty_proto::project::{
     Autonomy, NativeCounts, ProjectId, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
     VerifierRun,
 };
-use slopty_proto::thread::{AgentId, AskId};
+use slopty_proto::thread::AskId;
 use slopty_theme::{Theme, Typography, alpha};
 
 use super::model::{
@@ -95,6 +95,10 @@ pub enum ProjectEvent {
     SetReviewLimit(u16),
     /// Merge these tasks, each ready and offering it: "Merge all ready".
     MergeReady(Vec<TaskId>),
+    /// Land the finished goal: its branch into a pull request ("Open pull request").
+    Land,
+    /// Open the orchestrator's thread, whose agent has ended: its Resume starts it again.
+    OpenOrchestrator,
     /// Let the project's agents go this far before they ask the person.
     SetAutonomy(Autonomy),
     /// Check each task's work by this command; an empty one is none.
@@ -205,9 +209,6 @@ pub struct WorkerSeen {
     pub os: Option<slopty_proto::server::Os>,
     /// What machine it is, once it has said: the glyph its place wears.
     pub form: Option<slopty_proto::server::Form>,
-    /// The agents it can start, while it is linked: what "Give to another agent" offers for a
-    /// task that ran there.
-    pub agents: Vec<AgentId>,
     /// It is out of reach now: a task running there is not heard from until it is back.
     pub away: bool,
 }
@@ -218,7 +219,7 @@ pub struct Seen {
     /// The project, or `None` once the server has let it go.
     pub board: Option<Arc<Board>>,
     /// The workers the board names: the orchestrator's, and every one a task runs on, ran on,
-    /// is pinned to, or takes a step on.
+    /// or takes a step on.
     pub workers: BTreeMap<WorkerId, WorkerSeen>,
     /// The agents this client sees, by session.
     pub agents: HashMap<SessionId, AgentSeen>,
@@ -227,6 +228,21 @@ pub struct Seen {
     /// What changed since this client last looked, from the moment the board opened until the
     /// person closes it or the board hides.
     pub recap: Option<Recap>,
+    /// The orchestrator's agent has ended: its machine is linked and lists its terminal no
+    /// more.
+    pub orchestrator_ended: bool,
+}
+
+/// Where the finished goal's pull request stands, as the person asked for it here.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+enum Landing {
+    /// Not asked, or the server refused.
+    #[default]
+    Idle,
+    /// Asked; the server has not answered.
+    Asking,
+    /// The pull request the goal waits in: its number and its page.
+    Opened(u32, String),
 }
 
 /// How a project's work is checked, as the person sets it on the board: the verifier command.
@@ -273,6 +289,8 @@ pub struct ProjectView {
     checks: Option<Checks>,
     /// The tasks asked to start again whose new agent the board does not show yet.
     handing: BTreeMap<TaskId, Handing>,
+    /// The finished goal's pull request, once asked for.
+    landing: Landing,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -314,6 +332,7 @@ impl ProjectView {
             refused: None,
             checks: None,
             handing: BTreeMap::new(),
+            landing: Landing::Idle,
             #[cfg(test)]
             renders: 0,
         }
@@ -347,7 +366,8 @@ impl ProjectView {
         let same = same_board
             && self.seen.workers == seen.workers
             && self.seen.agents == seen.agents
-            && self.seen.recap == seen.recap;
+            && self.seen.recap == seen.recap
+            && self.seen.orchestrator_ended == seen.orchestrator_ended;
         if !same {
             self.seen = seen;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
@@ -370,6 +390,14 @@ impl ProjectView {
         if self.handing.remove(&task).is_some() {
             cx.notify();
         }
+    }
+
+    /// The server's answer to "Open pull request": the pull request the goal waits in, by
+    /// its number and its page, or `None` when it refused (said apart, in its words) and the
+    /// button comes back.
+    pub fn landed(&mut self, opened: Option<(u32, String)>, cx: &mut Context<Self>) {
+        self.landing = opened.map_or(Landing::Idle, |(number, url)| Landing::Opened(number, url));
+        cx.notify();
     }
 
     /// Forget the asks the board has answered: a task with a new agent, merged, or gone.
@@ -635,7 +663,19 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
-/// The review limit's name, said to a screen reader and in its hint.
+/// The finished goal's way out, in the board's head.
+pub(crate) const OPEN_PULL: &str = "Open pull request";
+/// What it says while the server opens it.
+pub(crate) const OPENING_PULL: &str = "Opening pull request\u{2026}";
+/// Before the branch it lands into.
+pub(crate) const INTO: &str = "into";
+/// Before the opened pull request's number.
+pub(crate) const PULL_REQUEST: &str = "Pull request";
+/// What the board says while its orchestrator's agent has ended.
+pub(crate) const ORCHESTRATOR_ENDED: &str = "The orchestrator has stopped";
+/// Its way back: the orchestrator's thread, whose Resume starts it again.
+pub(crate) const OPEN_ORCHESTRATOR: &str = "Open its thread";
+/// The review limit's name, in its track and said to a screen reader.
 pub(crate) const REVIEW_LIMIT: &str = "Review limit";
 /// What the review limit holds to, under its name.
 pub(crate) const REVIEW_LIMIT_SAYS: &str =
@@ -843,14 +883,21 @@ impl ProjectView {
             .pt(px(sp.md))
             .pb(px(sp.sm))
             .child(title)
+            .child(div().flex().items_center().child(meta))
+            // How far it runs on its own, the person's two settings, on a line of their own
+            // under where it works: beside the place they cut it to a few letters in a board
+            // beside its orchestrator.
             .child(
                 div()
+                    .id("project-runs")
+                    .debug_selector(|| "project-runs".to_owned())
+                    .pt(px(sp.xs))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap(px(sp.sm))
-                    .child(meta)
-                    .child(self.review_limit(project.limits.review, cx))
-                    .child(self.autonomy(project.autonomy, cx)),
+                    .child(self.autonomy(project.autonomy, cx))
+                    .child(self.review_limit(project.limits.review, cx)),
             )
             .children((project.autonomy == Autonomy::Own).then(|| {
                 crate::kit::typed(div(), theme.roles().metadata)
@@ -858,7 +905,8 @@ impl ProjectView {
                     .text_color(hsla(s.text_muted))
                     .child(MANAGED_OWN)
             }))
-            .children(self.standing(board))
+            .children(self.ended_orchestrator(board, cx))
+            .children(self.standing(board, cx))
             .child(self.bar(board))
     }
 
@@ -880,6 +928,18 @@ impl ProjectView {
         };
         let fewer = (now > 1).then(|| now.saturating_sub(1));
         let more = (now < u16::MAX).then(|| now.saturating_add(1));
+        // Its name stands in the track, so the number never reads as a count of what waits now;
+        // what it holds to is its hint.
+        let hint_theme = Rc::clone(&self.hint_theme);
+        let name = crate::kit::meta(div(), theme)
+            .id("project-review-name")
+            .pl(px(theme.spacing.xs))
+            .child(REVIEW_LIMIT)
+            .map(crate::kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                let theme = Rc::clone(&hint_theme);
+                cx.new(|_| crate::kit::Hint::new(REVIEW_LIMIT_SAYS, "", theme)).into()
+            });
         crate::kit::track(theme)
             .id("project-review-limit")
             .debug_selector(|| "project-review-limit".to_owned())
@@ -888,6 +948,7 @@ impl ProjectView {
             .aria_description(REVIEW_LIMIT_SAYS)
             .flex_none()
             .gap(px(theme.spacing.xxs))
+            .child(name)
             .child(step("project-review-fewer", Symbol::Minus, FEWER_REVIEWS, fewer))
             .child(
                 crate::kit::tabular(crate::kit::typed(div(), theme.roles().metadata))
@@ -953,7 +1014,7 @@ impl ProjectView {
     /// ([`slopty_proto::project::Progress`]): its summary in the text's tone, what comes next
     /// under it in the secondary tone, and, once the goal is met, "Goal met" leading with the
     /// success mark. None until it has said anything.
-    fn standing(&self, board: &Board) -> Option<Stateful<Div>> {
+    fn standing(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
         let progress = board.project.progress.as_ref()?;
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1010,7 +1071,99 @@ impl ProjectView {
                 .gap(px(sp.xxs))
                 .children(met)
                 .child(summary)
-                .children(next),
+                .children(next)
+                .children(progress.done.then(|| self.land(board, cx))),
+        )
+    }
+
+    /// The finished goal's way out: "Open pull request", which lands its branch into the one
+    /// it was made from (said after it, when the server knows it), while the server works
+    /// "Opening pull request…", then the pull request's number as a link to its page.
+    fn land(&self, board: &Board, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let row = div().pt(px(sp.xs)).flex().items_center().gap(px(sp.sm));
+        if let Landing::Opened(number, url) = &self.landing {
+            let url = url.clone();
+            let words = SharedString::from(format!("{PULL_REQUEST} #{number}"));
+            let link = crate::kit::typed(div(), theme.roles().chrome)
+                .id("project-pull")
+                .debug_selector(|| "project-pull".to_owned())
+                .role(Role::Link)
+                .aria_label(words.clone())
+                .flex()
+                .items_center()
+                .gap(px(sp.xs))
+                .cursor_pointer()
+                .text_color(hsla(s.text))
+                .hover(gpui::Styled::underline)
+                .child(icon(theme, GitGlyph::PullRequest, IconSize::Inline, hsla(s.text_muted)))
+                .child(words)
+                .on_click(move |_ev, _w, cx| cx.open_url(&url));
+            return row.child(link).into_any_element();
+        }
+        if self.landing == Landing::Asking {
+            let opening = crate::kit::meta(div(), theme)
+                .debug_selector(|| "project-landing".to_owned())
+                .child(OPENING_PULL);
+            return row.child(opening).into_any_element();
+        }
+        let button =
+            crate::kit::button(theme, "project-land", OPEN_PULL, crate::kit::ButtonKind::Primary)
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    this.landing = Landing::Asking;
+                    cx.emit(ProjectEvent::Land);
+                    cx.notify();
+                }));
+        let into = board.project.base.as_ref().map(|base| {
+            crate::kit::meta(div(), theme)
+                .debug_selector(|| "project-land-into".to_owned())
+                .child(SharedString::from(format!("{INTO} {base}")))
+        });
+        row.child(button).children(into).into_any_element()
+    }
+
+    /// While the orchestrator's agent has ended, a quiet line says so with the way back: its
+    /// thread, whose Resume starts it again (the server then follows it to its new terminal).
+    /// None while it runs, or while its thread is not known.
+    fn ended_orchestrator(&self, board: &Board, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.seen.orchestrator_ended {
+            return None;
+        }
+        board.project.orchestrator_thread?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let open = crate::kit::button(
+            theme,
+            "project-orchestrator-thread",
+            OPEN_ORCHESTRATOR,
+            crate::kit::ButtonKind::Secondary,
+        )
+        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::OpenOrchestrator)));
+        Some(
+            div()
+                .id("project-orchestrator-ended")
+                .debug_selector(|| "project-orchestrator-ended".to_owned())
+                .role(Role::Status)
+                .aria_label(ORCHESTRATOR_ENDED)
+                .mt(px(sp.sm))
+                .flex()
+                .items_center()
+                .gap(px(sp.sm))
+                .child(
+                    crate::kit::meta(div(), theme)
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(sp.xs))
+                        .child(icon(theme, Symbol::StopFill, IconSize::Inline, hsla(s.text_muted)))
+                        .child(ORCHESTRATOR_ENDED),
+                )
+                .child(open)
+                .into_any_element(),
         )
     }
 
@@ -2083,8 +2236,13 @@ impl ProjectView {
         }
     }
 
-    /// The keyboard goes to the line to the orchestrator.
+    /// The keyboard goes to the line to the orchestrator; with its agent ended there is no line,
+    /// and its thread opens instead, where Resume starts it again.
     fn compose(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.seen.orchestrator_ended {
+            cx.emit(ProjectEvent::OpenOrchestrator);
+            return;
+        }
         if self.beside {
             // Its orchestrator's own composer stands beside it.
             cx.emit(ProjectEvent::Open(None));
@@ -2098,6 +2256,10 @@ impl ProjectView {
     /// Send what is on the line to the orchestrator, and clear it: the timeline shows it once
     /// the server has it.
     fn send_composed(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // Words for an orchestrator whose agent has ended would wait for nobody.
+        if self.seen.orchestrator_ended {
+            return;
+        }
         let Some((input, _)) = &self.composer else { return };
         let text = input.read(cx).value().trim().to_owned();
         if text.is_empty() {
@@ -2229,7 +2391,8 @@ impl ProjectView {
         window: &Window,
         cx: &Context<Self>,
     ) -> Option<Stateful<Div>> {
-        board.project.orchestrator.filter(|_| !self.beside)?;
+        // An orchestrator whose agent has ended takes no words: the head says so and opens it.
+        board.project.orchestrator.filter(|_| !self.beside && !self.seen.orchestrator_ended)?;
         let (input, _) = self.composer.as_ref()?;
         let theme = &self.theme;
         let sp = theme.spacing;

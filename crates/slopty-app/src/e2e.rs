@@ -558,7 +558,7 @@ async fn press_note(action: String, info: std::collections::BTreeMap<String, Str
         return error(&e);
     }
     match done_rx.await {
-        Ok(crate::verdict::Answered::Sent) => Reply::Ok,
+        Ok(crate::verdict::Answered::Sent | crate::verdict::Answered::Opened { .. }) => Reply::Ok,
         Ok(other) => Reply::Error { message: format!("{other:?}") },
         Err(e) => error(&e),
     }

@@ -899,7 +899,7 @@ struct NavBoard {
     project: ProjectId,
     /// Its most urgent lane's status.
     status: Option<Status>,
-    /// How many tasks wait on the person and how many are merged, as quiet words.
+    /// How many of its tasks are merged, as quiet words.
     words: String,
     /// Where the goal stands, its orchestrator's last summary's first line: a second line.
     summary: Option<String>,
@@ -1905,27 +1905,15 @@ impl WorkspaceView {
                 }
                 let lanes = board.lanes();
                 let status = lanes.first().map(|(lane, _)| super::projects::lane_status(*lane));
-                let waiting = lanes
-                    .iter()
-                    .find(|(lane, _)| *lane == crate::project::model::Lane::NeedsYou)
-                    .map_or(0, |(_, tasks)| tasks.len());
+                // How far the work is in, alone: what waits on the person is the row's mark and
+                // the Needs you section's, and said again here it pushed the count out of a
+                // navigator of the usual width.
                 let (merged, total) = board.progress();
-                let words = [
-                    match waiting {
-                        0 => None,
-                        1 => Some("1 needs you".to_owned()),
-                        n => Some(format!("{n} need you")),
-                    },
-                    Some(if total == 0 {
-                        NO_TASKS.to_owned()
-                    } else {
-                        format!("{merged} of {total} merged")
-                    }),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(META_SEPARATOR);
+                let words = if total == 0 {
+                    NO_TASKS.to_owned()
+                } else {
+                    format!("{merged} of {total} merged")
+                };
                 let summary = project
                     .progress
                     .as_ref()
@@ -2431,9 +2419,11 @@ impl WorkspaceView {
             row.with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
                 .into_any_element()
         });
-        let actions = (!home && !self.workers.is_empty()).then(|| {
+        // A phone's home keeps its filter always, so it has no Search row, but it starts an
+        // agent as every navigator does: the home goes first, so what starts shows.
+        let actions = (!self.workers.is_empty()).then(|| {
             let bindings = super::key_bindings();
-            let search = filter.is_none().then(|| {
+            let search = (!home && filter.is_none()).then(|| {
                 let keys = crate::palette::keys_for(&super::actions::FilterNavigator, &bindings);
                 rail_action(
                     theme,
@@ -2447,16 +2437,37 @@ impl WorkspaceView {
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)))
             });
-            let keys = crate::palette::keys_for(&super::actions::NewAgent, &bindings);
+            // A phone has no keys to name.
+            let keys_of = |action: &dyn gpui::Action| {
+                if home { String::new() } else { crate::palette::keys_for(action, &bindings) }
+            };
+            // A goal is the usual start, so it leads; an agent of one's own follows.
+            let new_goal = rail_action(
+                theme,
+                "nav-new-goal",
+                Symbol::Flag,
+                super::titlebar::NEW_GOAL,
+                keys_of(&super::actions::NewGoal),
+            )
+            .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                if home {
+                    this.navigated();
+                }
+                this.new_goal(&super::actions::NewGoal, window, cx);
+            }));
             let new_agent = rail_action(
                 theme,
                 "nav-new-agent",
                 Symbol::SquareAndPencil,
                 super::titlebar::NEW_AGENT,
-                keys,
+                keys_of(&super::actions::NewAgent),
             )
             .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
-            .on_click(cx.listener(|this, _ev, window, cx| {
+            .on_click(cx.listener(move |this, _ev, window, cx| {
+                if home {
+                    this.navigated();
+                }
                 this.new_agent(&super::actions::NewAgent, window, cx);
             }));
             div()
@@ -2468,6 +2479,7 @@ impl WorkspaceView {
                 .pt(px(spacing.xxs))
                 .pb(px(spacing.sm))
                 .children(search)
+                .child(new_goal)
                 .child(new_agent)
         });
         let lights = (!home).then(|| {
@@ -2893,6 +2905,16 @@ impl WorkspaceView {
         .on_click(cx.listener(|this, _ev, window, cx| {
             this.open_palette(&super::actions::OpenPalette, window, cx);
         }));
+        let new_goal = square(
+            "nav-rail-new-goal".to_owned(),
+            super::titlebar::NEW_GOAL.to_owned(),
+            Symbol::Flag.into(),
+            s.text_secondary,
+            false,
+        )
+        .on_click(cx.listener(|this, _ev, window, cx| {
+            this.new_goal(&super::actions::NewGoal, window, cx);
+        }));
         let new_agent = square(
             "nav-rail-new-agent".to_owned(),
             super::titlebar::NEW_AGENT.to_owned(),
@@ -2985,6 +3007,7 @@ impl WorkspaceView {
             .border_r(kit::HAIR)
             .border_color(hsla(s.stroke))
             .child(search)
+            .child(new_goal)
             .child(new_agent)
             .child(rule)
             .children(buttons)

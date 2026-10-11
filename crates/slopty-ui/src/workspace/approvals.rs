@@ -319,6 +319,36 @@ impl WorkspaceView {
         .detach();
     }
 
+    /// A goal-met note's "Open pull request": `project`'s goal into a pull request, the
+    /// person's word, through the server, as its board's button does. The board, where it is
+    /// open, shows the pull request; what did not go is said in a toast, in the server's words.
+    /// The tap settles once the server has answered.
+    pub(in crate::workspace) fn land_tapped(
+        &mut self,
+        project: slopty_proto::project::ProjectId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(caller) = self.projects.caller.clone() else {
+            self.show_failure(super::projects::NOT_SENT.to_owned(), cx);
+            self.settle_taps(cx);
+            return;
+        };
+        tracing::info!(%project, "a note's Open pull request sent");
+        self.approvals.through_server = self.approvals.through_server.saturating_add(1);
+        cx.spawn(async move |this, cx| {
+            let verb = Verb::ProjectLand { project: project.clone(), into: None };
+            let outcome = caller.call(verb).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.land_answered(&project, outcome, cx);
+                this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
+                if !this.approvals.taps_waiting() {
+                    cx.emit(WorkspaceEvent::TapsSettled);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Answer each waiting verdict whose request is here now; let go of one whose worker's
     /// table came without it, or whose time ran out, saying so. Looks again when the next is
     /// due.

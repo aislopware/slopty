@@ -285,6 +285,7 @@ pub fn defaults() -> Vec<Command> {
         Command::new(scope, name, action, defaults, contexts)
     }
     let mut out = vec![
+        c(Workspace, "new_goal", ws::NewGoal, &["cmd-n"], W),
         c(Workspace, "start_agent", ws::StartAgent, &["cmd-t"], W),
         c(Workspace, "new_terminal", ws::NewTerminal, &["cmd-shift-t"], W),
         c(Workspace, "new_agent", ws::NewAgent, &[], W),

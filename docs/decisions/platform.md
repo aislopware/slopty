@@ -1429,8 +1429,56 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is (`say_pushes`: a phone said or withdrawn, a token forgotten, pushing turned on or
     off, the kept phones loaded). The client link takes the latest from it beside its
     queue, so the word is never dropped or held behind a full queue, as with `Pushes`.
-  - The app's half (slopty-client's directory turning it into a change, the navigator's
-    line) follows from lane A.
+  - *In the app*: the directory turns it into `Change::Pushable`, and the workspace keeps the
+    latest (`WorkspaceView::set_pushable`). With notes allowed here and the server's word
+    false, the navigator's notes line says "The server can't send notifications to this
+    phone" over "Nothing reaches you here while Slopty is away." It has no door: the fix (an
+    APNs key named, the phone's token said again) is on the server's machine or comes by
+    itself on the next link. Notes off or never asked here are said first, with their doors,
+    since that is the fix the phone holds.
   - Tests: `hub::ladder::tests::a_phone_hears_whether_it_can_be_pushed_to` and
     `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back` (slopty-server); golden
-    `push_pushable` (slopty-proto).
+    `push_pushable` (slopty-proto);
+    `directory::tests::whether_the_server_can_push_here_is_a_change` (slopty-client);
+    `workspace::tests::setup_doors::a_phone_s_navigator_asks_for_notes_until_they_reach_the_person`
+    (slopty-ui).
+
+- ✅ **A hardware keyboard is heard as it comes and goes** (2026-10-11, the orchestrator-first
+  study's simplifications, readiness gap 7). The app asked `GCKeyboard.coalescedKeyboard`
+  every second on the settings file's tick, so an iPad woke once a second forever to learn
+  something the system announces, and the key bar and the on-screen affordances lagged a
+  keyboard by up to that second. Ruled:
+  - `slopty_platform::keyboard_presence::watch` observes `GCKeyboardDidConnectNotification`
+    (the first keyboard: attached) and `GCKeyboardDidDisconnectNotification` (the last gone:
+    not) on the main queue. The system coalesces every keyboard into one, so the pair is the
+    whole story (`GCKeyboard.h`).
+  - A change while the app is away may go unheard, so each resume on iOS (a return to the
+    front among them) reads `hardware_keyboard_attached` again. The launch reads it once, as
+    before. The settings tick no longer asks.
+  - The e2e build's `SLOPTY_HARDWARE_KEYBOARD` still decides over both, so a golden never
+    depends on when the simulator reports the Mac's keyboard.
+  - The module builds on macOS too, where a Mac always has a keyboard, only so the main-thread
+    harness can post the notifications.
+  - Test: `tests/main_thread.rs` `a_keyboard_is_heard_as_it_comes_and_goes` (slopty-platform).
+
+- ✅ **Open pull request on a goal-met note** (2026-10-11, `.research/readiness-a-2026-10-11.md`
+  item 4). A goal met posted as finished work, with nothing to press, though landing the goal
+  is the one step left and the board's "Open pull request" does it. Built like Merge on a
+  ready note.
+  - A `GoalDone` note about a project carries the `slopty.land` category: "Open pull request",
+    answered where the note is (on an unlocked device), and "Show". The project is kept in its
+    `userInfo` (`info::PROJECT`). This holds for a pushed note (`notify::pushed`) and for the
+    Mac's own project notes (`attention::notice`). The project's other notes have no buttons.
+  - A press is `Verb::ProjectLand { into: None }`, the person's word, as the board's button
+    is. With the app running it goes through the workspace's server link, and the board, where
+    it is open, shows the pull request. A refusal is a toast in the server's words, and the tap
+    settles once the server has answered. With no window, `verdict::answer_alone` sends it on a
+    link of its own. Then a quiet note takes the pressed one's place: "Pull request #N is
+    open", with its page under it (`verdict::opened_note`). A project gone is said quietly. A
+    refusal or a server not reached says "Couldn't open the pull request" in the server's words,
+    with the button kept to press again.
+  - Tests: `notify::pushed::tests::a_goal_met_note_opens_its_pull_request` (slopty-platform),
+    `verdict::tests::an_open_pull_request_pressed_on_a_goal_met_lands_it` (slopty-app),
+    `workspace::tests::attention::a_goal_met_note_offers_its_pull_request` and
+    `workspace::tests::approvals::a_goal_met_notes_open_pull_request_lands_its_goal`
+    (slopty-ui).

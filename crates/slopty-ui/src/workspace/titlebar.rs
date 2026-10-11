@@ -13,8 +13,8 @@
 //! forward, and the breadcrumb of where the focused work is (`project ▾ / checkout ▾ / branch`,
 //! `breadcrumb.rs`, whose project menu is how the bar goes between projects), then the tabs,
 //! and ends in the bell and "…". The bell counts what needs the person and the agents' turns
-//! left to review, and opens the navigator at them. Search and New agent stand in the bar only
-//! while neither the navigator nor its rail is drawn. Every other action is a key, the
+//! left to review, and opens the navigator at them. Search, New goal and New agent stand in the bar
+//! only while neither the navigator nor its rail is drawn. Every other action is a key, the
 //! palette, or a tile's own header. A menu fades in as it drops 4 pt from its button, at once
 //! under Reduce Motion.
 //!
@@ -41,8 +41,8 @@ use slopty_client::layout::{GroupKey, Tab, TabId, TileRef, WorkerKey};
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
-    AddWindow, FilterNavigator, GoBack, GoForward, NewAgent, NewNote, NewTerminal, OpenCommands,
-    OpenPalette, ToggleNavigator,
+    AddWindow, FilterNavigator, GoBack, GoForward, NewAgent, NewGoal, NewNote, NewTerminal,
+    OpenCommands, OpenPalette, ToggleNavigator,
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
@@ -72,7 +72,10 @@ const BELL: &str = "bell";
 /// What the magnifier beside the navigator's toggle is called.
 pub(super) const SEARCH: &str = "Search";
 
-/// What the pencil after it is called: it starts "New agent…".
+/// What the flag after it is called: it opens "New goal…", the usual start.
+pub(super) const NEW_GOAL: &str = "New goal";
+
+/// What the pencil after the flag is called: it starts "New agent…".
 pub(super) const NEW_AGENT: &str = "New agent";
 
 /// What the bar's arrows through the tabs visited are called.
@@ -379,7 +382,17 @@ impl WorkspaceView {
         ))
     }
 
-    /// "New agent", after "Search": "New agent…", the one way to start an agent.
+    /// "New goal", after "Search": the sheet that hands a goal to a new orchestrator.
+    pub(super) fn new_goal_button(
+        &self,
+        id: &'static str,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        self.leading_button(id, Symbol::Flag, NEW_GOAL, &NewGoal)
+            .on_click(cx.listener(|this, _ev, window, cx| this.new_goal(&NewGoal, window, cx)))
+    }
+
+    /// "New agent", after "New goal": "New agent…", the one way to start an agent.
     pub(super) fn new_agent_button(
         &self,
         id: &'static str,
@@ -407,12 +420,13 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
 
-        // Left, with the navigator hidden: its toggle, "Search" and "New agent" while the rail
-        // is not drawn either (the rail leads with them), back and forward through the tabs
-        // visited, and where the focused work is. A docked navigator holds all of it.
+        // Left, with the navigator hidden: its toggle, "Search", "New goal" and "New agent" while
+        // the rail is not drawn either (the rail leads with them), the arrows through the tabs
+        // visited, and where the focused work is. A docked navigator holds it all.
         let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
         let bare = has_workers && !phone && self.nav.drawn.is_none() && !self.nav.rail;
         let search = bare.then(|| self.search_button(false, cx));
+        let new_goal = bare.then(|| self.new_goal_button("bar-new-goal", cx));
         let new_agent = bare.then(|| self.new_agent_button("bar-new-agent", cx));
         let visits = (has_workers && !phone && !docked).then(|| self.visit_arrows(cx));
         let where_ = (has_workers && !phone && !docked).then(|| self.render_breadcrumb(cx));
@@ -527,6 +541,7 @@ impl WorkspaceView {
                     .gap(px(spacing.xs))
                     .children(toggle)
                     .children(search)
+                    .children(new_goal)
                     .children(new_agent)
                     .children(phone_title)
                     .children(visits)

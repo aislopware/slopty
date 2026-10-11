@@ -204,6 +204,7 @@ fn a_chords_words_come_with_the_keymap() {
     let keymap = Keymap::default();
     assert_eq!(keymap.label_of(&ws::NewTerminal), "⇧⌘T");
     assert_eq!(keymap.label_of(&ws::StartAgent), "⌘T");
+    assert_eq!(keymap.label_of(&ws::NewGoal), "⌘N", "a goal, the usual start");
     assert_eq!(keymap.label_of(&ws::OpenFile), "⌘P", "quick open");
     assert_eq!(keymap.label_of(&ws::OpenPalette), "⌘K", "search everything");
     assert_eq!(keymap.label_of(&ws::OpenCommands), "⇧⌘P", "the commands");

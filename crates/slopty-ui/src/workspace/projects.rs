@@ -27,7 +27,7 @@ use super::WorkspaceView;
 use super::agents::{agent_ask_text, agent_mark_of};
 use super::rollup::META_SEPARATOR;
 use crate::icons::Status;
-use crate::project::create::{Filled, GoalSheet, NewGoal, SheetEvent, Starter};
+use crate::project::create::{Filled, GoalSheet, NewGoal, Place, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Asked, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
@@ -588,9 +588,8 @@ impl WorkspaceView {
                 let worker = self.workers.get(&worker_key(id))?;
                 let caps = worker.caps.as_ref();
                 let (os, form) = (caps.map(|c| c.os), caps.map(|c| c.form));
-                let agents = self.startable_on(worker_key(id));
                 let away = worker.link.is_none();
-                Some((id, WorkerSeen { name: worker.name.clone(), os, form, agents, away }))
+                Some((id, WorkerSeen { name: worker.name.clone(), os, form, away }))
             })
             .collect();
         let now = crate::clock::now(cx);
@@ -603,7 +602,10 @@ impl WorkspaceView {
             let board = self.projects.mirror.get(&project).cloned();
             let agents = board.as_ref().map(|b| self.board_agents(b)).unwrap_or_default();
             let recap = self.projects.recaps.get(&project).cloned();
-            let seen = Seen { board, workers: names.clone(), agents, now, recap };
+            let orchestrator = board.as_ref().and_then(|b| b.project.orchestrator);
+            let orchestrator_ended = orchestrator.is_some_and(|term| self.agent_ended(term));
+            let seen =
+                Seen { board, workers: names.clone(), agents, now, recap, orchestrator_ended };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         for project in std::mem::take(&mut self.projects.focus) {
@@ -770,6 +772,8 @@ impl WorkspaceView {
                         this.act_on_task(&asked, *task, TaskAction::Merge, cx);
                     }
                 }
+                ProjectEvent::Land => this.land_project(&asked, cx),
+                ProjectEvent::OpenOrchestrator => this.open_orchestrator_thread(&asked, cx),
                 ProjectEvent::Delete => {
                     this.send_to_server(
                         Verb::ProjectDelete { project: asked.clone() },
@@ -989,6 +993,65 @@ impl WorkspaceView {
         });
     }
 
+    /// Whether `term`'s agent has ended: its machine is linked and lists the terminal no more.
+    /// A machine away says nothing of it.
+    fn agent_ended(&self, term: TermRef) -> bool {
+        let linked = self.workers.get(&worker_key(term.worker)).is_some_and(|w| w.link.is_some());
+        linked && self.summary(term.session).is_none()
+    }
+
+    /// Land `project`'s finished goal, the person's word: its branch into a pull request
+    /// (`Verb::ProjectLand`), whose number and page its board then shows. A refusal is said in
+    /// the server's words, and the board offers it again.
+    fn land_project(&self, project: &ProjectId, cx: &mut Context<Self>) {
+        if self.projects.caller.is_none() {
+            Self::not_sent(cx);
+            if let Some(board) = self.projects.views.get(project).cloned() {
+                board.update(cx, |b, cx| b.landed(None, cx));
+            }
+            return;
+        }
+        let verb = Verb::ProjectLand { project: project.clone(), into: None };
+        let project = project.clone();
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            this.land_answered(&project, outcome, cx);
+        });
+    }
+
+    /// What the server answered a landing of `project`'s goal: its board, where it is open,
+    /// shows the pull request opened, or offers Open again; a refusal is said in a toast, in
+    /// the server's words.
+    pub(super) fn land_answered(
+        &mut self,
+        project: &ProjectId,
+        outcome: Outcome,
+        cx: &mut Context<Self>,
+    ) {
+        let opened = match outcome {
+            Outcome::PullOpened { number, url } => Some((number, url)),
+            Outcome::Error { message, .. } => {
+                self.show_failure(message, cx);
+                None
+            }
+            _ => None,
+        };
+        if let Some(board) = self.projects.views.get(project).cloned() {
+            board.update(cx, |b, cx| b.landed(opened, cx));
+        }
+    }
+
+    /// Open `project`'s orchestrator's thread on its machine, whose agent has ended: the thread
+    /// face's Resume starts it again, and the server then follows it to its new terminal.
+    fn open_orchestrator_thread(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
+        let Some(board) = self.projects.mirror.get(project) else { return };
+        let (Some(term), Some(thread)) =
+            (board.project.orchestrator, board.project.orchestrator_thread)
+        else {
+            return;
+        };
+        self.open_thread(worker_key(term.worker), thread, cx);
+    }
+
     /// The server would not start `task`: say why, and let its card say what it did.
     fn start_refused(
         &mut self,
@@ -1082,17 +1145,29 @@ impl WorkspaceView {
     }
 
     /// What a goal starts with when the person says no more than the goal: the folder from the
-    /// focus, else the last start, else the home; the agents and machines that can take it; the
-    /// verifier guessed from the folder's repository. `None` while no machine can start one.
+    /// focus, else the last start, else the latest repository work stood in on its machine, and
+    /// the home only where there is none; the recent repositories on machines that can start
+    /// one; the agents and machines that can take it; the verifier guessed from the folder's
+    /// repository. `None` while no machine can start one.
     pub(super) fn goal_filled(&self, cx: &gpui::App) -> Option<Filled> {
         let starters = self.goal_starters();
         let worker = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)?;
+        let startable =
+            |key: WorkerKey| starters.iter().any(|s| s.machines.iter().any(|m| m.0 == key));
+        let places: Vec<Place> = self
+            .recent_places(None, cx)
+            .into_iter()
+            .filter(|p| startable(p.worker) && self.repo_at(p.worker, &p.cwd, cx).is_some())
+            .take(crate::project::create::PLACES)
+            .map(|p| Place { worker: p.worker, folder: p.cwd, name: p.name })
+            .collect();
         let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
         let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
-        let folder = here.or(last).unwrap_or_else(|| "~".to_owned());
+        let latest = || places.iter().find(|p| p.worker == worker).map(|p| p.folder.clone());
+        let folder = here.or(last).or_else(latest).unwrap_or_else(|| "~".to_owned());
         let repo = self.repo_at(worker, &folder, cx);
         let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
-        Some(Filled { folder, verifier, starters })
+        Some(Filled { folder, places, verifier, starters })
     }
 
     /// The goal written on the empty workspace's composer: handed to an orchestrator as the

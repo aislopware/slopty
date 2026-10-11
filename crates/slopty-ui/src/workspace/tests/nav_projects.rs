@@ -56,7 +56,8 @@ fn declare(
 }
 
 /// A declared project's board leads its group, under its header and above its tiles, with how
-/// its tasks stand; a click shows the board in its orchestrator's tile.
+/// far its tasks are merged and its most urgent lane as its mark; a click shows the board in
+/// its orchestrator's tile.
 #[gpui::test]
 fn a_projects_board_heads_its_group(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -71,8 +72,10 @@ fn a_projects_board_heads_its_group(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let label = "Board, 1 needs you · 1 of 2 merged";
+    let label = "Board, 1 of 2 merged";
     assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{tree:#?}");
+    // What waits on the person is the row's mark, not words that push the count out.
+    assert!(tree.iter().any(|n| n.is("Image", Some("Needs you"))), "{tree:#?}");
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     click(cx, "nav-board-board");
     assert!(view.read_with(cx, |v, _| v.board_shown(orchestrator)), "the board is shown");

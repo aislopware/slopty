@@ -366,3 +366,55 @@ fn a_ready_notes_merge_merges_the_task_it_names(cx: &mut TestAppContext) {
     let said = view.read_with(cx, |v, _| v.toast_texts());
     assert!(said.contains(&refused), "in the server's words: {said:?}");
 }
+
+/// A goal-met note's "Open pull request" lands the goal of the project it names, through the
+/// server, and leaves the workspace where it is; the tap settles once the server has answered,
+/// and a refusal is said in the server's words.
+#[gpui::test]
+fn a_goal_met_notes_open_pull_request_lands_its_goal(cx: &mut TestAppContext) {
+    use slopty_platform::notify::info::PROJECT;
+    use slopty_proto::orchestration::ErrorCode;
+    use slopty_proto::project::ProjectId;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, _cx| v.set_server_caller(Some(caller)));
+    cx.run_until_parked();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&events);
+    cx.update(|_window, cx| {
+        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
+            heard.borrow_mut().push(*event);
+        })
+        .detach();
+    });
+    let land = Tap {
+        id: "project-store-9".to_owned(),
+        info: BTreeMap::from([(PROJECT.to_owned(), "store".to_owned())]),
+        action: Some(notify::LAND.to_owned()),
+        text: None,
+    };
+    assert!(attention::answers(&land), "answered where the note is");
+    view.update_in(cx, |v, _w, cx| v.open_notification(&land, cx));
+    cx.run_until_parked();
+    let (verb, reply) = queue.try_next().expect("the landing went to the server");
+    let store = ProjectId::new("store").expect("a name");
+    assert_eq!(verb, Verb::ProjectLand { project: store, into: None });
+    assert!(events.borrow().is_empty(), "not settled before the server answers");
+    let url = "https://github.com/aislopware/slopty/pull/42".to_owned();
+    let _gone = reply.send(Outcome::PullOpened { number: 42, url });
+    cx.run_until_parked();
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled], "it may sleep");
+    assert_eq!(focused(&view, cx), Some(shell), "the workspace stays where it was");
+
+    view.update_in(cx, |v, _w, cx| v.open_notification(&land, cx));
+    cx.run_until_parked();
+    let (_, reply) = queue.try_next().expect("asked again");
+    let refused = "Name a branch".to_owned();
+    let _gone = reply.send(Outcome::Error { code: ErrorCode::Invalid, message: refused.clone() });
+    cx.run_until_parked();
+    let said = view.read_with(cx, |v, _| v.toast_texts());
+    assert!(said.contains(&refused), "in the server's words: {said:?}");
+}

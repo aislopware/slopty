@@ -80,12 +80,12 @@ fn focus_a_navigator_row(view: &Entity<WorkspaceView>, cx: &mut VisualTestContex
     panic!("no row of the navigator took the keyboard");
 }
 
-/// Under the navigator's top row stand "Search" then "New agent", rows across the panel
-/// (`MonoCode`'s rail actions), and its filter is hidden at rest. "Search" shows it in its place
-/// with the keyboard in it, Esc hides it, and so does the keyboard leaving it empty. ⌘F with a
-/// row holding the keyboard shows it, and so does typing there, the key going on after what it
-/// holds. With the navigator hidden the rail leads with the two, its "Search" opening the
-/// palette.
+/// Under the navigator's top row stand "Search", "New goal" then "New agent", rows across the
+/// panel (`MonoCode`'s rail actions), and its filter is hidden at rest. "Search" shows it in its
+/// place with the keyboard in it, Esc hides it, and so does the keyboard leaving it empty. ⌘F
+/// with a row holding the keyboard shows it, and so does typing there, the key going on after
+/// what it holds. With the navigator hidden the rail leads with the three, its "Search" opening
+/// the palette.
 #[gpui::test]
 fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -97,12 +97,14 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
     };
     let (nav, lights) = (bounds(cx, "navigator"), bounds(cx, "nav-lights-row"));
-    let (search, new) = (bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
-    for b in [search, new] {
+    let (search, goal, new) =
+        (bounds(cx, "nav-search"), bounds(cx, "nav-new-goal"), bounds(cx, "nav-new-agent"));
+    for b in [search, goal, new] {
         assert!(b.top() >= lights.bottom(), "under the lights row: {b:?}");
         assert!(b.left() > nav.left() && b.right() < nav.right(), "across the panel: {b:?}");
     }
-    assert!(search.bottom() <= new.top(), "in order: {search:?} {new:?}");
+    assert!(search.bottom() <= goal.top(), "in order: {search:?} {goal:?}");
+    assert!(goal.bottom() <= new.top(), "a goal first: {goal:?} {new:?}");
     assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
 
     click(cx, "nav-search");
@@ -149,11 +151,48 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    let (search, new) = (bounds(cx, "nav-rail-search"), bounds(cx, "nav-rail-new-agent"));
-    assert!(search.bottom() <= new.top(), "the rail leads with them: {search:?} {new:?}");
+    let (search, goal, new) = (
+        bounds(cx, "nav-rail-search"),
+        bounds(cx, "nav-rail-new-goal"),
+        bounds(cx, "nav-rail-new-agent"),
+    );
+    assert!(search.bottom() <= goal.top(), "the rail leads with them: {search:?} {goal:?}");
+    assert!(goal.bottom() <= new.top(), "a goal first: {goal:?} {new:?}");
     assert!(cx.debug_bounds("bar-search").is_none(), "and the bar holds neither");
     click(cx, "nav-rail-search");
     assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the rail's Search opens the palette");
+}
+
+/// A goal is the usual start, so it has a door wherever one starts: ⌘N, the navigator's
+/// "New goal", and its rail's flag each open the one sheet.
+#[gpui::test]
+fn a_goal_starts_from_its_key_the_navigator_and_the_rail(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    view.update_in(cx, |v, _w, cx| v.threads_linked(fake.key, cx));
+    let shell = opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/w/oss/slopty"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    let sheet = |cx: &mut VisualTestContext| cx.debug_bounds("goal-sheet").is_some();
+    let put_away = |cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("goal-sheet").is_none(), "Esc lets the sheet go");
+    };
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    assert!(sheet(cx), "⌘N opens it");
+    put_away(cx);
+
+    click(cx, "nav-new-goal");
+    assert!(sheet(cx), "the navigator's New goal opens it");
+    put_away(cx);
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    click(cx, "nav-rail-new-goal");
+    assert!(sheet(cx), "the rail's flag opens it");
 }
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every
@@ -772,6 +811,13 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     let needs = cx.debug_bounds("nav-needs-you").expect("what waits on the person");
     assert!(field.top() < needs.top(), "the field first: {field:?} {needs:?}");
     assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "its row");
+    // It starts a goal and an agent as every navigator does, under its field; the field is its
+    // search.
+    let goal = cx.debug_bounds("nav-new-goal").expect("New goal on the home");
+    let start = cx.debug_bounds("nav-new-agent").expect("New agent on the home");
+    assert!(field.bottom() <= goal.top() && goal.bottom() <= start.top(), "{goal:?} {start:?}");
+    assert!(start.bottom() <= needs.top(), "{start:?}");
+    assert!(!shown(cx, "nav-search"), "no Search row: the field is always there");
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the machine");
     assert!(needs.top() < worker.top(), "before the machines: {needs:?} {worker:?}");
     let headed = tree(cx).into_iter().any(|n| n.is("Heading", Some("studio")));
@@ -780,6 +826,12 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     let dimmed =
         cx.update(|window, _| window.painted_quads().into_iter().any(|q| q.background == modal));
     assert!(!dimmed, "nothing shows round it, so nothing is dimmed");
+
+    // Pressed, the home goes, so the start's tile shows where it lands.
+    let start = cx.debug_bounds("nav-new-agent").expect("New agent on the home");
+    cx.simulate_click(start.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("navigator").is_none(), "the home put away");
 }
 
 /// A shell whose directory is in `repo` on `branch`, as its worker reports it.

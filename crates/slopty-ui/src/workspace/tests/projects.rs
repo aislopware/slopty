@@ -912,6 +912,48 @@ fn a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it(cx: &mut T
     assert_eq!(sent(&mut queue, cx, done), [], "the server hands the goal over itself");
 }
 
+/// A goal starts where work stood: with nothing focused and no start before, the latest
+/// repository on its machine, never the home while there is one. The sheet offers the other
+/// recent repositories as chips under the folder (a folder in no repository is not one), and a
+/// press moves the folder there.
+#[gpui::test]
+fn a_goal_starts_in_the_latest_repository_and_offers_the_others(cx: &mut TestAppContext) {
+    use super::super::actions::NewGoal;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        for (at, cwd, repo) in
+            [(1, "/src/site", true), (2, "/tmp/scratch", false), (3, "/src/app", true)]
+        {
+            let mut shell = summary(SessionId::new(), Some(cwd));
+            shell.repo = repo.then(|| cwd.to_owned());
+            shell.started_ms = WallMs::from_millis(at);
+            v.session_opened(key, shell, cx);
+        }
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(NewGoal);
+    cx.run_until_parked();
+    let folder = |cx: &mut VisualTestContext| {
+        view.read_with(cx, WorkspaceView::goal_sheet_typed).map(|t| t.folder).unwrap_or_default()
+    };
+    assert_eq!(folder(cx), "/src/app", "the latest repository, not the home");
+    assert!(cx.debug_bounds("goal-sheet-place-0").is_some(), "the other repository offered");
+    assert!(
+        cx.debug_bounds("goal-sheet-place-1").is_none(),
+        "only it: the folder held is not offered again, and a folder in no repository is none"
+    );
+
+    let chip = cx.debug_bounds("goal-sheet-place-0").expect("the chip");
+    cx.simulate_click(chip.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(folder(cx), "/src/site", "the press moves the folder there");
+    assert!(cx.debug_bounds("goal-sheet-place-0").is_some(), "and offers the first back");
+}
+
 /// What waits on the person is one list, the bell's count. An agent whose turn stopped on a
 /// usage limit is under *Failed*; a task ready to merge is under *Ready to merge*, whose Merge
 /// sends `TaskMerge`; a task's agent whose turn ended unseen is not left to review, since its
@@ -1745,9 +1787,9 @@ fn a_task_on_a_machine_gone_away_says_so(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project-card-project-node-1-where-away").is_some(), "marked away");
 }
 
-/// "Start" on a task never started spawns it on its pin, by the orchestrator's agent (the
-/// server gives it its brief); its card says it is starting at once. With no server linked, the
-/// card says so and nothing is sent.
+/// "Start" on a task never started spawns it where the server places it, by the
+/// orchestrator's agent (the server gives it its brief); its card says it is starting at once. With
+/// no server linked, the card says so and nothing is sent.
 #[gpui::test]
 fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     use slopty_proto::thread::AgentId;
@@ -1755,11 +1797,11 @@ fn a_task_never_started_is_started_from_its_card(cx: &mut TestAppContext) {
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut pinned = card(3, "Golden files", TaskState::Planned);
-    pinned.depends_on = vec![TaskId(1)];
+    let mut planned = card(3, "Golden files", TaskState::Planned);
+    planned.depends_on = vec![TaskId(1)];
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
-        v.project_update(11, task_changed("board", pinned, None), cx);
+        v.project_update(11, task_changed("board", planned, None), cx);
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
@@ -1853,8 +1895,10 @@ fn the_board_says_where_the_goal_stands(cx: &mut TestAppContext) {
     assert!(said.iter().any(|l| l == "Goal met. All three merged and pushed"), "{said:#?}");
 }
 
-/// The board's head shows how far the project's agents go before they ask, and sets it: a
-/// press of another level says it to the server, the person's word. At Own it says a managed
+/// The board's head shows how far the project's agents go before they ask, and sets it, on a
+/// line of its own under the place with the review limit after it, so the place keeps its
+/// line in a board beside its orchestrator: a press of another level says it to the server,
+/// the person's word. At Own it says a managed
 /// Claude Code with auto mode off starts the agents asking; a press of the level already set
 /// says nothing.
 #[gpui::test]
@@ -1873,7 +1917,11 @@ fn the_board_sets_its_autonomy(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let place = cx.debug_bounds("project-place").expect("the place line");
     let control = cx.debug_bounds("project-autonomy").expect("the control");
-    assert!(place.right() <= control.left(), "after the place: {place:?} {control:?}");
+    assert!(control.top() >= place.bottom(), "under the place: {place:?} {control:?}");
+    assert!((control.left() - place.left()).abs() < px(0.5), "at its edge: {control:?}");
+    let limit = cx.debug_bounds("project-review-limit").expect("the review limit");
+    assert!(limit.left() >= control.right(), "the review limit after it: {limit:?}");
+    assert!(place.size.width > control.size.width + limit.size.width, "the place keeps its line");
     assert!(cx.debug_bounds("project-autonomy-managed").is_none(), "Ask says nothing more");
 
     click(cx, "project-autonomy-own");
@@ -1974,4 +2022,125 @@ fn the_board_sets_its_review_limit_and_merges_all_ready(cx: &mut TestAppContext)
     click(cx, "project-merge-ready");
     let merge = |task| Verb::TaskMerge { project: board_id.clone(), task: TaskId(task) };
     assert_eq!(sent(&mut queue, cx, done), [merge(5), merge(6)]);
+}
+
+/// Once the orchestrator says the goal is met, the board's head offers "Open pull request",
+/// saying the branch it goes into when the server knows it. A press sends `ProjectLand` with no
+/// branch of the person's own, says it is opening meanwhile, and then shows the pull request's
+/// number as a link. A refusal is said in the server's words and the button comes back.
+#[gpui::test]
+fn a_met_goal_opens_its_pull_request(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::ErrorCode;
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let term = TermRef { worker: fixtures_worker(&view, cx, orchestrator), session: orchestrator };
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let goal = |done: bool, base: Option<&str>| {
+        let mut record = project("board", Some(term));
+        record.base = base.map(str::to_owned);
+        record.progress = Some(slopty_proto::project::Progress {
+            summary: "Store and wire merged".to_owned(),
+            next: None,
+            done,
+            at_ms: fixtures::AT,
+        });
+        ProjectUpdate {
+            project: fixtures::id("board"),
+            record: Some(record),
+            task: None,
+            native: None,
+            entry: None,
+        }
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(11, goal(false, None), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-land").is_none(), "nothing to land before the goal is met");
+
+    view.update_in(cx, |v, _w, cx| v.project_update(12, goal(true, Some("develop")), cx));
+    cx.run_until_parked();
+    let into = labels(&view, cx);
+    assert!(into.iter().any(|l| l == "Open pull request"), "{into:#?}");
+    assert!(cx.debug_bounds("project-land-into").is_some(), "into develop, as it was made from");
+
+    let land = Verb::ProjectLand { project: fixtures::id("board"), into: None };
+    click(cx, "project-land");
+    assert!(cx.debug_bounds("project-landing").is_some(), "opening, at once");
+    let refused =
+        |_: &Verb| Outcome::Error { code: ErrorCode::Invalid, message: "Name a branch".into() };
+    assert_eq!(sent(&mut queue, cx, refused), std::slice::from_ref(&land));
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some("Name a branch"));
+    assert!(cx.debug_bounds("project-land").is_some(), "offered again");
+
+    click(cx, "project-land");
+    let opened = |_: &Verb| Outcome::PullOpened {
+        number: 42,
+        url: "https://github.com/aislopware/slopty/pull/42".into(),
+    };
+    assert_eq!(sent(&mut queue, cx, opened), [land]);
+    assert!(cx.debug_bounds("project-land").is_none(), "landed");
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "Pull request #42"), "{said:#?}");
+    assert!(cx.debug_bounds("project-pull").is_some(), "a link to its page");
+}
+
+/// While the orchestrator's agent has ended (its machine linked, its terminal gone from it),
+/// the board says so and opens its thread, whose Resume starts it again, and it has no line to
+/// type to it, since the words would wait for nobody. While it runs, or with its thread not
+/// known, the board says nothing of it.
+#[gpui::test]
+fn an_ended_orchestrator_is_opened_by_its_thread(cx: &mut TestAppContext) {
+    use slopty_proto::thread::ThreadId;
+
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
+    let worker = WorkerId::new();
+    let mut fake = connect_as(&view, cx, worker, "studio");
+    let ended = TermRef { worker, session: SessionId::new() };
+    let thread = ThreadId::new();
+    let created = || vec![entry(1, None, Moment::Created)];
+    let made = vec![card(1, "Wire the board", TaskState::Planned)];
+    let mut record = project("board", Some(ended));
+    view.update_in(cx, |v, _w, cx| {
+        v.projects_part(snapshot(10, vec![status(record.clone(), made, created())]), cx);
+        v.open_project(&fixtures::id("board"), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-1").is_some(), "the board in a tile of its own");
+    assert!(cx.debug_bounds("project-orchestrator-ended").is_none(), "no thread to open yet");
+
+    record.orchestrator_thread = Some(thread);
+    let update = ProjectUpdate {
+        project: fixtures::id("board"),
+        record: Some(record),
+        task: None,
+        native: None,
+        entry: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(11, update, cx));
+    cx.run_until_parked();
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "The orchestrator has stopped"), "{said:#?}");
+    assert!(cx.debug_bounds("project-composer").is_none(), "no line to an ended orchestrator");
+    let _earlier = fake.drain();
+    click(cx, "project-orchestrator-thread");
+    let ops: Vec<ItemOp> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Items(op) => Some(op),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, ItemOp::Add(item) if item.kind == ItemKind::Thread { thread })),
+        "its thread opens on its machine: {ops:?}"
+    );
 }

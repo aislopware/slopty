@@ -1,8 +1,10 @@
 //! The sheet "New goal…" opens: one goal handed over, and a project made around the agent that
 //! takes it (the orchestrator-first study, item 9).
 //!
-//! The person writes the goal; the folder it is worked in comes filled from the focus, and the
-//! agent and the machine from the last start, said in a line under the folder. "More" opens what
+//! The person writes the goal; the folder it is worked in comes filled from the focus, else the
+//! last start, else the latest repository work stood in, and the agent and the machine from the
+//! last start, said in a line under the folder. The other recent repositories wait under the
+//! folder as chips, and a press of one moves the folder, and the machine, there. "More" opens what
 //! is rarely changed: which agent on which machine, the branch the work lands on, the command
 //! that says a task's work is right, and how far the project's agents go before they ask. The
 //! project's name is drawn from the goal. ↵ in the goal (⇧↵ for a new line) or in any field, or
@@ -59,11 +61,25 @@ pub struct Starter {
     pub machines: Vec<(WorkerKey, String)>,
 }
 
+/// A repository work stood in lately, which the sheet offers as a chip under the folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The machine it is on.
+    pub worker: WorkerKey,
+    /// Its path there, as the folder field takes it.
+    pub folder: String,
+    /// What it is called: the repository and the path within it.
+    pub name: String,
+}
+
 /// What the sheet opens holding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Filled {
-    /// The folder, from the focus or the last start.
+    /// The folder, from the focus, else the last start, else the latest of [`Self::places`].
     pub folder: String,
+    /// The repositories work stood in lately, the latest first, on machines that can start
+    /// one of [`Self::starters`].
+    pub places: Vec<Place>,
     /// The verifier guessed from the repository's own scripts, when one reads as a check.
     pub verifier: Option<String>,
     /// The agents that can orchestrate, the last started first.
@@ -100,6 +116,9 @@ pub const TARGET_HINT: &str = "Blank: a branch of its own, off the checkout";
 /// The disclosure that opens the rarely changed settings.
 pub const MORE: &str = "More";
 
+/// The most recent repositories the sheet offers under the folder.
+pub const PLACES: usize = 4;
+
 /// The most lines the goal field grows to before it scrolls.
 pub(crate) const GOAL_ROWS: usize = 8;
 
@@ -116,6 +135,7 @@ pub struct GoalSheet {
     theme: Theme,
     fields: Fields,
     starters: Vec<Starter>,
+    places: Vec<Place>,
     /// Which of [`Self::starters`] starts.
     agent: usize,
     /// On which machine.
@@ -181,6 +201,7 @@ impl GoalSheet {
             theme,
             fields,
             starters: filled.starters,
+            places: filled.places,
             agent: 0,
             machine,
             autonomy: Autonomy::default(),
@@ -230,6 +251,87 @@ impl GoalSheet {
         self.machine = kept.or_else(|| starter.machines.first().map(|(k, _)| *k));
         self.agent = ix;
         cx.notify();
+    }
+
+    /// Move the folder to `place`, and the machine with it: the agent stays where it can start
+    /// there, else the first that can takes it.
+    fn pick_place(&mut self, place: &Place, window: &mut Window, cx: &mut Context<Self>) {
+        let on = |s: &Starter| s.machines.iter().any(|(k, _)| *k == place.worker);
+        let agent = if self.starter().is_some_and(on) {
+            Some(self.agent)
+        } else {
+            self.starters.iter().position(on)
+        };
+        let Some(agent) = agent else { return };
+        self.agent = agent;
+        self.machine = Some(place.worker);
+        let folder = place.folder.clone();
+        self.fields.folder.update(cx, |input, cx| input.set_value(folder, window, cx));
+        cx.notify();
+    }
+
+    /// The recent repositories as chips under the folder, but for the one it holds: a press
+    /// moves the folder there. A chip names its machine while the places span more than one.
+    fn places_row(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let sp = theme.spacing;
+        let held = self.fields.folder.read(cx).value().trim().to_owned();
+        let spans =
+            self.places.iter().any(|p| Some(p.worker) != self.places.first().map(|f| f.worker));
+        let shown: Vec<&Place> = self
+            .places
+            .iter()
+            .filter(|p| !(p.folder == held && Some(p.worker) == self.machine))
+            .collect();
+        if shown.is_empty() {
+            return None;
+        }
+        let chips = shown.into_iter().enumerate().map(|(ix, place)| {
+            let machine = self
+                .starters
+                .iter()
+                .flat_map(|st| &st.machines)
+                .find(|(k, _)| spans && *k == place.worker);
+            let words = machine.map_or_else(
+                || place.name.clone(),
+                |(_, name)| format!("{} \u{b7} {name}", place.name),
+            );
+            let picked = place.clone();
+            let el = kit::typed(div(), theme.roles().metadata)
+                .id(("goal-sheet-place", ix))
+                .debug_selector(move || format!("goal-sheet-place-{ix}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(words.clone()))
+                .aria_description(SharedString::from(place.folder.clone()))
+                .flex_none()
+                .max_w_full()
+                .flex()
+                .items_center()
+                .gap(px(sp.xxs))
+                .h(px(theme.density.chip))
+                .px(px(sp.xs))
+                .rounded(px(theme.radii.sm))
+                .border(kit::HAIR)
+                .border_color(hsla(s.border))
+                .cursor_pointer()
+                .overflow_hidden()
+                .text_color(hsla(s.text_secondary))
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .child(icon(theme, Symbol::Folder, IconSize::Inline, hsla(s.text_secondary)))
+                .child(div().min_w_0().truncate().child(SharedString::from(words)));
+            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, window, cx| {
+                this.pick_place(&picked, window, cx);
+            }))
+        });
+        Some(
+            div()
+                .debug_selector(|| "goal-sheet-places".to_owned())
+                .flex()
+                .flex_wrap()
+                .gap(px(sp.xxs))
+                .children(chips),
+        )
     }
 
     /// The line under the folder: which agent starts, on which machine.
@@ -416,7 +518,7 @@ impl Render for GoalSheet {
             .on_action(cx.listener(|_this, _: &Escape, _w, cx| cx.emit(SheetEvent::Cancel)))
             .child(kit::title(theme, TITLE))
             .child(field(theme, GOAL, goal))
-            .child(field(theme, FOLDER, folder))
+            .child(field(theme, FOLDER, folder).children(self.places_row(cx)))
             .child(who)
             .when(open, |el| el.child(self.more_fields(cx)))
             .child(
