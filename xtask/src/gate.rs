@@ -950,7 +950,7 @@ const SPAWNED_BINS: [(&str, &str); 9] = [
 ];
 
 /// `--bin <name>` for each of [`SPAWNED_BINS`].
-fn spawned_bin_args() -> Vec<String> {
+pub fn spawned_bin_args() -> Vec<String> {
     SPAWNED_BINS.iter().flat_map(|(bin, _)| ["--bin".to_owned(), (*bin).to_owned()]).collect()
 }
 
@@ -1336,7 +1336,7 @@ const SPAWNING: [&str; 5] =
 /// unbuilt: `--tests` would build the binaries' packages' tests too, so `--examples` stands in
 /// for it. No member has an example, and selecting them is what makes cargo resolve features
 /// with the selected packages' dev-dependencies, as their test build did.
-fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
+pub fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
     let Some(packages) = packages else {
         return Some(vec!["--workspace".to_owned(), "--tests".to_owned()]);
     };

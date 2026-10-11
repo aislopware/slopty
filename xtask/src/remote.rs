@@ -475,9 +475,9 @@ fn describe(opts: &RemoteOpts) -> String {
 /// The working tree as a commit on `HEAD`, written through an index of its own, so the real
 /// index stays as the person or a lane staged it. With no `only`, it starts from a copy of the
 /// real index, whose stat cache spares hashing what did not change, and takes every edit; with
-/// `only`, it starts from `HEAD` and takes the edits under those paths alone. Files
-/// `.gitignore` names stay out, as they would from a commit; the submodules go at the commits
-/// checked out in them.
+/// `only`, it starts from `HEAD` and takes the edits under those paths alone, its lock files
+/// resolved for what it holds ([`locks`]). Files `.gitignore` names stay out, as they would
+/// from a commit; the submodules go at the commits checked out in them.
 fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) -> Result<String> {
     let index = dir.join("index");
     if only.is_empty() {
@@ -490,16 +490,102 @@ fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) ->
             .context("adding the tree to the snapshot")?;
     } else {
         cmd!(sh, "git read-tree HEAD").env("GIT_INDEX_FILE", &index).quiet().run()?;
-        cmd!(sh, "git add --all -- {only...}")
+        // The lock files are what cargo makes of the manifests, so they are made below, never
+        // taken from the tree, which other lanes' manifests moved too.
+        let unlocked: Vec<String> = LOCKS.iter().map(|lock| format!(":(exclude){lock}")).collect();
+        cmd!(sh, "git add --all -- {only...} {unlocked...}")
             .env("GIT_INDEX_FILE", &index)
             .quiet()
             .run()
             .context("adding the paths to the snapshot")?;
+        locks(sh, root, dir, &index, only)?;
     }
     let tree = cmd!(sh, "git write-tree").env("GIT_INDEX_FILE", &index).quiet().read()?;
     let message = format!("check: {name}");
     let sha = cmd!(sh, "git commit-tree --no-gpg-sign -p HEAD -m {message} {tree}").read()?;
     Ok(sha)
+}
+
+/// The workspaces' lock files, each beside the manifest of a workspace of its own.
+const LOCKS: [&str; 2] = ["Cargo.lock", "fuzz/Cargo.lock"];
+
+/// Make the snapshot's lock files at `index` hold what its manifests need: `HEAD`'s lock (the
+/// tree's, when `only` names it) resolved again by cargo against the manifests the snapshot
+/// holds, which are `HEAD`'s with the edits under `only`.
+///
+/// Taken from the tree, a lock carries what every lane's manifest edits made of it, and a check
+/// with `cargo --locked` of a snapshot without those manifests fails. Left at `HEAD`'s, it lacks
+/// what the snapshot's own manifest edits add. So the snapshot is resolved apart, in `dir`: its
+/// manifests as they are, each of its Rust files as an empty one (cargo finds targets by their
+/// paths and never reads them to resolve), and its lock files to start from. Cargo resolves
+/// offline, keeping every version the lock pins, so a lock differs only by what the manifests
+/// changed. Nothing happens when no manifest and no lock is among the snapshot's edits.
+fn locks(sh: &Shell, root: &Path, dir: &Path, index: &Path, only: &[String]) -> Result<()> {
+    let named = |lock: &str| {
+        only.iter().any(|path| {
+            let path = path.trim_end_matches('/');
+            path == lock || path == "." || lock.starts_with(&format!("{path}/"))
+        })
+    };
+    let changed = cmd!(sh, "git diff-index --cached --name-only HEAD")
+        .env("GIT_INDEX_FILE", index)
+        .quiet()
+        .read()?;
+    if !changed.lines().any(|path| path.ends_with("Cargo.toml")) && !LOCKS.iter().any(|l| named(l))
+    {
+        return Ok(());
+    }
+    let export = dir.join("locks");
+    if export.exists() {
+        std::fs::remove_dir_all(&export).with_context(|| format!("clearing {export}"))?;
+    }
+    let listed =
+        cmd!(sh, "git ls-files --cached -z").env("GIT_INDEX_FILE", index).quiet().read()?;
+    for path in listed.split('\0').filter(|p| !p.is_empty()) {
+        let to = export.join(path);
+        if path.ends_with("Cargo.toml") {
+            let spec = format!(":{path}");
+            let text = cmd!(sh, "git show {spec}").env("GIT_INDEX_FILE", index).quiet().read()?;
+            write_new(&to, text.as_bytes())?;
+        } else if Path::new(path).extension() == Some("rs") {
+            write_new(&to, b"")?;
+        }
+    }
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    for lock in LOCKS {
+        let base = if named(lock) {
+            std::fs::read(root.join(lock)).with_context(|| format!("reading {lock}"))?
+        } else {
+            let spec = format!("HEAD:{lock}");
+            cmd!(sh, "git show {spec}").quiet().ignore_stderr().ignore_status().output()?.stdout
+        };
+        let manifest = export.join(lock).with_file_name("Cargo.toml");
+        if base.is_empty() || !manifest.exists() {
+            continue;
+        }
+        write_new(&export.join(lock), &base)?;
+        cmd!(sh, "{cargo} metadata --offline --format-version 1 --manifest-path {manifest}")
+            .quiet()
+            .ignore_stdout()
+            .run()
+            .with_context(|| format!("resolving {lock} for the snapshot"))?;
+        let made = export.join(lock);
+        let blob = cmd!(sh, "git hash-object -w {made}").read()?;
+        let entry = format!("100644,{blob},{lock}");
+        cmd!(sh, "git update-index --add --cacheinfo {entry}")
+            .env("GIT_INDEX_FILE", index)
+            .quiet()
+            .run()?;
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `path`, making its directory.
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("making {parent}"))?;
+    }
+    std::fs::write(path, bytes).with_context(|| format!("writing {path}"))
 }
 
 /// The local actions (`uses: ./<path>`) `workflow`'s text runs, by path.
@@ -666,7 +752,119 @@ fn noise(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MacJob, mac_verdict, noise, unaccepted};
+    use camino::{Utf8Path, Utf8PathBuf};
+    use xshell::{Shell, cmd};
+
+    use super::{MacJob, mac_verdict, noise, snapshot, unaccepted};
+
+    /// A shell in `root` whose git ignores the user's configuration (signing, hooks, branch).
+    fn git_shell(root: &Utf8Path) -> Shell {
+        let sh = Shell::new().expect("shell");
+        sh.change_dir(root);
+        sh.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        sh.set_var("GIT_CONFIG_NOSYSTEM", "1");
+        for (key, value) in [
+            ("GIT_AUTHOR_NAME", "test"),
+            ("GIT_AUTHOR_EMAIL", "test@example.com"),
+            ("GIT_COMMITTER_NAME", "test"),
+            ("GIT_COMMITTER_EMAIL", "test@example.com"),
+        ] {
+            sh.set_var(key, value);
+        }
+        sh
+    }
+
+    fn scratch(name: &str) -> Utf8PathBuf {
+        let dir = std::env::temp_dir().join(format!("xtask-remote-{name}-{}", std::process::id()));
+        let _gone = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        Utf8PathBuf::from_path_buf(dir).expect("utf8 tmp dir")
+    }
+
+    fn write(root: &Utf8Path, path: &str, text: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, text).expect("write");
+    }
+
+    /// Crate `name`'s manifest, depending on the crates `on` by path.
+    fn manifest(name: &str, on: &[&str]) -> String {
+        use std::fmt::Write as _;
+        let deps = on.iter().fold(String::new(), |mut deps, d| {
+            let _written = writeln!(deps, "{d} = {{ path = \"../{d}\" }}");
+            deps
+        });
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{deps}"
+        )
+    }
+
+    /// The `dependencies` of package `name` in a lock file's text.
+    fn locked_deps(lock: &str, name: &str) -> Vec<String> {
+        let block = lock
+            .split("[[package]]")
+            .find(|block| block.contains(&format!("name = \"{name}\"\n")))
+            .unwrap_or_else(|| panic!("{name} is in the lock:\n{lock}"));
+        block
+            .lines()
+            .skip_while(|line| !line.starts_with("dependencies"))
+            .skip(1)
+            .take_while(|line| !line.starts_with(']'))
+            .map(|line| line.trim().trim_matches(|c| c == '"' || c == ',').to_owned())
+            .collect()
+    }
+
+    /// A snapshot of some paths holds the lock its own manifests make: a dependency a crate
+    /// among the paths gained is in it, and one another lane's crate gained in the tree is not,
+    /// though the tree's lock has both. With no manifest among the paths, it is `HEAD`'s lock.
+    #[test]
+    fn a_snapshot_s_lock_is_made_for_its_own_manifests() {
+        let root = scratch("lock-repo");
+        let dir = scratch("lock-check");
+        let sh = git_shell(&root);
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        write(
+            &root,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"d\"]\nresolver = \"3\"\n",
+        );
+        for name in ["a", "b", "c", "d"] {
+            write(&root, &format!("{name}/Cargo.toml"), &manifest(name, &[]));
+            write(&root, &format!("{name}/src/lib.rs"), "");
+        }
+        let lock = |sh: &Shell| {
+            cmd!(sh, "{cargo} metadata --offline --format-version 1").quiet().ignore_stdout().run()
+        };
+        lock(&sh).expect("the first lock");
+        cmd!(sh, "git init -q").run().expect("init");
+        cmd!(sh, "git add -A").run().expect("add");
+        cmd!(sh, "git commit -q -m first").run().expect("commit");
+        let head = cmd!(sh, "git show HEAD:Cargo.lock").read().expect("HEAD's lock");
+
+        // This lane's crate `a` takes `c`; another lane's `b` takes `d`. The tree's lock has both.
+        write(&root, "a/Cargo.toml", &manifest("a", &["c"]));
+        write(&root, "b/Cargo.toml", &manifest("b", &["d"]));
+        write(&root, "a/src/lib.rs", "//! a\n");
+        lock(&sh).expect("the tree's lock");
+        let tree = std::fs::read_to_string(root.join("Cargo.lock")).expect("tree lock");
+        assert_eq!(locked_deps(&tree, "b"), ["d"], "the tree's lock has the other lane's");
+
+        let only = |paths: &[&str]| -> String {
+            let paths: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
+            let sha = snapshot(&sh, &root, &dir, "test", &paths).expect("a snapshot");
+            let spec = format!("{sha}:Cargo.lock");
+            cmd!(sh, "git show {spec}").read().expect("its lock")
+        };
+        let mine = only(&["a"]);
+        assert_eq!(locked_deps(&mine, "a"), ["c"], "its own crate's new dependency");
+        assert!(locked_deps(&mine, "b").is_empty(), "not the other lane's: {mine}");
+        assert_eq!(only(&["a/src"]), head, "no manifest among the paths: HEAD's lock");
+        let named = only(&["a", "Cargo.lock"]);
+        assert!(locked_deps(&named, "b").is_empty(), "the tree's lock, made for the snapshot");
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.lock")).expect("lock"), tree, "kept");
+        let _gone = std::fs::remove_dir_all(&root);
+        let _gone = std::fs::remove_dir_all(&dir);
+    }
 
     fn check(name: &str, queued: bool) -> MacJob {
         MacJob { gate: false, queued, check: Some(name.to_owned()) }

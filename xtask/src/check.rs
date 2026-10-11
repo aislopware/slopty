@@ -64,7 +64,19 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     let host = TRIPLES[0];
     if part == Part::Tests {
         if cfg!(target_os = "macos") {
-            nextest(sh, b)?;
+            // On a runner, as the gate's macOS lanes test there: the binaries the tests spawn
+            // built first, and the runner's profile, whose filter leaves out what the virtual
+            // Mac lacks the hardware for.
+            let names: Vec<&str> = names().collect();
+            if let Some(spawned) = crate::gate::spawned_selection(Some(&names)) {
+                let bins = crate::gate::spawned_bin_args();
+                quiet_step(
+                    "spawned binaries",
+                    cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
+                )?;
+            }
+            let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
+            nextest(sh, b, &["--profile", crate::gate::NEXTEST_CI_PROFILE])?;
         } else {
             // As CI's linux lane tests them: without the workspace hack, whose features pull in
             // the client's GPUI, and with the binaries the tests spawn built first.
@@ -100,7 +112,7 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
         lint_linux(sh, &names().collect::<Vec<_>>())?;
     }
     if part == Part::All {
-        nextest(sh, b)?;
+        nextest(sh, b, &[])?;
     }
     if !quick {
         rustdoc(sh, &names().collect::<Vec<_>>())?;
@@ -113,13 +125,14 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     Ok(())
 }
 
-/// nextest on `built`, the crates and [`WORKSPACE_HACK`] as `-p` arguments.
-fn nextest(sh: &Shell, built: &[String]) -> Result<()> {
+/// nextest on `built`, the crates and [`WORKSPACE_HACK`] as `-p` arguments, with `profile`'s
+/// arguments (none for the default profile).
+fn nextest(sh: &Shell, built: &[String], profile: &[&str]) -> Result<()> {
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
     quiet_step(
         "nextest",
-        cmd!(sh, "cargo nextest run {built...} --no-tests=pass")
+        cmd!(sh, "cargo nextest run {built...} {profile...} --no-tests=pass")
             .env(crate::runner::RUNNER_VAR, runner),
     )
 }
