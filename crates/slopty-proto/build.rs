@@ -54,7 +54,8 @@ fn rerun_if_changed(paths: &[&str]) {
 }
 
 /// When the goldens in `crate_dir` last changed, in seconds since the Unix epoch: now while
-/// they differ from the last commit, else that commit's time. `None` without git.
+/// they differ from the last commit, else that commit's time. `None` without git, and in a
+/// shallow clone, which cannot say.
 fn wire_changed(crate_dir: &std::path::Path) -> Option<u64> {
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
@@ -65,6 +66,11 @@ fn wire_changed(crate_dir: &std::path::Path) -> Option<u64> {
             .filter(|out| out.status.success())?;
         String::from_utf8(out.stdout).ok()
     };
+    // A shallow clone (CI's) knows no commit before the one checked out, so it would stamp
+    // every commit as the wire's last change, and recompile this crate and all above it.
+    if git(&["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
+        return None;
+    }
     let edited = git(&["status", "--porcelain", "--", "tests/snapshots"])?;
     if !edited.trim().is_empty() {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
