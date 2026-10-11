@@ -159,8 +159,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     stops the streams and keeps the partials. A finished staging transfer puts its paths on
     the pasteboard as file URLs, stamped with this worker as origin, so they are not
     announced back.
-  - `Fetch` walks the path (symbolic links skipped, 10 000 files at most) and sends `Begin`
-    and then one bulk stream per file. A download cut short resumes from what the client
+  - `Fetch` walks the path (symbolic links skipped) and sends `Begin` and then one bulk
+    stream per file. A folder of more than 10 000 files is refused in words, as `Failed`
+    before `Begin` (2026-10-11): it used to be cut at 10 000 with only a log line, so part of
+    a folder landed as if it were the whole (`a_folder_past_the_limit_is_refused_not_cut`).
+    Empty directories are not carried, since only files travel; that stays (a wire change for
+    a nicety). A download cut short resumes from what the client
     holds, over the same link or the next (`docs/decisions/transport.md`, "A download outlives
     its link").
 

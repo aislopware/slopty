@@ -971,9 +971,19 @@ pub struct Outgoing {
     pub mode: u32,
 }
 
-/// The files under `path` (itself when it is a file), symbolic links left out, up to
-/// [`MAX_FILES`]. A name that is not UTF-8 cannot travel and is skipped.
+/// The files under `path` (itself when it is a file), symbolic links left out. A name that is
+/// not UTF-8 cannot travel and is skipped.
+///
+/// # Errors
+///
+/// `path` or a directory under it cannot be read, or it holds more than [`MAX_FILES`] files,
+/// which no fetch carries: a part of the folder would land as if it were the whole.
 pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
+    outgoing_up_to(path, MAX_FILES)
+}
+
+/// [`outgoing`], refusing past `max` files.
+fn outgoing_up_to(path: &Path, max: usize) -> std::io::Result<Vec<Outgoing>> {
     let base = path.parent().unwrap_or_else(|| Path::new("/"));
     let mut out = Vec::new();
     let mut stack = vec![path.to_path_buf()];
@@ -999,9 +1009,12 @@ pub fn outgoing(path: &Path) -> std::io::Result<Vec<Outgoing>> {
                 mtime_ms,
                 mode: meta.permissions().mode() & MODE_BITS,
             });
-            if out.len() >= MAX_FILES {
-                tracing::warn!(path = %path.display(), "the fetch stops at {MAX_FILES} files");
-                break;
+            if out.len() > max {
+                return Err(std::io::Error::other(format!(
+                    "{} holds more than {max} files, more than one fetch carries: fetch a folder \
+                     inside it, or pack it into one file first",
+                    path.display()
+                )));
             }
         }
     }
@@ -1540,5 +1553,20 @@ mod tests {
         assert_eq!(names, [("proj/a.txt", 1), ("proj/src/b.rs", 2)]);
         let one = outgoing(&root.join("a.txt")).unwrap();
         assert_eq!(one[0].name, "a.txt");
+    }
+
+    /// A folder with more files than a fetch carries is refused in words, never sent in part
+    /// as if it were the whole.
+    #[test]
+    fn a_folder_past_the_limit_is_refused_not_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("big");
+        std::fs::create_dir_all(&root).unwrap();
+        for n in 0..3 {
+            std::fs::write(root.join(format!("{n}.txt")), b"x").unwrap();
+        }
+        assert_eq!(outgoing_up_to(&root, 3).unwrap().len(), 3, "at the limit, whole");
+        let refused = outgoing_up_to(&root, 2).unwrap_err().to_string();
+        assert!(refused.contains("holds more than 2 files"), "{refused}");
     }
 }
