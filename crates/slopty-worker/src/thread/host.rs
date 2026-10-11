@@ -120,6 +120,8 @@ struct Inner {
     seat_env: Option<EnvOf>,
     /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
     scheduling: Arc<tokio::sync::Notify>,
+    /// The threads whose start is held at Claude Code's trust dialog ([`Host::hold_start`]).
+    held: Vec<ThreadId>,
 }
 
 /// A [`SeatEnv`], which shows as nothing more.
@@ -133,6 +135,26 @@ impl std::fmt::Debug for EnvOf {
 
 /// The file in a thread's directory that keeps the seat it was started at ([`Seated`]).
 const SEAT_FILE: &str = "seat.json";
+
+/// The file in a thread's directory that keeps its start while Claude Code is held at its
+/// trust dialog ([`HeldStart`]).
+const HELD_START_FILE: &str = "held-start.json";
+
+/// A Claude Code start held at its trust dialog, kept in its thread's directory so the person's
+/// "Trust this folder" still opens it again after the worker restarts ([`Host::hold_start`]).
+///
+/// It holds nothing secret: what the start gave `claude` (the session, the model, the mode, the
+/// first message, a seat's role), never the relay, a token or a seat's variables, which are
+/// given afresh where it opens again.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HeldStart {
+    /// What `claude` was opened with.
+    pub args: Vec<String>,
+    /// The session it was opened on.
+    pub native: String,
+    /// The folder it was opened in.
+    pub cwd: String,
+}
 
 #[derive(Debug)]
 struct Hosted {
@@ -344,6 +366,7 @@ impl Host {
     pub fn open(dir: &Path, limits: Limits) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let mut cold = HashMap::new();
+        let mut held = Vec::new();
         let mut table = Table::new(ThreadId::new().as_uuid().as_u64_pair().1);
         for entry in std::fs::read_dir(dir)? {
             // One entry the OS will not list is one thread lost, not every thread.
@@ -357,8 +380,12 @@ impl Host {
             if !path.is_dir() {
                 continue;
             }
+            let held_start = path.join(HELD_START_FILE).is_file();
             if let Some(head) = Log::head(&path) {
                 table.put(head.row.clone());
+                if held_start {
+                    held.push(head.row.id);
+                }
                 cold.insert(head.row.id, head);
                 continue;
             }
@@ -369,6 +396,9 @@ impl Host {
                 Ok(mut hosted) => {
                     let row = hosted.log.state().row(WallMs::now());
                     table.put(row.clone());
+                    if held_start {
+                        held.push(row.id);
+                    }
                     match hosted.log.write_head(&row) {
                         Ok(head) => {
                             cold.insert(row.id, head);
@@ -400,6 +430,7 @@ impl Host {
                 },
                 seat_env: None,
                 scheduling: Arc::default(),
+                held,
             })),
         })
     }
@@ -568,6 +599,7 @@ impl Host {
     pub fn remove(&self, thread: ThreadId) -> io::Result<()> {
         let mut inner = self.inner.lock();
         inner.table.remove(thread);
+        inner.held.retain(|t| *t != thread);
         if inner.cold.remove(&thread).is_some() {
             return std::fs::remove_dir_all(inner.dir.join(thread.to_string()));
         }
@@ -623,6 +655,57 @@ impl Host {
             hosted.log.state().meta.clone()
         };
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+    }
+
+    /// `thread`'s start is held at Claude Code's trust dialog: kept in its directory until it is
+    /// taken ([`Self::take_held_start`]) or the thread goes. One that cannot be written is
+    /// warned of, and is kept for this run alone.
+    pub fn hold_start(&self, thread: ThreadId, start: &HeldStart) {
+        let mut inner = self.inner.lock();
+        inner.load(thread);
+        if !inner.threads.contains_key(&thread) {
+            return;
+        }
+        let dir = inner.dir.join(thread.to_string());
+        if let Err(e) = write_atomic(&dir, HELD_START_FILE, start) {
+            tracing::warn!(%thread, "its held start could not be kept: {e}");
+        }
+        if !inner.held.contains(&thread) {
+            inner.held.push(thread);
+        }
+    }
+
+    /// The start `thread` holds at Claude Code's trust dialog, taken: it is kept no more.
+    #[must_use]
+    pub fn take_held_start(&self, thread: ThreadId) -> Option<HeldStart> {
+        let mut inner = self.inner.lock();
+        let at = inner.held.iter().position(|t| *t == thread)?;
+        inner.held.remove(at);
+        let path = inner.dir.join(thread.to_string()).join(HELD_START_FILE);
+        drop(inner);
+        let start = std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%thread, "its held start could not be let go: {e}");
+        }
+        start
+    }
+
+    /// Every start held at Claude Code's trust dialog, as kept: across a restart too.
+    #[must_use]
+    pub fn held_starts(&self) -> Vec<(ThreadId, HeldStart)> {
+        let (dir, held) = {
+            let inner = self.inner.lock();
+            (inner.dir.clone(), inner.held.clone())
+        };
+        held.into_iter()
+            .filter_map(|thread| {
+                let bytes =
+                    std::fs::read(dir.join(thread.to_string()).join(HELD_START_FILE)).ok()?;
+                Some((thread, serde_json::from_slice(&bytes).ok()?))
+            })
+            .collect()
     }
 
     /// The seat `thread` was started at, if it was ([`Self::seated`]).
@@ -967,10 +1050,15 @@ fn set_scheduled(
 /// Keep `seated` in thread directory `dir`, whole or not at all: it goes to a sibling that is
 /// renamed into place.
 fn write_seat(dir: &Path, seated: &Seated) -> io::Result<()> {
-    let bytes = serde_json::to_vec(seated).map_err(io::Error::other)?;
-    let staging = dir.join(format!(".{SEAT_FILE}"));
+    write_atomic(dir, SEAT_FILE, seated)
+}
+
+/// Write `value` as `name` in `dir` whole or not at all.
+fn write_atomic(dir: &Path, name: &str, value: &impl serde::Serialize) -> io::Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    let staging = dir.join(format!(".{name}"));
     std::fs::write(&staging, bytes)?;
-    std::fs::rename(&staging, dir.join(SEAT_FILE))
+    std::fs::rename(&staging, dir.join(name))
 }
 
 impl Inner {

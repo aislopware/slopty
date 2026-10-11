@@ -2662,6 +2662,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     dialog, so such a start used to ask nothing and wait unseen. It settles as before: on the
     first hook, or on a turn the transcript shows. Test: the trust test above, now with the
     hooks kept off and the request in before `UNHEARD`.
+  - **Across a worker restart** (2026-10-11, readiness-w 10-12 rank 5). The opening the press
+    acts on lived in the starts' task alone. A worker restarted while Claude Code waited at the
+    dialog (an update, a crash) left the thread showing the offer, and a press was refused: the
+    person had to start again. The held start is now kept in its thread's directory
+    (`held-start.json`, `Host::hold_start`) until the press takes it or the thread goes. It
+    holds what the start gave `claude` and nothing secret: no relay, no token, no seat's
+    variables, which are the worker's own for the seat again when it opens. A worker that
+    starts finds each one kept and, while Claude Code still waits in its terminal in a folder
+    still not trusted, begins its thread again there with the offer on it. A folder trusted
+    meanwhile (the person answered in the terminal) lets the held start go. A terminal not
+    adopted yet leaves it kept for the next start. Test:
+    `a_start_held_at_the_trust_dialog_is_offered_again_after_a_restart` (offered again after a
+    restart and opened again as it was on the press; let go once the folder was trusted
+    meanwhile).
   - Tests: `trust::tests::a_named_folder_is_trusted_but_never_the_home_or_above_it`
     (slopty-agent: the home, its parent and `/` refused with the config untouched);
     `trust_pressed_on_a_held_start_trusts_the_folder_and_opens_claude_again` (slopty-worker

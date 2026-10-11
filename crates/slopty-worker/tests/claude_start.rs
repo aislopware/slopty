@@ -123,6 +123,35 @@ mod claude_start {
         events: (broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
         /// Claude Code's config, in the test's own home.
         config: PathBuf,
+        /// The worker's observer and starts, ended by a restart.
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    /// The worker's threads kept in `root`, the observer of `sources` and `events`, and the
+    /// starts that open `programs`' `claude` in `terminals`, with Claude Code's trust kept in
+    /// `root`: what a worker starts with.
+    fn launch(
+        root: &Path,
+        sources: &Arc<Fake>,
+        events: &(broadcast::Sender<WorkerMsg>, broadcast::Sender<AgentEvent>),
+        terminals: &Arc<Kept>,
+        programs: &Path,
+    ) -> (Host, claude::start::Starter, Vec<tokio::task::JoinHandle<()>>) {
+        let host = Host::open(&root.join("threads"), Limits::default()).unwrap();
+        let (driver, asks) = claude::Driver::channel();
+        let observed: Arc<dyn Sources> = Arc::<Fake>::clone(sources);
+        let (told, heard) = (events.0.subscribe(), events.1.subscribe());
+        let observer = claude::spawn(host.clone(), told, heard, observed, asks);
+        let (starter, asks) = claude::start::Starter::channel();
+        let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(terminals);
+        let path = Some(programs.to_owned().into_os_string());
+        let registry = root.join("registry");
+        // Claude Code's config in the test's own home: the person's is never read.
+        let trust =
+            claude::start::TrustAt { config: root.join(".claude.json"), home: root.join("home") };
+        let spawned = claude::start::spawn_trusting;
+        let starts = spawned(host.clone(), driver, opened, path, registry, (trust, asks));
+        (host, starter, vec![observer, starts])
     }
 
     impl Rig {
@@ -134,32 +163,29 @@ mod claude_start {
             std::fs::create_dir_all(&work).unwrap();
             std::fs::create_dir_all(&programs).unwrap();
             std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
-            let host = Host::open(&root.join("threads"), Limits::default()).unwrap();
             let sources = Arc::new(Fake {
                 main: watch::Sender::new(None),
                 seen: watch::Sender::new(Seen::default()),
                 hooks_off: std::sync::atomic::AtomicBool::new(false),
             });
             let events = (broadcast::Sender::new(64), broadcast::Sender::new(64));
-            let (driver, asks) = claude::Driver::channel();
-            let observed: Arc<dyn Sources> = Arc::<Fake>::clone(&sources);
-            let (told, heard) = (events.0.subscribe(), events.1.subscribe());
-            drop(claude::spawn(host.clone(), told, heard, observed, asks));
             let terminals = Arc::new(Kept::default());
-            let (starter, asks) = claude::start::Starter::channel();
-            let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(&terminals);
-            let path = Some(programs.clone().into_os_string());
-            let registry = root.join("registry");
-            // Claude Code's config in the test's own home: the person's is never read.
-            let trust = claude::start::TrustAt {
-                config: root.join(".claude.json"),
-                home: root.join("home"),
-            };
-            std::fs::write(&trust.config, "{}").unwrap();
-            let config = trust.config.clone();
-            let spawned = claude::start::spawn_trusting;
-            drop(spawned(host.clone(), driver, opened, path, registry, (trust, asks)));
-            Self { dir, work, programs, host, terminals, sources, starter, events, config }
+            let config = root.join(".claude.json");
+            std::fs::write(&config, "{}").unwrap();
+            let (host, starter, tasks) = launch(&root, &sources, &events, &terminals, &programs);
+            Self { dir, work, programs, host, terminals, sources, starter, events, config, tasks }
+        }
+
+        /// The worker restarts: its observer and starts end, and new ones take up the threads
+        /// it kept, while the terminals stay open, as ptyd keeps them.
+        fn restart(&mut self) {
+            for task in self.tasks.drain(..) {
+                task.abort();
+            }
+            let root = std::fs::canonicalize(self.dir.path()).unwrap();
+            let launched =
+                launch(&root, &self.sources, &self.events, &self.terminals, &self.programs);
+            (self.host, self.starter, self.tasks) = launched;
         }
 
         /// Claude Code keeps the work folder trusted, as the person's "yes" would have.
@@ -419,6 +445,51 @@ mod claude_start {
         let twice = rig.starter.trust(thread).await;
         assert!(matches!(twice, Outcome::Refused { .. }), "{twice:?}");
         assert_eq!(rig.opened().len(), 2, "nothing opened again");
+    }
+
+    /// A start held at the trust dialog when the worker restarts still offers the press: the
+    /// new worker begins its thread again on the Claude Code still waiting in its terminal,
+    /// and pressed, it opens Claude Code again as it was. One whose folder the person trusted
+    /// in the terminal meanwhile is offered no more.
+    #[tokio::test]
+    async fn a_start_held_at_the_trust_dialog_is_offered_again_after_a_restart() {
+        let mut rig = Rig::new();
+        let outcome = rig.starter.start(IntentId::new(), rig.start(Some("hello"))).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        until(&rig.host, thread, |s| s.open_requests().next().is_some()).await;
+        let before = rig.host.state(thread).unwrap().1;
+
+        rig.restart();
+        let trust_offered = |s: &ThreadState| {
+            s.open_requests().any(|r| r.options.iter().any(|o| o.id == observed::TRUST_CHOICE))
+        };
+        let host = rig.host.clone();
+        let begun_again = |s: &ThreadState| {
+            trust_offered(s) && host.state(thread).is_some_and(|(_, at)| at.epoch != before.epoch)
+        };
+        let state = until(&rig.host, thread, begun_again).await;
+        assert_eq!(state.meta.terminal, Some(rig.opened()[0].3), "in the terminal it waits in");
+
+        let first = rig.opened()[0].3;
+        let pressed = tokio::spawn({
+            let starter = rig.starter.clone();
+            async move { starter.trust(thread).await }
+        });
+        gone(&rig, first, &thread_native(&rig, thread));
+        assert_eq!(pressed.await.unwrap(), Outcome::Done);
+        let opened = rig.opened();
+        let [(first, ..), (again, ..)] = opened.as_slice() else { panic!("{opened:?}") };
+        assert_eq!(again, first, "opened again as it was");
+
+        // Held again, and answered in the terminal while the worker was down.
+        std::fs::write(&rig.config, "{}").unwrap();
+        let outcome = rig.starter.start(IntentId::new(), rig.start(Some("again"))).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        until(&rig.host, thread, |s| s.open_requests().next().is_some()).await;
+        rig.trust_work();
+        rig.restart();
+        let twice = rig.starter.trust(thread).await;
+        assert!(matches!(twice, Outcome::Refused { .. }), "{twice:?}");
     }
 
     /// A server task's thread opens Claude Code in a terminal under the seat, with the seat's
