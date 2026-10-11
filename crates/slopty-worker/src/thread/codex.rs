@@ -986,14 +986,35 @@ impl Session {
 
     /// Every start not answered is refused with `reason`: Codex went before it answered.
     /// What waited on this link when it went: starts and forks refused for `reason`, answers
-    /// said not to have gone ([`REQUEST_ENDED`]); the messages, to wait for the next link
-    /// ([`HOLD_FOR`]).
+    /// said not to have gone ([`REQUEST_ENDED`]); the messages, those queued behind a turn in
+    /// each thread's own queue among them, to wait for the next link ([`HOLD_FOR`]). One the
+    /// person's stop held stays held, saying so, for them to send again.
     fn abandon(&mut self, reason: &str) -> Vec<Ask> {
         let waiting = std::mem::take(&mut self.held)
             .into_iter()
             .chain(std::mem::take(&mut self.waking).into_values().flatten());
         let mut held = Vec::new();
         let mut messages = Vec::new();
+        let queues = self
+            .threads
+            .values_mut()
+            .map(|f| (f.id, f.shared.queue().take_all()))
+            .chain(
+                self.requeue
+                    .drain()
+                    .map(|(native, q)| (slopty_agent::codex::shared::thread_of(&native), q)),
+            )
+            .collect::<Vec<_>>();
+        for (thread, queue) in queues {
+            for (pending, _attached) in queue.into_held() {
+                if pending.stopped() {
+                    not_sent(&self.host, thread, pending, Pending::STOPPED);
+                    continue;
+                }
+                let Pending { intent, text, attachments, delivery, .. } = pending;
+                messages.push(Ask::Send { thread, text, attachments, delivery, intent });
+            }
+        }
         for ask in waiting {
             match ask {
                 Ask::Start { id, reply, .. } => held.push((id, vec![reply])),
@@ -1561,6 +1582,16 @@ impl Session {
         not_sent(&self.host, thread, pending, reason);
     }
 
+    /// Message `intent` of `thread` goes now: it leaves the thread's list of messages on their
+    /// way, where it stood when it was queued behind a turn on a link that went.
+    fn gone_from_list(&self, thread: ThreadId, intent: IntentId) {
+        let Some((state, _)) = self.host.state(thread) else { return };
+        if state.pending.iter().any(|p| p.intent == intent) {
+            let list = state.pending.into_iter().filter(|p| p.intent != intent).collect();
+            self.host.apply(thread, vec![Action::PendingSet(list)]);
+        }
+    }
+
     /// Host Codex thread `thread`, as it now stands.
     async fn follow(&mut self, thread: &p::Thread) -> Result<(), String> {
         let terminal = self.tuis.running.get(&slopty_agent::codex::shared::thread_of(&thread.id));
@@ -1879,9 +1910,11 @@ impl Session {
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
                 match followed.shared.send(&text, attached, delivery, intent) {
                     Send::Start(params) => {
+                        self.gone_from_list(thread, intent);
                         self.request(params.as_ref(), Waiting::Turn { thread }).await
                     }
                     Send::Steer(params) => {
+                        self.gone_from_list(thread, intent);
                         self.request(params.as_ref(), Waiting::Turn { thread }).await
                     }
                     Send::Held(actions) => {

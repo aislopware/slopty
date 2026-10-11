@@ -1364,6 +1364,79 @@ mod codex {
         assert_eq!(sent.last().unwrap()["params"]["threadId"], native);
     }
 
+    /// A stand-in for the person's Codex whose link goes in the middle of a turn: it has the
+    /// recording's thread loaded, takes it up again, starts the first turn as the recording did
+    /// and leaves it running; once `cut` fires it closes the link, and the next one is Codex
+    /// after a restart ([`restarted`]). Every frame the worker sent goes to `heard`.
+    async fn cut_mid_turn(
+        listener: UnixListener,
+        heard: mpsc::UnboundedSender<Value>,
+        cut: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let lines = starter();
+        let native = resumed()["result"]["thread"]["id"].clone();
+        {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut cut = std::pin::pin!(cut);
+            loop {
+                let msg = tokio::select! {
+                    _ = &mut cut => break,
+                    msg = next(&mut ws, &heard) => match msg { Some(msg) => msg, None => break },
+                };
+                let id = msg["id"].clone();
+                let mut answer = match msg["method"].as_str() {
+                    Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                    Some("thread/loaded/list") => {
+                        json!({ "result": { "data": [native], "nextCursor": null } })
+                    }
+                    Some("thread/resume") => resumed(),
+                    Some("turn/start") => lines[recorded(&lines, "turn/start").1].msg.clone(),
+                    _ => continue,
+                };
+                answer["id"] = id;
+                say(&mut ws, &answer).await;
+                if msg["method"] == "turn/start" {
+                    let started = lines.iter().find(|l| l.msg["method"] == "turn/started");
+                    let mut started = started.unwrap().msg.clone();
+                    started["params"]["threadId"] = native.clone();
+                    say(&mut ws, &started).await;
+                }
+            }
+        }
+        restarted(listener, heard).await;
+    }
+
+    /// A message queued behind a turn when Codex's link goes is not lost with the link's own
+    /// queue: it waits for the next link and goes there as a turn of its own, leaving the list
+    /// of messages on their way.
+    #[tokio::test]
+    async fn a_message_queued_behind_a_turn_goes_after_codex_s_link_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let (host, thread) = kept_thread(dir.path(), short.path()).await;
+        let socket: PathBuf = short.path().join("after.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let (cut, cutting) = tokio::sync::oneshot::channel();
+        let _server = tokio::spawn(cut_mid_turn(listener, tx, cutting));
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        handle.send(thread, "First.".to_owned(), Vec::new(), Delivery::Steer, IntentId::new());
+        until_sent(&mut heard, "turn/start").await;
+        polled(&host, thread, |s| s.turns.last().is_some_and(|t| t.state == TurnState::Active))
+            .await;
+        let queued = IntentId::new();
+        handle.send(thread, "Then this.".to_owned(), Vec::new(), Delivery::Queue, queued);
+        polled(&host, thread, |s| s.pending.iter().any(|p| p.intent == queued)).await;
+
+        cut.send(()).unwrap();
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let turn = sent.last().unwrap();
+        assert_eq!(turn["params"]["input"][0]["text"], "Then this.", "{sent:?}");
+        polled(&host, thread, |s| !s.pending.iter().any(|p| p.intent == queued)).await;
+    }
+
     /// Whether `state` holds the message `intent` back, saying `reason`.
     fn held_back(state: &ThreadState, intent: IntentId, reason: &str) -> bool {
         state.pending.iter().any(|p| {

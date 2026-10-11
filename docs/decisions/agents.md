@@ -2820,10 +2820,15 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     again at once if anyone follows it (`Host::followers`). Others are taken up on the next
     follow or message, as before. A thread Codex still holds waits for its resume too, so a
     kept message cannot find it not yet followed.
-  - Not done: a message queued behind a running turn waits in the old link's queue
-    (`Shared`), and it goes with that link.
+  - **What was queued behind a turn waits too** (the same day). A message queued while a turn
+    ran waited in the link's own queue (`Shared`), so it went with the link. On a link's end,
+    each followed thread's queue is taken (`Queue::into_held`), along with any held for a
+    thread being read again. Its messages wait for the next link as any message written
+    meanwhile does. Once one goes, it leaves the thread's list of messages on their way. One
+    the person's stop held stays held, saying so (`Pending::STOPPED`), for them to send again.
   - Tests (`slopty-worker/tests/codex.rs`):
     `a_message_written_while_codex_is_away_goes_once_it_is_back`,
     `a_message_codex_does_not_come_back_for_is_said_not_to_have_gone` (on a paused clock),
     `an_answer_given_while_codex_is_away_is_said_not_to_have_gone_at_once`,
-    `a_followed_thread_is_taken_up_again_once_codex_is_back`.
+    `a_followed_thread_is_taken_up_again_once_codex_is_back`,
+    `a_message_queued_behind_a_turn_goes_after_codex_s_link_comes_back`.

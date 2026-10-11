@@ -133,6 +133,12 @@ impl<X> Queue<X> {
         Some(self.shown())
     }
 
+    /// Everything held, in its order, for a link that goes with its queue: the adapter sends
+    /// each again on the next one, or says it did not go.
+    pub fn into_held(self) -> impl Iterator<Item = (Pending, X)> {
+        self.held.into_iter()
+    }
+
     /// Whether nothing is held.
     #[must_use]
     pub fn is_empty(&self) -> bool {
