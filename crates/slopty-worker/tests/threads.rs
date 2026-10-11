@@ -115,6 +115,61 @@ mod threads {
         host.state(thread).expect("the thread is held")
     }
 
+    /// What opening the host costs a worker that kept many threads: 2,000 threads of 20 turns,
+    /// each with an answer of about 2 KB, written once, then opened again and timed. Run by
+    /// hand for `docs/MEASUREMENTS.md` (readiness-w 10-11 rank 7):
+    /// `cargo nextest run -p slopty-worker --release --run-ignored only -E
+    /// 'test(host_open_cost)' --no-capture`.
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn host_open_cost() {
+        const THREADS: usize = 2_000;
+        const TURNS: u32 = 20;
+        let dir = tempfile::tempdir().unwrap();
+        let answer = "The build failed on a missing import, now fixed. ".repeat(40);
+        {
+            let host = open(dir.path());
+            for _ in 0..THREADS {
+                let meta = meta();
+                let thread = meta.id;
+                host.create(meta).unwrap();
+                let actions = (1..=TURNS).flat_map(|n| {
+                    let id = format!("a{n}");
+                    [turn(n), text(&id, n), append(&id, &answer)]
+                });
+                host.apply(thread, actions.collect());
+            }
+        }
+        let bytes = walk(dir.path());
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let started = std::time::Instant::now();
+            let host = open(dir.path());
+            times.push(started.elapsed());
+            drop(host);
+        }
+        times.sort_unstable();
+        eprintln!(
+            "host_open_cost: {THREADS} threads x {TURNS} turns, {} MiB on disk, open median {} ms, \
+             worst {} ms",
+            bytes >> 20,
+            times[times.len() / 2].as_millis(),
+            times[times.len() - 1].as_millis()
+        );
+    }
+
+    /// The bytes of every file under `dir`.
+    fn walk(dir: &Path) -> u64 {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let meta = entry.metadata().unwrap();
+                if meta.is_dir() { walk(&entry.path()) } else { meta.len() }
+            })
+            .sum()
+    }
+
     /// The log outlives the worker: the state comes back whole, the epoch stays, and a cursor
     /// from before the restart is sent only what it missed.
     #[tokio::test]

@@ -681,11 +681,15 @@ mod tests {
         assert!(caps.lan.iter().all(|port| port.mac.is_unicast()), "{:?}", caps.lan);
     }
 
-    /// This Mac says whether it wakes for a magic packet.
+    /// This Mac's answer is what `pmset -g` says of `womp`. A virtual Mac (a CI runner) has
+    /// no network card that wakes, and no `womp` line, so the answer is unknown there.
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn this_mac_says_whether_it_wakes_on_lan() {
-        assert!(wake_on_lan().await.is_some());
+        let pmset = std::process::Command::new("/usr/bin/pmset").arg("-g").output().unwrap();
+        assert!(pmset.status.success(), "pmset -g answers");
+        let said = String::from_utf8_lossy(&pmset.stdout);
+        assert_eq!(wake_on_lan().await, womp(&said), "{said}");
     }
 
     #[cfg(target_os = "macos")]
