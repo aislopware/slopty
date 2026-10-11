@@ -5,8 +5,10 @@
 //! merged it), the permission prompts the daemon holds and settles, in order
 //! ([`Driver::permission`]), and what the hooks and the mod said of each session
 //! ([`Sources::seen`]). A task per terminal session running Claude Code reads its transcripts
-//! on the blocking pool, at once after a hook and on a [`TICK`] between, and puts what the codec
-//! makes of it all into the [`Host`]: a thread per Claude Code session, one per subagent.
+//! on the blocking pool, at once after a hook and whenever the kernel says one was written
+//! (`follow`), and puts what the codec makes of it all into the [`Host`]: a thread per Claude
+//! Code session, one per subagent. It looks again on a [`TICK`] only while time alone may change
+//! what its thread says, and otherwise on a [`RESTING_TICK`], in case a write went unheard.
 //!
 //! A session's thread is begun when its own id is known (its first hook, or the transcript
 //! file's name), since that id names the thread. Until then, a Claude Code the tracker sees in
@@ -49,11 +51,19 @@ use tokio::task::JoinHandle;
 use super::Host;
 use crate::conversation::Seen;
 
+mod follow;
 pub mod start;
 
-/// How often a session's transcripts are read between hooks: answers and thinking arrive with
-/// no hook of their own.
+/// How often a session is looked at while time alone may change what it says.
+///
+/// That is while a block waits out its grace before it asks in the terminal
+/// ([`Observed::ticking`]), a live block may expire, or a start that no hook has spoken for may
+/// be held at a dialog. A file the kernel cannot report on is looked at this often too.
 pub const TICK: Duration = Duration::from_millis(250);
+
+/// How often a session at rest is read anyway: the kernel's events say when a transcript was
+/// written, so this only bounds what a write they missed could wait.
+pub const RESTING_TICK: Duration = Duration::from_secs(5);
 
 /// Where the daemon keeps what an observed session needs.
 pub trait Sources: Send + Sync {
@@ -167,6 +177,7 @@ pub fn spawn(
             cwds: HashMap::new(),
             titles: HashMap::new(),
             claims: Claims::default(),
+            follows: follow::Follows::start(),
         };
         loop {
             tokio::select! {
@@ -229,6 +240,8 @@ struct Observers {
     cwds: HashMap<SessionId, String>,
     titles: HashMap<SessionId, String>,
     claims: Claims,
+    /// The transcripts every session reads, followed together.
+    follows: follow::Follows,
 }
 
 impl Observers {
@@ -244,7 +257,8 @@ impl Observers {
             }
             let claims = Arc::clone(&self.claims);
             let sources = Arc::clone(&self.sources);
-            tokio::spawn(observe(self.host.clone(), session, sources, claims, rx));
+            let followed = self.follows.join();
+            tokio::spawn(observe(self.host.clone(), session, sources, claims, followed, rx));
             tx
         });
         if tx.send(input).is_err() {
@@ -289,6 +303,7 @@ async fn observe(
     session: SessionId,
     sources: Arc<dyn Sources>,
     claims: Claims,
+    (followed, mut written): (follow::Followed, mpsc::Receiver<()>),
     mut inputs: mpsc::UnboundedReceiver<Input>,
 ) {
     let mut seen = sources.seen(session);
@@ -310,6 +325,7 @@ async fn observe(
         meters: seen.borrow().meters.clone(),
         silent_since: None,
         trust: None,
+        followed,
     };
     // The hook that brought the session here was heard before this watched for changes.
     let heard = seen.borrow().cwd.clone();
@@ -317,9 +333,10 @@ async fn observe(
         on.cwd = cwd;
         on.hooked_cwd = true;
     }
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ticked = tokio::time::Instant::now();
     loop {
+        let every = if on.ticking() { TICK } else { RESTING_TICK };
+        let next = ticked.checked_add(every).unwrap_or(ticked);
         tokio::select! {
             input = inputs.recv() => match input {
                 None => {
@@ -375,7 +392,9 @@ async fn observe(
                 }
                 Err(_) => watching = false,
             },
-            _ = tick.tick() => {
+            Some(()) = written.recv() => on.read().await,
+            () = tokio::time::sleep_until(next) => {
+                ticked = tokio::time::Instant::now();
                 on.read().await;
                 let board = seen.borrow().live.clone();
                 if let Some(observed) = on.observed.as_mut() {
@@ -416,9 +435,16 @@ struct Session {
     silent_since: Option<Instant>,
     /// The folder the person may trust, should Claude Code here be held at its dialog.
     trust: Option<String>,
+    /// The session's transcripts, as the kernel's events follow them.
+    followed: follow::Followed,
 }
 
 impl Session {
+    /// Whether the session must be looked at on the short [`TICK`] now.
+    fn ticking(&self) -> bool {
+        self.silent_since.is_some() || self.observed.as_ref().is_some_and(Observed::ticking)
+    }
+
     async fn status(&mut self, event: AgentEvent) {
         let native = event.agent_session.clone().or_else(|| self.native_from_file());
         match native {
@@ -638,6 +664,8 @@ impl Session {
     async fn read(&mut self) {
         self.offer_commands().await;
         let sources = self.sources.sources(self.terminal);
+        let paths: Vec<PathBuf> = sources.main.iter().chain(&sources.subagents).cloned().collect();
+        self.followed.set(&paths);
         let Some(main) = sources.main else { return };
         if self.observed.as_ref().is_none_or(Observed::is_provisional)
             && let Some(native) = stem(&main)

@@ -16233,3 +16233,39 @@ Step 2 takes the terminal (18,000 lines) out of that harness.
 Lines: `slopty-kit` holds 14,762 of Rust with its unit tests, and `slopty-ui` is that much
 smaller, less the lints. The lints move out of the kit into `slopty-ui/src/lints.rs` and
 `lints/overflow.rs` (1,725 lines), so the views' harness still builds them.
+
+## 2026-10-11 — an observed Claude Code's transcript, read on the kernel's word
+
+With no mod and no hook for the write, an observed session read its transcript on a 250 ms
+tick, so an answer reached its thread a tick later on average and up to a whole tick late.
+Now one shared follower (kqueue, inotify) rings the session that reads the file written, and a
+session at rest looks again only every 5 s, or every 250 ms while time alone can change its
+thread. Both runs are the worker daemon end to end on a `macos-26` runner, release with LTO
+off and 16 codegen units for both (fat LTO ran past the job's limit): before run 38134291172
+(HEAD 8ba9942f49), after run 38134321316 (82db747328).
+
+| what | before | after |
+| --- | --- | --- |
+| write → thread, no hook, 120 answers 97 ms apart (p50 / p90 / p99 / max) | 133.1 / 230.3 / 238.4 / 244.6 ms | 6.8 / 8.1 / 11.7 / 16.8 ms |
+| worker at rest, no session | 18.4 wakeups/s | 22.9 wakeups/s |
+| worker at rest, 8 observed sessions | 30.4 wakeups/s | 21.1 wakeups/s |
+| each observed session at rest | 1.50 wakeups/s | none above the noise (−0.22) |
+
+- **The answer now comes in under a frame.** The p99 went from a whole tick (the 2026-10-04
+  entry "an echo beside a followed thread" had 218.6 ms on that path) to 11.7 ms. What
+  remains is the follower's quiet spell (2 ms), the read on the blocking pool and the
+  host.
+- **Sessions at rest cost nothing measurable.** The no-session baseline moved by 4.5
+  wakeups/s between the two runs, which is the runner's noise. Before, the 8 sessions' 250 ms
+  ticks added 12 wakeups/s (less than 8 × 4, since ticks that fall together are one wake of
+  the runtime). After, the 8 sessions sit inside the noise.
+- **Cycles read zero on the runner.** `ri_cycles` from `proc_pid_rusage` is 0 in the runner's
+  virtual machine, so only wakeups are compared here.
+
+```sh
+export CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+cargo build --release -p slopty-ptyd -p slopty-cli
+cargo test -p slopty-workerd --release --test e2e -- --ignored --nocapture --test-threads=1 \
+  a_transcript_write_reaches_its_follower observed_sessions_at_rest
+# before: main with only the two tests added (apps/slopty-worker/tests/e2e.rs)
+```

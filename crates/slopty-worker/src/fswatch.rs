@@ -95,6 +95,10 @@ pub struct Status {
     pub events: bool,
     /// Watch lists taken so far.
     pub lists: u64,
+    /// The paths of the last list taken, sorted: each is followed from its stamp at the take,
+    /// so a change after the status says it is reported, and only a look after that sees one
+    /// made before.
+    pub followed: Vec<String>,
 }
 
 /// The paths whose files changed, as the follower reports them. Dropping it ends the follower.
@@ -441,7 +445,9 @@ impl State {
         let mut polled: Vec<String> =
             self.files.iter().filter(|(_, f)| f.polled).map(|(k, _)| k.clone()).collect();
         polled.sort();
-        Status { files: self.files.len(), polled, events: self.queue.is_some(), lists }
+        let mut followed: Vec<String> = self.files.keys().cloned().collect();
+        followed.sort();
+        Status { files: self.files.len(), polled, events: self.queue.is_some(), lists, followed }
     }
 
     /// Take a new watch list. A kept path that was polled is watched again if the watches it

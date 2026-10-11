@@ -532,6 +532,20 @@ impl Observed {
         self.meta.native.is_empty()
     }
 
+    /// Whether time alone may still change what the thread says: a block waits out its
+    /// [`ASK_GRACE`] before it asks in the terminal ([`Observed::waited`]), or a live block is
+    /// shown that its step's end leaves to expire ([`live::SETTLE_GRACE`]). Only then must the
+    /// worker look at it on a short tick.
+    #[must_use]
+    pub fn ticking(&self) -> bool {
+        let asks = self.blocked_kind.is_some()
+            && self.in_terminal.is_none()
+            && self.open.is_empty()
+            && self.meta.terminal.is_some()
+            && self.status.as_ref().is_some_and(|s| self.held_block != Some(s.since_ms));
+        asks || !self.overlay.is_empty()
+    }
+
     /// A hook spoke for the session: prompts are held from now on, so the thread declares
     /// `approvals`.
     pub fn hooked(&mut self) -> Vec<Out> {

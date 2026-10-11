@@ -542,6 +542,42 @@ mod claude_threads {
         until(&host, provisional, |s| s.meta.cwd == "/work/sub").await;
     }
 
+    /// An answer Claude Code writes with no hook to say so (no mod streams it either) reaches
+    /// the thread on the kernel's word that the transcript was written, well inside
+    /// [`claude::RESTING_TICK`], so not by the look a session at rest still takes now and then.
+    /// The first is written as the thread begins, while the follower may not have taken the
+    /// transcript yet; the others once the session is at rest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answer_written_with_no_hook_reaches_the_thread_at_once() {
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        until(&host, thread, |_| true).await;
+        let mut transcript = std::fs::OpenOptions::new().append(true).open(&rig.main).unwrap();
+        for n in 1..=3_u32 {
+            if n > 1 {
+                tokio::time::sleep(Duration::from_millis(1_200)).await;
+            }
+            let text = format!("answer {n}");
+            let record = serde_json::json!({
+                "type": "assistant", "uuid": format!("a{n}"),
+                "parentUuid": (n > 1).then(|| format!("a{}", n.saturating_sub(1))),
+                "timestamp": "2026-09-27T03:15:26.000Z",
+                "message": { "role": "assistant", "content": [{ "type": "text", "text": text }] },
+            });
+            let written = Instant::now();
+            std::io::Write::write_all(&mut transcript, format!("{record}\n").as_bytes()).unwrap();
+            until(&host, thread, |s| {
+                s.items.iter().any(|i| matches!(&i.body, ItemBody::Text(t) if t.text == text))
+            })
+            .await;
+            let took = written.elapsed();
+            assert!(took < Duration::from_millis(500), "answer {n} took {took:?}");
+        }
+    }
+
     /// The status line's meters heard before the session's thread begins are its first: a
     /// window said once, before Claude Code named its session, is not lost until the next.
     #[tokio::test]

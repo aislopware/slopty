@@ -284,6 +284,9 @@ mod follow {
         let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
         let (lists, mut changes) = following(&refs, limits).await;
         let polled = status(&changes).polled;
+        let mut every: Vec<String> = paths.iter().map(|p| key(p)).collect();
+        every.sort();
+        assert_eq!(status(&changes).followed, every, "the list taken, polled ones too");
         assert!(polled.contains(&key(&paths[2])), "{polled:?}");
         assert!(!polled.contains(&key(&paths[0])), "{polled:?}");
 
@@ -297,6 +300,7 @@ mod follow {
         lists.send_replace(vec![key(&paths[2])]);
         changes.status().wait_for(|s| s.lists >= 2).await.unwrap();
         assert!(status(&changes).polled.is_empty(), "{:?}", status(&changes).polled);
+        assert_eq!(status(&changes).followed, [key(&paths[2])], "the list taken now");
         write_in_place(&paths[0], "dropped\n");
         write_in_place(&paths[2], "followed\n");
         assert_eq!(next(&mut changes, poll / 2).await, Some(vec![key(&paths[2])]));

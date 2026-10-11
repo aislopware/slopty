@@ -5438,6 +5438,148 @@ mod tests {
         reader.abort();
     }
 
+    /// A Claude Code record of an answer saying when it was written, `us` after the test began.
+    fn answer_record(n: u64, us: u128, text: &str) -> String {
+        let record = serde_json::json!({
+            "type": "assistant", "uuid": format!("g{n}"),
+            "parentUuid": (n > 1).then(|| format!("g{}", n.saturating_sub(1))),
+            "timestamp": "2026-09-27T03:15:26.000Z",
+            "message": { "role": "assistant",
+                "content": [{ "type": "text", "text": format!("t={us} {text}") }] },
+        });
+        format!("{record}\n")
+    }
+
+    /// A measurement, not a check: how long an answer appended to the transcript of a Claude
+    /// Code the mod does not reach takes to reach a follower, with no hook to say it was
+    /// written. 120 answers, 97 ms apart, so each lands at another moment of any timer the
+    /// worker reads on.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
+                a_transcript_write_reaches_its_follower -- --ignored --nocapture"]
+    async fn a_transcript_write_reaches_its_follower() {
+        use slopty_proto::ctl::CtlRequest;
+        use slopty_proto::thread::wire::{ThreadFrame, ThreadRequest};
+        use slopty_proto::thread::{Action, ItemBody};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let agent = open_shell(&mut worker, dir.path()).await;
+        let main = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "").unwrap();
+        let sock = dir.path().join("worker.sock");
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "session_id": "s1",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
+        let thread = slopty_agent::observed::thread_of("s1");
+
+        let WorkerConn { mut tx, rx, conn, .. } = worker;
+        let reader = tokio::spawn(async move {
+            let mut rx = rx;
+            while rx.recv().await.is_ok() {}
+        });
+        let follow = ThreadRequest::Follow { thread, have: None, turns: 1, max_latency_ms: 0 };
+        tx.send(&ClientMsg::Thread(follow)).await.unwrap();
+        let mut stream = thread_stream(&conn).await;
+        let base = std::time::Instant::now();
+        let follower = tokio::spawn(async move {
+            let mut lags = Vec::new();
+            let mut timed = std::collections::HashSet::new();
+            while let Ok(frame) = stream.recv().await {
+                let ThreadFrame::Actions { actions, .. } = frame else { continue };
+                for action in actions {
+                    let (Action::ItemStarted(item) | Action::ItemCompleted(item)) = action else {
+                        continue;
+                    };
+                    let ItemBody::Text(text) = item.body else { continue };
+                    let written = text.text.strip_prefix("t=").and_then(|t| {
+                        t.split_once(' ').and_then(|(us, _)| us.parse::<u128>().ok())
+                    });
+                    if let Some(us) = written.filter(|us| timed.insert(*us)) {
+                        let now = base.elapsed().as_micros();
+                        #[expect(clippy::cast_precision_loss, reason = "micros below 2^53")]
+                        lags.push(now.saturating_sub(us) as f64 / 1e3);
+                    }
+                }
+            }
+            lags
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
+        for n in 1..=120_u64 {
+            let record = answer_record(n, base.elapsed().as_micros(), "an answer");
+            std::io::Write::write_all(&mut file, record.as_bytes()).unwrap();
+            tokio::time::sleep(Duration::from_millis(97)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tx.send(&ClientMsg::Thread(ThreadRequest::Unfollow { thread })).await.unwrap();
+        let lags = tokio::time::timeout(STEP, follower).await.unwrap().unwrap();
+        let (p50, p99, max) = p50_p99_max(&lags);
+        let (_p50, p90, _max) = quantiles(&mut lags.clone());
+        eprintln!(
+            "write → follower, no hook, over {} answers: p50 {p50:.1} / p90 {p90:.1} / \
+             p99 {p99:.1} / max {max:.1} ms",
+            lags.len()
+        );
+        assert_eq!(lags.len(), 120, "every answer reached the follower");
+        reader.abort();
+    }
+
+    /// A measurement, not a check: what Claude Code sessions observed at rest cost the worker.
+    /// Its idle wakeups and cycles over ten seconds, first with no session, then with eight
+    /// shells each heard as a Claude Code with a transcript that does not change.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "a measurement: cargo test -p slopty-workerd --release --test e2e \
+                observed_sessions_at_rest -- --ignored --nocapture"]
+    async fn observed_sessions_at_rest() {
+        use slopty_proto::ctl::CtlRequest;
+
+        const SESSIONS: u64 = 8;
+        const OVER: Duration = Duration::from_secs(10);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (guard, mut worker) = connect(dir.path()).await;
+        let pid = guard.0.get(1).and_then(Child::id).and_then(|p| i32::try_from(p).ok()).unwrap();
+        let rest = async |what: &str| {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let before = slopty_testkit::process::usage(pid).unwrap();
+            tokio::time::sleep(OVER).await;
+            let after = slopty_testkit::process::usage(pid).unwrap();
+            let secs = OVER.as_secs_f64();
+            #[expect(clippy::cast_precision_loss, reason = "counts below 2^53")]
+            let (woke, cycles) = (
+                after.wakeups.saturating_sub(before.wakeups) as f64 / secs,
+                after.cycles.saturating_sub(before.cycles) as f64 / secs / 1e6,
+            );
+            eprintln!("worker at rest, {what}: {woke:.1} wakeups/s, {cycles:.2} M cycles/s");
+            (woke, cycles)
+        };
+        let (idle_woke, idle_cycles) = rest("no session").await;
+        let sock = dir.path().join("worker.sock");
+        std::fs::create_dir_all(dir.path().join("projects")).unwrap();
+        for n in 1..=SESSIONS {
+            let agent = open_shell(&mut worker, dir.path()).await;
+            let main = dir.path().join("projects").join(format!("s{n}.jsonl"));
+            std::fs::write(&main, answer_record(1, 0, "an answer")).unwrap();
+            let start = serde_json::json!({
+                "hook_event_name": "SessionStart", "session_id": format!("s{n}"),
+                "transcript_path": main, "cwd": dir.path(),
+            });
+            ctl(&sock, &CtlRequest::Hook { session: agent, payload: start.to_string() }).await;
+        }
+        let (woke, cycles) = rest(&format!("{SESSIONS} observed sessions")).await;
+        #[expect(clippy::cast_precision_loss, reason = "a handful")]
+        let each = SESSIONS as f64;
+        eprintln!(
+            "each observed session at rest: {:.2} wakeups/s, {:.3} M cycles/s",
+            (woke - idle_woke) / each,
+            (cycles - idle_cycles) / each
+        );
+    }
+
     /// The next control message `pick` takes, within a step.
     async fn next_control<T>(
         events: &mut tokio::sync::mpsc::Receiver<LinkEvent>,

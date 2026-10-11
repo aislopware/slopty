@@ -240,6 +240,7 @@ fn live_blocks_stream_after_their_prompt_then_the_transcript_settles_them() {
         assert!(appends(&outs) > 0, "{scenario}: what the blocks said meanwhile");
         host.take(outs);
         assert!(provisional(&host) > 0, "{scenario}: live items shown");
+        assert!(live.ticking(), "{scenario}: a shown block may expire");
         let main = host.thread(live.main());
         let prompt = main.items.iter().position(|i| matches!(i.body, ItemBody::User(_)));
         let first_live = main.items.iter().position(|i| i.id.0.starts_with("live:"));
@@ -251,6 +252,7 @@ fn live_blocks_stream_after_their_prompt_then_the_transcript_settles_them() {
         let changes = Transcripts::default().read(&dir.join("transcript.jsonl"), &subagents(&dir));
         host.take(live.transcript(&changes, &[]));
         assert_eq!(provisional(&host), 0, "{scenario}: every live item settled");
+        assert!(!live.ticking(), "{scenario}: nothing left to expire");
         let (_, alone, _) = replay(&dir);
         for (id, state) in &alone.threads {
             assert_eq!(host.thread(*id).items, state.items, "{scenario}: as the transcript alone");
@@ -647,10 +649,13 @@ fn a_block_with_no_prompt_held_asks_in_the_terminal() {
     };
 
     let asked = "How should the test wait?";
+    assert!(!observed.ticking(), "nothing waits on time");
     host.take(observed.status(&event(question(), Some(asked), 5)));
     host.take(observed.waited(WallMs::from_millis(404)));
     assert!(open(&host, &observed).is_empty(), "a held prompt may still come");
+    assert!(observed.ticking(), "the grace runs on time alone");
     host.take(observed.waited(after(5)));
+    assert!(!observed.ticking(), "asked, it waits on the person");
     let [request] = open(&host, &observed).try_into().expect("one request");
     assert_eq!((request.kind.as_str(), request.title.as_str()), (Request::QUESTION, asked));
     assert!(request.options.is_empty() && request.questions.is_empty(), "answered only there");
@@ -687,6 +692,7 @@ fn a_block_with_no_prompt_held_asks_in_the_terminal() {
     host.take(observed.waited(after(20)));
     let ids: Vec<String> = open(&host, &observed).into_iter().map(|r| r.id.0).collect();
     assert_eq!(ids, ["7"], "the held prompt alone");
+    assert!(!observed.ticking(), "a held prompt asks nothing in the terminal");
     let by = ClientId::from_uuid(uuid::Uuid::from_u128(5));
     let outcome = Settled::Answered { verdict: Verdict::Allow, by };
     host.take(observed.permission(&PermissionEvent::Settled { session, ask: 7, outcome }));

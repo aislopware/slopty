@@ -184,9 +184,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     tracker's merged status (`WorkerMsg::Agent`), the held prompts (`WorkerMsg::Permission`),
     and the session summaries for the working directory. It also gets the board each followed
     session already has, with its hooks heard, meters, subagent files and the mod's blocks.
-    It reads the transcripts itself on the blocking pool, after each hook and every 250 ms,
-    with the same decoder the face uses. Nothing of the old path changes. The daemon starts it
-    (`apps/slopty-worker/src/threads.rs`), with the host under `<data dir>/threads`.
+    It reads the transcripts itself on the blocking pool, after each hook and on the kernel's
+    word that one was written (since 2026-10-11, "An observed Claude Code is read when its
+    transcript is written"), with the same decoder the face uses. Nothing of the old path
+    changes. The daemon starts it (`apps/slopty-worker/src/threads.rs`), with the host under
+    `<data dir>/threads`.
   - **A thread per Claude Code session, named by the session's own id.** The id is derived
     from the session id (and for a subagent, from that and its agent id). So the same session
     is the same thread across a worker restart, and across a `claude --resume` in another
@@ -2903,3 +2905,41 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `the_gate_lets_through_what_the_mode_allows` (`slopty-agent/tests/pi.rs`); the unknown
     mode in `a_start_pi_cannot_take_is_refused` (`slopty-worker/tests/pi.rs`); the pi task's
     mode in `any_agent_runs_a_task_as_a_thread` (`hub/thread_tests.rs`).
+
+- ✅ **An observed Claude Code is read when its transcript is written** (2026-10-11,
+  readiness-w 10-12 rank 2; `crates/slopty-worker/src/thread/claude.rs` and `claude/follow.rs`).
+  - **The gap.** With no mod streaming and no hook for the write, an observed session read its
+    transcript every 250 ms. The mod reaches only the Claude Code builds it is pinned to, so
+    the `stable` channel, a company's managed `claude` held back, or any build the person has
+    not updated, streamed on that tick: p99 238 ms from the write to the thread. Every
+    session, busy or not, also woke the worker four times a second.
+  - **One follower for every session.** The transcripts are followed by the kernel
+    (`crate::fswatch`, kqueue on macOS, inotify on Linux), and a write rings the session
+    that reads that file. There is one follower for all of them, not one per session: on
+    Linux each follower is an inotify instance and a user gets 128 by default, shared with
+    every other program. A session names its paths (the main transcript and its subagents')
+    at each read, and the follower takes the union.
+  - **No write is missed between the list and its watch.** A path is followed only from the
+    moment the follower takes the list naming it, so a write just before is no event. The
+    follower now says which paths the list it last took holds (`fswatch::Status::followed`).
+    A session whose new paths were not all in it is rung once they are, and that one read
+    catches whatever was written before. Every write after is an event. No timing is
+    guessed: a tick after a list change would only make the race rarer.
+  - **The tick is kept only where time alone changes the thread.** That is while a block
+    waits out its grace before it asks in the terminal, while a live block may expire
+    (`Observed::ticking`), and while a start no hook has spoken for may be held at a dialog.
+    Then it is 250 ms. Otherwise a session looks again every 5 s (`RESTING_TICK`), which
+    bounds what a write the kernel did not report could wait. A file the kernel cannot
+    report on (a network volume) is polled at 250 ms by the follower itself.
+  - **Numbers** (MEASUREMENTS, "an observed Claude Code's transcript, read on the kernel's
+    word"): the write reaches the thread at p50 6.8 ms and p99 11.7 ms, from 133.1 ms and
+    238.4 ms. Eight sessions at rest cost the worker nothing above the runner's noise, from
+    1.5 wakeups/s each.
+  - Tests: `an_answer_written_with_no_hook_reaches_the_thread_at_once`
+    (`slopty-worker/tests/claude_threads.rs`; each answer must arrive inside 500 ms, two of
+    them written after a second of rest); `past_the_watch_limit_a_file_is_polled`
+    (`tests/fswatch.rs`, what `followed` says); the `ticking` assertions in
+    `a_block_with_no_prompt_held_asks_in_the_terminal` and
+    `live_blocks_stream_after_their_prompt_then_the_transcript_settles_them` (`observed`
+    tests). The measurements are `a_transcript_write_reaches_its_follower` and
+    `observed_sessions_at_rest` (`apps/slopty-worker/tests/e2e.rs`, ignored).
