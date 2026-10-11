@@ -33,6 +33,9 @@ on:
       snapshots:
         description: "What the tests do with insta snapshots: compare, accept"
         default: compare
+      full:
+        description: "yes: every check (iOS and Linux clippy, rustdoc); no: fmt, host clippy, tests"
+        default: "no"
 
 run-name: check ${{ inputs.name }} ${{ inputs.sha }}
 
@@ -116,12 +119,14 @@ jobs:
       - if: inputs.packages != ''
         env:
           PACKAGES: ${{ inputs.packages }}
+          FULL: ${{ inputs.full }}
           # An accept writes every changed snapshot and lets its assertion pass.
           INSTA_UPDATE: ${{ inputs.snapshots == 'accept' && 'always' || 'no' }}
           INSTA_FORCE_PASS: ${{ inputs.snapshots == 'accept' && '1' || '0' }}
         run: |
           args=()
           for p in $PACKAGES; do args+=(-p "$p"); done
+          [ "$FULL" = yes ] || args+=(--quick)
           cargo xtask check "${args[@]}" 2>&1 | tee target/remote/check.log
       - if: ${{ !cancelled() && inputs.e2e != '' }}
         env:

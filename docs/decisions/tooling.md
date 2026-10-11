@@ -1547,3 +1547,36 @@ more full-window layer.
     runner makes the scheduled e2e a real check.
   - Test: `remote::tests::progress_lines_are_noise_and_diagnostics_are_not` (`xtask`); the
     command itself is proved by its first runs.
+
+- ✅ **Lanes never wait on a check** (2026-10-11, the person's idea, measured and extended). The
+  person asked that the runners run the gate while the agents keep coding and fix whatever
+  fails, with no one waiting on anyone. Measured first:
+  - **The hard limit is five macOS jobs at once.** It holds on Free, Pro and Team alike
+    (docs.github.com/en/actions/reference/limits: "Pro | 40 | 5", "Team | 60 | 5"), and the
+    plan is the owning account's (`aislopware`, Free). Larger runners need Team and draw on the
+    same five. A gate run holds all five for about 13 minutes, so every remote check queues
+    behind it, and Pro buys none of them.
+  - **A remote check of the small `slopty-core` took 10 min**: 105 s of setup, host clippy
+    182 s, iOS clippy 125 s, rustdoc 125 s, nextest 26 s, Linux 15 s (run 38107906317).
+  - **A lane's unfinished edits failed the other lane's checks** twice in the first hour: a
+    doc lint in `slopty-platform`, then one in `slopty-agent`, since a snapshot took the whole
+    tree.
+
+  Ruled:
+  - **A lane pipelines.** It finishes an item, starts its remote check in the background, and
+    goes straight on to the next item. On green it reports the checkpoint; on red it fixes
+    what was named and starts another check. It never sits idle waiting on a run.
+  - **The remote check is quick by default**: fmt, host clippy, nextest, shear and typos
+    (`xtask check --quick`), about half the time. iOS and Linux clippy and rustdoc stay with
+    the gate. `remote --full` runs them all, for a change to `cfg(target_os = "ios")` or Linux
+    code, or to proto.
+  - **`remote --only <path>` checks `HEAD` plus a lane's own edits.** The snapshot starts
+    from `HEAD`, not the whole tree, so a lane's check never fails on another lane's half-done
+    crate. A lane that builds on another's uncommitted proto names those paths too.
+  - **The orchestrator commits a green checkpoint at once and lands at once.** `gate` keeps
+    one run in progress and only the newest push waiting, so landing often costs nothing
+    extra. The gate is the full check. A red is routed to the lane that owns it and fixed
+    forward. The local main never waits on CI.
+  - **A check costs a fifth of a gate run** in macOS job-minutes (one job against five), so
+    checking before a commit is cheaper than a red gate run's cycle, and it keeps unverified
+    code out of the `HEAD` every lane's check stands on.

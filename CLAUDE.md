@@ -93,8 +93,12 @@ in it until checked here.
   - **Nothing compiles on this Mac**: its cores and disk are the person's. Every build, lint
     and test runs on a GitHub runner through `cargo xtask remote -p <crate>` (`--e2e <case>`
     for live tests and goldens; `docs/DEV.md`), which checks the working tree without touching
-    the index. An agent sets `SLOPTY_LANE=<its name>`, runs it in the background, and
-    finishes an item on its clean run, then reports. Only the quick gate and xtask build here.
+    the index. Only the quick gate and xtask build here.
+  - **No one waits.** An agent sets `SLOPTY_LANE=<its name>`, checks only its own edits on
+    `HEAD` (`--only <its paths>`; quick unless `--full`), runs the check in the background and
+    goes straight on to the next item. It reports a checkpoint on green and fixes on red. The
+    orchestrator commits each green checkpoint and lands at once; the gate's red is fixed
+    forward by the lane that owns it (`docs/decisions/tooling.md`, "Lanes never wait").
   - An agent keeps its crates compiling between edits, because a half-edited crate breaks the
     other agents' remote checks. An agent blocked by another agent's half-edited crate reports
     rather than waiting for it.

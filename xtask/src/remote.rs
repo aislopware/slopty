@@ -84,6 +84,14 @@ pub struct RemoteOpts {
     /// The simulator the ios case uses: iphone or ipad.
     #[arg(long, default_value = "iphone", requires = "e2e")]
     pub sim: String,
+    /// Take the tree's edits under these paths only (files or directories, repeatable), on top
+    /// of `HEAD`: another lane's unfinished edits elsewhere stay out of the check.
+    #[arg(long = "only", value_name = "PATH")]
+    pub only: Vec<String>,
+    /// Every check: iOS and Linux clippy and rustdoc too, not only fmt, host clippy and the
+    /// tests.
+    #[arg(long)]
+    pub full: bool,
     /// Accept every insta snapshot the tests change, and apply them to the tree.
     #[arg(long)]
     pub accept_snapshots: bool,
@@ -120,7 +128,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let sha = if opts.head {
         cmd!(sh, "git rev-parse HEAD").read()?
     } else {
-        snapshot(sh, &root, &dir, &opts.name)?
+        snapshot(sh, &root, &dir, &opts.name, &opts.only)?
     };
     let short = sha.get(..10).unwrap_or(&sha);
     let branch = format!("check/{}", opts.name);
@@ -180,7 +188,8 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
 fn describe(opts: &RemoteOpts) -> String {
     let mut parts = Vec::new();
     if !opts.packages.is_empty() {
-        parts.push(format!("check {}", opts.packages.join(" ")));
+        let depth = if opts.full { "full" } else { "quick" };
+        parts.push(format!("{depth} check {}", opts.packages.join(" ")));
     }
     if let Some(case) = &opts.e2e {
         let filter = opts.filter.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
@@ -189,19 +198,30 @@ fn describe(opts: &RemoteOpts) -> String {
     parts.join(", ")
 }
 
-/// The working tree as a commit on `HEAD`, written through an index of its own: a copy of the
-/// real one, so its stat cache spares hashing what did not change, and the real index stays as
-/// the person or a lane staged it. Files `.gitignore` names stay out, as they would from a
-/// commit; the submodules go at the commits checked out in them.
-fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str) -> Result<String> {
+/// The working tree as a commit on `HEAD`, written through an index of its own, so the real
+/// index stays as the person or a lane staged it. With no `only`, it starts from a copy of the
+/// real index, whose stat cache spares hashing what did not change, and takes every edit; with
+/// `only`, it starts from `HEAD` and takes the edits under those paths alone. Files
+/// `.gitignore` names stay out, as they would from a commit; the submodules go at the commits
+/// checked out in them.
+fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) -> Result<String> {
     let index = dir.join("index");
-    let real = cmd!(sh, "git rev-parse --git-path index").read()?;
-    std::fs::copy(root.join(real), &index).context("copying the index")?;
-    cmd!(sh, "git add --all")
-        .env("GIT_INDEX_FILE", &index)
-        .quiet()
-        .run()
-        .context("adding the tree to the snapshot")?;
+    if only.is_empty() {
+        let real = cmd!(sh, "git rev-parse --git-path index").read()?;
+        std::fs::copy(root.join(real), &index).context("copying the index")?;
+        cmd!(sh, "git add --all")
+            .env("GIT_INDEX_FILE", &index)
+            .quiet()
+            .run()
+            .context("adding the tree to the snapshot")?;
+    } else {
+        cmd!(sh, "git read-tree HEAD").env("GIT_INDEX_FILE", &index).quiet().run()?;
+        cmd!(sh, "git add --all -- {only...}")
+            .env("GIT_INDEX_FILE", &index)
+            .quiet()
+            .run()
+            .context("adding the paths to the snapshot")?;
+    }
     let tree = cmd!(sh, "git write-tree").env("GIT_INDEX_FILE", &index).quiet().read()?;
     let message = format!("check: {name}");
     let sha = cmd!(sh, "git commit-tree --no-gpg-sign -p HEAD -m {message} {tree}").read()?;
@@ -219,6 +239,7 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         format!("goldens={}", opts.goldens.input()),
         format!("sim={}", opts.sim),
         format!("snapshots={}", if opts.accept_snapshots { "accept" } else { "compare" }),
+        format!("full={}", if opts.full { "yes" } else { "no" }),
     ];
     let args: Vec<String> = fields.iter().flat_map(|f| ["-f".to_owned(), f.clone()]).collect();
     cmd!(sh, "gh workflow run {WORKFLOW} --ref {REF} {args...}")

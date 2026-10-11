@@ -34,8 +34,11 @@ zed itself so it is never behind zed while longbridge lags.
   e2e case; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
   `--accept-snapshots` does its insta snapshots, `--head` checks the commit without the tree's
   edits, and `--goldens review` brings every changed frame's render and diff to
-  `target/e2e/artifacts/`. A newer check of the same name cancels the older one. Only the quick
-  gate (tools, seconds) and xtask itself build here.
+  `target/e2e/artifacts/`. A newer check of the same name cancels the older one. It is quick
+  by default (fmt, host clippy, nextest, shear, typos); `--full` adds iOS and Linux clippy and
+  rustdoc. `--only <path>` (repeatable) checks `HEAD` plus the edits under those paths alone,
+  so another lane's unfinished work stays out. Only the quick gate (tools, seconds) and xtask
+  itself build here.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes

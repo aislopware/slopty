@@ -16,6 +16,10 @@
 //! other features, and every set compiled and kept its own copy of them and of the crates on
 //! top (`docs/decisions/tooling.md`, "target/ stays bounded").
 //!
+//! `--quick` keeps fmt, host clippy, nextest, shear and typos, which catch most of what goes red,
+//! in about half the time, and leaves iOS and Linux clippy and rustdoc to the gate
+//! (`docs/decisions/tooling.md`, "Lanes never wait on a check").
+//!
 //! A clean run is what an agent reports back. The session that lands the work still gates the
 //! index.
 
@@ -26,7 +30,7 @@ use crate::tools::{
     HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, quiet_step, workspace_packages,
 };
 
-pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
+pub fn run(sh: &Shell, crates: &[String], quick: bool) -> Result<()> {
     if crates.is_empty() {
         bail!("name the crates to check: `cargo xtask check -p <crate> [-p <crate>…]`");
     }
@@ -58,15 +62,19 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
             "cargo clippy --keep-going {b...} --all-targets {live...} --target {host} -- -D warnings"
         ),
     )?;
-    clippy_ios(sh, &names().collect::<Vec<_>>())?;
-    lint_linux(sh, &names().collect::<Vec<_>>())?;
+    if !quick {
+        clippy_ios(sh, &names().collect::<Vec<_>>())?;
+        lint_linux(sh, &names().collect::<Vec<_>>())?;
+    }
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
     quiet_step(
         "nextest",
         cmd!(sh, "cargo nextest run {b...} --no-tests=pass").env(crate::runner::RUNNER_VAR, runner),
     )?;
-    rustdoc(sh, &names().collect::<Vec<_>>())?;
+    if !quick {
+        rustdoc(sh, &names().collect::<Vec<_>>())?;
+    }
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();
     let d = &dirs;

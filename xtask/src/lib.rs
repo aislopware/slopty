@@ -88,6 +88,9 @@ enum Cmd {
         /// A crate to check; repeat for several.
         #[arg(short = 'p', long = "package", required = true)]
         packages: Vec<String>,
+        /// fmt, host clippy, nextest, shear and typos only: no iOS or Linux clippy, no rustdoc.
+        #[arg(long)]
+        quick: bool,
     },
     /// The pre-commit gate on the staged tree: fmt, taplo, deny, hakari, shear, typos, committed
     /// and host clippy, then the next step. The other lanes run in CI once `land` pushes.
@@ -346,8 +349,8 @@ pub fn main() -> Result<()> {
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         #[cfg(not(target_os = "macos"))]
         Cmd::Ime { .. } => anyhow::bail!("input sources are macOS's"),
-        Cmd::Check { packages } => {
-            let checked = check::run(&sh, &packages);
+        Cmd::Check { packages, quick } => {
+            let checked = check::run(&sh, &packages, quick);
             prune::auto();
             checked
         }
