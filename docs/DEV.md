@@ -25,14 +25,23 @@ zed itself so it is never behind zed while longbridge lags.
   them it names the app to switch on under System Settings → Privacy & Security → Developer
   Tools (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
   also checks the free space against the floor below.
-- `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
+- **Nothing compiles on this Mac** (`docs/decisions/tooling.md`, "Every compile runs on a
+  runner"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside the
+  real index, pushes it to `check/<name>` (`--name`, or `SLOPTY_LANE`) and runs
+  `cargo xtask check` for those crates on a GitHub macOS runner (`check.yml`): fmt, clippy for
+  the host, iOS and Linux, nextest, rustdoc, shear, typos. It waits, prints the failed log's
+  end and keeps every log under `target/remote/<name>/`. `--e2e app -E '<filterset>'` adds an
+  e2e case; `--goldens accept` (or `accept-all`) copies the run's goldens back over the tree's,
+  and `--goldens review` brings every changed frame's render and diff to
+  `target/e2e/artifacts/`. A newer check of the same name cancels the older one. Only the quick
+  gate (tools, seconds) and xtask itself build here.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes
   the commit to the `gate` branch, where CI runs every lane, and main moves to that commit only
-  once every lane passes (below, "Gate"). Before the push it runs, under `nice`, host clippy,
-  rustdoc and iOS clippy of the packages the commits change and of their dependents; `--full`
-  adds their tests and Linux clippy, `--no-check` skips it all. A red run names the failed lane and tests in its
+  once every lane passes (below, "Gate"). It pushes at once; `--check` first runs, here under
+  `nice`, host clippy, rustdoc and iOS clippy of the packages the commits change and of their
+  dependents, and `--full` adds their tests and Linux clippy. A red run names the failed lane and tests in its
   summary: fix it in a new commit and land again; that push's run, which waits for any run in
   progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
@@ -289,9 +298,10 @@ every target dir under `target/` and in both of cargo's layouts (to 1.99 and fro
 - the incremental caches no compile has touched for a day;
 - the object files a binary's earlier compiles left beside it.
 
-Then, when `target/` is over its budget (160 GB, `SLOPTY_TARGET_BUDGET_GB` or `--budget-gb`) or
-its volume has less than the floor free (50 GB, `SLOPTY_DISK_FLOOR_GB` or `--floor-gb`), it
-deletes the least recently used units and caches until both hold with a tenth to spare. Nothing
+Then, when `target/` is over its budget (30 GB, since nothing heavy compiles here;
+`SLOPTY_TARGET_BUDGET_GB` or `--budget-gb`) or its volume has less than the floor free (50 GB,
+`SLOPTY_DISK_FLOOR_GB` or `--floor-gb`), it deletes the least recently used units and caches
+until both hold with a tenth to spare. Nothing
 used in the last hour goes that way. It runs after every `check` and `gate`, skipping a dir whose
 build lock is held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). It prints
 what went, the largest entries and how much was used how recently. The gate will not start

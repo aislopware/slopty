@@ -1,0 +1,150 @@
+name: Check
+
+# A working tree's checks on a runner instead of this Mac (`cargo xtask remote`): nothing heavy
+# runs on a developer's Mac, whose cores and disk are the person's (docs/decisions/tooling.md,
+# "Every compile runs on a runner"). `remote` commits the tree as it is (staged or not) to a
+# branch `check/<name>` and starts this with that commit. Dispatched on `gate`, so the run reads
+# and fills the compile cache the gate's lanes use: a cache is read by its own branch and main
+# only, and a `check/*` branch of its own would start cold every time.
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Who asks (a lane's name); a newer check of the same name cancels the older
+        required: true
+      sha:
+        description: The commit `remote` pushed to check/<name>
+        required: true
+      packages:
+        description: Crates for `cargo xtask check`, space-separated; empty for none
+        default: ""
+      e2e:
+        description: An `xtask e2e` case (app, ios, worker, …); empty for none
+        default: ""
+      filter:
+        description: The e2e case's nextest filterset
+        default: ""
+      goldens:
+        description: "What the e2e case does with the goldens: compare, accept, accept-all, review"
+        default: compare
+      sim:
+        description: The simulator the ios case uses
+        default: iphone
+
+run-name: check ${{ inputs.name }} ${{ inputs.sha }}
+
+concurrency:
+  group: check-${{ inputs.name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  check:
+    name: check (${{ inputs.name }})
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha }}
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+      # `xtask check` lints the host, both iOS triples and Linux (`tools::lint_linux`).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+          targets: >-
+            aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
+            x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      # The gate's entry, read and never saved: the 10 GB quota is the compile cache's.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: false
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      # The gate lanes' builds of libghostty-vt, read only: iOS clippy's holds the most triples.
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-clippy-ios-${{ steps.ghostty.outputs.key }}
+          restore-keys: ghostty-prebuilt-${{ runner.os }}-
+      - uses: actions/cache/restore@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: >-
+          cargo xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
+          --lane tests --lane rustdoc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - if: inputs.packages != ''
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          args=()
+          for p in $PACKAGES; do args+=(-p "$p"); done
+          cargo xtask check "${args[@]}" 2>&1 | tee check.log
+      - if: ${{ !cancelled() && inputs.e2e != '' }}
+        env:
+          CASE: ${{ inputs.e2e }}
+          FILTER: ${{ inputs.filter }}
+          GOLDENS: ${{ inputs.goldens }}
+          SIM: ${{ inputs.sim }}
+        run: |
+          args=("$CASE")
+          [ -n "$FILTER" ] && args+=(-E "$FILTER")
+          [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
+          [ "$CASE" = ios ] && args+=(--sim "$SIM")
+          cargo xtask e2e "${args[@]}" 2>&1 | tee e2e.log
+      # The goldens as the run left them, which `remote` copies back over the tree's after an
+      # accept, and the renders and diffs of every changed frame.
+      - if: ${{ always() && inputs.e2e != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: goldens
+          path: crates/slopty-e2e/golden
+          if-no-files-found: ignore
+          retention-days: 3
+      - if: ${{ always() && inputs.e2e != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: renders
+          path: target/e2e/artifacts
+          if-no-files-found: ignore
+          retention-days: 3
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            check.log
+            e2e.log
+          if-no-files-found: ignore
+          retention-days: 3

@@ -79,10 +79,9 @@ in it until checked here.
   `cargo gate -m '<message>' > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`:
   fmt, the tools, the locks and `committed`, which compile nothing and take seconds. Unstaged
   edits are invisible to it. Read `GATE_EXIT=0` or "gate passed" in the log, then
-  `git commit -F target/gate/COMMIT_MSG` without restaging, and `cargo xtask land`. That lints
-  the changed packages under `nice` (host and iOS clippy, rustdoc; no tests), then pushes to
-  the `gate` branch, where CI runs every lane (clippy, tests, rustdoc) and fast-forwards main
-  once all pass; the app's e2e runs there on a schedule. Keep working meanwhile. A red run
+  `git commit -F target/gate/COMMIT_MSG` without restaging, and `cargo xtask land`. That
+  pushes at once to the `gate` branch, where CI runs every lane (clippy, tests, rustdoc) and
+  fast-forwards main once all pass; the app's e2e runs there on a schedule. Keep working meanwhile. A red run
   names its lane and tests in the run's summary, and the fix lands on top. The wrapper's own
   exit code is the `echo`'s. Batch several changes per land.
 - **Parallel work happens in this one checkout, with no worktrees.** Split the work by
@@ -91,11 +90,14 @@ in it until checked here.
   - A change to a shared crate (`slopty-proto`, `slopty-core`, the workspace `Cargo.toml`) is
     owned by one agent and lands first. Work that depends on it is sequenced after it, not run
     alongside it.
-  - An agent keeps its crates compiling between edits, because a half-edited crate breaks
-    everyone's build. It finishes with host `cargo clippy -p <crate> --all-targets` and its own
-    tests, then reports. It never runs `cargo xtask check` or any other lane across triples: the
-    slow checks belong to the session that started it, once per batch. An agent blocked by
-    another agent's half-edited crate reports rather than waiting for it.
+  - **Nothing compiles on this Mac**: its cores and disk are the person's. Every build, lint
+    and test runs on a GitHub runner through `cargo xtask remote -p <crate>` (`--e2e <case>`
+    for live tests and goldens; `docs/DEV.md`), which checks the working tree without touching
+    the index. An agent sets `SLOPTY_LANE=<its name>`, runs it in the background, and
+    finishes an item on its clean run, then reports. Only the quick gate and xtask build here.
+  - An agent keeps its crates compiling between edits, because a half-edited crate breaks the
+    other agents' remote checks. An agent blocked by another agent's half-edited crate reports
+    rather than waiting for it.
   - Subagents do not commit. The session that started them stages the batch, runs one gate
     over it, and commits by owner.
 

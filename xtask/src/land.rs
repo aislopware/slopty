@@ -6,11 +6,11 @@
 //! gate at a time on that branch; a newer push waits behind the run in progress, and only the
 //! newest waits, since its green covers every commit under it.
 //!
-//! Before the push, the packages the commits change and their dependents are linted here under
-//! `nice`: host and iOS clippy and rustdoc, the checks that most often turned a run red
-//! ([`crate::gate::land_checks`]; `docs/decisions/tooling.md`, "land lints the changed packages
-//! first, by default"). The tests stay CI's; `--full` adds them and Linux clippy, and
-//! `--no-check` pushes with no check at all.
+//! It pushes at once: nothing compiles on this Mac, whose cores and disk are the person's
+//! (`docs/decisions/tooling.md`, "Every compile runs on a runner"). A change likely to go red is
+//! checked first on a runner with `cargo xtask remote`. `--check` still lints the changed
+//! packages and their dependents here under `nice` (host and iOS clippy and rustdoc,
+//! [`crate::gate::land_checks`]), and `--full` adds their tests and Linux clippy.
 
 use std::time::{Duration, Instant};
 
@@ -38,12 +38,12 @@ pub struct LandOpts {
     /// Block until CI promoted the commit to main, or failed, and report which.
     #[arg(long)]
     pub wait: bool,
-    /// Also run the changed packages' tests and Linux clippy before the push.
-    #[arg(long, conflicts_with = "no_check")]
-    pub full: bool,
-    /// Push without linting the changed packages first.
+    /// Lint the changed packages here before the push, which compiles on this Mac.
     #[arg(long)]
-    pub no_check: bool,
+    pub check: bool,
+    /// With `--check`: also run the changed packages' tests and Linux clippy.
+    #[arg(long, requires = "check")]
+    pub full: bool,
 }
 
 /// A run as `promote` reads it from `gh run list`.
@@ -148,7 +148,7 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         .quiet()
         .read()
         .unwrap_or_default();
-    if opts.no_check {
+    if !opts.check {
         println!("  no checks before the push: CI alone decides");
     } else {
         // What `gate` already holds is CI's to check, so a land on top of one still running is

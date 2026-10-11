@@ -1514,3 +1514,34 @@ more full-window layer.
     the_run_is_ended_only_after_its_looks_stuck_in_a_row}` (`xtask`).
   - **Kept if** 25 worker jobs in a row finish without a cancel, with at least two of them
     wedged runs ending "⚠ videotoolbox … the runner's encoder stopped" and then "✓ nextest".
+
+- ✅ **Every compile runs on a runner** (2026-10-11; supersedes "land lints the changed packages
+  first, by default", and the line in "Nothing heavy runs here before a land" that agents still
+  build as they code). The person asked for this Mac's CPU and disk back: two agents' clippy and
+  nextest runs, `land`'s lints (529 s for the ghostty bump) and the test binaries macOS's
+  `syspolicyd` scans on first launch held most of its cores, and `target/` held 140 to 154 GB.
+  - **`cargo xtask remote`.** It writes the working tree, staged or not, to a commit on `HEAD`
+    through a copy of the real index (`GIT_INDEX_FILE`), so neither the index nor the tree a
+    lane is editing moves, and pushes it to `check/<name>`. It then dispatches
+    `.github/workflows/check.yml` on `gate` with that commit: `cargo xtask check -p …` for the
+    crates named, and an `xtask e2e` case with its goldens compared, accepted or reviewed. It
+    waits, prints the end of a failed log without cargo's progress lines, and keeps the logs
+    under `target/remote/<name>/`. An accept copies the run's goldens back over the tree's,
+    and the renders and diffs of changed frames land in `target/e2e/artifacts/`.
+  - **Dispatched on `gate`, checked out at the snapshot.** A run reads the Actions cache of its
+    own ref and of main only, so a run on `check/<name>` would compile cold every time. On `gate`
+    it shares the gate lanes' sccache entries, the registry entry (read only) and their
+    libghostty-vt builds (read only), and saves nothing else into the 10 GB quota.
+  - **One run per name.** `concurrency: check-<name>`, cancelling the older run, so a lane that
+    checks again never queues two. Runs share the plan's five macOS jobs with the gate, so a
+    check waits while a gate run holds them.
+  - **`land` pushes at once.** `--check` keeps the local lints for the rare change no runner
+    checked first.
+  - **`target/` budget 160 → 30 GB**, since only xtask, the quick gate's tree and the odd
+    `land --check` build here.
+  - **Goldens come from a runner too.** A hosted Mac's virtual GPU draws a few hundred pixels
+    differently from this Mac's (e2e run 38099160564: 0.004–0.13 % of a frame), which kept
+    `e2e.yml` red against goldens drawn here. Retaking them with `--goldens accept-all` on a
+    runner makes the scheduled e2e a real check.
+  - Test: `remote::tests::progress_lines_are_noise_and_diagnostics_are_not` (`xtask`); the
+    command itself is proved by its first runs.

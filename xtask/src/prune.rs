@@ -53,11 +53,11 @@ use crate::tools::repo_root;
 /// How long a unit or an incremental cache may go unused before it goes.
 pub const DEFAULT_IDLE_HOURS: u64 = 24;
 
-/// What `target/` may hold, in GB (`SLOPTY_TARGET_BUDGET_GB`). A full gate's lanes take 32 GB
-/// and a day of agents' builds in `target/debug` about 60 GB (`docs/MEASUREMENTS.md`,
-/// 2026-09-30, "target/ under a budget"); the rest is room for a toolchain or fork bump, which
-/// rebuilds everything once beside the old units until they age out.
-pub const DEFAULT_BUDGET_GB: u64 = 160;
+/// What `target/` may hold, in GB (`SLOPTY_TARGET_BUDGET_GB`). Every compile runs on a runner
+/// (`cargo xtask remote`; `docs/decisions/tooling.md`, "Every compile runs on a runner"), so
+/// what stays here is xtask, the quick gate's tree and the odd `land --check`: a full gate's
+/// lanes took 32 GB and a day of agents' builds about 60 GB when they ran here.
+pub const DEFAULT_BUDGET_GB: u64 = 30;
 
 /// The free space `target/`'s volume keeps, in GB (`SLOPTY_DISK_FLOOR_GB`): a cold full gate
 /// writes about 35 GB, so a build that starts above the floor finishes before the disk does.
