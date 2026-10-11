@@ -69,9 +69,6 @@ jobs:
     name: lint (${{ inputs.name }})
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
-    env:
-      # The gate's Apple lint lanes run on this image too, so a check reads their compile cache.
-      SCCACHE_GHA_ENABLED: "true"
     # A step with no shell named runs `bash -e`, without pipefail, so a failed check piped
     # through `tee` passed (run 38107934242).
     defaults:
@@ -82,9 +79,11 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       # Host clippy and rustdoc for the Mac; with --full, both iOS triples and Linux.
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -96,11 +95,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      # The gate's entry, read and never saved: the 10 GB quota is the compile cache's.
+      # The gate's entry, read and never saved.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -186,10 +184,6 @@ jobs:
     name: test (${{ inputs.name }})
     runs-on: ${{ inputs.test_runner }}
     timeout-minutes: 60
-    env:
-      # A Mac's tests read the gate's test shards' compile cache; Linux keeps its own on the
-      # runner, as the gate's linux job does.
-      SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.test_runner, 'macos') && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -206,16 +200,18 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          actions-cache: ${{ startsWith(inputs.test_runner, 'macos') && 'true' || 'false' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
@@ -309,9 +305,6 @@ jobs:
     name: run (${{ inputs.name }})
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
-    env:
-      # A Mac reads and fills the gate's compile cache; Linux keeps its own on the runner.
-      SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -320,9 +313,12 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           submodules: recursive
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
         with:
-          version: v0.18.0
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          actions-cache: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -336,7 +332,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
-          add-rust-environment-hash-key: false
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
