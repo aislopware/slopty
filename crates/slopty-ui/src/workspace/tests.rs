@@ -69,6 +69,7 @@ fn drawn_at(
 }
 
 fn workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+    played::forget();
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.bind_keys(key_bindings(cx));
@@ -1684,7 +1685,7 @@ mod palette_threads;
 mod panes;
 mod past_sessions;
 mod pins;
-mod played;
+pub(super) mod played;
 mod popout;
 mod presence;
 mod preview;

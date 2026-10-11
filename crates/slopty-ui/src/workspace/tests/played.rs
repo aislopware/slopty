@@ -33,6 +33,13 @@ thread_local! {
     static PLAYED: RefCell<Played> = RefCell::new(Played::default());
 }
 
+/// Forget what earlier tests played on this thread: a test run again under `ITERATIONS` runs
+/// on the same thread, and the ladder it left (keyed by worker, which every run numbers the
+/// same) would count its agents twice.
+pub(crate) fn forget() {
+    PLAYED.with(|p| *p.borrow_mut() = Played::default());
+}
+
 /// A test's way to say what a terminal's agent does.
 pub(crate) trait Agents {
     /// `event` as the worker's codec maps it, into the row of the thread that names its

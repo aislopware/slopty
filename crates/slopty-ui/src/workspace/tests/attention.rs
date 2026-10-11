@@ -409,6 +409,7 @@ fn the_badge_is_the_bells_count() {
 
 /// A focused workspace, drawn once.
 fn workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+    crate::workspace::tests::played::forget();
     cx.update(gpui_kit::init);
     let (view, cx) = cx.add_window_view(|window, cx| {
         let mut view = WorkspaceView::new(Theme::default(), None, cx);

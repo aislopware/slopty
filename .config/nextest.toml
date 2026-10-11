@@ -92,6 +92,12 @@ slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
 filter = 'test(/^(proptest|fuzz|slow)_/)'
 slow-timeout = { period = "120s", terminate-after = 2 }
 
+# The 20k-line file's first full syntect highlight takes about 4 s a run (run 38176047490), so
+# the nightly's 50 GPUI iterations take about 210 s, past the 120 s bound.
+[[profile.default.overrides]]
+filter = 'package(slopty-ui) & test(=file::tests::a_twenty_thousand_line_file_stays_editable)'
+slow-timeout = { period = "60s", terminate-after = 5, grace-period = "5s" }
+
 # The simulator self-test: boot, launch, pair and a real shell take minutes, not seconds.
 [[profile.default.overrides]]
 filter = 'package(slopty-e2e) & (binary(ios) | binary(ios_uikit))'
