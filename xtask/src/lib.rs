@@ -150,6 +150,13 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Wait until none of the gate's macOS jobs is queued or running, for at most `--hours`; print
+    /// `true` once it is idle, `false` when it never was (the Deep workflow's macOS jobs wait so).
+    GateWait {
+        /// The longest wait.
+        #[arg(long, default_value_t = 5)]
+        hours: u64,
+    },
     /// Pin a Rust toolchain (the newest stable rustup has, by default) in `rust-toolchain.toml`
     /// and every workflow that names the pinned one.
     Toolchain {
@@ -396,6 +403,7 @@ pub fn main() -> Result<()> {
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
         Cmd::GateLatency { since } => latency::run(&sh, since.as_deref()),
+        Cmd::GateWait { hours } => remote::gate_wait(&sh, hours),
         Cmd::Toolchain { version } => toolchain::run(&sh, version.as_deref()),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),
         Cmd::CiProfile => ci_profile::write(&sh),

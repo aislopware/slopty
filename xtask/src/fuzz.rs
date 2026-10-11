@@ -21,7 +21,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args;
 use xshell::{Shell, cmd};
 
-use crate::tools::{TRIPLES, quiet_step, repo_root};
+use crate::tools::{HOST, quiet_step, repo_root};
 
 /// Where the goldens every seed corpus starts from live.
 const SNAPSHOTS: &str = "crates/slopty-proto/tests/snapshots";
@@ -115,9 +115,10 @@ fn replay(sh: &Shell) -> Result<()> {
 
 /// The nightly toolchain and the flags every cargo-fuzz call shares: the host triple named
 /// (cargo-fuzz otherwise takes the triple it was itself built for, x86-64 when it came as a
-/// Rosetta binary), debug assertions on, and a target dir of its own.
+/// Rosetta binary), debug assertions on, and a target dir of its own. No target calls Apple
+/// code, so CI fuzzes on Linux.
 fn cargo_fuzz<'a>(sh: &'a Shell, verb: &str) -> xshell::Cmd<'a> {
-    let host = TRIPLES[0];
+    let host = HOST;
     cmd!(
         sh,
         "cargo +nightly fuzz {verb} --debug-assertions --target {host} --target-dir target/fuzz/build"
@@ -134,7 +135,7 @@ fn build(sh: &Shell) -> Result<()> {
 }
 
 fn binary(root: &Utf8Path, target: &str) -> Utf8PathBuf {
-    root.join("target/fuzz/build").join(TRIPLES[0]).join("release").join(target)
+    root.join("target/fuzz/build").join(HOST).join("release").join(target)
 }
 
 /// Run one target for `seconds`; the artifacts it left.

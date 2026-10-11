@@ -1764,10 +1764,18 @@ more full-window layer.
     two runs on R2, against 596 and 571 for the rest and 628 and 770 for the worker).
   - `cargo fetch` runs only when that job will save: an entry restored whole is never saved
     again, and the fetch took 19–35 s of every worker shard for nothing.
-  - The key's environment part holds the rustc versions on the runner, the image's own stable
-    beside the pinned one, so a new toolchain or image misses the whole cache once: about twice
-    a Rust release, which the action offers no way to avoid without dropping the lock from the
-    key.
+  - The key holds no environment part now (`add-rust-environment-hash-key: false`). It held
+    every toolchain installed on the runner, so the tools lane, which saves x86_64 Linux's entry
+    and installs nightly for rustfmt, saved under a key the linux and clippy-linux jobs never
+    matched once the toolchain was pinned by name (8ac395d6). They cloned every git dependency on
+    every run, and one clone's TLS error in libgit2 failed the gate (run 38144514113). Nothing
+    cached depends on the toolchain, so each OS and architecture has one entry, keyed by the
+    lock.
+  - CI's cargo fetches git dependencies with the `git` command and retries a failed fetch five
+    times (`[net]` in `.cargo/ci-profile.toml`): cargo retries no libgit2 error of the TLS
+    class. They sit in that file and not in `CARGO_NET_*` variables because sccache hashes every
+    `CARGO_*` variable into each unit's key, and a new one recompiles every lane. With the git
+    checkouts emptied, `cargo fetch` took 14 s through `git` (probe run 38145298956).
 
 - ✅ **A remote check yields its Mac to the gate** (2026-10-11). The account has five macOS
   runners, and the gate's three test shards need three. Lane checks once held all five: gate run
@@ -1776,7 +1784,11 @@ more full-window layer.
   takes a Mac (tests that need one, or a probe or e2e case on one), until the Actions API shows
   that:
   - no macOS job of the gate is queued;
-  - the macOS jobs outside the gate, this check's counted, are two at most;
+  - the macOS jobs outside the gate, this check's counted, are two at most. A job counts when it
+    runs, or when it is a check's and queued: that check passed this same wait and takes the
+    next free Mac. Another workflow's queued jobs do not count: Deep's matrix lists every
+    macOS job it has not run as queued while it runs one at a time, and counting them kept
+    every check waiting for hours (Deep run 38133881188);
   - no other check of its lane (the name before its first `-`) holds a Mac. A check of the same
     name does not wait, since dispatching it cancels the older one.
 
@@ -1792,3 +1804,45 @@ more full-window layer.
   opt-level 3 from `[profile.dev.package."*"]`, and with it its compile cache entries. Here the
   xtask crate compiled in 7.0–7.4 s against 13.4–14.3 s. Local `cargo xtask` keeps the dev
   profile.
+
+- ✅ **Deep's checks fail when they fail** (2026-10-11). Each Deep job ran
+  `cargo xtask … | tee report.log` under GitHub's default shell, `bash -e` without `pipefail`,
+  so the job took `tee`'s status. From at least 2026-10-04 (run 37238501323) to 2026-10-11,
+  every night's miri and three sanitizers failed, and most nights' leaks, gpui seeds, coverage,
+  features and fuzz did too. Every job was green, and the "Deep checks failing" issue never
+  opened. The weekly mutation run did no work either: every shard stopped at once on a missing
+  directory, behind its `|| true` (run 38055397887). Deep now names `bash`, which runs a step
+  with `pipefail`, and so does the release job, where `cargo xtask dist … | tee` and
+  `curl … | sh` had the same hole. What had failed:
+  - Most of it was one cause: the binaries the tests spawn, which nextest's setup script builds
+    (`cargo xtask spawned-bins`) for every run that does not say they are built.
+    - Miri and the three sanitizers never ran a test. The script built without the run's
+      target, so under a sanitizer rustc refused the proc macros, and under Miri on Linux the
+      build reached the client's crates. Miri, the realtime sanitizer, the property tests and
+      the gpui seeds spawn nothing and say so now (`SLOPTY_BINS_FRESH`); the address and thread
+      sanitizers build the binaries first, with the sanitizer and the target.
+    - Coverage built the workspace a second time (1080 s) into the environment's target dir,
+      while cargo-llvm-cov builds the tests in the one it names in `CARGO_LLVM_COV_TARGET_DIR`;
+      the binaries vouched for no test, and about 60 tests that start an agent stub failed.
+      The script builds there now.
+    - `leaks` runs test binaries without nextest, so each test that spawns one built them inside
+      itself under `leaks`, up to the 600 s bound. It builds them first now.
+    - The gpui seeds spent 660 s of a Mac building them for nothing.
+  - Found and not seen: two crashes of the `reassemble` fuzz target, a worker test that asked
+    the runner for Wake-on-LAN, and three UI tests and a timeout under the gpui seeds. The
+    seeds now run every package whose tests use gpui's test harness (a dev-dependency on `gpui`
+    with `test-support`, from `cargo metadata`), not `slopty-ui` alone.
+
+- ✅ **Deep's macOS jobs wait for the gate** (2026-10-11). GitHub starts a schedule late when it
+  is busy, by hours: the night of 2026-10-11 began at 10:58Z instead of 04:37 (run
+  38133881188), and its ten macOS jobs sat in the queue through the gate's working day.
+  - A Linux job first waits until none of the gate's macOS jobs is queued or running
+    (`cargo xtask gate-wait`, every minute, five hours at most). Only then do the macOS checks
+    start, one at a time; a gate that never goes idle skips the night's macOS checks. Waiting
+    inside a macOS job would hold its Mac while it waited.
+  - What calls no Apple framework runs on arm Linux, side by side: the fuzzers, the property
+    tests and the features check (cargo-hack through `cargo-zigbuild`, as the host clippy lane
+    checks the Mac's triple). The sanitizers, `leaks`, the gpui seeds, coverage (it covers the
+    Mac's crates) and the loom model (the audio ring is Apple's alone) stay on the Mac.
+  - A night took 238–311 macOS minutes (median 286 over six nights), of which the moved checks
+    were 74–94 (median 89): about 200 a night now, on a third fewer Mac hours.

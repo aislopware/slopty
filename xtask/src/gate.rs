@@ -971,8 +971,19 @@ pub fn spawned_bins(sh: &Shell) -> Result<()> {
     let env =
         std::env::var_os("NEXTEST_ENV").context("nextest runs this and names $NEXTEST_ENV")?;
     let bins = spawned_bin_args();
-    cmd!(sh, "cargo build --profile test --workspace --tests {bins...}").run()?;
-    let built = crate::tools::target_dir(sh)?.join("debug");
+    // Under `cargo llvm-cov nextest` the tests are built in the directory it names in
+    // `CARGO_LLVM_COV_TARGET_DIR` and passes cargo as `--target-dir`, not in the environment's
+    // `CARGO_TARGET_DIR`: built there, the binaries vouched for no test, and Deep's coverage
+    // built the workspace twice (1080 s) and failed every test that spawns one (run 38001943825).
+    let (dir, built): (Vec<String>, Utf8PathBuf) = match std::env::var("CARGO_LLVM_COV_TARGET_DIR")
+    {
+        Ok(dir) => {
+            let built = Utf8PathBuf::from(&dir).join("debug");
+            (vec!["--target-dir".to_owned(), dir], built)
+        }
+        Err(_) => (Vec::new(), crate::tools::target_dir(sh)?.join("debug")),
+    };
+    cmd!(sh, "cargo build --profile test --workspace --tests {dir...} {bins...}").run()?;
     std::fs::write(&env, format!("{BINS_BUILT}={built}\n"))
         .with_context(|| format!("write {}", std::path::Path::new(&env).display()))?;
     Ok(())
@@ -1330,6 +1341,25 @@ fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
     }
     let mut args = selected(names);
     args.push("--examples".to_owned());
+    Some(args)
+}
+
+/// The arguments of a build of [`SPAWNED_BINS`] for the tests of `packages` and no others,
+/// without the workspace hack: a build with flags of its own (a sanitizer's, `deep sanitize`)
+/// beside a nextest run of those packages alone. `None` when none of their tests spawns one.
+pub fn spawned_bins_for(packages: &[&str]) -> Option<Vec<String>> {
+    if !packages.iter().any(|p| SPAWNING.contains(p)) {
+        return None;
+    }
+    let mut names: Vec<&str> = packages.to_vec();
+    for (_, package) in SPAWNED_BINS {
+        if !names.contains(&package) {
+            names.push(package);
+        }
+    }
+    let mut args = selected(names);
+    args.push("--examples".to_owned());
+    args.extend(spawned_bin_args());
     Some(args)
 }
 
@@ -1950,6 +1980,7 @@ mod tests {
         for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
             let jobs = std::fs::read_to_string(path.with_file_name(name)).expect("a workflow");
             assert!(!jobs.contains("brew install zig"), "Homebrew's zig is whatever it is today");
+            assert!(!jobs.contains("setup-zig"), "{name}: zig through the one action");
             assert!(!jobs.contains("sccache-action@"), "{name}: sccache through the one action");
             assert!(!jobs.contains("SCCACHE_GHA_ENABLED"), "{name}: the action picks the backend");
             assert!(jobs.contains("uses: ./.github/actions/sccache"), "{name} caches its units");

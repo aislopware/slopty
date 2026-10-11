@@ -163,6 +163,43 @@ fn mac_jobs_in_flight(sh: &Shell) -> Result<Vec<MacJob>> {
     Ok(found)
 }
 
+/// `xtask gate-wait`: waits until none of the gate's macOS jobs is queued or running, asking every
+/// [`MAC_POLL`], for at most `hours`, saying why on stderr while it waits. Prints `true` once the
+/// gate is idle and `false` when it never was, for a workflow's step output. The Deep workflow
+/// waits so on a Linux runner before it takes a Mac for hours: GitHub can start its nightly
+/// schedule hours late, into the gate's busiest time (run 38133881188 started at 10:58Z).
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
+pub fn gate_wait(sh: &Shell, hours: u64) -> Result<()> {
+    let cap = Duration::from_hours(hours);
+    let started = Instant::now();
+    let mut said = String::new();
+    let mut answered = false;
+    let idle = loop {
+        // A transient API error is asked again, not taken for an idle gate.
+        if let Ok(jobs) = mac_jobs_in_flight(sh) {
+            answered = true;
+            let busy = jobs.iter().filter(|j| j.gate).count();
+            if busy == 0 {
+                break true;
+            }
+            let why = format!("{busy} of the gate's macOS jobs queued or running");
+            if why != said {
+                let secs = started.elapsed().as_secs();
+                eprintln!("  waiting for the gate: {why} ({}m{:02}s)", secs / 60, secs % 60);
+                said = why;
+            }
+        }
+        if started.elapsed() >= cap {
+            ensure!(answered, "the Actions API never answered in {hours} h");
+            eprintln!("  the gate was never idle in {hours} h");
+            break false;
+        }
+        std::thread::sleep(MAC_POLL);
+    };
+    println!("{idle}");
+    Ok(())
+}
+
 /// Waits until a check of `name` taking `mine` macOS jobs may start ([`mac_verdict`]), asking
 /// every [`MAC_POLL`] and saying why while it waits. The lane keeps working meanwhile; its check
 /// only starts later.

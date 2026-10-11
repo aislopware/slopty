@@ -108,14 +108,49 @@ pub fn run(sh: &Shell, cmd: Option<&NightlyCmd>) -> Result<()> {
     }
 }
 
-fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
+/// The workspace's packages whose tests run on gpui's test harness: a dev-dependency on `gpui`
+/// with its `test-support`, read from `cargo metadata --no-deps`'s `json`. The gpui seeds run
+/// every one of them, so a crate split out of the UI joins without anyone listing it.
+fn gpui_tested(json: &str) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        packages: Vec<Package>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Package {
+        name: String,
+        dependencies: Vec<Dependency>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Dependency {
+        name: String,
+        kind: Option<String>,
+        features: Vec<String>,
+    }
+    let metadata: Metadata = serde_json::from_str(json).context("cargo metadata")?;
+    let mut names: Vec<String> = metadata
+        .packages
+        .into_iter()
+        .filter(|p| {
+            p.dependencies.iter().any(|d| {
+                d.name == "gpui"
+                    && d.kind.as_deref() == Some("dev")
+                    && d.features.iter().any(|f| f == "test-support")
+            })
+        })
+        .map(|p| p.name)
+        .collect();
+    names.sort_unstable();
+    Ok(names)
+}
+
+fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str, gpui: &[String]) -> Vec<Check> {
     let own = |args: &[&str]| -> Vec<String> { args.iter().map(|a| (*a).to_owned()).collect() };
+    // With the workspace hack on a Mac, so the units are the gate's; off one without it, as the
+    // gate's Linux lane: its features pull in the client's GPUI, which no Linux build takes.
+    let hack = cfg!(target_os = "macos").then_some(&WORKSPACE_HACK);
     let selected = |packages: &[&str]| -> Vec<String> {
-        packages
-            .iter()
-            .chain([&WORKSPACE_HACK])
-            .flat_map(|p| ["-p".to_owned(), (*p).to_owned()])
-            .collect()
+        packages.iter().chain(hack).flat_map(|p| ["-p".to_owned(), (*p).to_owned()]).collect()
     };
     let deep = |name: &'static str, args: &[&str], needs: Option<Need>| Check {
         name,
@@ -149,15 +184,19 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
                 own(&["-E", PROPTEST_FILTER, "--no-fail-fast"]),
             ]
             .concat(),
-            env: vec![("PROPTEST_CASES", opts.proptest_cases.to_string())],
+            env: vec![("PROPTEST_CASES", opts.proptest_cases.to_string()), no_spawned_bins()],
             needs: None,
         },
         Check {
             name: "gpui-iterations",
             program: "cargo".to_owned(),
-            args: [own(&["nextest", "run"]), selected(&["slopty-ui"]), own(&["--no-fail-fast"])]
-                .concat(),
-            env: vec![("ITERATIONS", opts.iterations.to_string())],
+            args: [
+                own(&["nextest", "run"]),
+                selected(&gpui.iter().map(String::as_str).collect::<Vec<_>>()),
+                own(&["--no-fail-fast"]),
+            ]
+            .concat(),
+            env: vec![("ITERATIONS", opts.iterations.to_string()), no_spawned_bins()],
             needs: None,
         },
         Check {
@@ -171,7 +210,7 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
                 "-E",
                 "test(every_tile_kind_opened_and_closed_many_times_leaves_nothing)",
             ]),
-            env: vec![("SLOPTY_SOAK_CYCLES", "1000".to_owned())],
+            env: vec![("SLOPTY_SOAK_CYCLES", "1000".to_owned()), no_spawned_bins()],
             needs: None,
         },
         Check {
@@ -193,6 +232,14 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
         deep("leaks", &["leaks"], Some(Need::Tool("leaks"))),
         deep("metal", &["metal"], Some(Need::Tool("xcodebuild"))),
     ]
+}
+
+/// What tells nextest's setup script that the binaries tests spawn are built, for a check none
+/// of whose tests spawns one: the script otherwise builds them all, the client's among them,
+/// first. The gpui seeds spent 660 s of a Mac on it (Deep run 38001943825), and on Linux the
+/// property tests failed on it (run 38145903056).
+fn no_spawned_bins() -> (&'static str, String) {
+    (crate::gate::BINS_FRESH, "1".to_owned())
 }
 
 /// Why `need` is not met here, if it is not.
@@ -222,7 +269,8 @@ fn nightly(sh: &Shell, opts: &NightlyOpts) -> Result<()> {
     let xtask =
         Utf8PathBuf::from_path_buf(xtask).map_err(|p| anyhow::anyhow!("{}", p.display()))?;
     let rev = cmd!(sh, "git rev-parse --short HEAD").quiet().read().unwrap_or_default();
-    let all = checks(opts, &dir, xtask.as_str());
+    let metadata = cmd!(sh, "cargo metadata --format-version 1 --no-deps").quiet().read()?;
+    let all = checks(opts, &dir, xtask.as_str(), &gpui_tested(&metadata)?);
     let unknown: Vec<&String> =
         opts.only.iter().chain(&opts.skip).filter(|n| !all.iter().any(|c| c.name == *n)).collect();
     if !unknown.is_empty() {
@@ -384,15 +432,33 @@ mod tests {
     }
 
     #[test]
+    fn the_gpui_seeds_run_every_package_on_gpui_s_test_harness() {
+        let json = r#"{"packages":[
+            {"name":"slopty-ui","dependencies":[
+                {"name":"gpui","kind":null,"features":[]},
+                {"name":"gpui","kind":"dev","features":["test-support"]}]},
+            {"name":"slopty-kit","dependencies":[
+                {"name":"gpui","kind":"dev","features":["test-support"]}]},
+            {"name":"slopty-core","dependencies":[{"name":"serde","kind":null,"features":[]}]},
+            {"name":"slopty-term","dependencies":[{"name":"gpui","kind":null,"features":[]}]}
+        ]}"#;
+        assert_eq!(gpui_tested(json).unwrap(), ["slopty-kit", "slopty-ui"]);
+    }
+
+    #[test]
     fn every_check_is_named_once_and_the_deep_ones_say_what_they_need() {
-        let checks = checks(&NightlyOpts::default(), Utf8Path::new("/tmp/n"), "xtask");
+        let gpui = ["slopty-ui".to_owned()];
+        let checks = checks(&NightlyOpts::default(), Utf8Path::new("/tmp/n"), "xtask", &gpui);
         let mut names: Vec<&str> = checks.iter().map(|c| c.name).collect();
         let count = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), count, "{names:?}");
         let proptest = checks.iter().find(|c| c.name == "proptest").unwrap();
-        assert_eq!(proptest.env, [("PROPTEST_CASES", "4096".to_owned())]);
+        assert_eq!(
+            proptest.env,
+            [("PROPTEST_CASES", "4096".to_owned()), ("SLOPTY_BINS_FRESH", "1".to_owned())]
+        );
         let soak = checks.iter().find(|c| c.name == "soak").unwrap();
         assert!(soak.args.windows(2).any(|w| w == ["--seconds", "1200"]), "{:?}", soak.args);
         assert!(

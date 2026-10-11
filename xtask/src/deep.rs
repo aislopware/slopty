@@ -251,6 +251,11 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
     // `fork`, so it is told.
     let _root = sh.push_env("INSTA_WORKSPACE_ROOT", sh.current_dir());
     let _update = sh.push_env("INSTA_UPDATE", "no");
+    // No pure crate's test spawns a daemon, and none could under Miri, but they take the test
+    // kit, so nextest's setup script would build every one the workspace has: on a Linux
+    // runner, the client's too, which no Linux build takes (run 38001943825, and every night
+    // from 2026-10-04 on).
+    let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
     let packages = packages(chosen, PURE);
     // Under nextest each test is its own interpreter, side by side on the cores, and the `miri`
     // profile ends one that runs past its bound instead of the night.
@@ -283,6 +288,9 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
         let flags = "-Zsanitizer=realtime --cfg slopty_rtsan -C target-cpu=apple-m1";
         let _flags = sh.push_env("RUSTFLAGS", flags);
         let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
+        // No codec test spawns a daemon; nextest's setup script would build them without the
+        // target, so with the sanitizer on the proc macros, which rustc refuses.
+        let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
         let packages = packages(chosen, &["slopty-codec"]);
         let host = TRIPLES[0];
         return step(
@@ -308,13 +316,30 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
         let packages = packages(&group, &[]);
         let _options = options.map(|o| sh.push_env(options_var, o));
         let filter = &filter;
-        let ran = step(
-            &title,
-            &cmd!(
-                sh,
-                "nice -n 10 cargo +nightly nextest run -Zbuild-std --target {host} --no-fail-fast {packages...} {filter...}"
-            ),
-        );
+        // The daemons the tests spawn, built here with the sanitizer and the target as the tests
+        // are. Left to nextest's setup script, they were built without the target, so with the
+        // sanitizer on the proc macros, which rustc refuses: no sanitized test ran from
+        // 2026-10-04 to 2026-10-11 (run 38001943825).
+        let names: Vec<&str> = group.iter().map(String::as_str).collect();
+        let built = crate::gate::spawned_bins_for(&names).map_or(Ok(()), |spawned| {
+            step(
+                &format!("{title}: the binaries tests spawn"),
+                &cmd!(
+                    sh,
+                    "nice -n 10 cargo +nightly build -Zbuild-std --target {host} --profile test {spawned...}"
+                ),
+            )
+        });
+        let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
+        let ran = built.and_then(|()| {
+            step(
+                &title,
+                &cmd!(
+                    sh,
+                    "nice -n 10 cargo +nightly nextest run -Zbuild-std --target {host} --no-fail-fast {packages...} {filter...}"
+                ),
+            )
+        });
         if let Err(e) = ran {
             failed.push(format!("{e:#}"));
         }
@@ -341,9 +366,13 @@ fn sanitized_groups(chosen: &[String]) -> Vec<(Vec<String>, Option<&'static str>
 
 /// `--each-feature` builds every crate with each feature alone, none and all; the iOS lane
 /// of the gate covers one axis of this (the `e2e`/`headless` features off), this covers all.
+/// Off a Mac, as CI runs it, cargo-hack's cargo is the one that checks an Apple target there
+/// (`tools::apple_cargo`), which it takes from `CARGO_HACK_CARGO_SRC`.
 fn features(sh: &Shell) -> Result<()> {
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("features")?);
     let host = TRIPLES[0];
+    let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
+    let _cargo = (cargo != "cargo").then(|| sh.push_env("CARGO_HACK_CARGO_SRC", cargo));
     step(
         "cargo hack check --each-feature",
         &cmd!(
@@ -419,6 +448,19 @@ fn leaks(sh: &Shell, chosen: &[String], stacks: bool) -> Result<()> {
         .context("building the test binaries")?;
     let binaries = test_binaries(&built);
     anyhow::ensure!(!binaries.is_empty(), "cargo built no test binary");
+    // The daemons and stubs the tests spawn, built beside them first, so no test builds them
+    // inside itself under `leaks`: those that did ran into the 600 s bound (run 38001943825).
+    let names: Vec<&str> = if chosen.is_empty() {
+        LEAK_CHECKED.to_vec()
+    } else {
+        chosen.iter().map(String::as_str).collect()
+    };
+    if let Some(spawned) = crate::gate::spawned_bins_for(&names) {
+        quiet_step(
+            "leaks: the binaries tests spawn",
+            cmd!(sh, "nice -n 10 cargo build --profile test {spawned...}"),
+        )?;
+    }
     let reports = deep_dir("leaks")?.join("reports");
     std::fs::create_dir_all(&reports)?;
     let mut failed = Vec::new();
@@ -469,6 +511,8 @@ fn under_leaks(binary: &str, report: &std::path::Path, stacks: bool) -> Result<R
     let mut child = std::process::Command::new("nice")
         .args(["-n", "10", "leaks", "--atExit", "--", binary, "--test-threads=1", "-q"])
         .envs(stacks.then_some(("MallocStackLogging", "1")))
+        // Built by `leaks` before any binary runs.
+        .env(crate::gate::BINS_FRESH, "1")
         .stdout(out.try_clone()?)
         .stderr(out)
         .process_group(0)
@@ -560,6 +604,10 @@ fn mutants(sh: &Shell, package: &str, timeout: u64, shard: Option<&str>, jobs: u
     let jobs = jobs.max(1).to_string();
     let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
     let out = mutants_dir(package, shard);
+    // cargo-mutants makes the report's own directory but not the one above it, and ended every
+    // shard of the weekly run at once without it (run 38055397887).
+    std::fs::create_dir_all(sh.current_dir().join(&out))
+        .with_context(|| format!("create {out}"))?;
     let shard: Vec<&str> = shard.map(|s| vec!["--shard", s]).unwrap_or_default();
     step(
         &format!("cargo mutants: {package}"),

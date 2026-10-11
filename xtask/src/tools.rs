@@ -13,6 +13,17 @@ pub const TRIPLES: [&str; 3] =
 /// `c_char` is unsigned, and a PTY or `/proc` reader crosses that.
 pub const LINUX_TRIPLES: [&str; 2] = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 
+/// The triple xtask itself runs on, which a check that calls no Apple framework builds for: the
+/// Mac's, or a Linux runner's, where the Deep workflow runs those checks so they hold none of the
+/// five macOS runners (`docs/decisions/tooling.md`, "Deep's macOS jobs wait for the gate").
+pub const HOST: &str = if cfg!(target_os = "macos") {
+    TRIPLES[0]
+} else if cfg!(target_arch = "aarch64") {
+    LINUX_TRIPLES[1]
+} else {
+    LINUX_TRIPLES[0]
+};
+
 /// The triple [`SERVER_CRATES`] are also linted for. Static musl is how a Linux server ships.
 pub const SERVER_TRIPLE: &str = "x86_64-unknown-linux-musl";
 

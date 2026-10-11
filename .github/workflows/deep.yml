@@ -6,9 +6,11 @@ name: Deep
 # the top of the hour, which GitHub delays under load (02:00 Bangkok started up to 4 h late),
 # since the macOS job holds one of the five slots for hours
 # (.research/dev-speed-2026-10-10.md item 5); mutation testing once a week; and on demand
-# (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing). Each check is a job of
-# its own, so a slow one holds no other, on Linux where its crates build there and on macOS where
-# they need Apple's frameworks. A failure opens (or adds to) the "Deep checks failing" issue.
+# (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing, `-f macos=false` for the
+# Linux checks alone). Each check is a job of its own, so a slow one holds no other, on Linux
+# where its crates build there and on macOS only where they need Apple's frameworks
+# (`docs/decisions/tooling.md`, "Deep's macOS jobs wait for the gate"). A failure opens (or adds
+# to) the "Deep checks failing" issue.
 on:
   schedule:
     - cron: "37 4 * * *"
@@ -19,9 +21,21 @@ on:
         description: Also run mutation testing
         type: boolean
         default: false
+      macos:
+        description: Run the macOS checks too
+        type: boolean
+        default: true
 
 permissions:
   contents: read
+
+# `bash` named, so a step runs with pipefail. GitHub's default shell runs without it, so each
+# check's `cargo xtask … | tee` passed whatever the check said: on 2026-10-10 (run 38001943825)
+# miri, the three sanitizers, the gpui seeds and coverage failed and the fuzzers found a crash in
+# `reassemble`, and every job was green and no issue opened.
+defaults:
+  run:
+    shell: bash
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,20 +44,52 @@ env:
   # .github/actions/sccache's call.
 
 jobs:
-  # What needs macOS: the sanitized crates call Apple's frameworks, the loom model and the
-  # realtime sanitizer check the CoreAudio render path, `leaks` is macOS's own, and the rest build
-  # the whole workspace.
+  # GitHub starts a schedule late when it is busy, by hours (run 38133881188, due 04:37, began
+  # 10:58), into the gate's working day. The macOS checks take a Mac each for up to an hour, so
+  # they start only once none of the gate's macOS jobs is queued or running, waited for here on
+  # a Linux runner rather than on a Mac. A gate that never goes idle in five hours skips the
+  # night's macOS checks quietly; the Linux ones run regardless.
+  wait:
+    if: >-
+      github.event.schedule != '0 7 * * 6'
+      && (github.event_name != 'workflow_dispatch' || inputs.macos)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      actions: read
+    outputs:
+      idle: ${{ steps.gate.outputs.idle }}
+    steps:
+      - uses: actions/checkout@v5
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+      # Built as the gate builds it (`ci.yml`), so the compile cache serves it.
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_PROFILE_DEV_OPT_LEVEL: 0
+        run: echo "idle=$(cargo xtask gate-wait --hours 5)" >> "$GITHUB_OUTPUT"
+
+  # What needs macOS: the sanitized crates call Apple's frameworks, the loom model checks the
+  # CoreAudio ring, which builds for Apple alone, `leaks` is macOS's own, the UI's tests run on
+  # the Mac's GPUI, and coverage covers every crate, the Mac's among them. The rest runs on Linux
+  # (below), so a night takes a Mac for about 200 minutes instead of 290.
   mac:
     name: ${{ matrix.check }}
-    if: github.event.schedule != '0 7 * * 6'
+    needs: wait
+    if: needs.wait.outputs.idle == 'true'
     runs-on: macos-26
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      # The account runs five macOS jobs at once, and these take hours. Two at a time left three
-      # for the gate's five macOS jobs, and gate runs queued 10 to 20 minutes during the Deep
-      # window (.research/dev-speed-2026-10-05.md). One at a time leaves four, and the night
-      # holds the six hours this takes. A job that waited for the gate inside itself would hold
+      # The account runs five macOS jobs at once, and the gate's three test shards need three of
+      # them. One at a time leaves four; a job that waited for the gate inside itself would hold
       # its Mac while it waited.
       max-parallel: 1
       matrix:
@@ -53,11 +99,7 @@ jobs:
           - { check: sanitize realtime, run: deep sanitize realtime, slug: rtsan }
           - { check: loom, run: deep loom, slug: loom }
           - { check: leaks, run: deep leaks, slug: leaks }
-          # Two minutes a target: the terminal target's surface is the widest.
-          - { check: fuzz, run: deep fuzz --time 120, slug: fuzz }
-          - { check: proptest, run: nightly run --only proptest, slug: proptest }
           - { check: gpui seeds, run: nightly run --only gpui-iterations, slug: gpui }
-          - { check: features, run: deep features, slug: features }
           - { check: coverage, run: deep coverage, slug: coverage }
     steps:
       - uses: actions/checkout@v5
@@ -77,26 +119,16 @@ jobs:
         with:
           components: rust-src, rustfmt
       # The gate's one entry of registry, git checkouts and tools (`ci.yml`). The gate saves it on
-      # its own branch, which a run on main cannot read, so one check saves it here: main's
-      # entry serves every branch, the gate's included, and the rest save none.
+      # its own branch, which a run on main cannot read, so one check of each OS saves it here:
+      # main's entry serves every branch, the gate's included, and the rest save none.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
-          save-if: ${{ matrix.slug == 'features' }}
-      # What the fuzzers found interesting grows from night to night: restored from the last run,
-      # saved under this one's.
-      - if: matrix.slug == 'fuzz'
-        uses: actions/cache@v4
-        with:
-          path: target/fuzz/corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          save-if: ${{ matrix.slug == 'coverage' }}
       - uses: cargo-bins/cargo-binstall@main
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          use-cache: false
+      - uses: ./.github/actions/zig
       # As in the gate (`ci.yml`): Ghostty's zig packages fetched ahead of the build, with
       # retries and a bound. Left to the build script, a fetch that stalled held asan, loom and
       # coverage silent until their 240-minute timeout (run 37156507396).
@@ -114,8 +146,7 @@ jobs:
       - run: |
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
-      # Each check's report: its log, the tests' JUnit, `leaks`' reports, and the fuzzers'
-      # crashes (an input for `cargo xtask fuzz --keep`) and logs.
+      # Each check's report: its log, the tests' JUnit and `leaks`' reports.
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -124,6 +155,86 @@ jobs:
             target/deep/report.log
             target/deep/**/junit.xml
             target/deep/leaks/reports
+            target/nightly/**/*.log
+          if-no-files-found: ignore
+
+  # What calls no Apple framework, on arm Linux beside each other: the fuzzers (no target calls
+  # Apple code), the property tests of the wire, media and grid crates, and every crate's
+  # features checked for the Mac as the gate's host clippy checks it there, through zig
+  # (`tools::apple_cargo`).
+  linux-deep:
+    name: ${{ matrix.check }}
+    if: github.event.schedule != '0 7 * * 6'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Two minutes a target: the terminal target's surface is the widest.
+          - { check: fuzz, run: deep fuzz --time 120, slug: fuzz, tools: --tool cargo-fuzz }
+          - check: proptest
+            run: nightly run --only proptest
+            slug: proptest
+            tools: --tool cargo-nextest
+          - check: features
+            run: deep features
+            slug: features
+            tools: --tool cargo-hack --tool cargo-zigbuild
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          targets: aarch64-apple-darwin
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      # As the macOS checks' (above), arm Linux's entry saved by one of them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: ${{ matrix.slug == 'features' }}
+      # What the fuzzers found interesting grows from night to night: restored from the last run,
+      # saved under this one's.
+      - if: matrix.slug == 'fuzz'
+        uses: actions/cache@v4
+        with:
+          path: target/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - uses: cargo-bins/cargo-binstall@main
+      - uses: ./.github/actions/zig
+      - uses: actions/cache@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: cargo xtask setup ${{ matrix.tools }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: |
+          mkdir -p target/deep
+          cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
+      # The fuzzers' crashes (an input for `cargo xtask fuzz --keep`) and logs too.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-${{ matrix.slug }}
+          path: |
+            target/deep/report.log
+            target/deep/**/junit.xml
             target/nightly/**/*.log
             target/fuzz/artifacts
             target/fuzz/logs
@@ -217,7 +328,7 @@ jobs:
   # cancelled run says nothing, and the weekly mutation run alone closes nothing, since a missed
   # mutant is a finding and not a failure.
   report:
-    needs: [mac, linux, mutants]
+    needs: [wait, mac, linux-deep, linux, mutants]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
