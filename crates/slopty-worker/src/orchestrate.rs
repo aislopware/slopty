@@ -1191,6 +1191,17 @@ impl Orchestrator {
                     .map_err(|failed| worktree_failed(&failed))?;
                 Ok(Outcome::Done)
             }
+            Verb::OnOrigin { worker, repo, target, heads } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let heads = crate::repo::verify::on_origin(git, &repo, &target, heads)
+                    .await
+                    .map_err(|f| verify_failure(&f))?;
+                Ok(Outcome::OnOrigin { heads })
+            }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }
     }

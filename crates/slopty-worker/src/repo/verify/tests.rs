@@ -340,6 +340,37 @@ async fn the_clone_s_target_catches_up_with_origin_s() {
     assert_ne!(first, merged);
 }
 
+/// Merged work pushed from a terminal is seen: before the push the forge holds none of the
+/// heads asked about, after it those it took, in the order asked. A head the clone lacks is
+/// not held, the clone's own branch does not move, and a forge that cannot be reached says so.
+#[tokio::test]
+async fn the_forge_says_which_merged_heads_it_holds() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, task) = clone_with_a_task(&root);
+    git_in(&root, &["clone", "-q", "--bare", "demo", "forge.git"]);
+    let forge = root.join("forge.git");
+    git_in(&repo, &["remote", "add", "origin", &forge.to_string_lossy()]);
+    git_in(&repo, &["merge", "-q", "--ff-only", &task]);
+    let lacked = "0123456789abcdef0123456789abcdef01234567".to_owned();
+    let asked = vec![task.clone(), lacked.clone(), first.clone()];
+
+    let before = on_origin(git, &repo, "main", asked.clone()).await.expect("fetched");
+    assert_eq!(before, vec![first.clone()], "merged here, not pushed yet");
+
+    git_in(&repo, &["push", "-q", "origin", "main"]);
+    let after = on_origin(git, &repo, "main", asked).await.expect("fetched");
+    assert_eq!(after, vec![task.clone(), first], "pushed from a terminal, in the order asked");
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), task, "the clone's branch stays");
+
+    git_in(&repo, &["remote", "set-url", "origin", &root.join("gone.git").to_string_lossy()]);
+    let unreachable = on_origin(git, &repo, "main", vec![task]).await;
+    assert!(matches!(unreachable, Err(Failed::Other(_))), "{unreachable:?}");
+    let named = on_origin(git, &repo, "-x", vec![lacked]).await;
+    assert!(named.is_err(), "a target that names no branch: {named:?}");
+}
+
 /// A project let go takes its checkout with it, by force: what a verifier built and left
 /// behind goes, and the clone forgets the worktree. One already gone is answered as gone, and
 /// one whose clone is gone too goes as a plain directory.

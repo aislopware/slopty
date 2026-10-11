@@ -17,6 +17,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use slopty_proto::project::{TESTS_NAMED, TestDiff, is_test_path};
 
@@ -415,6 +416,39 @@ pub async fn catch_up(git: &Path, repo: &Path, target: &str) -> Result<Moved, Fa
         return Err(Failed::Diverged(upstream));
     }
     fast_forward(git, repo, target, &now, &upstream, false).await
+}
+
+/// How long [`on_origin`] waits on `origin`: a look for pushes made outside Slopty is a
+/// courtesy, and a slow or unreachable forge must not hold the merge queue behind it.
+pub const ORIGIN_WAIT: Duration = Duration::from_secs(20);
+
+/// Those of `heads` that `origin`'s branch `target` holds, fetched now to its tracking ref
+/// (`refs/remotes/origin/<target>`), in the order asked.
+///
+/// Merged work pushed from a terminal rather than through Slopty is seen this way. A head the
+/// clone does not have is not held. Nothing local moves but the tracking ref.
+///
+/// # Errors
+/// A fetch that failed or took longer than [`ORIGIN_WAIT`], or a `target` that names no
+/// branch.
+pub async fn on_origin(
+    git: &Path,
+    repo: &Path,
+    target: &str,
+    heads: Vec<String>,
+) -> Result<Vec<String>, Failed> {
+    let reference = branch_ref(target)?;
+    let tracking = format!("refs/remotes/origin/{target}");
+    let refspec = format!("+{reference}:{tracking}");
+    let fetch = ["fetch", "--quiet", "--no-tags", "--end-of-options", "origin", &refspec];
+    bundle::run_within(git, repo, &fetch, ORIGIN_WAIT).await?;
+    let mut held = Vec::with_capacity(heads.len());
+    for head in heads {
+        if is_ancestor(git, repo, &head, &tracking).await {
+            held.push(head);
+        }
+    }
+    Ok(held)
 }
 
 /// The project's checkout at `place` made a worktree of the clone at `repo` if it is not one,
