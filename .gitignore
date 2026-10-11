@@ -2,6 +2,8 @@
 /.research
 /vendor/ghostty/zig-out
 /vendor/ghostty/.zig-cache
+# zig cc (cargo-zigbuild, the Linux lint lanes) keeps its cache in the directory it runs in.
+/.zig-cache
 *.dSYM
 .DS_Store
 /apps/slopty-ios/xcode/*.xcodeproj
