@@ -1731,3 +1731,19 @@ more full-window layer.
   ictool; any change, and a verdict missing, unreadable or holding another digest, runs the
   whole check. The rest shard keeps the directory in the Actions cache, keyed by the image and
   the icon's sources.
+
+- ✅ **The registry cache renews with the lock, saved by the UI shard** (2026-10-11). Keyed by
+  the manifests and the lock, the registry cache's entry is saved again on the first gate run
+  after a change to them: up to one run in three (in three days, 33 of 339 commits touched
+  them, 23 the lock, over 102 gate runs). On a Mac that save took 120 s (run 38126044772): 36 s for the action to list
+  the workspace's packages, 28 s cleaning the target dir and the registry, 35 s of tar and 17 s
+  of upload for 290 MB; the tools lane on Linux saved the same size in 7 s. It was the worker
+  shard's, the longest, so it ended the run at 770 s.
+  - The UI shard saves it now, the shortest since xtask's tests left it (492 and 545 s on the
+    two runs on R2, against 596 and 571 for the rest and 628 and 770 for the worker).
+  - `cargo fetch` runs only when that job will save: an entry restored whole is never saved
+    again, and the fetch took 19–35 s of every worker shard for nothing.
+  - The key's environment part holds the rustc versions on the runner, the image's own stable
+    beside the pinned one, so a new toolchain or image misses the whole cache once: about twice
+    a Rust release, which the action offers no way to avoid without dropping the lock from the
+    key.

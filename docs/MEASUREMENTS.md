@@ -16158,6 +16158,47 @@ comparable; the gate steps are.
   compiles at a time that is about 12 s a shard of 430 hits.
 - Writes: 0.2–0.44 s on R2 against 0.3 s on the Actions cache, with no write lost.
 
+### On the gate (runs 38126044772 and 38126378174)
+
+The first two gate runs on R2, against the last two warm ones on the Actions cache (38118291368,
+38121577149). The first R2 run was partly warm, not cold: the pull request's runs had already
+filled the Mac prefix. Its successor changed only xtask.
+
+| job (s) | Actions cache | R2, partly warm | R2, warm |
+| --- | --- | --- | --- |
+| tests ui: job / build | 606 / 403.9, 552 / 355.5 | 545 / 338.3 | 492 / 318.7 |
+| tests worker: job / build | 586 / 218.7, 504 / 160.5 | 770 / 295.2 | 628 / 274.5 |
+| tests rest: job / build | 349 / 138.3, 532 / 238.2 | 571 / 209.2 | 596 / 232.0 |
+| Mac hits / misses (ui, worker, rest) | 557/17, 322/23, 330/11 | 663/9, 325/20, 455/20 | 552/11, 328/17, 347/19 |
+| Mac read hit (s) | 0.063–0.262 | 0.138–0.204 | 0.076–0.130 |
+| linux: job / build | 500 / 316.2, 611 / 355.4 | 320 / 164.8 | 378 / 228.1 |
+| clippy-linux, clippy-host, clippy-ios, rustdoc | 351, 201, 160, 141; 329, 240, 200, 196 | 319, 210, 152, 174 | 230, 182, 184, 129 |
+| lanes' wall, first start to last end | 1161, 1266 | 776 | 635 |
+
+- No write errors on R2. The Linux jobs gained the most: the linux lane compiled everything
+  before, for want of quota, and its build fell by 90–190 s.
+- On the Mac shards R2 neither wins nor loses on these four runs. A hit reads in 0.08–0.20 s,
+  against 0.06–0.26 s; at 330–660 hits three at a time that is at most 15 s a shard. What moved
+  the worker's build, 160–219 s on the Actions cache and 275–295 s on R2, is the machine: the
+  units no cache serves were 1.3–1.5 times slower on the R2 runs' runners too (the worker's
+  test binary 70–71 s against 102–120 s, libghostty-vt's build script 9 s against 9–13 s,
+  `cargo-timing.html` of each run).
+- The Actions cache's runs waited longer for Mac slots, so their lanes' wall was longer.
+- One-offs on the first R2 run: the registry cache's new key (`add-rust-environment-hash-key`)
+  found no entry, so the tools lane compiled taplo from source (121 s, binstall's QuickInstall
+  answered nothing), the worker shard fetched every crate (`cargo fetch` 35 s), and its save
+  took 120 s. xtask's new binary was built by two shards at once (39 s and 50 s), the cache's
+  design on a change to xtask. The second run restored everything (tools setup back to
+  seconds).
+- `ci_profile::tests::the_ci_profile_names_every_proc_macro` did not drop with the renewed
+  registry: 31.5 s, 48.7 s, 42.9 s on the three runs, so its time is not the download measured
+  before.
+- The app's e2e on R2 (38128122523, af698f96, `promote`'s dispatch), its own units cold:
+  1808 s against 2170 s on the Actions cache (38112934785), whose sccache counted no compile
+  request at all. Daemons and app built in 728.0 s against 840.6 s, with 411 hits and 357 misses;
+  setup, with xtask's binary cached, went from 120 s to seconds. Its stream cases failed ("a
+  refresh or a stall on loopback"), not a build matter. The next e2e is the warm one.
+
 ## 2026-10-11 — slopty-ui split, step 1: the chrome kit as a crate
 
 Why: `.research/ui-test-compile-2026-10-11.md`. CI's `tests ui` job is a CPU-bound build on a

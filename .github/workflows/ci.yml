@@ -92,15 +92,18 @@ jobs:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
       # installed tools. The action keys an entry by the runner's OS and architecture, so there
-      # are three: the tools lane saves x86_64 Linux's, host clippy arm Linux's and the worker
-      # shard the Macs', each after `cargo fetch` (below) has every package in it. A cache is read
-      # by its own branch and the ones based on main, so the Deep workflow saves its own on main.
+      # are three: the tools lane saves x86_64 Linux's, host clippy arm Linux's and the UI shard
+      # the Macs', each after `cargo fetch` (below) has every package in it. A cache is read by
+      # its own branch and the ones based on main, so the Deep workflow saves its own on main.
       # Keyed by the manifests and the lock too, so an entry is renewed when they change: one
       # entry for ever went nine days stale, and every Mac job downloaded what came since and
       # `cargo metadata` 95 crates more (22.8 s, run 38123134797). The Actions cache has the room
       # since the compile cache moved to R2. Saved on failure too: a red lane is no reason to
-      # download it all again.
-      - uses: Swatinem/rust-cache@v2
+      # download it all again. On a Mac the save takes two minutes (cleaning, then a slow tar),
+      # so the shard with the most slack does it: the UI's, since xtask's build left it
+      # (`docs/decisions/tooling.md`, "The registry cache renews with the lock").
+      - id: rust-cache
+        uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
           cache-targets: false
@@ -108,7 +111,7 @@ jobs:
           save-if: >-
             ${{ github.ref == 'refs/heads/gate'
             && (matrix.lane == 'tools' || matrix.lane == 'clippy-host'
-            || matrix.shard == 'worker') }}
+            || matrix.shard == 'ui') }}
       - uses: cargo-bins/cargo-binstall@main
       # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
       # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
@@ -173,8 +176,11 @@ jobs:
           key: >-
             verdicts-${{ runner.os }}-${{ steps.image.outputs.version }}-${{
             hashFiles('assets/icon.svg', 'xtask/src/icon.rs', 'xtask/src/icon/**') }}
-      # Every package of every platform, for the cache entry the lane saves.
-      - if: matrix.lane == 'clippy-host' || matrix.shard == 'worker'
+      # Every package of every platform, for the cache entry the lane saves: only when it will
+      # save one, as an entry restored whole is never saved again (19–35 s a run otherwise).
+      - if: >-
+          github.ref == 'refs/heads/gate' && steps.rust-cache.outputs.cache-hit != 'true'
+          && (matrix.lane == 'clippy-host' || matrix.shard == 'ui')
         run: cargo fetch --locked
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
