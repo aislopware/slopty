@@ -4,11 +4,11 @@
 //! ([`shell`]) and its send control ([`send_control`]), so a message reads as a message, not
 //! as a form's field, in both.
 //!
-//! The frame is Zed's and Warp's squared down (`docs/decisions/ui.md`, "The design system
-//! starts from `MonoCode`'s"): boxed in the reading column it rests on the raised step inside
-//! the control's ring at a card's radius, 6 pt; in a narrow pane it runs full-bleed, edge to
-//! edge under a sash line, as a pane's own bar does. The keyboard in it adds the card's 3 %
-//! wash and leaves the ring alone: the caret says where the keyboard is. Its words are the
+//! The frame is the thread's one card (`docs/decisions/ui.md`, "The thread is one card
+//! language"): boxed in the reading column it rests on the card's wash inside its ring at a
+//! card's radius, `MonoCode`'s composer; in a narrow pane it runs full-bleed, edge to edge under
+//! a sash line, as a pane's own bar does. The keyboard in it steps the ring to the keyboard's
+//! tint and adds no fill: the caret says where the keyboard is. Its words are the
 //! prose's: what is written to an agent is read at length. The send control is a 26 pt square
 //! at a control's radius at the foot's trailing end, in the neutral solid, sending or
 //! stopping. On a touch screen its side is the touch target's. It carries no key badge: its
@@ -32,7 +32,7 @@ pub const SEND: f32 = 26.0;
 pub struct Frame {
     /// Something stands on it as its head (a thread's tray), so only its foot's corners round.
     pub capped: bool,
-    /// The keyboard is in it: the card's wash over the raised step.
+    /// The keyboard is in it: its ring a step firmer.
     pub focused: bool,
     /// The pane is narrow: edge to edge with no ring and no radius, the line along its top.
     pub bleeds: bool,
@@ -41,14 +41,14 @@ pub struct Frame {
 /// `el` as a message's frame, standing as `frame` says.
 pub fn shell<E: Styled>(el: E, theme: &Theme, frame: Frame) -> E {
     let s = theme.surfaces;
-    let fill = if frame.focused { s.card.over(s.elevated) } else { s.elevated };
-    let el = el.bg(hsla(fill));
     if frame.bleeds {
         return el.border_t(super::HAIR).border_color(hsla(s.stroke));
     }
+    let el = super::inset(el, theme);
     let r = px(theme.radii.md);
     let el = if frame.capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
-    el.border(super::HAIR).border_color(hsla(s.border))
+    let ring = if frame.focused { s.keyed } else { s.border };
+    el.border(super::HAIR).border_color(hsla(ring))
 }
 
 /// The send control under `id`, named `label` and drawn as `glyph`.
@@ -92,10 +92,12 @@ mod tests {
     use crate::colors::hsla;
     use crate::icons::Symbol;
 
-    /// Boxed, the frame is a card's radius inside the control's ring; focused, it takes the
-    /// card's wash and keeps the same ring; in a narrow pane it bleeds, square under a sash.
+    /// Boxed, the frame is the thread's one card: the card's wash inside the `border` ring at a
+    /// card's radius, never `elevated`. Focused, its ring steps to the keyboard's tint and the
+    /// fill stays, so focus is no second surface. In a narrow pane it bleeds, square under a
+    /// sash.
     #[test]
-    fn a_message_is_boxed_or_bleeds_and_focus_is_a_wash() {
+    fn a_message_is_the_threads_card_and_focus_steps_its_ring() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
@@ -104,20 +106,25 @@ mod tests {
             let r = Some(gpui::px(theme.radii.md).into());
             assert_eq!(style.corner_radii.top_left, r, "{variant:?}: a card's radius");
             assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: the ring");
-            assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.elevated))));
+            let card = Some(gpui::Fill::from(hsla(s.card)));
+            assert_eq!(style.background, card, "{variant:?}: the card's wash");
             let focus = Frame { focused: true, ..Frame::default() };
             let mut held = shell(div(), &theme, focus);
             let held = held.style().clone();
-            assert_eq!(held.border_color, style.border_color, "{variant:?}: the ring stays");
-            let washed = gpui::Fill::from(hsla(s.card.over(s.elevated)));
-            assert_eq!(held.background, Some(washed), "{variant:?}: the wash");
-            assert_ne!(held.background, style.background, "{variant:?}: focus shows");
+            assert_eq!(held.border_color, Some(hsla(s.keyed)), "{variant:?}: the ring steps");
+            assert_eq!(held.background, style.background, "{variant:?}: no second fill");
+            let capped = Frame { capped: true, ..Frame::default() };
+            let mut under = shell(div(), &theme, capped);
+            let under = under.style();
+            assert!(under.corner_radii.top_left.is_none(), "{variant:?}: its head rounds the top");
+            assert_eq!(under.corner_radii.bottom_left, r, "{variant:?}: its foot rounds");
             let mut bled = shell(div(), &theme, Frame { bleeds: true, ..Frame::default() });
             let bled = bled.style();
             assert!(bled.corner_radii.top_left.is_none(), "{variant:?}: square");
             assert!(bled.border_widths.left.is_none(), "{variant:?}: edge to edge");
             assert!(bled.border_widths.top.is_some(), "{variant:?}: a line on top");
             assert_eq!(bled.border_color, Some(hsla(s.stroke)), "{variant:?}: the line");
+            assert!(bled.background.is_none(), "{variant:?}: on the pane's own plane");
         }
     }
 

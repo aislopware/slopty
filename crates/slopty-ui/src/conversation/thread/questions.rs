@@ -36,6 +36,8 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::detail::{Answer, Question};
 use slopty_theme::Theme;
 
+use crate::colors::hsla;
+
 /// What a question with answers calls the field for one of one's own.
 pub const OTHER: &str = "Other";
 
@@ -235,8 +237,9 @@ impl Questions {
     /// The questionnaire drawn: the question on show, its answers, the field, what is
     /// missing, and the ways on, with `lead` (the request's own answers) first in their row.
     /// The question's header is the card's to show ([`Questions::current`]).
-    pub fn element(&self, theme: &Theme, lead: Vec<AnyElement>) -> AnyElement {
+    pub fn element(&self, theme: &Theme, lead: Vec<AnyElement>, cx: &App) -> AnyElement {
         let state = &self.state;
+        let held = state.read(cx);
         let spacing = theme.spacing;
         // The field stands at least as tall as an answer's card at this size (the kit's own
         // measure: 32 + 4), so one's own answer reads as one more answer, not a footnote, and
@@ -246,15 +249,20 @@ impl Questions {
             let name = SharedString::from(ix.to_string());
             let answers = (!question.options.is_empty()).then(|| {
                 QuestionnaireChoices::new(state, name.clone()).children(
-                    (0..question.options.len())
-                        .map(|at| QuestionnaireChoice::new(state, name.clone(), at.to_string())),
+                    (0..question.options.len()).map(|at| {
+                        let value = at.to_string();
+                        let chosen = held
+                            .choice_state(&name, &value)
+                            .is_some_and(|choice| choice.is_selected());
+                        option(QuestionnaireChoice::new(state, name.clone(), value), theme, chosen)
+                    }),
                 )
             });
             let several = (question.multi_select && !question.options.is_empty()).then(|| {
                 div()
                     .debug_selector(|| "thread-question-several".to_owned())
                     .text_size(gpui::px(theme.typography.small()))
-                    .text_color(crate::colors::hsla(theme.surfaces.text_muted))
+                    .text_color(hsla(theme.surfaces.text_muted))
                     .child(SELECT_ALL)
             });
             QuestionnaireItem::new(state, name.clone())
@@ -310,6 +318,24 @@ impl Questions {
     }
 }
 
+/// `el` as one answer to a question: a pill at a field's radius in the `border` ring, padded
+/// 8 by 6, on the card it sits in. Chosen, it takes the selection's wash and its ring steps to
+/// the control's, which reads 3:1 (`docs/decisions/ui.md`, "The thread is one card language").
+/// The kit's own look laid a resting wash in dark and a tinted ring on the chosen one.
+fn option<E: gpui::Styled>(el: E, theme: &Theme, chosen: bool) -> E {
+    let s = theme.surfaces;
+    let (ring, fill) = if chosen {
+        (hsla(s.control), hsla(s.selected))
+    } else {
+        (hsla(s.border), gpui::transparent_black())
+    };
+    el.rounded(gpui::px(theme.radii.sm))
+        .px(gpui::px(theme.spacing.sm))
+        .py(gpui::px(theme.spacing.xs + theme.spacing.xxs))
+        .border_color(ring)
+        .bg(fill)
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_proto::thread::detail::Offered;
@@ -330,6 +356,29 @@ mod tests {
 
     fn answer(question: &str, answer: &str) -> Answer {
         Answer { question: question.to_owned(), answer: answer.to_owned() }
+    }
+
+    /// An answer is a pill in the card's ring at a field's radius, on nothing at rest; chosen,
+    /// it takes the selection's wash and the control's ring, in both modes.
+    #[test]
+    fn an_answer_is_a_pill_and_chosen_is_the_selection() {
+        use slopty_theme::Variant;
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let mut rest = option(div(), &theme, false);
+            let rest = rest.style().clone();
+            let r = Some(gpui::px(theme.radii.sm).into());
+            assert_eq!(rest.corner_radii.top_left, r, "{variant:?}: a field's radius");
+            assert_eq!(rest.border_color, Some(hsla(s.border)), "{variant:?}: the ring");
+            let clear = Some(gpui::Fill::from(gpui::transparent_black()));
+            assert_eq!(rest.background, clear, "{variant:?}: no wash at rest");
+            let mut chosen = option(div(), &theme, true);
+            let chosen = chosen.style();
+            assert_eq!(chosen.border_color, Some(hsla(s.control)), "{variant:?}: a 3:1 ring");
+            let picked = Some(gpui::Fill::from(hsla(s.selected)));
+            assert_eq!(chosen.background, picked, "{variant:?}: the selection's wash");
+        }
     }
 
     /// The answered line reads the answers, not their JSON; a plain choice reads as itself.

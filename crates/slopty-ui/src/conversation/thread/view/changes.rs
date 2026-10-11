@@ -134,8 +134,9 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .px(px(theme.spacing.sm))
-            .min_h(px(theme.density.row))
+            .pl(px(theme.spacing.md))
+            .pr(px(theme.spacing.xs))
+            .min_h(px(theme.density.item))
             .child(self.icon(Symbol::Pencil, s.text_muted))
             .child(
                 div()
@@ -151,7 +152,9 @@ impl ThreadView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .text_color(hsla(s.text_secondary))
+                            .map(|el| kit::typed(el, theme.roles().chrome))
+                            .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
+                            .text_color(hsla(s.text))
                             .child(SharedString::from(words.clone())),
                     )
                     .children(kit::changes(theme, added, removed)),
@@ -184,7 +187,7 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs))
-                    .px(px(theme.spacing.sm))
+                    .px(px(theme.spacing.md))
                     .min_h(px(TOOL_ROW))
                     .cursor_pointer()
                     .text_size(px(theme.typography.small()))
@@ -230,8 +233,10 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
+                .border_t(kit::HAIR)
+                .border_color(hsla(s.stroke))
                 .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.sm))
+                .px(px(theme.spacing.md))
                 .min_h(px(TOOL_ROW))
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
@@ -248,7 +253,9 @@ impl ThreadView {
             Some(_) => format!("{words}, {added} added, {removed} removed"),
             None => words,
         };
-        kit::inset(div(), theme)
+        // The thread's one card; the quieter line parts its head from its files.
+        let rule = div().flex_none().w_full().h(kit::HAIR).bg(hsla(s.stroke));
+        kit::raised(div(), theme)
             .id(ElementId::Name(format!("changes-{}", turn.0).into()))
             .debug_selector(move || format!("changes-{}", turn.0))
             .role(Role::Group)
@@ -256,13 +263,11 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .py(px(theme.spacing.xxs))
             .rounded(px(theme.radii.md))
-            .border(kit::HAIR)
-            .border_color(hsla(s.border))
             .overflow_hidden()
             .child(head)
-            .children(rows)
+            .child(rule)
+            .child(div().w_full().flex().flex_col().py(px(theme.spacing.xxs)).children(rows))
             .children(toggle)
             .into_any_element()
     }

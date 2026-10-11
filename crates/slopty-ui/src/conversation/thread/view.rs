@@ -1272,7 +1272,9 @@ impl ThreadView {
         self.button_frame(id, label.clone(), kind).child(label)
     }
 
-    /// [`Self::button`] without its words, for a caller that sets a mark before them.
+    /// [`Self::button`] without its words, for a caller that sets a mark before them: a card's
+    /// answer, an icon button tall ([`slopty_theme::Density::button`]) at the small role,
+    /// `MonoCode`'s card actions a step up so their words keep their contrast.
     fn button_frame(
         &self,
         id: impl Into<SharedString>,
@@ -1292,9 +1294,9 @@ impl ThreadView {
             .flex()
             .items_center()
             .justify_center()
-            .min_h(px(theme.density.control))
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.xs))
+            .min_h(px(theme.density.button))
+            .px(px(theme.spacing.sm + theme.spacing.xxs))
+            .py(px(theme.spacing.xxs))
             .border(kit::HAIR)
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
@@ -1369,10 +1371,9 @@ impl ThreadView {
             };
             px(size)
         }));
-        style.code_block = gpui::StyleRefinement::default()
+        style.code_block = kit::inset(gpui::StyleRefinement::default(), theme)
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small()))
-            .bg(hsla(theme.surfaces.card))
             .rounded(px(theme.radii.sm))
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.sm));
@@ -1677,7 +1678,9 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// What the person sent, on the raised surface at the column's right, its pictures over it.
+    /// What the person sent, the thread's one card (`kit::raised`) at the column's right, its
+    /// pictures over it: the card's wash and ring lift it off the page, where the agent's
+    /// answer lies on it.
     fn bubble(
         &self,
         id: String,
@@ -1694,7 +1697,7 @@ impl ThreadView {
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.sm))
             .rounded(px(theme.radii.md))
-            .map(|el| kit::inset(el, theme))
+            .map(|el| kit::raised(el, theme))
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))

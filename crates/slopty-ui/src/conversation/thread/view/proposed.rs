@@ -1,6 +1,7 @@
 //! What a request on its card asks the person to read before answering: the change an edit
-//! would make, under the file it names, and a plan whole. Each stands in a well at most a
-//! share of the window tall and scrolls past it, so the answers under it stay on screen.
+//! would make, under the file it names and the quieter line, and a plan whole. Each stands in
+//! one well at most a share of the window tall and scrolls past it, so the answers under it
+//! stay on screen.
 //!
 //! An agent whose request names its call (Codex, pi) is answered on the call's own line, where
 //! the change already shows; this is for one whose request belongs to no call on show (Claude
@@ -65,6 +66,7 @@ impl ThreadView {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xs))
+                .px(px(theme.spacing.sm))
                 .min_h(px(kit::Row::One.height(theme)))
                 .text_size(px(theme.typography.small()))
                 .child(crate::icons::symbol(
@@ -104,6 +106,9 @@ impl ThreadView {
                 )
                 .children(kit::changes(theme, patch.added, patch.removed))
         });
+        // The quieter line parts the file's line from its change, in the one well.
+        let rule =
+            head.is_some().then(|| div().flex_none().w_full().h(kit::HAIR).bg(hsla(s.stroke)));
         let id = request.id.0.clone();
         let scroll = format!("proposed-scroll-{id}");
         // The file's line stays put while a long change scrolls under it, so what is being
@@ -117,10 +122,10 @@ impl ThreadView {
             .child(self.patch_well(
                 &key(request),
                 (path.as_deref().unwrap_or_default(), patch),
-                false,
+                (false, false),
                 cx,
             ));
-        div()
+        kit::inset(div(), theme)
             .id(ElementId::Name(format!("proposed-{id}").into()))
             .debug_selector(move || format!("proposed-{id}"))
             .role(Role::Group)
@@ -135,8 +140,10 @@ impl ThreadView {
             .mb(px(theme.spacing.md))
             .flex()
             .flex_col()
-            .gap(px(theme.spacing.xxs))
+            .rounded(px(theme.radii.sm))
+            .overflow_hidden()
             .children(head.map(gpui::Styled::flex_none))
+            .children(rule)
             .child(diff)
             .into_any_element()
     }

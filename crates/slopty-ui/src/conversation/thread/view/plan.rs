@@ -1,10 +1,10 @@
-//! A plan the agent proposes, as a document in the thread rather than a call, set in type on
-//! the thread's plane as the agent's prose is: a small muted "Plan" over its title (how it
-//! stands after the word, in the warn tone while it waits on the person), the title in the
-//! medium weight at the prose size, then its Markdown at the prose size. No card, no mark: the
-//! word and the title's weight say what it is. Its copy shows under the pointer. A long plan
-//! shows its head until opened. While the agent waits on the person's word, its answers sit
-//! under it, as a call's do.
+//! A plan the agent proposes, as a document in the thread rather than a call, on the thread's
+//! one card (`kit::raised`, as the changes card and the composer are): a head of its mark and
+//! a small muted "Plan" (how it stands after the word, in the warn tone while it waits on the
+//! person), the title in the medium weight at the prose size, then its Markdown at the prose
+//! size. It is a thing put to the person, so it holds its own edge. Its copy shows under the
+//! pointer. A long plan shows its head until opened. While the agent waits on the person's
+//! word, its answers end the card, as a call's do.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -93,6 +93,7 @@ impl ThreadView {
             .min_h(px(theme.density.row))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
+            .child(self.icon(Symbol::Checklist, s.text_muted))
             .child(div().flex_none().child("Plan"))
             .children(word.map(|w| {
                 div()
@@ -143,7 +144,7 @@ impl ThreadView {
             Some(word) => format!("Plan: {title}, {word}"),
             None => format!("Plan: {title}"),
         };
-        div()
+        kit::raised(div(), theme)
             .id(ElementId::Name(SharedString::from(selector.clone())))
             .debug_selector(move || selector)
             .group(group)
@@ -152,6 +153,10 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
+            .rounded(px(theme.radii.md))
+            .px(px(theme.spacing.md))
+            .pt(px(theme.spacing.xxs))
+            .pb(px(theme.spacing.sm + theme.spacing.xxs))
             .child(eyebrow)
             .child(heading)
             .child(

@@ -2731,23 +2731,45 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// The thread's stream is type on one plane: no call and no plan in it is a card or rests
-    /// raised. A card there boxed the calls that changed something while their neighbours that
-    /// only looked were lines, and a stream of type then wore four kinds of edge; how a call
-    /// stands is its mark and a word. An opened call's body is a well ([`super::inset`]).
+    /// The thread's work is type on one plane: no call in it is a card or rests raised. A card
+    /// there boxed the calls that changed something while their neighbours that only looked
+    /// were lines, and a stream of type then wore four kinds of edge; how a call stands is its
+    /// mark and a word. An opened call's body is a well ([`super::inset`]), and a file it names
+    /// a chip on the same wash. What holds something of its own (a plan, the changes, a
+    /// request) is a card, the one in [`the_thread_rests_on_one_card`].
     #[test]
-    fn the_stream_wears_no_card() {
-        const STREAM: [&str; 2] =
-            ["conversation/thread/view/tools.rs", "conversation/thread/view/plan.rs"];
+    fn the_work_wears_no_card() {
+        const WORK: [&str; 1] = ["conversation/thread/view/tools.rs"];
         const RAISED: [&str; 4] = ["kit::card(", "kit::card_part(", "kit::raised(", "raised_part("];
         let mut wrong = Vec::new();
         for (file, no, line) in chrome_lines("slopty-ui/src") {
             let code = !line.trim_start().starts_with("//");
-            if !code || !STREAM.iter().any(|s| file.ends_with(s)) {
+            if !code || !WORK.iter().any(|s| file.ends_with(s)) {
                 continue;
             }
             if let Some(raised) = RAISED.iter().find(|r| line.contains(*r)) {
-                wrong.push(format!("{file}:{no}: `{raised}` in the stream: {}", line.trim()));
+                wrong.push(format!("{file}:{no}: `{raised}` in the work: {}", line.trim()));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Everything that rests in the thread's column wears one card (`docs/decisions/ui.md`,
+    /// "The thread is one card language"): the card's wash and its ring through
+    /// [`super::raised`], or the wash alone through [`super::inset`]. No part names the
+    /// `elevated` plane, which is the floats' ([`super::elevate`]), nor lays the card's wash by
+    /// hand, so no part grows a surface of its own again.
+    #[test]
+    fn the_thread_rests_on_one_card() {
+        const PLANES: [&str; 3] = ["elevated", "surfaces.card)", "s.card)"];
+        let mut wrong = Vec::new();
+        for (file, no, line) in chrome_lines("slopty-ui/src") {
+            let code = !line.trim_start().starts_with("//");
+            if !code || !file.contains("conversation/thread/") {
+                continue;
+            }
+            if let Some(plane) = PLANES.iter().find(|p| line.contains(*p)) {
+                wrong.push(format!("{file}:{no}: `{plane}` in the thread: {}", line.trim()));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));

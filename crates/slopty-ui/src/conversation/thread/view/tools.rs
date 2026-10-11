@@ -243,11 +243,18 @@ impl ThreadView {
                 .gap(px(theme.spacing.xs))
                 .children(verb.map(|v| div().flex_none().text_color(hsla(ink)).child(v)))
                 .child(
+                    // A file is a chip set into the line (`MonoCode`'s file chip): the card's
+                    // wash with no ring, at the least radius.
                     div()
                         .id(ElementId::Name(name_id.clone().into()))
                         .debug_selector(move || name_id)
                         .flex_none()
                         .max_w(gpui::relative(0.7))
+                        .when(a_file, |el| {
+                            kit::inset(el, theme)
+                                .rounded(px(theme.radii.xs))
+                                .px(px(theme.spacing.xs))
+                        })
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
@@ -366,7 +373,7 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         if let Some((path, patch)) = path_patch(call) {
-            return Some(self.patch_well(id, (path, patch), true, cx).into_any_element());
+            return Some(self.patch_well(id, (path, patch), (true, true), cx).into_any_element());
         }
         let whole = self.whole.contains(id);
         let command = match &call.detail {
@@ -424,12 +431,14 @@ impl ThreadView {
     /// request's). With `peek`, its first [`PEEK_LINES`] lines, then "Show all N lines" until
     /// the reader asks for all of them (a call's, in the thread); without, all of it (a
     /// request's, in a well that scrolls). Once all shows, how many more lines the agent's side
-    /// left out, so a cut diff never reads as the whole change.
+    /// left out, so a cut diff never reads as the whole change. `walled` keeps the well; a
+    /// caller that draws the well round more than the diff (a request's change under its file's
+    /// line) takes the lines bare, so no wash lies over another.
     pub(super) fn patch_well(
         &self,
         key: &ItemId,
         (path, patch): (&str, &Patch),
-        peek: bool,
+        (peek, walled): (bool, bool),
         cx: &Context<Self>,
     ) -> Div {
         let theme = &self.theme;
@@ -459,7 +468,8 @@ impl ThreadView {
         }
         let selector = format!("patch-{}", key.0);
         let code = ink.code().py(px(theme.spacing.xxs)).children(children);
-        let well = self.well(code).debug_selector(move || selector);
+        let well = if walled { self.well(code) } else { code };
+        let well = well.debug_selector(move || selector);
         let more = (!whole).then(|| self.show_lines(key, total as u64, cx));
         let left_out = (whole && patch.clipped_lines > 0).then(|| {
             let n = u64::from(patch.clipped_lines);

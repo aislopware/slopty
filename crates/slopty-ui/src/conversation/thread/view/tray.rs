@@ -202,9 +202,8 @@ impl ThreadView {
                     .gap(px(theme.spacing.xxs))
                     .when(new > 0, |el| el.pl(px(theme.spacing.sm)).pr(px(theme.spacing.xs)))
                     .rounded(px(theme.radii.sm))
-                    .border(kit::HAIR)
-                    .border_color(hsla(s.border))
-                    .bg(hsla(s.elevated))
+                    // A chip over the body floats: the one thing in the thread on `elevated`.
+                    .map(|el| kit::elevate(el, theme))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .when(new > 0, |el| {
@@ -344,18 +343,15 @@ impl ThreadView {
                 .flex()
                 .flex_col()
                 .rounded(radius)
-                .border(kit::HAIR)
-                .border_color(hsla(s.border))
-                .bg(hsla(s.elevated))
+                .map(|el| kit::raised(el, theme))
                 .overflow_hidden()
                 .mb(px(theme.spacing.md))
                 .child(request)
         });
         // Over the composer the tray is the card's head: as wide, its corners the composer's,
-        // and the composer's top edge the one hairline between them, so one outline holds both
-        // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
-        // kinds of thing stand apart by the quieter hairline. It is raised as the composer is,
-        // on the same surface: a wash would sink it into the page in light.
+        // one ring round both and the quieter line between them, so no row reads as cut by the
+        // composer. Alone, it is a card of its own. It is the thread's one card, as the
+        // composer is (`kit::raised`).
         let radius = px(theme.radii.md);
         // A composer that bleeds has no box for the tray to head: the tray stands as a card.
         let tucked = tucked && !self.bleeds();
@@ -380,11 +376,13 @@ impl ThreadView {
                         .mb(px(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
-                // Tucked over the composer it is the card's head, on the band; the field under
-                // it stays raised, so the tone step parts them with no rule.
-                .map(|el| if tucked { kit::inset(el, theme) } else { el.bg(hsla(s.elevated)) })
+                .map(|el| kit::inset(el, theme))
                 .overflow_hidden()
                 .child(rest)
+                // Over the composer, whose top edge it takes, the quieter line parts the two.
+                .when(tucked, |el| {
+                    el.child(div().flex_none().w_full().h(kit::HAIR).bg(hsla(s.stroke)))
+                })
         });
         let tucked = tucked && rest.is_some();
         Some((
@@ -707,7 +705,7 @@ impl ThreadView {
                 .flex_col()
                 .px(px(theme.spacing.md))
                 .pb(px(theme.spacing.md))
-                .child(asking.questions().element(theme, answers))
+                .child(asking.questions().element(theme, answers, cx))
                 .into_any_element();
             (None, Some(body))
         } else if request.options.is_empty() {
@@ -779,10 +777,10 @@ impl ThreadView {
                     .whitespace_normal()
                     .map(|el| kit::typed(el, theme.roles().chrome));
                 if code {
-                    el.px(px(theme.spacing.sm))
+                    kit::inset(el, theme)
+                        .px(px(theme.spacing.sm))
                         .py(px(theme.spacing.xs))
                         .rounded(px(theme.radii.sm))
-                        .bg(hsla(s.ground))
                         .font_family(self.mono())
                         .text_color(hsla(s.text))
                         .child(SharedString::from(tail(&t, PEEK_LINES)))

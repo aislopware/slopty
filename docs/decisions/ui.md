@@ -6831,7 +6831,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     in a quiet well (`kit::inset`, `radii.md`) indented to the line's words. Deleted: the card
     look (`Look`), the edges in the warn and error tones and their `alpha::FAILED_EDGE` and
     `alpha::ASKING_EDGE`.
-  - **The plan is type** (`view/plan.rs`): a small muted eyebrow ("Plan", and "· Awaiting
+  - **The plan is type** (superseded 2026-10-11 by "The thread is one card language": a plan
+    is a card again, its eyebrow the card's head) (`view/plan.rs`): a small muted eyebrow ("Plan", and "· Awaiting
     approval" in the warn tone while it waits), its heading at the prose size in the medium
     weight, then its Markdown. The copy shows under the pointer. This supersedes "A plan is a
     card" in "The thread view recalls what was sent, reads a plan as a card…".
@@ -6841,7 +6842,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     where macOS puts the default. A group's rule gave way to space. A waiting request, its
     call and its plan lead with the one *needs you* mark (`ThreadView::needs_you`).
   - Lint: `kit::tests::the_stream_wears_no_card` (no `kit::card`, `card_part`, `raised` or
-    `raised_part` in the call or plan views).
+    `raised_part` in the call or plan views; since 2026-10-11 `the_work_wears_no_card`, over
+    the call view alone).
   - Tests: `conversation::thread::view::tools::tests::a_call_says_how_it_stands_in_a_word`,
     `conversation::thread::tests::face::{a_call_that_asks_as_it_arrives_is_answered_under_it_at_once,
     a_plan_in_the_thread_takes_its_answer}`.
@@ -8696,7 +8698,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       A tab's close is `kit::close_box`, 16 pt at `radii.xs`. The dead `kit::panel` is deleted.
     - **The composer is squared down.** Boxed in the reading column it is `radii.md` (6) inside
       the control's ring (`border`, 10 %) on the raised step. Focus adds the card's 3 % wash
-      and leaves the ring alone, where it used to step the ring up. In a narrow pane it bleeds:
+      and leaves the ring alone, where it used to step the ring up. (Superseded 2026-10-11 by
+      "The thread is one card language": the card's wash at rest, and focus steps the ring to
+      `keyed`.) In a narrow pane it bleeds:
       edge to edge at the pane's foot, square, under a sash line, with the tray over it a card
       of its own, not its head. Centred under an empty thread's question it stays boxed, and
       so does a view whose tile has not yet said its width. The tray's cards and its head are at
@@ -10385,3 +10389,46 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     starts (`docs/decisions/projects.md`), so the board's `PlaceHow::Pinned`, its lock on the
     place chip and `Place::why` ("Why: pinned") go with it.
   - Test: `workspace::tests::projects::the_board_sets_its_review_limit_and_merges_all_ready`.
+
+- ✅ **The thread is one card language** (2026-10-11, `.research/monocode-anatomy-2026-10-10.md`
+  §7 and its rulings). The thread's parts had each grown a surface of their own: the person's
+  turn a grey wash with no edge, the changes card a wash with a ring, the request card and the
+  composer white `elevated` plates with rings, a plan nothing at all. Three surfaces and two
+  ring rules in one column read as assembled. MonoCode's transcript rests everything that holds
+  something of its own on one 3 % fill inside one 10 % ring. Ruled, superseding "The plan is
+  type" in "The thread is type on one plane" and the composer's focused wash in "The design
+  system starts from `MonoCode`'s":
+  - **One card.** The card's wash inside the `border` ring at `radii.md` (`kit::raised`): the
+    person's turn, the changes card, the request card (an approval or a question), a plan, the
+    tray alone or as the composer's head, and the composer. `elevated` stays only on what
+    floats (menus, popovers, toasts, the palette, and the thread's way down to the newest,
+    now `kit::elevate` with the float's shadow).
+  - **The composer.** Boxed, on the card at rest; focused, its ring steps to `keyed` and no
+    second fill comes, the nearest token to MonoCode's `/20` and short of the 3:1 edge deleted
+    on 2026-10-05. Bled in a narrow pane it lies on the pane's plane under the sash.
+  - **One head, one rule, one foot.** A card's head row is a 14 pt glyph in `text_muted` and
+    its words at the chrome role (a plan's checklist and "Plan"; the changes card's pencil and
+    "Changed N files" in the medium weight in `text`). Between a head and a list, and between
+    the tray and the composer it heads, lies the quieter `stroke` line. Its answers end it at
+    `density.button` (26) on the small role, a step under the 28 pt control so they are no
+    longer the loudest thing in the column.
+  - **The person's turn joins the family**: the card with its ring, right-aligned. MonoCode's
+    10 % fill with no ring and its capsule for one line are not taken: a 10 % resting fill is
+    the selection in our tokens, and the ring is what lifts the turn off the page.
+  - **The work stays bare.** A call is a line; a file it names is a chip on the card's wash at
+    `radii.xs` with no ring. An opened call's well keeps `inset` at `radii.sm`. A proposed edit
+    put to the person is one well: its file's line, the `stroke` line, then its change, which
+    scrolls under the line that names it.
+  - **Question answers** (gpui-kit's questionnaire) are pills at `radii.sm` in the `border`
+    ring, 8 by 6, on nothing at rest; chosen, the `selected` wash in the `control` ring (3:1).
+    The kit's own look laid a wash under every answer in dark and a tinted ring on the chosen.
+  - **Not taken.** MonoCode's 12 radius for the changes card and the plan and its 10 for a file
+    preview: one radius for everything resting in the column wins over a spread its code does
+    not explain. Approvals as two bare buttons under the call: the decision row (the deny's
+    split, standing grants, the release) stays and takes the card's foot.
+  - Lints: `kit::tests::the_thread_rests_on_one_card` (no `elevated` and no hand-laid card
+    wash under `conversation/thread/`), `kit::tests::the_work_wears_no_card`.
+  - Tests: `kit::message::tests::a_message_is_the_threads_card_and_focus_steps_its_ring`,
+    `conversation::thread::questions::tests::an_answer_is_a_pill_and_chosen_is_the_selection`,
+    `conversation::thread::tests::proposed`; goldens `thread*`, `wide-reading-thread`,
+    `review-agent*`, `agent-*` and `empty-workspace` (its composer).
