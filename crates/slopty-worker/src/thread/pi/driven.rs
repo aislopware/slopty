@@ -317,6 +317,12 @@ impl Task {
             ThreadAsk::SetEffort { effort } => {
                 self.ask_for(Driven::set_effort(&effort), None).await;
             }
+            // The gate's own: pi knows nothing of it.
+            ThreadAsk::SetMode { mode } => {
+                if let Some(actions) = self.driven.set_mode(&mode) {
+                    self.apply(actions);
+                }
+            }
         }
     }
 
@@ -407,6 +413,10 @@ impl Task {
         let settled = matches!(record, Incoming::AgentSettled);
         let actions = self.driven.incoming(&record, now);
         self.apply(actions);
+        // What the thread's mode let through at the gate goes on without the person.
+        for allow in self.driven.take_allowed() {
+            self.write(&allow).await;
+        }
         if settled {
             self.ask_for(Command::GetSessionStats, Some(Expect::Stats)).await;
             self.next().await;

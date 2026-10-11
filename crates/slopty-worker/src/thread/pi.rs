@@ -114,6 +114,10 @@ enum ThreadAsk {
     SetEffort {
         effort: String,
     },
+    /// How far the gate lets calls through without asking ([`slopty_agent::pi::modes`]).
+    SetMode {
+        mode: String,
+    },
 }
 
 /// Where clients' asks go to the driven pi threads. Cheap to clone.
@@ -256,6 +260,12 @@ impl Pi {
                 }
                 ThreadAsk::SetEffort { effort: effort.clone() }
             }
+            Intent::SetMode { mode } => {
+                if !slopty_agent::pi::modes::known(mode) {
+                    return refused(&format!("pi's gate has no mode {mode}"));
+                }
+                ThreadAsk::SetMode { mode: mode.clone() }
+            }
             other => return other.unsupported(),
         };
         // What is held is the thread's record, answered whether pi runs or not.
@@ -388,8 +398,8 @@ impl Served {
             return outcome;
         }
         let role = seated.as_ref().and_then(|s| s.role.clone()).filter(|r| !r.trim().is_empty());
-        if start.mode.is_some() {
-            return self.host.record_start(id, refused("pi starts in no mode"));
+        if let Some(mode) = start.mode.as_deref().filter(|m| !slopty_agent::pi::modes::known(m)) {
+            return self.host.record_start(id, refused(&format!("pi's gate has no mode {mode}")));
         }
         if let Err(why) = super::attach::check(&start.attachments) {
             return self.host.record_start(id, refused(&why));
@@ -404,7 +414,9 @@ impl Served {
             intent: id,
             delivery: Delivery::Steer,
         });
-        let first: Vec<ThreadAsk> = effort.into_iter().chain(send).collect();
+        // The gate's level goes first too, so no call of the first turn asks more than it.
+        let mode = start.mode.clone().map(|mode| ThreadAsk::SetMode { mode });
+        let first: Vec<ThreadAsk> = mode.into_iter().chain(effort).chain(send).collect();
         let resumed = sessions::resumed(&start.args);
         let (session, own) = match resumed {
             Some((session, rest)) => (session.to_owned(), rest),

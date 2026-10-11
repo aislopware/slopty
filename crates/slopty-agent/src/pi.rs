@@ -12,6 +12,7 @@
 //! newer worker writes its own beside it.
 
 pub mod driven;
+pub mod modes;
 pub mod rpc;
 pub mod sessions;
 

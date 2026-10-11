@@ -628,6 +628,13 @@ mod pi {
         let mut nowhere = rig.start("Say hello.");
         nowhere.cwd = rig.work.join("gone").to_string_lossy().into_owned();
         assert!(matches!(pi.start(IntentId::new(), nowhere).await, Outcome::Refused { .. }));
+        let mut unknown = rig.start("Say hello.");
+        unknown.mode = Some("bypass".to_owned());
+        let unknown = pi.start(IntentId::new(), unknown).await;
+        assert!(
+            matches!(&unknown, Outcome::Refused { reason } if reason.contains("no mode bypass")),
+            "the gate's modes alone: {unknown:?}"
+        );
         assert_eq!(rig.host.threads(), []);
 
         let (bare, asks) = Pi::channel();

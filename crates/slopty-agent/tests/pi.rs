@@ -477,6 +477,59 @@ mod tests {
             assert_eq!(Driven::set_model("no-provider"), None);
         }
 
+        /// The gate puts to the person only what the thread's mode does not let through: in Ask a
+        /// read in its folder goes with no request, and its allow is sent; a command asks. Moved
+        /// on its own, the command goes too. The mode is kept with the thread, and one the gate
+        /// does not know is refused.
+        #[test]
+        fn the_gate_lets_through_what_the_mode_allows() {
+            use slopty_agent::pi::modes;
+            let (mut driven, started) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let shown = started.iter().find_map(|a| match a {
+                Action::MetersSet(m) => m.mode.clone(),
+                _ => None,
+            });
+            assert_eq!(shown.as_deref(), Some(modes::ASK), "asks by default");
+            let ids: Vec<String> = driven.meta().modes.iter().map(|m| m.id.clone()).collect();
+            assert_eq!(ids, [modes::ASK, modes::EDITS, modes::OWN]);
+            let ask = |id: &str, tool: &str, input: serde_json::Value| {
+                let call = format!("c-{id}");
+                let title = serde_json::json!({
+                    "gate": "slopty-gate/1", "call": call, "tool": tool, "input": input,
+                });
+                serde_json::json!({
+                    "type": "extension_ui_request", "id": id, "method": "select",
+                    "title": title.to_string(), "options": ["allow", "deny"],
+                })
+                .to_string()
+            };
+            let read =
+                heard(&mut driven, &ask("r", "read", serde_json::json!({"path": "src/x.rs"})), 1);
+            assert!(opened(&read).is_empty(), "a read in its folder asks nothing");
+            assert_eq!(driven.take_allowed(), [rpc::allow("r")]);
+            assert_eq!(driven.take_allowed(), Vec::<Request>::new(), "sent once");
+            let bash =
+                heard(&mut driven, &ask("b", "bash", serde_json::json!({"command": "ls"})), 2);
+            assert_eq!(opened(&bash).len(), 1, "a command asks");
+            assert_eq!(
+                driven.take_allowed(),
+                Vec::<Request>::new(),
+                "a command is not let through"
+            );
+
+            assert!(driven.set_mode("bypass").is_none(), "no such mode");
+            let moved = driven.set_mode(modes::OWN).expect("a mode it knows");
+            assert!(moved.iter().any(|a| matches!(a, Action::MetersSet(m)
+                if m.mode.as_deref() == Some(modes::OWN))));
+            assert_eq!(driven::mode_of(driven.meta()), modes::OWN, "kept with the thread");
+            let own =
+                heard(&mut driven, &ask("o", "bash", serde_json::json!({"command": "ls"})), 3);
+            assert!(opened(&own).is_empty(), "on its own, nothing asks");
+            assert_eq!(driven.take_allowed(), [rpc::allow("o")]);
+            let (again, _) = Driven::of(driven.meta(), WallMs::ZERO);
+            assert_eq!(driven::mode_of(again.meta()), modes::OWN, "read again, the same");
+        }
+
         fn heard(driven: &mut Driven, line: &str, now: u64) -> Vec<Action> {
             driven.incoming(&rpc::record(line.as_bytes()).unwrap(), WallMs::from_millis(now))
         }

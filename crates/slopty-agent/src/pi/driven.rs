@@ -54,11 +54,12 @@ use crate::driven::{OUTPUT, PROSE, caps, choice, replaced_patch, title_of, tool,
 use crate::queue::Queue;
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 9] = [
+pub const CAPS: [&str; 10] = [
     Cap::APPROVALS,
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::SET_EFFORT,
+    Cap::SET_MODE,
     Cap::SET_MODEL,
     Cap::SCHEDULE,
     Cap::QUEUE,
@@ -69,6 +70,16 @@ pub const CAPS: [&str; 9] = [
 /// The fact that keeps the flags a thread's pi was started with, as a JSON list: a pi started
 /// again for it, driven or in its TUI, gets them too.
 pub const ARGS_FACT: &str = "pi-args";
+
+/// The fact that keeps how far the thread's gate lets calls through without asking
+/// ([`super::modes`]); [`super::modes::ASK`] when it is not set.
+pub const MODE_FACT: &str = "pi-mode";
+
+/// The mode `meta`'s gate runs in ([`MODE_FACT`]).
+#[must_use]
+pub fn mode_of(meta: &ThreadMeta) -> &str {
+    meta.facts.get(MODE_FACT).map_or(super::modes::ASK, String::as_str)
+}
 
 /// The fact that names the session's file, as pi said it.
 pub const SESSION_FILE_FACT: &str = "session-file";
@@ -176,6 +187,9 @@ pub struct Driven {
     open: BTreeMap<AskId, Open>,
     /// Calls the person denied, which end blocked rather than failed.
     denied: Vec<String>,
+    /// Gate asks the thread's mode let through, whose allow is still to be sent
+    /// ([`Driven::take_allowed`]).
+    allowed: Vec<AskId>,
     /// Messages sent and not yet heard back, with the intent that sent each.
     sends: VecDeque<(IntentId, String)>,
     /// Messages held until pi has nothing else to do ([`Cap::QUEUE`]).
@@ -199,7 +213,7 @@ impl Driven {
     #[must_use]
     pub fn new(session: &str, version: &str, cwd: &str, now: WallMs) -> (Self, Vec<Action>) {
         let meta = ThreadMeta {
-            modes: Vec::new(),
+            modes: super::modes::modes(),
             efforts: Vec::new(),
             id: thread_of(session),
             agent: AgentId::named(AgentId::PI),
@@ -226,10 +240,12 @@ impl Driven {
     pub fn of(meta: &ThreadMeta, now: WallMs) -> (Self, Vec<Action>) {
         let mut meta = meta.clone();
         meta.models.clear();
+        meta.modes = super::modes::modes();
         Self::with(meta, now)
     }
 
     fn with(meta: ThreadMeta, now: WallMs) -> (Self, Vec<Action>) {
+        let mode = Some(mode_of(&meta).to_owned());
         let driven = Self {
             meta,
             turns: 0,
@@ -240,9 +256,10 @@ impl Driven {
             calls: HashMap::new(),
             open: BTreeMap::new(),
             denied: Vec::new(),
+            allowed: Vec::new(),
             sends: VecDeque::new(),
             queued: Queue::default(),
-            meters: Meters::default(),
+            meters: Meters { mode, ..Meters::default() },
             usage: thread::Usage::default(),
             running: false,
             aborting: false,
@@ -250,7 +267,11 @@ impl Driven {
             phase: (Phase::Idle, now),
             notices: 0,
         };
-        let actions = vec![Action::Meta(Box::new(driven.meta.clone())), driven.status_now()];
+        let actions = vec![
+            Action::Meta(Box::new(driven.meta.clone())),
+            Action::MetersSet(driven.meters.clone()),
+            driven.status_now(),
+        ];
         (driven, actions)
     }
 
@@ -268,6 +289,25 @@ impl Driven {
         let json = serde_json::to_string(args).unwrap_or_default();
         self.meta.facts.insert(ARGS_FACT.to_owned(), json);
         vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
+    /// The gate's mode is `mode` ([`super::modes`]), kept for every pi started again for the
+    /// thread. `None` for a mode the gate does not know.
+    pub fn set_mode(&mut self, mode: &str) -> Option<Vec<Action>> {
+        if !super::modes::known(mode) {
+            return None;
+        }
+        self.meta.facts.insert(MODE_FACT.to_owned(), mode.to_owned());
+        self.meters.mode = Some(mode.to_owned());
+        Some(vec![
+            Action::Meta(Box::new(self.meta.clone())),
+            Action::MetersSet(self.meters.clone()),
+        ])
+    }
+
+    /// The allows to send for the gate asks the thread's mode let through since last asked.
+    pub fn take_allowed(&mut self) -> Vec<Request> {
+        self.allowed.drain(..).map(|ask| rpc::allow(&ask.0)).collect()
     }
 
     /// This thread's session branched off `fork`'s (`--fork`), which it holds the history of.
@@ -989,6 +1029,14 @@ impl Driven {
     /// The gate asks about `gate`'s call, as dialog `id`.
     fn gate(&mut self, id: &str, gate: &GateAsk, now: WallMs) -> Vec<Action> {
         let ask = AskId(id.to_owned());
+        let call = (gate.tool.as_str(), &gate.input, &gate.hints);
+        if super::modes::lets(mode_of(&self.meta), call, std::path::Path::new(&self.meta.cwd)) {
+            // Let through by the level the person set: nothing is put to them.
+            self.allowed.push(ask);
+            let mut actions = self.call_state(&gate.call, ToolState::Running, None, now);
+            actions.push(self.status(now));
+            return actions;
+        }
         let title = ask_title(gate);
         let asks = Asks::Gate { call: gate.call.clone() };
         self.open.insert(ask.clone(), Open { asks, title: title.clone(), until: None });

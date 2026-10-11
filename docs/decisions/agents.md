@@ -2832,3 +2832,39 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_answer_given_while_codex_is_away_is_said_not_to_have_gone_at_once`,
     `a_followed_thread_is_taken_up_again_once_codex_is_back`,
     `a_message_queued_behind_a_turn_goes_after_codex_s_link_comes_back`.
+
+- ✅ **pi's gate lets through what its mode allows** (2026-10-11, readiness-w 10-11 rank 4). This
+  refines "pi is driven over its RPC mode, with a gate that fails closed by pi's own rule".
+  - **The gap.** The gate put every call to the person: reads, Slopty's own tools, all of
+    them. A project's autonomy never reached a pi task. The server held only Claude Code and
+    Codex to a level, so a pi task at Edits or On its own still asked about everything, and
+    with a few such tasks Needs you filled up with reads.
+  - **Modes.** pi has no permission system, so the gate is the one it runs under, and it now
+    has three modes (`slopty_agent::pi::modes`), the project's levels by name:
+    - `ask`, the default: a read inside the thread's folder (pi's `read`, `grep`, `find`,
+      `ls`, or a tool of pi's own that says `readOnlyHint`) and Slopty's tools
+      (`mcp__slopty__…`) go. Everything else asks.
+    - `edits`: `edit` and `write` inside the folder go too.
+    - `own`: every call goes.
+    A path that climbs out of the folder, or one outside it, always asks. Another MCP server's
+    read-only hint is not taken. An unknown mode lets nothing through, so the gate still fails
+    closed.
+  - **Where it is set.** The thread offers the modes (`ThreadMeta.modes`, `Cap::SET_MODE`), and
+    the person switches them as any agent's mode. A start may name one (`Start.mode`). A
+    project's pi task starts at its level (`Autonomy` → `ask`, `edits`, `own`). The mode is
+    kept as the fact `pi-mode`, so a pi started again for the thread keeps it, and the meters
+    show it.
+  - **Not Slopty answering.** A call let through is the level the person set, as Claude Code's
+    own `acceptEdits` and `auto` are. Every call the level does not cover still goes to the
+    person, and nothing is answered in their place.
+  - ACP tasks start in their agent's default mode, ruled kept (2026-10-11). An ACP agent
+    names its modes itself, and they are known only once its session exists. A table of ids
+    guessed per agent would be the per-agent polish the orchestrator-first ruling drops, and a
+    wrong guess at Own would loosen past what the agent documents. The default asks the person
+    no less than any level, so a higher level only costs an ACP task some questions. The
+    person can still switch the thread's mode from its own list.
+  - Tests: `each_mode_lets_through_what_it_says`, `a_read_only_hint_is_taken_from_pi_s_own_tools_alone`
+    and `the_modes_offered_are_the_ones_known` (`pi/modes.rs`);
+    `the_gate_lets_through_what_the_mode_allows` (`slopty-agent/tests/pi.rs`); the unknown
+    mode in `a_start_pi_cannot_take_is_refused` (`slopty-worker/tests/pi.rs`); the pi task's
+    mode in `any_agent_runs_a_task_as_a_thread` (`hub/thread_tests.rs`).
