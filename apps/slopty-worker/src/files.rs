@@ -144,6 +144,11 @@ pub enum Save {
 
 /// Take one client's saves and edit ends in order until the connection goes and the last one
 /// sent is taken. One at a time: a second save of a file never overtakes the first.
+///
+/// A git op goes once the saves sent before it are on disk, and runs beside what follows, in
+/// order with the other git ops of its repository. A save waits only for a git op that holds its
+/// path: a commit the paths it commits, a worktree's removal everything in the worktree. So a
+/// pre-commit hook that runs for minutes holds the saves of the files it commits, and no other.
 pub async fn save_in_order(
     handoffs: Handoffs,
     worker: slopty_worker::Worker,
@@ -151,33 +156,98 @@ pub async fn save_in_order(
     out: mpsc::Sender<WorkerMsg>,
     mut saves: mpsc::UnboundedReceiver<Save>,
 ) {
+    let mut running: Vec<Running> = Vec::new();
     while let Some(save) = saves.recv().await {
+        running.retain(|op| !op.finished());
         match save {
             Save::File { path, text, base_modified_ms } => {
+                let at = slopty_worker::file::expand_home(std::path::Path::new(&path));
+                for op in running.iter().filter(|op| op.holds(&at)) {
+                    done(op.done.clone()).await;
+                }
                 write(&handoffs, client, &out, path, text, base_modified_ms).await;
             }
             Save::Edited(reply) => handoffs.lock().replied(client, reply),
-            Save::Fs { request, op } => fs_op(client, &out, request, op).await,
-            // A status, a commit, a review of the changes or a worktree's removal is the
-            // disk's, in order with the saves around it; a push or a pull request waits on the
-            // network, so it runs beside them, after what came before.
-            Save::Git {
-                request,
-                repo,
-                op:
-                    op @ (GitOp::Status
-                    | GitOp::Commit { .. }
-                    | GitOp::Changes { .. }
-                    | GitOp::RemoveWorktree),
-            } => {
-                git_op(&worker, client, &out, request, repo, op).await;
+            // A folder op may move or trash any path, so it waits for every git op that holds
+            // some.
+            Save::Fs { request, op } => {
+                for git in running.iter().filter(|git| !matches!(git.holds, Holds::Nothing)) {
+                    done(git.done.clone()).await;
+                }
+                fs_op(client, &out, request, op).await;
             }
+            // A status, a commit, a review of the changes or a worktree's removal is the
+            // disk's: a later git op of its repository waits for it. A push or a pull request
+            // waits on the network, and only on what came before.
             Save::Git { request, repo, op } => {
+                let before: Vec<watch::Receiver<bool>> =
+                    running.iter().filter(|op| op.repo == repo).map(|op| op.done.clone()).collect();
+                let holds = match &op {
+                    GitOp::Commit { paths, .. } => Some(Holds::Paths(paths.clone())),
+                    GitOp::RemoveWorktree => Some(Holds::Under(slopty_worker::file::expand_home(
+                        std::path::Path::new(&repo),
+                    ))),
+                    GitOp::Status | GitOp::Changes { .. } => Some(Holds::Nothing),
+                    _ => None,
+                };
+                let (finished, done_rx) = watch::channel(false);
+                if let Some(holds) = holds {
+                    running.push(Running { repo: repo.clone(), holds, done: done_rx });
+                }
                 let (out, worker) = (out.clone(), worker.clone());
-                tokio::spawn(async move { git_op(&worker, client, &out, request, repo, op).await });
+                tokio::spawn(async move {
+                    for op in before {
+                        done(op).await;
+                    }
+                    git_op(&worker, client, &out, request, repo, op).await;
+                    let _told = finished.send(true);
+                });
             }
         }
     }
+}
+
+/// A git op of the disk's under way for one client ([`save_in_order`]).
+struct Running {
+    /// The folder it was asked in, as the client named it.
+    repo: String,
+    /// What a save waits for it on.
+    holds: Holds,
+    /// Turns true, or closes, once it is done.
+    done: watch::Receiver<bool>,
+}
+
+/// What a git op under way holds from the saves.
+enum Holds {
+    /// Nothing: it only reads.
+    Nothing,
+    /// The repository-relative paths it commits.
+    Paths(Vec<String>),
+    /// Everything under a folder: a worktree it removes.
+    Under(std::path::PathBuf),
+}
+
+impl Running {
+    /// Whether it is done.
+    fn finished(&self) -> bool {
+        *self.done.borrow() || self.done.has_changed().is_err()
+    }
+
+    /// Whether a save of `path` waits for it. A committed path is matched by its last
+    /// components, so a file of the same name in another repository waits too, which costs
+    /// a wait and never a commit of half a save.
+    fn holds(&self, path: &std::path::Path) -> bool {
+        match &self.holds {
+            Holds::Nothing => false,
+            Holds::Paths(paths) => paths.iter().any(|p| !p.is_empty() && path.ends_with(p)),
+            Holds::Under(dir) => path.starts_with(dir),
+        }
+    }
+}
+
+/// Once the git op that tells `done` is done.
+async fn done(mut done: watch::Receiver<bool>) {
+    let _closed_is_done = done.wait_for(|finished| *finished).await;
 }
 
 /// The directory of every terminal running on `worker`.

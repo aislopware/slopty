@@ -5578,6 +5578,123 @@ mod tests {
         assert!(why.contains("no remote"), "{why}");
     }
 
+    /// A commit whose hook runs long holds only the saves of what it commits: a save of another
+    /// file lands while the hook waits, a later save of a committed file waits for the commit,
+    /// which commits the file as it was saved before, and the status asked after the commit
+    /// sees it made. The hook waits on a fifo the test opens, so nothing rests on a timing.
+    #[tokio::test]
+    async fn a_long_commit_hook_holds_only_the_saves_of_what_it_commits() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+
+        /// What the client hears, in order.
+        #[derive(Debug)]
+        enum Heard {
+            Written(String),
+            Git(u64, GitOutcome),
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let hooks = root.join("hooks");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&hooks).unwrap();
+        let fifo = root.join("release");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, format!("#!/bin/sh\nread _line < '{}'\n", fifo.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let git = |args: &[&str]| {
+            let ran = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+            String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Person"]);
+        git(&["config", "user.email", "person@example.com"]);
+        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "other\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        git(&["config", "core.hooksPath", &hooks.to_string_lossy()]);
+        std::fs::write(repo.join("a.txt"), "saved\n").unwrap();
+        let at = repo.to_string_lossy().into_owned();
+        let (a, b) = (
+            repo.join("a.txt").to_string_lossy().into_owned(),
+            repo.join("b.txt").to_string_lossy().into_owned(),
+        );
+        let save = |path: &str, text: &str| ClientMsg::WriteFile {
+            path: path.to_owned(),
+            text: text.to_owned(),
+            base_modified_ms: None,
+        };
+
+        let commit = GitOp::Commit { paths: vec!["a.txt".to_owned()], message: "Save".to_owned() };
+        link.send(ClientMsg::Git { request: 1, repo: at.clone(), op: commit }).await.unwrap();
+        link.send(save(&b, "beside the commit\n")).await.unwrap();
+        link.send(save(&a, "after the commit\n")).await.unwrap();
+        link.send(ClientMsg::Git { request: 2, repo: at.clone(), op: GitOp::Status })
+            .await
+            .unwrap();
+
+        let next = async |events: &mut tokio::sync::mpsc::Receiver<LinkEvent>| {
+            next_control(events, |msg| match msg {
+                WorkerMsg::Written { path, .. } => Some(Heard::Written(path)),
+                WorkerMsg::GitDone { request, outcome } => Some(Heard::Git(request, outcome)),
+                _other => None,
+            })
+            .await
+        };
+        let first = next(&mut events).await;
+        assert!(
+            matches!(&first, Heard::Written(p) if *p == b),
+            "b goes while the hook waits: {first:?}"
+        );
+        let release = fifo.clone();
+        tokio::task::spawn_blocking(move || std::fs::write(release, "go\n"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut heard = Vec::new();
+        while heard.len() < 3 {
+            heard.push(next(&mut events).await);
+        }
+        let Some(Heard::Git(1, GitOutcome::Done(GitDone::Committed { files: 1, .. }))) =
+            heard.first()
+        else {
+            panic!("the commit ends first: {heard:?}")
+        };
+        assert!(
+            heard.iter().any(|h| matches!(h, Heard::Written(p) if *p == a)),
+            "a is saved once the commit is made: {heard:?}"
+        );
+        assert_eq!(git(&["show", "HEAD:a.txt"]), "saved", "committed as saved before");
+        let status = heard.iter().find_map(|h| match h {
+            Heard::Git(2, GitOutcome::Done(GitDone::Status(status))) => Some(status),
+            _ => None,
+        });
+        let status = status.unwrap_or_else(|| panic!("no status: {heard:?}"));
+        let files: Vec<(&str, &str)> =
+            status.files.iter().map(|f| (f.path.as_str(), f.xy.as_str())).collect();
+        assert_eq!(
+            files,
+            [("a.txt", ".M"), ("b.txt", ".M")],
+            "after the commit and both later saves"
+        );
+    }
+
     /// A clone asked of a real worker straight: a place holding a clone of the same origin is
     /// answered as found, with which repository it is, and a place holding anything else is
     /// refused in words. Nothing reaches the network.
