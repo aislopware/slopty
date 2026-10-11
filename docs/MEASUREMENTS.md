@@ -16422,3 +16422,27 @@ gh run view 38157096222 --log --job 114522216729 | grep 'memory'   # rest
 - Of our own processes, `slopty-ptyd` outlived the worker shard's tests.
 - No `cargo` or `rustc` ran during the tests: the spawned binaries were vouched and nothing
   built them again.
+
+## 2026-10-12 — the Mac worker shard's memory once facts are gathered only when asked
+
+The same shard as the entry above, run as a probe on a `macos-26` runner with the facts fix
+(40437e1a: facts gathered once the server asks, Rust targets read from rustup's files, a warden
+that ends a killed worker's probes). Check run 38161142392:
+
+```sh
+cargo xtask remote --name W-facts-mac --runner macos-26 \
+  --probe 'xtask gate --ci --lane tests --shard worker'
+gh run view 38161142392 --log | grep 'memory'
+```
+
+| the tests step, MB | before (gate run 38157096222) | after (check run 38161142392) |
+| --- | --- | --- |
+| compressed | 58 977 | 0 |
+| decompressed | 42 347 | 529 |
+| paged out | 8 712 | 16 |
+| swapped out | 409 | 0 |
+
+- No `rustup` or `xcodebuild` was among the largest commands in any 10 s sample, where
+  `rustup` led every sample before at 1 300–2 460 MB. The largest of ours was a test's
+  `slopty-worker`, 196–204 MB.
+- No process of ours outlived the tests. nextest ran 1 102 tests in 148 s.

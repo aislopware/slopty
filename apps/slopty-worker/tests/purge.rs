@@ -86,6 +86,7 @@ mod purge {
     async fn daemons(dir: &Path, home: &Path, data: &Path) -> (Daemons, SocketAddr) {
         std::fs::create_dir_all(data.join("run")).unwrap();
         let mut ptyd = started(PTYD, home, data, &[]).stdout(Stdio::null()).spawn().unwrap();
+        slopty_testkit::group::ward(ptyd.id());
         let socket = service::Layout::new(data).ptyd_socket();
         let up = async {
             while tokio::net::UnixStream::connect(&socket).await.is_err() {
@@ -102,6 +103,7 @@ mod purge {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(worker.id());
         let stdout = worker.stdout.take().unwrap();
         let mut line = String::new();
         let mut reader = BufReader::new(stdout);

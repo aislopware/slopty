@@ -135,6 +135,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .expect("slopty-ptyd built alongside the tests");
+        slopty_testkit::group::ward(ptyd.id());
         wait_for_ptyd(&mut ptyd, &ptyd_sock).await;
         ptyd
     }
@@ -172,6 +173,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(worker.id());
         let stdout = worker.stdout.take().unwrap();
         let mut line = String::new();
         let read = tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line)).await;

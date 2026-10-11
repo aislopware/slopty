@@ -82,9 +82,11 @@ mod tests {
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(ptyd.id());
         let ready = async {
             while tokio::net::UnixStream::connect(&ptyd_sock).await.is_err() {
                 assert!(ptyd.try_wait().unwrap().is_none(), "ptyd exited early");
@@ -105,9 +107,11 @@ mod tests {
             .env("SLOPTY_WORKER_NAME", "link-test")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(worker.id());
         let mut line = String::new();
         let stdout = worker.stdout.take().unwrap();
         tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line))

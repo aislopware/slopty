@@ -108,6 +108,7 @@ mod threads {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(ptyd.id());
         while tokio::net::UnixStream::connect(&ptyd_sock).await.is_err() {
             assert!(ptyd.try_wait().unwrap().is_none(), "ptyd exited");
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -143,6 +144,7 @@ mod threads {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        slopty_testkit::group::ward(worker.id());
         let mut line = String::new();
         let stdout = worker.stdout.take().unwrap();
         BufReader::new(stdout).read_line(&mut line).await.unwrap();

@@ -1540,11 +1540,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     daemons of `threads::a_trusted_mod_streams_live_blocks_that_the_transcript_settles`, which
     hung on the live-id assertion fixed the same day and was ended by nextest at 180 s. nextest
     kills the test's own process group, which the test's daemons, each leading a group of its
-    own, are outside of, and the test's `Drop` that ends them never ran.
+    own, are outside of, and the test's `Drop` that ends them never ran. So a test's daemons
+    now have a warden too (`slopty_testkit::group::ward`, called right after each spawn): a
+    `sh` in a group of its own per test process, told `+<group>` and `-<group>` on a pipe only
+    the test process holds, which kills every group still listed once the test process is gone.
+    `group::end` takes a group out of its care once it is gone. It is `/bin/sh` rather than a
+    binary of ours, so a test finds it without a build; a kill between a spawn and its `ward` is
+    the one gap, microseconds wide.
   - Tests: `warden::the_groups_still_listed_die_when_the_worker_goes`,
     `facts::the_rust_targets_are_the_active_toolchain_s_read_from_rustup_s_files`
     (`slopty-worker`); `server_link::a_probe_running_when_the_worker_is_killed_dies_with_it`
     and `server_link::the_worker_gathers_its_facts_once_the_server_asks` (`slopty-workerd`);
+    `group::tests::a_killed_test_s_warded_daemons_die_with_it` (`slopty-testkit`: a test
+    process that wards a daemon and is then killed outright);
     `a_worker_s_reported_facts_are_shown_under_the_server_s` (`slopty-server`, asked once a
     registration); `a_worker_s_own_facts_are_listed_and_a_task_runs_where_it_says`
     (`slopty-cli`) reads them through `slopty workers`.
