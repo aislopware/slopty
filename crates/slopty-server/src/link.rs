@@ -272,6 +272,7 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     // Only a person's client is where a person is, and gets notices.
     let seated = (speaker == Speaker::Person).then(|| hub.seat(number, name.clone(), out.clone()));
     let seat = seated.as_ref().map(crate::hub::Seated::link);
+    let mut pushable = seated.as_ref().map(crate::hub::Seated::pushable);
     let welcome = FromServer::Welcome {
         name: hub.name().to_owned(),
         link: number,
@@ -292,6 +293,7 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
                 break;
             }
             Some(reply) = replies.recv() => vec![reply],
+            now = next_pushable(&mut pushable) => vec![FromServer::Pushable(now)],
             change = changes.recv() => match change {
                 Ok(change) => vec![change],
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
@@ -311,6 +313,23 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     reader.abort();
     drop(seated);
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
+}
+
+/// The next word on whether the server can push to the phone a client said it is, once it
+/// moved: never for a client that is no person's, before it said a phone, or once the hub is
+/// gone. A watch, so the word never waits behind a full queue and the client hears the last.
+async fn next_pushable(word: &mut Option<watch::Receiver<Option<bool>>>) -> bool {
+    loop {
+        let Some(rx) = word.as_mut() else { return std::future::pending().await };
+        if rx.changed().await.is_err() {
+            *word = None;
+            continue;
+        }
+        let now = *rx.borrow_and_update();
+        if let Some(now) = now {
+            return now;
+        }
+    }
 }
 
 /// Dispatch each request the client sends until its link ends, and return why it ended.

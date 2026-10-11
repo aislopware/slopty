@@ -184,7 +184,8 @@ impl Directory {
             | FromServer::Reply { .. }
             | FromServer::Projects { .. }
             | FromServer::Deliver { .. }
-            | FromServer::Pushes(_) => Vec::new(),
+            | FromServer::Pushes(_)
+            | FromServer::Pushable(_) => Vec::new(),
             FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
             FromServer::Present(present) => vec![Change::Present(present)],
             FromServer::Notice(notice) => vec![Change::Notice(notice)],

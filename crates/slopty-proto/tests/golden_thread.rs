@@ -1220,5 +1220,6 @@ mod golden_thread {
             },
         );
         snap("push_answerable", &slopty_proto::server::FromServer::Pushes(true));
+        snap("push_pushable", &slopty_proto::server::FromServer::Pushable(false));
     }
 }

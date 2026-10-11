@@ -1414,3 +1414,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `notify::pushed::tests::a_ready_note_merges_the_task_it_names` (slopty-platform),
     `verdict::tests::a_merge_pressed_on_a_ready_note_merges_its_task` (slopty-app),
     `workspace::tests::approvals::a_ready_notes_merge_merges_the_task_it_names` (slopty-ui).
+
+- ✅ **A phone hears whether the server can push to it** (2026-10-11, readiness 10-12 item
+  22, the wire's half). A phone with notes allowed believed it was reachable, but the server
+  could still push nothing to it: pushing not set up there (no APNs key named), a token that
+  was no token, a token another install took over, or one APNs said is gone. The phone
+  could not tell, so it never said "Nothing reaches you here while Slopty is away".
+  - *On the wire*: `FromServer::Pushable(bool)`, a variant of its own rather than a second
+    meaning for the workers' `Pushes`, since the two answer different questions (can any
+    phone answer, against can this one be reached). True while pushing is set up and the
+    device this client last said is kept. Sent only to a client that said a phone
+    (`ToServer::PushDevice`, so never to a Mac), after that and on every change.
+  - *On the server*: each seat holds a `watch` of the word, set wherever the workers' word
+    is (`say_pushes`: a phone said or withdrawn, a token forgotten, pushing turned on or
+    off, the kept phones loaded). The client link takes the latest from it beside its
+    queue, so the word is never dropped or held behind a full queue, as with `Pushes`.
+  - The app's half (slopty-client's directory turning it into a change, the navigator's
+    line) follows from lane A.
+  - Tests: `hub::ladder::tests::a_phone_hears_whether_it_can_be_pushed_to` and
+    `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back` (slopty-server); golden
+    `push_pushable` (slopty-proto).

@@ -178,9 +178,9 @@ mod tests {
     }
 
     /// A server pushing through `pusher`; a phone that registers with it and then stops
-    /// listening; a worker whose thread comes to need the person for a yes or no, which is
-    /// then answered elsewhere. What APNs got, read off `got`: the note and its take-back, with
-    /// the phone's key and token.
+    /// listening, hearing that it can be pushed to; a worker whose thread comes to need the person
+    /// for a yes or no, which is then answered elsewhere. What APNs got, read off `got`: the
+    /// note and its take-back, with the phone's key and token.
     async fn a_phone_is_pushed(
         pusher: Arc<dyn Pusher>,
         got: &mut mpsc::UnboundedReceiver<Got>,
@@ -217,13 +217,17 @@ mod tests {
             listening: false,
         };
         phone.tx.send(&ToServer::Presence(away)).await.unwrap();
-        loop {
-            let msg = tokio::time::timeout(PATIENCE, phone.rx.recv()).await.unwrap().unwrap();
-            if matches!(&msg, FromServer::Present(list) if list.iter().any(|p| !p.presence.listening))
-            {
-                break;
+        let (mut away_heard, mut pushable) = (false, None);
+        while !away_heard || pushable.is_none() {
+            match tokio::time::timeout(PATIENCE, phone.rx.recv()).await.unwrap().unwrap() {
+                FromServer::Present(list) if list.iter().any(|p| !p.presence.listening) => {
+                    away_heard = true;
+                }
+                FromServer::Pushable(now) => pushable = Some(now),
+                _ => {}
             }
         }
+        assert_eq!(pushable, Some(true), "the phone hears it can be pushed to");
         assert_eq!(server.hub().devices().len(), 1, "the phone is registered");
 
         let (worker, shell) = (WorkerId::new(), SessionId::new());

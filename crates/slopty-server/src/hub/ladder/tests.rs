@@ -577,6 +577,55 @@ async fn the_workers_hear_whether_a_pocketed_phone_can_answer() {
     assert_eq!((told(&mut first), told(&mut second)), (Some(false), Some(false)), "no phone now");
 }
 
+/// A phone hears whether the server can push to it: nothing before it says it is a phone, no
+/// while pushing is off, yes once it is set up, and no again when another phone takes its
+/// token, when it says no phone, or when APNs says its token is gone. A client that never said
+/// a phone hears nothing.
+#[tokio::test]
+async fn a_phone_hears_whether_it_can_be_pushed_to() {
+    use slopty_proto::push::PushDevice;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let told = |rx: &mut watch::Receiver<Option<bool>>| {
+        rx.has_changed().unwrap_or(false).then(|| *rx.borrow_and_update()).flatten()
+    };
+    let (phone, client) = (Client::sit(&hub, "phone"), ClientId::new());
+    let mac = Client::sit(&hub, "mac");
+    let (mut word, mut mac_word) = (phone.seated.pushable(), mac.seated.pushable());
+    let device = PushDevice {
+        token: "0f".repeat(32),
+        key: [7; 32],
+        sandbox: true,
+        topic: "dev.aislopware.slopty".to_owned(),
+        quiet_ms: 60_000,
+    };
+    assert_eq!(told(&mut word), None, "no phone said yet");
+    hub.push_device(phone.seated.link(), client, Some(device.clone()));
+    assert_eq!(told(&mut word), Some(false), "a phone, but pushing is off");
+    let (out, _pushed) = mpsc::channel(8);
+    hub.push_to(Some(out));
+    assert_eq!(told(&mut word), Some(true), "set up, with this phone");
+    hub.push_device(phone.seated.link(), client, Some(device.clone()));
+    assert_eq!(told(&mut word), None, "said once");
+
+    let (again, other) = (Client::sit(&hub, "set up again"), ClientId::new());
+    let mut again_word = again.seated.pushable();
+    hub.push_device(again.seated.link(), other, Some(device.clone()));
+    assert_eq!((told(&mut word), told(&mut again_word)), (Some(false), Some(true)), "token moved");
+    hub.push_device(
+        phone.seated.link(),
+        client,
+        Some(PushDevice { token: "1e".repeat(32), ..device.clone() }),
+    );
+    assert_eq!(told(&mut word), Some(true), "a token of its own");
+    hub.push_device(phone.seated.link(), client, None);
+    assert_eq!(told(&mut word), Some(false), "no phone now");
+    hub.forget_device(other, &device.token);
+    assert_eq!(told(&mut again_word), Some(false), "APNs said the token is gone");
+    hub.push_to(None);
+    assert_eq!(told(&mut mac_word), None, "a client that said no phone hears nothing");
+}
+
 /// The note `push` shows.
 fn body(push: &Outgoing) -> &PushBody {
     match &push.what {

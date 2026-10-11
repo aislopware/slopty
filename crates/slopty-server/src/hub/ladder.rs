@@ -560,6 +560,9 @@ struct Sitting {
     presence: Option<Presence>,
     /// The client, once it said it is a phone the server may push to.
     client: Option<ClientId>,
+    /// Whether the server can push to that phone ([`FromServer::Pushable`]), once it said
+    /// one: a word the link takes the latest of, so none is dropped behind a full queue.
+    pushable: watch::Sender<Option<bool>>,
 }
 
 impl Board {
@@ -902,6 +905,7 @@ impl Board {
 pub struct Seated {
     hub: WeakHub,
     link: u64,
+    pushable: watch::Receiver<Option<bool>>,
 }
 
 impl Seated {
@@ -909,6 +913,13 @@ impl Seated {
     #[must_use]
     pub const fn link(&self) -> u64 {
         self.link
+    }
+
+    /// Whether the server can push to the phone this client said it is, as that moves: `None`
+    /// until it said one ([`FromServer::Pushable`]).
+    #[must_use]
+    pub fn pushable(&self) -> watch::Receiver<Option<bool>> {
+        self.pushable.clone()
     }
 }
 
@@ -942,11 +953,13 @@ impl Hub {
     /// notices go on `tx`.
     #[must_use]
     pub fn seat(&self, link: u64, name: String, tx: mpsc::Sender<FromServer>) -> Seated {
+        let (pushable, word) = watch::channel(None);
         let mut state = self.inner.state.lock();
-        state.board.seats.insert(link, Sitting { name, tx, presence: None, client: None });
+        let sitting = Sitting { name, tx, presence: None, client: None, pushable };
+        state.board.seats.insert(link, sitting);
         state.board.settle_awake();
         drop(state);
-        Seated { hub: self.downgrade(), link }
+        Seated { hub: self.downgrade(), link, pushable: word }
     }
 
     /// Where the person is on the client of `link`.
@@ -1118,10 +1131,18 @@ impl Hub {
 }
 
 /// Tell every worker linked whether a pocketed phone can answer, once that moved: while one
-/// can, a worker holds for it any prompt nobody follows ([`FromServer::Pushes`]).
+/// can, a worker holds for it any prompt nobody follows ([`FromServer::Pushes`]). Tell each
+/// client that said it is a phone whether the server can push to it, once that moved
+/// ([`FromServer::Pushable`]).
 fn say_pushes(state: &State) {
-    let now = state.board.phones.answerable();
-    state.board.phones.said.send_if_modified(|said| std::mem::replace(said, now) != now);
+    let phones = &state.board.phones;
+    let now = phones.answerable();
+    phones.said.send_if_modified(|said| std::mem::replace(said, now) != now);
+    for seat in state.board.seats.values() {
+        let Some(client) = seat.client else { continue };
+        let now = Some(phones.out.is_some() && phones.devices.contains_key(&client));
+        seat.pushable.send_if_modified(|was| std::mem::replace(was, now) != now);
+    }
 }
 
 impl Board {

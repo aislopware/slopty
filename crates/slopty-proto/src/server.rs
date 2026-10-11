@@ -390,6 +390,12 @@ pub enum FromServer {
     /// and a plan or a question is answered in the thread the note opens. Sent after the
     /// welcome and on every change.
     Pushes(bool),
+    /// For a client that said it is a phone ([`ToServer::PushDevice`]): whether the server
+    /// can push to it while the person is away from every client (pushing is set up here, and
+    /// the phone it last said is kept). False too once it said no phone, or APNs said its token
+    /// is gone. Sent after the link's first [`ToServer::PushDevice`] and on every change after;
+    /// never to a client that sent none. Each replaces the last.
+    Pushable(bool),
 }
 
 /// Why the server refused a hello.
