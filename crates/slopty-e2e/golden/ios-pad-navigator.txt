@@ -12,6 +12,7 @@ Button │ Needs you
 Button │ More
 Navigation │ Projects
 Button │ Search
+Button │ New goal
 Button │ New agent
 Button │ e2e-ios-worker
 Group │ Terminal
@@ -30,7 +31,9 @@ Group │ Status
 Button │ Show the tab's terminal
 Navigation │ Navigator
 Button │ Search
+Button │ New goal
 Button │ New agent
+Group │ The server can't send notifications to this device
 Button │ e2e-ios-worker
 Button │ Terminal
 Button │ Close tile

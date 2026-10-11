@@ -1432,7 +1432,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *In the app*: the directory turns it into `Change::Pushable`, and the workspace keeps the
     latest (`WorkspaceView::set_pushable`). With notes allowed here and the server's word
     false, the navigator's notes line says "The server can't send notifications to this
-    phone" over "Nothing reaches you here while Slopty is away." It has no door: the fix (an
+    device" (an iPad's too, so not "phone") over "Nothing reaches you here while Slopty is
+    away." It has no door: the fix (an
     APNs key named, the phone's token said again) is on the server's machine or comes by
     itself on the next link. Notes off or never asked here are said first, with their doors,
     since that is the fix the phone holds.

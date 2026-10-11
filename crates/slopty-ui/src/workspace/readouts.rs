@@ -718,8 +718,9 @@ pub(super) const NOTES_ALLOW: &str = "Allow";
 pub(super) const NOTES_OFF_LINE: &str = "Notifications are off";
 /// Its door: the system's settings, where they are turned on.
 pub(super) const NOTES_TURN_ON: &str = "Turn on";
-/// What it says while notes are allowed here and the server cannot push to this phone.
-pub(super) const NOTES_UNPUSHABLE: &str = "The server can't send notifications to this phone";
+/// What it says while notes are allowed here and the server cannot push to this device: a phone
+/// or an iPad alike.
+pub(super) const NOTES_UNPUSHABLE: &str = "The server can't send notifications to this device";
 /// What each costs, under it.
 pub(super) const NOTES_MEANS: &str = "Nothing reaches you here while Slopty is away.";
 
