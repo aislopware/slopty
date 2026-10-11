@@ -314,8 +314,9 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
 }
 
 /// No agent starts another with more than it has: flags that loosen Claude Code's or Codex's
-/// permissions are refused on every way an agent starts one, whatever project it names. The
-/// person's own start is theirs, flags and all, and the worker holds it to nothing.
+/// permissions are refused on every way an agent starts one, whatever project it names, and so
+/// are those that keep Codex off the person's daemon, where nothing would hold it. The person's
+/// own start is theirs, flags and all, and the worker holds it to nothing.
 #[tokio::test]
 async fn flags_that_loosen_permissions_are_the_person_s_alone() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -345,7 +346,13 @@ async fn flags_that_loosen_permissions_are_the_person_s_alone() {
         worktree: None,
     };
     refused(&hub.dispatch_as(Speaker::Agent, None, terminal).await, ErrorCode::Limit);
-    for codex in [&["codex", "--yolo"][..], &["/usr/local/bin/codex", "-s", "danger-full-access"]] {
+    let codexes = [
+        &["codex", "--yolo"][..],
+        &["/usr/local/bin/codex", "-s", "danger-full-access"],
+        &["codex", "--no-daemon"],
+        &["codex", "-c", "model=\"o3\""],
+    ];
+    for codex in codexes {
         let terminal = Verb::OpenTerminal {
             worker: linux,
             cwd: None,

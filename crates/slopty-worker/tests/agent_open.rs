@@ -167,12 +167,12 @@ mod agent_open {
         assert!(argv(&seen).is_empty(), "no relay to hand out: {:?}", argv(&seen));
     }
 
-    /// A project's `codex` opened on a worker with a server gets Slopty's tools among its MCP
-    /// servers, as `<relay> mcp` with the variables that name its server, project, task and
-    /// terminal, its own arguments after. A `codex` the person opens in a tile, one that names
-    /// Slopty's server already, and one on a worker with no server, start as asked.
+    /// A `codex` opened in a terminal starts as asked, a project's as much as a tile's: no
+    /// configuration override goes on its line, since one keeps Codex's TUI off the person's
+    /// daemon, where the worker follows its thread (`docs/decisions/projects.md`, "An agent's
+    /// Codex in a terminal stays on the daemon").
     #[tokio::test]
-    async fn a_project_s_codex_gets_slopty_s_tools_and_a_tile_s_does_not() {
+    async fn a_codex_opened_in_a_terminal_starts_as_asked_so_it_joins_the_daemon() {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let (_ptyd, socket) = ptyd(&dir).await;
@@ -183,40 +183,17 @@ mod agent_open {
         let relay = dir.join("relay/slopty");
         std::fs::create_dir_all(relay.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink("/usr/bin/true", &relay).unwrap();
-        worker.set_relay(Some(relay.clone()));
+        worker.set_relay(Some(relay));
         worker.set_session_env(vec![(
             slopty_proto::project::SERVER_ENV.to_owned(),
             "127.0.0.1:9".to_owned(),
         )]);
 
-        let tile = ["codex", "--model", "o3", "Read the brief"];
-        let seen = started(&worker, &dir, &tile).await;
-        assert_eq!(argv(&seen), tile[1..], "a tile's Codex is the person's: as asked");
-        let seen = started_in(&worker, &dir, &tile, Some("slopty")).await;
-        let config = |key: &str| {
-            let args = argv(&seen);
-            let at = args.iter().position(|a| a.starts_with(&format!("mcp_servers.slopty.{key}=")));
-            let at = at.unwrap_or_else(|| panic!("{key}: {args:?}"));
-            assert_eq!(args[at - 1], "-c", "{args:?}");
-            args[at].split_once('=').unwrap().1.to_owned()
-        };
-        assert_eq!(config("command"), format!("\"{}\"", relay.display()));
-        assert_eq!(config("args"), r#"["mcp"]"#);
-        let vars = config("env_vars");
-        for var in ["SLOPTY_SERVER", "SLOPTY_PROJECT", "SLOPTY_TASK", "SLOPTY_SESSION_TOKEN"] {
-            assert!(vars.contains(&format!("\"{var}\"")), "{vars}");
-        }
-        assert_eq!(argv(&seen)[6..], ["--model", "o3", "Read the brief"], "its own after");
-
-        let own = ["codex", "-c", "mcp_servers.slopty.command=\"x\"", "go"];
-        let seen = started_in(&worker, &dir, &own, Some("slopty")).await;
-        assert_eq!(argv(&seen), own[1..], "wired already: as asked");
-        let named = ["codex", "set mcp_servers.slopty up"];
-        let seen = started_in(&worker, &dir, &named, Some("slopty")).await;
-        assert_eq!(argv(&seen).len(), 7, "a prompt that names it is no config: {:?}", argv(&seen));
-        worker.set_session_env(Vec::new());
-        let seen = started_in(&worker, &dir, &["codex", "go"], Some("slopty")).await;
-        assert_eq!(argv(&seen), ["go"], "no server to serve its tools: as asked");
+        let line = ["codex", "--model", "o3", "Read the brief"];
+        let seen = started(&worker, &dir, &line).await;
+        assert_eq!(argv(&seen), line[1..], "a tile's Codex: as asked");
+        let seen = started_in(&worker, &dir, &line, Some("slopty")).await;
+        assert_eq!(argv(&seen), line[1..], "a project's Codex: as asked");
     }
 
     fn uuid_like(word: &str) -> bool {

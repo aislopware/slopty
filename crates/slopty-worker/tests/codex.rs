@@ -232,7 +232,7 @@ mod codex {
     /// the folder, so the policies are their configuration's; the start is answered with the
     /// thread Codex made, and the prompt goes as its first turn, the person's message marked with
     /// the start's intent. A start Codex cannot take is refused before it is asked, and a repeat
-    /// of the intent starts nothing.
+    /// of the intent starts nothing. A TUI found on it names its terminal while it runs.
     #[tokio::test]
     async fn a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -283,6 +283,15 @@ mod codex {
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("readOnly"));
         assert_eq!(state.meters.limits[0].name, "five-hour");
         assert_eq!(state.meters.limits[0].used_bp, 3_000);
+        // A Codex TUI on the thread that the worker did not open, found by the agent scan in a
+        // terminal: the thread names that terminal while it runs, and none once it has gone.
+        // Another terminal's end leaves it named.
+        let tile = SessionId::new();
+        handle.tui_runs(&native, tile, true);
+        polled(&host, thread, |s| s.meta.terminal == Some(tile)).await;
+        handle.tui_runs(&native, SessionId::new(), false);
+        handle.tui_runs(&native, tile, false);
+        polled(&host, thread, |s| s.meta.terminal.is_none()).await;
 
         served.abort();
         let _done = tokio::time::timeout(BOUND, server).await;

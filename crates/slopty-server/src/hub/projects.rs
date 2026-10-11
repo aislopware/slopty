@@ -408,6 +408,19 @@ fn claude_args(argv: &[String]) -> Option<Vec<String>> {
     detect::is_claude(name, argv).then(|| detect::agent_args(argv).to_vec())
 }
 
+/// An agent's `codex` refused for `word`, which would keep its TUI off the person's daemon.
+fn off_daemon(word: &str) -> Outcome {
+    error(
+        ErrorCode::Limit,
+        &format!(
+            "{word} keeps Codex off the person's daemon, where the worker would see no thread of \
+             it: nothing would show what it asks the person or hold it to its autonomy, so an \
+             agent's Codex starts without it. Name the model with --model; start a project's \
+             Codex with task_start"
+        ),
+    )
+}
+
 fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
     let whose = project.map_or_else(
         || "an agent started outside a project".to_owned(),
@@ -1615,6 +1628,11 @@ impl Hub {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
         let allowed = allowance(caller);
+        if let Some(word) =
+            codex::args_of(&command).and_then(codex::off_daemon).filter(|_| !allowed)
+        {
+            return off_daemon(&word);
+        }
         let flag = claude_args(&command)
             .as_deref()
             .and_then(loosening)

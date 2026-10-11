@@ -1426,6 +1426,12 @@ impl Threads {
         &self.host
     }
 
+    /// Codex's TUI on thread `native`, found in terminal `session` by the agent scan, runs
+    /// there (`running`) or has gone ([`Codex::tui_runs`]).
+    pub(crate) fn codex_tui(&self, native: &str, session: SessionId, running: bool) {
+        self.codex.tui_runs(native, session, running);
+    }
+
     /// How many turns run now in threads this worker drives itself (pi, an ACP agent): their
     /// agents are this daemon's children, so they end with it, where a terminal's agent goes on
     /// in ptyd and Codex in its own daemon. An update says so before it ends them.

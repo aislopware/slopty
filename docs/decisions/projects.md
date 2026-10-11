@@ -3208,7 +3208,9 @@ reordering and edited allows are gone" in `agents.md`.*
 
 - ✅ **A task's Codex comes back after a reboot** (2026-10-11, readiness-w 10-11 rank 5). This
   extends "Sessions come back after a reboot" (`terminal.md`), which brought back Claude Code
-  alone.
+  alone. **Superseded 2026-10-12** by "An agent's Codex in a terminal stays on the daemon",
+  below: `codex resume --last` and its kept flags are deleted, and such a Codex comes back on
+  its own thread, as a typed one does.
   - **The gap.** A project's Codex that runs as its terminal's own command (a task's did until
     "A task's Codex runs on the person's daemon", below; now one an agent opens in a terminal
     of the project) was reopened after a reboot as a plain shell under the same id, so it
@@ -3330,3 +3332,49 @@ reordering and edited allows are gone" in `agents.md`.*
     `a_seated_start_gives_codex_the_seat_its_tools_and_its_role` (slopty-worker, the stand-in
     daemon: the `thread/start` parameters, every tool variable by value and no `env_vars`, and
     the row's seat, mode and sandbox); `the_tui_on_a_thread_joins_the_daemon` (slopty-agent).
+
+- ✅ **An agent's Codex in a terminal stays on the daemon, so its thread is seen and held**
+  (2026-10-12). This finishes "A task's Codex runs on the person's daemon" for the Codex that
+  is not a task: one an agent opens with `terminal_open`, or that a reboot brings back.
+  - **The gap.** Three paths still put Codex's TUI on an app-server of its own, off the
+    person's daemon (`codex-rs/tui/src/daemon_startup.rs`, `exclusion`, 0.162). The worker
+    follows the daemon alone, so it kept no row of that thread. Nothing showed what it asked
+    the person, and `Hub::held_settings` never saw its policy or sandbox. The three paths:
+    - The worker gave a project's `codex` Slopty's tools as `-c mcp_servers.slopty…`
+      overrides (`Manager::codex_tools`). Any `-c` override does this, the model's included.
+    - The server let an agent's `codex` carry `--no-daemon` and `-c` keys of the model.
+    - Restore brought a project's Codex back as `codex resume --last` with its old `-c` flags.
+  - **Now.**
+    - **The server.** It refuses an agent's `codex` with `--no-daemon`, `-c` or `--config`
+      (`hub::codex::off_daemon`). The refusal says why: nothing would show what it asks or
+      hold it. It names `--model` for the model and `task_start` for a project's Codex. A
+      project's Codex with Slopty's tools is a task, seated on the daemon.
+    - **The worker.** It runs a terminal's `codex` exactly as asked. `codex_tools` and its
+      helpers are deleted.
+    - **Restore.** `codex_again`, `codex_kept` and `Reopen.codex` are deleted. A Codex that
+      was its terminal's own command is found by the agent scan as a typed one is. On the
+      daemon, its thread is the one begun in its folder since it started. So after a reboot it
+      comes back as `codex resume <thread>` at a shell's prompt, its own thread exactly rather
+      than the folder's newest.
+  - **The terminal, named.** A Codex TUI the worker did not open was on the daemon's thread
+    but in no terminal the row named. The agent scan now tells the Codex adapter which
+    terminal each found thread's TUI runs in (`Codex::tui_runs`), and when it has gone. The
+    row names that terminal as it names one the worker opened, so:
+    - a client shows it;
+    - a request handed to the TUI goes to it rather than to a second TUI;
+    - in an agent's terminal, `held_settings` holds the thread's policy and sandbox at asking.
+  - **Off the daemon, nothing is guessed.** A TUI the person keeps off the daemon (their own
+    `--no-daemon`, a profile, a `-c` past a feature switch) holds no thread there to find. So
+    the scan no longer takes a thread begun in its folder meanwhile for its own
+    (`typed::codex`); that thread is somebody else's. One that names its thread
+    (`resume <id>`) still comes back on it.
+  - Tests:
+    - `what_keeps_codex_off_the_daemon_is_found` and
+      `only_what_asks_the_person_no_less_goes_through` (`slopty-server::hub::codex`), and
+      `flags_that_loosen_permissions_are_the_person_s_alone` (`slopty-server`);
+    - `a_codex_opened_in_a_terminal_starts_as_asked_so_it_joins_the_daemon` (`slopty-worker`,
+      `agent_open`);
+    - `a_codex_that_was_its_terminal_s_command_comes_back_on_its_thread` (`restore`);
+    - the TUI-found half of `a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`
+      (`slopty-worker`, the stand-in daemon);
+    - `codex_and_pi_are_known_by_name_and_say_what_they_hold` (`slopty-agent::typed`).

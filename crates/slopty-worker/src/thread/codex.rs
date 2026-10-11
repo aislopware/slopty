@@ -221,6 +221,13 @@ enum Ask {
         thread: ThreadId,
         setting: Setting,
     },
+    /// A Codex TUI the worker did not open runs on the thread in terminal `session`, or ran
+    /// there and is gone.
+    Runs {
+        thread: ThreadId,
+        session: SessionId,
+        running: bool,
+    },
 }
 
 impl Ask {
@@ -238,8 +245,11 @@ impl Ask {
             | Self::Review { thread, .. }
             | Self::Set { thread, .. }
             | Self::Wake { thread } => Some(*thread),
-            // A thread let go is not taken up again to be closed.
-            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } => None,
+            // A thread let go is not taken up again to be closed, nor to be told where its TUI
+            // runs: it is named as it is followed again.
+            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } | Self::Runs { .. } => {
+                None
+            }
         }
     }
 }
@@ -443,6 +453,16 @@ impl Codex {
     /// Someone follows `thread`: Codex takes it up again if the worker let it go.
     pub fn wake(&self, thread: ThreadId) {
         let _gone = self.0.send(Ask::Wake { thread });
+    }
+
+    /// Codex's TUI on thread `native`, one the person or an agent started rather than the
+    /// worker, runs in terminal `session` (`running`), or has gone from it: the thread names
+    /// that terminal while it runs, as it names one the worker opened. So a client shows it, a
+    /// request handed to the TUI goes to it, and the terminal's agent is held to what its
+    /// terminal allows by the thread's settings.
+    pub fn tui_runs(&self, native: &str, session: SessionId, running: bool) {
+        let thread = slopty_agent::codex::shared::thread_of(native);
+        let _gone = self.0.send(Ask::Runs { thread, session, running });
     }
 
     /// Hand `thread`'s requests to Codex's own TUI for intent `id`, once: done when it runs on
@@ -742,6 +762,14 @@ pub fn spawn(
                         }
                         Some(Ask::Sessions { reply, .. }) => {
                             let _gone = reply.send(Err(NOT_RUNNING.to_owned()));
+                        }
+                        // Named once Codex is followed again.
+                        Some(Ask::Runs { thread, session, running }) => {
+                            if running {
+                                open.running.insert(thread, session);
+                            } else if open.running.get(&thread) == Some(&session) {
+                                open.running.remove(&thread);
+                            }
                         }
                         Some(_) => {}
                         None => return,
@@ -1792,6 +1820,15 @@ impl Session {
         }
         match ask {
             Ask::Wake { .. } => Ok(()),
+            Ask::Runs { thread, session, running: true } => {
+                self.tuis.running.insert(thread, session);
+                self.name_terminal(thread, Some(session));
+                Ok(())
+            }
+            Ask::Runs { thread, session, running: false } => {
+                self.tui(Said::Closed { thread, session });
+                Ok(())
+            }
             Ask::Close { thread, done } => {
                 let result = self.close(thread).await;
                 let _gone = done.send(());
@@ -2053,6 +2090,11 @@ impl Session {
                 (thread, None)
             }
         };
+        self.name_terminal(thread, terminal);
+    }
+
+    /// `thread`, when followed, names `terminal` as the one its TUI runs in, or none.
+    fn name_terminal(&mut self, thread: ThreadId, terminal: Option<SessionId>) {
         let named = self.followed(thread).map(|f| f.shared.set_terminal(terminal));
         if let Some(actions) = named.filter(|a| !a.is_empty()) {
             self.host.apply(thread, actions);

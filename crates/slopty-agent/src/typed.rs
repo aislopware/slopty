@@ -168,18 +168,51 @@ const CODEX_VALUED: [&str; 14] = [
     "--image",
 ];
 
+/// Codex's switches that keep its TUI off the person's daemon, on an app-server of its own
+/// (`codex-rs/tui/src/daemon_startup.rs`, `exclusion`, 0.162).
+const CODEX_OFF_DAEMON: [&str; 5] =
+    ["--no-daemon", "--oss", "--search", "--strict-config", "--dangerously-bypass-hook-trust"];
+
+/// Codex's flags whose value keeps its TUI off the daemon: a profile, and a configuration
+/// override past the few the daemon's clients may give ([`codex_override_joins`]).
+const CODEX_OFF_VALUED: [&str; 4] = ["-p", "--profile", "-c", "--config"];
+
+/// Whether a `-c` override (`key=value`) still lets Codex's TUI join the daemon: a feature
+/// switch, or the TUI's own transcript view (`config_exclusion`, 0.162). Codex also checks the
+/// feature's name and that the value is a boolean; those are not followed here, so an odd
+/// feature reads as joining.
+fn codex_override_joins(value: &str) -> bool {
+    let key = value.split_once('=').map_or(value, |(key, _)| key).trim();
+    key.starts_with("features.")
+        || ["tui.fullscreen_transcript", "suppress_unstable_features_warning"].contains(&key)
+}
+
 /// What Codex's TUI with `args` holds: `resume <id>` names its thread; a fresh one, a
-/// `resume` from the picker or `--last`, and a `fork` hold one the daemon says.
+/// `resume` from the picker or `--last`, and a `fork` hold one the daemon says. A TUI kept off
+/// the daemon holds none the daemon could say, so it holds nothing to be found: a thread begun
+/// in its folder meanwhile is somebody else's.
 fn codex(args: &[String]) -> Holds {
+    let mut off = false;
+    let begun = |off: bool| if off { Holds::Nothing } else { Holds::Begun };
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if word == "--help" || word == "-h" || word == "--version" || word == "-V" {
             return Holds::Nothing;
         }
         if word.starts_with('-') {
-            if CODEX_VALUED.contains(&word.as_str()) {
-                words.next();
-            }
+            let (flag, inline) = match word.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+                _ => (word.as_str(), None),
+            };
+            let value = if inline.is_none() && CODEX_VALUED.contains(&flag) {
+                words.next().map(String::as_str)
+            } else {
+                inline
+            };
+            off |= CODEX_OFF_DAEMON.contains(&flag)
+                || (CODEX_OFF_VALUED.contains(&flag)
+                    && !(matches!(flag, "-c" | "--config")
+                        && value.is_some_and(codex_override_joins)));
             continue;
         }
         if CODEX_ELSEWHERE.contains(&word.as_str()) {
@@ -189,13 +222,13 @@ fn codex(args: &[String]) -> Holds {
             // `resume <id>`; `--last`, `--all` or nothing is the picker's or the newest.
             return match words.find(|w| !w.starts_with('-')) {
                 Some(id) if is_thread_id(id) => Holds::Named(id.clone()),
-                _ => Holds::Begun,
+                _ => begun(off),
             };
         }
         // `fork`, or the first prompt.
-        return Holds::Begun;
+        return begun(off);
     }
-    Holds::Begun
+    begun(off)
 }
 
 /// Whether `id` is a Codex thread id: a UUID, as its rollouts are named.
@@ -302,6 +335,26 @@ mod tests {
                 Some((Agent::Codex, Holds::Begun)),
             ),
             ("codex", &["codex", "exec", "hi"], Some((Agent::Codex, Holds::Nothing))),
+            ("codex", &["codex", "--no-daemon"], Some((Agent::Codex, Holds::Nothing))),
+            ("codex", &["codex", "-c", "model=\"o3\"", "go"], Some((Agent::Codex, Holds::Nothing))),
+            ("codex", &["codex", "--config=x=1", "resume"], Some((Agent::Codex, Holds::Nothing))),
+            ("codex", &["codex", "-p", "work"], Some((Agent::Codex, Holds::Nothing))),
+            (
+                "codex",
+                &[
+                    "codex",
+                    "-c",
+                    "features.worktrees=false",
+                    "-c",
+                    "tui.fullscreen_transcript=true",
+                ],
+                Some((Agent::Codex, Holds::Begun)),
+            ),
+            (
+                "codex",
+                &["codex", "--no-daemon", "resume", ID],
+                Some((Agent::Codex, Holds::Named(ID.to_owned()))),
+            ),
             ("codex", &["codex", "app-server"], Some((Agent::Codex, Holds::Nothing))),
             (
                 "node",

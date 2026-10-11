@@ -178,8 +178,9 @@ async fn keep_typed(
     let gone: Vec<SessionId> =
         seen.keys().filter(|session| !holding.contains(session)).copied().collect();
     for session in gone {
-        if let Some((_, Some(_))) = seen.remove(&session) {
+        if let Some((_, Some(typed))) = seen.remove(&session) {
             daemon.worker.keep_typed(session, None);
+            codex_tui(daemon, session, &typed, false);
         }
     }
     for (session, fg, agent, holds) in &agents {
@@ -204,11 +205,27 @@ async fn keep_typed(
             Holds::Nothing => None,
         };
         let typed = found.map(|found| Typed { agent: *agent, session: found, cwd });
-        if typed.is_some() {
+        if let Some(found) = &typed {
             tracing::info!(%session, agent = agent.program(), "a typed agent's session kept");
             daemon.worker.keep_typed(*session, typed.clone());
+            codex_tui(daemon, *session, found, true);
         }
-        seen.insert(*session, (fg.pid, typed));
+        if let Some((_, Some(was))) = seen.insert(*session, (fg.pid, typed))
+            && seen.get(session).and_then(|(_, now)| now.as_ref()) != Some(&was)
+        {
+            codex_tui(daemon, *session, &was, false);
+        }
+    }
+}
+
+/// Tell the Codex threads that `typed`, when it is Codex's, runs in terminal `session` or has
+/// gone from it, so its thread names the terminal while it runs
+/// ([`crate::threads::Threads::codex_tui`]).
+fn codex_tui(daemon: &Daemon, session: SessionId, typed: &Typed, running: bool) {
+    if typed.agent == typed::Agent::Codex
+        && let Some(threads) = &daemon.threads
+    {
+        threads.codex_tui(&typed.session, session, running);
     }
 }
 

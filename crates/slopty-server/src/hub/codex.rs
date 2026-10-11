@@ -4,9 +4,11 @@
 //! judged against the project's level.
 //!
 //! As with Claude Code, a word is let through only when Codex documents it as asking the person
-//! no less ([`SAFE_SWITCHES`], [`SAFE_VALUED`], a sandbox or approval policy that asks, a
-//! config key of the model alone). Anything else loosens: a profile or a config key that could
-//! name a looser policy, a tool server or a hook, another working root, a subcommand, or `--`.
+//! no less ([`SAFE_SWITCHES`], [`SAFE_VALUED`], a sandbox or approval policy that asks). Anything
+//! else loosens: a profile or a config key that could name a looser policy, a tool server or a
+//! hook, another working root, a subcommand, or `--`. A word that keeps Codex's TUI off the
+//! person's daemon ([`off_daemon`]) is refused before that, for what it hides rather than what it
+//! allows.
 
 use slopty_proto::project::Autonomy;
 
@@ -15,7 +17,7 @@ pub(super) const PROGRAM: &str = "codex";
 
 /// Flags that take no value and give nothing the person would be asked for: a session in a new
 /// git worktree of its own among them.
-const SAFE_SWITCHES: [&str; 3] = ["--worktree", "--no-alt-screen", "--no-daemon"];
+const SAFE_SWITCHES: [&str; 2] = ["--worktree", "--no-alt-screen"];
 
 /// Flags whose value gives nothing the person would be asked for.
 const SAFE_VALUED: [&str; 4] = ["--model", "-m", "--image", "-i"];
@@ -26,9 +28,26 @@ const SAFE_SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 /// Approval policies that ask the person no less than Codex's default.
 const SAFE_APPROVALS: [&str; 2] = ["untrusted", "on-request"];
 
-/// Config keys (`-c key=value`) that choose the model and how it reasons, and nothing else.
-const SAFE_CONFIG: [&str; 4] =
-    ["model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity"];
+/// Words that keep Codex's TUI off the person's daemon, as `--no-daemon` says outright: a
+/// configuration override of any key, the model's included (`codex-rs/tui/src/daemon_startup.rs`,
+/// `config_exclusion`, 0.162).
+///
+/// Off the daemon, the TUI runs an app-server of its own. The worker follows the daemon alone, so
+/// it would keep no row of the thread: nothing would show what it asks the person, and nothing
+/// would hold its policy or sandbox to its autonomy (`Hub::held_settings`). The model goes as
+/// `--model`, which the TUI forwards to the daemon with the thread's start.
+const OFF_DAEMON: [&str; 3] = ["--no-daemon", "-c", "--config"];
+
+/// The first word in `args`, Codex's own arguments, that keeps its TUI off the person's daemon.
+pub(super) fn off_daemon(args: &[String]) -> Option<String> {
+    args.iter()
+        .take_while(|word| *word != "--")
+        .find(|word| {
+            let flag = word.split_once('=').map_or(word.as_str(), |(flag, _)| flag);
+            OFF_DAEMON.contains(&flag)
+        })
+        .cloned()
+}
 
 /// The first word in `args`, Codex's own arguments, that may loosen what it asks the person.
 pub(super) fn loosening(args: &[String]) -> Option<String> {
@@ -48,9 +67,6 @@ pub(super) fn loosening(args: &[String]) -> Option<String> {
             f if SAFE_VALUED.contains(&f) => |_| true,
             "--sandbox" | "-s" => |v| SAFE_SANDBOXES.contains(&v),
             "--ask-for-approval" | "-a" => |v| SAFE_APPROVALS.contains(&v),
-            "--config" | "-c" => {
-                |v| v.split_once('=').is_some_and(|(key, _)| SAFE_CONFIG.contains(&key.trim()))
-            }
             _ => return Some(word.clone()),
         };
         let Some(value) = inline.or_else(|| words.next().cloned()) else {
@@ -95,15 +111,14 @@ mod tests {
 
     /// Only what asks the person no less goes through: the model, images, a worktree, a
     /// sandbox that keeps writes to the workspace, a policy that asks. A bypass, a looser
-    /// sandbox or policy, a profile, a config key past the model's, another root, a subcommand
-    /// and a flag missing its value all loosen, and the refusal names the word.
+    /// sandbox or policy, a profile, a config key, another root, a subcommand and a flag
+    /// missing its value all loosen, and the refusal names the word.
     #[test]
     fn only_what_asks_the_person_no_less_goes_through() {
         let fine = [
             &["--model", "o3", "-m", "gpt-5", "-i", "a.png", "--worktree"][..],
             &["-s", "workspace-write", "--sandbox=read-only", "-a", "untrusted"],
-            &["--ask-for-approval=on-request", "-c", "model_reasoning_effort=\"high\""],
-            &["--config", "model=\"o3\"", "--no-alt-screen"],
+            &["--ask-for-approval=on-request", "--no-alt-screen"],
             &[],
         ];
         for args in fine {
@@ -120,8 +135,8 @@ mod tests {
             (&["-s", "danger-full-access"], "-s danger-full-access"),
             (&["--sandbox=danger-full-access"], "--sandbox danger-full-access"),
             (&["-a", "never"], "-a never"),
-            (&["-c", "approval_policy=\"never\""], "-c approval_policy=\"never\""),
-            (&["-c", "mcp_servers.x.command=\"sh\""], "-c mcp_servers.x.command=\"sh\""),
+            (&["-c", "approval_policy=\"never\""], "-c"),
+            (&["-c", "mcp_servers.x.command=\"sh\""], "-c"),
             (&["-p", "loose"], "-p"),
             (&["-C", "/"], "-C"),
             (&["--add-dir", "/"], "--add-dir"),
@@ -134,9 +149,30 @@ mod tests {
         for (args, said) in loose {
             assert_eq!(loosening(&words(args)).as_deref(), Some(said), "{args:?}");
         }
+        let model = words(&["-c", "model=\"o3\""]);
+        assert_eq!(loosening(&model).as_deref(), Some("-c"), "even the model's key");
         let never = words(&["-a", "never"]);
         assert_eq!(args_of(&words(&["/opt/bin/codex", "-a", "never"])), Some(never.as_slice()));
         assert_eq!(args_of(&words(&["codexx"])), None);
+    }
+
+    /// A word that keeps the TUI off the daemon is found wherever it stands before `--`: the
+    /// switch, and an override of any key, inline or not. Codex's TUI on the daemon goes by.
+    #[test]
+    fn what_keeps_codex_off_the_daemon_is_found() {
+        for (args, said) in [
+            (&["--no-daemon"][..], "--no-daemon"),
+            (&["-m", "o3", "-c", "model=\"o3\""], "-c"),
+            (&["--config=model_verbosity=\"low\""], "--config=model_verbosity=\"low\""),
+            (&["resume", "--config", "x=1"], "--config"),
+        ] {
+            assert_eq!(off_daemon(&words(args)).as_deref(), Some(said), "{args:?}");
+        }
+        for args in
+            [&["--model", "o3", "--worktree", "go"][..], &["resume", "x"], &["--", "-c"], &[]]
+        {
+            assert_eq!(off_daemon(&words(args)), None, "{args:?}");
+        }
     }
 
     /// A Codex thread's settings, as its row says them, are judged as its arguments are: a
