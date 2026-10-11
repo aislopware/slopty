@@ -53,6 +53,11 @@ jobs:
     name: check (${{ inputs.name }})
     runs-on: macos-26
     timeout-minutes: 90
+    # A step with no shell named runs `bash -e`, without pipefail, so a failed check piped
+    # through `tee` passed (run 38107934242).
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
         with:
