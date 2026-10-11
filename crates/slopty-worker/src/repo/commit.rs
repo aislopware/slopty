@@ -285,18 +285,45 @@ async fn commit(
     if let Some(bad) = paths.iter().find(|p| !inside(p)) {
         return Err(refuse(&format!("{bad} is not a path inside the repository")));
     }
+    // What the index held for the chosen paths, put back should the commit fail: a hook that
+    // refuses leaves nothing staged the person did not stage.
+    let mut listed = vec!["ls-files", "--stage", "-z", "--"];
+    listed.extend(paths.iter().map(String::as_str));
+    let before = run(git, root, &listed, None, LOCAL).await?;
     let mut add = vec!["add", "--all", "--"];
     add.extend(paths.iter().map(String::as_str));
     run(git, root, &add, None, LOCAL).await?;
     let mut commit = vec!["commit", "--file=-", "--only", "--"];
     commit.extend(paths.iter().map(String::as_str));
-    run(git, root, &commit, Some(message), LOCAL).await?;
+    if let Err(failed) = run(git, root, &commit, Some(message), LOCAL).await {
+        unstage(git, root, paths, &before).await;
+        return Err(failed);
+    }
     let head = run(git, root, &["rev-parse", "HEAD"], None, LOCAL).await?.trim().to_owned();
     let branch = current_branch(git, root).await;
     let changed =
         run(git, root, &["show", "--name-only", "--format=", "HEAD"], None, LOCAL).await?;
     let files = u32::try_from(changed.lines().filter(|l| !l.is_empty()).count()).unwrap_or(0);
     Ok(GitDone::Committed { commit: head, branch, files })
+}
+
+/// Put the index entries of `paths` back as `before` (`git ls-files --stage -z`) had them: a
+/// path added for a commit that failed is staged no more, and one staged before is as it was.
+/// A failure here is logged; the commit's own failure is what the person hears.
+async fn unstage(git: &Path, root: &Path, paths: &[String], before: &str) {
+    let mut reset = vec!["reset", "--quiet", "--"];
+    reset.extend(paths.iter().map(String::as_str));
+    if let Err(e) = run(git, root, &reset, None, LOCAL).await {
+        tracing::warn!(?e, "a failed commit's paths left staged");
+        return;
+    }
+    if before.is_empty() {
+        return;
+    }
+    let restore = ["update-index", "-z", "--index-info"];
+    if let Err(e) = run(git, root, &restore, Some(before), LOCAL).await {
+        tracing::warn!(?e, "the index before a failed commit not put back");
+    }
 }
 
 /// Whether `path` names something inside the repository: relative, never climbing out.
@@ -343,22 +370,29 @@ async fn push_branch(git: &Path, root: &Path) -> Result<(String, String, bool), 
             why: "HEAD is detached: check out a branch to push".to_owned(),
         });
     };
-    let upstream = format!("{branch}@{{upstream}}");
-    let tracked = run(
-        git,
-        root,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", &upstream],
-        None,
-        LOCAL,
-    )
-    .await
-    .ok()
-    .map(|u| u.trim().to_owned())
-    .filter(|u| !u.is_empty());
-    if let Some(tracked) = tracked {
-        run(git, root, &["push", "--porcelain"], None, REMOTE).await?;
-        let remote = tracked.split_once('/').map_or(tracked.as_str(), |(r, _)| r).to_owned();
-        return Ok((remote, branch, false));
+    let config = async |key: String| {
+        let read = run(git, root, &["config", "--get", &key], None, LOCAL).await;
+        read.ok().map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
+    };
+    let remote = config(format!("branch.{branch}.remote")).await;
+    let merge = config(format!("branch.{branch}.merge")).await;
+    if let (Some(remote), Some(merge)) = (remote, merge)
+        && remote != "."
+    {
+        // Pushed to the branch it tracks, by name: a pull request's worktree has a branch
+        // named apart from the one it tracks, and git's own default refuses a bare push then.
+        let Some(onto) = merge.strip_prefix("refs/heads/") else {
+            return Err(GitOutcome::Refused {
+                why: format!(
+                    "{branch} tracks {merge}, which no forge takes a push to: its pull request \
+                     comes from a fork, so push to the fork's branch"
+                ),
+            });
+        };
+        let refspec = format!("HEAD:refs/heads/{onto}");
+        let push = ["push", "--porcelain", "--end-of-options", &remote, &refspec];
+        run(git, root, &push, None, REMOTE).await?;
+        return Ok((remote, onto.to_owned(), false));
     }
     let remotes = run(git, root, &["remote"], None, LOCAL).await?;
     let remotes: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();

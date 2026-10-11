@@ -153,6 +153,41 @@ async fn the_chosen_files_are_committed_with_the_person_s_message_and_pushed() {
     assert!(matches!(again, GitDone::Pushed { upstream_set: false, .. }), "{again:?}");
 }
 
+/// A branch that tracks one of another name, as a pull request's worktree does, pushes to the
+/// branch it tracks, which a bare `git push` refuses under git's default; one that tracks a
+/// fork's pull request head, which no forge takes a push to, is refused in words.
+#[tokio::test]
+async fn a_branch_tracking_another_name_pushes_to_the_one_it_tracks() {
+    let (_tmp, work, bare) = repo();
+    git_in(&work, &["remote", "add", "origin", &bare.to_string_lossy()]);
+    git_in(&work, &["push", "--quiet", "origin", "HEAD:refs/heads/fix-login"]);
+    git_in(&work, &["checkout", "--quiet", "-b", "worktree-review"]);
+    git_in(&work, &["config", "branch.worktree-review.remote", "origin"]);
+    git_in(&work, &["config", "branch.worktree-review.merge", "refs/heads/fix-login"]);
+    git_in(&work, &["commit", "--quiet", "--allow-empty", "-m", "Address the review"]);
+
+    let pushed = done(&work, GitOp::Push).await;
+    let into = GitDone::Pushed {
+        remote: "origin".to_owned(),
+        branch: "fix-login".to_owned(),
+        upstream_set: false,
+        pull: None,
+    };
+    assert_eq!(pushed, into);
+    let head = git_in(&work, &["rev-parse", "HEAD"]);
+    assert_eq!(git_in(&bare, &["rev-parse", "fix-login"]), head, "the pull request's branch");
+    let made = git_in(&bare, &["branch", "--list", "worktree-review"]);
+    assert!(made.trim().is_empty(), "no branch of the worktree's name: {made}");
+
+    git_in(&work, &["config", "branch.worktree-review.merge", "refs/pull/7/head"]);
+    let git = &git_only();
+    let fork = apply(git, &work.to_string_lossy(), GitOp::Push, &[]).await;
+    assert!(
+        matches!(&fork, GitOutcome::Refused { why } if why.contains("fork")),
+        "a fork's head: {fork:?}"
+    );
+}
+
 /// What cannot be done is said: no files chosen, no message (none is made up), a path out of
 /// the repository, a folder in none, no remote; and what git refuses, in git's own words, as a
 /// commit hook that fails or a push the remote rejects.
@@ -193,9 +228,19 @@ async fn a_refusal_is_said_in_git_s_own_words() {
         .expect("written");
     std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("executable");
-    let said = failed(apply(git, &at, commit(&["kept.txt"], "Change it"), &[]).await);
+    std::fs::write(work.join("new.txt"), "new\n").expect("written");
+    std::fs::write(work.join("staged.txt"), "staged\n").expect("written");
+    git_in(&work, &["add", "staged.txt"]);
+    let index = || git_in(&work, &["ls-files", "--stage"]);
+    let staged = index();
+    let chosen = commit(&["kept.txt", "new.txt", "staged.txt"], "Change it");
+    let said = failed(apply(git, &at, chosen, &[]).await);
     assert!(said.contains("lint: kept.txt is not formatted"), "{said}");
+    assert_eq!(index(), staged, "the index is as it was: new.txt unstaged, staged.txt staged");
     std::fs::remove_file(&hook).expect("removed");
+    std::fs::remove_file(work.join("new.txt")).expect("removed");
+    git_in(&work, &["rm", "--quiet", "--cached", "staged.txt"]);
+    std::fs::remove_file(work.join("staged.txt")).expect("removed");
 
     git_in(&work, &["remote", "add", "origin", &bare.to_string_lossy()]);
     assert!(matches!(apply(git, &at, GitOp::Push, &[]).await, GitOutcome::Done(_)));
