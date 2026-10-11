@@ -463,6 +463,8 @@ fn a_fetch_after_the_board_moved_is_unavailable() {
 /// Every item of a copy, and every type it holds, is announced in order and fetched back by
 /// item: a Finder copy's files, an app's private type, a PDF. Dynamic types, old names and the
 /// markers are left behind.
+// Apple types reach only a Mac's pasteboard (`slopty_input::pasteboard::type_on_board`).
+#[cfg(target_os = "macos")]
 #[test]
 fn every_item_and_apple_type_round_trips() {
     let c = clip();
@@ -804,6 +806,9 @@ fn a_poll_inside_a_write_of_promises_announces_nothing() {
 /// Nothing a client sends that names a file goes on the pasteboard, however it is spelled: a
 /// file URL as an Apple type, Finder's node, a link whose scheme is `file`, whether it came
 /// inline or through a promise.
+// Apple types reach only a Mac's pasteboard (`slopty_input::pasteboard::type_on_board`): on
+// another board none of these lands at all.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_clients_file_names_never_go_on_the_pasteboard() {
     let c = clip();

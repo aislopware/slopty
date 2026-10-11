@@ -134,17 +134,22 @@ fn the_catch_says_what_it_took_and_keeps_what_does_not_ride_inline() {
     let data = vec![
         CaughtData {
             item: 2,
-            uti: "public.utf8-plain-text".to_owned(),
+            uti: slopty_input::pasteboard::board_type(ClipFormat::Text),
             bytes: Some(b"fox".to_vec()),
             size: 3,
         },
         CaughtData {
             item: 2,
-            uti: "public.png".to_owned(),
+            uti: slopty_input::pasteboard::board_type(ClipFormat::Png),
             bytes: Some(big.clone()),
             size: big.len() as u64,
         },
-        CaughtData { item: 3, uti: "public.tiff".to_owned(), bytes: None, size: 1 << 30 },
+        CaughtData {
+            item: 3,
+            uti: slopty_input::pasteboard::board_type(ClipFormat::Tiff),
+            bytes: None,
+            size: 1 << 30,
+        },
     ];
     let files = vec![named.to_string_lossy().into_owned()];
     assert_eq!(

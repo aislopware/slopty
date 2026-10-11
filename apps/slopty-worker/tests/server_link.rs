@@ -1592,7 +1592,8 @@ mod tests {
         assert_eq!(reg.name, "link-test");
         assert_eq!(reg.listen, daemons.listen, "where its clients' listener is bound");
         assert_eq!(reg.sessions, []);
-        assert_eq!(reg.caps.os, Os::MacOs);
+        let host = if cfg!(target_os = "linux") { Os::Linux } else { Os::MacOs };
+        assert_eq!(reg.caps.os, host, "the host's own");
         assert!(reg.caps.cpus > 0 && reg.caps.memory > 0, "{:?}", reg.caps);
         let worker = reg.worker;
 
@@ -1637,7 +1638,9 @@ mod tests {
         let slow = peer.send(Verb::WaitFor { term, until: never, timeout_ms: 3_000 }).await;
         let screen = peer.ask(Verb::ReadScreen { term }).await;
         let Outcome::Screen(screen) = screen else { panic!("{screen:?}") };
-        assert!(screen.lines.iter().any(|l| l.text == "$ echo hi"), "{screen:?}");
+        // Ends with: Debian's bash reads /etc/bash.bashrc, whose PS1 replaces the test's, even
+        // under `--norc` once the shell integration's `--rcfile` stands in for it.
+        assert!(screen.lines.iter().any(|l| l.text.ends_with("$ echo hi")), "{screen:?}");
         assert_eq!(peer.reply(slow).await, Outcome::Waited(Waited::TimedOut));
 
         let bad = peer.ask(Verb::SendInput { term, input: Input::Keys(vec!["ctrl+nope".into()]) });

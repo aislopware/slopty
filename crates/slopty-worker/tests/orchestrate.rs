@@ -126,6 +126,9 @@ mod orchestrate {
         };
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
+        // Debian's bash reads /etc/bash.bashrc before any rcfile, and Ubuntu's sets its own PS1
+        // there; the home's .bashrc, which the integration reads after it, puts the test's back.
+        std::fs::write(home.join(".bashrc"), "PS1='$ '\n").unwrap();
         let size = TermSize {
             cols: 80,
             rows: 24,

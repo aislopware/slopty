@@ -72,7 +72,8 @@ fn enter_maps_then_places_the_source_then_presses_and_drags() {
     assert_eq!((*x, *y), (110.0, 220.0), "global points");
     assert_eq!(source[0].file.as_deref(), Some("/Users/w/.slopty/drop/d/a.txt"));
     assert!(source[1].given.iter().any(|g| g.bytes == b"fox"), "text at once");
-    assert!(!source[1].given.iter().any(|g| g.uti == "public.png"), "the picture when it comes");
+    let png = slopty_input::pasteboard::board_type(ClipFormat::Png);
+    assert!(!source[1].given.iter().any(|g| g.uti == png), "the picture when it comes");
     assert_eq!(
         drop_in.hear(Heard::Helper(FromHelper::Ready { drag })),
         [Act::Press { x: 10.0, y: 20.0 }, Act::Deadline(Some(START_WAIT))]
@@ -189,7 +190,7 @@ fn the_release_waits_for_every_file() {
             Act::Helper(ToHelper::Data {
                 drag,
                 item: 1,
-                uti: "public.png".to_owned(),
+                uti: slopty_input::pasteboard::board_type(ClipFormat::Png),
                 bytes: Some(b"png".to_vec())
             }),
             Act::Release,
