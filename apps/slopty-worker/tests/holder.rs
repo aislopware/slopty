@@ -74,18 +74,21 @@ mod tests {
 
     /// `display` held to its planned mode as the worker's registry holds it, enforced until
     /// macOS says it is settled (for up to 10 s), since macOS may pick another mode for a new
-    /// display; its size in points then.
-    fn enforced(remote: &mut Remote, display: &HeldBy) -> (f64, f64) {
+    /// display; its size in points then, and what the last enforcement said.
+    fn enforced(remote: &mut Remote, display: &HeldBy) -> ((f64, f64), String) {
         let asked = Instant::now();
+        let mut said = String::from("nothing");
         while asked.elapsed() < Duration::from_secs(10) {
-            if matches!(remote.enforce(display), Ok(Enforced::Settled)) {
+            let state = remote.enforce(display);
+            said = format!("{state:?}");
+            if matches!(state, Ok(Enforced::Settled)) {
                 break;
             }
             #[expect(clippy::disallowed_methods, reason = "a test polling what macOS shows")]
             std::thread::sleep(Duration::from_millis(50));
         }
         let size = CGDisplayBounds(remote.id(display)).size;
-        (size.width, size.height)
+        ((size.width, size.height), said)
     }
 
     /// Where the stand-in's window is: the display its screen shows (0 for none) and its frame
@@ -266,17 +269,19 @@ mod tests {
             clippy::cast_sign_loss,
             reason = "a display's side in points, a few thousand"
         )]
-        let points = |side: f64| (side * 2.0).max(1600.0).round() as u32;
+        let points = |side: f64| (side * 1.5).round() as u32;
         let (width, height) = (points(main.width), points(main.height));
         let shape = DisplayShape { width, height, scale: 1.0, refresh_hz: 60 };
         let plan = sized::plan_for(key, &shape);
         let mut first = worker(&socket, &store, true);
         let made = first.create(key, &plan).expect("the holder made a display");
         let id = first.id(&made);
-        let room = enforced(&mut first, &made);
-        let size =
-            ((main.width * 1.5).min(room.0 - 120.0), (main.height * 1.5).min(room.1 - 160.0));
-        assert!(size.0 > main.width && size.1 > main.height, "{size:?} past {main:?} in {room:?}");
+        // Half again the main display, and a window a fifth larger than it: what any Mac's
+        // virtual display takes, the gate's 1920 × 1080 and a 1024 × 768 guest alike.
+        let (room, said) = enforced(&mut first, &made);
+        let size = (main.width * 1.2, main.height * 1.2);
+        let fits = size.0 + 120.0 <= room.0 && size.1 + 160.0 <= room.1;
+        assert!(fits, "{size:?}, past {main:?}, in {room:?} (enforce said {said})");
         let mut window = Window::open(id, size.0, size.1);
         let _settling = window.during(Duration::from_secs(2));
         let before = window.last;

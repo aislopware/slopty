@@ -209,10 +209,19 @@ impl Follower {
                         return;
                     }
                     let paths = self.lists.borrow_and_update().clone();
-                    let Some((back, ())) = blocking(state, move |s| s.set(paths)).await else {
+                    let polling = state.polls();
+                    let Some((back, moved)) = blocking(state, move |s| s.set(paths)).await else {
                         return;
                     };
                     state = back;
+                    // A poll that starts with this list looks a period on, as the take just
+                    // stamped what it polls; a look at once would only race a writer.
+                    if !polling && state.polls() {
+                        poll.reset();
+                    }
+                    if !self.report(moved) {
+                        return;
+                    }
                     lists = lists.saturating_add(1);
                     let status = state.status(lists);
                     tracing::debug!(
@@ -450,20 +459,34 @@ impl State {
         Status { files: self.files.len(), polled, events: self.queue.is_some(), lists, followed }
     }
 
-    /// Take a new watch list. A kept path that was polled is watched again if the watches it
-    /// lacked are free now, and looked at once, since the poll that would have seen a change
-    /// since its last look no longer runs.
-    fn set(&mut self, paths: Vec<String>) {
+    /// Take a new watch list, and answer the kept paths that moved. A kept path that was polled
+    /// is watched again if the watches it lacked are free now, and looked at here, since the
+    /// poll that would have seen a change since its last look no longer runs.
+    ///
+    /// The look is now, not a touch for later: a touch has no event behind it, and a truncate
+    /// that came after it would have its hold counted from the touch, already out by the time
+    /// the look was paced to run, so the emptied file would be reported half written.
+    fn set(&mut self, paths: Vec<String>) -> Vec<String> {
         let keep: BTreeSet<String> = paths.into_iter().collect();
         self.files.retain(|k, _| keep.contains(k));
         self.touched.retain(|k, _| keep.contains(k));
         self.release();
-        let polled: Vec<String> =
-            self.files.iter().filter(|(_, f)| f.polled).map(|(k, _)| k.clone()).collect();
-        for key in &polled {
-            self.resolve(key);
-        }
-        self.touch(polled, Instant::now(), false);
+        let now = Instant::now();
+        let looked = Touch {
+            first: now,
+            last: now,
+            held: false,
+            done: false,
+            not_before: None,
+            content: false,
+        };
+        let polled: Vec<(String, Option<Touch>)> = self
+            .files
+            .iter()
+            .filter(|(_, f)| f.polled)
+            .map(|(k, _)| (k.clone(), Some(looked)))
+            .collect();
+        let moved = self.look(polled, now);
         for key in keep {
             if self.files.contains_key(&key) {
                 continue;
@@ -489,6 +512,7 @@ impl State {
         }
         self.release();
         self.follow_contents();
+        moved
     }
 
     /// Read what the kernel has said, and mark the paths it touches.

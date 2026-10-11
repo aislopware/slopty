@@ -125,7 +125,8 @@ pub fn wait(group: u32, mut reaped: impl FnMut() -> bool) -> bool {
 pub const LOOK_EVERY: Duration = Duration::from_millis(2);
 
 /// End each of `children`, every one the leader of a group of its own, and wait for each group
-/// to be gone ([`kill`], then [`wait`]), then out of the warden's care ([`ward`]).
+/// to be gone ([`kill`], then [`wait`], killing again while any of it is left), then out of the
+/// warden's care ([`ward`]).
 ///
 /// What a test's daemons hold of its output is closed once this returns. `id` says a child's
 /// pid while it is unreaped, and `reaped` reaps it if it has exited. It says whether every
@@ -142,7 +143,15 @@ pub fn end<T>(
     let mut all = true;
     for (child, group) in children.iter_mut().zip(groups) {
         let Some(group) = group else { continue };
-        let ended = wait(group, || reaped(child));
+        let ended = wait(group, || {
+            let reaped = reaped(child);
+            // A member forking as the kill came can leave a child the kill missed, still in the
+            // group; it goes with the next.
+            if !gone(group) {
+                kill(group);
+            }
+            reaped
+        });
         if ended {
             unward(group);
         }
@@ -164,17 +173,28 @@ mod tests {
 
     /// A group leader and the child it started are both ended by one kill, and the wait sees
     /// them gone once the leader is reaped.
+    ///
+    /// The kill comes only once `sh` says the `sleep`'s pid, after its fork returned: a group
+    /// killed while a member is still forking can miss the child the fork is making, which
+    /// then lives on in the group, orphaned.
     #[test]
     fn a_group_and_what_it_started_are_ended_together() {
+        use std::io::BufRead as _;
         let mut leader = Command::new("/bin/sh")
-            .args(["-c", "/bin/sleep 600 & wait"])
-            .stdout(Stdio::null())
+            .args(["-c", "/bin/sleep 600 >/dev/null & echo $!; exec >&-; wait"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .process_group(0)
             .spawn()
             .unwrap();
+        let mut said = String::new();
+        let out = leader.stdout.take().unwrap();
+        std::io::BufReader::new(out).read_line(&mut said).unwrap();
+        assert!(said.trim().parse::<u32>().is_ok(), "the sleep's pid, not {said:?}");
         let group = leader.id();
         assert!(!gone(group));
-        kill(group);
+        let killed = kill_process_group(pid(group).unwrap(), Signal::KILL);
+        assert_eq!(killed, Ok(()), "the group is killed");
         assert!(wait(group, || leader.try_wait().is_ok_and(|s| s.is_some())), "all gone");
     }
 

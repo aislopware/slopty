@@ -290,15 +290,20 @@ mod follow {
         assert!(polled.contains(&key(&paths[2])), "{polled:?}");
         assert!(!polled.contains(&key(&paths[0])), "{polled:?}");
 
-        // The polled file is still seen, within a period.
+        // The polled file is still seen, within a period; not at once, since the list's take
+        // stamped it and a look then would only race this write.
         write_in_place(&paths[2], "polled\n");
         let at = Instant::now();
         assert_eq!(next(&mut changes, poll * 2).await, Some(vec![key(&paths[2])]));
-        assert!(at.elapsed() <= poll * 2);
+        let waited = at.elapsed();
+        assert!(waited >= poll / 2 && waited <= poll * 2, "{waited:?}");
 
-        // A path dropped from the list is no longer reported, and frees its watches.
+        // A path dropped from the list is no longer reported, and frees its watches. The polled
+        // one watched now is looked at as the list is taken, for what the poll has not seen.
+        write_in_place(&paths[2], "between\n");
         lists.send_replace(vec![key(&paths[2])]);
         changes.status().wait_for(|s| s.lists >= 2).await.unwrap();
+        assert_eq!(next(&mut changes, HOLD).await, Some(vec![key(&paths[2])]), "looked at");
         assert!(status(&changes).polled.is_empty(), "{:?}", status(&changes).polled);
         assert_eq!(status(&changes).followed, [key(&paths[2])], "the list taken now");
         write_in_place(&paths[0], "dropped\n");
