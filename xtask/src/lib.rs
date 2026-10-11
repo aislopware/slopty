@@ -29,6 +29,7 @@ mod ios;
 mod land;
 mod latency;
 mod linux;
+mod memstat;
 mod nightly;
 mod pi;
 mod prune;

@@ -1014,7 +1014,10 @@ fn test_lane(
     // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
     // each unit of the build cost. Here it would pile up a report per gate.
     let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
+    // What each step does to a runner Mac's memory (`crate::memstat`); nothing elsewhere.
+    let memory = crate::memstat::read(sh);
     quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run {timings...}"))?;
+    let memory = crate::memstat::report(sh, "the test build", memory);
     // Every binary a test spawns, so no test shells out to cargo and waits on its locks while
     // another build on the machine holds them. With the tests selected that were built just now,
     // cargo resolves features with their dev-dependencies as that build did
@@ -1029,6 +1032,7 @@ fn test_lane(
             cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
         )?;
     }
+    let memory = crate::memstat::report(sh, "the spawned binaries", memory);
     let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
@@ -1094,6 +1098,7 @@ fn test_lane(
     });
     let ptys = ptys.finish();
     print!("{}", ptys.report());
+    let _memory = crate::memstat::report(sh, "the tests", memory);
     both(both(tests, videotoolbox), ptys.verdict())
 }
 
