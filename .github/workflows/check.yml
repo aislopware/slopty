@@ -36,6 +36,12 @@ on:
       full:
         description: "yes: every check (iOS and Linux clippy, rustdoc); no: fmt, host clippy, tests"
         default: "no"
+      runner:
+        description: The runner image (macos-26, ubuntu-24.04, ubuntu-24.04-arm)
+        default: macos-26
+      probe:
+        description: A shell command to run after setup, for trying a step on a runner
+        default: ""
 
 run-name: check ${{ inputs.name }} ${{ inputs.sha }}
 
@@ -49,12 +55,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  SCCACHE_GHA_ENABLED: "true"
+  # The Actions cache is the Mac lanes' (10 GB, full); a Linux run keeps its compile cache on
+  # the runner, as the gate's linux job does.
+  SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
 
 jobs:
   check:
     name: check (${{ inputs.name }})
-    runs-on: macos-26
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     # A step with no shell named runs `bash -e`, without pipefail, so a failed check piped
     # through `tee` passed (run 38107934242).
@@ -62,6 +70,9 @@ jobs:
       run:
         shell: bash
     steps:
+      # A hosted Ubuntu image leaves about 14 GB free; these SDKs are what no step here uses.
+      - if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.sha }}
@@ -128,6 +139,10 @@ jobs:
           for p in $PACKAGES; do args+=(-p "$p"); done
           [ "$FULL" = yes ] || args+=(--quick)
           cargo xtask check "${args[@]}" 2>&1 | tee target/remote/check.log
+      - if: ${{ !cancelled() && inputs.probe != '' }}
+        env:
+          PROBE: ${{ inputs.probe }}
+        run: bash -c "$PROBE" 2>&1 | tee target/remote/probe.log
       - if: ${{ !cancelled() && inputs.e2e != '' }}
         env:
           CASE: ${{ inputs.e2e }}

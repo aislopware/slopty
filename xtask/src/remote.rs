@@ -99,6 +99,12 @@ pub struct RemoteOpts {
     /// one: wait for it, print what failed and apply what it accepted, as the same options say.
     #[arg(long = "run", value_name = "ID")]
     pub attach: Option<u64>,
+    /// The runner image: macos-26, or ubuntu-24.04 / ubuntu-24.04-arm for what needs no Mac.
+    #[arg(long, default_value = "macos-26")]
+    pub runner: String,
+    /// A shell command to run on the runner after its setup, to try a step there.
+    #[arg(long)]
+    pub probe: Option<String>,
     /// Check `HEAD` as committed, without the tree's edits: other lanes' unfinished work stays
     /// out of it.
     #[arg(long)]
@@ -117,8 +123,11 @@ struct Listed {
 
 pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     ensure!(
-        opts.attach.is_some() || !opts.packages.is_empty() || opts.e2e.is_some(),
-        "name what to check: `-p <crate>` (repeatable), `--e2e <case>`, or both"
+        opts.attach.is_some()
+            || !opts.packages.is_empty()
+            || opts.e2e.is_some()
+            || opts.probe.is_some(),
+        "name what to check: `-p <crate>` (repeatable), `--e2e <case>`, `--probe <command>`"
     );
     ensure!(
         opts.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
@@ -153,7 +162,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let conclusion = finish(sh, run.id)?;
     let logs = download(sh, run.id, "logs", &dir.join("logs"));
     if let Some(logs) = logs.as_deref() {
-        for name in ["check.log", "e2e.log"] {
+        for name in ["check.log", "probe.log", "e2e.log"] {
             let path = logs.join(name);
             if conclusion != "success" && path.exists() {
                 show(&path)?;
@@ -206,6 +215,12 @@ fn describe(opts: &RemoteOpts) -> String {
         let filter = opts.filter.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
         parts.push(format!("e2e {case}{filter} ({})", opts.goldens.input()));
     }
+    if let Some(probe) = &opts.probe {
+        parts.push(format!("probe `{probe}`"));
+    }
+    if opts.runner != "macos-26" {
+        parts.push(format!("on {}", opts.runner));
+    }
     parts.join(", ")
 }
 
@@ -251,6 +266,8 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         format!("sim={}", opts.sim),
         format!("snapshots={}", if opts.accept_snapshots { "accept" } else { "compare" }),
         format!("full={}", if opts.full { "yes" } else { "no" }),
+        format!("runner={}", opts.runner),
+        format!("probe={}", opts.probe.as_deref().unwrap_or_default()),
     ];
     let args: Vec<String> = fields.iter().flat_map(|f| ["-f".to_owned(), f.clone()]).collect();
     cmd!(sh, "gh workflow run {WORKFLOW} --ref {REF} {args...}")
