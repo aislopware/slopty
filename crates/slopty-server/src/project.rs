@@ -1219,6 +1219,7 @@ impl Projects {
             push: new.push,
             orchestrator: new.orchestrator,
             orchestrator_thread: None,
+            landed: None,
             limits,
             metadata: metadata(new.metadata)?,
             created_ms: now,
@@ -1747,13 +1748,7 @@ impl Projects {
                 let Some((_, pull)) = seen.iter().find(|(seat, _)| *seat == term.session) else {
                     continue;
                 };
-                let pull = pull.clone().map(|mut p| {
-                    p.url = clipped(&p.url, REF_MAX);
-                    p.title = clipped(&p.title, TITLE_MAX);
-                    p.base = clipped(&p.base, REF_MAX);
-                    p.failed_first = p.failed_first.map(|f| clipped(&f, REF_MAX));
-                    p
-                });
+                let pull = pull.clone().map(bounded_pull);
                 if t.pull == pull {
                     continue;
                 }
@@ -2098,6 +2093,43 @@ impl Projects {
             None => {}
         }
         changes
+    }
+
+    /// Project `id`'s finished goal's pull request as the forge says it stands now
+    /// ([`Project::landed`]), cut to a card's bounds. One first seen, or come to stand
+    /// otherwise (its checks, its review, its merge), is worth the timeline; one with only its
+    /// words changed, the project alone.
+    pub(crate) fn landed_seen(
+        &mut self,
+        id: &ProjectId,
+        pull: PullSeen,
+        now: WallMs,
+    ) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let pull = bounded_pull(pull);
+        if record.project.landed.as_ref() == Some(&pull) {
+            return Vec::new();
+        }
+        let standing = |p: Option<&PullSeen>| p.map(|p| (p.number, p.stands));
+        let moved = standing(record.project.landed.as_ref()) != standing(Some(&pull));
+        record.project.landed = Some(pull.clone());
+        let entry = moved.then(|| record.log(None, Moment::Pull(pull), now));
+        vec![record.record_update(entry)]
+    }
+
+    /// The projects whose finished goal's pull request is still open, as they are: what the
+    /// server reads again from the forge ([`Project::landed`]).
+    pub(crate) fn landing(&self) -> Vec<Project> {
+        self.records
+            .values()
+            .filter(|r| {
+                r.project
+                    .landed
+                    .as_ref()
+                    .is_some_and(|p| !matches!(p.stands, PullStands::Merged | PullStands::Closed))
+            })
+            .map(|r| r.project.clone())
+            .collect()
     }
 
     /// Project `id`'s target `target` reached `origin` as it stood at `at`: every task merged
@@ -2453,6 +2485,15 @@ impl Projects {
             leaf(report, natives, now);
         }
     }
+}
+
+/// `pull` cut to a card's bounds: its page, title, base and first failed check.
+fn bounded_pull(mut pull: PullSeen) -> PullSeen {
+    pull.url = clipped(&pull.url, REF_MAX);
+    pull.title = clipped(&pull.title, TITLE_MAX);
+    pull.base = clipped(&pull.base, REF_MAX);
+    pull.failed_first = pull.failed_first.map(|f| clipped(&f, REF_MAX));
+    pull
 }
 
 /// `text` cut to at most `max` bytes, at a character boundary: what a worker reports is kept

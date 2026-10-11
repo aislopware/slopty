@@ -10,8 +10,7 @@ use slopty_proto::thread::{AgentId, Cursor, Phase, ThreadId};
 
 use super::ladder::tests::{asking, row, snapshot, under};
 use super::project_tests::{
-    answer, create, installed, new_task, opened, project, refused, request, spawn, status,
-    worker_on,
+    answer, create, installed, new_task, project, refused, request, spawn, status, worker_on,
 };
 use super::*;
 
@@ -294,7 +293,7 @@ async fn a_task_goes_to_another_agent_and_starts_fresh() {
     let task = new_task(&hub).await;
     let pi = AgentId::named(AgentId::PI);
     let codex = AgentId::named(AgentId::CODEX);
-    let restart = |agent| Verb::TaskRestart { project: project(), task, agent };
+    let restart = |agent| Verb::TaskRestart { project: project(), task, agent, worker: None };
 
     let never = hub.dispatch(restart(None)).await;
     assert!(refused(&never, ErrorCode::Invalid).contains("name the agent"), "{never:?}");
@@ -315,37 +314,77 @@ async fn a_task_goes_to_another_agent_and_starts_fresh() {
     let own = hub.dispatch_as(Speaker::Proven(seat), None, restart(None)).await;
     refused(&own, ErrorCode::Forbidden);
 
-    // To Codex: pi's seat closes, then Codex opens where pi worked, on pi's worker.
+    // To Codex: pi's seat closes, then Codex starts where pi worked, on pi's worker.
     let asked = spawn(&hub, restart(Some(codex.clone())));
     let (id, verb) = request(&mut rx).await;
     assert_eq!(verb, Verb::Close { term: TermRef { worker: linux, session: seat } });
     answer(&lease, id, Outcome::Done);
-    let start = request(&mut rx).await;
-    let Verb::OpenTerminal { worker, cwd, command, .. } = &start.1 else { panic!("{start:?}") };
-    assert_eq!((*worker, cwd.as_deref()), (linux, Some("~/src/slopty/crates/x")));
-    assert_eq!(command.first().map(String::as_str), Some("codex"));
-    let prompt = command.last().expect("its first prompt");
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { worker, start, seat: codex_seat, .. } = verb else {
+        panic!("{verb:?}")
+    };
+    assert_eq!((worker, start.cwd.as_str()), (linux, "~/src/slopty/crates/x"));
+    assert_eq!(start.agent, codex);
+    let prompt = start.prompt.clone().expect("its first prompt");
     assert!(prompt.starts_with("Build it."), "{prompt}");
     assert!(prompt.contains(&format!("slopty agent read --thread {first}")), "{prompt}");
-    let term = opened(&lease, &start);
+    let second = ThreadId::new();
+    answer(&lease, id, Outcome::ThreadStarted { thread: second, worktree: None });
     let Outcome::Task(given) = asked.await.unwrap() else { panic!("not a task") };
-    assert_eq!(given.assignment.map(|a| a.term), Some(term), "Codex's terminal is the task's");
+    let term = TermRef { worker: linux, session: codex_seat };
+    assert_eq!(given.assignment.map(|a| a.term), Some(term), "Codex's seat is the task's");
 
     // Fresh, on the agent it ran last: Codex, from its own row.
-    let mut tui = row(Phase::Idle, 2, Some(term.session));
+    let mut tui = row(Phase::Idle, 2, None);
+    tui.id = second;
     tui.agent = codex.clone();
     tui.cwd = Some("~/src/slopty/crates/x".to_owned());
+    tui.facts.insert(SEAT_FACT.to_owned(), codex_seat.to_string());
     lease.handle(snapshot(vec![tui.clone()]));
     let asked = spawn(&hub, restart(None));
     let (id, verb) = request(&mut rx).await;
     assert_eq!(verb, Verb::Close { term });
     answer(&lease, id, Outcome::Done);
-    let start = request(&mut rx).await;
-    let Verb::OpenTerminal { command, .. } = &start.1 else { panic!("{start:?}") };
-    assert_eq!(command.first().map(String::as_str), Some("codex"), "the same agent, afresh");
-    let prompt = command.last().expect("its first prompt");
-    assert!(prompt.contains(&format!("--thread {}", tui.id)), "{prompt}");
-    let again = opened(&lease, &start);
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { start, seat: again, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(start.agent, codex, "the same agent, afresh");
+    let prompt = start.prompt.clone().expect("its first prompt");
+    assert!(prompt.contains(&format!("--thread {second}")), "{prompt}");
+    answer(&lease, id, Outcome::ThreadStarted { thread: ThreadId::new(), worktree: None });
     let Outcome::Task(fresh) = asked.await.unwrap() else { panic!("not a task") };
+    let again = TermRef { worker: linux, session: again };
     assert_eq!(fresh.assignment.map(|a| a.term), Some(again));
+}
+
+/// A task whose machine has gone away starts again on another one, asked with no worker named:
+/// the away machine is not asked to close its seat, which is let go, and the start goes where
+/// the agent is installed and online.
+#[tokio::test]
+async fn a_task_whose_machine_is_away_starts_again_elsewhere() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    mac_lease.handle(ToServer::Facts(installed(&["pi"])));
+    lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let task = new_task(&hub).await;
+    let pi = AgentId::named(AgentId::PI);
+    let on_box = TaskLaunch { pin: Some(linux), agent: pi.clone() };
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on_box });
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    answer(&lease, id, Outcome::ThreadStarted { thread: ThreadId::new(), worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    drop((lease, rx));
+    let restart = Verb::TaskRestart { project: project(), task, agent: Some(pi), worker: None };
+    let asked = spawn(&hub, restart);
+    let (id, verb) = request(&mut mac_rx).await;
+    let Verb::StartThread { worker, seat: again, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(worker, mac, "on the machine that is there");
+    assert_ne!(again, seat, "a seat of its own");
+    answer(&mac_lease, id, Outcome::ThreadStarted { thread: ThreadId::new(), worktree: None });
+    let Outcome::Task(moved) = asked.await.unwrap() else { panic!("not a task") };
+    let term = moved.assignment.map(|a| a.term);
+    assert_eq!(term, Some(TermRef { worker: mac, session: again }), "the old seat let go");
 }

@@ -554,6 +554,80 @@ mod review {
         assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
     }
 
+    /// A branch checked out nowhere is reviewed as committed (`GitOp::Range`): from where it
+    /// left its base to its tip, so neither the base's own later commits nor the working tree
+    /// count; `origin`'s copy of either branch is read when it holds the local one; a branch
+    /// that is in neither, or two that share no history, say so; nothing in the repository
+    /// moves; and a thread's review of the same range reads the same.
+    #[tokio::test]
+    async fn a_branch_checked_out_nowhere_is_reviewed_as_committed() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+        use slopty_worker::repo::commit::{Programs, apply};
+        use slopty_worker::repo::snapshot::{NO_BRANCH, NO_FORK};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        run(&repo, &["switch", "-q", "-c", "goal"]);
+        std::fs::write(repo.join("goal.txt"), "the goal\n").unwrap();
+        run(&repo, &["add", "goal.txt"]);
+        run(&repo, &["rm", "-q", "gone.txt"]);
+        run(&repo, &["commit", "-q", "-m", "goal"]);
+        run(&repo, &["switch", "-q", "main"]);
+        std::fs::write(repo.join("later.txt"), "main moved on\n").unwrap();
+        run(&repo, &["add", "later.txt"]);
+        run(&repo, &["commit", "-q", "-m", "later"]);
+        std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
+        let (head, index) =
+            (run(&repo, &["rev-parse", "HEAD"]), std::fs::read(repo.join(".git/index")).unwrap());
+        let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
+        let folder = repo.to_string_lossy().into_owned();
+        let range = async |base: &str, head: &str| {
+            let op = GitOp::Range { base: base.to_owned(), head: head.to_owned() };
+            match apply(&programs, &folder, op, &[]).await {
+                GitOutcome::Done(GitDone::Changes(review)) => *review,
+                other => panic!("{other:?}"),
+            }
+        };
+        let paths =
+            |review: &Review| review.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+
+        let goal = range("main", "goal").await;
+        let scope = ReviewScope::Range { base: "main".to_owned(), head: "goal".to_owned() };
+        assert_eq!(goal.scope, scope);
+        assert_eq!(paths(&goal), ["goal.txt", "gone.txt"], "the goal's commits, nothing else");
+        assert_eq!(goal.absent, None);
+        assert_eq!(run(&repo, &["rev-parse", "HEAD"]), head, "HEAD stays");
+        assert_eq!(std::fs::read(repo.join(".git/index")).unwrap(), index, "the index untouched");
+        assert_eq!(run(&repo, &["status", "--porcelain"]), "M a.txt", "the working tree untouched");
+
+        // Pushed further from another machine: origin's copy holds the local one, so it reads.
+        run(&repo, &["switch", "-q", "goal"]);
+        std::fs::write(repo.join("pushed.txt"), "from elsewhere\n").unwrap();
+        run(&repo, &["add", "pushed.txt"]);
+        run(&repo, &["commit", "-q", "-m", "pushed"]);
+        run(&repo, &["update-ref", "refs/remotes/origin/goal", "HEAD"]);
+        run(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        run(&repo, &["switch", "-q", "main"]);
+        assert_eq!(paths(&range("main", "goal").await), ["goal.txt", "gone.txt", "pushed.txt"]);
+
+        let nowhere = range("main", "nope").await;
+        assert_eq!(nowhere.absent.as_deref(), Some(NO_BRANCH), "a branch that is not there");
+        assert_eq!(nowhere.files, Vec::new());
+        run(&repo, &["switch", "-q", "--orphan", "alone"]);
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "alone"]);
+        run(&repo, &["switch", "-q", "-f", "main"]);
+        let apart = range("main", "alone").await;
+        assert_eq!(apart.absent.as_deref(), Some(NO_FORK), "two histories that never met");
+
+        let rig = Rig::new(dir.path(), &repo);
+        let threads = rig.snapshots.review(rig.thread, scope).await;
+        assert_eq!(
+            paths(&threads),
+            ["goal.txt", "gone.txt", "pushed.txt"],
+            "a thread's reads the same"
+        );
+    }
+
     /// A review past its line budget spends it in the order the files are read, the
     /// weightiest first and the quiet ones last, so a lock file is the one left without hunks
     /// rather than the source after it; a file past the budget says how many lines it has, and

@@ -15,7 +15,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::AgentId;
-use slopty_proto::thread::wire::{PullStands, TableFrame};
+use slopty_proto::thread::wire::{PullSeen, PullStands, TableFrame};
 
 use super::tests::{caps, registration, summary};
 use super::*;
@@ -1955,25 +1955,23 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
-    // Codex's terminal opens in one the worker makes from the target too: its own `--worktree`
+    // Codex's thread starts in one the worker makes from the target too: its own `--worktree`
     // would start from whatever the clone has checked out.
     linux_lease.handle(ToServer::Facts(installed(&["claude", "codex"])));
     let codex_task = new_task(&hub).await;
     let launch = TaskLaunch { agent: AgentId::named(AgentId::CODEX), ..on(linux) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: codex_task, launch });
     forge_has_the_target(&studio_lease, &mut studio_rx).await;
-    let start = request(&mut linux_rx).await;
-    let Verb::OpenTerminal { cwd, command, worktree, .. } = start.1.clone() else {
-        panic!("{:?}", start.1)
-    };
-    assert_eq!(cwd.as_deref(), Some("/home/c/slopty"));
-    assert!(!command.iter().any(|a| a == "--worktree"), "not Codex's own: {command:?}");
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::StartThread { start, role, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(start.cwd, "/home/c/slopty");
+    assert!(start.args.is_empty(), "not Codex's own: {:?}", start.args);
     let name = format!("slopty-slopty-{codex_task}");
-    assert_eq!(worktree.map(|w| (w.name, w.base)), Some((name.clone(), Some("main".to_owned()))));
-    assert!(command[2].contains(&format!("a git worktree of your own, {name}")), "{command:?}");
+    let made = start.worktree.map(|w| (w.name, w.base));
+    assert_eq!(made, Some((name.clone(), Some("main".to_owned()))));
+    let role = role.unwrap_or_default();
+    assert!(role.contains(&format!("a git worktree of your own, {name}")), "{role}");
     // The worker says where it made it, so the task frees it once merged: Codex names none.
-    let (worker, session) = chosen(&start.1);
-    linux_lease.handle(ToServer::SessionChanged(summary(session)));
     let path = format!("/home/c/slopty/.claude/worktrees/{name}");
     let worktree = Box::new(Worktree {
         name: name.clone(),
@@ -1982,9 +1980,9 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
         original_cwd: "/home/c/slopty".to_owned(),
         original_branch: Some("main".to_owned()),
     });
-    let term = TermRef { worker, session };
-    linux_lease
-        .handle(ToServer::Reply { id: start.0, outcome: Outcome::OpenedIn { term, worktree } });
+    let thread = slopty_proto::thread::ThreadId::new();
+    let outcome = Outcome::ThreadStarted { thread, worktree: Some(worktree) };
+    linux_lease.handle(ToServer::Reply { id, outcome });
     let Outcome::Task(task) = asked.await.unwrap() else { panic!("no task") };
     let task = assigned(&hub, task.id).await;
     assert_eq!(task.worktree.as_deref(), Some(path.as_str()), "the task knows its worktree");
@@ -2658,8 +2656,10 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
 }
 
 /// A task never goes to a worker that cannot run its agent: a Codex task only where Codex is
-/// installed, pinned or not, and the refusal says so. It opens the person's own `codex` with its
-/// role as developer instructions and its brief last, held to asking.
+/// installed, pinned or not, and the refusal says so. It starts as a thread on the person's
+/// Codex daemon at its seat, with its role and its brief, asking as its level says; the row the
+/// worker keeps of it names the seat and what Codex says it runs with, so a switch past asking,
+/// made in its own TUI or anywhere, closes it.
 #[tokio::test]
 async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -2678,29 +2678,33 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     assert!(message.contains("studio: codex is not installed"), "a pin is no way round: {message}");
 
     let asked = spawn(&hub, spawn_verb(docs, codex(None)));
-    let start = request(&mut linux_rx).await;
-    let Verb::OpenTerminal { worker, command, env, .. } = &start.1 else { panic!("{:?}", start.1) };
-    assert_eq!(*worker, linux);
-    assert_eq!(command[..2], ["codex", "-c"]);
-    assert!(
-        command[2].starts_with("developer_instructions=\"You are the agent of task"),
-        "{command:?}"
-    );
-    let held = ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"];
-    assert_eq!(command[3..7], held, "held to asking, whatever its config.toml says");
-    assert_eq!(command[7..], ["Build it."], "no clone known: no worktree");
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::StartThread { worker, start, seat, env, role } = verb else { panic!("{verb:?}") };
+    assert_eq!(worker, linux);
+    assert_eq!(start.agent, AgentId::named(AgentId::CODEX));
+    assert_eq!(start.mode.as_deref(), Some("on-request"), "held to asking at its level");
+    assert_eq!(start.prompt.as_deref(), Some("Build it."), "told its brief");
+    assert!(start.args.is_empty(), "no command line: nothing keeps its TUI off the daemon");
+    assert!(role.is_some_and(|r| r.starts_with("You are the agent of task")), "its role apart");
     assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == docs.to_string()), "{env:?}");
-    let term = opened(&linux_lease, &start);
+    let thread = slopty_proto::thread::ThreadId::new();
+    answer(&linux_lease, id, Outcome::ThreadStarted { thread, worktree: None });
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let term = TermRef { worker: linux, session: seat };
 
     // Its row says what Codex runs with: asking, it stays; switched past it, it is closed.
-    let mut tui = ladder::tests::row(slopty_proto::thread::Phase::Idle, 1, Some(term.session));
+    let mut tui = ladder::tests::row(slopty_proto::thread::Phase::Idle, 1, None);
+    tui.id = thread;
     tui.agent = AgentId::named(AgentId::CODEX);
+    tui.facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.to_string());
     tui.meters.mode = Some("on-request".to_owned());
     tui.facts.insert("sandbox".to_owned(), "workspaceWrite".to_owned());
     linux_lease.handle(ladder::tests::snapshot(vec![tui.clone()]));
     let quiet = tokio::time::timeout(Duration::from_millis(100), request(&mut linux_rx)).await;
     assert!(quiet.is_err(), "asking: nothing closes {quiet:?}");
+    // The person joined it in Codex's own TUI, in a terminal of its own, and switched it there:
+    // the seat is still the task's.
+    tui.terminal = Some(SessionId::new());
     tui.facts.insert("sandbox".to_owned(), "dangerFullAccess".to_owned());
     linux_lease.handle(ladder::tests::snapshot(vec![tui]));
     let (_, close) = request(&mut linux_rx).await;
@@ -3061,8 +3065,47 @@ async fn a_finished_goal_lands_through_one_pull_request_into_where_it_came_from(
     assert_eq!(asked, (want.0, want.1, want.2, want.3, "Ship the inbox"), "from its clone");
     let url = "https://example.com/o/demo/pull/9".to_owned();
     answer(&lease, id, Outcome::PullOpened { number: 9, url: url.clone() });
+    // The forge is read at once, and the project keeps what it says for every device.
+    let (id, verb) = request(&mut rx).await;
+    let Verb::PullOf { repo, branch, .. } = &verb else { panic!("{verb:?}") };
+    assert_eq!((repo.as_str(), branch.as_str()), ("/w/demo", "slopty/slopty/goal"));
+    let seen = PullSeen {
+        forge: slopty_proto::git::Forge::GitHub,
+        number: 9,
+        url: url.clone(),
+        title: "Ship the inbox".to_owned(),
+        base: "main".to_owned(),
+        stands: PullStands::Running,
+        failed: 0,
+        failed_first: None,
+        running: 2,
+    };
+    answer(&lease, id, Outcome::PullOf { pull: Some(seen.clone()) });
     let landed = landing.await.unwrap();
     assert_eq!(landed, Outcome::PullOpened { number: 9, url: url.clone() });
+    assert_eq!(status(&hub).await.project.landed, Some(seen.clone()), "kept as the forge said");
+    let open = hub.landings();
+    assert_eq!(open.len(), 1, "followed while it is open");
+    assert!(open[0].lively(), "its checks run");
+    let merged = PullSeen { stands: PullStands::Merged, running: 0, ..seen };
+    let reading = {
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            hub.read_landed(&project(), worker, "/w/demo".to_owned(), "x".to_owned()).await
+        })
+    };
+    let (id, _) = request(&mut rx).await;
+    answer(&lease, id, Outcome::PullOf { pull: Some(merged.clone()) });
+    assert_eq!(reading.await.unwrap(), Some(merged.clone()));
+    let now = status(&hub).await;
+    assert_eq!(now.project.landed, Some(merged), "its merge reaches the project");
+    assert!(
+        now.timeline
+            .iter()
+            .any(|e| matches!(&e.what, Moment::Pull(p) if p.stands == PullStands::Merged)),
+        "the timeline says it merged"
+    );
+    assert!(hub.landings().is_empty(), "a merged one is read no more");
     let noted = status(&hub).await.timeline.into_iter().any(
         |e| matches!(&e.what, Moment::Note { text } if text.contains("#9") && text.contains(&url)),
     );
@@ -3086,15 +3129,17 @@ async fn a_finished_goal_lands_through_one_pull_request_into_where_it_came_from(
 /// An orchestrator taken up again in another terminal (`claude --resume`, the same thread) is
 /// followed: its thread is kept once its worker's table shows it in the orchestrator's
 /// terminal, another thread elsewhere moves nothing, and once that thread runs in another
-/// terminal the project's orchestrator is that terminal, as the timeline says.
+/// terminal the project's orchestrator is that terminal, as the timeline says. Once its agent
+/// ended, the person resumes it from the board: its thread is taken up again on its machine,
+/// never while it runs and never by an agent.
 #[tokio::test]
 async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
     use ladder::tests::{row, snapshot};
-    use slopty_proto::thread::Phase;
     use slopty_proto::thread::wire::ThreadRow;
+    use slopty_proto::thread::{Liveness, Phase, Status};
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (old, other, new) = (SessionId::new(), SessionId::new(), SessionId::new());
-    let (worker, lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, old, true);
     create(&hub, Some(TermRef { worker, session: old })).await;
     let thread = row(Phase::Working, 10, Some(old));
@@ -3106,7 +3151,7 @@ async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
 
     announce(&lease, new, true);
     let resumed = ThreadRow { id: thread.id, terminal: Some(new), ..row(Phase::Working, 20, None) };
-    lease.handle(snapshot(vec![resumed, elsewhere]));
+    lease.handle(snapshot(vec![resumed.clone(), elsewhere.clone()]));
     let now = status(&hub).await;
     let to = TermRef { worker, session: new };
     assert_eq!(now.project.orchestrator, Some(to), "followed to the resumed session");
@@ -3116,4 +3161,19 @@ async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
         _ => None,
     });
     assert_eq!(said, Some(to), "the timeline says where it went");
+
+    let resume = || Verb::ProjectResume { project: project() };
+    let running = hub.dispatch(resume()).await;
+    assert!(refused(&running, ErrorCode::Invalid).contains("still runs"), "{running:?}");
+    let exited =
+        Status { liveness: Liveness::Exited { resumable: true }, ..resumed.status.clone() };
+    lease.handle(snapshot(vec![ThreadRow { status: exited, ..resumed }, elsewhere]));
+    let by_agent = hub.dispatch_as(Speaker::Agent, None, resume()).await;
+    refused(&by_agent, ErrorCode::Forbidden);
+    let resuming = spawn(&hub, resume());
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::ResumeThread { of: ThreadOf::On { worker, thread: thread.id } });
+    answer(&lease, id, Outcome::ThreadStarted { thread: thread.id, worktree: None });
+    let started = resuming.await.unwrap();
+    assert!(matches!(started, Outcome::ThreadStarted { thread: t, .. } if t == thread.id));
 }

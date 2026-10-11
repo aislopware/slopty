@@ -306,10 +306,13 @@ mod codex {
     }
 
     /// A server task's thread is asked of Codex with the seat's variables set in the commands it
-    /// runs, Slopty's tools among its MCP servers with those variables, and the role as its
-    /// developer instructions; the first message goes as written. Its row names the seat, kept
-    /// whatever Codex says of the thread, and a start repeated at the seat answers with the
-    /// thread the first one started.
+    /// runs, Slopty's tools among its MCP servers given those variables' values (the daemon's
+    /// environment is nobody's seat, so no `env_vars`), the role as its developer instructions,
+    /// the approval policy its level names and a sandbox that writes only in its workspace; the
+    /// first message goes as written. Its row names the seat, kept whatever Codex says of the
+    /// thread, and the policy and sandbox Codex says it runs with, which is what the server
+    /// holds a task's Codex to; a start repeated at the seat answers with the thread the first
+    /// one started.
     #[tokio::test]
     async fn a_seated_start_gives_codex_the_seat_its_tools_and_its_role() {
         let dir = tempfile::tempdir().unwrap();
@@ -326,8 +329,11 @@ mod codex {
 
         let seat = SessionId::new();
         let env = vec![
-            ("SLOPTY_SESSION".to_owned(), seat.to_string()),
+            ("SLOPTY_SERVER".to_owned(), "studio:7171".to_owned()),
+            ("SLOPTY_PROJECT".to_owned(), "atlas".to_owned()),
             ("SLOPTY_TASK".to_owned(), "task-1".to_owned()),
+            ("SLOPTY_SESSION".to_owned(), seat.to_string()),
+            ("SLOPTY_SESSION_TOKEN".to_owned(), "proof".to_owned()),
         ];
         let relay = "/opt/slopty/bin/slopty";
         let seated = Seated {
@@ -336,9 +342,10 @@ mod codex {
             role: Some("You review.".to_owned()),
             relay: Some(relay.to_owned()),
         };
-        let outcome = handle.start_seated(start(&work, "Say hello."), seated.clone()).await;
+        let held = Start { mode: Some("on-request".to_owned()), ..start(&work, "Say hello.") };
+        let outcome = handle.start_seated(held.clone(), seated.clone()).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
-        let again = handle.start_seated(start(&work, "Say hello."), seated).await;
+        let again = handle.start_seated(held, seated).await;
         assert_eq!(again, outcome, "one thread a seat");
         assert_eq!(host.seated_at(seat), Some(thread));
         let state = until(&host, thread, |s| {
@@ -347,6 +354,9 @@ mod codex {
         .await;
         let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept over what Codex says of the thread");
+        assert_eq!(state.meters.mode.as_deref(), Some("on-request"), "the policy Codex said");
+        let sandbox = state.meta.facts.get("sandbox").map(String::as_str);
+        assert_eq!(sandbox, Some("readOnly"), "the sandbox Codex said, as the stand-in answers");
 
         served.abort();
         let _done = tokio::time::timeout(BOUND, server).await;
@@ -358,11 +368,21 @@ mod codex {
         assert_eq!(starts.len(), 1, "one thread asked for: {sent:?}");
         let config = shared::seated(&env, Some(relay));
         assert_eq!(config["shell_environment_policy.set.SLOPTY_TASK"], "task-1");
-        assert_eq!(config["mcp_servers.slopty.env"]["SLOPTY_SESSION"], seat.to_string().as_str());
+        let tools = json!({
+            "SLOPTY_SERVER": "studio:7171",
+            "SLOPTY_PROJECT": "atlas",
+            "SLOPTY_TASK": "task-1",
+            "SLOPTY_SESSION": seat.to_string(),
+            "SLOPTY_SESSION_TOKEN": "proof",
+        });
+        assert_eq!(config["mcp_servers.slopty.env"], tools, "every value, as the seat has it");
+        assert!(!config.contains_key("mcp_servers.slopty.env_vars"), "no name to look up");
         let want = json!({
             "cwd": work.to_string_lossy(),
             "config": config,
             "developerInstructions": "You review.",
+            "approvalPolicy": "on-request",
+            "sandbox": "workspace-write",
         });
         assert_eq!(starts[0]["params"], want);
         let turns: Vec<&Value> = sent.iter().filter(|m| m["method"] == "turn/start").collect();

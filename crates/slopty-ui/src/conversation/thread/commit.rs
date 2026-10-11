@@ -1473,6 +1473,7 @@ impl CommitSheet {
                 | GitOp::PullStatus
                 | GitOp::PullComments { .. }
                 | GitOp::Changes { .. }
+                | GitOp::Range { .. }
                 | GitOp::Branches
                 | GitOp::Worktrees
                 | GitOp::Scripts

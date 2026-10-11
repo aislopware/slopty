@@ -137,6 +137,19 @@ pub fn resume_args(native: &str) -> Vec<String> {
     vec![RESUME.to_owned(), native.to_owned()]
 }
 
+/// The command that opens Codex's own TUI on the daemon's thread `native`, run as `program`:
+/// `codex resume <native>`, with nothing else on its line.
+///
+/// Codex's TUI joins the person's daemon only when its command line holds nothing that keeps
+/// it off it: `--no-daemon`, `--oss`, `--profile`, a configuration override (`-c`, `--enable`,
+/// `--disable`, `--search`), `--strict-config` (`codex-rs/tui/src/daemon_startup.rs`,
+/// `exclusion`). Anything of those would run the TUI on an app-server of its own, a second
+/// writer of the same session, so the TUI takes the thread's settings from the daemon instead.
+#[must_use]
+pub fn tui(program: String, native: &str) -> Vec<String> {
+    vec![program, RESUME.to_owned(), native.to_owned()]
+}
+
 /// The Codex thread a start's `args` take up again, when they are [`resume_args`].
 #[must_use]
 pub fn resumed(args: &[String]) -> Option<&str> {
@@ -2127,6 +2140,22 @@ mod tests {
         assert_eq!(config["mcp_servers.slopty.env"], vars);
         let bare = seated(&env, None);
         assert!(bare.keys().all(|k| k.starts_with("shell_environment_policy.")), "{bare:?}");
+    }
+
+    /// The person's TUI on a thread is `codex resume <thread>` alone: no word that keeps
+    /// Codex's TUI off the daemon (as `daemon_startup.rs` lists them), so it joins the
+    /// daemon's thread as one more client rather than loading the session a second time.
+    #[test]
+    fn the_tui_on_a_thread_joins_the_daemon() {
+        let native = "019a0000-0000-7000-8000-000000000001";
+        let command = tui("/opt/homebrew/bin/codex".to_owned(), native);
+        assert_eq!(command, ["/opt/homebrew/bin/codex", "resume", native]);
+        let off = ["--no-daemon", "--oss", "--profile", "-c", "--config", "--enable"];
+        let off = off.into_iter().chain(["--disable", "--search", "--strict-config"]);
+        for word in off {
+            assert!(!command.iter().any(|w| w == word || w.starts_with(&format!("{word}="))));
+        }
+        assert_eq!(resumed(&command[1..]), Some(native), "the thread named is the one joined");
     }
 
     /// The shell Codex wraps a command in is taken off, its quoting undone; a command it did

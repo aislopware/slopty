@@ -170,6 +170,13 @@ pub trait TaskThreads: Send + Sync {
     /// [`ErrorCode::Unsupported`] for an agent it cannot start; any other failure as it is.
     fn start(&self, thread: TaskThread) -> BoxFuture<'_, Result<ThreadId, Failure>>;
 
+    /// Take a thread whose agent exited up again as `start` says, by its agent's own door (a
+    /// start of its session), as a client's Resume would: answers the thread, the same one.
+    ///
+    /// # Errors
+    /// As [`Self::start`].
+    fn resume(&self, start: wire::Start) -> BoxFuture<'_, Result<ThreadId, Failure>>;
+
     /// End the agent of the thread seated at `seat`, its session kept to take up again.
     /// `Ok(false)` when no thread is seated there.
     ///
@@ -191,6 +198,45 @@ pub trait ThreadReads: Send + Sync {
     /// The row of the thread whose agent runs in terminal `session`, hanging from no other:
     /// the latest to change, when several did.
     fn at_terminal(&self, session: SessionId) -> Option<ThreadRow>;
+}
+
+/// How the exited agent of `state`'s thread takes its own session up again, as a client's
+/// Resume does: Claude Code by `--resume <session>` with the model it ran last, Codex's shared
+/// thread by `resume <thread>`. One still running, one whose agent cannot go on, and any other
+/// agent (whose next message starts it) are refused in words.
+///
+/// # Errors
+/// [`ErrorCode::Invalid`] for a thread that is not to be resumed this way.
+fn resume_start(state: &ThreadState) -> Result<wire::Start, Failure> {
+    use slopty_proto::thread::{AgentId, Drive, Liveness};
+    let refuse = |why: &str| Err(Failure::new(ErrorCode::Invalid, why));
+    let Liveness::Exited { resumable } = state.status.liveness else {
+        return refuse("its agent still runs");
+    };
+    let meta = &state.meta;
+    if !resumable || meta.native.trim().is_empty() {
+        return refuse("its agent cannot take this session up again");
+    }
+    let (model, args) = if meta.agent.is(AgentId::CLAUDE_CODE) && meta.drive.is(Drive::OBSERVED) {
+        let model = state.meters.model_id.clone().filter(|m| !m.trim().is_empty());
+        (model, vec![slopty_agent::resume::RESUME_FLAG.to_owned(), meta.native.clone()])
+    } else if meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED) {
+        (None, slopty_agent::codex::shared::resume_args(&meta.native))
+    } else {
+        return refuse("its agent goes on with the next message sent to it");
+    };
+    Ok(wire::Start {
+        agent: meta.agent.clone(),
+        cwd: meta.cwd.clone(),
+        drive: Some(meta.drive.clone()),
+        prompt: None,
+        model,
+        mode: None,
+        effort: None,
+        attachments: Vec::new(),
+        args,
+        worktree: None,
+    })
 }
 
 /// A boxed future a [`TaskThreads`] answers with.
@@ -484,6 +530,7 @@ impl Orchestrator {
             | Verb::TaskMerge { .. }
             | Verb::TaskPush { .. }
             | Verb::ProjectLand { .. }
+            | Verb::ProjectResume { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectList
@@ -632,6 +679,7 @@ impl Orchestrator {
             | Verb::RemoveWorktree { .. }
             | Verb::DropBranches { .. }
             | Verb::BranchOff { .. }
+            | Verb::PullOf { .. }
             | Verb::OnOrigin { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
@@ -639,6 +687,10 @@ impl Orchestrator {
                     Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
                 })?;
                 let mut start = *start;
+                // The server names a folder as the person does, `~` and all; an agent's thread
+                // starts in the folder itself.
+                let home = crate::file::expand_home(Path::new(&start.cwd));
+                start.cwd = home.to_string_lossy().into_owned();
                 let made = crate::repo::worktrees::enter(&mut start, &|_| {})
                     .await
                     .map_err(|failed| worktree_failed(&failed))?;
@@ -737,6 +789,16 @@ impl Orchestrator {
                 }
                 let read = thread_read::read(&state, inner.id, view, after);
                 Ok(Outcome::Thread(Box::new(read)))
+            }
+            Verb::ResumeThread { of } => {
+                let (thread, reads) = self.thread_of(&of)?;
+                let state = reads.state(thread).ok_or_else(|| no_thread(thread))?;
+                let start = resume_start(&state)?;
+                let threads = inner.task_threads.get().cloned().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker starts no thread")
+                })?;
+                let resumed = threads.resume(start).await?;
+                Ok(Outcome::ThreadStarted { thread: resumed, worktree: None })
             }
             Verb::SendMessage { of, text } => {
                 let (thread, reads) = self.thread_of(&of)?;
@@ -1191,6 +1253,22 @@ impl Orchestrator {
                     .await
                     .map_err(|failed| worktree_failed(&failed))?;
                 Ok(Outcome::Done)
+            }
+            Verb::PullOf { worker, repo, branch } => {
+                self.mine(worker)?;
+                let programs = crate::repo::commit::Programs::here().await;
+                let root = crate::file::expand_home(Path::new(&repo));
+                let read = crate::repo::pull::status_of(&programs, &root, Some(&branch));
+                let pull = programs.scope(read).await.map_err(|outcome| {
+                    use slopty_proto::git::GitOutcome;
+                    let why = match outcome {
+                        GitOutcome::Refused { why } | GitOutcome::Unavailable { why, .. } => why,
+                        GitOutcome::Failed { said } => said,
+                        other @ GitOutcome::Done(_) => format!("{other:?}"),
+                    };
+                    Failure::new(ErrorCode::Failed, why)
+                })?;
+                Ok(Outcome::PullOf { pull: pull.as_ref().map(crate::thread::pulls::seen) })
             }
             Verb::OnOrigin { worker, repo, target, heads } => {
                 self.mine(worker)?;
@@ -1716,7 +1794,8 @@ fn refused(refusal: &FsRefusal) -> Failure {
         FsRefusal::Protected { path } => (
             ErrorCode::Forbidden,
             format!(
-                "{path} holds others' work (a root, a volume, the home or a folder above it), so                  it is never moved or trashed"
+                "{path} holds others' work (a root, a volume, the home or a folder above it), so \
+                 it is never moved or trashed"
             ),
         ),
         FsRefusal::Clash { path } => (

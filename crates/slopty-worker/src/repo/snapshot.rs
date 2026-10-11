@@ -182,6 +182,25 @@ impl Repo {
         Ok(Some(TreeRef(tree)))
     }
 
+    /// The commit the branch `name` stands at: `origin`'s copy when it holds every commit of
+    /// the local one, else the local one. `None` when neither is.
+    async fn branch(&self, name: &str) -> Option<String> {
+        let verify = async |rev: &str| {
+            let spec = format!("{rev}^{{commit}}");
+            self.line(&["rev-parse", "-q", "--verify", "--end-of-options", &spec], None).await.ok()
+        };
+        let remote = verify(&format!("refs/remotes/origin/{name}")).await;
+        let local = verify(&format!("refs/heads/{name}")).await;
+        match (remote, local) {
+            (Some(remote), Some(local)) => {
+                let holds = ["merge-base", "--is-ancestor", &local, &remote];
+                Some(if self.run(&holds, None, None).await.is_ok() { remote } else { local })
+            }
+            (Some(one), None) | (None, Some(one)) => Some(one),
+            (None, None) => None,
+        }
+    }
+
     /// The working tree as a tree, through the thread's index.
     ///
     /// # Errors
@@ -749,6 +768,12 @@ const BASES: [&str; 5] = ["origin/HEAD", "origin/main", "origin/master", "main",
 /// Why a working tree's review against its base has nothing to compare.
 pub const NO_BASE: &str = "This branch has no base branch to compare with";
 
+/// What a range's review says when either branch is in neither the clone nor its `origin`.
+pub const NO_BRANCH: &str = "The branch is not in this clone or its origin";
+
+/// What a range's review says when its two branches share no history.
+pub const NO_FORK: &str = "The two branches share no history";
+
 /// The working tree of the repository at `root` now, new files and all, as a review against
 /// `against`.
 ///
@@ -779,6 +804,40 @@ pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<R
         });
     };
     let to = repo.take().await?;
+    let files = repo.changes(&from, &to).await?;
+    Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
+}
+
+/// What the commits of `head` brought since it left `base`, as committed, in the repository at
+/// `root` ([`ReviewScope::Range`]): from where `head` forked from `base` to `head`'s tree.
+///
+/// Either branch is read as `origin` holds it when that holds every commit of the local one,
+/// else as the local one, so a goal pushed from another machine still reviews. No index,
+/// checkout or ref is touched. When either branch or their fork is missing the review says so
+/// in `absent`.
+///
+/// # Errors
+///
+/// When git fails.
+pub async fn range(git: &Path, root: &Path, base: &str, head: &str) -> Result<Review, Failed> {
+    // Only committed objects are read: no index is ever named.
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
+    let scope = ReviewScope::Range { base: base.to_owned(), head: head.to_owned() };
+    let absent = |why: &str| Review {
+        scope: scope.clone(),
+        from: None,
+        to: None,
+        files: Vec::new(),
+        absent: Some(why.to_owned()),
+    };
+    let (Some(old), Some(new)) = (repo.branch(base).await, repo.branch(head).await) else {
+        return Ok(absent(NO_BRANCH));
+    };
+    let Ok(fork) = repo.line(&["merge-base", &old, &new], None).await else {
+        return Ok(absent(NO_FORK));
+    };
+    let from = TreeRef(repo.line(&["rev-parse", &format!("{fork}^{{tree}}")], None).await?);
+    let to = TreeRef(repo.line(&["rev-parse", &format!("{new}^{{tree}}")], None).await?);
     let files = repo.changes(&from, &to).await?;
     Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
 }

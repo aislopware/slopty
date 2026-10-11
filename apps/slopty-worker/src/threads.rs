@@ -1460,18 +1460,16 @@ impl orchestrate::TaskThreads for Threads {
                 let why = format!("{} is no agent this machine can start", agent.0);
                 return Err(Failure::new(ErrorCode::Unsupported, why));
             };
-            match outcome {
-                Outcome::Started { thread } => Ok(thread),
-                Outcome::Unsupported { cap } => {
-                    let why = format!("{} cannot {} through Slopty", agent.0, cap.0);
-                    Err(Failure::new(ErrorCode::Unsupported, why))
-                }
-                Outcome::Refused { reason } => Err(Failure::new(ErrorCode::Failed, reason)),
-                Outcome::Done | Outcome::Accepted | Outcome::SetupFailed { .. } => {
-                    let why = format!("{} started no thread", agent.0);
-                    Err(Failure::new(ErrorCode::Failed, why))
-                }
-            }
+            started(&agent, outcome)
+        })
+    }
+
+    fn resume(&self, start: Start) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
+        Box::pin(async move {
+            let agent = start.agent.clone();
+            tracing::info!(agent = %agent.0, cwd = start.cwd, "resume a thread at the server's word");
+            let outcome = begin(self, IntentId::new(), Box::new(start)).await;
+            started(&agent, outcome)
         })
     }
 
@@ -1483,6 +1481,22 @@ impl orchestrate::TaskThreads for Threads {
             self.end(&state).await.map_err(|e| Failure::new(ErrorCode::Failed, e))?;
             Ok(true)
         })
+    }
+}
+
+/// The thread `agent`'s start answered with `outcome`, or why there is none.
+fn started(agent: &AgentId, outcome: Outcome) -> Result<ThreadId, Failure> {
+    match outcome {
+        Outcome::Started { thread } => Ok(thread),
+        Outcome::Unsupported { cap } => {
+            let why = format!("{} cannot {} through Slopty", agent.0, cap.0);
+            Err(Failure::new(ErrorCode::Unsupported, why))
+        }
+        Outcome::Refused { reason } => Err(Failure::new(ErrorCode::Failed, reason)),
+        Outcome::Done | Outcome::Accepted | Outcome::SetupFailed { .. } => {
+            let why = format!("{} started no thread", agent.0);
+            Err(Failure::new(ErrorCode::Failed, why))
+        }
     }
 }
 

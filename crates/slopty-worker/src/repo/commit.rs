@@ -127,6 +127,10 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::Range { base, head } => super::snapshot::range(git, &root, &base, &head)
+            .await
+            .map(|review| GitDone::Changes(Box::new(review)))
+            .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
         GitOp::FileDiff { from, to } => {
             super::snapshot::file_diff(git, &root, from.as_deref(), to.as_deref())
                 .await

@@ -95,6 +95,16 @@ pub enum GitOp {
         /// What the working tree is compared with.
         against: Against,
     },
+    /// The commits of `head` since it left `base`, as committed, with no checkout and no
+    /// working tree ([`GitDone::Changes`], scoped [`crate::thread::wire::ReviewScope::Range`]):
+    /// a review of a branch checked out nowhere, a project's finished goal. Nothing in the
+    /// repository moves.
+    Range {
+        /// The branch it left: the old side is where `head` forked from it.
+        base: String,
+        /// The branch reviewed.
+        head: String,
+    },
     /// Free the worktree the folder is, one an agent works in under its clone's
     /// `.claude/worktrees/` ([`GitDone::WorktreeRemoved`]). Refused in words while anything in
     /// it is not committed or a terminal works in it. Its branch goes too once every commit on

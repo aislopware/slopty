@@ -1,13 +1,12 @@
-//! Codex as a project's task (`docs/decisions/projects.md`, "Codex runs a task"): the person's
-//! own `codex`, told its role as developer instructions, and judged before it starts for words
-//! that would give it more than the person allows.
+//! Codex as a project's task (`docs/decisions/projects.md`, "A task's Codex runs on the person's
+//! daemon"): a `codex` command line an agent runs in a terminal is judged for words that would
+//! give it more than the person allows, and a Codex thread's settings, as its row says them, are
+//! judged against the project's level.
 //!
 //! As with Claude Code, a word is let through only when Codex documents it as asking the person
 //! no less ([`SAFE_SWITCHES`], [`SAFE_VALUED`], a sandbox or approval policy that asks, a
 //! config key of the model alone). Anything else loosens: a profile or a config key that could
 //! name a looser policy, a tool server or a hook, another working root, a subcommand, or `--`.
-
-use std::fmt::Write as _;
 
 use slopty_proto::project::Autonomy;
 
@@ -70,47 +69,6 @@ pub(super) fn args_of(argv: &[String]) -> Option<&[String]> {
     (program.rsplit('/').next() == Some(PROGRAM)).then(|| argv.get(1..).unwrap_or_default())
 }
 
-/// Codex's flags for its approval policy.
-const APPROVAL_FLAGS: [&str; 2] = ["--ask-for-approval", "-a"];
-/// Codex's flags for its sandbox.
-const SANDBOX_FLAGS: [&str; 2] = ["--sandbox", "-s"];
-/// The sandbox a task's Codex is held to at every level: writes in its workspace.
-const HELD_SANDBOX: &str = "workspace-write";
-
-/// The command line that starts a task's Codex: its role as developer instructions (Codex's
-/// own place for what the person or a tool adds to its prompt), the caller's arguments, and its
-/// brief as its first prompt. A task that writes in a clone opens in a worktree the worker made
-/// from the project's target, not in one of Codex's own.
-///
-/// Held to its project's level, it asks as that level says ([`Autonomy::codex_approval`]: on
-/// request, or never at a project that goes on its own) and writes only in its workspace,
-/// unless the arguments name another policy or sandbox, which [`loosening`] let through only as
-/// asking no less: the person's own `config.toml`, which may say `approval_policy = "never"`,
-/// does not decide for a task.
-pub(super) fn command(
-    role: &str,
-    args: Vec<String>,
-    prompt: Option<String>,
-    level: Autonomy,
-) -> Vec<String> {
-    let mut command = vec![PROGRAM.to_owned(), "-c".to_owned()];
-    command.push(format!("developer_instructions={}", toml_string(role)));
-    let named = |flags: &[&str]| {
-        args.iter().take_while(|w| *w != "--").any(|word| {
-            flags.contains(&word.split_once('=').map_or(word.as_str(), |(flag, _)| flag))
-        })
-    };
-    if !named(&APPROVAL_FLAGS) {
-        command.extend([APPROVAL_FLAGS[0].to_owned(), level.codex_approval().to_owned()]);
-    }
-    if !named(&SANDBOX_FLAGS) {
-        command.extend([SANDBOX_FLAGS[0].to_owned(), HELD_SANDBOX.to_owned()]);
-    }
-    command.extend(args);
-    command.extend(prompt.filter(|p| !p.trim().is_empty()));
-    command
-}
-
 /// What in a Codex thread's settings, as its row says them (its mode, Codex's approval policy,
 /// and its `sandbox` fact, by the app-server's names), asks the person less than a task held to
 /// `level` may: a policy past `on-request` (or past `never` at [`Autonomy::Own`]), or a sandbox
@@ -125,27 +83,6 @@ pub(super) fn looser_settings(
         return Some(format!("approval policy {mode}"));
     }
     sandbox.filter(|s| !["readOnly", "workspaceWrite"].contains(s)).map(|s| format!("sandbox {s}"))
-}
-
-/// `text` as a TOML basic string, which is how Codex reads a `-c` value.
-fn toml_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len().saturating_add(2));
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => {
-                let _infallible = write!(out, "\\u{:04X}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -200,48 +137,6 @@ mod tests {
         let never = words(&["-a", "never"]);
         assert_eq!(args_of(&words(&["/opt/bin/codex", "-a", "never"])), Some(never.as_slice()));
         assert_eq!(args_of(&words(&["codexx"])), None);
-    }
-
-    /// The role goes as a TOML basic string, escaped as TOML says, before the caller's
-    /// arguments, which are passed as they are; the brief is the last word, and a blank one
-    /// is none.
-    #[test]
-    fn codex_starts_with_its_role_and_its_brief() {
-        let role = "You are \"task 1\"\\n\nline\ttab\u{7}é";
-        let args = words(&["--worktree", "-m", "o3", "-a", "untrusted", "-s", "read-only"]);
-        let started = command(role, args, Some("Go.".into()), Autonomy::Ask);
-        assert_eq!(started[..2], ["codex", "-c"]);
-        assert_eq!(
-            started[2],
-            r#"developer_instructions="You are \"task 1\"\\n\nline\ttab\u0007é""#
-        );
-        assert_eq!(
-            started[3..],
-            ["--worktree", "-m", "o3", "-a", "untrusted", "-s", "read-only", "Go."]
-        );
-        let blank = command("r", Vec::new(), Some("  ".into()), Autonomy::Ask);
-        assert_eq!(blank.len(), 7, "the policy and sandbox pinned, no prompt: {blank:?}");
-    }
-
-    /// Held to its project's level, a task's Codex asks on request (never, at a project that goes
-    /// on its own) and writes only in its workspace, whatever its own configuration says, unless
-    /// its arguments chose a policy or a sandbox that asks no less.
-    #[test]
-    fn a_task_s_codex_is_held_to_its_level() {
-        let start = |args: &[&str], level| command("r", words(args), None, level);
-        let pinned = ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"];
-        assert_eq!(start(&["-m", "o3"], Autonomy::Ask)[3..7], pinned);
-        assert_eq!(start(&["-m", "o3"], Autonomy::Ask)[7..], ["-m", "o3"]);
-        assert_eq!(start(&[], Autonomy::Edits)[3..7], pinned, "edits in the workspace ask too");
-        assert_eq!(
-            start(&["-a", "untrusted", "--sandbox=read-only"], Autonomy::Ask)[3..],
-            ["-a", "untrusted", "--sandbox=read-only"],
-            "their own choices stand"
-        );
-        let asks = start(&["-s", "read-only"], Autonomy::Ask);
-        assert_eq!(asks[3..5], ["--ask-for-approval", "on-request"]);
-        let own = ["--ask-for-approval", "never", "--sandbox", "workspace-write"];
-        assert_eq!(start(&[], Autonomy::Own)[3..7], own, "on its own: never, in its workspace");
     }
 
     /// A Codex thread's settings, as its row says them, are judged as its arguments are: a

@@ -590,6 +590,14 @@ pub enum ReviewScope {
     /// The working tree now, new files and all, against a commit of its repository
     /// (`crate::git::GitOp::Changes` asks it of a folder with no thread).
     WorkingTree(Against),
+    /// The commits of `head` since it left `base`, as committed: no working tree
+    /// (`crate::git::GitOp::Range`).
+    Range {
+        /// The branch it left.
+        base: String,
+        /// The branch reviewed.
+        head: String,
+    },
 }
 
 /// What a working tree's review compares it with ([`ReviewScope::WorkingTree`]).

@@ -154,6 +154,7 @@ impl Server {
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
             tokio::spawn(Hub::settle_finished(hub.downgrade())),
+            tokio::spawn(Hub::watch_landings(hub.downgrade())),
         ];
 
         tracing::info!(name = %hub.name(), %quic, state = %store.path().display(), "serving");

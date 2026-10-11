@@ -3180,8 +3180,8 @@ reordering and edited allows are gone" in `agents.md`.*
     on every table frame). The timeline says so (`Moment::Orchestrator`), and the reports that
     waited go there.
   - **The door.** While the orchestrator's agent has ended, its thread is the way back: the
-    board opens it, and its Resume takes the session up (the UI's half). No verb of its own is
-    needed.
+    board opens it, and its Resume takes the session up (the UI's half). The board's own
+    Resume is `Verb::ProjectResume` ("The orchestrator is resumed from the board", below).
   - Tests: `an_orchestrator_resumed_in_another_terminal_is_followed`
     (`hub/project_tests.rs`); the project goldens, which moved for `orchestrator_thread`.
 
@@ -3209,9 +3209,10 @@ reordering and edited allows are gone" in `agents.md`.*
 - ✅ **A task's Codex comes back after a reboot** (2026-10-11, readiness-w 10-11 rank 5). This
   extends "Sessions come back after a reboot" (`terminal.md`), which brought back Claude Code
   alone.
-  - **The gap.** A task's Codex runs as its terminal's own command. A reboot reopened that
-    terminal as a plain shell under the same id, so the task still read as running while
-    nothing worked.
+  - **The gap.** A project's Codex that runs as its terminal's own command (a task's did until
+    "A task's Codex runs on the person's daemon", below; now one an agent opens in a terminal
+    of the project) was reopened after a reboot as a plain shell under the same id, so it
+    still read as running while nothing worked.
   - **How.** The worker reopens it as `codex resume --last` in the directory it was opened in,
     with the flags it was started with: its role (`-c developer_instructions`), the policy and
     sandbox the server pinned, the model, and how its TUI draws. The brief and its images
@@ -3232,3 +3233,100 @@ reordering and edited allows are gone" in `agents.md`.*
   - Rejected: matching the daemon's threads to terminals by directory and start time. That is
     a guess, and with no daemon running there are no threads to match.
   - Test: `restore::tests::a_task_s_codex_comes_back_resumed_in_its_worktree` (slopty-worker).
+
+- ✅ **A landed goal's pull request is followed on every device** (2026-10-11, readiness-a
+  10-11 rank 7). `Verb::ProjectLand` used to answer the pull request's number and page to the
+  device that asked, and nothing kept it.
+  - **Kept.** The project now holds it (`Project::landed`, a `PullSeen` like a thread's), set
+    the moment it opens, so every device shows it at once.
+  - **Read again.** While it is open the server reads it through the orchestrator's worker,
+    with the person's own `gh` or `glab` (`Verb::PullOf { worker, repo, branch }`, answered
+    `Outcome::PullOf`; `gh pr view <branch>`, `glab mr view <branch>`). It reads every minute
+    while its checks run and every five minutes once they rest, and stops once it merged or
+    closed (`hub/landing.rs`). A worker that is not linked is skipped until it is.
+  - **Said.** When its standing changes (checks failing, approved, merged) the timeline says
+    so (`Moment::Pull`) and the project moves on every device. The attention ladder is not
+    used, since the project row and its timeline are where a goal is watched.
+  - Rejected: a watch on the worker like a thread's pull watch. The goal's branch is checked
+    out nowhere once its tasks are done, and the worker's watches follow threads.
+  - Test: `a_finished_goal_lands_through_one_pull_request_into_where_it_came_from`
+    (`hub/project_tests.rs`) reads it back as running, then merged, and the watch lets it go.
+
+- ✅ **The orchestrator is resumed from the board** (2026-10-11, readiness-a 10-11 rank 9).
+  `Verb::ProjectResume { project }` takes up the ended orchestrator's own session again.
+  - The server holds only the orchestrator's thread id, which is derived from the agent's
+    native session and cannot be turned back into it. So it forwards
+    `Verb::ResumeThread { of }` to the worker that has the thread, and the worker builds the
+    start from the thread's own state: Claude Code with `--resume <session>` and its model,
+    Codex with `resume <session>`, as the thread view's Resume does. The answer is
+    `ThreadStarted`, and following ("Following", above) seats the new terminal.
+  - It is refused while the orchestrator still runs, refused to an agent (the person resumes
+    it), and keyed so a retried press starts one.
+  - Test: `an_orchestrator_resumed_in_another_terminal_is_followed`
+    (`hub/project_tests.rs`).
+
+- ✅ **A task can start again on another machine** (2026-10-11, readiness-a 10-11 rank 8).
+  `Verb::TaskRestart` gains `worker`.
+  - Named, the task starts there. Not named, it starts where it ran, unless that machine is
+    away, when placement picks one that is up.
+  - Moving starts it in a fresh worktree on the new machine. When the task had opened a pull
+    request, its branch is on `origin` and the worktree starts from it, so that work comes
+    along. Work never pushed stays on the old machine. The old terminal is closed when that machine is up, and left
+    alone when it is away.
+  - Test: `a_task_whose_machine_is_away_starts_again_elsewhere` (`hub/thread_tests.rs`).
+
+- ✅ **A finished goal is reviewed as one range** (2026-10-11, readiness-a 10-11 rank 5).
+  `GitOp::Range { base, head }` reviews the commits of `head` since it left `base`, as
+  committed, scoped `ReviewScope::Range`. A changes item can name the branch it reviews
+  (`ItemKind::Changes::head`).
+  - It reads from the fork's tree to `head`'s tree, with no checkout and no index, so the
+    goal's branch reviews though it is checked out nowhere. Either branch is read as `origin`
+    holds it when that holds every commit of the local one, so a goal pushed from another
+    machine reviews whole.
+  - A branch in neither the clone nor `origin`, or two branches with no shared history, say
+    so in the review.
+  - Test: `a_branch_checked_out_nowhere_is_reviewed_as_committed` (slopty-worker
+    `tests/review.rs`).
+
+- ✅ **A task's Codex runs on the person's daemon, seated, so its settings are held as it runs**
+  (2026-10-11). This supersedes the terminal start of "Codex runs a task, with Slopty's tools"
+  and the "At the start" half of "A task's Codex is held to asking, as Claude Code is".
+  - **The gap.** A task's Codex started as its terminal's command, with its role and Slopty's
+    tools as `-c` overrides. Codex's TUI joins the person's daemon only when its command line
+    has no such override (`codex-rs/tui/src/daemon_startup.rs`, `config_exclusion`: "command-line
+    configuration overrides (-c, --enable, --disable, or --search)", in 0.160.0 and on main).
+    So it ran an app-server of its own that the daemon, the only one the worker follows, never
+    saw. The worker kept no row of it. `Board::codex_moves` never saw its policy or sandbox,
+    so a switch to full access in its TUI went unseen, and the board had no status for it. The
+    tools' `env_vars` were also resolved in whichever process spawned the MCP server, not
+    from the seat.
+  - **Now.** A Codex task starts as any other agent's does (`StartThread` at a seat, its role,
+    its brief), with the approval policy its level names as the start's mode. The worker asks
+    the person's daemon (`thread/start`, the daemon brought up if needed): the role as
+    `developerInstructions`, the tools with the seat's values as their own `env`, the approval
+    policy, and `sandbox: workspace-write` for every server task. Its row carries the seat, the
+    policy as its mode and the sandbox as a fact, so a policy or sandbox past the level closes
+    it by its seat (`Hub::codex_settings`, `Verb::Close` of a seat).
+  - **The person's TUI.** Joining it opens `codex resume <thread>` with nothing else on its line
+    (`slopty_agent::codex::shared::tui`), so Codex's TUI attaches to the daemon's thread as one
+    more client rather than loading the session a second time. A row's seat now wins over the
+    terminal its TUI runs in (`seat_of`), so a thread joined in its TUI stays its task's: its
+    status, its ladder and the hold go to the seat.
+  - **Unproven: that the joined TUI attaches to the daemon's thread rather than loading it
+    again.** The stand-in daemon cannot run Codex's TUI, so the test holds the command's shape
+    and Codex's source says the rest. To check it by hand with a real Codex: start a Codex
+    task, wait for its first turn, and join it from the thread view. The worker's log and the
+    thread list must still show one thread with that id, and no new one. A message typed in the TUI must show in the thread view at once, and an approval
+    answered in the GUI must close in the TUI. A second thread id, or a TUI that does not hear
+    the GUI's answer, means it forked.
+  - A task's folder comes as the person names it, `~` and all. A terminal's shell expanded it;
+    the worker now expands it for every task's thread before the agent sees it.
+  - Deleted: the server's Codex command line (`codex::command`, the pinned policy and sandbox
+    flags, the TOML quoting). The judging of a `codex` an agent types or opens stays.
+  - Tests: `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (the seated start,
+    and the close from its row, its TUI joined), the Codex half of
+    `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` and
+    `a_task_goes_to_another_agent_and_starts_fresh` (slopty-server);
+    `a_seated_start_gives_codex_the_seat_its_tools_and_its_role` (slopty-worker, the stand-in
+    daemon: the `thread/start` parameters, every tool variable by value and no `env_vars`, and
+    the row's seat, mode and sandbox); `the_tui_on_a_thread_joins_the_daemon` (slopty-agent).

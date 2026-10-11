@@ -1024,7 +1024,8 @@ pub fn agent_id(name: &str) -> AgentId {
 /// Start a task's work again with a new agent ([`Verb::TaskRestart`]).
 ///
 /// The one on it now is closed, and `agent` (else the one it ran last) starts where it ran, in
-/// its worktree, told its brief and where the earlier agent's thread is.
+/// its worktree, told its brief and where the earlier agent's thread is. When that machine is
+/// away, the server starts it on another one.
 ///
 /// # Errors
 /// As [`task_report`]; a merged task, an agent's own task, and another project's are refused.
@@ -1037,7 +1038,7 @@ pub async fn task_restart<D: Dispatch>(
 ) -> Result<Task, ToolError> {
     let (project, task) = project_task(dispatch, project, task).await?;
     let agent = agent.map(str::trim).filter(|a| !a.is_empty()).map(agent_id);
-    task_answer(dispatch, key, Verb::TaskRestart { project, task, agent }).await
+    task_answer(dispatch, key, Verb::TaskRestart { project, task, agent, worker: None }).await
 }
 
 /// Push a merged task's work to the forge again, as the person ([`Verb::TaskPush`]): after a

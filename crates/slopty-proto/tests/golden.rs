@@ -854,6 +854,7 @@ mod golden {
                     kind: ItemKind::Changes {
                         path: "/w/slopty".to_owned(),
                         against: Some("develop".to_owned()),
+                        head: Some("slopty/slopty/goal".to_owned()),
                     },
                     name: None,
                     facts: std::collections::BTreeMap::new(),

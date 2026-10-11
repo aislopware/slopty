@@ -370,7 +370,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let open = self.layout.tiles().find_map(|t| match &self.item(t)?.kind {
-            ItemKind::Changes { path: p, against: a }
+            ItemKind::Changes { path: p, against: a, head: None }
                 if t.worker == key && *p == path && *a == against =>
             {
                 Some(t.item)
@@ -383,7 +383,7 @@ impl WorkspaceView {
         }
         let item = Item {
             id: ItemId::new(),
-            kind: ItemKind::Changes { path, against },
+            kind: ItemKind::Changes { path, against, head: None },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
@@ -398,7 +398,7 @@ impl WorkspaceView {
             .layout
             .tiles()
             .filter_map(|t| match &self.item(t)?.kind {
-                ItemKind::Changes { path, against } => {
+                ItemKind::Changes { path, against, head: None } => {
                     Some((t.item, t.worker, path.clone(), against.clone()))
                 }
                 _ => None,

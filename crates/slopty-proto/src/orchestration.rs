@@ -909,6 +909,10 @@ pub enum Verb {
     /// thread. The agent is `agent` (handing the task to another agent), else the one it ran
     /// last (a fresh start of the same agent). Answered with [`Outcome::Task`]. An agent may
     /// restart only its project's tasks, as their orchestrator, never its own task.
+    ///
+    /// It starts elsewhere when `worker` names another machine, or names none while the one
+    /// it ran on is away: there from its branch as `origin` has it, else from the target, and
+    /// the seat it had is let go.
     TaskRestart {
         /// In which project.
         project: ProjectId,
@@ -916,6 +920,8 @@ pub enum Verb {
         task: TaskId,
         /// The agent that takes it; the one it ran last when absent.
         agent: Option<AgentId>,
+        /// The machine it starts on; where it ran when absent and that one is there.
+        worker: Option<WorkerId>,
     },
     /// Server → worker: land `head` on the protected `target` through the forge. It is pushed
     /// to `origin` as `branch` (forced: it is the task's work rebased by the merge queue), and
@@ -1036,6 +1042,32 @@ pub enum Verb {
         /// The branch to land into, over the one the target was made from.
         into: Option<String>,
     },
+    /// Resume a project's orchestrator whose agent has ended, the person's word: its thread
+    /// ([`crate::project::Project::orchestrator_thread`]) is taken up again on its machine, as
+    /// the thread's own Resume would, and the project follows it to its new terminal. Answered
+    /// with [`Outcome::ThreadStarted`]; one still running is [`ErrorCode::Invalid`], and an
+    /// agent is [`ErrorCode::Forbidden`].
+    ProjectResume {
+        /// Which.
+        project: ProjectId,
+    },
+    /// Server → worker: take thread `of` up again in its agent's own session, as a client's
+    /// Resume on a thread whose agent exited does. Answered with [`Outcome::ThreadStarted`];
+    /// [`ErrorCode::Invalid`] for a thread whose agent runs or that cannot be resumed.
+    ResumeThread {
+        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
+        of: ThreadOf,
+    },
+    /// Server → worker: the pull request of `branch` in the clone `repo`, checked out there or
+    /// not, as the person's own `gh` or `glab` reads it. Answered with [`Outcome::PullOf`].
+    PullOf {
+        /// Where.
+        worker: WorkerId,
+        /// A folder in the clone.
+        repo: String,
+        /// The branch whose pull request it is.
+        branch: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1121,6 +1153,8 @@ impl Verb {
             | Self::TaskMerge { .. }
             | Self::TaskPush { .. }
             | Self::ProjectLand { .. }
+            | Self::ProjectResume { .. }
+            | Self::ResumeThread { .. }
             | Self::ProjectDelete { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
@@ -1153,6 +1187,7 @@ impl Verb {
             | Self::ListItems { .. }
             | Self::ListWindows { .. }
             | Self::ReadThread { .. }
+            | Self::PullOf { .. }
             | Self::CaptureStill { .. }
             | Self::ProjectList
             | Self::ProjectStatus { .. }
@@ -1623,6 +1658,11 @@ pub enum Outcome {
         /// Its page.
         url: String,
     },
+    /// For [`Verb::PullOf`]: the branch's pull request, none when it has none.
+    PullOf {
+        /// It, as the forge says it stands.
+        pull: Option<crate::thread::wire::PullSeen>,
+    },
     /// For [`Verb::Settings`]: the daemon's settings file as it stands.
     Settings(Box<crate::settings::DaemonSettings>),
     /// For [`Verb::OnOrigin`]: those of the heads asked about that the forge's branch holds, in
@@ -1633,8 +1673,8 @@ pub enum Outcome {
     },
 }
 
-/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`] or a [`Verb::SendMessage`]
-/// is about.
+/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`], a [`Verb::SendMessage`] or a
+/// [`Verb::ResumeThread`] is about.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ThreadOf {
     /// The thread working on a task now: its assignment's.

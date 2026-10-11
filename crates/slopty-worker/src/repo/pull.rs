@@ -156,12 +156,28 @@ pub(super) fn program(programs: &Programs, forge: Forge) -> Result<&Path, GitOut
 /// # Errors
 /// The forge's command line is missing, or says something other than its answer.
 pub async fn status(programs: &Programs, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
+    status_of(programs, root, None).await
+}
+
+/// The pull request of `branch` in the repository at `root`, checked out there or not, else of
+/// the branch checked out; none when it has none.
+///
+/// # Errors
+/// As [`status`].
+pub async fn status_of(
+    programs: &Programs,
+    root: &Path,
+    branch: Option<&str>,
+) -> Result<Option<PullStatus>, GitOutcome> {
     let forge = forge(root);
     let program = program(programs, forge)?;
     let read = if forge == Forge::GitLab {
-        gitlab::status(program, root).await?
+        gitlab::status(program, root, branch).await?
     } else {
-        match run(program, root, &["pr", "view", "--json", FIELDS], None, REMOTE).await {
+        let mut view = vec!["pr", "view"];
+        view.extend(branch);
+        view.extend(["--json", FIELDS]);
+        match run(program, root, &view, None, REMOTE).await {
             Ok(out) => Some(parse(&out)?),
             Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => None,
             Err(other) => return Err(other),

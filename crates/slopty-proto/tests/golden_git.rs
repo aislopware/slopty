@@ -346,6 +346,17 @@ mod golden_git {
             absent: Some("This repository has no base branch to compare with".to_owned()),
         };
         snap("worker_git_changes_absent", &done(10, none));
+        let (base, head) = ("main".to_owned(), "slopty/demo/goal".to_owned());
+        let range = GitOp::Range { base: base.clone(), head: head.clone() };
+        snap("client_git_range", &ask(11, range));
+        let goal = Review {
+            scope: ReviewScope::Range { base, head },
+            from: Some(TreeRef("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned())),
+            to: Some(TreeRef("9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d".to_owned())),
+            files: Vec::new(),
+            absent: None,
+        };
+        snap("worker_git_range", &done(11, goal));
     }
 
     /// A clone asked of a worker straight, how far it has come, and how it went.

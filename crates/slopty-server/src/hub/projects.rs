@@ -14,7 +14,7 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentBranch;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
-    ASKING_ENV, Autonomy, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX,
+    ASKING_ENV, Assignment, Autonomy, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX,
     PERMISSION_MODE_FLAG, PROJECT_ENV, Project, ProjectId, ProjectStatus, ProjectsPart, TASK_ENV,
     Task, TaskId, TaskLaunch, TaskState, TimelineEntry, VERIFY_PLACES, WorkerFacts,
 };
@@ -648,9 +648,9 @@ struct Place {
 enum Worktree {
     /// One the worker makes ([`slopty_proto::thread::wire::NewWorktree`]) from the project's
     /// target, so the task's work starts where it is to land: Claude Code's own
-    /// `--worktree <name>` opens it, Codex's terminal opens in it, and any other agent's thread
-    /// starts in it. Codex's own `--worktree` would start from the clone's `HEAD`, whatever
-    /// branch the person left it on.
+    /// `--worktree <name>` opens it, and any other agent's thread, Codex's among them, starts in
+    /// it. Codex's own `--worktree` would start from the clone's `HEAD`, whatever branch the
+    /// person left it on.
     Worker {
         /// Its name, reopened by it.
         name: String,
@@ -1002,6 +1002,45 @@ impl Hub {
         if followed {
             self.unpark_deliveries(state);
         }
+    }
+
+    /// The person resumes `project`'s orchestrator, whose agent ended ([`Verb::ProjectResume`]):
+    /// its thread is taken up again on its machine ([`Verb::ResumeThread`]), as the thread's own
+    /// Resume would, and [`Self::follow_orchestrators`] then follows it to its new terminal.
+    pub(super) async fn project_resume(&self, caller: Caller, project: &ProjectId) -> Outcome {
+        if caller == Caller::Agent {
+            return error(
+                ErrorCode::Forbidden,
+                "an orchestrator is the person's to resume, never an agent's",
+            );
+        }
+        let read = {
+            let state = self.inner.state.lock();
+            state.projects.project(project).map(|record| {
+                let at = record.orchestrator.zip(record.orchestrator_thread);
+                let runs =
+                    at.and_then(|(term, thread)| state.board.running_at(term.worker, thread));
+                (at, runs)
+            })
+        };
+        let (at, runs) = match read {
+            Ok(read) => read,
+            Err(refused) => return refused,
+        };
+        let Some((term, thread)) = at else {
+            return error(
+                ErrorCode::Invalid,
+                &format!(
+                    "project {project} has no orchestrator thread to resume: open its \
+                     orchestrator's terminal and start one there"
+                ),
+            );
+        };
+        if runs.is_some() {
+            return error(ErrorCode::Invalid, "its orchestrator still runs");
+        }
+        let of = ThreadOf::On { worker: term.worker, thread };
+        self.forward(None, Verb::ResumeThread { of }).await
     }
 
     /// `verb`, a project to make, with the branch its work lands on: one it names, else a branch
@@ -1679,16 +1718,19 @@ impl Hub {
 
     /// Start `task`'s work again with a new agent ([`Verb::TaskRestart`]): the one on it now is
     /// closed, and `agent` (else the one it ran last) starts on the worker it ran on, in the
-    /// folder it worked in there, told its brief and where the earlier agent's thread is.
+    /// folder it worked in there, told its brief and where the earlier agent's thread is. When
+    /// `worker` names another machine, or names none while the one it ran on is away, it starts
+    /// there instead ([`Self::restart_once`]).
     pub(super) async fn task_restart(
         &self,
         caller: Caller,
         key: Option<IdempotencyKey>,
         project: ProjectId,
         task: TaskId,
-        agent: Option<AgentId>,
+        (agent, worker): (Option<AgentId>, Option<WorkerId>),
     ) -> Outcome {
-        let verb = Verb::TaskRestart { project: project.clone(), task, agent: agent.clone() };
+        let verb =
+            Verb::TaskRestart { project: project.clone(), task, agent: agent.clone(), worker };
         if let Some(key) = &key
             && let Some(answer) = keyed(&mut self.inner.state.lock(), caller, key, &verb)
         {
@@ -1697,7 +1739,7 @@ impl Hub {
         let hub = self.clone();
         let restarted = tokio::spawn(async move {
             let part = key.as_ref().map(|k| k.part("restart"));
-            let outcome = hub.restart_once(caller, part, project, task, agent).await;
+            let outcome = hub.restart_once(caller, part, project, task, (agent, worker)).await;
             if let Some(key) = key {
                 remember(&mut hub.inner.state.lock(), caller, key, &verb, &outcome);
             }
@@ -1709,13 +1751,17 @@ impl Hub {
     }
 
     /// [`Self::task_restart`], once its key is checked.
+    ///
+    /// A start elsewhere goes beside a clone there, in a worktree of the task's own made from
+    /// its branch as `origin` has it when its pull request put it there, else from where a new
+    /// start begins. The seat it had is let go: a worker that is away is not asked to close it.
     async fn restart_once(
         &self,
         caller: Caller,
         key: Option<IdempotencyKey>,
         project: ProjectId,
         task: TaskId,
-        agent: Option<AgentId>,
+        (agent, named): (Option<AgentId>, Option<WorkerId>),
     ) -> Outcome {
         let earlier = {
             let mut state = self.inner.state.lock();
@@ -1732,13 +1778,23 @@ impl Hub {
             let (terminals, _) = live(&mut state);
             let had = t.assignment.as_ref();
             let ran = had.and_then(|a| state.board.ran_at(a.term));
+            let was = had.map(|a| a.term.worker);
+            let away = was.and_then(|w| state_online(&state, w)) == Some(false);
             drop(state);
             let (thread, agent, cwd) = match ran {
                 Some((thread, agent, cwd)) => (Some(thread), Some(agent), cwd),
                 None => (None, None, None),
             };
+            let elsewhere = match named {
+                Some(named) => was != Some(named),
+                None => away,
+            };
+            let pushed = t.pull.as_ref().and_then(|_| t.branch.clone());
+            // Leaving, its seat is let go even on a machine that cannot say it ended.
+            let held = |a: &&Assignment| a.open() && (elsewhere || terminals.contains(&a.term));
             Earlier {
-                live: had.filter(|a| a.open() && terminals.contains(&a.term)).map(|a| a.term),
+                elsewhere: elsewhere.then_some(Elsewhere { to: named, from: pushed, away }),
+                live: had.filter(held).map(|a| a.term),
                 worker: had.map(|a| a.term.worker),
                 thread,
                 agent,
@@ -1753,7 +1809,11 @@ impl Hub {
             );
         };
         if let Some(term) = earlier.live {
-            if let failed @ Outcome::Error { .. } = self.forward(None, Verb::Close { term }).await {
+            let away = earlier.elsewhere.as_ref().is_some_and(|e| e.away);
+            if !away
+                && let failed @ Outcome::Error { .. } =
+                    self.forward(None, Verb::Close { term }).await
+            {
                 return failed;
             }
             // Its worker says so in a moment; the task is free for its next agent now.
@@ -1762,12 +1822,23 @@ impl Hub {
             self.projects_moved(&mut state, updates);
             drop(state);
         }
-        let launch = Launch {
-            pin: earlier.worker,
-            cwd: earlier.cwd.unwrap_or_default(),
-            prompt: restart_prompt(&earlier.brief, earlier.thread),
-            agent,
-            ignore_dependencies: earlier.worker.is_some(),
+        let launch = match earlier.elsewhere {
+            Some(Elsewhere { to, from, .. }) => Launch {
+                pin: to,
+                cwd: String::new(),
+                prompt: restart_prompt(&earlier.brief, earlier.thread),
+                agent,
+                ignore_dependencies: true,
+                from,
+            },
+            None => Launch {
+                pin: earlier.worker,
+                cwd: earlier.cwd.unwrap_or_default(),
+                prompt: restart_prompt(&earlier.brief, earlier.thread),
+                agent,
+                ignore_dependencies: earlier.worker.is_some(),
+                from: None,
+            },
         };
         self.task_spawn(caller, key, project, task, launch).await
     }
@@ -1790,6 +1861,7 @@ impl Hub {
             agent: asked.agent,
             prompt: brief.filter(|b| !b.is_empty()),
             ignore_dependencies: false,
+            from: None,
         }
     }
 
@@ -2055,12 +2127,16 @@ impl Hub {
             Ok(prepared) => prepared,
             Err(refused) => return refused,
         };
-        let Launch { agent, prompt, .. } = launch;
+        let Launch { agent, prompt, from, .. } = launch;
         let Place { path: cwd, worktree } = at;
         // Its worktree starts from the target as the orchestrator's clone has it, or from the
         // checked work of the task it starts from, sent there first when that is another
-        // clone: with pushing off, only that clone holds what the merge queue merged.
+        // clone: with pushing off, only that clone holds what the merge queue merged. A
+        // restart elsewhere starts from its own branch as `origin` has it, when it is there.
         let worktree = match worktree {
+            Some(Worktree::Worker { name, .. }) if let Some(base) = from => {
+                Some(Worktree::Worker { name, base })
+            }
             Some(Worktree::Worker { name, .. }) => {
                 let at = (worker, cwd.clone());
                 match self.send_start_to((project, task), at, on.as_ref().map(|o| o.0)).await {
@@ -2117,27 +2193,10 @@ impl Hub {
                 };
                 (spawn, conversation)
             }
-            // The worker gives it Slopty's tools as it opens (`Worker::as_agent`).
-            agent if agent.is(AgentId::CODEX) => {
-                let open = Verb::OpenTerminal {
-                    worker,
-                    cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
-                    command: codex::command(&role, Vec::new(), prompt, level),
-                    env,
-                    name: Some(format!("{project} #{task}")),
-                    size,
-                    session,
-                    worktree: worktree.map(|Worktree::Worker { name, base }| NewWorktree {
-                        name,
-                        base: Some(base),
-                        merge_base: target.clone(),
-                        pull: None,
-                        setup: true,
-                    }),
-                };
-                (open, None)
-            }
-            // Its adapter gives it Slopty's tools and its role through the agent's own doors.
+            // Its adapter gives it Slopty's tools and its role through the agent's own doors. Codex
+            // runs on the person's daemon, where its row says the policy and sandbox it runs with
+            // and its own TUI joins it; started in a terminal with its role and tools as `-c`
+            // overrides, its TUI would run an app-server of its own that nothing else sees.
             agent => {
                 let worktree = worktree.map(|Worktree::Worker { name, base }| NewWorktree {
                     name,
@@ -2146,15 +2205,22 @@ impl Hub {
                     pull: None,
                     setup: true,
                 });
-                let pi = agent.is(AgentId::PI);
+                // pi runs under Slopty's gate, whose mode is the project's level; Codex asks as
+                // its approval policy at that level says.
+                let mode = if agent.is(AgentId::PI) {
+                    Some(pi_mode(level).to_owned())
+                } else if agent.is(AgentId::CODEX) {
+                    Some(level.codex_approval().to_owned())
+                } else {
+                    None
+                };
                 let start = Start {
                     agent,
                     cwd,
                     drive: None,
                     prompt,
                     model: None,
-                    // pi runs under Slopty's gate, whose mode is the project's level.
-                    mode: pi.then(|| pi_mode(level).to_owned()),
+                    mode,
                     effort: None,
                     attachments: Vec::new(),
                     args: Vec::new(),
@@ -2389,6 +2455,8 @@ impl Hub {
 
 /// What a task restarted on its earlier worker knew before ([`Hub::task_restart`]).
 struct Earlier {
+    /// It starts on another machine than the one it ran on.
+    elsewhere: Option<Elsewhere>,
     /// Its agent's terminal, or seat, while one runs.
     live: Option<TermRef>,
     /// The worker it ran on last.
@@ -2404,9 +2472,24 @@ struct Earlier {
     brief: String,
 }
 
+/// Where a restarted task goes when it leaves the machine it ran on.
+struct Elsewhere {
+    /// The machine named; one with room when absent.
+    to: Option<WorkerId>,
+    /// Its branch, on `origin` since its pull request put it there: the work starts from it.
+    from: Option<String>,
+    /// The machine it ran on is away, so its seat is let go without asking it.
+    away: bool,
+}
+
+/// Whether `worker` has a link to the server now; `None` for a worker the server does not know.
+fn state_online(state: &State, worker: WorkerId) -> Option<bool> {
+    state.workers.get(&worker).map(|entry| entry.link.is_some())
+}
+
 /// What a task's start runs, as the hub builds it: the person and the orchestrator name only
-/// the worker and the agent ([`TaskLaunch`]), and the hub adds the rest. Claude Code and Codex
-/// run in their own terminals, any other agent as a thread.
+/// the worker and the agent ([`TaskLaunch`]), and the hub adds the rest. Claude Code runs in its
+/// own terminal, any other agent as a thread, Codex's on the person's daemon.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Launch {
     /// The worker; one with room when absent.
@@ -2420,6 +2503,9 @@ pub(super) struct Launch {
     pub prompt: Option<String>,
     /// Start it though a task it depends on is not merged: a restart's, whose work is begun.
     pub ignore_dependencies: bool,
+    /// The branch its worktree starts from, as `origin` has it, over where a new start begins:
+    /// a restart elsewhere of a task whose pull request pushed its work.
+    pub from: Option<String>,
 }
 
 /// A restarted task's first prompt: its brief, then where the earlier agent's work and thread

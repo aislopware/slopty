@@ -1296,6 +1296,7 @@ impl Hub {
             body.push_str("\n\n");
             body.push_str(&progress.summary);
         }
+        let repo_of_land = repo.clone();
         let land = Verb::LandPull {
             worker,
             repo,
@@ -1309,13 +1310,19 @@ impl Hub {
         let Outcome::PullOpened { number, url } = &outcome else {
             return error(ErrorCode::Failed, &format!("{target} did not land: {}", said(&outcome)));
         };
-        let now = WallMs::now();
-        let mut state = self.inner.state.lock();
-        let mut changes = state.projects.pushed_with(project, &target, now);
-        let words = format!("{target} goes into {into} through pull request #{number}: {url}");
-        changes.extend(state.projects.note(project, None, &words, now));
-        self.projects_moved(&mut state, changes);
-        drop(state);
+        {
+            let now = WallMs::now();
+            let mut state = self.inner.state.lock();
+            let mut changes = state.projects.pushed_with(project, &target, now);
+            let words = format!("{target} goes into {into} through pull request #{number}: {url}");
+            changes.extend(state.projects.note(project, None, &words, now));
+            // Kept on the project as opening it said, until the forge is read just below.
+            let known = super::landing::opened(&record, (*number, url), &into);
+            changes.extend(state.projects.landed_seen(project, known, now));
+            self.projects_moved(&mut state, changes);
+            drop(state);
+        }
+        self.read_landed(project, worker, repo_of_land, target).await;
         outcome
     }
 }

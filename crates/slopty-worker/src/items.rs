@@ -308,7 +308,9 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         ItemKind::Folder { path } | ItemKind::Changes { path, .. } if !good_path(path) => {
             Err(WorkerError::Items("bad folder path".to_owned()))
         }
-        ItemKind::Changes { against: Some(branch), .. } if !good_branch(branch) => {
+        ItemKind::Changes { against, head, .. }
+            if against.iter().chain(head.iter()).any(|branch| !good_branch(branch)) =>
+        {
             Err(WorkerError::Items("bad branch".to_owned()))
         }
         ItemKind::Browser { url } if !web_address(url) => {

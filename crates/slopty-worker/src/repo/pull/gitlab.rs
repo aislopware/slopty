@@ -128,11 +128,21 @@ pub(super) async fn open_of(
 ///
 /// # Errors
 /// glab says something other than its answer.
-pub(super) async fn status(glab: &Path, root: &Path) -> Result<Option<PullStatus>, GitOutcome> {
-    let view = match run(glab, root, &["mr", "view", "--output", "json"], None, REMOTE).await {
+pub(super) async fn status(
+    glab: &Path,
+    root: &Path,
+    of: Option<&str>,
+) -> Result<Option<PullStatus>, GitOutcome> {
+    let mut view = vec!["mr", "view"];
+    view.extend(of);
+    view.extend(["--output", "json"]);
+    let view = match run(glab, root, &view, None, REMOTE).await {
         Ok(view) => view,
         Err(GitOutcome::Failed { said }) if said.contains(NONE_FOUND) => {
-            let Some(branch) = crate::repo::branch_of(root) else { return Ok(None) };
+            let Some(branch) = of.map(str::to_owned).or_else(|| crate::repo::branch_of(root))
+            else {
+                return Ok(None);
+            };
             let list = [
                 "mr",
                 "list",

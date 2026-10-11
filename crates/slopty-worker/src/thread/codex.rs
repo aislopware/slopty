@@ -309,11 +309,8 @@ impl Launch {
         let codex = crate::facts::installed("codex", self.path.clone())
             .await
             .ok_or_else(|| NO_CODEX.to_owned())?;
-        let command = vec![
-            codex.program.to_string_lossy().into_owned(),
-            "resume".to_owned(),
-            native.to_owned(),
-        ];
+        let program = codex.program.to_string_lossy().into_owned();
+        let command = slopty_agent::codex::shared::tui(program, native);
         let env = vec![("PATH".to_owned(), codex.path.to_string_lossy().into_owned())];
         terminals.open(command, cwd, env).await
     }
@@ -478,8 +475,9 @@ impl Codex {
 
     /// Start a server task's thread as `start` says, once per seat: Codex loads it with the
     /// seat's variables in its commands and Slopty's tools among its MCP servers
-    /// ([`slopty_agent::codex::shared::seated`]), and the role as its developer instructions
-    /// (`developerInstructions`). Taken up again after Codex let it go, it is loaded the same.
+    /// ([`slopty_agent::codex::shared::seated`]), the role as its developer instructions
+    /// (`developerInstructions`), the approval policy the start's mode names, and a sandbox that
+    /// writes only in its workspace. Taken up again after Codex let it go, it is loaded the same.
     pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
         let (reply, outcome) = oneshot::channel();
         let (id, seated) = (seated.intent(), Some(Box::new(seated)));
@@ -1865,6 +1863,8 @@ impl Session {
                         if let Some(seated) = seated.as_deref() {
                             params.config = Some(tools(&self.host, seated));
                             params.developer_instructions.clone_from(&seated.role);
+                            // A server task writes only in its workspace, at every level.
+                            params.sandbox = Some(p::SandboxMode::WorkspaceWrite);
                         }
                         let prompt = start.prompt.filter(|p| !p.trim().is_empty());
                         let attachments = start.attachments;

@@ -199,7 +199,7 @@ fn a_folders_changes_open_as_a_tile_with_no_thread(cx: &mut TestAppContext) {
         })
         .collect();
     let [item] = added.as_slice() else { panic!("one item: {added:?}") };
-    assert_eq!(item.kind, ItemKind::Changes { path: "/w/atlas".into(), against: None });
+    assert_eq!(item.kind, ItemKind::Changes { path: "/w/atlas".into(), against: None, head: None });
     let changes = |sent: &[ClientMsg]| -> Vec<(RequestId, Against)> {
         sent.iter()
             .filter_map(|m| match m {
@@ -564,8 +564,13 @@ fn a_reviews_open_file_opens_it_on_its_machine(cx: &mut TestAppContext) {
     frames(cx);
     assert_eq!(files_added(&mut studio), [path], "a thread's review");
 
-    let changes =
-        arrives(&view, cx, &studio, ItemKind::Changes { path: "/w".into(), against: None }, 20);
+    let changes = arrives(
+        &view,
+        cx,
+        &studio,
+        ItemKind::Changes { path: "/w".into(), against: None, head: None },
+        20,
+    );
     frames(cx);
     let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
     let folder = folder.expect("the folder's review");
@@ -589,7 +594,7 @@ fn a_reviews_sheet_frees_a_merged_worktree(cx: &mut TestAppContext) {
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
     let root = "/r/.claude/worktrees/fix".to_owned();
-    let kind = ItemKind::Changes { path: root.clone(), against: None };
+    let kind = ItemKind::Changes { path: root.clone(), against: None, head: None };
     let changes = arrives(&view, cx, &studio, kind, 20);
     frames(cx);
     let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
@@ -613,8 +618,13 @@ fn a_folders_review_opens_the_thread_that_wrote_a_line(cx: &mut TestAppContext) 
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (thread, tile) = thread_tile(&view, cx, &studio);
-    let changes =
-        arrives(&view, cx, &studio, ItemKind::Changes { path: "/w".into(), against: None }, 20);
+    let changes = arrives(
+        &view,
+        cx,
+        &studio,
+        ItemKind::Changes { path: "/w".into(), against: None, head: None },
+        20,
+    );
     frames(cx);
     let folder = view.read_with(cx, |v, _| v.changes_view(changes.item).cloned());
     let folder = folder.expect("the folder's review");

@@ -187,7 +187,9 @@ pub async fn save_in_order(
                     GitOp::RemoveWorktree => Some(Holds::Under(slopty_worker::file::expand_home(
                         std::path::Path::new(&repo),
                     ))),
-                    GitOp::Status | GitOp::Changes { .. } => Some(Holds::Nothing),
+                    GitOp::Status | GitOp::Changes { .. } | GitOp::Range { .. } => {
+                        Some(Holds::Nothing)
+                    }
                     _ => None,
                 };
                 let (finished, done_rx) = watch::channel(false);
@@ -291,6 +293,7 @@ pub async fn git_op(
         GitOp::PullStatus => "pull request status",
         GitOp::Merge { .. } => "merge",
         GitOp::Changes { .. } => "changes",
+        GitOp::Range { .. } => "range",
         GitOp::RemoveWorktree => "remove worktree",
         GitOp::Branches => "branches",
         GitOp::PullComments { .. } => "pull request comments",

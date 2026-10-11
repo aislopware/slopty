@@ -685,6 +685,7 @@ mod tests {
                 push: false,
                 orchestrator: None,
                 orchestrator_thread: None,
+                landed: None,
                 limits: Limits::default(),
                 metadata: None,
                 created_ms: WallMs::ZERO,
@@ -900,7 +901,7 @@ mod tests {
             .verbs()
             .into_iter()
             .filter_map(|v| match v {
-                Verb::TaskRestart { project, task, agent } => Some((project, task, agent)),
+                Verb::TaskRestart { project, task, agent, .. } => Some((project, task, agent)),
                 _ => None,
             })
             .collect();

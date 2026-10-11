@@ -67,6 +67,7 @@ mod awake;
 mod cleanup;
 mod codex;
 mod ladder;
+mod landing;
 mod outcomes;
 mod projects;
 mod queue;
@@ -938,8 +939,8 @@ impl Hub {
                 let launch = self.launch_for(&project, task, launch);
                 self.task_spawn(caller, key, project, task, launch).await
             }
-            Verb::TaskRestart { project, task, agent } => {
-                self.task_restart(caller, key, project, task, agent).await
+            Verb::TaskRestart { project, task, agent, worker } => {
+                self.task_restart(caller, key, project, task, (agent, worker)).await
             }
             Verb::WorkerFacts { worker } => self.worker_facts(worker),
             Verb::TaskGet { project, task } => self.task_get(&project, task),
@@ -973,6 +974,14 @@ impl Hub {
                 Ok(of) => self.forward(key, Verb::SendMessage { of, text }).await,
                 Err(refused) => refused,
             },
+            Verb::ResumeThread { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "an ended agent is the person's to resume, never an agent's",
+            ),
+            Verb::ResumeThread { of } => match self.thread_on(of) {
+                Ok(of) => self.forward(key, Verb::ResumeThread { of }).await,
+                Err(refused) => refused,
+            },
             Verb::RestartWorker { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "a machine's worker is the person's to restart, never an agent's",
@@ -987,6 +996,7 @@ impl Hub {
             }
             verb @ (Verb::TaskPush { .. }
             | Verb::ProjectLand { .. }
+            | Verb::ProjectResume { .. }
             | Verb::ProjectDelete { .. }) => self.once(caller, key, verb).await,
             Verb::Verify { .. }
             | Verb::Rebase { .. }
@@ -1053,10 +1063,11 @@ impl Hub {
             Verb::ProjectLand { project, into } => {
                 self.project_land(caller, project, into.clone()).await
             }
+            Verb::ProjectResume { project } => self.project_resume(caller, project).await,
             Verb::ProjectDelete { project } => self.project_delete(project),
             _ => error(
                 ErrorCode::Invalid,
-                "only a push, a landing or a project let go is made once here",
+                "only a push, a landing, a resume or a project let go is made once here",
             ),
         };
         if let Some(key) = key {
@@ -1818,7 +1829,8 @@ fn remember(
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. }
         | Verb::TaskPush { project, .. }
-        | Verb::ProjectLand { project, .. } => Some(project),
+        | Verb::ProjectLand { project, .. }
+        | Verb::ProjectResume { project } => Some(project),
         _ => None,
     };
     let answer = match (outcome, project) {
@@ -1974,6 +1986,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskMerge { .. }
         | Verb::TaskPush { .. }
         | Verb::ProjectLand { .. }
+        | Verb::ProjectResume { .. }
         | Verb::ProjectDelete { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
@@ -2003,6 +2016,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::DropBranches { worker, .. }
         | Verb::BranchOff { worker, .. }
         | Verb::RestartWorker { worker }
+        | Verb::PullOf { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
         Verb::Settings { of, .. } => *of,
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
@@ -2016,7 +2030,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Close { term } => Some(term.worker),
         Verb::ReadThread { of, .. }
         | Verb::AnswerRequest { of, .. }
-        | Verb::SendMessage { of, .. } => match of {
+        | Verb::SendMessage { of, .. }
+        | Verb::ResumeThread { of } => match of {
             ThreadOf::On { worker, .. } => Some(*worker),
             // The server finds the worker first ([`Hub::thread_on`]).
             ThreadOf::Task { .. } | ThreadOf::Term(_) | ThreadOf::Thread(_) => None,

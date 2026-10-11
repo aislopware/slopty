@@ -30,6 +30,7 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         push: false,
         orchestrator,
         orchestrator_thread: None,
+        landed: None,
         limits: Limits::default(),
         metadata: None,
         created_ms: AT,

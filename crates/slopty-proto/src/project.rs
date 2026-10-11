@@ -466,6 +466,10 @@ pub struct Project {
     /// the same across a resume of its session in another terminal, which the project then
     /// follows, and the door to resume it while its agent has ended.
     pub orchestrator_thread: Option<crate::thread::ThreadId>,
+    /// The finished goal's pull request ([`crate::orchestration::Verb::ProjectLand`]), as the
+    /// forge last said it stands: its checks, its review, its merge. The server reads it
+    /// again while it is open, so every device sees it.
+    pub landed: Option<PullSeen>,
     /// How long the orchestrator worked, idle waits left out: its share, apart from its
     /// tasks'.
     pub orchestrator_spent: Spent,

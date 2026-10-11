@@ -1392,10 +1392,11 @@ struct Root<'a> {
 }
 
 /// The thread `row` hangs from in `table`, through every parent there; itself when none.
-/// Where `row`'s thread sits, as the projects know its agent: the terminal its TUI runs in,
-/// else the seat a task's thread was started at ([`SEAT_FACT`]).
+/// Where `row`'s thread sits, as the projects know its agent: the seat a task's thread was
+/// started at ([`SEAT_FACT`]), which stays its seat while the person's TUI joins it in a
+/// terminal of its own; else the terminal its TUI runs in.
 fn seat_of(row: &ThreadRow) -> Option<SessionId> {
-    row.terminal.or_else(|| seat_fact(row))
+    seat_fact(row).or(row.terminal)
 }
 
 /// The seat a task's thread was started at, as its row's [`SEAT_FACT`] says.

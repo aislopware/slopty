@@ -13,7 +13,7 @@ mod golden_project {
     use slopty_proto::folder::FsOp;
     use slopty_proto::git::Forge;
     use slopty_proto::orchestration::{
-        BranchBundle, ErrorCode, Happening, HubEvent, Outcome, TermRef, Verb,
+        BranchBundle, ErrorCode, Happening, HubEvent, Outcome, TermRef, ThreadOf, Verb,
     };
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Commits, Fact, Facts, GiveBacks, Limits, LimitsChange,
@@ -79,6 +79,7 @@ mod golden_project {
             orchestrator_thread: Some(ThreadId::from_uuid(Uuid::from_u128(
                 0x0199_a000_0000_7000_8000_0000_0000_0007,
             ))),
+            landed: Some(pull()),
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
             created_ms: at(),
@@ -426,13 +427,18 @@ mod golden_project {
                 done: true,
             }),
         );
-        let restart = |agent: Option<AgentId>| Verb::TaskRestart {
+        let restart = |agent: Option<AgentId>, worker: Option<WorkerId>| Verb::TaskRestart {
             project: project_id(),
             task: TaskId(6),
             agent,
+            worker,
         };
-        snap("task_restart", &request(restart(None)));
-        snap("task_restart_codex", &request(restart(Some(AgentId::named(AgentId::CODEX)))));
+        snap("task_restart", &request(restart(None, None)));
+        let codex = Some(AgentId::named(AgentId::CODEX));
+        snap("task_restart_codex", &request(restart(codex, None)));
+        let elsewhere =
+            Some(WorkerId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0b0b)));
+        snap("task_restart_elsewhere", &request(restart(None, elsewhere)));
         let start = Start {
             agent: AgentId::acp("gemini"),
             cwd: "/w/slopty".to_owned(),
@@ -638,6 +644,10 @@ mod golden_project {
             "project_land",
             &request(Verb::ProjectLand { project: project_id(), into: Some("main".to_owned()) }),
         );
+        snap("project_resume", &request(Verb::ProjectResume { project: project_id() }));
+        let thread =
+            ThreadId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0007));
+        snap("resume_thread", &request(Verb::ResumeThread { of: ThreadOf::Thread(thread) }));
         let edit = |key: &str, entry: Option<&str>, literal: Option<&str>| SettingEdit {
             table: "worker".to_owned(),
             key: key.to_owned(),
@@ -699,6 +709,16 @@ mod golden_project {
         );
         let url = "https://github.com/o/slopty/pull/12".to_owned();
         snap("pull_opened", &reply(Outcome::PullOpened { number: 12, url: url.clone() }));
+        snap(
+            "pull_of",
+            &request(Verb::PullOf {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                branch: "slopty/slopty/goal".to_owned(),
+            }),
+        );
+        snap("pull_of_open", &reply(Outcome::PullOf { pull: Some(pull()) }));
+        snap("pull_of_none", &reply(Outcome::PullOf { pull: None }));
         let waiting = Merge::Pull {
             target: "main".to_owned(),
             head: commit('d'),
