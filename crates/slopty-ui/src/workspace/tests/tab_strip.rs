@@ -265,3 +265,71 @@ fn a_closed_title_tab_folds_away(cx: &mut TestAppContext) {
     let _width = close(cx, 1);
     assert!(cx.debug_bounds("title-tab-closing").is_none(), "gone at once under Reduce Motion");
 }
+
+/// A tab opened grows from nothing to its slot over the tab pace, and a tab moved slides from
+/// where it stood into its new place (`MonoCode`'s tab opening and reorder); under Reduce Motion
+/// both land at once.
+#[gpui::test]
+fn an_opened_tab_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
+    use crate::kit::Pace;
+
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let studio = connect(&view, cx, 1, "studio");
+    let _first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let tabs = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.title_tabs().into_iter().map(|t| t.id).collect::<Vec<_>>())
+    };
+    let bounds = |cx: &mut VisualTestContext, id: slopty_client::layout::tiling::TabId| {
+        let n = id.get();
+        cx.debug_bounds(Box::leak(format!("title-tab-{n}").into_boxed_str())).expect("drawn")
+    };
+    let step = |cx: &mut VisualTestContext, at: Duration| {
+        view.update(cx, |v, _| v.hold_clock(Some(at)));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    };
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    on_new_tab(&view, cx, second);
+    step(cx, Pace::Sheet.duration());
+    let third = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    on_new_tab(&view, cx, third);
+    let new = *tabs(cx).last().expect("the new tab");
+    let slot = |cx: &mut VisualTestContext| {
+        let n = new.get();
+        let opening = Box::leak(format!("title-tab-opening-{n}").into_boxed_str());
+        cx.debug_bounds(opening).map(|b| b.size.width)
+    };
+    assert!(slot(cx).is_some_and(|w| w < px(1.0)), "it starts from nothing: {:?}", slot(cx));
+    let start = Pace::Sheet.duration();
+    step(cx, start.saturating_add(start.checked_div(2).unwrap_or_default()));
+    let half = slot(cx).expect("still growing");
+    assert!(half > px(1.0) && half < px(224.0), "growing: {half:?}");
+    step(cx, start.saturating_mul(2));
+    assert!(slot(cx).is_none(), "grown");
+    assert_eq!(bounds(cx, new).size.width, px(224.0), "its slot once grown");
+
+    let old = tabs(cx)[0];
+    let (was, place) = (bounds(cx, new).left(), bounds(cx, old).left());
+    view.update_in(cx, |v, _w, cx| {
+        v.layout_action(cx, |l| {
+            l.move_tab(new, 0);
+        });
+    });
+    cx.run_until_parked();
+    let at = bounds(cx, new).left();
+    assert!((f32::from(at - was)).abs() < 1.0, "it leaves from where it stood: {at:?} {was:?}");
+    step(cx, start.saturating_mul(2).saturating_add(Pace::Settle.duration()));
+    let landed = bounds(cx, new).left();
+    assert!((f32::from(landed - place)).abs() < 1.0, "in its new place: {landed:?} {place:?}");
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    let fourth = opens(&view, cx, &studio, SessionId::new(), studio.me, 4);
+    on_new_tab(&view, cx, fourth);
+    let newest = *tabs(cx).last().expect("the newest tab");
+    assert_eq!(bounds(cx, newest).size.width, px(224.0), "whole at once under Reduce Motion");
+}

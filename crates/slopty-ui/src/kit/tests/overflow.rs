@@ -51,7 +51,8 @@ fn ellipsizes(own: &str) -> bool {
 fn holds_words(whole: &str) -> bool {
     whole.split(".child(").skip(1).any(|child| {
         let first = child.split(").child(").next().unwrap_or_default();
-        let fills = first.contains(".fill()") || first.contains(".fill_from_start()");
+        let fills =
+            [".fill()", ".fill_from_start()", ".fill_fading("].iter().any(|f| first.contains(f));
         child.starts_with('"')
             || child.starts_with("format!(")
             || child.starts_with("SharedString::from(")

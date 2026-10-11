@@ -1711,7 +1711,10 @@ impl WorkspaceView {
                 .when(self.is_preview(tile), gpui::Styled::italic)
                 .min_w_0()
                 .overflow_hidden()
-                .child(ChromeText::new(title, px(self.theme.typography.ui_size)).fill())
+                .child(
+                    ChromeText::new(title, px(self.theme.typography.ui_size))
+                        .fill_fading(px(tab_look::TITLE_FADE)),
+                )
                 .into_any_element(),
         }
     }

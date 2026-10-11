@@ -3021,6 +3021,24 @@ mod tests {
         );
     }
 
+    /// A tab's title, the title bar's and a pane's alike (and the lone header's, which is a
+    /// pane's), fades over its last 40 pt while it is cut, as `MonoCode`'s `TabLabel` does,
+    /// rather than losing its last letters to an ellipsis: the one fill that fades
+    /// (`ChromeText::fill_fading`, whose own test holds when it fades).
+    #[test]
+    fn a_tabs_title_fades_over_its_end() {
+        let fades = |file: &str| {
+            chrome_lines("slopty-ui/src")
+                .into_iter()
+                .filter(|(f, _, l)| {
+                    f.ends_with(file) && l.contains(".fill_fading(px(tab_look::TITLE_FADE))")
+                })
+                .count()
+        };
+        assert_eq!(fades("workspace/title_tabs.rs"), 1, "the title tab's");
+        assert_eq!(fades("workspace/tile.rs"), 1, "the pane tab's and the lone header's");
+    }
+
     /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that
     /// hold the window until answered (adding a worker) dim it with the [`backdrop`]. Both open
     /// at one place. The settings are a page in the panes' place, and dim nothing.

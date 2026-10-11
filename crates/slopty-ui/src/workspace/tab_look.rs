@@ -30,6 +30,10 @@ pub(super) const TAB_FLOOR: f32 = 112.0;
 /// The gap between a tab's lead, its title and what follows: `MonoCode`'s `gap-1.5`.
 pub(super) const TAB_GAP: f32 = 6.0;
 
+/// How far a tab's title fades out over its end while it is cut: `MonoCode`'s `TabLabel` mask,
+/// 2.5 rem.
+pub(super) const TITLE_FADE: f32 = 40.0;
+
 /// The side of the dot that says a pane of a split has the keyboard: `MonoCode`'s `size-2`.
 pub(super) const FOCUS_DOT: f32 = 8.0;
 

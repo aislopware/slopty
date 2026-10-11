@@ -6,7 +6,8 @@
 //! sizes itself by its shaped width instead of a measure callback, and paints each glyph
 //! through `Window::paint_glyph`. It paints what GPUI's text element paints: the same shaping,
 //! the same baseline, the same glyph origins. It fills its parent and ends in an ellipsis at either
-//! end where a title needs it.
+//! end where a title needs it, or fades out over its last points (a tab's title, `MonoCode`'s
+//! `TabLabel`), only while it is cut.
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -26,13 +27,16 @@ pub struct ChromeText {
     fill: bool,
     /// Where a filled label gives way: its start rather than its end.
     from_start: bool,
+    /// A filled label cut at its end fades out over this many points rather than ending in an
+    /// ellipsis.
+    fade: Option<Pixels>,
 }
 
 impl ChromeText {
     /// `text` at `base` points, in the font and colour of the enclosing text style.
     #[must_use]
     pub fn new(text: impl Into<SharedString>, base: Pixels) -> Self {
-        Self { text: text.into(), base, fill: false, from_start: false }
+        Self { text: text.into(), base, fill: false, from_start: false, fade: None }
     }
 
     /// Take the parent's width and end the text with an ellipsis where it does not fit
@@ -49,6 +53,18 @@ impl ChromeText {
     pub const fn fill_from_start(mut self) -> Self {
         self.fill = true;
         self.from_start = true;
+        self
+    }
+}
+
+impl ChromeText {
+    /// [`Self::fill`], but a label that does not fit fades out over its last `width` points,
+    /// every letter kept to the edge: a tab's title (`MonoCode`'s 2.5 rem mask). A label that
+    /// fits is drawn sharp to its last letter.
+    #[must_use]
+    pub const fn fill_fading(mut self, width: Pixels) -> Self {
+        self.fill = true;
+        self.fade = Some(width);
         self
     }
 }
@@ -158,6 +174,12 @@ fn cut_start_at(xs: &[Pixels], width: Pixels, ellipsis: Pixels, available: Pixel
     let last = xs.len().saturating_sub(1);
     let keep = xs.iter().position(|x| width - *x + ellipsis <= available).unwrap_or(last);
     xs.get(keep).map(|at| Cut { keep, at: *at })
+}
+
+/// How far a filled label of `width` fades over its end in a box `available` wide, when it
+/// fades (`fade`): only while it is cut, so a label that fits is sharp to its last letter.
+fn fade_over(fade: Option<Pixels>, width: Pixels, available: Pixels) -> Option<Pixels> {
+    fade.filter(|_| width > available + SUBPIXEL)
 }
 
 /// How the glyphs are painted: the size and the colour.
@@ -328,7 +350,8 @@ impl Element for ChromeText {
         let shaped = &request_layout.shaped;
         let (line, ellipsis) = (&shaped.line, shaped.ellipsis.width);
         let give = if self.from_start { cut_start_at } else { cut_at };
-        self.fill.then(|| give(&boundaries(line), line.width, ellipsis, bounds.size.width))?
+        let cuts = self.fill && self.fade.is_none();
+        cuts.then(|| give(&boundaries(line), line.width, ellipsis, bounds.size.width))?
     }
 
     fn paint(
@@ -348,6 +371,19 @@ impl Element for ChromeText {
         let baseline = bounds.origin.y + padding_top + layout.ascent;
         let cut = *prepaint;
         let shaped = Rc::clone(&request_layout.shaped);
+        if let Some(width) = fade_over(self.fade, shaped.line.width, bounds.size.width) {
+            let fade = gpui::EdgeFade::new(gpui::Edges { right: width, ..gpui::Edges::default() });
+            let mask = Some(gpui::ContentMask { bounds });
+            window.with_content_mask(mask, |window| {
+                window.with_edge_fade(bounds, fade, |window| {
+                    window.paint_layer(bounds, |window| {
+                        let place = Place { x: bounds.origin.x, baseline };
+                        paint_line(window, &shaped.line, place, (0, None), paint);
+                    });
+                });
+            });
+            return;
+        }
         window.paint_layer(bounds, |window| {
             let origin = bounds.origin.x;
             match cut {
@@ -447,5 +483,16 @@ mod tests {
         let cut = cut_start_at(&xs, width, px(8.0), px(20.0)).expect("six pixels over");
         assert_eq!((cut.keep, cut.at), (3, px(18.0)));
         assert!(cut_start_at(&xs, width, px(8.0), px(26.0)).is_none(), "it fits");
+    }
+
+    /// A fading label fades only while it is cut, and over the width it was given; half a pixel
+    /// of overrun is no cut, as for the ellipsis. A label that does not fade never fades.
+    #[test]
+    fn a_label_fades_only_while_it_is_cut() {
+        let fade = Some(px(40.0));
+        assert_eq!(fade_over(fade, px(300.0), px(168.0)), Some(px(40.0)), "cut: it fades");
+        assert_eq!(fade_over(fade, px(26.27), px(26.0)), None, "a subpixel over: whole");
+        assert_eq!(fade_over(fade, px(100.0), px(168.0)), None, "it fits: sharp");
+        assert_eq!(fade_over(None, px(300.0), px(168.0)), None, "an ellipsis label");
     }
 }

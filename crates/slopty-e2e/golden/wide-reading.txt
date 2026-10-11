@@ -6,7 +6,7 @@ Button │ Forward
 Group │ Where
 Button │ e2e-worker
 TabList
-Tab │ NOTES.md, Do these steps in order with the named tools, then reply "done". 1) Read…
+Tab │ NOTES.md, 2 tiles
 Button │ Close tab
 Button │ Needs you
 Button │ More

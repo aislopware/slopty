@@ -94,7 +94,7 @@ fn title_tabs(tiling: &Tiling) -> Vec<TitleTab> {
             lead: crate::icons::Mark::Symbol(crate::icons::Symbol::Terminal),
             place: None,
             edited: false,
-            meta: None,
+            tiles: tab.panes().count(),
             marks: vec![crate::icons::Status::Working; tab.panes().count().min(2)],
             shown: i == project.shown_index(),
         })

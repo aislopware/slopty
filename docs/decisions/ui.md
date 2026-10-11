@@ -10143,17 +10143,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **A tab of several tiles reads as two levels** (2026-10-11, the MonoCode port's review).
   A tab of two panes drew its title tab and its focused pane's tab as the same filled pill with
-  the same words, 40 pt apart, so the frame read as doubled. MonoCode names the focused pane in
-  its title tab too, but gives a tab of several panes a second line and heads a session pane in
-  a split with words, not a pill. Ruled:
-  - A title tab holding more than its focused tile says what else it holds on a second line:
-    the other tile's title, or "N tiles" (`MonoCode`'s `tabCopy`). Both lines are at the
-    caption's size on a 1.25 leading, so they fit the 30 pt pill; the title is medium, the rest
-    muted. A screen reader hears "Terminal 2, Terminal".
+  the same words, 40 pt apart, so the frame read as doubled.
   - A pane's tab on show carries no fill, only the text's full tone and its close
     (`tab_look::pane_tab`); the title tab alone wears `selected`. The hover's 5 % wash was tried
     first and read the same as light's 6.5 % selection.
-  - Tests: `workspace::tests::focus::a_tab_of_several_tiles_reads_as_two_levels`,
+  - **Every pill is one line** (revised the same day). A second line under a split's title tab
+    (the other tile's title, or "N tiles", MonoCode's `tabCopy`, both at the caption's size)
+    was tried and dropped: it was the one pill unlike a navigator row, which is exactly the
+    tabs-against-rows mismatch the person named. A split tab is named for its focused tile on
+    one line at the chrome role; the split itself shows under it, where the focus dot marks the
+    pane. A screen reader hears the count ("Terminal 2, 2 tiles").
+  - Tests: `workspace::tests::focus::a_tab_of_several_tiles_is_one_line`,
     `workspace::tab_look::tests::a_pane_tab_on_show_is_a_level_under_a_title_tab`.
 
 - ✅ **The board's head says where the goal stands** (2026-10-11, the orchestrator-first study,
@@ -10319,3 +10319,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::the_empty_workspaces_composer_says_where_the_goal_goes`,
     `workspace::tests::the_empty_workspace_is_placed_by_this_frames_layout`; golden
     `empty-workspace`.
+
+- ✅ **A cut tab title fades; tabs grow, slide and fold** (2026-10-11, the MonoCode port's two
+  open deviations, `.research/monocode-anatomy-2026-10-10.md` §1a).
+  - **Fade.** A title tab's title, a pane tab's and the lone header's fade over their last
+    40 pt while they are cut, every letter kept, as MonoCode's `TabLabel` masks its label
+    (`ChromeText::fill_fading`, `tab_look::TITLE_FADE`). A title that fits is drawn sharp. The
+    ellipsis it replaces cost the last letters three dots, and was the one cut no row of
+    MonoCode's makes.
+  - **Motion.** A title tab opened grows from nothing to its 224 pt slot, its 112 pt floor
+    growing with it, over the tab pace (200 ms on `Curve::TAB`): a slot widening round the
+    whole tab, which keeps its own width inside, as MonoCode's `tab-opening` wraps it. Tabs put
+    in another order slide from where they stood to their places over `Motion::settle`
+    (160 ms, MonoCode's reorder). No close shows while a tab is carried. Under Reduce Motion
+    every one lands at once, as the fold already did.
+  - Tests: `chrome_text::tests::a_label_fades_only_while_it_is_cut`,
+    `kit::tests::a_tabs_title_fades_over_its_end`,
+    `workspace::tests::tab_strip::an_opened_tab_grows_and_a_moved_one_slides`.

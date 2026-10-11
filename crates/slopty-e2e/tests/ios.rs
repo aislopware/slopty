@@ -201,9 +201,9 @@ mod tests {
         .await
         .unwrap();
 
-        // "Open settings" from the palette opens the settings on their form, with Done in its
-        // head. The phone has no worker of its own to open `settings.toml` in, so the form is
-        // all there is.
+        // "Open settings" from the palette opens the settings on their form: Done in a phone's
+        // head, Back at the foot of an iPad's section list. A phone or a tablet has no worker
+        // of its own to open `settings.toml` in, so the form is all there is.
         open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
         // The best match leads; a looser one (a machine's clipboard line) may follow it.
@@ -222,8 +222,16 @@ mod tests {
             .await
             .unwrap();
         assert!(dump.a11y_node("Button", Some("Open the file")).is_none(), "{:#?}", dump.a11y);
-        let [left, top, width, height] =
-            dump.a11y_node("Button", Some("Done")).expect("the page's Done").bounds;
+        // An iPad's is the section list's foot, the lowest Back: the bar's Back goes between
+        // tiles.
+        let back = || {
+            dump.a11y
+                .iter()
+                .filter(|n| n.role == "Button" && n.label.as_deref() == Some("Back"))
+                .max_by(|a, b| a.bounds[1].total_cmp(&b.bounds[1]))
+        };
+        let out = dump.a11y_node("Button", Some("Done")).or_else(back);
+        let [left, top, width, height] = out.expect("the page's way out").bounds;
         drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
         drv.wait_for("the settings to close", STEP, |d| {
             d.a11y_node("Group", Some("Settings")).is_none()

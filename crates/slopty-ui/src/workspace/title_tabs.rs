@@ -10,8 +10,9 @@
 //! its width (`MonoCode`'s title strip).
 //!
 //! A tab that closes folds its width away over 200 ms (`MonoCode`'s tab close, on
-//! [`Curve::TAB`]) while the tabs after it close the gap ([`Closing`]); under Reduce Motion it
-//! is gone at once.
+//! [`Curve::TAB`]) while the tabs after it close the gap, a tab that opens grows from nothing to
+//! its slot over the same, and tabs put in another order slide to their places over 160 ms
+//! ([`Closing`]); no close shows while a tab is carried. Under Reduce Motion each lands at once.
 //!
 //! A right click or a long press on a tab opens its menu: close it, the others, those to its
 //! right or to its left.
@@ -36,6 +37,7 @@ use slopty_theme::{Curve, Theme, stroke};
 
 use super::area::{self, DropSpots};
 use super::tab_look;
+use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{Mark, Status, Symbol};
@@ -52,9 +54,6 @@ const SCROLL_LEAST: f32 = tab_look::TAB_FLOOR;
 
 /// The share of the row's width a chevron scrolls it by.
 const SCROLL_SHARE: f32 = 0.6;
-
-/// The leading of a two-line tab's lines, over their size: `MonoCode`'s `leading-tight`.
-const TWO_LINE_LEADING: f32 = 1.25;
 
 /// How much faster a tab's place shrinks than its title.
 const PLACE_SHRINK: f32 = 1000.0;
@@ -81,10 +80,9 @@ pub(super) struct TitleTab {
     /// Its one tile is a file with an edit not yet on disk, a dot after the title, when the bar
     /// is the tile's header.
     pub edited: bool,
-    /// What else it holds, when it holds more than its focused tile: the other's title, or how
-    /// many tiles it holds. The tab then says it on a second line under its title
-    /// (`MonoCode`'s `tabCopy`), so it never reads as its focused tile's pane tab again.
-    pub meta: Option<SharedString>,
+    /// How many tiles it holds. A tab of several is named for its focused tile on one line, as
+    /// every pill is; the count is said to a screen reader only, since the split shows under it.
+    pub tiles: usize,
     /// One mark for each agent in it that works or has finished, in pane order.
     pub marks: Vec<Status>,
     /// It is the one on show.
@@ -134,10 +132,12 @@ pub(super) struct Clock {
     pub moves: bool,
 }
 
-/// The title tabs that closed and still fold away, worked out as the row is built from the tabs
-/// it drew last: one gone from the same project since, while motion is on, leaves a bare ghost
-/// of its title at its last width, which narrows to nothing. Another project's tabs shown anew
-/// close nothing. Read and written while the row is built, which never writes its host.
+/// How the title tabs move, worked out as the row is built from the tabs it drew last, while
+/// motion is on: one gone from the same project since leaves a bare ghost of its title at its
+/// last width, which narrows to nothing; one new since grows from nothing to its slot; and
+/// tabs whose order changed slide from where they stood to their new place (`MonoCode`'s
+/// `tab-opening` and its reorder). Another project's tabs shown anew move nothing. Read and
+/// written while the row is built, which never writes its host.
 #[derive(Debug, Default)]
 pub(super) struct Closing(RefCell<Folding>);
 
@@ -146,6 +146,28 @@ struct Folding {
     project: Option<u64>,
     last: Vec<(TabId, SharedString)>,
     ghosts: Vec<Ghost>,
+    /// Tabs opened, and when.
+    opening: Vec<(TabId, Instant)>,
+    /// Tabs sliding to a new place: how far left of it they stood, and since when.
+    slides: Vec<(TabId, Pixels, Instant)>,
+}
+
+/// How the row moves in one frame ([`Folding::step`]).
+#[derive(Debug, Default)]
+struct Moves {
+    /// The ghosts: the tab each stands before (none past the last), its title and its width.
+    ghosts: Vec<(Option<TabId>, SharedString, Pixels)>,
+    /// The tabs still growing, and how far along (0 to 1).
+    opening: Vec<(TabId, f32)>,
+    /// The tabs still sliding, and how far left of their place they stand.
+    slides: Vec<(TabId, Pixels)>,
+}
+
+impl Moves {
+    /// Whether anything moves, so the next frame is drawn.
+    const fn any(&self) -> bool {
+        !self.ghosts.is_empty() || !self.opening.is_empty() || !self.slides.is_empty()
+    }
 }
 
 /// A closed tab folding away: the tab it stood before (none past the last), its title, the
@@ -159,18 +181,19 @@ struct Ghost {
 }
 
 impl Folding {
-    /// The ghosts at `clock.now`, each with its width then, from `tabs` and where `widths` says
-    /// each tab lay last frame.
+    /// How the row moves at `clock.now`, from `tabs` and where `widths` says each tab lay last
+    /// frame.
     fn step(
         &mut self,
         tabs: &[TitleTab],
         widths: &[(TabId, gpui::Bounds<Pixels>)],
         clock: Clock,
-    ) -> Vec<(Option<TabId>, SharedString, Pixels)> {
+    ) -> Moves {
         let now: Vec<(TabId, SharedString)> =
             tabs.iter().map(|t| (t.id, t.title.clone())).collect();
         let stays = |id: TabId| tabs.iter().any(|t| t.id == id);
         if self.project == Some(clock.project) && clock.moves {
+            self.start_moves(&now, widths, clock.now);
             for (i, (id, title)) in self.last.iter().enumerate() {
                 if stays(*id) {
                     continue;
@@ -182,21 +205,77 @@ impl Folding {
             }
         } else {
             self.ghosts.clear();
+            self.opening.clear();
+            self.slides.clear();
         }
         self.project = Some(clock.project);
         self.last = now;
-        let length = Pace::Sheet.duration();
+        let (length, slide) = (Pace::Sheet.duration(), Pace::Settle);
         let curve = Curve::TAB;
-        self.ghosts
-            .retain(|g| clock.moves && clock.now.saturating_duration_since(g.start) < length);
-        self.ghosts
-            .iter()
-            .map(|g| {
-                let gone = clock.now.saturating_duration_since(g.start);
-                let t = curve.at((gone.as_secs_f32() / length.as_secs_f32()).min(1.0));
-                (g.before, g.title.clone(), g.width * (1.0 - t))
-            })
-            .collect()
+        let along = |start: Instant, length: std::time::Duration| {
+            let gone = clock.now.saturating_duration_since(start);
+            (gone.as_secs_f32() / length.as_secs_f32()).min(1.0)
+        };
+        let live = |start: Instant, length| clock.now.saturating_duration_since(start) < length;
+        self.ghosts.retain(|g| clock.moves && live(g.start, length));
+        self.opening.retain(|(_, start)| live(*start, length));
+        self.slides.retain(|(.., start)| live(*start, slide.duration()));
+        Moves {
+            ghosts: self
+                .ghosts
+                .iter()
+                .map(|g| {
+                    let t = curve.at(along(g.start, length));
+                    (g.before, g.title.clone(), g.width * (1.0 - t))
+                })
+                .collect(),
+            opening: self
+                .opening
+                .iter()
+                .map(|(id, start)| (*id, curve.at(along(*start, length))))
+                .collect(),
+            slides: self
+                .slides
+                .iter()
+                .map(|(id, dx, start)| {
+                    (*id, *dx * (1.0 - slide.curve().at(along(*start, slide.duration()))))
+                })
+                .collect(),
+        }
+    }
+
+    /// Start what `now` moves against the tabs drawn last: a tab new since grows, and when the
+    /// tabs on both lists stand in another order, each that moved slides from where it stood
+    /// (by `widths`, last frame's) to the place of the tab that stood there before.
+    fn start_moves(
+        &mut self,
+        now: &[(TabId, SharedString)],
+        widths: &[(TabId, gpui::Bounds<Pixels>)],
+        at: Instant,
+    ) {
+        let had = |id: TabId| self.last.iter().any(|(t, _)| *t == id);
+        let new: Vec<TabId> = now.iter().map(|(t, _)| *t).filter(|t| !had(*t)).collect();
+        // A first frame has nothing it grew from.
+        if !self.last.is_empty() {
+            self.opening.extend(new.iter().map(|id| (*id, at)));
+        }
+        let stays = |id: TabId| now.iter().any(|(t, _)| *t == id);
+        let before: Vec<TabId> = self.last.iter().map(|(t, _)| *t).filter(|t| stays(*t)).collect();
+        let after: Vec<TabId> = now.iter().map(|(t, _)| *t).filter(|t| had(*t)).collect();
+        if before == after {
+            return;
+        }
+        let left = |id: TabId| widths.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
+        for (i, id) in after.iter().enumerate() {
+            let (Some(from), Some(to)) = (left(*id), before.get(i).and_then(|t| left(*t))) else {
+                continue;
+            };
+            let dx = from - to;
+            if dx != px(0.0) {
+                self.slides.retain(|(t, ..)| t != id);
+                self.slides.push((*id, dx, at));
+            }
+        }
     }
 }
 
@@ -321,15 +400,19 @@ pub(super) fn render<V: TitleTabsHost>(
 ) -> gpui::AnyElement {
     let s = &theme.surfaces;
     let mut field = drops.field;
-    // Where each tab lay last frame is the width a closed one folds from.
-    let ghosts = drops.closing.map_or_else(Vec::new, |(closing, clock)| {
+    // Where each tab lay last frame is the width a closed one folds from and the place a moved
+    // one slides from.
+    let moves = drops.closing.map_or_else(Moves::default, |(closing, clock)| {
         closing.0.borrow_mut().step(tabs, &drops.spots.tabs.borrow(), clock)
     });
-    if !ghosts.is_empty() {
+    if moves.any() {
         window.request_animation_frame();
     }
+    // While a tab is carried no close shows, so none is pressed on the way.
+    let carrying = drops.at.is_some();
     let ghosts_before = |before: Option<TabId>| -> Vec<gpui::AnyElement> {
-        ghosts
+        moves
+            .ghosts
             .iter()
             .filter(|(b, ..)| *b == before)
             .map(|(_, title, width)| ghost(theme, title.clone(), *width))
@@ -364,7 +447,8 @@ pub(super) fn render<V: TitleTabsHost>(
                     this.close_title_tab(id, window, cx);
                 },
             ));
-            let close = tab_look::close(theme, close, false, TAB_GROUP);
+            let close = tab_look::close(theme, close, false, TAB_GROUP)
+                .when(carrying, gpui::Styled::invisible);
             let host = cx.weak_entity();
             let el = kit::menu_press(div().id(("title-tab", n)), move |at, window, cx| {
                 let _gone = host.update(cx, |this, cx| this.title_tab_menu(id, at, window, cx));
@@ -375,14 +459,16 @@ pub(super) fn render<V: TitleTabsHost>(
                 tab_look::edited(theme, ("title-tab-edited", n))
                     .debug_selector(move || format!("title-tab-edited-{n}"))
             });
+            // Cut, the title fades over its end rather than losing letters to an ellipsis.
             let title = div()
                 .debug_selector(move || format!("title-tab-text-{n}"))
                 .flex_initial()
                 .min_w_0()
                 .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(tab.title.clone());
+                .child(
+                    ChromeText::new(tab.title.clone(), px(roles.chrome.size))
+                        .fill_fading(px(tab_look::TITLE_FADE)),
+                );
             let place = tab.place.clone().map(|place| {
                 let mut el = div();
                 // Gives way long before the title does.
@@ -396,9 +482,14 @@ pub(super) fn render<V: TitleTabsHost>(
                     .text_color(hsla(s.text_muted))
                     .child(place)
             });
-            let label = match &tab.meta {
-                Some(meta) => SharedString::from(format!("{}, {meta}", tab.title)),
-                None => tab.title.clone(),
+            let label = if tab.tiles > 1 {
+                SharedString::from(format!(
+                    "{}, {}",
+                    tab.title,
+                    kit::count(tab.tiles as u64, "tile", "tiles")
+                ))
+            } else {
+                tab.title.clone()
             };
             let el = tab_look::tab(theme, el, tab.shown, true)
                 .debug_selector(move || format!("title-tab-{n}"))
@@ -419,15 +510,36 @@ pub(super) fn render<V: TitleTabsHost>(
                     }),
                 )
                 .child(tab_lead(theme, tab))
-                .map(|el| match (named, tab.meta.clone()) {
-                    (Some(field), _) => el.child(field),
-                    (None, Some(meta)) => el.child(two_lines(theme, title, meta, n)),
-                    (None, None) => el.child(title).children(edited).children(place),
+                .map(|el| match named {
+                    Some(field) => el.child(field),
+                    None => el.child(title).children(edited).children(place),
                 })
                 .child(close)
                 .child(spot)
-                .children(mark)
-                .into_any_element();
+                .children(mark);
+            // A tab opened grows from nothing to its slot, its floor growing with it; a tab moved
+            // slides into its place.
+            let sliding = moves.slides.iter().find(|(t, _)| *t == id).map(|(_, dx)| *dx);
+            let el = match sliding {
+                Some(dx) => el.left(dx),
+                None => el,
+            };
+            // A tab opened grows from nothing to its slot, its floor growing with it: a slot that
+            // widens round the whole tab, which keeps its own width inside (`MonoCode`'s
+            // `tab-opening`).
+            let growing = moves.opening.iter().find(|(t, _)| *t == id).map(|(_, t)| *t);
+            let el = match growing {
+                Some(t) => div()
+                    .debug_selector(move || format!("title-tab-opening-{n}"))
+                    .flex_initial()
+                    .flex_shrink(1.0)
+                    .w(px(tab_look::TAB_SLOT * t))
+                    .min_w(px(tab_look::TAB_FLOOR * t))
+                    .overflow_hidden()
+                    .child(el)
+                    .into_any_element(),
+                None => el.into_any_element(),
+            };
             // A tab closed just before this one folds away in its place.
             let mut here = ghosts_before(Some(id));
             here.push(el);
@@ -557,35 +669,4 @@ impl gpui::Element for PastEnd {
             child.paint(window, cx);
         }
     }
-}
-
-/// A tab's title over what else it holds, `MonoCode`'s two-line tab: both lines at the caption's
-/// size on a tight line so the two fit the pill, the title at the medium weight in the tab's
-/// tone and the rest in the muted one.
-fn two_lines(theme: &Theme, title: gpui::Div, meta: SharedString, n: u64) -> gpui::Div {
-    let size = theme.typography.caption();
-    let line = px(size * TWO_LINE_LEADING);
-    let meta = div()
-        .debug_selector(move || format!("title-tab-meta-{n}"))
-        .min_w_0()
-        .overflow_hidden()
-        .text_ellipsis()
-        .whitespace_nowrap()
-        .text_size(px(size))
-        .line_height(line)
-        .text_color(hsla(theme.surfaces.text_muted))
-        .child(meta);
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .child(
-            title
-                .text_size(px(size))
-                .line_height(line)
-                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT)),
-        )
-        .child(meta)
 }

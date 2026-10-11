@@ -124,6 +124,9 @@ async fn a_project_board_follows_its_orchestration() {
             "Ship the project board",
             "--repo",
             "slopty",
+            // A label, not a checkout: the work lands on a named branch, so none is made.
+            "--target",
+            "main",
             "--verifier",
             "cargo gate",
             "--orchestrator",
@@ -449,6 +452,9 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
             "Ship the project board",
             "--repo",
             "slopty",
+            // A label, not a checkout: the work lands on a named branch, so none is made.
+            "--target",
+            "main",
             "--verifier",
             "cargo gate",
             "--orchestrator",

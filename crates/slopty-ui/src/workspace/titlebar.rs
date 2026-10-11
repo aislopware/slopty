@@ -253,15 +253,7 @@ impl WorkspaceView {
                         })
                     })
                     .collect();
-                // What else it holds, under its title: the other tile's title, or how many.
-                let tiles: Vec<TileRef> = tab.tiles().collect();
-                let others: Vec<TileRef> =
-                    tiles.iter().copied().filter(|t| Some(*t) != tab.focused()).collect();
-                let meta = match others.as_slice() {
-                    [] => None,
-                    [other] => Some(self.tab_title(*other)),
-                    _ => Some(kit::count(tiles.len() as u64, "tile", "tiles")),
-                };
+                let tiles = tab.tiles().count();
                 let shown = shown == Some(tab.id());
                 let alone = lone.filter(|_| shown);
                 // A tab's one tile's state is its strip's glyph, with its words: said once.
@@ -274,7 +266,7 @@ impl WorkspaceView {
                     lead,
                     place: place.map(SharedString::from),
                     edited,
-                    meta: meta.map(SharedString::from),
+                    tiles,
                     marks,
                     shown,
                 }

@@ -16,7 +16,7 @@ Image │ Working
 Button │ Terminal
 Button │ Close tile
 TabList
-Tab │ Check the editor, Terminal
+Tab │ Check the editor, 2 tiles
 Image │ Working
 Button │ Close tab
 Button │ More
