@@ -190,8 +190,9 @@ const WARM_UP_HEVC: [&[u8]; 3] = [
 /// Measured 2026-09-05 (MEASUREMENTS.md, "start-up on a cold connection"): the first
 /// `VTDecompressionSessionCreate` in a process takes ~150 ms, every later one ~3 ms, and the
 /// stream worker that creates it holds every datagram behind it for that long — which the
-/// reassembler then counted as a 150 ms link stall. Call this once, off the stream's path,
-/// when a worker link comes up.
+/// reassembler then counted as a 150 ms link stall. Call this once, off the stream's path, as
+/// the app starts. Refused, opening nothing, in a process switched off
+/// ([`crate::NO_VIDEOTOOLBOX`]).
 pub fn warm_up() -> Result<std::time::Duration, CodecError> {
     let started = std::time::Instant::now();
     let mut decoder = Decoder::new(VideoCodec::Hevc, |_frame| {});
@@ -331,6 +332,7 @@ impl Decoder {
 
     /// Build a format description from parameter sets and (re)create the session.
     fn configure(&mut self, sets: &[Vec<u8>]) -> Result<(), CodecError> {
+        crate::admit("VTDecompressionSessionCreate")?;
         let format = format_description(self.codec, sets)?;
         let output = output_format(self.codec, sets);
         if let Some(session) = self.session.as_ref() {

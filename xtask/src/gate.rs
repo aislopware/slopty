@@ -1038,15 +1038,14 @@ fn test_lane(
                 _ => ran,
             }
         });
-        let tests = nextest_step(
-            profile,
-            // No decoder warm-up in the main run: a link warming a decoder on a guest whose
-            // codec wedged sticks in the kernel as it exits and holds a test slot for good
-            // (.research/ci-vt-hang-2026-10-11.md); the VideoToolbox group runs beside it.
-            cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
-                .env(crate::runner::RUNNER_VAR, &runner)
-                .env("SLOPTY_NO_DECODER_WARM_UP", "1"),
-        );
+        let main = cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
+            .env(crate::runner::RUNNER_VAR, &runner);
+        // No VideoToolbox session in a main run the group runs apart from: a process that
+        // opened one on a guest whose codec wedged sticks in the kernel as it exits and holds a
+        // test slot for good (.research/ci-vt-hang-2026-10-11.md). One a test opens is refused,
+        // so the test fails at once, naming the call, and belongs in the group.
+        let main = if apart { main.env(crate::e2e::NO_VIDEOTOOLBOX, "1") } else { main };
+        let tests = nextest_step(profile, main);
         (tests, join(videotoolbox))
     });
     let ptys = ptys.finish();

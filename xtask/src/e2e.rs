@@ -161,9 +161,9 @@ struct Suite {
     /// Its tests code video through VideoToolbox: they run after the rest, behind the encoder
     /// probe and a deadline ([`coding_step`]).
     codes: bool,
-    /// Its tests stream nothing, so its apps open no decoder at launch
-    /// (`slopty_client::NO_DECODER_WARM_UP`).
-    quiet_decoder: bool,
+    /// Its tests code no video, so its processes open no `VideoToolbox` session: the warm-up at
+    /// launch is refused with the rest ([`NO_VIDEOTOOLBOX`]).
+    no_videotoolbox: bool,
 }
 
 impl Suite {
@@ -177,7 +177,7 @@ impl Suite {
             default: None,
             serial: false,
             codes: false,
-            quiet_decoder: false,
+            no_videotoolbox: false,
         }
     }
 
@@ -201,9 +201,9 @@ impl Suite {
         Self { codes: true, ..self }
     }
 
-    /// Its tests stream nothing ([`Suite::quiet_decoder`]).
-    const fn quiet_decoder(self) -> Self {
-        Self { quiet_decoder: true, ..self }
+    /// Its tests code no video ([`Suite::no_videotoolbox`]).
+    const fn no_videotoolbox(self) -> Self {
+        Self { no_videotoolbox: true, ..self }
     }
 }
 
@@ -216,23 +216,27 @@ const FRAME_TIME: &str = "test(~frame_time::)";
 const SHOWCASE: &str = "test(~showcase::)";
 
 /// The app target's tests that code video: a window or a display streamed into a tile, a
-/// remote window opened, and the screen captured. Each is named; a new one left out still runs,
-/// in the first group, only not behind the probe.
+/// remote window opened, and the screen captured. Each is named; a new one left out fails in
+/// the first group, where every `VideoToolbox` session is refused ([`NO_VIDEOTOOLBOX`]), naming
+/// the call.
 macro_rules! coding {
     () => {
         "(test(~stream::) | test(~screen_recording::) \
          | test(=clipboard::text_copied_on_one_worker_is_ready_to_paste_in_another_workers_window) \
-         | test(=gallery::a_remote_window_waits_in_its_chrome))"
+         | test(=gallery::a_remote_window_waits_in_its_chrome) \
+         | test(=dnd::files_dropped_on_a_display_are_whole_on_the_worker_when_it_lets_go) \
+         | test(=dnd::a_refused_or_left_drag_leaves_nothing_on_the_worker) \
+         | test(=conversation::the_screen_an_agent_drives_opens_beside_its_thread))"
     };
 }
 
-/// The app's tests: first every one that codes no video, its apps opening no decoder at launch,
+/// The app's tests: first every one that codes no video, its processes opening no session,
 /// so a runner whose encoder stops cannot hold them; then the ones that code, last, behind the
 /// encoder probe ([`coding_step`]).
 const APP: &[Suite] = &[
     Suite::live("slopty-e2e", "app")
         .only(concat!("not test(~frame_time::) and not test(~showcase::) and not ", coding!()))
-        .quiet_decoder(),
+        .no_videotoolbox(),
     Suite::live("slopty-e2e", "app")
         .only(concat!("not test(~frame_time::) and not test(~showcase::) and ", coding!()))
         .codes(),
@@ -409,8 +413,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             sh,
             "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {threads...} {filter_flag...} {expr...}"
         );
-        if suite.quiet_decoder {
-            command = command.env(NO_DECODER_WARM_UP, "1");
+        if suite.no_videotoolbox {
+            command = command.env(NO_VIDEOTOOLBOX, "1");
         }
         println!("▶ {title}");
         let started = std::time::Instant::now();
@@ -474,9 +478,9 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
 /// Nextest's exit code when the filters leave no test to run.
 const NO_TESTS_RUN: i32 = 4;
 
-/// The variable that keeps the app from opening a decoder at launch
-/// (`slopty_client::NO_DECODER_WARM_UP`).
-const NO_DECODER_WARM_UP: &str = "SLOPTY_NO_DECODER_WARM_UP";
+/// The variable that has a process open no `VideoToolbox` session, refusing each it would
+/// (`slopty_codec::NO_VIDEOTOOLBOX`).
+pub const NO_VIDEOTOOLBOX: &str = "SLOPTY_NO_VIDEOTOOLBOX";
 
 /// How long a suite runs on a runner before [`crate::watchdog`] says what it waits on: the
 /// app's whole suite takes about a quarter of an hour on a green runner.
@@ -657,8 +661,8 @@ mod tests {
     #[test]
     fn the_app_runs_its_tests_that_code_video_last_and_apart() {
         let [rest, coding] = APP else { panic!("two groups") };
-        assert!(rest.quiet_decoder && !rest.codes);
-        assert!(coding.codes && !coding.quiet_decoder);
+        assert!(rest.no_videotoolbox && !rest.codes);
+        assert!(coding.codes && !coding.no_videotoolbox);
         let (rest, coding) = (rest.only.unwrap_or_default(), coding.only.unwrap_or_default());
         assert_eq!(rest.replace(" and not (", " and ("), coding, "the same list, once negated");
         assert!(coding.contains("test(~stream::)"), "{coding}");

@@ -1497,9 +1497,12 @@ more full-window layer.
     only the VideoToolbox group opens codec sessions. `ci-videotoolbox` runs those one at a time
     (`test-threads = 1`, 63 s serial beside a main run of three or four minutes) to learn
     whether sessions side by side are what wedges the guest's codec.
-  - **Next.** Move the warm-up out of `WorkerLink::launch` into the app, so a File Provider
-    extension and the tests never open a decoder, and move any other session-making test into
-    the group (the report's fix 1). Then a watchdog that ends nextest once every remaining test
-    is stuck exiting (fix 2).
+  - **Then, by construction** (2026-10-11, the report's fix 1). The warm-up left
+    `WorkerLink::launch` for the apps' launch, and `SLOPTY_NO_DECODER_WARM_UP` gave way to
+    `SLOPTY_NO_VIDEOTOOLBOX`, which refuses every session a process would create. The main
+    run sets it only when the group runs apart, so a local gate's single run still codes. A
+    session-making test outside the group now fails in seconds, naming the call, instead of
+    one run in ten hanging (`docs/decisions/video.md`, the 1020th-client entry).
+  - **Next.** A watchdog that ends nextest once every remaining test is stuck exiting (fix 2).
   - **Kept if** 25 worker jobs in a row finish without a cancel, with at least two of them
     wedged runs ending "⚠ videotoolbox … the runner's encoder stopped" and then "✓ nextest".

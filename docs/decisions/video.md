@@ -222,8 +222,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   section blamed). Rules that follow, each measured in the same test:
   * `slopty_codec::warm_up` builds one HEVC session from canned 64×64 parameter sets;
     `slopty_client::warm_up_decoder` runs it once per process on its own thread and is
-    called at app launch (`open_workspace`), on the CLI's connect, by `WorkerLink::start`
-    (`crates/slopty-client/src/link.rs`), and by the test. First picture 526 → 319 ms on
+    called at app launch (`open_workspace`), on the CLI's connect, and by the test (by
+    `WorkerLink::start` too until 2026-10-11; see the 1020th-client entry). First picture 526 → 319 ms on
     the first open in a process.
   * `slopty_worker::screen::warm_up` builds and drops a 64×64 HEVC encoder, then starts and
     stops a 64×64 capture of the first display, when hostd comes online. The capture-only
@@ -2771,15 +2771,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_run_past_its_deadline_is_killed_with_its_group` and
     `the_encoder_probe_is_a_test_of_the_codec` (`xtask` gate), and the probe itself,
     `the_encoder_codes_one_frame` (`slopty-codec`).
-  - *Not proven: how a runner gets there.* The whole worker shard on a fresh guest adds 61
-    clients (4 → 65), far from 1020, and a hosted runner is a fresh virtual Mac per job. The
-    hangs match the stopped encoder in every sign, but either the runner's guest starts a job
-    with clients in use or its limit is lower. The CI watchdog is to log the guest's client
-    count (`ioreg -r -c AppleVideoToolboxParavirtualizationDriver`) and the driver's lines from
-    the system log when a test hangs, which will tell them apart. The first hang fell on
-    eabfe413 and none in the thirty runs before it; that commit's stripe timing never ran in
-    the hung tests (their sizes are under `TIMED_FROM`, or the timing is a stub), and it
-    leaves no client a process does not already leave.
+  - *A runner never gets there; its codec wedges first* (2026-10-11,
+    `.research/ci-vt-hang-2026-10-11.md`). The watchdog's client count settled it: both runs
+    that hung to the job's cancel held 50 clients, not 1020, and their system logs had no "No
+    real codec" or -12908. The guest's codec wedged about 23 session-making processes in, and
+    in 9 of 9 wedges since 2026-10-06
+    `a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on` was among the first
+    tests to hang. Loading or linking VideoToolbox attaches nothing (no initialiser in it or
+    its paravirtualisation framework); only a session's create makes a process a client. What
+    turned a wedge into a 45-minute hang was the main run: every `WorkerLink` warmed a decoder,
+    about 39 processes per worker shard, and three `slopty-files::domain` tests warming one on
+    the wedged codec stuck in the kernel as they exited, holding every test slot.
+    - *Now.* A link warms nothing. Only the apps that show video (`open_workspace`, the
+      CLI's connect) call `warm_up_decoder` at launch, so the File Provider extension opens
+      no decoder either. `SLOPTY_NO_VIDEOTOOLBOX` (`slopty_codec::NO_VIDEOTOOLBOX`, read once
+      per process) refuses every session the codec would create, encoder and decoder, with
+      `CodecError::Refused` naming the call. CI's main run sets it whenever the
+      `videotoolbox` group runs apart (`test_lane`), as do the app e2e's suites that code no
+      video. `slopty-testkit` keeps it for the daemons a test starts. So the main run opens no
+      session, and a test that would fails at once, naming the call; it belongs in the group.
+      `screens::console::a_locked_mac_reaches_the_client_and_so_does_its_return`
+      (`slopty-workerd`) runs a real synthetic encoder and moved into the group; a run of
+      every other test with the switch set found no other (2026-10-11, the worker, rest and
+      ui shards' packages that link VideoToolbox). The app e2e's two drags onto a drawn
+      display and its agent-driven screen stream too, and joined the suite that codes.
+    - Not proven: why that one test wedges the guest's codec. A second session in another
+      process at the same moment may be part of it; the group now runs one at a time on CI to
+      find out (`docs/decisions/tooling.md`).
+    - Test: `switch_tests::a_process_switched_off_has_its_sessions_refused` (`slopty-codec`).
   - Not taken: fewer VideoToolbox tests side by side. The limit is in processes, not in
     sessions at once, so it would only slow the shard.
   - Tests: `replacements_lost_without_a_frame_are_rebuilt_ever_more_slowly` (`screen`),

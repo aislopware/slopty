@@ -15,9 +15,13 @@ use std::path::Path;
 /// program the person installed: no real `claude` among them.
 pub const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// What is kept of the test's own environment: the locale, the terminal type, who the user is,
-/// the temporary directory, and what the Rust toolchain reads (logging, backtraces, coverage).
-pub const KEPT: [&str; 14] = [
+/// What is kept of the test's own environment.
+///
+/// The locale, the terminal type, who the user is, the temporary directory, what the Rust
+/// toolchain reads (logging, backtraces, coverage), and the switch that has a run's processes
+/// open no `VideoToolbox` session (`slopty_codec::NO_VIDEOTOOLBOX`), so the daemons a test
+/// starts obey it too.
+pub const KEPT: [&str; 15] = [
     "TMPDIR",
     "USER",
     "LOGNAME",
@@ -32,6 +36,7 @@ pub const KEPT: [&str; 14] = [
     "RUST_BACKTRACE",
     "RUST_LIB_BACKTRACE",
     "LLVM_PROFILE_FILE",
+    "SLOPTY_NO_VIDEOTOOLBOX",
 ];
 
 /// Whether the variable `name` is kept.

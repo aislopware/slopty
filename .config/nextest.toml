@@ -81,6 +81,8 @@ filter = '''
 | (package(slopty-worker) & (
     test(=screen::tests::a_rebuild_beside_a_cadence_change_finishes)
     | test(/^screen::synthetic::tests::/)))
+| (package(slopty-workerd)
+    & test(=screens::console::a_locked_mac_reaches_the_client_and_so_does_its_return))
 '''
 slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
 
@@ -135,6 +137,9 @@ test-group = '@global'
 # The worker's drawn-screen tests run the real encoder and decoder too: four or more side by side
 # on a loaded machine held a replacement session inside VideoToolbox past a second, and the
 # give-up tests then counted an extra session (CI run 37076838709); two at a time they pass.
+# Every test that opens a session belongs here: CI's main run refuses them
+# (`SLOPTY_NO_VIDEOTOOLBOX`, docs/decisions/video.md, the 1020th-client entry), so one left out
+# fails there at once, naming the call. Keep this filter and the CI bound's above the same.
 [test-groups.videotoolbox]
 max-threads = 2
 
@@ -144,6 +149,8 @@ filter = '''
 | (package(slopty-worker) & (
     test(=screen::tests::a_rebuild_beside_a_cadence_change_finishes)
     | test(/^screen::synthetic::tests::/)))
+| (package(slopty-workerd)
+    & test(=screens::console::a_locked_mac_reaches_the_client_and_so_does_its_return))
 '''
 test-group = 'videotoolbox'
 

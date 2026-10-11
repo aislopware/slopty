@@ -116,4 +116,52 @@ pub enum CodecError {
     /// This platform has no audio encoder (`docs/decisions/platform.md`, "Linux seams").
     #[error("no audio encoder on this platform")]
     NoAudio,
+    /// The process was started to open no `VideoToolbox` session ([`NO_VIDEOTOOLBOX`]), and
+    /// `call` would have opened one.
+    #[error("{call} refused: this process opens no VideoToolbox session (SLOPTY_NO_VIDEOTOOLBOX)")]
+    Refused {
+        /// The session's create call.
+        call: &'static str,
+    },
+}
+
+/// The variable that, set in a process's environment, has every `VideoToolbox` session the
+/// process would open refused with [`CodecError::Refused`], encoder and decoder alike.
+///
+/// A virtual Mac's paravirtual codec keeps two clients of every process that opened a session
+/// until the guest restarts, and a guest's codec that wedges holds each process that opens one
+/// in the kernel as it exits (`docs/decisions/video.md`, "A virtual Mac's encoder stops for good
+/// past its 1020th client"). The test runs that code no video set it, so a test that opens a
+/// session there fails at once, naming the call, and belongs in the `videotoolbox` test group.
+pub const NO_VIDEOTOOLBOX: &str = "SLOPTY_NO_VIDEOTOOLBOX";
+
+/// Refuse `call`, a session's create, when this process opens no `VideoToolbox` session
+/// ([`NO_VIDEOTOOLBOX`], read once).
+#[cfg(target_vendor = "apple")]
+fn admit(call: &'static str) -> Result<(), CodecError> {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    admitted(*OFF.get_or_init(|| std::env::var_os(NO_VIDEOTOOLBOX).is_some()), call)
+}
+
+/// `call`, refused while `VideoToolbox` is switched `off` for the process.
+#[cfg(target_vendor = "apple")]
+const fn admitted(off: bool, call: &'static str) -> Result<(), CodecError> {
+    if off { Err(CodecError::Refused { call }) } else { Ok(()) }
+}
+
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+mod switch_tests {
+    use super::*;
+
+    /// With `VideoToolbox` switched off, a session's create is refused, named; with it on, it
+    /// goes ahead.
+    #[test]
+    fn a_process_switched_off_has_its_sessions_refused() {
+        let call = "VTDecompressionSessionCreate";
+        assert!(matches!(admitted(true, call), Err(CodecError::Refused { call: c }) if c == call));
+        admitted(false, call).unwrap();
+        let said = CodecError::Refused { call }.to_string();
+        assert!(said.contains(call) && said.contains(NO_VIDEOTOOLBOX), "{said}");
+    }
 }

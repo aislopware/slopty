@@ -138,8 +138,6 @@ impl WorkerLink {
     }
 
     fn launch(conn: WorkerConn, forward: bool) -> Self {
-        #[cfg(target_vendor = "apple")]
-        warm_up_decoder();
         let WorkerConn { conn: quic, ack, mut tx, mut rx, .. } = conn;
         let (events_tx, events_rx) = mpsc::channel(EVENT_DEPTH);
         let (out_tx, mut out_rx) = mpsc::channel::<ClientMsg>(OUT_DEPTH);
@@ -881,10 +879,6 @@ async fn receive_bulk(
     }
 }
 
-/// The variable that, set, keeps [`warm_up_decoder`] from opening a session.
-#[cfg(target_vendor = "apple")]
-pub const NO_DECODER_WARM_UP: &str = "SLOPTY_NO_DECODER_WARM_UP";
-
 #[cfg(target_vendor = "apple")]
 /// Whether the process has warmed VideoToolbox's decoder up yet.
 static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -893,17 +887,15 @@ static DECODER_WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// Pay VideoToolbox's first-session cost (150–400 ms) now, on its own thread, rather than in
 /// the first stream's worker where it holds the keyframe and reads as a link stall.
 ///
-/// Once per process; later calls are free. [`WorkerLink::start`] calls it, but a session
-/// created while the first stream is already starting still delays that stream's own
-/// session, so the apps call it at launch, before any worker is dialed.
+/// Once per process; later calls are free. Only the apps that show video call it, at launch,
+/// before any worker is dialed: a session made while the first stream is starting still delays
+/// that stream's own. A link does not, so a process that shows no video (the File Provider
+/// extension, a test) opens no session it has no use for.
 ///
-/// Not at all with [`NO_DECODER_WARM_UP`] set: a virtual Mac's VideoToolbox keeps two clients
-/// of every process that opened a session until it restarts, and stops past a few dozen
-/// (`docs/decisions/video.md`), so the app's e2e sets it for the tests that stream nothing. A
-/// stream still makes its decoder when it comes.
+/// Opens nothing in a process switched off ([`slopty_codec::NO_VIDEOTOOLBOX`]), where the warm-up
+/// is refused and the refusal logged.
 pub fn warm_up_decoder() {
-    if DECODER_WARM.swap(true, Ordering::Relaxed) || std::env::var_os(NO_DECODER_WARM_UP).is_some()
-    {
+    if DECODER_WARM.swap(true, Ordering::Relaxed) {
         return;
     }
     let spawned = std::thread::Builder::new().name("decoder-warm-up".to_owned()).spawn(|| {

@@ -1208,9 +1208,10 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     that streamed nothing. The log cannot show
     which wait hung; the next run will (below).
   - **Coding last.** `cargo xtask e2e app` runs the target in two groups. First every test
-    that codes no video, with `SLOPTY_NO_DECODER_WARM_UP` set so its apps open no decoder at
-    launch, and so a stopped encoder cannot hold them (a stream still makes its decoder when it
-    comes). Then the tests that code (`stream::`, `screen_recording::`, and the two named in
+    that codes no video, with `SLOPTY_NO_VIDEOTOOLBOX` set so its processes open no
+    VideoToolbox session, the launch's warm-up included, and so a stopped encoder cannot hold
+    them. A test there that would open one fails, naming the call (2026-10-11; it was
+    `SLOPTY_NO_DECODER_WARM_UP`, which skipped only the warm-up). Then the tests that code (`stream::`, `screen_recording::`, and the two named in
     `xtask/src/e2e.rs`), behind the gate's way of asking: the encoder probe
     (`slopty-encoder-probe`, one keyframe through a real session, under a minute) skips them
     with a warning when the encoder does not answer, the group is killed whole past six

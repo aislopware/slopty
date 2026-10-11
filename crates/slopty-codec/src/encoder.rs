@@ -321,6 +321,7 @@ impl Encoder {
         rate_control: RateControl,
         sink: Sink,
     ) -> Result<Self, CodecError> {
+        crate::admit("VTCompressionSessionCreate")?;
         let chroma = config.chroma;
         if chroma == Chroma::Full && config.codec != VideoCodec::Hevc {
             return Err(CodecError::NoFullChroma(config.codec));
