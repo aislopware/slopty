@@ -554,6 +554,40 @@ mod review {
         assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
     }
 
+    /// An edit of the same size, with the file's stat as the index recorded it, is seen in the
+    /// working tree's review as git itself sees it: the index file is as old as the entry, so git
+    /// reads the file again ("racy git"), and the review's scratch copy of the index keeps that
+    /// age rather than looking newer and trusting the stat. The ctime is set aside
+    /// (`core.trustctime`), since a test cannot set it back.
+    #[tokio::test]
+    async fn an_edit_with_the_stat_unchanged_is_still_reviewed() {
+        use std::time::SystemTime;
+
+        use slopty_proto::thread::wire::Against;
+        use slopty_worker::repo::snapshot::working_tree;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        run(&repo, &["config", "core.trustctime", "false"]);
+        let then = SystemTime::now().checked_sub(Duration::from_secs(3_600)).unwrap();
+        let age = |path: &Path| {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(then)).unwrap();
+        };
+        age(&repo.join("a.txt"));
+        // The entry takes the old stat, long before the index is written, so it is not smudged.
+        run(&repo, &["update-index", "--refresh"]);
+        std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
+        age(&repo.join("a.txt"));
+        age(&repo.join(".git/index"));
+
+        let review = working_tree(&git(), &repo, Against::Head).await.unwrap();
+        let paths = review.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>();
+        assert_eq!(paths, ["a.txt"], "the edit, though its stat is the entry's");
+        let status = run(&repo, &["status", "--porcelain", "--untracked-files=no"]);
+        assert_eq!(status, "M a.txt", "as git itself sees it");
+    }
+
     /// A branch checked out nowhere is reviewed as committed (`GitOp::Range`): from where it
     /// left its base to its tip, so neither the base's own later commits nor the working tree
     /// count; `origin`'s copy of either branch is read when it holds the local one; a branch

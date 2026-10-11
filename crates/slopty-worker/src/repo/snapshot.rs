@@ -768,6 +768,24 @@ const BASES: [&str; 5] = ["origin/HEAD", "origin/main", "origin/master", "main",
 /// Why a working tree's review against its base has nothing to compare.
 pub const NO_BASE: &str = "This branch has no base branch to compare with";
 
+/// Give the scratch `copy` of the index at `own` the original's modification time.
+///
+/// Git trusts an entry whose stat matches the file unless the entry is as new as the index
+/// file itself, which it then reads again ("racy git"). A copy stamped now would make an edit of
+/// the same size, in the same second as the index was written, look clean.
+async fn same_age(own: &Path, copy: &Path) -> Result<(), Failed> {
+    let stamp = |e: std::io::Error| Failed(format!("the scratch index's time: {e}"));
+    let written = tokio::fs::metadata(own).await.and_then(|m| m.modified()).map_err(stamp)?;
+    let copy = tokio::fs::OpenOptions::new().write(true).open(copy).await.map_err(stamp)?;
+    let copy = copy.into_std().await;
+    tokio::task::spawn_blocking(move || {
+        copy.set_times(std::fs::FileTimes::new().set_modified(written))
+    })
+    .await
+    .map_err(|e| Failed(format!("the scratch index's time: {e}")))?
+    .map_err(stamp)
+}
+
 /// What a range's review says when either branch is in neither the clone nor its `origin`.
 pub const NO_BRANCH: &str = "The branch is not in this clone or its origin";
 
@@ -792,6 +810,8 @@ pub async fn working_tree(git: &Path, root: &Path, against: Against) -> Result<R
     // No index yet (nothing ever added): the scratch one starts from `HEAD` instead.
     if tokio::fs::copy(&own, &index).await.is_err() {
         let _partial = tokio::fs::remove_file(&index).await;
+    } else {
+        same_age(&own, &index).await?;
     }
     let scope = ReviewScope::WorkingTree(against.clone());
     let Some(from) = repo.against(&against).await? else {
