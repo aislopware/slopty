@@ -2,11 +2,11 @@
 //! could say that it waits: its row in its worker's table says it to the chrome instead, and a
 //! thread whose terminal's agent already says it is not counted twice.
 
+use slopty_kit::icons::Status;
 use slopty_proto::thread::wire::{RequestCard, TableFrame, ThreadRow};
 use slopty_proto::thread::{AskId, Cursor, Request, ThreadId};
 
 use super::*;
-use crate::icons::Status;
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())

@@ -29,11 +29,10 @@ use gpui::{
 use slopty_client::layout::Rect;
 use slopty_client::layout::tiling::{Drop, TabId};
 use slopty_client::layout::tree::{Laid, PaneId, Sash, Side, SplitAxis, TabFrame};
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::draw::Draw;
+use slopty_kit::kit::{self, Pace};
 use slopty_theme::{Theme, alpha};
-
-use crate::colors::{hsla, hsla_alpha};
-use crate::draw::Draw;
-use crate::kit::{self, Pace};
 
 /// What draws in the panes and moves their sashes.
 pub(super) trait PaneHost: Sized + 'static {

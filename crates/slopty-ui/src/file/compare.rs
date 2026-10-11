@@ -14,13 +14,13 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Task, div, px,
 };
 use similar::{Algorithm, DiffOp, DiffTag};
+use slopty_kit::icons::Symbol;
 use slopty_proto::thread::Patch;
 use slopty_proto::thread::detail::{Hunk, heading};
 
 use super::FileView;
 use crate::conversation::diff::{self, Block};
 use crate::conversation::lines::{self, Ink};
-use crate::icons::Symbol;
 
 /// Lines of context around each change, as `git diff` gives.
 const CONTEXT: usize = 3;
@@ -219,7 +219,7 @@ impl FileView {
             div()
                 .px(px(self.theme.spacing.inset()))
                 .py(px(self.theme.spacing.xs))
-                .text_color(crate::colors::hsla(s.text_muted))
+                .text_color(slopty_kit::colors::hsla(s.text_muted))
                 .font_family(self.theme.typography.ui_family.clone())
                 .child(SharedString::from(format!("{more} more lines not shown")))
         });

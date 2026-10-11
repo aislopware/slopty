@@ -640,7 +640,7 @@ impl WorkspaceView {
     pub(in crate::workspace) fn approval_buttons(
         &self,
         answer: &Answer,
-        cx: &crate::draw::Draw<'_, Self>,
+        cx: &slopty_kit::draw::Draw<'_, Self>,
     ) -> gpui::Div {
         use gpui::accesskit::Role;
         use gpui::prelude::FluentBuilder as _;
@@ -648,8 +648,7 @@ impl WorkspaceView {
             ElementId, InteractiveElement as _, ParentElement as _,
             StatefulInteractiveElement as _, Styled as _, div, px,
         };
-
-        use crate::colors::hsla;
+        use slopty_kit::colors::hsla;
 
         // The navigator's row: its tones.
         let theme = &self.theme;
@@ -671,10 +670,10 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .text_color(hsla(ink))
                 .font_weight(weight)
-                .map(crate::kit::eased)
+                .map(slopty_kit::kit::eased)
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(label);
-            crate::a11y::tab_stop(el, s.focus)
+            slopty_kit::a11y::tab_stop(el, s.focus)
         };
         let of = answer.thread.to_string();
         let answered = |allow: bool| {

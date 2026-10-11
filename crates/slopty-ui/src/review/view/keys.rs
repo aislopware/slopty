@@ -15,11 +15,11 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 
 use super::{ReviewView, Row, Span};
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// Where the keyboard stands: a file's head (`hunk` none), or one of its changes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -211,7 +211,7 @@ impl ReviewView {
         let s = theme.surfaces;
         let on = self.is_viewed(at);
         let selector = format!("review-viewed-{at}");
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             div()
                 .id(ElementId::Name(selector.clone().into()))
                 .debug_selector(move || selector)

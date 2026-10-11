@@ -138,7 +138,7 @@ impl WorkspaceView {
                     url: c.url,
                     into: c.into,
                 });
-                PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Repo)
+                PaletteItem::new(&shown, action, &[]).with_icon(slopty_kit::icons::GitGlyph::Repo)
             })
             .collect()
     }

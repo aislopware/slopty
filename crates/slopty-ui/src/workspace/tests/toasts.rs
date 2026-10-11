@@ -24,7 +24,8 @@ fn a_notice_under_the_pointer_stays_until_the_pointer_leaves(cx: &mut TestAppCon
     cx.simulate_mouse_move(point(px(10.0), px(400.0)), None, Modifiers::default());
     cx.run_until_parked();
     assert_eq!(up(cx), ["Copied the address"], "not at once");
-    cx.executor().advance_clock(SAY_AFTER_HOVER.saturating_add(crate::kit::Pace::Fade.duration()));
+    cx.executor()
+        .advance_clock(SAY_AFTER_HOVER.saturating_add(slopty_kit::kit::Pace::Fade.duration()));
     cx.run_until_parked();
     assert!(up(cx).is_empty(), "then it goes");
 }
@@ -94,7 +95,8 @@ fn a_notice_waits_while_the_app_is_not_in_front(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.set_app_active(true, cx));
     cx.run_until_parked();
     assert_eq!(up(cx), ["Copied the address"], "not at once");
-    cx.executor().advance_clock(SAY_AFTER_HOVER.saturating_add(crate::kit::Pace::Fade.duration()));
+    cx.executor()
+        .advance_clock(SAY_AFTER_HOVER.saturating_add(slopty_kit::kit::Pace::Fade.duration()));
     cx.run_until_parked();
     assert!(up(cx).is_empty(), "then it goes");
 }

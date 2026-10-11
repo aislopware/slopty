@@ -2,13 +2,13 @@
 //! names its thread gives the tile, and which started threads open as tiles.
 
 use slopty_core::WallMs;
+use slopty_kit::icons::Status;
 use slopty_proto::thread::wire::{
     Intent, IntentDone, Outcome, RequestCard, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{AskId, Cursor, Phase, Request, ThreadMeta, ThreadState};
 
 use super::*;
-use crate::icons::Status;
 use crate::workspace::faces::Face;
 
 /// A shell of this client's on `fake`'s worker with Claude Code working in it, focused.

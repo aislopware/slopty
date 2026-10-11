@@ -19,11 +19,11 @@ use std::time::Instant;
 
 use gpui::Context;
 use slopty_core::SessionId;
+use slopty_kit::icons::Status;
 use slopty_proto::terminal::{ProgramState, ProgramStatus};
 
 use super::attention::PROGRAM_QUIET;
 use super::{WorkspaceEvent, WorkspaceView};
-use crate::icons::Status;
 
 /// Whether `record` is a result, which stays for the person to see.
 const fn result(record: &ProgramStatus) -> bool {

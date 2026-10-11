@@ -84,13 +84,13 @@ impl Section {
 
     /// Its glyph in the section list.
     #[must_use]
-    pub const fn symbol(self) -> crate::icons::Symbol {
-        use crate::icons::Symbol;
+    pub const fn symbol(self) -> slopty_kit::icons::Symbol {
+        use slopty_kit::icons::Symbol;
         match self {
             Self::Appearance => Symbol::Palette,
             Self::Terminal => Symbol::Terminal,
             Self::Input => Symbol::Cursorarrow,
-            Self::Agents => crate::icons::AGENT,
+            Self::Agents => slopty_kit::icons::AGENT,
             Self::Network => Symbol::ServerRack,
             Self::Keyboard => Symbol::Keyboard,
             Self::About => Symbol::InfoCircle,

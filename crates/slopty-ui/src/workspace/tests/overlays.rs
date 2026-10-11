@@ -25,7 +25,7 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     tree.into_iter().filter_map(|n| n.label).collect()
 }
 
@@ -111,7 +111,7 @@ fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.palette_open()), "closed to the keys");
     assert!(cx.debug_bounds("palette").is_some(), "still drawing its way out");
-    cx.executor().advance_clock(crate::kit::Pace::Fade.duration());
+    cx.executor().advance_clock(slopty_kit::kit::Pace::Fade.duration());
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_none(), "dropped once out");
 
@@ -133,7 +133,7 @@ fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let theme = Theme::default();
     // From the sheet's outer edge: its hairline and its pad.
-    let pad = crate::kit::sheet_pad(&theme) + slopty_theme::stroke::LINE;
+    let pad = slopty_kit::kit::sheet_pad(&theme) + slopty_theme::stroke::LINE;
     let list = crate::palette::list_pad(&theme) + slopty_theme::stroke::LINE;
     let inset = |cx: &mut VisualTestContext, sheet: &'static str, row: &'static str| {
         let (sheet, row) = (

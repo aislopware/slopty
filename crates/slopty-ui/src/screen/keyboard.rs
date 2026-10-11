@@ -24,13 +24,13 @@ use std::rc::Rc;
 use gpui::{
     Context, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, Task, Window,
 };
+use slopty_kit::keys;
 use slopty_platform::keyboard::{KeyKind, NativeKey, Taken};
 use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::screen::{MediaKey, ScreenInput};
 use tokio::sync::Notify;
 
 use super::{ScreenView, is_paste_chord};
-use crate::keys;
 
 /// What the view asks the platform about the keyboard. A seam: tests drive a stand-in.
 pub trait KeyPlatform {

@@ -47,8 +47,6 @@ objc2-image-io = { workspace = true, features = [
 ] }
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
-# The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).
-nucleo-matcher.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true
 # The native view under the window, where a browser tile's page goes (`browser`).
@@ -62,6 +60,8 @@ slopty-client.workspace = true
 slopty-platform.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
+# The chrome kit every view is drawn with.
+slopty-kit.workspace = true
 slopty-predict.workspace = true
 slopty-proto.workspace = true
 # The settings form's rows: every key of `settings.toml` with its type, default and range
@@ -71,15 +71,12 @@ slopty-theme.workspace = true
 # The device's layout, saved as `layout.json`, and its drafts, as `drafts.json` (`workspace`).
 serde.workspace = true
 serde_json.workspace = true
-# Syntax colouring for a file tile and a fenced code block (`highlight`).
-syntect.workspace = true
-two-face.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [features]
 # `a11y::tree` for the self-test socket (`slopty/e2e`); tests get it through `cfg(test)`.
-e2e = [ "gpui/test-support" ]
+e2e = [ "gpui/test-support", "slopty-kit/e2e" ]
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
@@ -87,4 +84,6 @@ gpui = { workspace = true, features = [ "test-support" ] }
 # rasterise real glyphs (`terminal::view::paint_oracle`).
 gpui_platform = { workspace = true, features = [ "font-kit" ] }
 slopty-client = { workspace = true, features = [ "headless" ] }
+# The kit's test reach (`a11y::tree`, the retained-frame oracle, the held spin clock).
+slopty-kit = { workspace = true, features = [ "e2e" ] }
 tempfile.workspace = true

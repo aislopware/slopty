@@ -269,7 +269,7 @@ fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 impl WorkspaceView {
     /// Keep the drafts in `path`, and take back what it holds.
     pub fn set_drafts_path(&mut self, path: PathBuf, cx: &Context<Self>) {
-        self.drafts.held = Drafts::read(&path, crate::clock::now(cx));
+        self.drafts.held = Drafts::read(&path, slopty_kit::clock::now(cx));
         self.drafts.path = Some(path);
     }
 
@@ -343,7 +343,7 @@ impl WorkspaceView {
 
     /// Read what every live composer and review holds into the store.
     fn gather_drafts(&mut self, cx: &Context<Self>) {
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let mut threads: Vec<(ThreadId, String)> = Vec::new();
         for view in self.thread_faces().map(|(_, v)| v).chain(self.thread_items().map(|(_, v)| v)) {
             let view = view.read(cx);

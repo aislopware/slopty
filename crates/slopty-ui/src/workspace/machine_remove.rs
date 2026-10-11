@@ -15,12 +15,12 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_theme::Theme;
 
 use super::WorkspaceView;
 use super::actions::RemoveMachine;
-use crate::colors::hsla;
-use crate::kit::{self, ButtonKind};
 
 /// A machine row's way to its removal.
 pub(super) const REMOVE: &str = "Remove\u{2026}";
@@ -171,7 +171,7 @@ impl Render for RemoveSheet {
 pub(super) struct Asking {
     view: Entity<RemoveSheet>,
     worker: WorkerKey,
-    /// What the dim and the sheet track: Tab stays inside ([`crate::a11y::trap`]).
+    /// What the dim and the sheet track: Tab stays inside ([`slopty_kit::a11y::trap`]).
     scope: FocusHandle,
     _events: Subscription,
 }
@@ -218,7 +218,7 @@ impl WorkspaceView {
             });
         let scope = cx.focus_handle();
         let home = Focusable::focus_handle(view.read(cx), cx);
-        crate::a11y::hold(&scope, &home, cx);
+        slopty_kit::a11y::hold(&scope, &home, cx);
         self.machine_remove = Some(Asking { view, worker: key, scope, _events: events });
         cx.notify();
     }
@@ -270,7 +270,7 @@ impl WorkspaceView {
         let asking = self.machine_remove.as_ref()?;
         let backdrop = kit::backdrop(&self.theme, window).id("remove-machine-backdrop");
         Some(
-            crate::a11y::trap(backdrop, &asking.scope)
+            slopty_kit::a11y::trap(backdrop, &asking.scope)
                 .occlude()
                 .on_mouse_down(
                     gpui::MouseButton::Left,

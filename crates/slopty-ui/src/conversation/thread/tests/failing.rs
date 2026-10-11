@@ -37,7 +37,7 @@ fn try_again_sends_one_message(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let said = "Failed: API Error: 529 Overloaded";
     assert!(tree.iter().any(|n| n.is("Status", Some(said))), "{tree:#?}");
     let again = cx.debug_bounds("thread-try-again").expect("Try again").center();

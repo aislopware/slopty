@@ -39,14 +39,14 @@ use gpui_kit::component::input::{
     MoveUp, OutdentInline,
 };
 use slopty_client::search::{Row, SearchResults, SearchState};
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
 use slopty_proto::search::{ContextLine, FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_theme::{Theme, Typography, alpha};
 pub use tiles::{SearchScope, TileHit, TileOpen};
 
-use crate::colors::{hsla, hsla_alpha};
-use crate::icons::{IconSize, Symbol};
-use crate::kit::find::{CASE_FACE, MATCH_CASE, REGEX, REGEX_FACE, WHOLE_WORD, WORD_FACE};
 use crate::palette::{Layer, Plate};
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -113,13 +113,13 @@ pub enum ProjectSearchEvent {
     },
     /// Find `query` in the open tiles: the workspace answers with [`ProjectSearch::set_tiles`].
     /// An empty needle clears them.
-    FindTiles(crate::kit::find::Query),
+    FindTiles(slopty_kit::kit::find::Query),
     /// Go to a tile the query was found in, its find bar open on `query`.
     OpenTile {
         /// Which tile, and how.
         open: TileOpen,
         /// The query, toggles and all.
-        query: crate::kit::find::Query,
+        query: slopty_kit::kit::find::Query,
     },
     /// Esc, or a click outside.
     Dismiss,
@@ -133,7 +133,7 @@ type Selected = (String, Option<usize>);
 /// The surface.
 pub struct ProjectSearch {
     query: Entity<InputState>,
-    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
+    /// What its whole surface tracks: Tab stays inside it ([`slopty_kit::a11y::trap`]).
     scope: FocusHandle,
     files: Entity<InputState>,
     match_case: bool,
@@ -603,7 +603,7 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .child(crate::icons::icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
+            .child(slopty_kit::icons::icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))
             .child(
                 div()
                     .flex_none()
@@ -616,7 +616,7 @@ impl ProjectSearch {
                     .child(SharedString::from(name.to_owned())),
             )
             .child(
-                crate::kit::meta(div(), theme)
+                slopty_kit::kit::meta(div(), theme)
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -625,7 +625,7 @@ impl ProjectSearch {
                     .child(SharedString::from(dir.to_owned())),
             )
             .child(
-                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary))
+                slopty_kit::kit::tabular(slopty_kit::kit::pill(theme, s.text_secondary))
                     .flex_none()
                     .child(SharedString::from(hits.lines.len().to_string())),
             )
@@ -636,7 +636,7 @@ impl ProjectSearch {
     fn number(&self, line: u32, context: bool) -> gpui::Div {
         let theme = &self.theme;
         let s = theme.surfaces;
-        crate::kit::meta(crate::kit::tabular(div()), theme)
+        slopty_kit::kit::meta(slopty_kit::kit::tabular(div()), theme)
             .flex_none()
             .w(px(NUMBER_W))
             .text_right()
@@ -711,11 +711,11 @@ impl ProjectSearch {
         let theme = &self.theme;
         let s = theme.surfaces;
         let toggle = |id: &'static str, face, label, on, act: fn(&mut Self) -> &mut bool| {
-            crate::kit::text_toggle(theme, id, face, label, on)
+            slopty_kit::kit::text_toggle(theme, id, face, label, on)
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(act, cx)))
         };
-        let query_row = crate::kit::inset_x(div(), theme)
+        let query_row = slopty_kit::kit::inset_x(div(), theme)
             .flex_none()
             .h(px(theme.density.row + theme.spacing.lg))
             .flex()
@@ -740,7 +740,7 @@ impl ProjectSearch {
             .child(toggle("search-regex", REGEX_FACE, REGEX, self.regex, |t| &mut t.regex))
             .when(self.within == SearchScope::Files, |row| {
                 row.child(
-                    crate::kit::icon_toggle(
+                    slopty_kit::kit::icon_toggle(
                         theme,
                         "search-context",
                         Symbol::ArrowUpAndDown,
@@ -754,14 +754,14 @@ impl ProjectSearch {
                 )
             });
         let files = self.within == SearchScope::Files;
-        let files_row = crate::kit::inset_x(div(), theme)
+        let files_row = slopty_kit::kit::inset_x(div(), theme)
             .flex_none()
             .h(px(theme.density.row))
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
-            .border_t(crate::kit::HAIR)
-            .border_b(crate::kit::HAIR)
+            .border_t(slopty_kit::kit::HAIR)
+            .border_b(slopty_kit::kit::HAIR)
             .border_color(hsla(s.stroke))
             .text_size(px(theme.typography.small()))
             .when(!files, |row| row.child(self.every_tile()))
@@ -783,13 +783,13 @@ impl ProjectSearch {
 
     /// Where the files searched are: `~/w/slopty on studio`.
     fn place(&self, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-        crate::kit::meta(div(), theme)
+        slopty_kit::kit::meta(div(), theme)
             .id("search-place")
             .debug_selector(|| "search-place".to_owned())
             .role(Role::Label)
             .aria_label(SharedString::from(self.place.clone()))
             .flex_none()
-            .max_w(px(crate::kit::Overlay::Editor.bounds().0 / 2.0))
+            .max_w(px(slopty_kit::kit::Overlay::Editor.bounds().0 / 2.0))
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()
@@ -832,7 +832,7 @@ impl ProjectSearch {
                 .flex()
                 .items_center()
                 .gap(px(theme.spacing.xs + theme.spacing.xxs))
-                .child(crate::kit::key_cap(theme, key))
+                .child(slopty_kit::kit::key_cap(theme, key))
                 .child(what)
         };
         let keys: [(String, &str); 2] = [
@@ -840,7 +840,7 @@ impl ProjectSearch {
             (chord("enter"), "Open"),
         ];
         let last = keys.len().saturating_sub(1);
-        crate::kit::inset_x(div(), theme)
+        slopty_kit::kit::inset_x(div(), theme)
             .id("search-foot")
             .debug_selector(|| "search-foot".to_owned())
             .flex_none()
@@ -848,20 +848,20 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
-            .map(|el| crate::kit::inset(el, theme))
+            .map(|el| slopty_kit::kit::inset(el, theme))
             .rounded_b(px(theme.radii.lg - 1.0))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .when(busy, |el| {
-                el.child(crate::icons::status_icon(
+                el.child(slopty_kit::icons::status_icon(
                     theme,
-                    crate::icons::Status::Working,
+                    slopty_kit::icons::Status::Working,
                     px(theme.typography.icon()),
                     hsla(s.text_muted),
                 ))
             })
             .child(
-                crate::kit::tabular(div())
+                slopty_kit::kit::tabular(div())
                     .id("search-status")
                     .debug_selector(|| "search-status".to_owned())
                     .role(Role::Status)
@@ -896,7 +896,7 @@ impl ProjectSearch {
             return div()
                 .flex_none()
                 .children(text.map(|text| {
-                    crate::kit::inset_x(div(), theme)
+                    slopty_kit::kit::inset_x(div(), theme)
                         .id("search-empty")
                         .debug_selector(|| "search-empty".to_owned())
                         .role(Role::Status)
@@ -937,10 +937,10 @@ impl Render for ProjectSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
         let height = f32::from(window.viewport_size().height);
-        let (_, ceiling) = crate::kit::Overlay::Editor.bounds();
+        let (_, ceiling) = slopty_kit::kit::Overlay::Editor.bounds();
         let mut context = KeyContext::new_with_defaults();
         context.add(CTX);
-        let panel = crate::kit::dialog(&theme, crate::kit::Overlay::Editor)
+        let panel = slopty_kit::kit::dialog(&theme, slopty_kit::kit::Overlay::Editor)
             .id("search")
             .debug_selector(|| "search".to_owned())
             .role(Role::Dialog)
@@ -952,12 +952,12 @@ impl Render for ProjectSearch {
             .child(self.list(cx))
             .when(self.footed(cx), |el| el.child(self.foot(cx)));
         // The keyboard summons it, so it fades in where it stands, with no travel.
-        let panel = crate::kit::fade_in(panel, "search-open", cx);
+        let panel = slopty_kit::kit::fade_in(panel, "search-open", cx);
         let page = isize::try_from(PAGE).unwrap_or(1);
         let home = self.query.read(cx).focus_handle(cx);
-        crate::a11y::hold(&self.scope, &home, cx);
-        let root = crate::kit::anchor(&theme, window).id("search-backdrop");
-        let root = crate::a11y::trap(root, &self.scope)
+        slopty_kit::a11y::hold(&self.scope, &home, cx);
+        let root = slopty_kit::kit::anchor(&theme, window).id("search-backdrop");
+        let root = slopty_kit::a11y::trap(root, &self.scope)
             .child(panel)
             // While an input method composes in a field, these keys are its own.
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {

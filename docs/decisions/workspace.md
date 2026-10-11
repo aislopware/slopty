@@ -146,7 +146,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   while the tile's worker is away); the focused tile's hairline turns accent, drawn over the
   tile (so the content never moves by a point), an agent waiting on the human's warn. The
   add-worker panel is an overlay, except on the first run (ui.md, 2026-09-25). Reduce Motion
-  lands every animation at once. Theme tokens only (`kit.rs` lint tests). The column marks
+  lands every animation at once. Theme tokens only (the lint tests in `lints.rs`). The column marks
   became dots and the ring a hairline on 2026-09-25 (ui.md, "The de-slop pass").
 
 - ✅ **Only what is near the view costs anything** (2026-09-24). A tile is laid out only when
@@ -1783,7 +1783,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     file's first lines. A line the card cuts ends in an ellipsis, as the facts do. A shell's
     or agent's longer text stands on the card's foot so the newest line is never clipped; a
     short one hangs from the top as a fresh screen's does. It is the one chrome use of the mono face besides the settings file and an address,
-    since it quotes a body whose own face is mono (`kit.rs`'s lint lists it).
+    since it quotes a body whose own face is mono (`lints.rs` lists it).
   - **Copied, never read while drawing.** The quote and what only the text says (a file's
     length, kind and task list) are copied out of the body when the overview opens, and again
     while it shows when that body's facts change: a command starts or ends, a file's edit is

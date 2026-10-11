@@ -17,11 +17,10 @@ use gpui::{
     App, Div, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{Status, status_mark};
+use slopty_kit::kit;
 use slopty_theme::{Theme, Typography};
-
-use crate::colors::hsla;
-use crate::icons::{Status, status_mark};
-use crate::kit;
 
 /// The tile's button that updates a worker on a different build.
 pub const UPDATE: &str = "Update";

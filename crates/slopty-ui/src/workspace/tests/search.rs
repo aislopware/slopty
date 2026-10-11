@@ -182,8 +182,9 @@ fn the_toggles_search_again_and_closing_stops_the_search(cx: &mut TestAppContext
         })
         .collect();
     assert_eq!(starts, [("/w/lib", false), ("/w/lib", true)], "{asked:#?}");
-    let case =
-        tree(cx).into_iter().find(|n| n.label.as_deref() == Some(crate::kit::find::MATCH_CASE));
+    let case = tree(cx)
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(slopty_kit::kit::find::MATCH_CASE));
     assert!(case.is_some(), "the toggle is there by name");
 
     view.read_with(cx, |v, cx| {

@@ -18,14 +18,14 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_core::WallMs;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, Delivery, ThreadState, TurnState};
 
 use super::ThreadView;
-use crate::colors::hsla;
 use crate::conversation::figures;
-use crate::icons::Symbol;
-use crate::kit::{self, ButtonKind};
 
 /// What goes at a limit's reset when nothing is typed.
 const CONTINUE: &str = "Continue";
@@ -84,7 +84,7 @@ impl ThreadView {
         if !state.meta.can(Cap::SCHEDULE) || self.composing.editing() {
             return None;
         }
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let at = limit_lifts(state, now)?;
         // One waiting already says when the thread goes on.
         if state.pending.iter().any(|p| matches!(p.delivery, Delivery::At { .. })) {

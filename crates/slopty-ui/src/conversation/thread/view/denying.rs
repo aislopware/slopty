@@ -17,12 +17,12 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::ButtonKind;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AskId, Choice, Request};
 
 use super::ThreadView;
-use crate::colors::hsla;
-use crate::kit::ButtonKind;
 
 /// What the reason's field says before anything is written.
 pub const PLACEHOLDER: &str = "Why, for the agent (optional)";

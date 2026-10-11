@@ -18,12 +18,12 @@ use gpui::{
 };
 use slopty_client::items::{ItemCache, ItemDoc};
 use slopty_client::layout::WorkerKey;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
 
 use super::WorkspaceView;
 use super::area::Placed;
 use super::tile::title_ink;
-use crate::colors::hsla;
-use crate::draw::Draw;
 
 /// The cache and the writes under way.
 #[derive(Default)]

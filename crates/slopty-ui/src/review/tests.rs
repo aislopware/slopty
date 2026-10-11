@@ -842,7 +842,10 @@ fn said(cx: &mut VisualTestContext) -> Vec<String> {
         window.refresh();
     });
     cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window)).into_iter().filter_map(|n| n.label).collect()
+    cx.update(|window, _cx| slopty_kit::a11y::tree(window))
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect()
 }
 
 /// The review asks who wrote its files' lines as the diff ends, once each; the answer names a
@@ -981,7 +984,7 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
             window.refresh();
         });
         cx.run_until_parked();
-        cx.update(|window, _cx| crate::a11y::tree(window))
+        cx.update(|window, _cx| slopty_kit::a11y::tree(window))
             .into_iter()
             .filter(|n| n.role == "MenuItem")
             .filter_map(|n| n.label)

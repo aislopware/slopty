@@ -16,14 +16,14 @@ use gpui::{
 };
 use slopty_client::layout::{Saved, SavedBoard, TileRef, WorkerKey};
 use slopty_core::ItemId;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::Symbol;
 use slopty_proto::project::ProjectId;
 
 use super::WorkspaceView;
 use super::area::Placed;
 use super::tile::{BodyState, title_ink};
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::Symbol;
 
 /// The key board tiles sit under: the nil id, which no worker has.
 pub(super) const BOARD_WORKER: WorkerKey = WorkerKey::new(0);

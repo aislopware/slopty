@@ -73,7 +73,7 @@ fn a_focused_shell_whose_find_bar_has_the_keys_is_replayed_until_it_is_typed_in(
     view.update_in(cx, |v, _w, cx| v.focus_tile(mine, cx));
     cx.run_until_parked();
     let focused = view.read_with(cx, |v, _| v.terminal(quiet).cloned()).expect("attached");
-    let line = crate::kit::find::Query { needle: "line".to_owned(), ..Default::default() };
+    let line = slopty_kit::kit::find::Query { needle: "line".to_owned(), ..Default::default() };
     cx.update(|window, cx| {
         focused.update(cx, |t, cx| {
             t.find_with(&line, window, cx);

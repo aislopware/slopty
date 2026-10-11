@@ -27,15 +27,15 @@ use gpui::{
 };
 use slopty_client::layout::TileRef;
 use slopty_core::SessionId;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{Drawn, IconSize, Symbol};
+use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 
 use super::WorkspaceView;
 use super::actions::TabTerminal;
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{Drawn, IconSize, Symbol};
-use crate::kit;
 
 /// The toggle's name while the tab's terminal is put away, or the tab has none.
 pub(super) const SHOW_TERMINAL: &str = "Show the tab's terminal";

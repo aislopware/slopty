@@ -313,7 +313,7 @@ fn a_board_taller_than_its_tile_says_more_lies_below(cx: &mut TestAppContext) {
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
         let body = cx.debug_bounds("project-body").expect("drawn");
-        cx.update(|window, _| crate::retained::faded_edges(window, body))
+        cx.update(|window, _| slopty_kit::retained::faded_edges(window, body))
     };
     let edges = faded(cx);
     assert!(edges.bottom, "lanes run on below");
@@ -430,7 +430,7 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let fresh = |cx: &mut VisualTestContext, step: &str| {
         cx.run_until_parked();
-        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
         assert!(stale.is_none(), "{step}: the window shows a stale frame. {stale:?}");
     };
     fresh(cx, "the board");
@@ -653,7 +653,7 @@ fn the_palette_reaches_the_board(cx: &mut TestAppContext) {
     let lines = view.read_with(cx, |v, _| v.project_lines());
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].label, "Ship the project board");
-    assert_eq!(lines[0].status, Some(crate::icons::Status::NeedsYou), "its most urgent lane");
+    assert_eq!(lines[0].status, Some(slopty_kit::icons::Status::NeedsYou), "its most urgent lane");
 
     view.update_in(cx, |v, _w, cx| v.open_project(&fixtures::id("board"), cx));
     cx.run_until_parked();
@@ -1166,7 +1166,10 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window)).into_iter().filter_map(|n| n.label).collect()
+    cx.update(|window, _cx| slopty_kit::a11y::tree(window))
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect()
 }
 
 /// A board opens onto what changed since this client last looked. The first look has nothing

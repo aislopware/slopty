@@ -13,13 +13,13 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
     relative,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::thread::{Clipped, ItemId, ToolCall, ToolState};
 use slopty_theme::{Rgb, Surfaces, Typography};
 
 use super::ThreadView;
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// Lines of a long plan shown before it opens.
 const HEAD: usize = 12;
@@ -123,7 +123,7 @@ impl ThreadView {
                 kit::count(lines as u64, "line", "lines")
             ));
             let selector = format!("plan-more-{}", id.0);
-            crate::a11y::tab_stop(
+            slopty_kit::a11y::tab_stop(
                 div()
                     .id(ElementId::Name(SharedString::from(selector.clone())))
                     .debug_selector(move || selector)

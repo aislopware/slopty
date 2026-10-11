@@ -10,13 +10,13 @@ use gpui::{
     ListOffset, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::thread::{ItemId, ThreadId, TurnId};
 use slopty_theme::Typography;
 
 use super::ThreadView;
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// A thread above the subagent's on show, as the reader left it.
 #[derive(Debug)]
@@ -143,7 +143,7 @@ impl ThreadView {
                         let _was = this.leave_subagent(window, cx);
                     }),
                 ))
-                .child(self.icon(crate::icons::AGENT, s.text_muted))
+                .child(self.icon(slopty_kit::icons::AGENT, s.text_muted))
                 .child(
                     div()
                         .min_w_0()

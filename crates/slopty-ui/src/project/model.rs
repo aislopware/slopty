@@ -52,7 +52,7 @@ pub fn merged_words(merge: &Merge, piped: bool) -> Option<String> {
     let Merge::Merged { target, head, pushed, push_failed, .. } = merge else { return None };
     let at = format!("into {target} at {}", short_commit(head));
     Some(match push_failed {
-        Some(why) if !piped => format!("{at}, push failed: {}", crate::kit::first_line(why)),
+        Some(why) if !piped => format!("{at}, push failed: {}", slopty_kit::kit::first_line(why)),
         None if *pushed => format!("{at}, pushed"),
         Some(_) | None => at,
     })
@@ -201,8 +201,8 @@ impl Lane {
 
     /// Its stage, the one its head wears.
     #[must_use]
-    pub const fn phase(self) -> crate::icons::Phase {
-        use crate::icons::Phase;
+    pub const fn phase(self) -> slopty_kit::icons::Phase {
+        use slopty_kit::icons::Phase;
         match self {
             Self::NeedsYou => Phase::NeedsYou,
             Self::Failed => Phase::Failed,
@@ -758,7 +758,7 @@ impl Board {
                 let mut failed = Vec::new();
                 if let Some(run) = self.verdict(task).filter(|r| !r.passed) {
                     let command = self.project.verifier.as_deref().unwrap_or("The verifier");
-                    let summary = crate::kit::first_line(&run.summary);
+                    let summary = slopty_kit::kit::first_line(&run.summary);
                     let what =
                         if summary.is_empty() { String::new() } else { format!(": {summary}") };
                     failed.push(format!(
@@ -812,7 +812,7 @@ impl Board {
                 Some(format!(
                     "Resolve the conflicts. Your work does not rebase onto {target}: {}. Rebase \
                      onto {onto}, resolve them, then {then}",
-                    crate::kit::first_line(why)
+                    slopty_kit::kit::first_line(why)
                 ))
             }
             TaskAction::Review
@@ -854,7 +854,7 @@ impl Board {
             });
             return failed
                 .map(|why| {
-                    let words = format!("Push failed: {}", crate::kit::first_line(why));
+                    let words = format!("Push failed: {}", slopty_kit::kit::first_line(why));
                     failure(StageKind::Push, words)
                 })
                 .into_iter()
@@ -991,7 +991,7 @@ impl Board {
 #[must_use]
 pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
     let at = name(step.worker);
-    let first = |text: &str| crate::kit::first_line(text).to_owned();
+    let first = |text: &str| slopty_kit::kit::first_line(text).to_owned();
     match (step.kind, &step.state) {
         (StepKind::Clone, StepState::Running { phase, percent }) => match percent {
             Some(p) => format!("Cloning on {at}: {} {p}%", first(phase)),
@@ -1067,7 +1067,7 @@ pub fn verdict_detail(run: &VerifierRun) -> String {
         }
     }
     if run.took_ms > 0 {
-        parts.push(crate::kit::duration(std::time::Duration::from_millis(run.took_ms)));
+        parts.push(slopty_kit::kit::duration(std::time::Duration::from_millis(run.took_ms)));
     }
     parts.join(" \u{b7} ")
 }

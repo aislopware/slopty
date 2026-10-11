@@ -116,11 +116,7 @@ fn diff(shown: &[String], scratch: &[String], limit: usize) -> Option<String> {
 
 /// Which edges of `region` what the window last painted fades toward (`gpui::edge_fade`): an
 /// edge counts once a primitive is painted in a fade whose ramp rises from that edge of `region`.
-#[cfg(test)]
-pub(crate) fn faded_edges(
-    window: &Window,
-    region: gpui::Bounds<gpui::Pixels>,
-) -> gpui::Edges<bool> {
+pub fn faded_edges(window: &Window, region: gpui::Bounds<gpui::Pixels>) -> gpui::Edges<bool> {
     let scale = window.scale_factor();
     let sides = [region.left(), region.top(), region.right(), region.bottom()]
         .map(|side| f32::from(side) * scale);
@@ -131,16 +127,16 @@ pub(crate) fn faded_edges(
         else {
             continue;
         };
-        for (slot, side) in sides.iter().enumerate() {
+        for (((faded, side), edge), rate) in faded.iter_mut().zip(&sides).zip(edge).zip(rate) {
             // A fade's region is snapped out to whole device pixels.
-            faded[slot] |= rate[slot] != 0.0 && (edge[slot] - side).abs() <= 1.0;
+            *faded |= rate != 0.0 && (edge - side).abs() <= 1.0;
         }
     }
-    gpui::Edges { left: faded[0], top: faded[1], right: faded[2], bottom: faded[3] }
+    let [left, top, right, bottom] = faded;
+    gpui::Edges { left, top, right, bottom }
 }
 
 /// The four figures after `key` in a fade's description.
-#[cfg(test)]
 fn ramp_field(ramps: &str, key: &str) -> Option<[f32; 4]> {
     let list = ramps.split(key).nth(1)?.split(']').next()?;
     let figures: Vec<f32> = list.split(", ").filter_map(|f| f.parse().ok()).collect();

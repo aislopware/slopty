@@ -38,13 +38,13 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 pub use native::{Dialog, DialogKind, Edit};
 use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Tally};
+use slopty_kit::kit::{self, ButtonKind, FindBar};
 use slopty_proto::transfer::TunnelRefusal;
 use slopty_theme::Theme;
 
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
-use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Tally};
-use crate::kit::{self, ButtonKind, FindBar};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 use crate::workspace::actions::{PageCut, PageRedo, PageSelectAll, PageUndo, UndoClose};
 
@@ -1310,7 +1310,7 @@ impl BrowserView {
                     .text_size(px(theme.typography.small()))
                     .font_family(theme.typography.ui_family.clone())
                     .text_color(hsla(s.text))
-                    .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone)))
+                    .child(slopty_kit::icons::icon(theme, icon, IconSize::Inline, hsla(tone)))
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .child(kit::meta(kit::tabular(div()), theme).flex_none().child(status))
                     .when(cfg!(target_os = "macos") && row.state == DownloadState::Saved, |el| {

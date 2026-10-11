@@ -22,8 +22,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use slopty_client::pacing::percentile;
-
-use crate::shown::Shown;
+use slopty_kit::shown::Shown;
 
 /// Keys kept for the percentiles.
 pub const RING: usize = 256;

@@ -18,15 +18,15 @@ use gpui::{
     AnyElement, App, Context, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::wire::{Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{Cap, TurnId};
 
 use super::{TOOL_ROW, ThreadView, ThreadViewEvent};
-use crate::colors::hsla;
 use crate::conversation::thread::activity;
 use crate::conversation::thread::rows::Row;
-use crate::icons::Symbol;
-use crate::kit::{self, ButtonKind};
 
 /// How many files the card lists before the way to the rest.
 pub(super) const SHOWN: usize = 3;
@@ -177,7 +177,7 @@ impl ThreadView {
         let shown = if open { files.len() } else { SHOWN };
         let rows = files.iter().take(shown).enumerate().map(|(ix, file)| {
             let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_owned();
-            crate::a11y::tab_stop(
+            slopty_kit::a11y::tab_stop(
                 div()
                     .id(("changes-file", ix))
                     .debug_selector(move || format!("changes-file-{ix}"))
@@ -193,9 +193,9 @@ impl ThreadView {
                     .text_size(px(theme.typography.small()))
                     .text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                    .child(Self::slot().child(crate::icons::symbol(
+                    .child(Self::slot().child(slopty_kit::icons::symbol(
                         theme,
-                        crate::icons::file_mark(&name),
+                        slopty_kit::icons::file_mark(&name),
                         px(theme.typography.icon()),
                         hsla(s.text_muted),
                     )))

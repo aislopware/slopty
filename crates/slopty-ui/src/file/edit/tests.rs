@@ -241,7 +241,7 @@ fn timing_of_the_editor_helpers() {
     let mib = lines((1 << 20) / line.len());
     let big = lines((16 << 20) / line.len());
     let find = |text: &str, needle: &str, regex: bool| {
-        let query = crate::kit::find::Query {
+        let query = slopty_kit::kit::find::Query {
             needle: needle.to_owned(),
             match_case: false,
             whole_word: false,

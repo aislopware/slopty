@@ -10,14 +10,14 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Notice, Retry, Turn};
 use slopty_theme::{Rgb, Surfaces};
 
 use super::{TOOL_ROW, ThreadView, composer, tokens};
-use crate::colors::hsla;
 use crate::conversation::figures::{model_name, spoken_model};
-use crate::icons::Symbol;
-use crate::kit;
 
 /// A compaction in words: "Compacted 120k → 18k tokens".
 pub(super) fn compacted(c: &Compaction) -> String {

@@ -80,6 +80,11 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown
 use slopty_client::groups::{self, GroupKey, fact};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark};
+use slopty_kit::kit::{self, meta, tabular};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::server::{Os, WorkerCaps};
@@ -101,11 +106,6 @@ use super::grouping::{Grouping, group_glyph, parent_of, section_name};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark};
-use crate::kit::{self, meta, tabular};
 use crate::palette::Plate;
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
@@ -552,7 +552,7 @@ fn at_rest(agent: &ThreadStand) -> bool {
 
 /// The readouts' clock in Unix milliseconds, as the workers stamp an agent's change.
 fn now_ms(cx: &gpui::App) -> u64 {
-    crate::clock::now(cx).as_millis()
+    slopty_kit::clock::now(cx).as_millis()
 }
 
 /// One row of the navigator's list, `MonoCode`'s pill as a tab is one
@@ -632,7 +632,7 @@ fn group_ink(theme: &Theme, key: &GroupKey) -> Rgb {
 
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
 fn disclosure(theme: &Theme, chevron: Symbol, ink: Rgb) -> Div {
-    crate::icons::Drawn::disclosure(theme, chevron)
+    slopty_kit::icons::Drawn::disclosure(theme, chevron)
         .slot(px(IconSize::Inline.slot(theme)), hsla(ink))
 }
 
@@ -2065,7 +2065,7 @@ impl WorkspaceView {
 
     /// The mark of `thread`'s agent, the neutral glyph while it is not known.
     pub(super) fn thread_mark(&self, thread: ThreadId) -> Mark {
-        self.thread_agent(thread).map_or_else(|| crate::icons::AGENT.into(), Mark::agent)
+        self.thread_agent(thread).map_or_else(|| slopty_kit::icons::AGENT.into(), Mark::agent)
     }
 
     /// A declared project's title, else its name.
@@ -2141,7 +2141,7 @@ impl WorkspaceView {
             }
             Some(done) => done.command.clone(),
             None => asks
-                .map(|a| crate::markdown::plain_line(&a.title))
+                .map(|a| slopty_kit::markdown::plain_line(&a.title))
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_default(),
         };
@@ -2883,7 +2883,7 @@ impl WorkspaceView {
                     }
                 })
                 .child(
-                    crate::icons::Drawn::new(theme, glyph, IconSize::Lead)
+                    slopty_kit::icons::Drawn::new(theme, glyph, IconSize::Lead)
                         .slot(px(IconSize::Lead.slot(theme)), hsla(ink)),
                 );
             tab_stop(el, s.focus)
@@ -3079,9 +3079,11 @@ impl WorkspaceView {
         self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default()
     }
 
-    /// The glyph `key`'s machine wears, by its form ([`crate::icons::machine`]).
+    /// The glyph `key`'s machine wears, by its form ([`slopty_kit::icons::machine`]).
     pub(super) fn machine_glyph(&self, key: WorkerKey) -> Symbol {
-        crate::icons::machine(self.workers.get(&key).and_then(|w| w.caps.as_ref()).map(|c| c.form))
+        slopty_kit::icons::machine(
+            self.workers.get(&key).and_then(|w| w.caps.as_ref()).map(|c| c.form),
+        )
     }
 
     /// A row of *Needs you* or *To review*: what it is and how long it has waited, then what
@@ -3166,7 +3168,7 @@ impl WorkspaceView {
             .child(lead_slot(theme, {
                 let side = px(theme.typography.icon());
                 let tone = hsla(agent.status.ink(theme));
-                crate::icons::status_icon(theme, agent.status, side, tone).into_any_element()
+                slopty_kit::icons::status_icon(theme, agent.status, side, tone).into_any_element()
             }))
             .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
@@ -3259,7 +3261,7 @@ impl WorkspaceView {
             .child(lead_slot(theme, {
                 let side = px(theme.typography.icon());
                 let tone = hsla(Status::Done.ink(theme));
-                crate::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
+                slopty_kit::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
             }))
             .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
@@ -3460,7 +3462,9 @@ impl WorkspaceView {
             el.when(!shown && !touch, |el| el.opacity(0.0))
                 .group_hover(group.clone(), |st| st.opacity(1.0))
                 .focus(|st| st.opacity(1.0))
-                .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).opacity(1.0))
+                .focus_visible(move |st| {
+                    st.outline_ring(slopty_kit::a11y::ring(s.focus)).opacity(1.0)
+                })
         };
         // Under the pointer the machine's glyph turns into the fold's chevron in its place, as a
         // project's does (`MonoCode`'s folder row); a finger has no hover, so on touch the

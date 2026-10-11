@@ -48,15 +48,15 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit::ButtonKind;
 use slopty_platform::login::Login;
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::{Choice, Kind};
 use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
 
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{IconSize, Symbol};
-use crate::kit::ButtonKind;
 use crate::palette::PaletteItem;
 
 #[path = "settings_form_schema.rs"]
@@ -998,14 +998,14 @@ impl SettingsForm {
             .debug_selector(|| "settings-search".to_owned())
             .flex_none()
             .gap(px(theme.spacing.xs))
-            .px(px(crate::kit::FIELD_INSET))
+            .px(px(slopty_kit::kit::FIELD_INSET))
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                 if !this.composing(cx) {
                     this.step_from(None, true, window, cx);
                     cx.stop_propagation();
                 }
             }))
-            .child(crate::icons::icon(
+            .child(slopty_kit::icons::icon(
                 theme,
                 Symbol::Magnifyingglass,
                 IconSize::Inline,
@@ -1050,12 +1050,12 @@ impl SettingsForm {
                     if selected {
                         // The sections lie on the chrome, so the one shown rises off it as a
                         // white plate in light, as the navigator's chosen row does.
-                        crate::kit::selected(el, theme, keyed)
+                        slopty_kit::kit::selected(el, theme, keyed)
                             .text_color(hsla(s.text))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     } else {
                         el.text_color(hsla(s.text_secondary))
-                            .map(crate::kit::eased)
+                            .map(slopty_kit::kit::eased)
                             .hover(move |el| el.bg(hover).text_color(hsla(s.text)))
                     }
                 })
@@ -1066,10 +1066,10 @@ impl SettingsForm {
                     this.tab_key(section, ev, window, cx);
                 }))
                 .child(section.label());
-            crate::a11y::tab_stop(el, s.focus)
+            slopty_kit::a11y::tab_stop(el, s.focus)
         };
         let groups = Group::ALL.into_iter().enumerate().map(|(n, group)| {
-            let heading = crate::kit::typed(div(), theme.roles().section)
+            let heading = slopty_kit::kit::typed(div(), theme.roles().section)
                 .id(("settings-group", n))
                 .debug_selector(move || format!("settings-group-{n}"))
                 .role(gpui::accesskit::Role::Heading)
@@ -1177,12 +1177,12 @@ impl SettingsForm {
             .role(gpui::accesskit::Role::Button)
             .aria_label(words)
             .text_color(hsla(s.text_secondary))
-            .map(crate::kit::eased)
+            .map(slopty_kit::kit::eased)
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .active(move |el| el.bg(hsla(s.pressed)))
             .on_click(cx.listener(move |_this, _ev, _window, cx| then(cx)))
             .child(words);
-        crate::a11y::tab_stop(el, s.focus)
+        slopty_kit::a11y::tab_stop(el, s.focus)
     }
 
     /// A group's heading over the rows it names, as System Settings titles its groups: the
@@ -1193,7 +1193,7 @@ impl SettingsForm {
         let text: SharedString = text.into();
         let theme = &self.theme;
         let spacing = theme.spacing;
-        crate::kit::typed(div(), theme.roles().section)
+        slopty_kit::kit::typed(div(), theme.roles().section)
             .id(("settings-heading", n))
             .debug_selector(move || format!("settings-heading-{n}"))
             .role(gpui::accesskit::Role::Heading)
@@ -1213,7 +1213,7 @@ impl SettingsForm {
     /// tone, a step under the ring, at its leading inset.
     fn footer(&self, words: &'static str, n: usize) -> AnyElement {
         let theme = &self.theme;
-        crate::kit::typed(div(), theme.roles().metadata)
+        slopty_kit::kit::typed(div(), theme.roles().metadata)
             .id(("settings-footer", n))
             .debug_selector(move || format!("settings-footer-{n}"))
             .aria_label(words)
@@ -1236,7 +1236,7 @@ impl SettingsForm {
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let searching = !self.query.trim().is_empty();
         let words = if self.narrow || searching { SETTINGS } else { self.section.label() };
-        let title = crate::kit::typed(div(), theme.roles().panel_title)
+        let title = slopty_kit::kit::typed(div(), theme.roles().panel_title)
             .id("settings-title")
             .debug_selector(|| "settings-title".to_owned())
             .role(gpui::accesskit::Role::Heading)
@@ -1247,7 +1247,7 @@ impl SettingsForm {
             .text_ellipsis()
             .text_color(hsla(s.text))
             .child(words);
-        let row = crate::kit::priority_row("settings-head-row")
+        let row = slopty_kit::kit::priority_row("settings-head-row")
             .h(px(theme.density.row))
             .gap(px(spacing.sm))
             .title(title, px(theme.typography.ui_size * TITLE_FLOOR_EMS))
@@ -1255,12 +1255,12 @@ impl SettingsForm {
         let picks =
             !self.narrow && !searching && Self::picks_machine(self.section) && self.picks_any();
         let row = if picks {
-            row.item("machine", crate::kit::Priority::ESSENTIAL, self.machine_pick(true, cx))
+            row.item("machine", slopty_kit::kit::Priority::ESSENTIAL, self.machine_pick(true, cx))
         } else {
             row
         };
         let row = if self.narrow {
-            let done = crate::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
+            let done = slopty_kit::kit::button(theme, "settings-done", "Done", ButtonKind::Primary)
                 .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
             if self.file_opens {
                 let open = |_this: &mut Self,
@@ -1269,21 +1269,25 @@ impl SettingsForm {
                             cx: &mut Context<Self>| {
                     cx.emit(SettingsFormEvent::OpenFile);
                 };
-                let file =
-                    crate::kit::button(theme, "settings-open-file", OPEN_FILE, ButtonKind::Link)
-                        .on_click(cx.listener(open));
-                let glyph = crate::kit::icon_button(
+                let file = slopty_kit::kit::button(
+                    theme,
+                    "settings-open-file",
+                    OPEN_FILE,
+                    ButtonKind::Link,
+                )
+                .on_click(cx.listener(open));
+                let glyph = slopty_kit::kit::icon_button(
                     theme,
                     "settings-open-file-glyph",
                     Symbol::Curlybraces,
                     OPEN_FILE,
                 )
                 .on_click(cx.listener(open));
-                row.item("file", crate::kit::Priority::HIGH, file)
-                    .item("done", crate::kit::Priority::ESSENTIAL, done)
+                row.item("file", slopty_kit::kit::Priority::HIGH, file)
+                    .item("done", slopty_kit::kit::Priority::ESSENTIAL, done)
                     .menu(glyph)
             } else {
-                row.item("done", crate::kit::Priority::ESSENTIAL, done)
+                row.item("done", slopty_kit::kit::Priority::ESSENTIAL, done)
             }
         } else {
             row
@@ -1363,7 +1367,7 @@ impl SettingsForm {
         }
         if key == "tab" && !(m.control || m.alt || m.platform) {
             self.recording = None;
-            crate::a11y::step(!m.shift, window, cx);
+            slopty_kit::a11y::step(!m.shift, window, cx);
             cx.notify();
             return;
         }
@@ -1457,7 +1461,7 @@ impl SettingsForm {
                 .flex()
                 .items_center()
                 .gap(px(spacing.xxs))
-                .children(row.keys.iter().map(|k| crate::kit::key_cap(theme, k.clone())))
+                .children(row.keys.iter().map(|k| slopty_kit::kit::key_cap(theme, k.clone())))
                 .into_any_element()
         };
         let quiet = hsla(s.text_muted);
@@ -1474,7 +1478,7 @@ impl SettingsForm {
             .rounded(px(theme.radii.sm))
             .min_w(px(FIELD_WIDTH))
             .justify_end()
-            .px(px(crate::kit::FIELD_INSET))
+            .px(px(slopty_kit::kit::FIELD_INSET))
             .text_size(px(theme.typography.small()))
             .cursor_pointer()
             .when(unbound, |el| {
@@ -1491,7 +1495,7 @@ impl SettingsForm {
             None => well,
         };
         let reset = row.set.then(|| {
-            crate::kit::icon_button(
+            slopty_kit::kit::icon_button(
                 theme,
                 format!("settings-key-reset-{ix}"),
                 Symbol::ArrowUturnBackward,
@@ -1508,20 +1512,20 @@ impl SettingsForm {
             .flex()
             .items_baseline()
             .gap(px(spacing.sm))
-            .map(crate::kit::hint_timing)
+            .map(slopty_kit::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let (name, theme) = (name.clone(), Rc::clone(&hint_theme));
-                cx.new(|_| crate::kit::Hint::new(name, "", theme).mono()).into()
+                cx.new(|_| slopty_kit::kit::Hint::new(name, "", theme).mono()).into()
             })
             .child(
-                crate::kit::typed(div(), theme.roles().action)
+                slopty_kit::kit::typed(div(), theme.roles().action)
                     .min_w_0()
                     .truncate()
                     .text_color(hsla(s.text))
                     .child(row.label.clone()),
             )
             .children(was.map(|was| {
-                crate::kit::meta(div(), theme)
+                slopty_kit::kit::meta(div(), theme)
                     .line_height(px(theme.roles().metadata.line))
                     .debug_selector(move || format!("settings-key-was-{ix}"))
                     .flex_shrink(1.0)
@@ -1549,7 +1553,7 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.xs))
                     .children(reset)
-                    .child(crate::a11y::tab_stop(well, s.focus)),
+                    .child(slopty_kit::a11y::tab_stop(well, s.focus)),
             )
             .into_any_element()
     }
@@ -1562,7 +1566,7 @@ impl SettingsForm {
         let text = if more == 0 { first.clone() } else { format!("{first} (+{more} more)") };
         let theme = &self.theme;
         Some(
-            crate::kit::meta(div(), theme)
+            slopty_kit::kit::meta(div(), theme)
                 .id("settings-keys-said")
                 .debug_selector(|| "settings-keys-said".to_owned())
                 .role(gpui::accesskit::Role::Alert)
@@ -1588,15 +1592,15 @@ impl SettingsForm {
                 .aria_label("About")
                 .aria_description(format!("{said}, {build}"))
                 .when(first, |el| el.mt(px(spacing.sm)))
-                .child(crate::kit::brand(
+                .child(slopty_kit::kit::brand(
                     theme,
                     Some(
-                        crate::kit::tabular(crate::kit::meta(div(), theme))
+                        slopty_kit::kit::tabular(slopty_kit::kit::meta(div(), theme))
                             .flex()
                             .items_center()
                             .gap(px(spacing.xs))
                             .child(said)
-                            .child(crate::kit::separator(theme))
+                            .child(slopty_kit::kit::separator(theme))
                             .child(build)
                             .into_any_element(),
                     ),
@@ -1622,13 +1626,13 @@ impl SettingsForm {
                 .hover(gpui::Styled::underline)
                 .on_click(move |_ev, _window, _cx| slopty_platform::open_url(url))
                 .child(words)
-                .child(crate::icons::icon(
+                .child(slopty_kit::icons::icon(
                     theme,
                     Symbol::ArrowUpRight,
                     IconSize::Inline,
                     hsla(s.text_muted),
                 ));
-            children.push(crate::a11y::tab_stop(link, s.focus).into_any_element());
+            children.push(slopty_kit::a11y::tab_stop(link, s.focus).into_any_element());
         }
     }
 
@@ -1749,7 +1753,7 @@ impl SettingsForm {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let under = |el: Div| {
-            crate::kit::meta(el, theme)
+            slopty_kit::kit::meta(el, theme)
                 .line_height(px(theme.roles().metadata.line))
                 .w_full()
                 .min_w_0()
@@ -1789,7 +1793,7 @@ impl SettingsForm {
                     .items_center()
                     .gap(px(spacing.md))
                     .child(
-                        crate::kit::typed(div(), theme.roles().action)
+                        slopty_kit::kit::typed(div(), theme.roles().action)
                             .flex_1()
                             .min_w_0()
                             .truncate()
@@ -1843,7 +1847,7 @@ impl SettingsForm {
                 this.control_key(ix, ev, window, cx);
             },
         ));
-        crate::a11y::tab_stop(el, self.theme.surfaces.focus)
+        slopty_kit::a11y::tab_stop(el, self.theme.surfaces.focus)
     }
 
     /// A switch: the neutral solid with its knob at its end when on, a quiet track when off. The
@@ -1891,9 +1895,9 @@ impl SettingsForm {
             .rounded_full()
             .bg(ink);
         let dot = match turned {
-            Some(turn) if crate::kit::motion(cx) => {
+            Some(turn) if slopty_kit::kit::motion(cx) => {
                 let from = travel - to;
-                let slide = crate::kit::Pace::Settle.animation();
+                let slide = slopty_kit::kit::Pace::Settle.animation();
                 let turn = u64::try_from(turn).unwrap_or_default();
                 let named = gpui::ElementId::NamedInteger(slide_id, turn);
                 dot.with_animation(named, slide, move |el, t| {
@@ -1950,7 +1954,7 @@ impl SettingsForm {
                     div()
                         .flex_none()
                         .h(px(theme.typography.small()))
-                        .border_l(crate::kit::HAIR)
+                        .border_l(slopty_kit::kit::HAIR)
                         .border_color(hsla(s.stroke))
                         .when(beside, gpui::Styled::invisible)
                         .into_any_element(),
@@ -1986,7 +1990,7 @@ impl SettingsForm {
                 .child(words);
             segments.push(el.into_any_element());
         }
-        let el = crate::kit::track(theme)
+        let el = slopty_kit::kit::track(theme)
             .flex_none()
             .h(px(theme.density.row))
             .id(("settings-choice", ix))
@@ -2030,11 +2034,11 @@ impl SettingsForm {
                 .rounded(px(theme.radii.xs))
                 .when(live, |el| {
                     el.cursor_pointer()
-                        .map(crate::kit::eased)
+                        .map(slopty_kit::kit::eased)
                         .hover(move |el| el.bg(hsla(s.hover)))
                         .on_click(cx.listener(move |this, _ev, _window, cx| this.nudge(ix, up, cx)))
                 })
-                .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(ink)))
+                .child(slopty_kit::icons::icon(theme, icon, IconSize::Inline, hsla(ink)))
         };
         let el = well(theme)
             .id(("settings-stepper", ix))
@@ -2048,7 +2052,7 @@ impl SettingsForm {
             .px(px(spacing.xxs))
             .child(button(false))
             .child(
-                crate::kit::tabular(div())
+                slopty_kit::kit::tabular(div())
                     .min_w(px(theme.typography.ui_size * 4.0))
                     .flex()
                     .justify_center()
@@ -2073,7 +2077,7 @@ impl SettingsForm {
             .w(px(FONT_WIDTH))
             .justify_between()
             .gap(px(spacing.xs))
-            .px(px(crate::kit::FIELD_INSET))
+            .px(px(slopty_kit::kit::FIELD_INSET))
             .cursor_pointer()
             .on_click(cx.listener(move |this, ev: &ClickEvent, _window, cx| {
                 // Return on the open list picks the family the keyboard is on.
@@ -2094,7 +2098,7 @@ impl SettingsForm {
                     .text_size(px(theme.typography.ui_size))
                     .child(family),
             )
-            .child(crate::icons::icon(
+            .child(slopty_kit::icons::icon(
                 theme,
                 Symbol::ChevronDown,
                 IconSize::Inline,
@@ -2129,13 +2133,13 @@ impl SettingsForm {
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .when(at, |el| el.bg(hsla(s.selected)))
-                .when(!at, |el| crate::kit::eased(el).hover(move |el| el.bg(hsla(s.hover))))
+                .when(!at, |el| slopty_kit::kit::eased(el).hover(move |el| el.bg(hsla(s.hover))))
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.pick_font(ix, &picked, cx);
                 }))
                 .child(div().font_family(family.clone()).child(family.clone()))
                 .when(on, |el| {
-                    el.child(crate::icons::icon(
+                    el.child(slopty_kit::icons::icon(
                         theme,
                         Symbol::Checkmark,
                         IconSize::Inline,
@@ -2155,7 +2159,7 @@ impl SettingsForm {
             .mb(px(spacing.sm))
             .p(px(spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .map(|el| crate::kit::inset(el, theme))
+            .map(|el| slopty_kit::kit::inset(el, theme))
             .text_size(px(theme.typography.ui_size))
             .children(rows)
             .into_any_element()
@@ -2173,7 +2177,7 @@ impl SettingsForm {
             .h(px(theme.typography.icon()))
             .overflow_hidden()
             .rounded(px(theme.radii.xs))
-            .border(crate::kit::HAIR)
+            .border(slopty_kit::kit::HAIR)
             .border_color(hsla(theme.surfaces.border))
             .children(ansi.iter().map(|c| div().w(px(theme.spacing.sm)).h_full().bg(hsla(*c))))
     }
@@ -2196,7 +2200,7 @@ impl SettingsForm {
                         .flex_none()
                         .size(px(theme.typography.icon()))
                         .rounded(px(theme.radii.xs))
-                        .border(crate::kit::HAIR)
+                        .border(slopty_kit::kit::HAIR)
                         .border_color(hsla(s.border))
                         .bg(hsla(colour))
                 })
@@ -2216,7 +2220,7 @@ impl SettingsForm {
             .w(px(if row.field.kind == Kind::Colour { FIELD_WIDTH } else { TEXT_WIDTH }))
             .max_w_full()
             .gap(px(spacing.xs))
-            .px(px(crate::kit::FIELD_INSET))
+            .px(px(slopty_kit::kit::FIELD_INSET))
             .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
                 if !this.composing(cx) {
                     this.step_from(Some(ix), false, window, cx);
@@ -2243,9 +2247,9 @@ impl SettingsForm {
     }
 }
 
-/// A control's well: a row tall, a field's ground ([`crate::kit::field`]), no hairline.
+/// A control's well: a row tall, a field's ground ([`slopty_kit::kit::field`]), no hairline.
 fn well(theme: &Theme) -> Div {
-    crate::kit::field(div(), theme)
+    slopty_kit::kit::field(div(), theme)
         .flex_none()
         .h(px(theme.density.row))
         .flex()
@@ -2297,10 +2301,10 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
                 .px(inset)
                 .bg(wash)
                 .border_color(ring)
-                .border_l(crate::kit::HAIR)
-                .border_r(crate::kit::HAIR)
-                .when(first, |el| el.border_t(crate::kit::HAIR).rounded_t(r))
-                .when(last, |el| el.border_b(crate::kit::HAIR).rounded_b(r))
+                .border_l(slopty_kit::kit::HAIR)
+                .border_r(slopty_kit::kit::HAIR)
+                .when(first, |el| el.border_t(slopty_kit::kit::HAIR).rounded_t(r))
+                .when(last, |el| el.border_b(slopty_kit::kit::HAIR).rounded_b(r))
                 .when(spaced && !first, |el| {
                     el.child(
                         div()
@@ -2309,7 +2313,7 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
                             .top_0()
                             .left(inset)
                             .right_0()
-                            .h(crate::kit::HAIR)
+                            .h(slopty_kit::kit::HAIR)
                             .bg(rule),
                     )
                 })
@@ -2453,9 +2457,10 @@ fn ansi_of(mut ansi: [Rgb; 16], own: &[String]) -> [Rgb; 16] {
 /// The bundled face, then every installed family whose `i` is as wide as its `M`.
 fn monospace_families(text_system: &gpui::TextSystem) -> Vec<SharedString> {
     let size = px(16.0);
-    let mut out: Vec<SharedString> = vec![crate::fonts::MONO_FAMILY.into()];
+    let mut out: Vec<SharedString> = vec![slopty_kit::fonts::MONO_FAMILY.into()];
     for name in text_system.all_font_names() {
-        let ours = name == crate::fonts::MONO_FAMILY || name == crate::fonts::SYMBOLS_FAMILY;
+        let ours =
+            name == slopty_kit::fonts::MONO_FAMILY || name == slopty_kit::fonts::SYMBOLS_FAMILY;
         // A leading dot is a system family's private name (`.SF NS`), not one to choose.
         if ours || name.starts_with('.') {
             continue;
@@ -2506,7 +2511,7 @@ impl Render for SettingsForm {
             .child(head)
             .when(self.narrow, |el| {
                 el.child(
-                    crate::kit::inset_x(div(), &self.theme)
+                    slopty_kit::kit::inset_x(div(), &self.theme)
                         .flex_none()
                         .py(px(self.theme.spacing.sm))
                         .child(self.search_field(&draw)),
@@ -2524,7 +2529,7 @@ impl Render for SettingsForm {
                 .h_full()
                 .flex()
                 .bg(hsla(self.theme.surfaces.sidebar))
-                .border_r(crate::kit::HAIR)
+                .border_r(slopty_kit::kit::HAIR)
                 .border_color(hsla(self.theme.surfaces.stroke))
                 .child(self.sections(window, &draw));
             root.child(sidebar).child(column)
@@ -2566,7 +2571,7 @@ mod tests {
         assert!(at(cx, "rule", 1).is_none(), "no rule over the first row");
         let rule = at(cx, "rule", 2).expect("a rule over the second");
         // The rule starts where the titles do: inside the ring's line, then the inset.
-        let inset = crate::kit::HAIR + px(theme.spacing.lg);
+        let inset = slopty_kit::kit::HAIR + px(theme.spacing.lg);
         assert!((rule.left() - first.left() - inset).abs() < px(0.5), "inset to the titles");
         let footer = at(cx, "footer", parts.len().saturating_add(1)).expect("the group's footer");
         let last = parts.last().copied().expect("a part");
@@ -2647,7 +2652,7 @@ mod tests {
             cx.update(Window::simulate_next_frame);
             cx.run_until_parked();
             let page = cx.debug_bounds("settings-page").expect("the page");
-            let edges = cx.update(|window, _| crate::retained::faded_edges(window, page));
+            let edges = cx.update(|window, _| slopty_kit::retained::faded_edges(window, page));
             (edges.top, edges.bottom)
         };
         assert_eq!(faded(cx), (false, true), "more below the start");
@@ -2855,7 +2860,7 @@ mod map_tests {
         cx.update(|window, _| window.set_a11y_active(true));
         cx.run_until_parked();
         let items = |cx: &mut VisualTestContext| -> Vec<String> {
-            let tree = cx.update(|window, _| crate::a11y::tree(window));
+            let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
             tree.into_iter().filter(|n| n.role == "ListItem").filter_map(|n| n.label).collect()
         };
         let start: String = gone.to_string().chars().take(8).collect();

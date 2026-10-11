@@ -21,16 +21,16 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{Drawn, IconSize};
+use slopty_kit::kit::{self, ButtonKind, Pace};
 use slopty_proto::thread::wire::RequestCard;
 use slopty_proto::thread::{AskId, ThreadId};
 
 use super::WorkspaceView;
 use super::approvals::{ALLOW, Answer, DENY};
 use super::titlebar::titlebar_height;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{Drawn, IconSize};
-use crate::kit::{self, ButtonKind, Pace};
 
 /// A card's width, in points: `MonoCode`'s, room for three lines of a command.
 pub(super) const CARD_W: f32 = 360.0;

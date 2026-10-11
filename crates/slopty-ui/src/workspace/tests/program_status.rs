@@ -1,9 +1,9 @@
 //! A program's status records (`OSC 7501`) as its tile's state.
 
+use slopty_kit::icons::Status;
 use slopty_proto::terminal::{ProgramState, ProgramStatus};
 
 use super::*;
-use crate::icons::Status;
 
 fn record(id: &str, state: ProgramState, need: Option<&str>) -> ProgramStatus {
     ProgramStatus {
@@ -20,7 +20,7 @@ fn record(id: &str, state: ProgramState, need: Option<&str>) -> ProgramStatus {
 /// The window shows what a frame drawn from scratch would.
 fn fresh(cx: &mut VisualTestContext, step: &str) {
     cx.run_until_parked();
-    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
     if let Some(stale) = stale {
         panic!("{step}: the window shows a stale frame. {stale}");
     }

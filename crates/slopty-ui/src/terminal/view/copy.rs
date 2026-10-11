@@ -167,7 +167,7 @@ impl TerminalView {
     pub(super) fn render_copy_mode(&self, cx: &Context<Self>) -> Option<gpui::Div> {
         let pill = FootPill {
             id: "copy-mode",
-            icon: crate::icons::Symbol::CharacterCursorIbeam,
+            icon: slopty_kit::icons::Symbol::CharacterCursorIbeam,
             words: SharedString::new_static(COPY_MODE),
             act: COPY_MODE_DONE,
         };

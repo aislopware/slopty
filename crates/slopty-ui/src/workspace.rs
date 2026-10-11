@@ -193,7 +193,7 @@ enum Region {
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
 /// cached. It holds nothing: it draws the workspace's region, which it reads and never writes
-/// ([`crate::draw`]), and is drawn again only when notified, by the workspace changing
+/// ([`slopty_kit::draw`]), and is drawn again only when notified, by the workspace changing
 /// ([`Chrome::notify`]) or by a clock of its own (an age, a turn's time, the frame time).
 struct ChromeView {
     workspace: WeakEntity<WorkspaceView>,
@@ -214,14 +214,14 @@ impl gpui::Render for ChromeView {
             let projects = Rc::clone(&workspace.read(cx).frame_projects);
             projects.hold(false, cx);
         }
-        crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
+        slopty_kit::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
             workspace.render_region(region, window, cx)
         })
     }
 }
 
 /// The tab on show as a view of its own, built from the workspace, which it reads and never
-/// writes ([`crate::draw`]). What only changes the panes (a working mark's turn, the pointer
+/// writes ([`slopty_kit::draw`]). What only changes the panes (a working mark's turn, the pointer
 /// over a tile, a body's own news) builds this view alone: the workspace's own notify is news
 /// of a change for the chrome and the titles. What the area drew is kept for it in
 /// [`area::Drawn`].
@@ -243,7 +243,7 @@ impl gpui::Render for AreaHost {
             let projects = Rc::clone(&workspace.read(cx).frame_projects);
             projects.hold(false, cx);
         }
-        crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
+        slopty_kit::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
             workspace.render_area(host, window, cx)
         })
     }
@@ -399,7 +399,7 @@ impl WorkerStatus {
             Self::Connecting | Self::Relinking => "reconnecting…".to_owned(),
             Self::Connected => "connected".to_owned(),
             Self::Silent(secs) => {
-                format!("silent {}", crate::kit::duration(Duration::from_secs(*secs)))
+                format!("silent {}", slopty_kit::kit::duration(Duration::from_secs(*secs)))
             }
             Self::Checking => "checking…".to_owned(),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
@@ -640,10 +640,10 @@ pub struct AgentTurn {
 }
 
 impl Finished {
-    /// The badge text: "Done · 3.2 s", "Exit 1 · 1m 4s", in [`crate::kit::duration`]'s words.
+    /// The badge text: "Done · 3.2 s", "Exit 1 · 1m 4s", in [`slopty_kit::kit::duration`]'s words.
     #[must_use]
     pub fn label(&self) -> String {
-        let took = crate::kit::duration(self.elapsed);
+        let took = slopty_kit::kit::duration(self.elapsed);
         match self.exit {
             Some(0) | None => format!("Done · {took}"),
             Some(code) => format!("Exit {code} · {took}"),
@@ -931,8 +931,8 @@ pub struct WorkspaceView {
     palette_leaving: Option<Entity<CommandPalette>>,
     /// Search in files: the surface, shown or kept, and where the keyboard goes back to.
     search: project_search::Surface,
-    pending_find: Option<(SessionId, crate::kit::find::Query)>,
-    pending_find_file: Option<(ItemId, crate::kit::find::Query)>,
+    pending_find: Option<(SessionId, slopty_kit::kit::find::Query)>,
+    pending_find_file: Option<(ItemId, slopty_kit::kit::find::Query)>,
     rename: Option<Rename>,
     rename_return: Option<FocusHandle>,
     pending_focus_rename: bool,
@@ -1144,7 +1144,7 @@ impl WorkspaceView {
             }
             let until = this.upgrade().and_then(|this| this.read(cx).echo_awaited(window, cx));
             if let Some(until) = until {
-                crate::icons::hold_steps(cx, until);
+                slopty_kit::icons::hold_steps(cx, until);
             }
         });
         Self {
@@ -1450,7 +1450,7 @@ impl WorkspaceView {
     /// The agent at work in `session` as its thread's row says, in the status vocabulary and
     /// in one short line; `None` with no agent there.
     #[must_use]
-    pub fn agent(&self, session: SessionId) -> Option<(crate::icons::Status, String)> {
+    pub fn agent(&self, session: SessionId) -> Option<(slopty_kit::icons::Status, String)> {
         let agent = self.agent_state(session)?;
         Some((agents::agent_mark_of(agent), agents::agent_status_text(agent)))
     }
@@ -1728,7 +1728,7 @@ impl WorkspaceView {
         &self,
         region: Region,
         window: &Window,
-        cx: &crate::draw::Draw<'_, Self>,
+        cx: &slopty_kit::draw::Draw<'_, Self>,
     ) -> gpui::AnyElement {
         match region {
             Region::Navigator => self.render_navigator_region(window, cx),
@@ -1750,7 +1750,7 @@ impl WorkspaceView {
                     let clock = tab_look::Clock {
                         row: std::hash::Hasher::finish(&hasher),
                         now: self.clock_instant(),
-                        moves: self.animate && crate::kit::motion(cx),
+                        moves: self.animate && slopty_kit::kit::motion(cx),
                     };
                     (&self.title_closing, clock)
                 });
@@ -1932,7 +1932,7 @@ impl WorkspaceView {
         if !self.focus.is_focused(window) {
             return;
         }
-        if crate::a11y::cycle(ev, window, cx) {
+        if slopty_kit::a11y::cycle(ev, window, cx) {
             cx.stop_propagation();
         } else if ev.keystroke.key == "enter"
             && !ev.keystroke.modifiers.modified()
@@ -2105,7 +2105,7 @@ impl gpui::Render for WorkspaceView {
             // schedules no frame, so the new holder would not be drawn as holding it.
             self.focus_lost = Some(cx.on_focus_lost(window, |_this, window, cx| {
                 cx.defer_in(window, |this, window, cx| {
-                    if window.focused(cx).is_none() && !crate::a11y::reclaim(window, cx) {
+                    if window.focused(cx).is_none() && !slopty_kit::a11y::reclaim(window, cx) {
                         this.return_keyboard(window, cx);
                     }
                 });
@@ -2190,7 +2190,7 @@ impl gpui::Render for WorkspaceView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(crate::colors::hsla(self.theme.surfaces.ground));
+            .bg(slopty_kit::colors::hsla(self.theme.surfaces.ground));
         let applies = self.applies();
         let root = Self::register_layout_actions(root, applies, cx);
         // Global: whatever has the focus.
@@ -2287,11 +2287,11 @@ impl gpui::Render for WorkspaceView {
                 },
             ))
             .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                crate::a11y::step(true, window, cx);
+                slopty_kit::a11y::step(true, window, cx);
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
-                crate::a11y::step(false, window, cx);
+                slopty_kit::a11y::step(false, window, cx);
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
@@ -2381,8 +2381,8 @@ impl WorkspaceView {
                     .top_0()
                     .bottom_0()
                     .right_0()
-                    .w(crate::kit::HAIR)
-                    .bg(crate::colors::hsla(self.theme.surfaces.stroke));
+                    .w(slopty_kit::kit::HAIR)
+                    .bg(slopty_kit::colors::hsla(self.theme.surfaces.stroke));
                 let column = gpui::div()
                     .relative()
                     .flex_none()
@@ -2480,10 +2480,11 @@ impl WorkspaceView {
         let panel = gpui::div().h_full().w(width).flex().child(panel);
         let handle = (mode == navigator::Mode::Overlay).then(|| Self::render_handle(width, cx));
         let sheet = || {
-            Animation::new(slopty_theme::Motion::DEFAULT.sheet).with_easing(crate::kit::drawer())
+            Animation::new(slopty_theme::Motion::DEFAULT.sheet)
+                .with_easing(slopty_kit::kit::drawer())
         };
-        let moves = self.animate && crate::kit::motion(cx);
-        let dim = crate::kit::scrim(&self.theme);
+        let moves = self.animate && slopty_kit::kit::motion(cx);
+        let dim = slopty_kit::kit::scrim(&self.theme);
         let scrim = gpui::div().absolute().inset_0().when(!home, |el| el.bg(dim));
         let scrim = if moves {
             scrim

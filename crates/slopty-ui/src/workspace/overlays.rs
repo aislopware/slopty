@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
+use slopty_kit::kit::find::Query;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
@@ -14,7 +15,6 @@ use slopty_proto::thread::wire::ThreadRow;
 use super::WorkspaceView;
 use super::actions::{OpenCommands, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_mark_of, agent_status_text, needs_human};
-use crate::kit::find::Query;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 
@@ -64,7 +64,7 @@ impl WorkspaceView {
             };
             let form = w.caps.as_ref().map(|caps| caps.form);
             PaletteItem::worker(&w.name, &detail, *key)
-                .with_icon(crate::icons::machine(form))
+                .with_icon(slopty_kit::icons::machine(form))
                 .with_status(health.map(|(mark, _)| mark))
         })
     }

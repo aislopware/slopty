@@ -20,6 +20,9 @@ use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::thread::{ItemBody, ItemId, Patch, ToolCall, ToolDetail, ToolState};
 use slopty_theme::{Rgb, Surfaces};
 
@@ -27,12 +30,9 @@ use super::{
     PEEK_LINES, TOOL_ROW, ThreadView, ThreadViewEvent, call_path, patch_of, path_patch, tail,
     tool_icon,
 };
-use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// `text` with the paths in it as a person reads them: under the agent's folder `cwd` relative
 /// to it (`/w/app/src/x.rs` reads `src/x.rs`, by either of macOS's names for a temporary
@@ -185,8 +185,14 @@ impl ThreadView {
             ToolState::Pending { .. } => self.needs_you(),
             _ => {
                 let kind = tool_icon(&call.kind);
-                let glyph = call_path(call).map_or_else(|| kind.into(), crate::icons::file_mark);
-                crate::icons::symbol(theme, glyph, px(theme.typography.icon()), hsla(s.text_muted))
+                let glyph =
+                    call_path(call).map_or_else(|| kind.into(), slopty_kit::icons::file_mark);
+                slopty_kit::icons::symbol(
+                    theme,
+                    glyph,
+                    px(theme.typography.icon()),
+                    hsla(s.text_muted),
+                )
             }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
@@ -506,7 +512,7 @@ impl ThreadView {
             let title =
                 if link.title.trim().is_empty() { link.url.clone() } else { link.title.clone() };
             let selector = format!("source-{}-{number}", id.0);
-            crate::a11y::tab_stop(
+            slopty_kit::a11y::tab_stop(
                 div()
                     .id(ElementId::Name(selector.clone().into()))
                     .debug_selector(move || selector)

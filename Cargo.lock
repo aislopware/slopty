@@ -7784,6 +7784,7 @@ dependencies = [
  "slopty-crash",
  "slopty-deploy",
  "slopty-e2e",
+ "slopty-kit",
  "slopty-net",
  "slopty-platform",
  "slopty-proto",
@@ -8107,6 +8108,28 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "slopty-kit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core-foundation 0.10.1",
+ "gpui",
+ "gpui-kit",
+ "gpui_platform",
+ "nucleo-matcher",
+ "parking_lot",
+ "regex",
+ "slopty-client",
+ "slopty-core",
+ "slopty-platform",
+ "slopty-proto",
+ "slopty-theme",
+ "syntect",
+ "tracing",
+ "two-face",
 ]
 
 [[package]]
@@ -8444,7 +8467,6 @@ dependencies = [
  "icu_normalizer",
  "icu_properties",
  "image",
- "nucleo-matcher",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-video",
@@ -8460,16 +8482,15 @@ dependencies = [
  "slopty-client",
  "slopty-core",
  "slopty-grid",
+ "slopty-kit",
  "slopty-platform",
  "slopty-predict",
  "slopty-proto",
  "slopty-settings",
  "slopty-theme",
- "syntect",
  "tempfile",
  "tokio",
  "tracing",
- "two-face",
 ]
 
 [[package]]

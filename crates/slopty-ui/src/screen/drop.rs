@@ -22,13 +22,13 @@ use gpui::{
 };
 use slopty_client::dnd::out::{Outgoing, Shared};
 use slopty_client::dnd::{Hover, Outcome, Phase, Read};
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Status, Symbol, icon, status_icon};
+use slopty_kit::kit;
 use slopty_proto::drag::{DragEvent, DragId, DragInput, DragItem, DragOp, DragOps, Promised};
 use slopty_proto::screen::ScreenInput;
 
 use super::{ScreenView, ScreenViewEvent};
-use crate::colors::hsla;
-use crate::icons::{IconSize, Status, Symbol, icon, status_icon};
-use crate::kit;
 
 /// A drag over the tile.
 #[derive(Clone, Copy, Debug)]

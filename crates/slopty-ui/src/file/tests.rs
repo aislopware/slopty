@@ -14,8 +14,8 @@ use super::*;
 type Events = Rc<RefCell<Vec<FileViewEvent>>>;
 
 /// A find for `text`, its toggles off.
-fn needle(text: &str) -> crate::kit::find::Query {
-    crate::kit::find::Query { needle: text.to_owned(), ..Default::default() }
+fn needle(text: &str) -> slopty_kit::kit::find::Query {
+    slopty_kit::kit::find::Query { needle: text.to_owned(), ..Default::default() }
 }
 
 fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
@@ -280,7 +280,7 @@ fn a_file_that_cannot_open_says_what_is_so_then_why(cx: &mut TestAppContext) {
     let notice = |cx: &mut VisualTestContext| {
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        cx.update(|window, _cx| crate::a11y::tree(window))
+        cx.update(|window, _cx| slopty_kit::a11y::tree(window))
             .into_iter()
             .find(|n| n.role == "Status")
             .and_then(|n| n.label)
@@ -375,14 +375,14 @@ fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
     assert_eq!(saved.lines().nth(19_990), Some("// edited near the end"));
 }
 
-/// A file past [`crate::highlight::COLOURED_BYTES`] is plain text: its whole-text parse would
+/// A file past [`slopty_kit::highlight::COLOURED_BYTES`] is plain text: its whole-text parse would
 /// outlast the pauses in typing. One within it is coloured.
 #[gpui::test]
 fn a_file_past_the_colour_limit_is_plain(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/src/gen.rs");
     arrives(&view, cx, text_read("fn a() {}", true, 1));
     assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), Some("Rust"));
-    let long = format!("fn a() {{}}\n{}", "x".repeat(crate::highlight::COLOURED_BYTES));
+    let long = format!("fn a() {{}}\n{}", "x".repeat(slopty_kit::highlight::COLOURED_BYTES));
     arrives(&view, cx, text_read(&long, true, 2));
     assert_eq!(view.read_with(cx, |v, _| v.coloured_as()), None);
     assert_eq!(view.read_with(cx, FileView::line_count), 2, "and still editable text");
@@ -481,7 +481,7 @@ fn timing_of_a_large_file(cx: &mut TestAppContext) {
         view.update(cx, FileView::close_find);
         let t = Instant::now();
         if let Some(syntax) = Syntax::for_path("big.rs", "") {
-            std::hint::black_box(crate::highlight::spans(&body, syntax));
+            std::hint::black_box(slopty_kit::highlight::spans(&body, syntax));
         }
         let parse = t.elapsed();
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
@@ -683,7 +683,7 @@ fn media(media_type: &str, bytes: Vec<u8>) -> FileRead {
 fn labels(cx: &mut VisualTestContext, role: &str) -> Vec<String> {
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window))
+    cx.update(|window, _cx| slopty_kit::a11y::tree(window))
         .into_iter()
         .filter(|n| n.role == role)
         .filter_map(|n| n.label)

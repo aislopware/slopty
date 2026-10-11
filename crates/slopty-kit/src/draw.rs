@@ -18,27 +18,33 @@ type Later = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 /// The context a view's elements are built in when the view is drawn by another one: `this`
 /// read, `app` shared.
-pub(crate) struct Draw<'a, T> {
+pub struct Draw<'a, T> {
     app: &'a App,
     this: WeakEntity<T>,
     later: RefCell<Vec<Later>>,
 }
 
+impl<T> std::fmt::Debug for Draw<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Draw").field("later", &self.later.borrow().len()).finish_non_exhaustive()
+    }
+}
+
 impl<'a, T: 'static> Draw<'a, T> {
     /// Building from `this` as `app` holds it.
     #[must_use]
-    pub(crate) fn new(app: &'a App, this: WeakEntity<T>) -> Self {
+    pub fn new(app: &'a App, this: WeakEntity<T>) -> Self {
         Self { app, this, later: RefCell::new(Vec::new()) }
     }
 
     /// The entity read.
     #[must_use]
-    pub(crate) fn weak_entity(&self) -> WeakEntity<T> {
+    pub fn weak_entity(&self) -> WeakEntity<T> {
         self.this.clone()
     }
 
     /// A handler that updates the entity read, as `Context::listener` makes one.
-    pub(crate) fn listener<E: ?Sized>(
+    pub fn listener<E: ?Sized>(
         &self,
         listener: impl Fn(&mut T, &E, &mut Window, &mut Context<T>) + 'static,
     ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
@@ -51,7 +57,7 @@ impl<'a, T: 'static> Draw<'a, T> {
 
     /// A builder of elements the framework calls later, as a list builds its rows, that reads
     /// the entity then, as `Context::processor` makes one that updates it.
-    pub(crate) fn processor<E>(
+    pub fn processor<E>(
         &self,
         f: impl Fn(&T, E, &mut Window, &Draw<'_, T>) -> AnyElement + 'static,
     ) -> impl Fn(E, &mut Window, &mut App) -> AnyElement + 'static {
@@ -60,7 +66,7 @@ impl<'a, T: 'static> Draw<'a, T> {
     }
 
     /// Do `f` once the build has let go of what it reads.
-    pub(crate) fn later(&self, f: impl FnOnce(&mut Window, &mut App) + 'static) {
+    pub fn later(&self, f: impl FnOnce(&mut Window, &mut App) + 'static) {
         self.later.borrow_mut().push(Box::new(f));
     }
 
@@ -81,7 +87,7 @@ impl<T> std::ops::Deref for Draw<'_, T> {
 
 /// Elements built from `this` as it is now, read and never written, and then what the build
 /// kept back done. Nothing once `this` is gone.
-pub(crate) fn build<T: 'static>(
+pub fn build<T: 'static>(
     this: &WeakEntity<T>,
     window: &mut Window,
     cx: &mut App,

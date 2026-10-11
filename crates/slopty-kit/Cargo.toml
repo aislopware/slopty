@@ -1,0 +1,40 @@
+[package]
+name = "slopty-kit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty's chrome kit: the design system on the theme tokens, icons, type, colour and motion"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+core-foundation.workspace = true
+gpui.workspace = true
+gpui-kit.workspace = true
+# The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).
+nucleo-matcher.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+slopty-client.workspace = true
+slopty-core.workspace = true
+slopty-platform.workspace = true
+slopty-proto.workspace = true
+slopty-theme.workspace = true
+# Syntax colouring for a file tile and a fenced code block (`highlight`).
+syntect.workspace = true
+two-face.workspace = true
+tracing.workspace = true
+
+[features]
+# `a11y::tree` and the retained-frame oracle for the self-test socket (`slopty/e2e`) and for the
+# crates above it in their tests; this crate's own tests get them through `cfg(test)`.
+e2e = [ "gpui/test-support" ]
+
+[dev-dependencies]
+gpui = { workspace = true, features = [ "test-support" ] }
+# The platform's own text system (Core Text), for the bundled faces' test (`fonts`).
+gpui_platform = { workspace = true, features = [ "font-kit" ] }

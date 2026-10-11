@@ -35,13 +35,13 @@ use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::folders::FolderPages;
 use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
 use slopty_proto::ClientMsg;
 use slopty_proto::folder::{After, FolderEntry, FsOp, Listing};
 use slopty_proto::orchestration::FileKind;
 use slopty_theme::Theme;
 
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
 use crate::palette::Plate;
 
 mod menu;
@@ -660,7 +660,7 @@ impl FolderView {
                 .gap(px(theme.spacing.sm))
                 .h(px(theme.density.row))
                 .px(px(theme.spacing.inset()))
-                .border_b(crate::kit::HAIR)
+                .border_b(slopty_kit::kit::HAIR)
                 .border_color(hsla(theme.surfaces.stroke))
                 .child(self.lead(Symbol::FolderBadgePlus, hsla(theme.surfaces.text_secondary)))
                 .children(self.name_field(NEW_FOLDER))
@@ -669,10 +669,10 @@ impl FolderView {
     }
 
     /// A row's lead: `symbol` beside the row's name at its size and weight.
-    fn lead(&self, mark: impl Into<crate::icons::Mark>, ink: gpui::Hsla) -> gpui::Div {
+    fn lead(&self, mark: impl Into<slopty_kit::icons::Mark>, ink: gpui::Hsla) -> gpui::Div {
         let theme = &self.theme;
         let chrome = theme.roles().chrome;
-        crate::icons::beside(theme, mark, chrome, ink)
+        slopty_kit::icons::beside(theme, mark, chrome, ink)
             .size(px(IconSize::beside_slot(theme, chrome)))
     }
 
@@ -811,8 +811,13 @@ impl FolderView {
             .items_center()
             .justify_center()
             .child(
-                crate::kit::notice(theme, crate::kit::notice_mark(theme, icon), title, detail)
-                    .children(next),
+                slopty_kit::kit::notice(
+                    theme,
+                    slopty_kit::kit::notice_mark(theme, icon),
+                    title,
+                    detail,
+                )
+                .children(next),
             )
             .into_any_element()
     }
@@ -862,8 +867,8 @@ impl FolderView {
         for (n, (label, path)) in crumbs.into_iter().enumerate() {
             if n > 0 {
                 trail = trail.child(
-                    crate::icons::Drawn::disclosure(theme, Symbol::ChevronRight)
-                        .slot(px(theme.typography.icon()), crate::kit::separator_ink(theme)),
+                    slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronRight)
+                        .slot(px(theme.typography.icon()), slopty_kit::kit::separator_ink(theme)),
                 );
             }
             let here = n == last;
@@ -907,19 +912,19 @@ impl FolderView {
             // the rows' icons and the header's glyph, not a pad's width right of them.
             .pl(px(theme.spacing.inset() - theme.spacing.xxs))
             .pr(px(theme.spacing.inset()))
-            .border_b(crate::kit::HAIR)
+            .border_b(slopty_kit::kit::HAIR)
             .border_color(hsla(s.stroke))
             .text_size(px(theme.typography.small()))
             .child(trail)
             .child(
-                crate::kit::meta(crate::kit::tabular(div()), theme)
+                slopty_kit::kit::meta(slopty_kit::kit::tabular(div()), theme)
                     .flex_none()
                     .text_size(px(theme.typography.small()))
                     .child(count_label(total)),
             )
             .when_some(crate::workspace::worktree_root(dir), |bar, root| {
                 bar.child(
-                    crate::kit::icon_button(
+                    slopty_kit::kit::icon_button(
                         theme,
                         format!("folder-remove-worktree-{id}"),
                         Symbol::Trash,
@@ -927,9 +932,10 @@ impl FolderView {
                     )
                     .map(|el| {
                         let theme = Rc::new(theme.clone());
-                        crate::kit::hint_timing(el).tooltip(move |_window, cx| {
+                        slopty_kit::kit::hint_timing(el).tooltip(move |_window, cx| {
                             let hint = crate::workspace::REMOVE_WORKTREE;
-                            cx.new(|_| crate::kit::Hint::new(hint, "", Rc::clone(&theme))).into()
+                            cx.new(|_| slopty_kit::kit::Hint::new(hint, "", Rc::clone(&theme)))
+                                .into()
                         })
                     })
                     .on_click(cx.listener(move |_this, _ev, _window, cx| {
@@ -940,7 +946,7 @@ impl FolderView {
             })
             .when(FILES_PICKER, |bar| {
                 bar.child(
-                    crate::kit::icon_button(
+                    slopty_kit::kit::icon_button(
                         theme,
                         format!("folder-upload-{id}"),
                         Symbol::ArrowUpToLine,
@@ -971,7 +977,7 @@ impl FolderView {
         let icon = match entry.kind {
             FileKind::Dir => Symbol::Folder.into(),
             FileKind::Symlink => Symbol::Link.into(),
-            FileKind::File => crate::icons::file_mark(&entry.name),
+            FileKind::File => slopty_kit::icons::file_mark(&entry.name),
             FileKind::Other => Symbol::Doc.into(),
         };
         let mut ink = RowInk::of(theme, entry, chosen);
@@ -988,7 +994,7 @@ impl FolderView {
         let detail = if folder {
             entry.items.map(count_label).unwrap_or_default()
         } else if entry.kind == FileKind::File {
-            crate::kit::size_label(entry.size)
+            slopty_kit::kit::size_label(entry.size)
         } else {
             String::new()
         };
@@ -996,7 +1002,7 @@ impl FolderView {
             .map(crate::palette::age_label)
             .unwrap_or_default();
         let column = |text: String, width: f32| {
-            crate::kit::meta(crate::kit::tabular(div()), theme)
+            slopty_kit::kit::meta(slopty_kit::kit::tabular(div()), theme)
                 .flex_none()
                 .w(px(width))
                 .text_size(px(theme.typography.small()))
@@ -1008,7 +1014,7 @@ impl FolderView {
         let pad = crate::palette::list_pad(theme);
         let drawn = Rc::clone(&self.drawn);
         let save = (FILES_PICKER && chosen).then(|| {
-            crate::kit::icon_button(
+            slopty_kit::kit::icon_button(
                 theme,
                 format!("folder-save-{}", self.id.as_uuid()),
                 Symbol::ArrowDownToLine,
@@ -1067,8 +1073,13 @@ impl FolderView {
             }))
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
-                    crate::icons::icon(theme, Symbol::Link, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(IconSize::Inline.slot(theme))),
+                    slopty_kit::icons::icon(
+                        theme,
+                        Symbol::Link,
+                        IconSize::Inline,
+                        hsla(s.text_muted),
+                    )
+                    .size(px(IconSize::Inline.slot(theme))),
                 )
             })
             .child(column(detail, SIZE_W))
@@ -1149,7 +1160,7 @@ impl FolderView {
         let theme = &self.theme;
         let id = self.id.as_uuid();
         Some(
-            crate::kit::meta(crate::kit::tabular(div()), theme)
+            slopty_kit::kit::meta(slopty_kit::kit::tabular(div()), theme)
                 .id("folder-cut")
                 .debug_selector(move || format!("folder-cut-{id}"))
                 .role(Role::Status)
@@ -1158,7 +1169,7 @@ impl FolderView {
                 .items_center()
                 .h(px(theme.density.row))
                 .px(px(theme.spacing.inset()))
-                .border_t(crate::kit::HAIR)
+                .border_t(slopty_kit::kit::HAIR)
                 .border_color(hsla(theme.surfaces.stroke))
                 .text_size(px(theme.typography.small()))
                 .child(format!("{shown} of {total} listed"))
@@ -1199,7 +1210,7 @@ impl Render for FolderView {
                     // Nothing to open here: a shell in it is the one next step.
                     let path = self.path.clone();
                     let shell =
-                        crate::kit::notice_action(&self.theme, "folder-new-shell", NEW_SHELL)
+                        slopty_kit::kit::notice_action(&self.theme, "folder-new-shell", NEW_SHELL)
                             .on_click(cx.listener(move |_this, _ev, _w, cx| {
                                 cx.emit(FolderViewEvent::NewShell(path.clone()));
                             }))

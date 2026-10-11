@@ -727,7 +727,7 @@ impl WorkspaceView {
             })
             .chain(self.threads_waiting().into_iter().filter_map(|w| {
                 let stand = self.thread_stand(w.thread)?;
-                let asks = stand.asks.as_ref().map(|a| crate::markdown::plain_line(&a.title));
+                let asks = stand.asks.as_ref().map(|a| slopty_kit::markdown::plain_line(&a.title));
                 let body = asks
                     .filter(|a| !a.trim().is_empty())
                     .or_else(|| stand.word().map(str::to_owned))

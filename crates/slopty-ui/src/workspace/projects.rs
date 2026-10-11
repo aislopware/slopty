@@ -15,6 +15,7 @@ use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_client::server::ServerCaller;
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
+use slopty_kit::icons::Status;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
@@ -26,7 +27,6 @@ use slopty_proto::thread::AgentId;
 use super::WorkspaceView;
 use super::agents::{agent_ask_text, agent_mark_of};
 use super::rollup::META_SEPARATOR;
-use crate::icons::Status;
 use crate::project::create::{Filled, GoalSheet, NewGoal, Place, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
@@ -61,7 +61,7 @@ pub(crate) const SENT_TO_ORCHESTRATOR: &str = "Sent to the orchestrator";
 /// The open "New goal" sheet.
 pub(super) struct Sheet {
     view: Entity<GoalSheet>,
-    /// What the dim and the sheet track: Tab stays inside ([`crate::a11y::trap`]).
+    /// What the dim and the sheet track: Tab stays inside ([`slopty_kit::a11y::trap`]).
     scope: gpui::FocusHandle,
     _events: gpui::Subscription,
 }
@@ -615,7 +615,7 @@ impl WorkspaceView {
                 Some((id, WorkerSeen { name: worker.name.clone(), os, form, away, gone }))
             })
             .collect();
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         // Only the boards on show: a hidden one is handed everything as it shows again.
         let views: Vec<(ProjectId, Entity<ProjectView>)> = wanted
             .iter()
@@ -1277,7 +1277,7 @@ impl WorkspaceView {
         });
         let scope = cx.focus_handle();
         let home = gpui::Focusable::focus_handle(view.read(cx), cx);
-        crate::a11y::hold(&scope, &home, cx);
+        slopty_kit::a11y::hold(&scope, &home, cx);
         self.projects.sheet = Some(Sheet { view, scope, _events: events });
         cx.notify();
     }
@@ -1446,7 +1446,7 @@ impl WorkspaceView {
             self.show_notice(WRITE_THE_GOAL.to_owned(), cx);
             return;
         }
-        let at = crate::clock::now(cx);
+        let at = slopty_kit::clock::now(cx);
         let went = slopty_client::starts::LastStart {
             agent: goal.agent.clone(),
             worker: goal.worker,
@@ -1552,9 +1552,9 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
         let sheet = self.projects.sheet.as_ref()?;
-        let backdrop = crate::kit::backdrop(&self.theme, window).id("goal-sheet-backdrop");
+        let backdrop = slopty_kit::kit::backdrop(&self.theme, window).id("goal-sheet-backdrop");
         Some(
-            crate::a11y::trap(backdrop, &sheet.scope)
+            slopty_kit::a11y::trap(backdrop, &sheet.scope)
                 .occlude()
                 .on_mouse_down(
                     gpui::MouseButton::Left,

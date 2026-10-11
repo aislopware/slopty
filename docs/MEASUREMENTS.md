@@ -1065,7 +1065,7 @@ only when `oldest` advances.
 
 ## 2026-09-05 — canvas frame time under streaming load (mac-studio, e2e app build)
 
-The app times its own draws (`slopty_ui::frames`: `begin` at the top of `Workspace::render`,
+The app times its own draws (`slopty_kit::frames`: `begin` at the top of `Workspace::render`,
 `end` in the last-painted element; ring of 1024, nearest-rank percentiles) and the self-test
 reads them back (`dump.frames`). Scenarios in `crates/slopty-e2e/tests/smooth.rs`
 (`cargo xtask e2e smooth`), 5 s each, window 1280×800, N shells running
@@ -3482,7 +3482,7 @@ datagram cut for a stale size now costs only itself (`a_too_large_datagram_costs
 ## 2026-09-25 — the editor's highlighter: a frame and a keystroke
 
 The file tile's body is gpui-kit's code editor with our syntect highlighter
-(`slopty_ui::highlight::editor`). What it costs on the UI thread, on a 2 000-line Rust file
+(`slopty_kit::highlight::editor`). What it costs on the UI thread, on a 2 000-line Rust file
 (the worker's read cap): styling the 60 rows a tile shows, which the editor asks for every
 frame it paints, and moving the colours below a typed newline (`editor::splice`), which runs
 on every edit. The full parse stays off the UI thread (2026-09-12: ≈ 165 ms for 2 000 lines)
@@ -3547,7 +3547,7 @@ the worker and the link, not the frame.
 
 **Keystrokes timed at the glass.** The meter used to stop at the next display tick after the
 paint. It now stops at `presented_at` of the first frame submitted after the paint
-(`slopty_ui::shown`, from `Window::on_frame_presented`). Scenario (d), 60 keys at 15/s into one
+(`slopty_kit::shown`, from `Window::on_frame_presented`). Scenario (d), 60 keys at 15/s into one
 shell:
 
 | meter | never: echo | always: echo | always: predicted |
@@ -16157,3 +16157,26 @@ comparable; the gate steps are.
 - A hit costs about twice as long on R2 from a Mac (0.158 s against 0.077 s); with three
   compiles at a time that is about 12 s a shard of 430 hits.
 - Writes: 0.2–0.44 s on R2 against 0.3 s on the Actions cache, with no write lost.
+
+## 2026-10-11 — slopty-ui split, step 1: the chrome kit as a crate
+
+Why: `.research/ui-test-compile-2026-10-11.md`. CI's `tests ui` job is a CPU-bound build on a
+3-core runner, and its tail was `slopty-ui`'s test harness alone on one core.
+
+```
+# before: gate run 38120306374 (`ci: run the worker's tests on the Linux lane`), artifact timings-ui
+gh run download 38120306374 -n timings-ui -D target/remote/A/timings/ui
+# after: the first gate run with slopty-kit, the same artifact
+```
+
+| | before | after |
+|---|---|---|
+| `tests ui` cargo build | 274.6 s | (first gate run with the split) |
+| slopty-ui lib (`e2e`) | 70.7 s | |
+| slopty-ui lib test harness | 99.0 s | |
+| slopty-kit lib / harness | — | |
+| units, core-seconds | 712.7 | |
+
+Lines: `slopty-kit` holds 14,762 of Rust with its unit tests, and `slopty-ui` is that much
+smaller, less the lints. The lints move out of the kit into `slopty-ui/src/lints.rs` and
+`lints/overflow.rs` (1,725 lines), so the views' harness still builds them.

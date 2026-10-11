@@ -14,13 +14,13 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
 use slopty_proto::git::GitOp;
 
 use super::{ReviewView, Row};
-use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::thread::git::Whole;
-use crate::icons::{IconSize, Symbol};
 
 /// What the row says of a file of `lines` lines left out: how many, and why.
 pub(super) fn left_out(lines: u32) -> String {
@@ -163,7 +163,7 @@ impl ReviewView {
                         .text_color(hsla(s.text_secondary))
                         .hover(move |el| el.text_color(hsla(s.text)))
                         .child(
-                            crate::icons::icon(
+                            slopty_kit::icons::icon(
                                 theme,
                                 Symbol::Unfold,
                                 IconSize::Inline,

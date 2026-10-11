@@ -68,7 +68,7 @@ impl gpui::Global for Waiting {}
 /// A frame of the window was shown (or dropped unshown): run what its paints were waiting for.
 /// The window's presentation reports call it; tests call it for the platform.
 #[cfg(not(all(target_os = "ios", target_abi = "sim")))]
-pub(crate) fn presented(frame: gpui::PresentedFrame, cx: &mut App) {
+pub fn presented(frame: gpui::PresentedFrame, cx: &mut App) {
     // A frame dropped for a newer one holds nothing the newer one does not.
     let Some(at) = frame.presented_at else { return };
     let waiting = cx.default_global::<Waiting>();

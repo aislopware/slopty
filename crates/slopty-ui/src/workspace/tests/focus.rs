@@ -70,7 +70,7 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppConte
     assert!(!title_leads(&view, cx, first), "the other is muted");
 
     let theme = Theme::default();
-    let accent = crate::colors::hsla(theme.surfaces.accent_fill);
+    let accent = slopty_kit::colors::hsla(theme.surfaces.accent_fill);
     // The accent's dot inside the pane's title, the dot's side square.
     let dotted = |cx: &mut VisualTestContext, tile: TileRef| {
         let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
@@ -82,7 +82,7 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppConte
                 && title.contains(&point(px(b.center().x.0 / scale), px(b.center().y.0 / scale)))
         })
     };
-    let pill = crate::colors::hsla(theme.surfaces.selected);
+    let pill = slopty_kit::colors::hsla(theme.surfaces.selected);
     for tile in [first, second] {
         let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
         let fills = fills_at(cx, title);
@@ -129,7 +129,7 @@ fn a_pane_of_tabs_leads_with_its_dot_on_the_lone_panes_edge(cx: &mut TestAppCont
         f32::from(tabbed_mark - lone_mark).abs() < 0.5,
         "one edge: {tabbed_mark:?} against {lone_mark:?}"
     );
-    let accent = crate::colors::hsla(Theme::default().surfaces.accent_fill);
+    let accent = slopty_kit::colors::hsla(Theme::default().surfaces.accent_fill);
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let dot = quads
         .iter()
@@ -174,5 +174,5 @@ fn a_tab_of_several_tiles_is_one_line(cx: &mut TestAppContext) {
 
     let pane_tab = cx.debug_bounds(selector("tab", second.item)).expect("the pane's tab on show");
     let fills = fills_at(cx, pane_tab);
-    assert!(!fills.contains(&crate::colors::hsla(theme.surfaces.selected)), "{fills:?}");
+    assert!(!fills.contains(&slopty_kit::colors::hsla(theme.surfaces.selected)), "{fills:?}");
 }

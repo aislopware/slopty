@@ -9,6 +9,11 @@ use gpui::{
 };
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::chrome_text::ChromeText;
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::Status;
 use slopty_proto::items::ItemKind;
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::{Phase, Request, Wait};
@@ -18,11 +23,6 @@ use super::actions::NextAttention;
 use super::attention::About;
 use super::faces::{ThreadStand, ThreadWait};
 use super::{Finished, WorkspaceEvent, WorkspaceView};
-use crate::a11y::tab_stop;
-use crate::chrome_text::ChromeText;
-use crate::colors::{hsla, hsla_alpha};
-use crate::draw::Draw;
-use crate::icons::Status;
 
 /// An agent waiting on the human: where, and the tile that shows it, if one does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,7 +146,7 @@ pub(super) fn agent_status_text(agent: &ThreadStand) -> String {
                 (_, None) => word,
             }
         }
-        Status::Working => agent.doing.as_deref().map_or(word, crate::markdown::plain_line),
+        Status::Working => agent.doing.as_deref().map_or(word, slopty_kit::markdown::plain_line),
         // At rest with work out: the commands it left running, as its thread's header says
         // them, or the work it waits on.
         Status::Running => match (wait_kind(agent), wait_text(agent)) {
@@ -213,7 +213,7 @@ pub(super) fn agent_ask_text(agent: &ThreadStand) -> Option<String> {
         Some(Request::APPROVAL) => wait_text(agent).or(call).or(card),
         _ => card.or_else(|| wait_text(agent)),
     };
-    said.map(crate::markdown::plain_line)
+    said.map(slopty_kit::markdown::plain_line)
 }
 
 impl WorkspaceView {
@@ -487,7 +487,7 @@ impl WorkspaceView {
         let quiet = theme.surfaces.text_secondary;
         let label = done.label();
         let item = tile.item;
-        let pill = crate::kit::pill_frame(theme)
+        let pill = slopty_kit::kit::pill_frame(theme)
             .id("finished")
             .debug_selector(move || format!("finished-{}", item.as_uuid()))
             .role(Role::Button)

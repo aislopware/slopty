@@ -29,6 +29,7 @@ use std::time::Duration;
 use gpui::{AppContext as _, Context, Entity, Task, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_core::WallMs;
+use slopty_kit::icons::{Status, Symbol};
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::{PastSession, PastSessions, ThreadRequest};
@@ -39,7 +40,6 @@ use super::actions::{
 };
 use super::projects::agent_label;
 use crate::conversation::thread::find;
-use crate::icons::{Status, Symbol};
 use crate::palette::{CommandPalette, PaletteItem};
 
 /// What is said when no machine can start an agent.
@@ -207,7 +207,7 @@ impl WorkspaceView {
                     .into_iter()
                     .map(|agent| {
                         let label = agent_label(&agent);
-                        let mark = crate::icons::Mark::agent(&agent.0);
+                        let mark = slopty_kit::icons::Mark::agent(&agent.0);
                         PaletteItem::new(&label, Box::new(NewAgentOf { agent }), &[])
                             .with_icon(mark)
                     })
@@ -359,8 +359,8 @@ impl WorkspaceView {
             let name = super::tile::place_name(&repo, Some(&repo), home).unwrap_or_default();
             let action = start(worker, agent, cwd.clone(), true);
             let shown = format!("{NEW_WORKTREE} {name}");
-            let line =
-                PaletteItem::new(&shown, action, &[]).with_icon(crate::icons::GitGlyph::Branch);
+            let line = PaletteItem::new(&shown, action, &[])
+                .with_icon(slopty_kit::icons::GitGlyph::Branch);
             if first.is_none() && last_repo.as_ref() == Some(&repo) {
                 first = Some(line);
             } else {
@@ -605,7 +605,7 @@ impl WorkspaceView {
         let Some(own) = asked.machines.first().map(|m| m.worker) else {
             return;
         };
-        let now = crate::clock::now(cx).as_millis();
+        let now = slopty_kit::clock::now(cx).as_millis();
         let same = |a: &PastSession, b: &PastSession| a.agent == b.agent && a.native == b.native;
         let line = |worker: WorkerKey, session: &PastSession| {
             let machine = (worker != own).then(|| self.worker_name(worker));
@@ -736,7 +736,7 @@ fn session_line(
     machine: Option<String>,
     now: u64,
 ) -> PaletteItem {
-    let prompt = session.prompts.first().map(|p| crate::kit::first_line(&p.text).to_owned());
+    let prompt = session.prompts.first().map(|p| slopty_kit::kit::first_line(&p.text).to_owned());
     let label = session
         .title
         .clone()
@@ -756,7 +756,7 @@ fn session_line(
     let about = session.prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
     // A session a live agent holds elsewhere is marked running: taking it up is refused.
     let running = session.facts.contains_key(slopty_proto::thread::wire::PAST_RUNNING);
-    let mark = crate::icons::Mark::agent(&session.agent.0);
+    let mark = slopty_kit::icons::Mark::agent(&session.agent.0);
     let action = Box::new(ResumeSession { worker, session: Box::new(session) });
     PaletteItem::new(&label, action, &[])
         .with_icon(mark)

@@ -19,17 +19,17 @@ use gpui::{
     AnyElement, App, Context, ElementId, FontWeight, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::git::{
     Forge, GitOp, LineSide, PullComments, PullThread, REVIEW_NOTES_MAX, ReviewNote, ReviewVerdict,
 };
 use slopty_theme::Typography;
 
 use super::{Came, ReviewView, Row, Side, on};
-use crate::colors::hsla;
 use crate::conversation::diff::{Block, Line};
 use crate::conversation::thread::git::Said;
-use crate::icons::Symbol;
-use crate::kit;
 use crate::review::model::Comment;
 
 /// The pull request the person's comments would be posted to: its number, its forge, and the

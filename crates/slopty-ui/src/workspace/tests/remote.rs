@@ -1212,7 +1212,7 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     agent_thread(&view, cx, studio.key, session);
     cx.update(|window, _cx| window.activate_window());
     cx.run_until_parked();
-    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
     assert!(stale.is_none(), "the caret: {}", stale.unwrap_or_default());
 
     let dir = tempfile::tempdir().unwrap();
@@ -1221,7 +1221,7 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&dropped), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("composer-attachment").is_some(), "the chip");
-    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
     assert!(stale.is_none(), "the chip: {}", stale.unwrap_or_default());
 }
 

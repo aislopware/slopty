@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
+use slopty_kit::icons::{Status, Symbol};
 use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
@@ -40,7 +41,6 @@ use super::actions::SwitchFace;
 use super::{WorkspaceEvent, WorkspaceView};
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, find, hub};
-use crate::icons::{Status, Symbol};
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::review::ReviewView;
 
@@ -618,7 +618,7 @@ impl WorkspaceView {
     }
 
     /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
-    pub(super) fn kind_glyph(&self, item: &Item) -> crate::icons::Mark {
+    pub(super) fn kind_glyph(&self, item: &Item) -> slopty_kit::icons::Mark {
         super::tile::kind_icon(item, self.item_agent(item))
     }
 
@@ -1328,7 +1328,7 @@ impl WorkspaceView {
         }
         let threads = &mut self.faces.threads;
         let drafts = &mut self.drafts;
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         threads.views.retain(|s, view| {
             let kept = wanted.contains(s) && threads.of_session.contains_key(s);
             if !kept {
@@ -1395,7 +1395,7 @@ impl WorkspaceView {
         }
         let threads = &mut self.faces.threads;
         let drafts = &mut self.drafts;
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         threads.items.retain(|item, view| {
             let kept = tiled.iter().any(|(i, ..)| i == item);
             if !kept {
@@ -1901,7 +1901,7 @@ impl WorkspaceView {
     /// line its thread's agent wrote. The agent's words are Markdown, and the line says them as
     /// plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
-        self.thread_line(self.session_thread(session)?).map(crate::markdown::plain_line)
+        self.thread_line(self.session_thread(session)?).map(slopty_kit::markdown::plain_line)
     }
 }
 

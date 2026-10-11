@@ -25,13 +25,13 @@ use gpui::{
     Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::Kind;
 
 use super::schema::{Row, rows};
 use super::{SettingsForm, well};
-use crate::colors::hsla;
-use crate::icons::Symbol;
 
 /// What a map row's field says before a name is typed.
 pub const ADD_ENTRY: &str = "Add by name";
@@ -361,7 +361,7 @@ impl SettingsForm {
             well(theme)
                 .flex_1()
                 .min_w_0()
-                .px(px(crate::kit::FIELD_INSET))
+                .px(px(slopty_kit::kit::FIELD_INSET))
                 .child(
                     Input::new(field)
                         .appearance(false)
@@ -384,24 +384,28 @@ impl SettingsForm {
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.toggle_entry(ix, &toggled, cx);
                 }));
-            crate::a11y::tab_stop(el, s.focus).into_any_element()
+            slopty_kit::a11y::tab_stop(el, s.focus).into_any_element()
         };
         let gone = name;
-        let remove =
-            crate::kit::icon_button(theme, format!("{slug}-remove"), Symbol::Xmark, REMOVE_ENTRY)
-                .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.remove_entry(ix, &gone, window, cx);
-                }));
+        let remove = slopty_kit::kit::icon_button(
+            theme,
+            format!("{slug}-remove"),
+            Symbol::Xmark,
+            REMOVE_ENTRY,
+        )
+        .on_click(cx.listener(move |this, _ev, window, cx| {
+            this.remove_entry(ix, &gone, window, cx);
+        }));
         let switched = matches!(kind, Kind::Switch);
         Some(
-            crate::kit::row(theme, crate::kit::Row::One)
+            slopty_kit::kit::row(theme, slopty_kit::kit::Row::One)
                 .id(SharedString::from(slug.clone()))
                 .debug_selector(move || slug)
                 .role(gpui::accesskit::Role::ListItem)
                 .aria_label(label)
                 .pl_0()
                 .child(
-                    crate::kit::typed(div(), theme.roles().chrome)
+                    slopty_kit::kit::typed(div(), theme.roles().chrome)
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()

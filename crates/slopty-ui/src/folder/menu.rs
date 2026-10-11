@@ -15,9 +15,9 @@ use gpui::{
     AnyElement, App, Context, FocusHandle, IntoElement as _, ParentElement as _, Pixels, Point,
     Window, px,
 };
+use slopty_kit::kit;
 
 use super::{DOWNLOAD, FILES_PICKER, FolderView, MOVE_TO_TRASH, RENAME_OR_MOVE, SAVE_TO_FILES};
-use crate::kit;
 
 /// Copies where the row's entry is.
 const COPY_PATH: &str = "Copy path";

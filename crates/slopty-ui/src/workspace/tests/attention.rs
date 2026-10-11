@@ -1020,7 +1020,7 @@ fn a_focused_needs_you_row_answers_by_its_keys(cx: &mut TestAppContext) {
         let row = cx.debug_bounds(row).expect("the row");
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        let nodes = cx.update(|window, _cx| crate::a11y::tree(window));
+        let nodes = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let focused = nodes.into_iter().find(|n| n.focused);
         focused.is_some_and(|n| {
             let [x, y, ..] = n.bounds;
@@ -1031,7 +1031,7 @@ fn a_focused_needs_you_row_answers_by_its_keys(cx: &mut TestAppContext) {
         if on_row(cx) {
             break;
         }
-        cx.update(|window, cx| crate::a11y::step(true, window, cx));
+        cx.update(|window, cx| slopty_kit::a11y::step(true, window, cx));
         cx.run_until_parked();
     }
     assert!(on_row(cx), "the keyboard's ring reaches the row");

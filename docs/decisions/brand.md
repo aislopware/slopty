@@ -253,7 +253,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `text.bubble` and its name. A specific ACP agent gets a mark only once it proves a daily
     driver: 26 more owners' marks for agents rarely run would be clutter
     (`feedback-prune-critically`).
-  - **The outlines are the owners' own, unmodified.** `crates/slopty-ui/assets/agents/`
+  - **The outlines are the owners' own, unmodified.** `crates/slopty-kit/assets/agents/`
     keeps `claude.svg` (the Agent Client Protocol registry's `claude-acp/icon.svg`, the same
     polygon as Anthropic's press kit file "Claude Spark - Clay.svg") and `openai.svg` (the
     registry's `codex-acp/icon.svg`), both Apache-2.0 as the registry ships them. pi has no
@@ -299,7 +299,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     strokes about 0.6 px; pi 1.0 / 1.0 (`docs/MEASUREMENTS.md`, "Agent marks at 1x").
   - Tests: `icons::marks::tests::{every_agent_wears_a_mark, a_mark_is_drawn_at_its_optical_size,
     a_mark_is_centred_on_its_ink, pi_lands_on_whole_pixels, the_marks_are_crisp_at_1x}`,
-    `kit::tests::an_agents_mark_wears_no_colour_of_its_own`,
+    `lints::an_agents_mark_wears_no_colour_of_its_own`,
     `slopty-platform` `outline::tests::{path_data_reads_as_svg_reads_it,
     an_outline_lands_on_the_pixels_it_covers}`, and the `agent-marks` golden, light and dark
     (`slopty-e2e` `marks::each_agent_wears_its_mark_in_the_navigator`). Where the mark stands

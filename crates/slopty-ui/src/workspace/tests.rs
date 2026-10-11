@@ -45,7 +45,7 @@ impl Fake {
 }
 
 /// A workspace whose frames hold still: GPUI's fades and slides run on the wall clock, so a
-/// test that judges a frame against one drawn from scratch ([`crate::retained::stale`]) runs
+/// test that judges a frame against one drawn from scratch ([`slopty_kit::retained::stale`]) runs
 /// under Reduce Motion, where a slow machine cannot catch one half way.
 fn still_workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
     cx.update(|cx| cx.set_reduce_motion(true));
@@ -336,10 +336,10 @@ fn blocks_of(rows: &[(&str, SemanticMark)], cursor_row: u16) -> Blocks {
 
 /// `debug_bounds` wants a static selector; tests may leak a handful.
 /// The accessibility tree of the next frame.
-fn tree(cx: &mut VisualTestContext) -> Vec<crate::a11y::Node> {
+fn tree(cx: &mut VisualTestContext) -> Vec<slopty_kit::a11y::Node> {
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window))
+    cx.update(|window, _cx| slopty_kit::a11y::tree(window))
 }
 
 fn selector(part: &str, id: ItemId) -> &'static str {
@@ -828,7 +828,7 @@ fn a_lost_worker_keeps_its_tiles_until_its_snapshot_says_otherwise(cx: &mut Test
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let labels = |cx: &mut VisualTestContext| {
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.into_iter().filter_map(|n| n.label).collect::<Vec<_>>()
     };
     assert!(!labels(cx).iter().any(|l| l.ends_with(", reconnecting")), "nobody is down");
@@ -1292,17 +1292,17 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     cx.dispatch_action(OpenPalette);
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_some(), "the palette is up");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
     // The empty field lists a few commands; typing reaches the rest.
     cx.simulate_keystrokes("p r e v i o u s space p r o");
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Previous project ⌥⌘⇞"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.palette_open()), "Esc empties the field first");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -1553,7 +1553,7 @@ fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("readout-server").is_some());
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let labels: Vec<&str> = tree.iter().filter_map(|n| n.label.as_deref()).collect();
     assert!(labels.contains(&"studio, unreachable"), "{labels:#?}");
     assert!(labels.contains(&"Server offline"), "{labels:#?}");
@@ -1752,7 +1752,7 @@ fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) 
         cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
-            crate::retained::painted(window)
+            slopty_kit::retained::painted(window)
         })
     };
     let settled = frame(cx);

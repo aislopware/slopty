@@ -22,6 +22,11 @@ use gpui::{
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{GitGlyph, IconSize, Mark, Phase, Status, Symbol, icon, status_icon};
+use slopty_kit::kit::progress::Progress;
+use slopty_kit::kit::{ButtonKind, Priority};
 use slopty_platform::notify::Pressed;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
@@ -42,11 +47,6 @@ use super::{
     ResolveConflicts, RetryTask, ReviewTask, SelectNext, SelectPrevious, ShowTerminal, StartTask,
     TellOrchestrator, TogglePush,
 };
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::icons::{GitGlyph, IconSize, Mark, Phase, Status, Symbol, icon, status_icon};
-use crate::kit::progress::Progress;
-use crate::kit::{ButtonKind, Priority};
 use crate::palette::{Plate, age_label, dotted};
 
 /// The key context of a board; its keys are bound in it.
@@ -660,10 +660,10 @@ impl ProjectView {
             .text_color(hsla(tone))
             .children(away)
             .child(div().min_w_0().truncate().child(SharedString::from(short)))
-            .map(crate::kit::hint_timing)
+            .map(slopty_kit::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
-                cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
+                cx.new(|_| slopty_kit::kit::Hint::new(hint.clone(), "", theme)).into()
             });
         Some(el)
     }
@@ -824,7 +824,7 @@ impl ProjectView {
         };
         let place = place_line(project);
         let readout = |id: &'static str, text: String| {
-            crate::kit::tabular(div())
+            slopty_kit::kit::tabular(div())
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .flex_none()
@@ -834,15 +834,19 @@ impl ProjectView {
         };
         let push = project.push;
         let push_toggle =
-            crate::kit::icon_toggle(theme, "project-push", Symbol::ArrowUpToLine, PUSH, push)
+            slopty_kit::kit::icon_toggle(theme, "project-push", Symbol::ArrowUpToLine, PUSH, push)
                 .on_click(cx.listener(move |_this, _ev, _w, cx| {
                     cx.emit(ProjectEvent::SetPush(!push));
                 }));
-        let terminal =
-            crate::kit::icon_button(theme, "project-terminal", Symbol::Terminal, SHOW_TERMINAL)
-                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
+        let terminal = slopty_kit::kit::icon_button(
+            theme,
+            "project-terminal",
+            Symbol::Terminal,
+            SHOW_TERMINAL,
+        )
+        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
         let checks_open = self.checks.is_some();
-        let checks_toggle = crate::kit::icon_toggle(
+        let checks_toggle = slopty_kit::kit::icon_toggle(
             theme,
             "project-checks",
             Symbol::Checklist,
@@ -864,7 +868,7 @@ impl ProjectView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .map(|el| crate::kit::typed(el, theme.roles().panel_title))
+            .map(|el| slopty_kit::kit::typed(el, theme.roles().panel_title))
             .text_color(hsla(s.text))
             .child(SharedString::from(project.title.clone()));
         // The name, then how far along it is and what runs, then its controls. Where the board
@@ -878,14 +882,14 @@ impl ProjectView {
                 .flex()
                 .items_center()
                 .gap(px(sp.xs))
-                .child(crate::kit::separator(theme).text_size(px(theme.typography.small())))
+                .child(slopty_kit::kit::separator(theme).text_size(px(theme.typography.small())))
                 .child(live)
                 .into_any_element()
         } else {
             live.into_any_element()
         };
-        let mut title = crate::kit::priority_row("project-header")
-            .h(px(crate::kit::icon_button_side(theme)))
+        let mut title = slopty_kit::kit::priority_row("project-header")
+            .h(px(slopty_kit::kit::icon_button_side(theme)))
             .gap(px(sp.xs))
             .title(name, px(theme.typography.ui_size * TITLE_FLOOR_EM))
             .end();
@@ -899,7 +903,7 @@ impl ProjectView {
         let ready = board.mergeable();
         if ready.len() > 1 {
             let n = ready.len();
-            let merge = crate::kit::button(
+            let merge = slopty_kit::kit::button(
                 theme,
                 "project-merge-ready",
                 format!("{MERGE_READY} ({n})"),
@@ -952,7 +956,7 @@ impl ProjectView {
                     .child(self.review_limit(project.limits.review, cx)),
             )
             .children((project.autonomy == Autonomy::Own).then(|| {
-                crate::kit::typed(div(), theme.roles().metadata)
+                slopty_kit::kit::typed(div(), theme.roles().metadata)
                     .debug_selector(|| "project-autonomy-managed".to_owned())
                     .text_color(hsla(s.text_muted))
                     .child(MANAGED_OWN)
@@ -969,7 +973,8 @@ impl ProjectView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let step = |id: &'static str, glyph: Symbol, label: &'static str, to: Option<u16>| {
-            let el = crate::kit::icon_button(theme, id, glyph, label).size(px(theme.density.chip));
+            let el =
+                slopty_kit::kit::icon_button(theme, id, glyph, label).size(px(theme.density.chip));
             match to {
                 Some(to) => el.on_click(cx.listener(move |_this, _ev, _w, cx| {
                     cx.emit(ProjectEvent::SetReviewLimit(to));
@@ -983,16 +988,16 @@ impl ProjectView {
         // Its name stands in the track, so the number never reads as a count of what waits now;
         // what it holds to is its hint.
         let hint_theme = Rc::clone(&self.hint_theme);
-        let name = crate::kit::meta(div(), theme)
+        let name = slopty_kit::kit::meta(div(), theme)
             .id("project-review-name")
             .pl(px(theme.spacing.xs))
             .child(REVIEW_LIMIT)
-            .map(crate::kit::hint_timing)
+            .map(slopty_kit::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
-                cx.new(|_| crate::kit::Hint::new(REVIEW_LIMIT_SAYS, "", theme)).into()
+                cx.new(|_| slopty_kit::kit::Hint::new(REVIEW_LIMIT_SAYS, "", theme)).into()
             });
-        crate::kit::track(theme)
+        slopty_kit::kit::track(theme)
             .id("project-review-limit")
             .debug_selector(|| "project-review-limit".to_owned())
             .role(Role::Group)
@@ -1003,7 +1008,7 @@ impl ProjectView {
             .child(name)
             .child(step("project-review-fewer", Symbol::Minus, FEWER_REVIEWS, fewer))
             .child(
-                crate::kit::tabular(crate::kit::typed(div(), theme.roles().metadata))
+                slopty_kit::kit::tabular(slopty_kit::kit::typed(div(), theme.roles().metadata))
                     .debug_selector(|| "project-review-count".to_owned())
                     .min_w(px(theme.density.chip))
                     .text_center()
@@ -1025,7 +1030,7 @@ impl ProjectView {
             let chosen = level == now;
             let id = format!("project-autonomy-{}", word.to_lowercase());
             let selector = id.clone();
-            let el = crate::kit::typed(div(), theme.roles().metadata)
+            let el = slopty_kit::kit::typed(div(), theme.roles().metadata)
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
                 .role(Role::RadioButton)
@@ -1036,7 +1041,7 @@ impl ProjectView {
                 .items_center()
                 .h(px(theme.density.chip))
                 .px(px(sp.sm))
-                .rounded(px(crate::kit::thumb_radius(theme)))
+                .rounded(px(slopty_kit::kit::thumb_radius(theme)))
                 .cursor_pointer()
                 .child(word);
             // The level now on the selected wash; the rest quiet, rising under the pointer.
@@ -1053,7 +1058,7 @@ impl ProjectView {
                 }
             }))
         });
-        crate::kit::track(theme)
+        slopty_kit::kit::track(theme)
             .id("project-autonomy")
             .debug_selector(|| "project-autonomy".to_owned())
             .role(Role::RadioGroup)
@@ -1097,14 +1102,14 @@ impl ProjectView {
                 ))
                 .child(GOAL_MET)
         });
-        let summary = crate::kit::typed(div(), roles.chrome)
+        let summary = slopty_kit::kit::typed(div(), roles.chrome)
             .debug_selector(|| "project-standing-summary".to_owned())
             .min_w_0()
             .line_clamp(STANDING_LINES)
             .text_color(hsla(s.text))
             .child(SharedString::from(summary.to_owned()));
         let next = next.map(|next| {
-            crate::kit::typed(div(), roles.metadata)
+            slopty_kit::kit::typed(div(), roles.metadata)
                 .debug_selector(|| "project-standing-next".to_owned())
                 .min_w_0()
                 .line_clamp(2)
@@ -1146,7 +1151,7 @@ impl ProjectView {
             let ink = glyph.state_ink(theme).unwrap_or(s.text_muted);
             let words = SharedString::from(format!("{PULL_REQUEST} {}", pull.line()));
             let tone = if pull.stands.needs_you() { s.warn } else { s.text };
-            crate::kit::typed(div(), theme.roles().chrome)
+            slopty_kit::kit::typed(div(), theme.roles().chrome)
                 .id("project-pull")
                 .debug_selector(|| "project-pull".to_owned())
                 .role(Role::Link)
@@ -1168,16 +1173,21 @@ impl ProjectView {
         }
         let base = board.project.base.as_ref().or_else(|| landed.map(|p| &p.base));
         let review = base.map(|_| {
-            crate::kit::button(theme, "project-review-goal", REVIEW_GOAL, ButtonKind::Secondary)
-                .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::ReviewGoal)))
+            slopty_kit::kit::button(
+                theme,
+                "project-review-goal",
+                REVIEW_GOAL,
+                ButtonKind::Secondary,
+            )
+            .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::ReviewGoal)))
         });
         let open = if self.landing {
-            crate::kit::meta(div(), theme)
+            slopty_kit::kit::meta(div(), theme)
                 .debug_selector(|| "project-landing".to_owned())
                 .child(OPENING_PULL)
                 .into_any_element()
         } else {
-            crate::kit::button(theme, "project-land", OPEN_PULL, ButtonKind::Primary)
+            slopty_kit::kit::button(theme, "project-land", OPEN_PULL, ButtonKind::Primary)
                 .on_click(cx.listener(|this, _ev, _w, cx| {
                     this.landing = true;
                     cx.emit(ProjectEvent::Land);
@@ -1186,7 +1196,7 @@ impl ProjectView {
                 .into_any_element()
         };
         let into = board.project.base.as_ref().filter(|_| !self.landing).map(|base| {
-            crate::kit::meta(div(), theme)
+            slopty_kit::kit::meta(div(), theme)
                 .debug_selector(|| "project-land-into".to_owned())
                 .child(SharedString::from(format!("{INTO} {base}")))
         });
@@ -1206,13 +1216,13 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let resume = if self.resuming {
-            crate::kit::meta(div(), theme)
+            slopty_kit::kit::meta(div(), theme)
                 .debug_selector(|| "project-orchestrator-resuming".to_owned())
                 .flex_none()
                 .child(RESUMING_ORCHESTRATOR)
                 .into_any_element()
         } else {
-            crate::kit::button(
+            slopty_kit::kit::button(
                 theme,
                 "project-orchestrator-resume",
                 RESUME_ORCHESTRATOR,
@@ -1225,7 +1235,7 @@ impl ProjectView {
             }))
             .into_any_element()
         };
-        let open = crate::kit::button(
+        let open = slopty_kit::kit::button(
             theme,
             "project-orchestrator-thread",
             OPEN_ORCHESTRATOR,
@@ -1243,7 +1253,7 @@ impl ProjectView {
                 .items_center()
                 .gap(px(sp.sm))
                 .child(
-                    crate::kit::meta(div(), theme)
+                    slopty_kit::kit::meta(div(), theme)
                         .flex_1()
                         .min_w_0()
                         .flex()
@@ -1267,7 +1277,7 @@ impl ProjectView {
         let sp = theme.spacing;
         let tasks = board.unpushed();
         let first = *tasks.first()?;
-        let count = crate::kit::count(tasks.len() as u64, "merged task", "merged tasks");
+        let count = slopty_kit::kit::count(tasks.len() as u64, "merged task", "merged tasks");
         let words = format!("{count} not pushed");
         let push = div()
             .id("project-push-now")
@@ -1284,12 +1294,12 @@ impl ProjectView {
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer()
             .child(TaskAction::Push.label());
-        let push = tab_stop(crate::kit::secondary(push, theme), s.focus).on_click(cx.listener(
-            move |this, _ev, _w, cx| {
+        let push = tab_stop(slopty_kit::kit::secondary(push, theme), s.focus).on_click(
+            cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.act(first, TaskAction::Push, cx);
-            },
-        ));
+            }),
+        );
         Some(
             div()
                 .flex_none()
@@ -1297,7 +1307,7 @@ impl ProjectView {
                 .items_center()
                 .gap(px(sp.xs))
                 .child(
-                    crate::kit::tabular(div())
+                    slopty_kit::kit::tabular(div())
                         .id("project-unpushed")
                         .debug_selector(|| "project-unpushed".to_owned())
                         .flex_none()
@@ -1369,9 +1379,9 @@ impl ProjectView {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             } else if held && ix == 0 {
-                crate::kit::solid_pressable(el, theme)
+                slopty_kit::kit::solid_pressable(el, theme)
             } else if ix == 0 {
-                crate::kit::secondary(el, theme)
+                slopty_kit::kit::secondary(el, theme)
             } else {
                 // One box to a row: what follows the first reads as a control beside it.
                 el.text_color(hsla(s.text_secondary))
@@ -1394,7 +1404,7 @@ impl ProjectView {
         #[expect(clippy::cast_precision_loss, reason = "task counts are small")]
         let share = if total == 0 { 0.0 } else { merged as f32 / total as f32 };
         let bar =
-            crate::kit::progress::Bar::new(theme, "project-bar-share", Progress::Share(share))
+            slopty_kit::kit::progress::Bar::new(theme, "project-bar-share", Progress::Share(share))
                 .label(SharedString::from(format!("{merged} of {total} merged")))
                 .tone(theme.surfaces.success_fill)
                 .height(px(theme.spacing.xs))
@@ -1413,7 +1423,7 @@ impl ProjectView {
         let s = &self.theme.surfaces;
         let asks = agent.asks.clone().unwrap_or_else(|| WAITING_ON_YOU.to_owned());
         let key = "project-needs-orchestrator";
-        let line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
+        let line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(self.theme.spacing.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(Some(Phase::NeedsYou)))
@@ -1450,7 +1460,7 @@ impl ProjectView {
             age => format!("Since you looked, {age} ago"),
         };
         let close =
-            crate::kit::icon_button(theme, "project-recap-close", Symbol::Xmark, CLOSE_RECAP)
+            slopty_kit::kit::icon_button(theme, "project-recap-close", Symbol::Xmark, CLOSE_RECAP)
                 .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::CloseRecap)));
         let head = div()
             .flex()
@@ -1488,7 +1498,7 @@ impl ProjectView {
                 .flex_none()
                 .mb(px(sp.xs))
                 .pb(px(sp.xs))
-                .map(|el| crate::kit::raised(el, theme))
+                .map(|el| slopty_kit::kit::raised(el, theme))
                 .child(head)
                 .children(lines)
                 .children(partial),
@@ -1556,7 +1566,7 @@ impl ProjectView {
             None => slot.child(
                 icon(
                     theme,
-                    crate::icons::AGENT,
+                    slopty_kit::icons::AGENT,
                     IconSize::Inline,
                     hsla(theme.surfaces.text_secondary),
                 )
@@ -1614,7 +1624,7 @@ impl ProjectView {
                 parts.push(words);
             }
             if let Some(status) = card.status.as_deref().filter(|s| !asked && !s.is_empty()) {
-                parts.push(crate::kit::first_line(status).to_owned());
+                parts.push(slopty_kit::kit::first_line(status).to_owned());
             }
         }
         if let Some(card) = card {
@@ -1641,7 +1651,7 @@ impl ProjectView {
         if let Some(step) = running
             && let StepState::Running { phase, .. } = &step.state
         {
-            let line = crate::kit::first_line(phase).to_owned();
+            let line = slopty_kit::kit::first_line(phase).to_owned();
             return Some(Check::Running { line, term: step.term });
         }
         let term = card
@@ -1677,7 +1687,7 @@ impl ProjectView {
             )
             .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
             .child(
-                crate::kit::tabular(div())
+                slopty_kit::kit::tabular(div())
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -1699,7 +1709,7 @@ impl ProjectView {
                 .px(px(sp.sm))
                 .py(px(sp.xs))
                 .rounded(px(theme.radii.sm))
-                .map(|el| crate::kit::inset(el, theme))
+                .map(|el| slopty_kit::kit::inset(el, theme))
                 // What the program printed, in the face a terminal and a tool's output use, at
                 // the facts' size and a reading line, so why it failed is read, not squinted at.
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
@@ -1817,10 +1827,11 @@ impl ProjectView {
                     .items_center()
                     .gap(px(sp.xs))
                     .child(
-                        crate::kit::label(theme, lane.title()).text_size(px(roles.metadata.size)),
+                        slopty_kit::kit::label(theme, lane.title())
+                            .text_size(px(roles.metadata.size)),
                     )
                     .when(folds, |el| {
-                        el.child(crate::kit::Disclosure::new(
+                        el.child(slopty_kit::kit::Disclosure::new(
                             format!("{head_id}-fold"),
                             !folded,
                             theme,
@@ -1830,7 +1841,7 @@ impl ProjectView {
                     }),
             )
             .child(
-                crate::kit::tabular(div())
+                slopty_kit::kit::tabular(div())
                     .debug_selector({
                         let id = format!("{head_id}-count");
                         move || id
@@ -1883,12 +1894,12 @@ impl ProjectView {
                 .flex_col()
                 .p(px(sp.xxs))
                 .rounded(px(theme.radii.md));
-            crate::kit::raised(group, theme).children(rows.into_iter().enumerate().map(
+            slopty_kit::kit::raised(group, theme).children(rows.into_iter().enumerate().map(
                 |(ix, row)| {
                     div()
                         .min_w_0()
                         .when(ix > 0, |el| {
-                            el.border_t(crate::kit::HAIR).border_color(hsla(s.stroke))
+                            el.border_t(slopty_kit::kit::HAIR).border_color(hsla(s.stroke))
                         })
                         .child(row)
                 },
@@ -1933,7 +1944,7 @@ impl ProjectView {
     /// A row's title: the action role (13, medium) in the text ink, on one line, ending in an
     /// ellipsis when its facts leave it less than its width.
     fn row_title(&self, text: String) -> Div {
-        crate::kit::typed(div(), self.theme.roles().action)
+        slopty_kit::kit::typed(div(), self.theme.roles().action)
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1959,7 +1970,7 @@ impl ProjectView {
             .px(px(theme.spacing.xs))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(picked, |el| crate::kit::selected(el, theme, true))
+            .when(picked, |el| slopty_kit::kit::selected(el, theme, true))
             .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.hover))))
     }
 
@@ -2029,7 +2040,7 @@ impl ProjectView {
             // The first is the move that frees the task, solid as a held card's first action;
             // the rest are controls beside it.
             let el = if ix == 0 {
-                crate::kit::solid_pressable(el, theme)
+                slopty_kit::kit::solid_pressable(el, theme)
             } else {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
@@ -2054,7 +2065,7 @@ impl ProjectView {
     /// What an agent asks the person, as a row's second line in the secondary ink.
     fn asks_line(&self, key: &str, asks: String) -> AnyElement {
         let id = format!("{key}-asks");
-        crate::kit::typed(div(), self.theme.roles().metadata)
+        slopty_kit::kit::typed(div(), self.theme.roles().metadata)
             .debug_selector(move || id)
             .min_w_0()
             .line_clamp(2)
@@ -2068,7 +2079,7 @@ impl ProjectView {
     fn handing_line(&self, key: &str, words: String) -> AnyElement {
         let id = format!("{key}-handing");
         let selector = id.clone();
-        crate::kit::typed(div(), self.theme.roles().metadata)
+        slopty_kit::kit::typed(div(), self.theme.roles().metadata)
             .id(SharedString::from(id))
             .debug_selector(move || selector)
             .role(Role::Status)
@@ -2098,7 +2109,7 @@ impl ProjectView {
             .text_size(px(roles.metadata.size))
             .text_color(hsla(s.text_muted))
             .children(glyph.map(|glyph| {
-                crate::icons::beside(theme, glyph, roles.metadata, hsla(s.text_secondary))
+                slopty_kit::icons::beside(theme, glyph, roles.metadata, hsla(s.text_secondary))
                     .size(px(IconSize::beside_slot(theme, roles.metadata)))
             }))
             .child(SharedString::from(words))
@@ -2226,13 +2237,13 @@ impl ProjectView {
             .filter(|stage| stage.kind != StageKind::Branch)
             .partition(|stage| stage.holds || stage.failed);
 
-        let number = crate::kit::tabular(div())
+        let number = slopty_kit::kit::tabular(div())
             .flex_none()
             .whitespace_nowrap()
             .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(format!("#{}", card.id)));
-        let mut line = crate::kit::priority_row(SharedString::from(format!("{key}-line")))
+        let mut line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(sp.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(phase))
@@ -2295,7 +2306,7 @@ impl ProjectView {
             cx.emit(ProjectEvent::Open(node));
             cx.notify();
         }));
-        crate::kit::slide_fade(el, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
+        slopty_kit::kit::slide_fade(el, arrive, ARRIVE, slopty_kit::kit::Pace::Fade, cx)
     }
 
     /// Make the message to the orchestrator once there is a window, and put refused words back
@@ -2447,7 +2458,7 @@ impl ProjectView {
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         let cancel = tab_stop(cancel, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.close_checks(window, cx)));
-        let save = crate::kit::solid_pressable(button("project-checks-save", "Save"), theme);
+        let save = slopty_kit::kit::solid_pressable(button("project-checks-save", "Save"), theme);
         let save = tab_stop(save, s.focus)
             .on_click(cx.listener(|this, _ev, window, cx| this.save_checks(window, cx)));
         let panel = div()
@@ -2474,7 +2485,7 @@ impl ProjectView {
     }
 
     /// The message to the orchestrator at the board's foot, while it has one: a thread's
-    /// composer's frame ([`crate::kit::message`]) with the field in the prose's size over its
+    /// composer's frame ([`slopty_kit::kit::message`]) with the field in the prose's size over its
     /// send control, the frame's edge in the accent while the keyboard is in it.
     fn composer_row(
         &self,
@@ -2497,18 +2508,19 @@ impl ProjectView {
                 .line_height(relative(theme.typography.prose_line_height))
                 .aria_label(COMPOSE_LABEL),
         );
-        let send = crate::kit::message::send_control(theme, "project-send", Symbol::ArrowUp, SEND)
-            .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
+        let send =
+            slopty_kit::kit::message::send_control(theme, "project-send", Symbol::ArrowUp, SEND)
+                .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()
             .flex()
             .justify_end()
             .px(px(sp.sm))
             .pb(px(sp.sm))
             .child(tab_stop(send, theme.surfaces.focus));
-        let frame = crate::kit::message::shell(
+        let frame = slopty_kit::kit::message::shell(
             div().flex().flex_col().gap(px(sp.xs)),
             theme,
-            crate::kit::message::Frame { focused, ..Default::default() },
+            slopty_kit::kit::message::Frame { focused, ..Default::default() },
         )
         .child(field)
         .child(foot);
@@ -2531,7 +2543,7 @@ impl ProjectView {
     /// when it must, a stage holding the merge back in the text ink: none of it is a control, so
     /// none of it wears a button's edge. Only a stage that failed is coloured, in the error ink
     /// with its mark, since that is what someone has to act on.
-    fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<crate::kit::FactsRow> {
+    fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<slopty_kit::kit::FactsRow> {
         if stages.is_empty() {
             return None;
         }
@@ -2539,10 +2551,11 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         // Wrapped between stages, never with a dot left at either end of a line.
-        let mut row = crate::kit::facts_row(SharedString::from(format!("{key}-stages")), theme)
-            .gap_x(px(sp.xs))
-            .gap_y(px(sp.xxs))
-            .text_size(px(theme.typography.small()));
+        let mut row =
+            slopty_kit::kit::facts_row(SharedString::from(format!("{key}-stages")), theme)
+                .gap_x(px(sp.xs))
+                .gap_y(px(sp.xxs))
+                .text_size(px(theme.typography.small()));
         for stage in stages {
             let id = format!("{key}-{}", stage.kind.word());
             let selector = id.clone();

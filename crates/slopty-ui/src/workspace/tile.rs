@@ -15,6 +15,12 @@ use gpui::{
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::chrome_text::ChromeText;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{GitGlyph, IconSize, Mark, Status, Symbol};
+use slopty_kit::kit;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::Worktree;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
@@ -30,14 +36,9 @@ use super::browsers::ADDRESS;
 use super::context_menus::Pressed;
 use super::faces::{Face, ThreadStand};
 use super::{Field, MenuRun, WorkerStatus, WorkspaceView, tab_look};
-use crate::a11y::tab_stop;
+use crate::add_worker;
 use crate::browser::BrowserView;
-use crate::chrome_text::ChromeText;
-use crate::colors::hsla;
-use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol};
-use crate::{add_worker, kit};
 
 /// An orchestrator's header toggle for its board, said as on or off.
 pub(super) const BOARD: &str = "Board";
@@ -656,9 +657,9 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Mark {
         return Mark::agent(agent);
     }
     let symbol = match &item.kind {
-        ItemKind::File { path } => return crate::icons::file_mark(path),
+        ItemKind::File { path } => return slopty_kit::icons::file_mark(path),
         ItemKind::Terminal { .. } => Symbol::Terminal,
-        ItemKind::Thread { .. } => crate::icons::AGENT,
+        ItemKind::Thread { .. } => slopty_kit::icons::AGENT,
         ItemKind::Window { .. } => Symbol::Macwindow,
         ItemKind::Display { .. } => Symbol::Display,
         ItemKind::Folder { .. } => Symbol::Folder,
@@ -721,7 +722,9 @@ impl WorkspaceView {
     fn derived_place(&self, item: &Item, title: &str) -> Option<String> {
         let unmarked = self
             .item_agent(item)
-            .filter(|agent| crate::icons::AgentMark::of(agent) == crate::icons::AgentMark::Neutral)
+            .filter(|agent| {
+                slopty_kit::icons::AgentMark::of(agent) == slopty_kit::icons::AgentMark::Neutral
+            })
             .map(|agent| super::projects::agent_label(&AgentId::named(agent)))
             .filter(|name| name != title);
         let place = self.derived_where(item, title);
@@ -1073,7 +1076,7 @@ impl WorkspaceView {
             .justify_center()
             .px(px(theme.spacing.md))
             .rounded(px(theme.radii.md))
-            .bg(crate::colors::hsla_alpha(s.accent_fill, slopty_theme::alpha::FAINT))
+            .bg(slopty_kit::colors::hsla_alpha(s.accent_fill, slopty_theme::alpha::FAINT))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .child(
@@ -1245,9 +1248,13 @@ impl WorkspaceView {
                 side,
             );
             let touch = theme.density == slopty_theme::Density::TOUCH;
-            let stop =
-                crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_secondary))
-                    .size(side);
+            let stop = slopty_kit::icons::icon(
+                theme,
+                Symbol::Xmark,
+                IconSize::Inline,
+                hsla(s.text_secondary),
+            )
+            .size(side);
             let mark = div()
                 .relative()
                 .flex_none()
@@ -1454,7 +1461,7 @@ impl WorkspaceView {
         let several = !bar && self.project_machines(tile) > 1;
         let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
             let name = w.name.clone();
-            let machine = crate::icons::machine(w.caps.as_ref().map(|c| c.form));
+            let machine = slopty_kit::icons::machine(w.caps.as_ref().map(|c| c.form));
             let muted = hsla(s.text_muted);
             // The glyph in its name's quiet tier: a machine's own colour is the navigator's
             // head's alone.
@@ -1469,7 +1476,7 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xs))
                 .text_color(muted)
                 .child(
-                    crate::icons::icon(theme, machine, IconSize::Inline, tint)
+                    slopty_kit::icons::icon(theme, machine, IconSize::Inline, tint)
                         .size(px(IconSize::Inline.slot(theme))),
                 )
                 .child(ChromeText::new(name, px(theme.typography.small())).fill())
@@ -1639,7 +1646,7 @@ impl WorkspaceView {
             .filter(|st| *st != Status::Idle)
             .filter(|st| !(opening && *st == Status::Working))?;
         let theme = &self.theme;
-        let mark = crate::icons::status_mark(theme, Some(status))
+        let mark = slopty_kit::icons::status_mark(theme, Some(status))
             .debug_selector(move || format!("status-{}", id.as_uuid()));
         let (session, agent) = match item.kind {
             ItemKind::Terminal { session } => (Some(session), self.agent_state(session)),
@@ -1839,7 +1846,7 @@ impl WorkspaceView {
                         .justify_center()
                         .when(!shown, |el| el.opacity(slopty_theme::alpha::STRONG))
                         .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
-                        .child(crate::icons::status_mark(theme, Some(st)))
+                        .child(slopty_kit::icons::status_mark(theme, Some(st)))
                         .into_any_element(),
                     None => tab_look::lead(theme, self.kind_glyph(item), shown)
                         .debug_selector(move || format!("tab-slot-{}", id.as_uuid()))
@@ -2080,7 +2087,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .text_color(muted)
                 .children(glyph.map(|glyph| {
-                    crate::icons::icon(theme, glyph, IconSize::Inline, muted)
+                    slopty_kit::icons::icon(theme, glyph, IconSize::Inline, muted)
                         .size(px(IconSize::Inline.slot(theme)))
                 }))
                 .child(ChromeText::new(words, px(theme.typography.small())).fill());
@@ -2153,7 +2160,7 @@ impl WorkspaceView {
                 cx.new(|_| kit::Hint::new(hint, path, theme)).into()
             })
             .child(
-                crate::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
+                slopty_kit::icons::icon(theme, GitGlyph::Branch, IconSize::Inline, muted)
                     .size(px(IconSize::Inline.slot(theme))),
             )
             .child(ChromeText::new(tree.name.clone(), px(theme.typography.small())).fill())
@@ -2211,7 +2218,7 @@ impl WorkspaceView {
                 cx.new(|_| kit::Hint::new(line, title, theme)).into()
             })
             .child(
-                crate::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
+                slopty_kit::icons::icon(theme, glyph, IconSize::Inline, hsla(glyph_ink))
                     .size(px(IconSize::Inline.slot(theme))),
             )
             .child(ChromeText::new(pull.named(), px(theme.typography.small())));
@@ -3049,7 +3056,7 @@ impl WorkspaceView {
             })
         });
         if centred {
-            let mark = crate::icons::notice_status(theme, status, hsla(status.ink(theme)));
+            let mark = slopty_kit::icons::notice_status(theme, status, hsla(status.ink(theme)));
             let buttons = div()
                 .flex()
                 .flex_wrap()
@@ -3100,7 +3107,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .child(crate::icons::status_icon(
+            .child(slopty_kit::icons::status_icon(
                 theme,
                 status,
                 px(theme.typography.icon()),
@@ -3308,7 +3315,7 @@ impl WorkspaceView {
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(
-                crate::icons::icon(
+                slopty_kit::icons::icon(
                     theme,
                     Symbol::ExclamationmarkTriangle,
                     IconSize::Inline,
@@ -3394,7 +3401,7 @@ impl WorkspaceView {
             None => format!("Opening {what}…"),
         });
         let block = Some({
-            let mark = crate::icons::notice_status(theme, Status::Running, hsla(s.text_muted));
+            let mark = slopty_kit::icons::notice_status(theme, Status::Running, hsla(s.text_muted));
             let block =
                 kit::notice(theme, mark, format!("Opening {what}"), worker.map(SharedString::from))
                     .debug_selector(move || format!("waiting-{}", id.as_uuid()))
@@ -3500,7 +3507,7 @@ impl WorkspaceView {
             .font_family(ty.ui_family.clone())
             .text_center()
             .child(
-                crate::icons::icon(
+                slopty_kit::icons::icon(
                     theme,
                     Symbol::ExclamationmarkTriangle,
                     IconSize::Inline,

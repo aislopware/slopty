@@ -12,13 +12,13 @@ use gpui::{
     ListOffset, ParentElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState};
+use slopty_kit::kit::find::{PLACEHOLDER, Tally};
+use slopty_kit::kit::{self, FindBar};
 use slopty_proto::thread::{ItemBody, ThreadState};
 
 use super::ThreadView;
 use crate::conversation::thread::find::{self, Found};
 use crate::conversation::thread::rows::Row;
-use crate::kit::find::{PLACEHOLDER, Tally};
-use crate::kit::{self, FindBar};
 
 /// The find bar: its field, the matches newest first, the one on show, and the older turns'
 /// matches the worker left out.

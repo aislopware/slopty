@@ -454,7 +454,7 @@ fn an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again(cx: &mut Tes
 /// place no longer names the agent in words. A plain shell keeps its own glyph.
 #[gpui::test]
 fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppContext) {
-    use crate::icons::{AgentMark, Mark};
+    use slopty_kit::icons::{AgentMark, Mark};
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let key = studio.key;
@@ -511,7 +511,7 @@ fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppCo
     assert!(ends(cx, "at rest").is_none(), "at rest the row's end says no state");
 
     let (glyph, place) = read(cx, shell);
-    assert_eq!(glyph, Mark::Symbol(crate::icons::Symbol::Terminal));
+    assert_eq!(glyph, Mark::Symbol(slopty_kit::icons::Symbol::Terminal));
     assert!(!place.unwrap_or_default().contains("Claude Code"), "a shell names no agent");
 
     // An agent with no mark of its own wears the neutral glyph and is named in words.
@@ -523,7 +523,7 @@ fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppCo
     opencode.meta.agent = AgentId::acp("opencode");
     table(&view, cx, key, 2, &[&claude, &opencode]);
     let (glyph, place) = read(cx, acp);
-    assert_eq!(glyph, Mark::Symbol(crate::icons::AGENT), "the neutral glyph");
+    assert_eq!(glyph, Mark::Symbol(slopty_kit::icons::AGENT), "the neutral glyph");
     let title = view.read_with(cx, |v, _| v.tile_title(v.item(acp).expect("the tile")));
     let place = place.unwrap_or_default();
     assert!(

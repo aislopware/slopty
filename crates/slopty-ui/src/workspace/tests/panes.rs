@@ -91,18 +91,18 @@ fn title_tabs(tiling: &Tiling) -> Vec<TitleTab> {
         .map(|(i, tab)| TitleTab {
             id: tab.id(),
             title: format!("Tab {i}").into(),
-            lead: crate::icons::Mark::Symbol(crate::icons::Symbol::Terminal),
+            lead: slopty_kit::icons::Mark::Symbol(slopty_kit::icons::Symbol::Terminal),
             place: None,
             edited: false,
             tiles: tab.panes().count(),
-            marks: vec![crate::icons::Status::Working; tab.panes().count().min(2)],
+            marks: vec![slopty_kit::icons::Status::Working; tab.panes().count().min(2)],
             shown: i == project.shown_index(),
         })
         .collect()
 }
 
 /// The window over a [`Harness`], drawn from it read and never written, as the workspace's own
-/// views are ([`crate::draw`]).
+/// views are ([`slopty_kit::draw`]).
 struct Shown {
     harness: Entity<Harness>,
     _heard: Subscription,
@@ -110,7 +110,7 @@ struct Shown {
 
 impl Render for Shown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::draw::build(&self.harness.downgrade(), window, cx, |this, window, cx| {
+        slopty_kit::draw::build(&self.harness.downgrade(), window, cx, |this, window, cx| {
             let frame = this.tiling.frame();
             let tabs = title_tabs(&this.tiling);
             let body = |laid: &slopty_client::layout::tree::Laid| {

@@ -623,7 +623,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The label is short so it fits the 168 pt sidebar beside its glyph; "Open settings.toml"
     did not.
   - The mono face lint now allows the held-back page's address only
-    (`kit::tests::the_mono_face_is_for_addresses`).
+    (`lints::the_mono_face_is_for_addresses`).
   - Tests: settings_editor `the_file_is_the_sidebars_advanced_path`,
     `a_narrow_sheet_keeps_its_head_whole`, `a_refusal_shows_until_the_next_change`,
     `a_change_on_its_way_outlives_the_file_changing`; workspace

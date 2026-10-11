@@ -174,7 +174,7 @@ fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.rows().is_empty()));
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter().any(|n| n.is("Heading", Some("What should Claude Code do in w?"))),
         "the question, by the folder's name"
@@ -463,7 +463,7 @@ fn the_turns_fade_under_the_header_with_no_rule(cx: &mut TestAppContext) {
         })
     });
     assert!(!ruled, "no hairline under the header");
-    let faded = cx.update(|window, _| crate::retained::faded_edges(window, rows));
+    let faded = cx.update(|window, _| slopty_kit::retained::faded_edges(window, rows));
     assert!(faded.top, "the turns above the newest fade under the header");
     assert!(!faded.bottom, "nothing lies below the newest");
 }

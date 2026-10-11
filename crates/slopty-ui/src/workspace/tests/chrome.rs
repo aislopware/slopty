@@ -379,7 +379,8 @@ fn a_typed_key_holds_the_working_marks_for_its_echo(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.set_rtt(key, Some(Duration::from_millis(30)), cx));
     cx.run_until_parked();
     assert!(terminal_focused(&view, cx, session), "the newest shell has the keyboard");
-    let held = |cx: &mut VisualTestContext| cx.update(|_w, cx| crate::icons::steps_held_until(cx));
+    let held =
+        |cx: &mut VisualTestContext| cx.update(|_w, cx| slopty_kit::icons::steps_held_until(cx));
     assert_eq!(held(cx), None);
 
     let at = cx.update(|_w, cx| cx.background_executor().now());
@@ -570,7 +571,7 @@ fn the_project_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     // Its first shell is at home, which names nothing, so the project takes its worker's.
     assert!(tree.iter().any(|n| n.is("Button", Some("studio"))), "{tree:#?}");
     let name = cx.debug_bounds("crumb-project-name").expect("the name");

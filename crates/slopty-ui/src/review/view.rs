@@ -39,6 +39,9 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use slopty_client::threads::Mirror;
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit;
 use slopty_proto::RequestId;
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Intent, Review, ReviewScope};
@@ -50,14 +53,11 @@ use slopty_theme::{Theme, Typography};
 use super::findings::{self, Finding};
 use super::model::{self, Comment, Model, Note, Scope, Side};
 use crate::authorship::{Authored, Opens, Writer};
-use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::commit::{CommitEvent, CommitSheet};
 use crate::conversation::thread::{HubEvent, ThreadHub};
 use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
-use crate::icons::{IconSize, Symbol};
-use crate::kit;
 use crate::review::{
     CommentOnChange, KeepChange, NextChange, NextFile, PreviousChange, PreviousFile, PutBackChange,
     ShowFiles, ToggleViewed,
@@ -1550,7 +1550,7 @@ impl ReviewView {
     }
 
     fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
-        crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
@@ -1587,7 +1587,7 @@ impl ReviewView {
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
         };
-        crate::a11y::tab_stop(el, s.focus)
+        slopty_kit::a11y::tab_stop(el, s.focus)
     }
 
     /// The switch of spans, then the bar's actions at its end: one row that fits the tile
@@ -1767,7 +1767,7 @@ impl ReviewView {
         let s = theme.surfaces;
         let (_, name) = self.door_of(cx)?;
         let roomy = self.room().is_wide();
-        let mark = (!roomy).then(|| self.icon(crate::icons::AGENT, s.text_secondary));
+        let mark = (!roomy).then(|| self.icon(slopty_kit::icons::AGENT, s.text_secondary));
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
             if roomy {
@@ -1793,9 +1793,9 @@ impl ReviewView {
                 .px(px(theme.spacing.sm))
                 .py(px(theme.spacing.xxs))
                 .text_color(hsla(s.text_secondary))
-                .child(crate::icons::status_icon(
+                .child(slopty_kit::icons::status_icon(
                     theme,
-                    crate::icons::Status::Working,
+                    slopty_kit::icons::Status::Working,
                     px(theme.typography.icon()),
                     hsla(s.text_muted),
                 ));
@@ -1822,7 +1822,7 @@ impl ReviewView {
             .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .children(mark)
             .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
-        Some(crate::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
+        Some(slopty_kit::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
     }
 
     /// Above the diff: how the agent's own review came out, and its findings that have no line
@@ -1959,7 +1959,7 @@ impl ReviewView {
             .px(px(theme.spacing.sm))
             .min_h(px(theme.density.row))
             .hover(move |el| el.bg(hsla(s.hover)))
-            .child(crate::a11y::tab_stop(toggle, s.focus))
+            .child(slopty_kit::a11y::tab_stop(toggle, s.focus))
             .children(self.came.as_ref().map(|_| {
                 self.close(
                     "review-came-close",
@@ -2265,8 +2265,9 @@ impl ReviewView {
             if shown {
                 el
             } else {
-                el.opacity(0.0)
-                    .focus_visible(move |st| st.outline_ring(crate::a11y::ring(ring)).opacity(1.0))
+                el.opacity(0.0).focus_visible(move |st| {
+                    st.outline_ring(slopty_kit::a11y::ring(ring)).opacity(1.0)
+                })
             }
         };
         div()
@@ -2297,7 +2298,7 @@ impl ReviewView {
         let radius = px(theme.radii.sm);
         let open = !self.folded.contains(&file.path);
         let side = px(theme.typography.icon());
-        let fold = crate::a11y::tab_stop(
+        let fold = slopty_kit::a11y::tab_stop(
             div()
                 .id(("review-fold", at))
                 .debug_selector(move || format!("review-fold-{at}"))
@@ -2755,9 +2756,9 @@ impl ReviewView {
         let diff_mark =
             || kit::notice_mark(theme, Symbol::PlusForwardslashMinus).into_any_element();
         let Some(review) = self.model.review() else {
-            let reading = crate::icons::notice_status(
+            let reading = slopty_kit::icons::notice_status(
                 theme,
-                crate::icons::Status::Running,
+                slopty_kit::icons::Status::Running,
                 hsla(s.text_muted),
             );
             return empty(reading.into_any_element(), READING.to_owned(), None);

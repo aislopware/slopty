@@ -36,6 +36,7 @@ slopty-platform = { path = "crates/slopty-platform" }
 slopty-media = { path = "crates/slopty-media" }
 slopty-theme = { path = "crates/slopty-theme" }
 slopty-ui = { path = "crates/slopty-ui" }
+slopty-kit = { path = "crates/slopty-kit" }
 slopty-agent = { path = "crates/slopty-agent" }
 slopty-settings = { path = "crates/slopty-settings" }
 slopty-push = { path = "crates/slopty-push" }

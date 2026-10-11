@@ -1,13 +1,12 @@
 //! What a program's progress report (`OSC 9;4`) says, in the kit's progress language
-//! ([`crate::kit::progress`]).
+//! ([`slopty_kit::kit::progress`]).
 //!
 //! The terminal draws no chrome of its own for it. A report used to be a square line along the
 //! terminal's top edge, which read as a stray rule. Now the tile's header shows it, where a tile
 //! says how it stands: the kit's bar with its figure, beside the title.
 
+use slopty_kit::kit::progress::Progress;
 use slopty_proto::terminal::{Progress as Report, ProgressState};
-
-use crate::kit::progress::Progress;
 
 /// What `report` shows, or `None` when nothing is reported.
 ///
@@ -27,10 +26,10 @@ pub(crate) fn shown(report: Report) -> Option<Progress> {
 
 #[cfg(test)]
 mod tests {
+    use slopty_kit::kit::progress::Progress;
     use slopty_proto::terminal::{Progress as Report, ProgressState};
 
     use super::shown;
-    use crate::kit::progress::Progress;
 
     fn report(state: ProgressState, percent: Option<u8>) -> Report {
         Report { state, percent }

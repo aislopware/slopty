@@ -90,7 +90,7 @@ impl WorkspaceView {
             return None;
         }
         let form = self.settings.as_ref()?.read(cx).form().clone();
-        let draw = crate::draw::Draw::new(cx, form.downgrade());
+        let draw = slopty_kit::draw::Draw::new(cx, form.downgrade());
         Some(form.read(cx).sections(window, &draw).into_any_element())
     }
 

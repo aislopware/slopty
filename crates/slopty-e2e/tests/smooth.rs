@@ -2,7 +2,7 @@
 //!
 //! Every test is live (`#[ignore]`): `cargo xtask e2e smooth` runs the Mac's, and
 //! `cargo xtask e2e smooth-ios --sim ipad` the simulator's. The app's frame probe
-//! (`slopty_ui::frames`, read back through `dump.frames`) times every frame the window draws
+//! (`slopty_kit::frames`, read back through `dump.frames`) times every frame the window draws
 //! while the driver steps a pane from tab to tab, opens the palette and types over the test
 //! socket; each scenario runs for [`RUN`] and prints one `MEASURE` line with the percentiles
 //! (`docs/MEASUREMENTS.md` quotes them). Stepping a pane through twenty streaming shells is the

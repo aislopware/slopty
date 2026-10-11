@@ -8,8 +8,7 @@
 use std::borrow::Cow;
 
 use gpui_kit::component::input::{Rope, RopeExt as _};
-
-use crate::highlight::Comment;
+use slopty_kit::highlight::Comment;
 
 /// How a file indents: what Tab puts in, and how wide a tab is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

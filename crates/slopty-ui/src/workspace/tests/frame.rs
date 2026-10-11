@@ -23,7 +23,7 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     tree.into_iter().filter_map(|n| n.label).collect()
 }
 
@@ -285,7 +285,8 @@ fn the_frame_says_where_the_focused_tile_is_once(cx: &mut TestAppContext) {
     assert_eq!(count.size, size(px(0.0), px(0.0)), "said, not drawn: no disc on the bell");
     let tree = tree(cx);
     assert!(tree.iter().any(|n| n.is("Status", Some("1 new"))), "the count is said: {tree:#?}");
-    let amber = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.warn_fill));
+    let amber =
+        gpui::Background::from(slopty_kit::colors::hsla(Theme::default().surfaces.warn_fill));
     let bell = cx.debug_bounds("bell").expect("the bell");
     let disc = cx.update(|window, _| {
         window.painted_quads().into_iter().any(|q| {
@@ -395,7 +396,7 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     assert!(names.iter().any(|l| l == "studio") && names.iter().any(|l| l == "laptop"));
     assert!(!names.iter().any(|l| l.contains("connected")), "{names:#?}");
     let marks = |cx: &mut VisualTestContext| {
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.into_iter().filter(|n| n.role == "Image").filter_map(|n| n.label).collect::<Vec<_>>()
     };
     assert!(!marks(cx).iter().any(|m| m == "Done"), "no success mark: {:?}", marks(cx));
@@ -417,7 +418,10 @@ fn a_healthy_worker_says_nothing_and_a_lost_one_says_what_is_wrong(cx: &mut Test
     let studio_line = view.read_with(cx, |v, _| {
         v.worker_lines().find(|l| l.label == "studio").map(|l| (l.keys, l.status))
     });
-    assert_eq!(studio_line, Some(("Reconnecting".to_owned(), Some(crate::icons::Status::Away))));
+    assert_eq!(
+        studio_line,
+        Some(("Reconnecting".to_owned(), Some(slopty_kit::icons::Status::Away)))
+    );
 }
 
 /// A worker's tiles are listed by what they want: the one that needs the human, then the one
@@ -786,7 +790,7 @@ fn the_window_is_one_opaque_ground(cx: &mut TestAppContext) {
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     cx.run_until_parked();
     let theme = theme();
-    let ground = crate::colors::hsla(theme.surfaces.ground);
+    let ground = slopty_kit::colors::hsla(theme.surfaces.ground);
     let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
     let bar = cx.debug_bounds("titlebar").expect("the title bar").scale(scale);
     let under_bar = quads.iter().any(|q| {
@@ -797,7 +801,7 @@ fn the_window_is_one_opaque_ground(cx: &mut TestAppContext) {
     assert!(under_bar, "the ground, opaque, under the title bar");
     assert!((ground.a - 1.0).abs() < f32::EPSILON, "the ground is opaque");
     let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell").scale(scale);
-    let content = crate::colors::hsla(theme.content());
+    let content = slopty_kit::colors::hsla(theme.content());
     let panel = quads.iter().find(|q| {
         (q.bounds.origin.x.0 - tile.origin.x.0).abs() < 0.5
             && q.background.as_solid() == Some(content)

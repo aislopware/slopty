@@ -77,7 +77,7 @@ fn an_edit_s_approval_shows_its_file_and_its_change(cx: &mut TestAppContext) {
     let diff = cx.debug_bounds("patch-ask-a").expect("the change, drawn");
     assert!(card.contains(&diff.center()), "on the card: {card:?} {diff:?}");
     assert!(cx.debug_bounds("proposed-file-a").is_some(), "under its file's name");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Group", Some("Change to src/main.rs"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("Link", Some("Open /w/src/main.rs"))), "{tree:#?}");
     assert!(cx.debug_bounds("whole-ask-a").is_none(), "a short change shows whole");
@@ -161,7 +161,7 @@ fn a_call_s_long_diff_shows_its_head_until_asked(cx: &mut TestAppContext) {
     cx.simulate_click(line, Modifiers::none());
     cx.run_until_parked();
     let head = cx.debug_bounds("patch-e").expect("the diff's head");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Button", Some("Show all 31 lines"))), "{tree:#?}");
     let more = cx.debug_bounds("whole-e").expect("the way to all of it").center();
     cx.simulate_click(more, Modifiers::none());

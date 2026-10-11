@@ -17,19 +17,19 @@ use gpui::{
     IntoElement as _, LiveRegion as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{AskId, BackgroundTask, Cap, Drive, ItemBody, ItemId, Request};
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, tail};
-use crate::colors::hsla;
 use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
 use crate::conversation::thread::hub::Refusal;
 use crate::conversation::thread::questions;
 use crate::conversation::thread::rows::Row;
-use crate::icons::Symbol;
-use crate::kit::{self, ButtonKind};
 
 /// The widest an answer's reach is drawn on its button, in ems of its text.
 const SCOPE_EMS: f32 = 14.0;
@@ -183,7 +183,7 @@ impl ThreadView {
             .absolute()
             .bottom(px(theme.spacing.md))
             .right(px(theme.spacing.sm))
-            .child(crate::a11y::tab_stop(
+            .child(slopty_kit::a11y::tab_stop(
                 div()
                     .id("thread-down")
                     .debug_selector(|| "thread-down".to_owned())
@@ -889,7 +889,7 @@ impl ThreadView {
             (Some(_), ..) if queued.stopped => None,
             (Some(why), ..) => Some(why.clone()),
             (None, false, ..) if !queued.delivery.is_kept() => Some("Sending".to_owned()),
-            (None, ..) => super::later::when_words(queued.delivery, crate::clock::now(cx)),
+            (None, ..) => super::later::when_words(queued.delivery, slopty_kit::clock::now(cx)),
         };
         let open = can_change && queued.on_worker && !queued.withdrawing;
         let editable = open && !queued.going && !self.composing.editing();
@@ -1111,7 +1111,7 @@ impl ThreadView {
             .map(|l| l.trim().to_owned());
         let shown = child.is_none() && printed.is_some() && self.tasks_shown.contains(&task.id);
         let took = (!task.started_ms.is_zero()).then(|| {
-            let end = task.ended_ms.unwrap_or_else(|| crate::clock::now(cx));
+            let end = task.ended_ms.unwrap_or_else(|| slopty_kit::clock::now(cx));
             kit::duration(Duration::from_secs(end.millis_since(task.started_ms) / 1_000))
         });
         let state_words = sentence(&task.state);

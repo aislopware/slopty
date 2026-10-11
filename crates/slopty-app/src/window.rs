@@ -133,7 +133,7 @@ pub(crate) fn open(
     let saved = workspace.read(cx).view.read(cx).window_frame().cloned();
     let (window_bounds, display_id) = match saved {
         Some(frame) => {
-            let (bounds, display) = slopty_ui::window_frame::bounds(&frame, cx);
+            let (bounds, display) = slopty_kit::window_frame::bounds(&frame, cx);
             (Some(bounds), display)
         }
         None => (options.window_bounds, options.display_id),
@@ -171,7 +171,7 @@ pub(crate) fn open(
                 }
             });
             let moved = cx.observe_window_bounds(window, |ws, window, cx| {
-                let frame = slopty_ui::window_frame::of(window, cx);
+                let frame = slopty_kit::window_frame::of(window, cx);
                 ws.view.update(cx, |v, cx| v.set_window_frame(frame, cx));
             });
             // A window opened again replaces the closed one's watches.
@@ -182,7 +182,7 @@ pub(crate) fn open(
             }
         });
         // The frame probe times every frame from the root down.
-        let framed = cx.new(|_| slopty_ui::frames::Framed::new(root_view));
+        let framed = cx.new(|_| slopty_kit::frames::Framed::new(root_view));
         cx.new(|cx| Root::new(framed, window, cx))
     })?;
     window.update(cx, |_root, window, cx| {

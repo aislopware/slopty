@@ -17,13 +17,13 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
 use slopty_proto::thread::ContentRef;
 use slopty_proto::thread::wire::Expanded;
 
 use super::{ReviewView, Row};
-use crate::colors::hsla;
 use crate::conversation::diff::{self, Line};
-use crate::icons::{IconSize, Symbol};
 
 /// The fold's words: how many lines it holds.
 fn unchanged(lines: u32) -> String {
@@ -162,14 +162,19 @@ impl ReviewView {
             .gap(px(theme.spacing.xs))
             .px(px(theme.spacing.sm))
             .py(px(theme.spacing.xxs))
-            .map(|el| crate::kit::inset(el, theme))
+            .map(|el| slopty_kit::kit::inset(el, theme))
             .cursor_pointer()
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
             .child(
-                crate::icons::icon(theme, Symbol::Unfold, IconSize::Inline, hsla(s.text_muted))
-                    .size(px(theme.typography.icon())),
+                slopty_kit::icons::icon(
+                    theme,
+                    Symbol::Unfold,
+                    IconSize::Inline,
+                    hsla(s.text_muted),
+                )
+                .size(px(theme.typography.icon())),
             )
             .child(SharedString::from(said))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.unfold(at, g, cx)))

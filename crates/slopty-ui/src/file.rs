@@ -3,7 +3,7 @@
 //! The item (`ItemKind::File`) names the path; the text is not in the registry. Each client
 //! asks the worker for it (`ClientMsg::ReadFile`) when the tile appears, and the worker's watch
 //! sends it again whenever the file changes on disk. The text sits in gpui-kit's code editor,
-//! coloured by [`crate::highlight::editor`]. ⌘S sends it back whole (`ClientMsg::WriteFile`)
+//! coloured by [`slopty_kit::highlight::editor`]. ⌘S sends it back whole (`ClientMsg::WriteFile`)
 //! with the modification time the edit started from, so the worker refuses to write over a
 //! change made meanwhile (`WriteResult::Conflict`); the tile then offers, inline, to reload the
 //! disk's text or overwrite it.
@@ -52,15 +52,15 @@ pub use search::SEARCH_CTX;
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Unsaved;
 use slopty_core::{ItemId, WallMs};
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::highlight::Syntax;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit::{ButtonKind, size_label};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
 use slopty_theme::{Theme, alpha};
 
 use crate::authorship::{self, Authored, Opens};
-use crate::colors::{hsla, hsla_alpha};
-use crate::highlight::Syntax;
-use crate::icons::{IconSize, Symbol};
-use crate::kit::{ButtonKind, size_label};
 use crate::terminal::Find;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -550,13 +550,13 @@ impl FileView {
         let theme = &self.theme;
         let opens = Opens { thread: run.thread, turn: run.turn };
         let id = SharedString::from(format!("file-author-{}", self.id.as_uuid()));
-        let mut tag = authorship::tag(theme, id, run, writer, None, crate::clock::now(cx));
+        let mut tag = authorship::tag(theme, id, run, writer, None, slopty_kit::clock::now(cx));
         if writer.is_some() {
             tag = tag.on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.emit(FileViewEvent::OpenThread(opens));
             }));
         }
-        let pill = crate::kit::elevate(crate::kit::pill_frame(theme), theme)
+        let pill = slopty_kit::kit::elevate(slopty_kit::kit::pill_frame(theme), theme)
             .debug_selector(|| "file-author".to_owned())
             .px(px(theme.spacing.xxs))
             .child(tag);
@@ -625,9 +625,9 @@ impl FileView {
             .text_color(hsla(s.text_muted));
         for (i, part) in parts.into_iter().enumerate() {
             if i > 0 {
-                row = row.child(crate::kit::separator(theme));
+                row = row.child(slopty_kit::kit::separator(theme));
             }
-            row = row.child(crate::kit::tabular(div()).child(SharedString::from(part)));
+            row = row.child(slopty_kit::kit::tabular(div()).child(SharedString::from(part)));
         }
         Some(row.into_any_element())
     }
@@ -1041,7 +1041,7 @@ impl FileView {
         self.pending_line =
             self.changed.first().copied().or(if reload { None } else { self.focus });
         let first = incoming.text.split('\n').next().unwrap_or_default();
-        self.syntax = if incoming.text.len() <= crate::highlight::COLOURED_BYTES {
+        self.syntax = if incoming.text.len() <= slopty_kit::highlight::COLOURED_BYTES {
             Syntax::for_path(&self.path, first)
         } else {
             None
@@ -1300,7 +1300,7 @@ impl FileView {
 
     /// The colours for this file's grammar in this theme.
     fn install_highlighter(&self, cx: &mut Context<Self>) {
-        let factory = crate::highlight::editor::factory(self.syntax, self.theme.clone());
+        let factory = slopty_kit::highlight::editor::factory(self.syntax, self.theme.clone());
         let language = self.syntax.map_or_else(String::new, |s| s.name().to_lowercase());
         self.editor.update(cx, |e, cx| {
             e.set_highlighter_factory(factory, cx);
@@ -1451,9 +1451,9 @@ impl FileView {
             .justify_center()
             .p(px(self.pad))
             .child(
-                crate::kit::notice(
+                slopty_kit::kit::notice(
                     theme,
-                    crate::kit::notice_mark(theme, icon),
+                    slopty_kit::kit::notice_mark(theme, icon),
                     title,
                     detail.map(SharedString::from),
                 )
@@ -1567,7 +1567,7 @@ impl FileView {
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .child(
-                crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
+                slopty_kit::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
                     .size(px(theme.typography.icon())),
             )
             .child(div().flex_1().min_w_0().overflow_hidden().text_color(hsla(s.text)).child(text))
@@ -1587,13 +1587,13 @@ impl FileView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let id = self.id.as_uuid();
-        let button = crate::kit::pill_frame(theme)
+        let button = slopty_kit::kit::pill_frame(theme)
             .id(part)
             .debug_selector(move || format!("{part}-{id}"))
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .border(crate::kit::HAIR)
+            .border(slopty_kit::kit::HAIR)
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(label);
@@ -1615,7 +1615,7 @@ impl FileView {
                 .hover(move |st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .active(move |st| st.bg(hsla(s.pressed))),
         };
-        crate::a11y::tab_stop(button, s.focus).on_click(on_click).into_any_element()
+        slopty_kit::a11y::tab_stop(button, s.focus).on_click(on_click).into_any_element()
     }
 }
 

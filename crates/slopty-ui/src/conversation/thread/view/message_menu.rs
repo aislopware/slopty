@@ -15,10 +15,10 @@ use gpui::{
     AnyElement, App, Context, FocusHandle, IntoElement as _, ParentElement as _, Pixels, Point,
     Window, px,
 };
+use slopty_kit::kit;
 use slopty_proto::thread::{ItemId, TurnId};
 
 use super::ThreadView;
-use crate::kit;
 
 /// The menu open over a message, where it was pressed.
 #[derive(Clone, Debug)]

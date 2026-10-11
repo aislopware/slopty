@@ -321,7 +321,7 @@ fn a_short_room_keeps_the_answers_row_in_view(cx: &mut TestAppContext) {
     );
     assert!(at.bottom() <= composer.top() + px(0.5), "over the composer, not under it");
     let field = cx.update(|window, _| {
-        crate::a11y::tree(window)
+        slopty_kit::a11y::tree(window)
             .into_iter()
             .find(|n| n.role == "MultilineTextInput" && n.label.as_deref() == Some("Other"))
             .map(|n| n.bounds)

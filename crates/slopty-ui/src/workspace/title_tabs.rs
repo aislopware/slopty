@@ -33,15 +33,15 @@ use gpui::{
     Styled as _, Window, div, px,
 };
 use slopty_client::layout::tiling::TabId;
+use slopty_kit::chrome_text::ChromeText;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{Mark, Status, Symbol};
+use slopty_kit::kit::{self, Pace};
 use slopty_theme::{Curve, Theme, stroke};
 
 use super::area::{self, DropSpots};
 use super::tab_look::{self, Clock};
-use crate::chrome_text::ChromeText;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{Mark, Status, Symbol};
-use crate::kit::{self, Pace};
 
 /// The most agents' marks a tab's lead shows before it counts the rest: `MonoCode`'s three.
 const MARKS_SHOWN: usize = 3;
@@ -235,7 +235,7 @@ fn tab_lead(theme: &Theme, tab: &TitleTab) -> gpui::AnyElement {
             .debug_selector(move || format!("title-tab-lead-{n}"))
             .into_any_element();
     }
-    let slot = crate::icons::IconSize::Inline.slot(theme);
+    let slot = slopty_kit::icons::IconSize::Inline.slot(theme);
     // Each mark under an id of its own: every one is a "status" image to the a11y tree.
     let marks = tab.marks.iter().take(MARKS_SHOWN).enumerate().map(|(i, st)| {
         div()
@@ -247,7 +247,7 @@ fn tab_lead(theme: &Theme, tab: &TitleTab) -> gpui::AnyElement {
             .justify_center()
             .when(i > 0, |el| el.ml(px(-MARK_OVERLAP)))
             .debug_selector(move || format!("title-tab-mark-{n}-{i}"))
-            .child(crate::icons::status_mark(theme, Some(*st)))
+            .child(slopty_kit::icons::status_mark(theme, Some(*st)))
             .into_any_element()
     });
     let more = tab.marks.len().saturating_sub(MARKS_SHOWN);
@@ -284,7 +284,7 @@ fn chevron<V: TitleTabsHost>(
         ("title-tabs-back", Symbol::ChevronLeft, "Scroll tabs back")
     };
     let side = px(kit::icon_button_side(theme));
-    let glyph = crate::icons::IconSize::Inline;
+    let glyph = slopty_kit::icons::IconSize::Inline;
     let handle = scroll.clone();
     let button = div()
         .id(id)
@@ -300,7 +300,7 @@ fn chevron<V: TitleTabsHost>(
         .text_color(hsla(s.text_secondary))
         .cursor_pointer()
         .child(
-            crate::icons::Drawn::new(theme, icon, glyph)
+            slopty_kit::icons::Drawn::new(theme, icon, glyph)
                 .slot(px(glyph.slot(theme)), hsla(s.text_secondary)),
         )
         .hover(move |el| el.bg(hsla(s.pressed)).text_color(hsla(s.text)))

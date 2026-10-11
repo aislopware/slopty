@@ -21,10 +21,10 @@ use slopty_client::remote::Remote;
 use slopty_client::xfer::ledger::{Kept, Ledger, Way};
 use slopty_client::xfer::{Brought, Versions};
 use slopty_core::XferId;
+use slopty_kit::kit;
 use tokio::sync::watch;
 
 use super::{Bringing, Upload, sent};
-use crate::kit;
 use crate::workspace::WorkspaceView;
 
 /// How far back a transfer's rate looks: long enough to smooth a link's bursts, short enough to

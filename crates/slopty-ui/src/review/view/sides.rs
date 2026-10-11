@@ -20,14 +20,14 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, div, img, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit;
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{FileDiff, FileKind, Modes};
 
 use super::{ReviewEvent, ReviewView};
-use crate::colors::hsla;
 use crate::conversation::thread::git::Blob;
-use crate::icons::{IconSize, Symbol};
-use crate::kit;
 
 /// A symbolic link's mode, as git writes it.
 const LINK: u32 = 0o120_000;
@@ -295,7 +295,7 @@ impl ReviewView {
                     .hover(gpui::Styled::underline)
                     .child(OPEN_WHOLE)
                     .child(
-                        crate::icons::icon(
+                        slopty_kit::icons::icon(
                             theme,
                             Symbol::ArrowUpRight,
                             IconSize::Inline,
@@ -308,7 +308,7 @@ impl ReviewView {
                             cx.emit(ReviewEvent::OpenFile { path });
                         }
                     }));
-                el.child(crate::a11y::tab_stop(link, s.focus))
+                el.child(slopty_kit::a11y::tab_stop(link, s.focus))
             })
             .into_any_element()
     }

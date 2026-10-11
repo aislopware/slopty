@@ -11,13 +11,13 @@ use gpui::{Context, Window};
 use slopty_client::groups::{GroupKey, fact};
 use slopty_client::layout::TileRef;
 use slopty_core::WallMs;
+use slopty_kit::icons::Status;
 use slopty_proto::items::ItemOp;
 
 use super::WorkspaceView;
 use super::actions::{PinToProject, ScopeTo};
 use super::grouping::group_glyph;
 use super::rollup::Rollup;
-use crate::icons::Status;
 use crate::palette::PaletteItem;
 
 /// What the palette calls letting go of a scope.

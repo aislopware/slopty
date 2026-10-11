@@ -24,12 +24,12 @@ use rustc_hash::{FxHashMap, FxHasher};
 use slopty_grid::{
     Cell, CellWidth, CursorShape, LineIndex, Style as CellStyle, StyleFlags, Underline,
 };
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::fonts;
 use slopty_predict::Prediction;
 use slopty_proto::terminal::{Placement, TermSize};
 use slopty_theme::{Colors, Rgb, Theme, alpha};
 
-use crate::colors::{hsla, hsla_alpha};
-use crate::fonts;
 use crate::terminal::metrics::{self, Grid};
 use crate::terminal::sprite;
 use crate::terminal::view::TerminalView;
@@ -1555,7 +1555,7 @@ impl Element for TerminalElement {
         // A viewport that moved since the last frame brings the scrollbar up in this one.
         let now = cx.background_executor().now();
         self.view.update(cx, |view, cx| view.viewport_drawn(now, cx));
-        let moves = crate::kit::motion(cx);
+        let moves = slopty_kit::kit::motion(cx);
         let fading;
         let prepared = {
             let view = self.view.read(cx);
@@ -1859,7 +1859,7 @@ impl Element for TerminalElement {
                     && hovered != Some(index)
                     && let Some(elapsed) = view.took(index)
                 {
-                    let text = crate::kit::duration(elapsed);
+                    let text = slopty_kit::kit::duration(elapsed);
                     let width = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
                     // The columns the command's text reaches, trailing blanks aside.
                     let typed =
@@ -2003,7 +2003,7 @@ impl Element for TerminalElement {
                 block_ticks,
                 rules,
                 rule: separator_color(theme),
-                rule_width: crate::kit::hair_painted(window.scale_factor()),
+                rule_width: slopty_kit::kit::hair_painted(window.scale_factor()),
                 failed,
                 failed_heads,
                 failed_look,
@@ -2343,7 +2343,7 @@ impl Element for TerminalElement {
             let shown = std::mem::take(&mut prepared.shown);
             let ack = self.view.read(cx).state().input_ack();
             let latency = self.view.read(cx).latency_record();
-            crate::shown::after_paint(window, cx, move |frame, _cx| {
+            slopty_kit::shown::after_paint(window, cx, move |frame, _cx| {
                 latency.borrow_mut().presented(frame, &shown, ack);
             });
         }

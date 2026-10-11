@@ -29,6 +29,9 @@ use gpui_kit::component::input::{self, InputEvent, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Status, Symbol};
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
 use slopty_proto::thread::{
@@ -42,15 +45,12 @@ use super::commit::{CommitEvent, CommitSheet};
 use super::draft::{Draft, Place};
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
-use crate::colors::hsla;
 use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
     AllowRequest, AskAside, CTX, CycleDensity, DenyRequest, EditLastQueued, Interrupt, OpenCommit,
     QueueMessage, RefreshPullRequest, WatchAgentScreen,
 };
-use crate::icons::{IconSize, Status, Symbol};
-use crate::kit::{self, ButtonKind};
 
 /// The pointer group a message and its actions answer as one.
 fn message_group(id: &ItemId) -> SharedString {
@@ -900,13 +900,15 @@ impl ThreadView {
     /// second: the soonest of them.
     fn until_tick(&self, cx: &App) -> Duration {
         let Some(state) = self.state(cx) else { return Duration::from_secs(1) };
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let turn = rows::under_way(state).map(|t| t.started_ms);
         let tasks = state.tasks.iter().filter(|t| t.is_running()).map(|t| t.started_ms);
         turn.into_iter()
             .chain(tasks)
             .filter(|t| !t.is_zero())
-            .map(|t| crate::icons::until_next_second(Duration::from_millis(now.millis_since(t))))
+            .map(|t| {
+                slopty_kit::icons::until_next_second(Duration::from_millis(now.millis_since(t)))
+            })
             .min()
             .unwrap_or(Duration::from_secs(1))
     }
@@ -1229,7 +1231,7 @@ impl ThreadView {
     }
 
     fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
-        crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(px(self.theme.typography.icon()))
             .into_any_element()
     }
@@ -1243,7 +1245,7 @@ impl ThreadView {
     /// the navigator's *Needs you* row and the bell wear. The calm dashed ring said "background
     /// work" on the one row that most needs the person.
     fn needs_you(&self) -> AnyElement {
-        crate::icons::status_icon(
+        slopty_kit::icons::status_icon(
             &self.theme,
             Status::NeedsYou,
             px(self.theme.typography.icon()),
@@ -1253,7 +1255,7 @@ impl ThreadView {
 
     fn spinner(&self, calm: bool) -> AnyElement {
         let status = if calm { Status::Running } else { Status::Working };
-        crate::icons::status_icon(
+        slopty_kit::icons::status_icon(
             &self.theme,
             status,
             px(self.theme.typography.icon()),
@@ -1318,7 +1320,7 @@ impl ThreadView {
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .active(move |el| el.bg(hsla(s.pressed))),
         };
-        crate::a11y::tab_stop(el, s.focus)
+        slopty_kit::a11y::tab_stop(el, s.focus)
     }
 
     /// A bare icon button: its glyph brightens under the pointer.
@@ -1331,7 +1333,7 @@ impl ThreadView {
         let s = self.theme.surfaces;
         let id = id.into();
         let selector = id.to_string();
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             div()
                 .id(ElementId::Name(id))
                 .debug_selector(move || selector)
@@ -1347,8 +1349,13 @@ impl ThreadView {
                 .text_color(hsla(s.text_muted))
                 .hover(move |el| el.text_color(hsla(s.text)))
                 .child(
-                    crate::icons::icon(&self.theme, icon, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(self.theme.typography.icon())),
+                    slopty_kit::icons::icon(
+                        &self.theme,
+                        icon,
+                        IconSize::Inline,
+                        hsla(s.text_muted),
+                    )
+                    .size(px(self.theme.typography.icon())),
                 ),
             s.focus,
         )
@@ -1360,7 +1367,7 @@ impl ThreadView {
         let theme = &self.theme;
         let base = theme.typography.prose();
         let mono = self.mono();
-        let mut style = crate::markdown::style(theme, &mono);
+        let mut style = slopty_kit::markdown::style(theme, &mono);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
         style.heading_base_font_size = px(base);
         style.heading_font_size = Some(Arc::new(move |level: u8, _base| {
@@ -1416,7 +1423,7 @@ impl ThreadView {
         let s = self.theme.surfaces;
         let label = SharedString::from(format!("Show all {lines} lines"));
         let selector = format!("whole-{}", item.0);
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             div()
                 .id(ElementId::Name(selector.clone().into()))
                 .debug_selector(move || selector)
@@ -1531,7 +1538,8 @@ impl ThreadView {
         let inner = if found {
             // The match the find bar is on: a wash under the whole row, the selection's hue at
             // its faint step.
-            let wash = crate::colors::hsla_alpha(self.theme.surfaces.accent_fill, alpha::FAINT);
+            let wash =
+                slopty_kit::colors::hsla_alpha(self.theme.surfaces.accent_fill, alpha::FAINT);
             div()
                 .debug_selector(|| "thread-found".to_owned())
                 .rounded(px(self.theme.radii.sm))
@@ -1621,7 +1629,7 @@ impl ThreadView {
         let selector = format!("copy-{}", id.0);
         let label: SharedString = if copied { "Copied".into() } else { "Copy message".into() };
         let item = id.clone();
-        let copy = crate::a11y::tab_stop(
+        let copy = slopty_kit::a11y::tab_stop(
             div()
                 .id(ElementId::Name(selector.clone().into()))
                 .debug_selector(move || selector)
@@ -1646,7 +1654,7 @@ impl ThreadView {
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             this.copy(item.clone(), words.clone(), cx);
         }));
-        let stamp = crate::conversation::figures::stamp(at_ms, crate::clock::now(cx));
+        let stamp = crate::conversation::figures::stamp(at_ms, slopty_kit::clock::now(cx));
         div()
             .w_full()
             .flex()
@@ -1820,7 +1828,7 @@ impl ThreadView {
             )
             .when(open, |el| {
                 let theme = &self.theme;
-                let mut style = crate::markdown::style(theme, &self.mono());
+                let mut style = slopty_kit::markdown::style(theme, &self.mono());
                 style.paragraph_gap = gpui::rems(theme.spacing.xs / theme.typography.ui_size);
                 // Under its mark, past the hairline rule a quiet call's output hangs from, so a
                 // thought reads as the same kind of aside.
@@ -1875,7 +1883,7 @@ impl ThreadView {
     fn thought_line(&self, line: &str) -> gpui::StyledText {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (words, code) = crate::markdown::plain_line_with_code(line);
+        let (words, code) = slopty_kit::markdown::plain_line_with_code(line);
         let run = |len: usize, family: &str, fill: Option<gpui::Hsla>, tone| gpui::TextRun {
             len,
             font: gpui::font(family.to_owned()),
@@ -2057,7 +2065,7 @@ impl ThreadView {
         let hub = self.hub.read(cx);
         let stopping = hub.threads().stopping(self.thread);
         let since = self.state(cx).and_then(|s| s.turn(turn)).map(|t| t.started_ms);
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let elapsed = since.filter(|t| !t.is_zero()).map(|t| kit::clock(now.since(t)));
         let s = self.theme.surfaces;
         let asks = self.state(cx).is_some_and(|st| st.status.phase == Phase::NeedsYou);
@@ -2250,7 +2258,7 @@ impl ThreadView {
                         .gap(px(theme.spacing.xxs))
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(st.word(theme)))
-                        .child(crate::icons::status_mark(theme, Some(st)))
+                        .child(slopty_kit::icons::status_mark(theme, Some(st)))
                         .child(st.label())
                 }))
                 .child(
@@ -2277,7 +2285,7 @@ impl ThreadView {
                     return None;
                 }
                 let agent = agent_label(&state.meta.agent);
-                let mark = crate::icons::notice_status(
+                let mark = slopty_kit::icons::notice_status(
                     theme,
                     Status::Working,
                     hsla(theme.surfaces.text_secondary),
@@ -2295,7 +2303,7 @@ impl ThreadView {
                 SharedString::from(format!("thread-reading-{}", self.thread.as_uuid())),
                 kit::notice(
                     theme,
-                    crate::icons::notice_status(
+                    slopty_kit::icons::notice_status(
                         theme,
                         Status::Running,
                         hsla(theme.surfaces.text_muted),
@@ -2791,7 +2799,7 @@ fn tool_icon(kind: &str) -> Symbol {
         kind::SEARCH => Symbol::Magnifyingglass,
         kind::FETCH | kind::WEB_SEARCH => Symbol::Globe,
         kind::MCP => Symbol::PuzzlepieceExtension,
-        kind::AGENT => crate::icons::AGENT,
+        kind::AGENT => slopty_kit::icons::AGENT,
         kind::QUESTION => Symbol::QuestionmarkBubble,
         kind::PLAN | kind::TASKS => Symbol::Checklist,
         _ => Symbol::WrenchAndScrewdriver,
@@ -2862,7 +2870,7 @@ fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyEl
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
-                    crate::icons::icon(
+                    slopty_kit::icons::icon(
                         theme,
                         Symbol::DocOnDoc,
                         IconSize::Inline,

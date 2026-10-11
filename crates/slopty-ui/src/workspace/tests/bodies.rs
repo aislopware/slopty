@@ -4,9 +4,9 @@
 
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseUpEvent};
 use slopty_core::WallMs;
+use slopty_kit::icons::Status;
 
 use super::*;
-use crate::icons::Status;
 use crate::screen::LOADING_GRACE;
 
 /// Within a point: bounds are laid out in floats.

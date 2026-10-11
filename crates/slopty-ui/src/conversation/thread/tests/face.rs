@@ -248,7 +248,7 @@ fn the_model_chip_switches_how_hard_the_model_thinks(cx: &mut TestAppContext) {
     state.meters.effort = Some("high".to_owned());
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
-    let named = cx.update(|window, _cx| crate::a11y::tree(window));
+    let named = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         named.iter().any(|n| n.label.as_deref() == Some("Model, Opus 5.5 \u{b7} High")),
         "the level after the model"
@@ -327,11 +327,11 @@ fn the_one_solid_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let theme = slopty_theme::Theme::default();
-    let fill = |c| gpui::Background::from(crate::colors::hsla(c));
+    let fill = |c| gpui::Background::from(slopty_kit::colors::hsla(c));
     let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
-    let square = theme.radii.sm / crate::kit::message::SEND;
-    assert!((f32::from(stop.size.width) - crate::kit::message::SEND).abs() < 0.5, "{stop:?}");
+    let square = theme.radii.sm / slopty_kit::kit::message::SEND;
+    assert!((f32::from(stop.size.width) - slopty_kit::kit::message::SEND).abs() < 0.5, "{stop:?}");
     let (painted, round) = disc(cx, stop).expect("the stop's square");
     assert_eq!(painted, fill(theme.surfaces.solid), "stopping is the solid");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
@@ -389,7 +389,7 @@ fn a_long_thread_scrolled_up_a_little_offers_the_way_down(cx: &mut TestAppContex
     scroll(cx, 60.0);
     assert!(!view.read_with(cx, |v, _| v.following()), "scrolled up");
     assert!(cx.debug_bounds("thread-down").is_some(), "the way down shows at once");
-    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
     assert!(stale.is_none(), "{stale:?}");
 }
 
@@ -446,7 +446,7 @@ fn a_subagent_s_thread_opens_at_its_newest_row_without_the_way_down(cx: &mut Tes
     let first_frame_holds = |cx: &mut VisualTestContext, before: usize, step: &str| {
         cx.run_until_parked();
         assert_eq!(moved(cx), before, "{step}: the first frame drew the marks the layout keeps");
-        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
         assert!(stale.is_none(), "{step}: {stale:?}");
     };
 
@@ -467,7 +467,7 @@ fn a_subagent_s_thread_opens_at_its_newest_row_without_the_way_down(cx: &mut Tes
         // The key's own frame is drawn before the key is handled, so the marks it read are
         // checked again once the way back drew: only the frame itself is judged here.
         cx.simulate_keystrokes("escape");
-        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
         assert!(stale.is_none(), "{turns}: back: {stale:?}");
         assert_eq!(view.read_with(cx, |v, _| v.shown()), main);
         assert!(!view.read_with(cx, |v, _| v.following()), "{turns}: where the reader left it");
@@ -511,7 +511,7 @@ fn the_way_down_counts_what_came_and_says_it_once_it_settles(cx: &mut TestAppCon
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
     let down = |cx: &mut VisualTestContext| {
-        cx.update(|window, _cx| crate::a11y::tree(window))
+        cx.update(|window, _cx| slopty_kit::a11y::tree(window))
             .into_iter()
             .find(|n| n.is("Button", Some("Scroll to the newest")))
             .map(|n| (n.value, n.live))
@@ -577,7 +577,7 @@ fn the_tray_lists_background_work(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
     let labelled = |cx: &mut VisualTestContext, label: &str| {
-        cx.update(|window, _cx| crate::a11y::tree(window))
+        cx.update(|window, _cx| slopty_kit::a11y::tree(window))
             .iter()
             .any(|n| n.label.as_deref() == Some(label))
     };
@@ -620,7 +620,7 @@ fn the_composer_names_the_effort_and_the_sandbox(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let named = cx.update(|window, _cx| crate::a11y::tree(window));
+    let named = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         named.iter().any(|n| n.label.as_deref().is_some_and(|l| l.ends_with("\u{b7} High"))),
         "the effort on the model's chip"
@@ -793,7 +793,7 @@ fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter().any(|n| n.is("Article", Some("Plan: Split the parser, Awaiting approval"))),
         "named by its heading and how it stands"
@@ -817,7 +817,7 @@ fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
     scroll(cx, -100_000.0);
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(cx.debug_bounds("request-p").is_some(), "the tray carries it while it is away");
     assert!(tree.iter().any(|n| n.label.as_deref() == Some("Plan ready")), "named, not copied");
     assert!(!tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("1. Step 1"))));
@@ -870,7 +870,7 @@ fn a_picture_opens_large_and_esc_closes_it(cx: &mut TestAppContext) {
 
     open(cx);
     assert!(cx.debug_bounds("picture-viewer").is_some(), "open large");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter()
             .any(|n| n.label.as_deref()
@@ -1146,7 +1146,7 @@ fn the_composer_bleeds_in_a_narrow_pane(cx: &mut TestAppContext) {
     let (view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     let theme = slopty_theme::Theme::default();
-    let narrow = crate::kit::Room::narrow_below(&theme) - 40.0;
+    let narrow = slopty_kit::kit::Room::narrow_below(&theme) - 40.0;
     for (width, bleeds) in [(800.0, false), (narrow, true)] {
         view.update(cx, |v, cx| v.set_layout(width, cx));
         cx.run_until_parked();
@@ -1181,7 +1181,7 @@ fn an_orchestrator_s_plan_is_confirmed_and_started(cx: &mut TestAppContext) {
     let labelled = |cx: &mut VisualTestContext, label: &str| {
         cx.update(|window, _cx| window.refresh());
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.iter().any(|n| n.label.as_deref() == Some(label))
     };
     assert!(cx.debug_bounds("answer-p-allow").is_some(), "the plan's answers in the tray");

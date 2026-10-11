@@ -16,14 +16,14 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, InputState, RangeDecoration, RangeDecorationStyle};
 use regex::Regex;
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::FindBar;
+use slopty_kit::kit::find::{
+    PLACEHOLDER as FIND_PLACEHOLDER, Query, REPLACE_PLACEHOLDER, Tally, Toggle,
+};
 
 use super::find::{self, MATCHES_MAX};
 use super::{FileView, FileViewEvent};
-use crate::colors::hsla;
-use crate::kit::FindBar;
-use crate::kit::find::{
-    PLACEHOLDER as FIND_PLACEHOLDER, Query, REPLACE_PLACEHOLDER, Tally, Toggle,
-};
 use crate::search::{ToggleMatchCase, ToggleRegex, ToggleWholeWord};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 

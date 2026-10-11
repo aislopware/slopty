@@ -15,11 +15,11 @@ use gpui::{
     App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::kit;
 use slopty_proto::thread::AgentId;
 
 use super::ScreenView;
-use crate::colors::hsla;
-use crate::kit;
 
 /// The pill's button that gives the person the screen.
 pub const TAKE_CONTROL: &str = "Take control";

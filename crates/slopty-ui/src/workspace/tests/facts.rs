@@ -4,11 +4,11 @@
 
 use std::time::Duration;
 
+use slopty_kit::icons::Status;
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::terminal::RepoChanges;
 
 use super::*;
-use crate::icons::Status;
 use crate::workspace::actions::{MUTE_SOUND, UNMUTE_SOUND};
 
 fn leak(selector: String) -> &'static str {

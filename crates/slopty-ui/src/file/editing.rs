@@ -15,6 +15,8 @@ use gpui_kit::component::input::{
     Input, InputEvent, InputState, RangeDecoration, RangeDecorationStyle, Rope, RopeExt as _,
     TabSize,
 };
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::highlight::Syntax;
 use slopty_theme::alpha;
 
 use super::edit::{self, Indent, LineEdit};
@@ -22,8 +24,6 @@ use super::{
     CloseGoToLine, DuplicateLine, FileView, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
     ToggleComment, TogglePreview, ToggleReplace, ToggleSoftWrap,
 };
-use crate::colors::{hsla, hsla_alpha};
-use crate::highlight::Syntax;
 use crate::palette::PaletteItem;
 
 /// The "go to line" field's placeholder.
@@ -304,7 +304,7 @@ impl FileView {
             .px(px(spacing.sm))
             .py(px(spacing.xs))
             .rounded(px(radii.sm))
-            .map(|el| crate::kit::elevate(el, theme))
+            .map(|el| slopty_kit::kit::elevate(el, theme))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .font_family(theme.typography.ui_family.clone())

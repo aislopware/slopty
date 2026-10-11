@@ -60,7 +60,7 @@ fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
         assert!(area.bottom() <= foot.top() + px(0.5), "the panes end over it");
     }
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let ground = crate::colors::hsla(theme.surfaces.ground);
+    let ground = slopty_kit::colors::hsla(theme.surfaces.ground);
     let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
     // A translucent line is painted as a quad of its own over the fill.
     let over = |q: &&gpui::Quad| {
@@ -70,7 +70,7 @@ fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
         quads.iter().filter(over).any(|q| q.background.as_solid() == Some(ground)),
         "on the ground"
     );
-    let stroke = crate::colors::hsla(theme.surfaces.stroke);
+    let stroke = slopty_kit::colors::hsla(theme.surfaces.stroke);
     assert!(
         quads.iter().filter(over).any(|q| q.border_color == stroke && q.border_widths.top.0 > 0.0),
         "the one line along its top"

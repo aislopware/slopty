@@ -19,9 +19,9 @@ use gpui::{
     AnyElement, App, Context, FocusHandle, IntoElement as _, ParentElement as _, Pixels, Point,
     Window, px,
 };
+use slopty_kit::kit;
 
 use super::{ReviewEvent, ReviewView};
-use crate::kit;
 use crate::review::model::Scope;
 
 /// Copies the file's whole path on its machine.

@@ -172,7 +172,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `UIKey` → `Keystroke` mapping (`hardware_keyboard.rs`) copies `gpui_macos`' rules — a shifted
   letter is `shift-a`, a shifted symbol is `!` with shift dropped, chords carry no `key_char`,
   `charactersIgnoringModifiers` falls back to the HID usage's ASCII name for non-Latin
-  layouts — so Slopty's keymaps and `slopty_ui::keys` need nothing iOS-specific. Plain text
+  layouts — so Slopty's keymaps and `slopty_kit::keys` need nothing iOS-specific. Plain text
   while a text input is first responder is forwarded to `super` (UIKit's text system types it,
   IME and marked text intact); everything else is consumed so the text system does not also
   insert "\n" for Enter. UIKit does not auto-repeat presses (verified: no repeated
@@ -532,7 +532,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `markdown_line_height`, paragraph gaps of one base unit, headings stepping down from
   `title()` to the base, code in the terminal mono at `small()` on `raised`. gpui-kit's own
   theme (what its inputs, the composer and `TextView` read) is rewritten from the same tokens
-  by `slopty_ui::kit::sync` on every theme change, instead of a second palette. The only
+  by `slopty_kit::kit::sync` on every theme change, instead of a second palette. The only
   literal geometry left is content-driven: the picker's 560×520 frame, the 420 pt pairing
   panel, the 320 pt host switcher, the 180 pt search field and its 40 pt counter, the list's
   512 pt overdraw, and the canvas zoom multipliers. Headless tests read the tokens back
@@ -542,7 +542,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   goldens (`terminal`, `note`, `conversation`, `conversation-permission`) were re-accepted for
   this ruling; the track report names each with its `differing/total`.
 
-- ✅ **Frame time is measured by the app itself, not inferred** (2026-09-05). `slopty_ui::frames`
+- ✅ **Frame time is measured by the app itself, not inferred** (2026-09-05). `slopty_kit::frames`
   is a pure probe (ring of 1024 frames, nearest-rank percentiles, unit-tested with hand-made
   instants): `begin` at the top of `Workspace::render`, `end` in a zero-size element painted
   last, so a sample is the whole draw (layout, prepaint, paint) and nothing else. It reports
@@ -798,7 +798,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Code is coloured by grammar and painted from the theme** (2026-09-12). A file card and a
   fenced block in an answer read as plain mono, so a Rust function and its comment looked the
-  same as a diff of prose. Ruled: `slopty-ui::highlight` parses with `syntect` — the bundled
+  same as a diff of prose. Ruled: `slopty-kit::highlight` parses with `syntect` — the bundled
   Sublime grammars on `regex-fancy`, the pure-Rust engine, no onig and no C — and reduces its
   TextMate scopes to nine tokens (`Token`: comment, string, constant, keyword, type, function,
   punctuation, invalid, plain) whose colours are looked up in the app's theme at draw time:
@@ -1353,7 +1353,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (Needs you, Finished, All).
 
   Every size, colour and gap still comes from the tokens, and the lint-as-tests in
-  `kit.rs` enforce them. Chrome text stays sentence case, and keybindings stay in the palette
+  `lints.rs` enforce them. Chrome text stays sentence case, and keybindings stay in the palette
   and in key caps, not on buttons. Tests: `icons` unit tests (every listed icon loads and the
   component bundle still does; every status has its own embedded icon), plus the tests each part
   lands with. The app goldens are re-accepted for this ruling.
@@ -1976,7 +1976,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the `border` hairline and the one shadow of `Elevation`, a 1 pt contact layer (blur 2) and a
     4 pt soft one (blur 12), black at 0.4 and 0.5 in dark and 0.06 and 0.12 in light.
     `kit::scrim` dims under a modal, black at `alpha::SCRIM` in dark and `alpha::TINT` in light.
-    gpui-kit's popover colour is `elevated`. A lint-as-test in `kit.rs` fails on a shadow or a
+    gpui-kit's popover colour is `elevated`. A lint-as-test in `lints.rs` fails on a shadow or a
     scrim chosen anywhere else; the files that still lift by hand are listed there until wave 2
     phase B moves them.
   - **Fills.** `warn`, `success`, `error` and `accent` stay text tones. Bars, badges, dots and
@@ -4898,7 +4898,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ❌ **One icon set at one weight; files and agents by their own marks** (superseded
   2026-10-05 by "The chrome's icons are SF Symbols" below; 2026-10-02, design
-  checkpoint 4, `crates/slopty-ui/src/icons.rs`, `file_types.rs`; licences vendored beside the
+  checkpoint 4, `crates/slopty-kit/src/icons.rs`, `file_types.rs`; licences vendored beside the
   drawings).
   - **Hugeicons draws the chrome, at 1.75.** Its free set is MIT (`assets/icons/LICENSE`,
     taken from the GitHub repository, whose README puts the free icons under MIT; the site's
@@ -5079,7 +5079,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `settings_form::tests::a_long_page_fades_where_more_lies_past`,
     `workspace::tests::projects::a_board_taller_than_its_tile_says_more_lies_below`,
     `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
-    `kit::tests::chrome_draws_no_gradient`, app `the_key_row_fades_where_keys_run_past_the_edge`.
+    `lints::chrome_draws_no_gradient`, app `the_key_row_fades_where_keys_run_past_the_edge`.
 
 - ✅ **The palette offers what the focus can do, and a pick is never dropped** (2026-10-03,
   readiness A13).
@@ -5360,7 +5360,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   wire, the decision files, the `slopty-worker` process and the `slopty worker` CLI keep
   "worker" (this amends "The worker is called a worker everywhere" in `topology.md` for the UI
   only). The update pill says "Updating Slopty on the machine", since the machine itself is not
-  what updates. A lint keeps it: `kit::tests::chrome_says_machine_not_worker` scans the string
+  what updates. A lint keeps it: `lints::chrome_says_machine_not_worker` scans the string
   literals of `workspace/**`, `workspace.rs`, `palette.rs` and `keymap.rs` (not their tests, log
   lines, element ids or `Debug` names) for "worker" as a word of its own. Left to their owners:
   `slopty-app` (`ssh.rs`, `this_mac.rs`, `finder.rs`, its menus' "Add a worker"),
@@ -6016,7 +6016,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A plan card's head is its title.** The map mark says it is a plan, so the "Plan" label
     that ran into the title at the same weight is gone. The title stands alone at the base size
     and the medium weight, a step over the card's small chrome (the strong weight stays for
-    titles of panels and pages, as `kit::tests::strong_weight_is_for_titles` holds), and how it
+    titles of panels and pages, as `lints::strong_weight_is_for_titles` holds), and how it
     stands sits muted at the small size. Screen readers still hear "Plan: {title},
     {standing}".
   - **The picture frame** already follows the picture's aspect up to the 3:1 cap. The
@@ -6873,7 +6873,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Bar`, and so does the project board, for its merged share.
   - Deleted: the terminal's sweep and its edge line, `tile::PROGRESS`, the navigator's
     `progress_line`, `add_worker`'s `SWEEP` and `SEGMENT`, the composer's own ring.
-  - Lint: `kit::tests::a_progress_is_kit_progress` rejects a hand-drawn fraction width beside a
+  - Lint: `lints::a_progress_is_kit_progress` rejects a hand-drawn fraction width beside a
     progress tone outside the kit; its check of itself is
     `the_progress_check_knows_a_bar_from_a_column`. The status bar's transfers and the board
     are waived until they move.
@@ -7056,7 +7056,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     hands an icon a component names by path to the app, which draws its symbol; a name with
     no symbol keeps the kit's SVG.
   - Lints: `kit::tests::the_chrome_draws_symbols` (since 2026-10-07 `the_chrome_draws_its_own_icons`; no SVG, `IconName` or `Glyph` in the
-    chrome but the app's mark) and `kit::tests::an_icon_takes_its_words_size` (a symbol is
+    chrome but the app's mark) and `lints::an_icon_takes_its_words_size` (a symbol is
     sized and painted only in `icons.rs`, from the type scale).
   - Tests: `slopty-platform/tests/symbols.rs`, including
     `every_symbol_the_chrome_draws_is_on_this_os`, which the macos-26 lane runs too;
@@ -7083,7 +7083,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     all are words.
   - **Away** is said by its word: the server and the display are their plain glyphs in the
     muted tone, not a struck-through one.
-  - Lint: `kit::tests::a_command_is_its_words` (no command line from any palette source has
+  - Lint: `lints::a_command_is_its_words` (no command line from any palette source has
     an icon, and no `with_icon` follows a `PaletteItem::new` outside the agent picker).
 
 - ✅ **The UX audit's small items** (2026-10-05, `.research/ux-audit-2026-10-05.md` items 7,
@@ -7933,7 +7933,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     padded image (about 2 px each side), and lets it reach an eighth past its slot
     (`FIT_ROOM`, 18 of 16) before drawing it smaller. The server rack, the folder and the
     window keep their words' size in a lead.
-  - **Git is GitHub's Octicons** (MIT, `crates/slopty-ui/assets/git/` with
+  - **Git is GitHub's Octicons** (MIT, `crates/slopty-kit/assets/git/` with
     `LICENSE-octicons` and `NOTICE`): branch, pull request (open, draft, closed), merge,
     commit and repository, as `icons::GitGlyph` (`Mark::Git`). SF has no git vocabulary, and
     its `arrow.triangle.pull` read as a lone bent arrow. They are drawn the way the agents'
@@ -7955,7 +7955,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     empty slot keeps the names' edge.
   - **Lints as tests:** `kit::tests::a_symbol_is_never_drawn_under_12_5` (no icon slot sized
     to `small()` or `caption()`, a check inside its filled box excepted) and
-    `kit::tests::a_lead_is_never_muted_at_rest`, beside
+    `lints::a_lead_is_never_muted_at_rest`, beside
     `icons::tests::{no_icon_size_draws_a_symbol_under_12_5,
     an_icon_takes_its_words_size_and_weight, a_leads_wide_symbol_keeps_its_size}` and
     `icons::git::tests::{every_git_glyph_reads, a_git_glyph_is_drawn_at_its_words_size,
@@ -8048,7 +8048,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     keeps the lead's tier. The hues sit at the status fills' lightness and keep 20° from every
     status hue, so an identity glyph never reads as a state. Shape keeps them apart as well,
     since an identity is never a circle.
-  - Lint: `kit::tests::identity_colour_stays_on_its_glyph`. The hues are read only in
+  - Lint: `lints::identity_colour_stays_on_its_glyph`. The hues are read only in
     `kit/identity.rs`, and the two inks are called only where a machine's or a project's glyph
     is drawn.
 - ✅ **A field that speaks to an agent keeps its lines** (2026-10-06,
@@ -8246,7 +8246,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The navigator's machine and project heads move from 600 to 500: a name, not a title.
     - `Typography::{title, heading, display, task_title}` are deleted. Every site reads
       `roles()`.
-    - Lints: `kit::tests::one_type_scale` (no call to the old sizes on the typography),
+    - Lints: `lints::one_type_scale` (no call to the old sizes on the typography),
       `strong_weight_is_for_titles` (600 only by a title's role), and the theme test that only
       `panel_title` and `page_heading` are strong.
   - **A light selection rises.** On the canvas (the docked navigator) the chosen row is the
@@ -8296,7 +8296,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       change 7, `docs/decisions/settings.md`).
   - Tests: `slopty_theme::tests::{the_type_roles_are_the_scale_the_critique_set,
     a_selection_on_the_canvas_rises_in_light, glass_reads_as_the_chrome_in_light_and_dark,
-    text_on_glass_keeps_its_floors_over_any_wallpaper}`, `kit::tests::{one_type_scale,
+    text_on_glass_keeps_its_floors_over_any_wallpaper}`, `lints::{one_type_scale,
     strong_weight_is_for_titles, identity_colour_stays_on_its_glyph}`,
     `icons::tests::an_icon_takes_its_words_size_and_weight`,
     `workspace::tests::nav_rows::{a_docked_selection_rises_to_white,
@@ -8373,7 +8373,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       project only while that project's orchestrator is not on the workspace in view.
   - Tests: `kit::panel::tests::{the_bands_hold_the_edge_and_leave_the_middle,
     a_panel_stands_on_the_canvas_with_its_corners_covered, a_flat_panel_is_its_surface_alone}`,
-    `kit::tests::a_tile_stands_on_a_panel`,
+    `lints::a_tile_stands_on_a_panel`,
     `workspace::tests::tiles::{a_tile_stands_on_a_panel_and_its_header_on_it,
     a_gutter_parts_every_neighbour, a_phone_tile_is_full_bleed,
     a_tab_row_fades_only_where_tabs_lie_hidden}`,
@@ -8498,7 +8498,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `kit::tests::the_destructive_button_reads_in_every_state`,
     `conversation::thread::view::decision` (the plain allow is `Go`), the theme's notch and
     glass floors and `controls_and_the_words_on_fills_read`,
-    `kit::tests::the_accent_is_never_a_control`.
+    `lints::the_accent_is_never_a_control`.
 
 - ✅ **A machine is removed from its row or the palette, after a confirm** (2026-10-06,
   readiness rank 20; what goes and what stays is ruled in `docs/decisions/workers.md`, "A
@@ -8789,8 +8789,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Lints: `icons::glyphs::tests::every_glyph_reads` (every glyph reads on its grid, filled or
     stroked as its name says, and every file kept is drawn and listed),
     `file_types::tests::every_file_icon_is_drawn_and_none_is_left_over`,
-    `kit::tests::the_chrome_draws_its_own_icons` (no SVG drawn outside the icon modules but the
-    app's mark) and `kit::tests::an_agents_mark_wears_no_colour_of_its_own`.
+    `lints::the_chrome_draws_its_own_icons` (no SVG drawn outside the icon modules but the
+    app's mark) and `lints::an_agents_mark_wears_no_colour_of_its_own`.
   - Tests: `icons::glyphs::tests::a_glyph_is_drawn_on_whole_pixels`,
     `icons::tests::{an_icon_fills_its_slot_on_the_ladder, a_file_leads_with_its_types_icon,
     a_file_icon_is_drawn_at_its_size_in_colour}`, `icons::git::tests::each_git_glyph_is_tablers`,
@@ -10346,7 +10346,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     its project, each pane's by its pane), so the two levels of tabs never move two ways. A
     pane tab that closes still leaves at once; only the title bar folds a closed tab away.
   - Tests: `chrome_text::tests::a_label_fades_only_while_it_is_cut`,
-    `kit::tests::a_tabs_title_fades_over_its_end`,
+    `lints::a_tabs_title_fades_over_its_end`,
     `workspace::tests::tab_strip::an_opened_tab_grows_and_a_moved_one_slides`,
     `workspace::tests::tiles::a_pane_tab_opened_grows_and_a_moved_one_slides`.
 
@@ -10430,8 +10430,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     preview: one radius for everything resting in the column wins over a spread its code does
     not explain. Approvals as two bare buttons under the call: the decision row (the deny's
     split, standing grants, the release) stays and takes the card's foot.
-  - Lints: `kit::tests::the_thread_rests_on_one_card` (no `elevated` and no hand-laid card
-    wash under `conversation/thread/`), `kit::tests::the_work_wears_no_card`.
+  - Lints: `lints::the_thread_rests_on_one_card` (no `elevated` and no hand-laid card
+    wash under `conversation/thread/`), `lints::the_work_wears_no_card`.
   - Tests: `kit::message::tests::a_message_is_the_threads_card_and_focus_steps_its_ring`,
     `conversation::thread::questions::tests::an_answer_is_a_pill_and_chosen_is_the_selection`,
     `conversation::thread::tests::proposed`; goldens `thread*`, `wide-reading-thread`,
@@ -10562,3 +10562,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   click now opens that thread on its machine: its tile if one is up, its live terminal's if it
   has one, else a thread tile of its own. A task in a terminal opens its terminal as before.
   - Test: `workspace::tests::projects::a_seated_tasks_card_opens_its_thread`.
+
+- ✅ **The chrome kit is a crate of its own** (2026-10-11, the first step of splitting
+  `slopty-ui`; `.research/ui-test-compile-2026-10-11.md`). CI's ui shard spent most of its
+  time building `slopty-ui` twice, the lib (70.7 s) and then its test harness (99.0 s) on one
+  core at the end of a CPU-bound build. One crate of 183 k lines puts every test of every view
+  in one harness, and an edit anywhere recompiles all of it.
+  - **The layout.** `slopty-kit` holds what every surface is drawn with and nothing that
+    draws a surface of its own: `kit`, `icons`, `colors`, `a11y`, `highlight`, `markdown`,
+    `fonts`, `frames`, `shown`, `draw`, `keys`, `clock`, `fuzzy`, `chrome_text`,
+    `file_types`, `window_frame`, the test oracle `retained`, and the bundled assets. The
+    views (`slopty-ui`) sit on it, and the kit never reaches up to them. Three helpers that
+    did were moved down first (`separator_ink`, `mono_family` and `drawn_keys` into `kit`,
+    `COLOURED_BYTES` into `highlight`, a lane's phase onto `Lane`). Paths are rewritten to
+    `slopty_kit::…` everywhere, with no re-exports kept.
+  - **The lints.** The chrome's source lints scan every crate the chrome is drawn in, so they
+    live in the top crate as `slopty-ui/src/lints.rs` (with `lints/overflow.rs`) and sweep
+    `CHROME`: `slopty-kit/src`, `slopty-ui/src` and `slopty-app/src`. Their own files are not
+    swept. `lints::the_sweeps_read_the_kit` holds that the kit is read: the kit's own scrim
+    is what the elevation check flags there once its waiver is left out. The kit's unit tests
+    (a button, a hint, motion, sizes) stay in `kit`.
+  - **Test reach.** What the views' tests read of the kit (`a11y::tree`, the retained-frame
+    oracle, the held spin clock) is behind the kit's `e2e` feature, which `slopty-ui` and
+    `slopty-app` turn on as dev-dependencies.
+  - **Next, each its own measured step:** `terminal`, then `screen`, then `conversation`,
+    `file` and `review`, as crates on the kit. `workspace` stays `slopty-ui`. Rejected:
+    moving the views' unit tests into integration crates, since that lifts them a layer or
+    grows a public API only for tests.
+  - Numbers: `docs/MEASUREMENTS.md`, "slopty-ui split, step 1".

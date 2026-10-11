@@ -1032,7 +1032,7 @@ impl WorkspaceView {
         // Every change of the terminal's: a frame is coming for it, which a working mark's step
         // held for a typed key's echo rides; and the navigator hears of a command started.
         cx.observe(&view, move |this, _view, cx| {
-            crate::icons::release_steps(cx);
+            slopty_kit::icons::release_steps(cx);
             this.terminal_changed(sid, cx);
         })
         .detach();

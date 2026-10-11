@@ -22,9 +22,9 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{Enter, Escape};
+use slopty_kit::colors::hsla;
 use slopty_theme::Theme;
 
-use crate::colors::hsla;
 use crate::settings_form::{SettingsForm, SettingsFormEvent};
 
 /// Key context of the page.
@@ -239,7 +239,7 @@ impl Render for SettingsEditor {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let error = self.error.clone().map(|error| {
-            crate::kit::inset_x(div(), theme)
+            slopty_kit::kit::inset_x(div(), theme)
                 .id("settings-error")
                 .debug_selector(|| "settings-error".to_owned())
                 .role(gpui::accesskit::Role::Alert)
@@ -349,13 +349,13 @@ mod tests {
     }
 
     fn focused(cx: &mut VisualTestContext) -> (String, Option<String>) {
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let node = tree.into_iter().find(|n| n.focused).expect("a focused node");
         (node.role, node.label)
     }
 
     fn value_of(cx: &mut VisualTestContext, role: &str, label: &str) -> Option<String> {
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.into_iter().find(|n| n.is(role, Some(label))).and_then(|n| n.value)
     }
 
@@ -365,7 +365,7 @@ mod tests {
     #[gpui::test]
     fn the_page_opens_on_the_form(cx: &mut TestAppContext) {
         let (_view, _events, cx) = editor(cx, "");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Group", Some("Settings"))), "{tree:#?}");
         for section in Section::ALL.map(Section::label) {
             assert!(tree.iter().any(|n| n.is("Tab", Some(section))), "{section}: {tree:#?}");
@@ -539,7 +539,7 @@ mod tests {
         );
         let error = form.read_with(cx, |f, _| f.error(ix).map(str::to_owned)).expect("a reason");
         assert!(error.contains("#rrggbb"), "{error}");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Alert", Some(&error))), "{tree:#?}");
 
         cx.simulate_input("3456");
@@ -562,7 +562,7 @@ mod tests {
         let (view, events, cx) = editor(cx, "");
         cx.simulate_input("ligat");
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Switch", Some("Ligatures"))), "{tree:#?}");
         assert!(!tree.iter().any(|n| n.is("RadioGroup", Some("Theme"))), "{tree:#?}");
         press(cx, "down");
@@ -616,14 +616,14 @@ mod tests {
         let (_view, _events, cx) = editor(cx, "");
         cx.simulate_input("zzz");
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let quiet = crate::settings_form::NO_MATCHES;
         assert!(tree.iter().any(|n| n.is("Status", Some(quiet))), "{tree:#?}");
         cx.simulate_keystrokes("cmd-a backspace");
         cx.simulate_input("live_agents");
         cx.run_until_parked();
         assert_eq!(value_of(cx, "SpinButton", "Live agents").as_deref(), Some("24"));
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Heading", Some("Agents"))), "{tree:#?}");
     }
 
@@ -635,7 +635,7 @@ mod tests {
         let search = cx.debug_bounds("settings-search").expect("the search");
         let title = cx.debug_bounds("settings-title").expect("the page's name");
         assert!((search.center().y - title.center().y).abs() < px(0.5), "{search:?} {title:?}");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let general = Section::ALL[0].label();
         assert!(tree.iter().any(|n| n.is("Heading", Some(general))), "{tree:#?}");
     }
@@ -715,7 +715,7 @@ mod tests {
         cx.simulate_resize(gpui::size(px(900.0), px(900.0)));
         cx.run_until_parked();
         click(cx, leak(format!("settings-section-{}", Section::Appearance.index())));
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let row = rows().first().expect("a row");
         assert!(
             tree.iter().any(|n| n.label.as_deref() == Some(row.label())
@@ -743,7 +743,7 @@ mod tests {
         assert!(cx.debug_bounds("settings-path").is_none(), "the form's title is Settings alone");
 
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let keys = |label: &str| {
             tree.iter().find(|n| n.is("ListItem", Some(label))).and_then(|n| n.value.clone())
         };
@@ -755,7 +755,7 @@ mod tests {
         assert!(!tree.iter().any(|n| n.is("RadioGroup", Some("Theme"))), "no rows here");
 
         click(cx, leak(format!("settings-section-{}", Section::About.index())));
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let about = tree.iter().find(|n| n.is("Group", Some("About"))).expect("the about block");
         let said = about.description.as_deref().unwrap_or_default();
         assert!(said.contains(env!("CARGO_PKG_VERSION")) && said.contains("build"), "{said}");
@@ -766,7 +766,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| view.focus(window, cx));
         cx.simulate_input("last output");
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("ListItem", Some("Copy last output"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Heading", Some("Keyboard"))), "{tree:#?}");
     }
@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(applied(&events), "[keys.workspace]\nnew_note = \"cmd-t\"\n");
         assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⌘T"));
         assert_eq!(value_of(cx, "ListItem", "New agent").as_deref(), Some(""), "⌘T went");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let said = tree.iter().find(|n| n.role == "Alert").and_then(|n| n.label.clone());
         assert_eq!(
             said.as_deref(),
@@ -929,7 +929,7 @@ mod tests {
         let (view, events, cx) = editor(cx, "");
         view.update(cx, |v, cx| v.set_error("could not write it".to_owned(), cx));
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Alert", Some("could not write it"))), "{tree:#?}");
         click(cx, "settings-section-1");
         click(cx, leak(format!("settings-switch-{}", row("font", "ligatures"))));
@@ -959,7 +959,7 @@ mod tests {
         let page = cx.debug_bounds("settings-editor").expect("the page");
         assert_eq!(page.size, viewport, "the whole window it is given");
         assert!(cx.debug_bounds("settings-backdrop").is_none(), "no dim under it");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(!tree.iter().any(|n| n.role == "Dialog"), "not a dialog: {tree:#?}");
     }
 

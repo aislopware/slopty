@@ -160,16 +160,19 @@ impl WorkspaceView {
             .enumerate()
             .map(|(ix, line)| {
                 let text = SharedString::from(line);
-                crate::kit::meta(crate::kit::sheet_row(theme, crate::kit::Row::One), theme)
-                    .id(("machine-fact", ix))
-                    .debug_selector(move || format!("machine-fact-{ix}"))
-                    .role(Role::Label)
-                    .aria_label(text.clone())
-                    .child(text)
-                    .into_any_element()
+                slopty_kit::kit::meta(
+                    slopty_kit::kit::sheet_row(theme, slopty_kit::kit::Row::One),
+                    theme,
+                )
+                .id(("machine-fact", ix))
+                .debug_selector(move || format!("machine-fact-{ix}"))
+                .role(Role::Label)
+                .aria_label(text.clone())
+                .child(text)
+                .into_any_element()
             })
             .collect();
-        rows.push(crate::kit::list_rule(theme));
+        rows.push(slopty_kit::kit::list_rule(theme));
         rows
     }
 

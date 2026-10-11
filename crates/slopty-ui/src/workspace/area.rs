@@ -24,15 +24,15 @@ use gpui::{
 use slopty_client::layout::tiling::TabId;
 use slopty_client::layout::{Drop, GroupKey, Laid, PaneId, Rect, Sash, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::WorkspaceView;
 use super::panes::{PaneHost, Panes};
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// How far a header press travels before it is a move rather than a click.
 const DRAG_SLOP: f32 = 4.0;
@@ -756,9 +756,11 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_secondary))
                 .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(SharedString::from(place));
-            crate::a11y::tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, window, cx| {
-                this.goal_sheet_from_page(window, cx);
-            }))
+            slopty_kit::a11y::tab_stop(el, s.focus).on_click(cx.listener(
+                |this, _ev, window, cx| {
+                    this.goal_sheet_from_page(window, cx);
+                },
+            ))
         });
         let composer = self.empty_goal.as_ref().map(|(goal, _)| {
             kit::field(div(), theme)
@@ -796,7 +798,7 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_secondary))
                 .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(label);
-            crate::a11y::tab_stop(el, s.focus)
+            slopty_kit::a11y::tab_stop(el, s.focus)
         };
         let line = div()
             .w_full()
@@ -952,7 +954,7 @@ impl WorkspaceView {
             .active(|st| st.bg(hsla(s.pressed)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
             .child(div().flex_none().text_color(hsla(s.text)).child(label));
-        crate::a11y::tab_stop(row, s.focus)
+        slopty_kit::a11y::tab_stop(row, s.focus)
     }
 }
 

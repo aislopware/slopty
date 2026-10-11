@@ -75,7 +75,7 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     let first = lines.first().expect("lines");
     assert_eq!(first.0, crate::palette::Section::Tiles, "{lines:#?}");
     assert!(first.1.contains("studio"), "the worker is named: {lines:#?}");
-    assert_eq!(first.2, Some(crate::icons::Status::NeedsYou), "the agent is marked");
+    assert_eq!(first.2, Some(slopty_kit::icons::Status::NeedsYou), "the agent is marked");
     let mut grouped: Vec<_> = lines.iter().map(|l| l.0).collect();
     grouped.dedup();
     assert_eq!(
@@ -87,7 +87,7 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
         ],
         "each group once, in order"
     );
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Heading", Some("Machines"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⇧⌘T"))), "{tree:#?}");
 
@@ -224,7 +224,7 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Heading", Some(EMPTY_QUESTION))), "{tree:#?}");
     for label in ["New terminal", "Add a window or display"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
@@ -282,7 +282,7 @@ fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     let heading = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.iter().find(|n| n.role == "Heading").and_then(|n| n.label.clone())
     };
     assert_eq!(heading(cx).as_deref(), Some(EMPTY_QUESTION), "no project on show");
@@ -311,7 +311,7 @@ fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContex
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let place = "studio · ~ · Claude Code";
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Button", Some(place))), "where it goes: {tree:#?}");
     let (foot, goal) = (cx.debug_bounds("empty-goal-foot"), cx.debug_bounds("empty-goal"));
     let (Some(foot), Some(goal)) = (foot, goal) else { panic!("the foot in the composer") };
@@ -447,7 +447,7 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     cx.simulate_input("e");
     cx.run_until_parked();
     let full = cx.debug_bounds("palette").expect("drawn");
-    let ceiling = crate::kit::Overlay::List.bounds().1.min(h * 0.6);
+    let ceiling = slopty_kit::kit::Overlay::List.bounds().1.min(h * 0.6);
     assert!((f32::from(full.size.height) - ceiling).abs() < 0.5, "at its ceiling: {full:?}");
     assert!(brief.size.height < full.size.height, "the brief list is shorter: {brief:?}");
     // The row the ceiling cuts fades out above the foot rather than ending on its hairline.
@@ -488,7 +488,7 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
 /// Whether the palette's rows fade out at their foot.
 fn more_below(cx: &mut VisualTestContext) -> bool {
     let rows = cx.debug_bounds("palette-rows").expect("the palette's rows");
-    cx.update(|window, _| crate::retained::faded_edges(window, rows)).bottom
+    cx.update(|window, _| slopty_kit::retained::faded_edges(window, rows)).bottom
 }
 
 /// ↓ past the lines in view scrolls the palette's list with the selection, and a query that

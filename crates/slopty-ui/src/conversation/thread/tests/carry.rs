@@ -57,7 +57,7 @@ fn open_menu(cx: &mut gpui::VisualTestContext) {
 
 /// The labels of the open menu's rows.
 fn menu_rows(cx: &mut gpui::VisualTestContext) -> Vec<String> {
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect()
 }
 

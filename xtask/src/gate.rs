@@ -163,6 +163,7 @@ impl Shard {
         match self {
             Self::Ui => &[
                 "slopty-ui",
+                "slopty-kit",
                 "slopty-app",
                 "slopty",
                 "slopty-e2e",

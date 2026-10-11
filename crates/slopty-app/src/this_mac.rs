@@ -526,8 +526,8 @@ impl Line {
     /// the button beside it, not a failure: red is for an install that failed or a worker that
     /// never answered. A line that is not in the way wears the quiet ring an unknown one does,
     /// its words saying why.
-    pub const fn status(&self) -> slopty_ui::icons::Status {
-        use slopty_ui::icons::Status;
+    pub const fn status(&self) -> slopty_kit::icons::Status {
+        use slopty_kit::icons::Status;
         match (self.mark, self.fix) {
             (Mark::Ok, _) => Status::Done,
             (
@@ -1240,7 +1240,7 @@ mod tests {
         );
         assert_eq!(
             off.status(),
-            slopty_ui::icons::Status::Idle,
+            slopty_kit::icons::Status::Idle,
             "quiet, not waiting on the person"
         );
         let key = PushSettings { apns_key: "/k.p8".to_owned(), ..PushSettings::default() };
@@ -1306,15 +1306,15 @@ mod tests {
         let off =
             app_lines(&flow(Some(Alerts::Denied), Some(Login::Blocked), Some(Step::NoWorkers)));
         assert_eq!(off[0].fix, Some(Fix::Open(Place::Notifications)));
-        assert_eq!(off[0].status(), slopty_ui::icons::Status::NeedsYou, "the person's to do");
+        assert_eq!(off[0].status(), slopty_kit::icons::Status::NeedsYou, "the person's to do");
         assert_eq!(off[1].fix, Some(Fix::Open(Place::LoginItems)), "only Login Items allows it");
-        assert_eq!(off[1].status(), slopty_ui::icons::Status::NeedsYou);
+        assert_eq!(off[1].status(), slopty_kit::icons::Status::NeedsYou);
         assert_eq!((off[2].mark, off[2].fix), (Mark::Unknown, None), "no machine to show yet");
         let failed = Some(Step::Failed("the system would not say".to_owned()));
         let bare = app_lines(&flow(Some(Alerts::Unavailable), Some(Login::Unavailable), failed));
         assert_eq!(bare.each_ref().map(|l| (l.mark, l.fix)), [(Mark::Advisory, None); 3]);
         assert_eq!(bare[2].detail, "the system would not say", "the reason, as it came");
-        assert_eq!(bare[0].status(), slopty_ui::icons::Status::Idle, "nothing to press: quiet");
+        assert_eq!(bare[0].status(), slopty_kit::icons::Status::Idle, "nothing to press: quiet");
         assert!(bare[1].detail.contains("not an app bundle"), "{}", bare[1].detail);
     }
 
@@ -1388,7 +1388,7 @@ mod tests {
     #[test]
     fn the_doctor_maps_to_lines_and_buttons() {
         use Mark::{Advisory, Missing, Ok};
-        use slopty_ui::icons::Status::{Done, Failed, Idle, NeedsYou};
+        use slopty_kit::icons::Status::{Done, Failed, Idle, NeedsYou};
         let down = Tailnet::Down(BackendState::Stopped);
         let lines = checklist_of(Worker::Up(doctor(false, false, down)), "");
         assert_eq!(marks(&lines), [Ok, Ok, Missing, Missing, Advisory]);

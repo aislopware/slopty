@@ -21,6 +21,7 @@ use gpui::{
 };
 use slopty_client::layout::WindowFrame;
 use slopty_core::ItemId;
+use slopty_kit::colors::hsla;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{CaptureTarget, ScreenRequest};
@@ -28,7 +29,6 @@ use slopty_theme::Theme;
 
 use super::WorkspaceView;
 use super::actions::ToggleOwnWindow;
-use crate::colors::hsla;
 use crate::screen::ScreenView;
 
 /// The key context of a tile's own window.
@@ -223,7 +223,7 @@ impl WorkspaceView {
                 self.popouts.windows.push((item, handle));
                 self.popouts.active = Some(item);
                 let frame =
-                    handle.update(cx, |_view, window, cx| crate::window_frame::of(window, cx));
+                    handle.update(cx, |_view, window, cx| slopty_kit::window_frame::of(window, cx));
                 if let Ok(Some(frame)) = frame {
                     self.popouts.moved_to(item, frame);
                 }
@@ -416,7 +416,7 @@ impl PopOutView {
     /// The window moved or took a new size: where it stands is saved, and once it holds a
     /// new size the remote window is asked for it.
     fn window_resized(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let (item, frame) = (self.item, crate::window_frame::of(window, cx));
+        let (item, frame) = (self.item, slopty_kit::window_frame::of(window, cx));
         let _ws = self.workspace.update(cx, |ws, cx| ws.popped_moved(item, frame, cx));
         let viewport = window.viewport_size();
         let per_point = 1.0 / self.points_per_px.max(f32::EPSILON);

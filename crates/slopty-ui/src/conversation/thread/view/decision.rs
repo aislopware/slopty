@@ -19,13 +19,13 @@ use gpui::{
     AnyElement, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::{Choice, Effect, Request};
 
 use super::ThreadView;
 use super::denying::{deny_choice, plain_deny};
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit::{self, ButtonKind};
 
 /// What the deny's chevron opens, and its menu's name.
 pub(crate) const OTHER_DENIALS: &str = "Other ways to deny";
@@ -220,7 +220,7 @@ impl ThreadView {
                 .px(px(theme.spacing.xs))
                 .rounded_r(px(theme.radii.sm))
                 .cursor_pointer();
-            crate::a11y::tab_stop(kit::secondary(el, theme), s.focus)
+            slopty_kit::a11y::tab_stop(kit::secondary(el, theme), s.focus)
                 .child(self.icon(Symbol::ChevronDown, s.text_secondary))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.denials_open = if this.denials_open.as_ref() == Some(&ask) {
@@ -360,10 +360,10 @@ impl ThreadView {
 
 #[cfg(test)]
 mod tests {
+    use slopty_kit::kit::ButtonKind;
     use slopty_proto::thread::{Choice, Effect};
 
     use super::{answer_label, answer_scope, arrange, standing_label};
-    use crate::kit::ButtonKind;
 
     fn choice(id: &str, effect: Effect, scope: Option<&str>, stops: bool) -> Choice {
         Choice {

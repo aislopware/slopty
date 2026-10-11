@@ -416,7 +416,7 @@ fn the_send_button_says_what_return_will_do(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     let said = |cx: &mut gpui::VisualTestContext| {
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         ["Send", "Steer", "Queue", "Update"]
             .into_iter()
             .find(|l| tree.iter().any(|n| n.is("Button", Some(l))))
@@ -480,7 +480,7 @@ fn the_meter_is_read_not_pressed(cx: &mut TestAppContext) {
     cx.simulate_click(meter, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-meter-panel").is_none(), "no panel to open");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let words: Vec<_> = tree.iter().filter_map(|n| n.label.clone()).collect();
     assert!(!words.iter().any(|w| w.contains('$')), "{words:?}");
     assert!(words.iter().any(|w| w.contains("Five hour 42%")), "{words:?}");
@@ -592,7 +592,7 @@ fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter().any(|n| n.is("ListItem", Some(&format!("after the build, {when}")))),
         "what it waits on"
@@ -643,7 +643,7 @@ fn a_stop_pauses_the_queue_until_the_next_message(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-queue-paused").is_some(), "the queue says it paused");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let said = format!("then the docs, {}", Pending::STOPPED);
     assert!(!tree.iter().any(|n| n.label.as_deref() == Some(&said)), "said once, not per row");
 
@@ -692,7 +692,7 @@ fn a_right_click_on_a_message_quotes_or_copies_it(cx: &mut TestAppContext) {
     };
 
     right_click(cx, "item-u1");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Menu", Some("Message"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("MenuItem", Some("Quote in reply"))), "{tree:#?}");
     assert!(cx.debug_bounds("message-menu-fork").is_none(), "no door to fork by");

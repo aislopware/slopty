@@ -382,7 +382,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   it. Gating the accessors on the `e2e` feature would mean gating that module too, and then no
   gate lane would compile it. Without the feature, nothing calls them and the linker strips
   them.
-- The token lint-as-tests in `kit.rs` read each file up to its first `#[cfg(test)]`. So one
+- The token lint-as-tests (`slopty-ui/src/lints.rs`, in `kit.rs` until the kit became a crate) read each file up to its first `#[cfg(test)]`. So one
   test-only accessor high in a file hid the rest of that file from them: 61 of the 7,755 lines of
   `terminal/view.rs` were read, and 73 of `workspace.rs`. They now stop only at a
   `#[cfg(test)]` over a `mod`, which reads 59,433 lines of the UI and the app where they read

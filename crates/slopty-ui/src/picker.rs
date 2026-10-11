@@ -16,12 +16,12 @@ use gpui::{
 };
 use gpui_kit::component::input::{Escape, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{Mark, Status, Symbol};
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_theme::Theme;
 
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::icons::{Mark, Status, Symbol};
 use crate::palette::{
     Plate, dotted, field_row, lead_slot, line_height, list_pad, quiet_line, section_heading,
 };
@@ -130,7 +130,7 @@ struct Row {
 /// from the dialog's edges, its text on the edge grid, as the palette's rows sit.
 fn list_row(theme: &Theme) -> gpui::Div {
     let pad = list_pad(theme);
-    crate::kit::row(theme, crate::kit::Row::One)
+    slopty_kit::kit::row(theme, slopty_kit::kit::Row::One)
         .h(px(line_height(theme)))
         .mx(px(pad))
         .px(px(theme.spacing.inset() - pad))
@@ -239,7 +239,7 @@ impl WindowPicker {
     pub fn leave(&mut self, cx: &mut Context<Self>) -> std::time::Duration {
         self.leaving = true;
         cx.notify();
-        crate::kit::exit_time(cx).unwrap_or_default()
+        slopty_kit::kit::exit_time(cx).unwrap_or_default()
     }
 
     /// Whether a keyboard is attached: without one the field ends in Cancel.
@@ -332,8 +332,8 @@ impl WindowPicker {
 
     /// The rows the field lets through: every word typed is in the row's text.
     fn visible(&self) -> Vec<Row> {
-        let mut fuzzy = crate::fuzzy::Fuzzy::new(&self.query);
-        let mut kept: Vec<(crate::fuzzy::Rank, Row)> = self
+        let mut fuzzy = slopty_kit::fuzzy::Fuzzy::new(&self.query);
+        let mut kept: Vec<(slopty_kit::fuzzy::Rank, Row)> = self
             .rows()
             .into_iter()
             .filter_map(|row| {
@@ -347,7 +347,9 @@ impl WindowPicker {
         // order (what needs you first).
         if !fuzzy.is_empty() {
             kept.sort_by(|a, b| {
-                a.1.section.cmp(&b.1.section).then_with(|| crate::fuzzy::best_first(&a.0, &b.0))
+                a.1.section
+                    .cmp(&b.1.section)
+                    .then_with(|| slopty_kit::fuzzy::best_first(&a.0, &b.0))
             });
         }
         kept.into_iter().map(|(_, row)| row).collect()
@@ -484,7 +486,7 @@ impl WindowPicker {
             )
             // Where it is, as the palette's context column says it: meta text, muted.
             .child(
-                crate::kit::meta(div(), theme)
+                slopty_kit::kit::meta(div(), theme)
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
@@ -494,11 +496,11 @@ impl WindowPicker {
                     .child(SharedString::from(secondary)),
             )
             .children(worker.map(|worker| {
-                crate::kit::meta(div(), theme).flex_none().child(dotted(theme, worker))
+                slopty_kit::kit::meta(div(), theme).flex_none().child(dotted(theme, worker))
             }))
             // How it is doing ends the line, never on its mark.
             .children(mark.filter(|m| *m != Status::Idle).map(|status| {
-                crate::icons::status_mark(theme, Some(status))
+                slopty_kit::icons::status_mark(theme, Some(status))
                     .debug_selector(move || format!("picker-status-{}-{}", id.0, id.1))
             }));
         let row = if chosen { self.plate.mark(row, ix) } else { row };
@@ -520,7 +522,7 @@ impl WindowPicker {
         row.role(gpui::accesskit::Role::Status)
             .aria_label(LOADING_WINDOWS)
             .text_color(muted)
-            .child(crate::icons::status_icon(
+            .child(slopty_kit::icons::status_icon(
                 theme,
                 Status::Working,
                 px(theme.typography.icon()),
@@ -584,7 +586,7 @@ impl Render for WindowPicker {
         let empty = rows.is_empty();
         let title = "Jump to a session, or add a window from the worker";
 
-        let panel = crate::kit::dialog(&theme, crate::kit::Overlay::List)
+        let panel = slopty_kit::kit::dialog(&theme, slopty_kit::kit::Overlay::List)
             .max_w(px(crate::palette::LIST_WIDTH))
             .id("picker")
             .debug_selector(|| "picker".to_owned())
@@ -595,11 +597,11 @@ impl Render for WindowPicker {
             .children(self.input.as_ref().map(|input| {
                 // Glass has no Esc: the field ends in Cancel, as iOS search does.
                 let cancel = (!self.chords).then(|| {
-                    crate::kit::button(
+                    slopty_kit::kit::button(
                         &theme,
                         "picker-cancel",
                         "Cancel",
-                        crate::kit::ButtonKind::Link,
+                        slopty_kit::kit::ButtonKind::Link,
                     )
                     .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(PickerEvent::Dismiss)))
                 });
@@ -631,19 +633,20 @@ impl Render for WindowPicker {
                 .debug_selector(|| "picker-scrim".to_owned())
                 .absolute()
                 .inset_0()
-                .bg(crate::kit::scrim(&theme))
+                .bg(slopty_kit::kit::scrim(&theme))
         });
         let layer = crate::palette::Layer::Dialog.priority();
         if self.leaving {
             let panel = panel.debug_selector(|| "picker-leaving".to_owned());
             let root = crate::palette::list_anchor(&theme, window).id("picker-backdrop");
-            let root = crate::kit::presence(root.children(scrim).child(panel), "picker", false);
+            let root =
+                slopty_kit::kit::presence(root.children(scrim).child(panel), "picker", false);
             return gpui::deferred(root).with_priority(layer);
         }
         let home = self.focus_handle(cx);
-        crate::a11y::hold(&self.focus, &home, cx);
+        slopty_kit::a11y::hold(&self.focus, &home, cx);
         let root = crate::palette::list_anchor(&theme, window).id("picker-backdrop");
-        let root = crate::a11y::trap(root, &self.focus)
+        let root = slopty_kit::a11y::trap(root, &self.focus)
             .on_key_down(cx.listener(Self::key_down))
             // While an input method composes in the field, the arrows and Esc are its own.
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
@@ -671,9 +674,9 @@ impl Render for WindowPicker {
             .children(scrim)
             .child(panel);
         // The keyboard summons it, so it arrives fading in where it stands, with no travel, and
-        // leaves the same way ([`crate::kit::Presence`]).
-        let root =
-            crate::kit::presence(root, "picker", true).arrives_whole(!crate::kit::motion(cx));
+        // leaves the same way ([`slopty_kit::kit::Presence`]).
+        let root = slopty_kit::kit::presence(root, "picker", true)
+            .arrives_whole(!slopty_kit::kit::motion(cx));
         gpui::deferred(root).with_priority(layer)
     }
 }
@@ -860,7 +863,7 @@ mod tests {
     /// The headings and states of the picker's last frame, in reading order.
     fn outline(cx: &mut gpui::VisualTestContext) -> Vec<String> {
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.into_iter()
             .filter(|n| matches!(n.role.as_str(), "Heading" | "Status"))
             .filter_map(|n| n.label.map(|l| format!("{} {l}", n.role)))

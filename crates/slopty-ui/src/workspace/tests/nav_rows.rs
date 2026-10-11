@@ -6,9 +6,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use gpui::Modifiers;
 use slopty_client::groups::{self, GroupKey, fact};
 use slopty_core::WallMs;
+use slopty_kit::icons::Status;
 
 use super::*;
-use crate::icons::Status;
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
@@ -376,7 +376,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("Needs approval"))),
         "the row's name says it"
     );
-    let wash = gpui::Background::from(crate::colors::hsla_alpha(
+    let wash = gpui::Background::from(slopty_kit::colors::hsla_alpha(
         Theme::default().surfaces.warn_fill,
         slopty_theme::alpha::FAINT,
     ));
@@ -461,7 +461,7 @@ fn a_folded_worker_rolls_up_what_its_tiles_want(cx: &mut TestAppContext) {
         let inside = |b: [f32; 4]| {
             b[0] >= f32::from(at.left()) - 0.5 && b[0] + b[2] <= f32::from(at.right()) + 0.5
         };
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         tree.into_iter()
             .filter(|n| n.role == "Image" && inside(n.bounds))
             .filter(|n| n.bounds[1] >= f32::from(at.top()) - 0.5)
@@ -714,7 +714,7 @@ fn the_plate_glides_on_the_workspaces_clock(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let to = row(cx, second);
     assert_eq!(plate(cx), Some(from), "the glide starts where the plate was");
-    let half = settled.saturating_add(crate::kit::Pace::Settle.duration().div_f32(2.0));
+    let half = settled.saturating_add(slopty_kit::kit::Pace::Settle.duration().div_f32(2.0));
     view.update(cx, |v, _| v.hold_clock(Some(half)));
     cx.update(Window::simulate_next_frame);
     cx.run_until_parked();
@@ -822,7 +822,7 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     assert!(needs.top() < worker.top(), "before the machines: {needs:?} {worker:?}");
     let headed = tree(cx).into_iter().any(|n| n.is("Heading", Some("studio")));
     assert!(!headed, "the workspace's name is the bar's, not a heading here");
-    let modal = gpui::Background::from(crate::kit::scrim(&theme));
+    let modal = gpui::Background::from(slopty_kit::kit::scrim(&theme));
     let dimmed =
         cx.update(|window, _| window.painted_quads().into_iter().any(|q| q.background == modal));
     assert!(!dimmed, "nothing shows round it, so nothing is dimmed");
@@ -1267,7 +1267,7 @@ fn a_files_row_says_its_folder_only_beside_a_namesake(cx: &mut TestAppContext) {
     };
     assert_eq!(meta(cx, "notes.md"), [""], "one line: the header names its folder");
     let row = cx.debug_bounds(selector("nav-tile", notes.item)).expect("drawn");
-    let one = navigator::row_height(&Theme::default(), crate::kit::Row::One);
+    let one = navigator::row_height(&Theme::default(), slopty_kit::kit::Row::One);
     assert!((f32::from(row.size.height) - one).abs() < 0.5, "a one-line row: {row:?}");
 
     let _other = arrives(&view, cx, &studio, ItemKind::File { path: "/w/b/notes.md".into() }, 2);
@@ -1305,8 +1305,8 @@ fn a_selection_is_the_wash_docked_or_drawn(cx: &mut TestAppContext) {
             })
         })
     };
-    let white = crate::colors::hsla(theme.surfaces.elevated);
-    let wash = crate::colors::hsla(theme.surfaces.selected);
+    let white = slopty_kit::colors::hsla(theme.surfaces.elevated);
+    let wash = slopty_kit::colors::hsla(theme.surfaces.selected);
     assert!(fill_at(cx, row, wash), "the wash under the docked selection");
     assert!(!fill_at(cx, row, white), "nothing rises to white");
 

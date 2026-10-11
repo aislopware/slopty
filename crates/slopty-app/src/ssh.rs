@@ -27,12 +27,12 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::WorkerId;
 pub use slopty_deploy::Target;
 use slopty_deploy::{Deployed, Event, Failure, HostKey, Served, Server, Step};
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_net::HostAddr;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::ServerLink;
 use slopty_ui::add_worker::{self, Bar, Install, Mark, StepLine, Updates};
-use slopty_ui::colors::hsla;
-use slopty_ui::kit::{self, ButtonKind};
 use tokio::sync::mpsc;
 
 use crate::this_mac::{self, Pending};
@@ -1270,10 +1270,10 @@ impl Workspace {
             .border(px(slopty_theme::stroke::LINE))
             .border_color(if on { hsla(s.solid) } else { hsla(s.control) })
             .when(on, |b| {
-                kit::solid(b, theme).child(slopty_ui::icons::icon(
+                kit::solid(b, theme).child(slopty_kit::icons::icon(
                     theme,
-                    slopty_ui::icons::Symbol::Checkmark,
-                    slopty_ui::icons::IconSize::Inline,
+                    slopty_kit::icons::Symbol::Checkmark,
+                    slopty_kit::icons::IconSize::Inline,
                     hsla(s.solid_ink),
                 ))
             });
@@ -1313,7 +1313,7 @@ impl Workspace {
     /// offered.
     pub(crate) fn ssh_row(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         self.deployer.as_ref()?;
-        let glyph = slopty_ui::icons::Symbol::Terminal;
+        let glyph = slopty_kit::icons::Symbol::Terminal;
         let server = self.adding.as_ref().is_some_and(|a| a.mode == crate::Panel::Server);
         let (id, title, meta) = if server {
             ("serve-over-ssh", SERVE_TITLE, SERVE_ROW_META)

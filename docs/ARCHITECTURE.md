@@ -34,6 +34,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      │ client (macOS app · iOS app · CLI)     ▼                              │
                      │ slopty-client: session state · line cache · prediction · items · layout│
                      │ slopty-ui (GPUI): workspace · terminal element · surface element · chrome│
+                     │ slopty-kit: the chrome kit · icons · type · colour · motion              │
                      │ slopty-codec (decode) → CVPixelBuffer → gpui surface (zero copy)      │
                      └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -1037,7 +1038,7 @@ reconcile_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: 
 worker follows each one on the kernel's events and re-sends a changed file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
 text up to 16 MiB, `FileRead::Text | Streamed | Binary | Missing | TooLarge`) into gpui-kit's code
 editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
-saying why not. Colour comes from the grammar the path names (`slopty-ui::highlight`: syntect's
+saying why not. Colour comes from the grammar the path names (`slopty-kit::highlight`: syntect's
 bundled grammars on the pure-Rust regex engine, reduced to nine tokens painted from the
 theme's palette); `highlight::editor::EditorHighlighter` is the editor's highlighter, which
 moves the last parse's colours with each edit (`editor::splice`) and parses the whole text
@@ -1468,7 +1469,7 @@ they hold the caret. Pills (tile header, badge) are `small()` text on a `TINT`
 fill of their tone with the tone as text; buttons are `radii.sm` with `raised` → `overlay`
 hover/pressed, and the one primary action on a surface is `accent_fill` with `accent_ink` text.
 gpui-kit's widgets (inputs, Markdown `TextView`) read gpui-kit's own theme, which
-`slopty_ui::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
+`slopty_kit::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
 a file's preview gets `markdown_line_height`, paragraph gaps of one base unit, headings
 stepping down from `title()` and code in the terminal mono at `small()` on `raised`. Headless
 tests read the tokens back through `painted_quads()`: the accent vs hairline item frame, the
@@ -1580,17 +1581,17 @@ SGR 5 text share one 600 ms clock on the view, started by the first prepared fra
 either and stopped by the first that holds neither (an unfocused cursor is a steady hollow
 block); a keystroke pins the phase on for a half. Nothing in the workspace is drawn scaled, so
 every glyph paints at its own size. The item chrome's text — title, pills, badge, block
-headings — is `slopty_ui::chrome_text::ChromeText`: shaped once at its base size (a per-app
+headings — is `slopty_kit::chrome_text::ChromeText`: shaped once at its base size (a per-app
 cache), sized by arithmetic rather than a taffy measure callback, painted glyph by glyph with
 GPUI's baseline and advance arithmetic, ellipsis included. Worker events reach the workspace from the
 link loop in batches (whatever queued while the last one applied, up to 256, in one update),
 so twenty streaming sessions cost one update per batch; a session itself never sends more than 125 frames a second
-(`MIN_FRAME_INTERVAL`). `slopty_ui::frames` times every draw (`begin` in `Workspace::render`,
+(`MIN_FRAME_INTERVAL`). `slopty_kit::frames` times every draw (`begin` in `Workspace::render`,
 `end` in the probe) into a 1024-frame ring with nearest-rank percentiles and a count of the
 frame slots long draws swallowed; it is the fourth line of the ⌘⇧I overlay and the `frames`
 block of the self-test `dump`, and `terminal::latency` stamps each keystroke so `dump` can say
 how long the local echo and the worker's echo took to reach the display: a paint that holds a
-waiting key hands `slopty_ui::shown::after_paint` the work, and the key is timed when the
+waiting key hands `slopty_kit::shown::after_paint` the work, and the key is timed when the
 window's presentation report (`Window::on_frame_presented`) says the first frame submitted
 after that paint reached the glass. Presentation is vsync-synced (the fork's `CAMetalLayer`
 keeps `displaySyncEnabled` at its default) and the compositor adds about a refresh, so a

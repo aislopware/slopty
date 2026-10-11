@@ -205,7 +205,7 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
         assert!(row.is_empty(), "{tile:?}: the row lies on the pane's ground: {row:?}");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let line = crate::colors::hsla(theme.surfaces.stroke);
+        let line = slopty_kit::colors::hsla(theme.surfaces.stroke);
         let foot = quads.iter().any(|q| {
             fill(q) == Some(line)
                 && (q.bounds.bottom().0 / scale - f32::from(header.bottom())).abs() < 0.5
@@ -213,7 +213,7 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         });
         assert!(foot, "{tile:?}: the one line along its foot");
         let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
-        let pill = crate::colors::hsla(theme.surfaces.selected);
+        let pill = slopty_kit::colors::hsla(theme.surfaces.selected);
         let boxed = quads_at(cx, title).iter().any(|q| fill(q) == Some(pill));
         assert!(!boxed, "{tile:?}: the title stands in no pill");
     }
@@ -243,7 +243,7 @@ fn panes_meet_edge_to_edge_at_their_sash(cx: &mut TestAppContext) {
     near(above.right(), area.right(), "on its trailing edge");
     near(above.top(), area.top(), "on its top");
     near(below.bottom(), area.bottom(), "on its bottom");
-    let border = crate::colors::hsla(Theme::default().surfaces.border);
+    let border = slopty_kit::colors::hsla(Theme::default().surfaces.border);
     let (scale, lines) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
     let inside = |q: &gpui::Quad| {
         let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
@@ -288,7 +288,7 @@ fn no_body_is_veiled(cx: &mut TestAppContext) {
     let canvas = Theme::default().surfaces.ground;
     let washes: Vec<gpui::Background> = [alpha::FAINT, alpha::TINT, alpha::PRESSED]
         .into_iter()
-        .map(|a| crate::colors::hsla_alpha(canvas, a).into())
+        .map(|a| slopty_kit::colors::hsla_alpha(canvas, a).into())
         .collect();
     for tile in [first, second] {
         let body = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
@@ -375,7 +375,7 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
     assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
-    let ring = crate::colors::hsla(Theme::default().surfaces.stroke);
+    let ring = slopty_kit::colors::hsla(Theme::default().surfaces.stroke);
     let edges = quads_at(cx, tile);
     let mut edges = edges.iter().filter(|q| q.border_widths.left.0 > 0.0);
     assert!(edges.all(|q| q.border_color == ring), "no outline but the panel's ring");
@@ -429,8 +429,8 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
         let theme = Theme::default();
         let s = theme.surfaces;
         let fill = q.background.as_solid();
-        [theme.content(), s.ground].iter().any(|c| fill == Some(crate::colors::hsla(*c)))
-            || fill == Some(crate::colors::hsla(s.stroke))
+        [theme.content(), s.ground].iter().any(|c| fill == Some(slopty_kit::colors::hsla(*c)))
+            || fill == Some(slopty_kit::colors::hsla(s.stroke))
     };
     let fills: Vec<&gpui::Quad> = quads
         .iter()
@@ -439,7 +439,7 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
     assert!(fills.is_empty(), "no fill in the header: {fills:#?}");
     assert!(cx.debug_bounds(selector("hooks", waiting.item)).is_none(), "no hooks offered");
     let nodes = tree(cx);
-    let in_slot = |n: &&crate::a11y::Node| {
+    let in_slot = |n: &&slopty_kit::a11y::Node| {
         let [x, y, ..] = n.bounds;
         slot.contains(&point(px(x + 1.0), px(y + 1.0)))
     };
@@ -497,7 +497,7 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
         .iter()
         .filter_map(|t| cx.debug_bounds(selector("title", t.item)))
         .collect();
-    let in_a_header = |n: &crate::a11y::Node| {
+    let in_a_header = |n: &slopty_kit::a11y::Node| {
         let [x, y, ..] = n.bounds;
         headers.iter().any(|h| h.contains(&point(px(x), px(y))))
     };
@@ -940,7 +940,7 @@ fn four_tabs(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Ti
 /// at once.
 #[gpui::test]
 fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
-    use crate::kit::Pace;
+    use slopty_kit::kit::Pace;
 
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1600.0), px(800.0)));
@@ -1040,7 +1040,7 @@ fn a_tab_row_never_fades(cx: &mut TestAppContext) {
     let row: &'static str = Box::leak(format!("tab-row-{}", first.item.as_uuid()).into_boxed_str());
     let faded = |cx: &mut VisualTestContext| {
         let at = cx.debug_bounds(row).expect("the tab row");
-        cx.update(|window, _| crate::retained::faded_edges(window, at))
+        cx.update(|window, _| slopty_kit::retained::faded_edges(window, at))
     };
     pane_at(&view, cx, last, 720.0);
     assert_eq!(faded(cx), gpui::Edges::default(), "every tab fits");
@@ -1154,7 +1154,7 @@ fn an_idle_agent_keeps_its_kind_in_the_slot(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
     assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no state at rest");
-    let idle = crate::icons::Status::Idle.label();
+    let idle = slopty_kit::icons::Status::Idle.label();
     let marked = tree(cx).into_iter().any(|n| {
         let [x, y, ..] = n.bounds;
         slot.contains(&point(px(x + 1.0), px(y + 1.0))) && n.is("Image", Some(idle))
@@ -1194,7 +1194,7 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
             window.text_system().shape_line(text.to_owned().into(), size, &[run], None).width
         })
     };
-    let took = words(cx, &crate::kit::duration(Duration::from_secs(6)));
+    let took = words(cx, &slopty_kit::kit::duration(Duration::from_secs(6)));
     let pad = px(2.0 * theme.spacing.xs);
     assert!(readout.size.width <= took + pad + px(0.5), "the time alone: {readout:?}");
     assert!(cx.debug_bounds(selector("unseen", tile.item)).is_none(), "no dot on screen");
@@ -1342,12 +1342,12 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
     paired(&view, cx, &fake, tile, 2);
     cx.executor().advance_clock(crate::screen::LOADING_GRACE);
     cx.run_until_parked();
-    let working = crate::icons::Status::Working.label();
+    let working = slopty_kit::icons::Status::Working.label();
     let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
     assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no header state");
     let body = cx.debug_bounds(selector("waiting", tile.item)).expect("the body's block");
     let nodes = tree(cx);
-    let in_slot = |n: &crate::a11y::Node| {
+    let in_slot = |n: &slopty_kit::a11y::Node| {
         let [x, y, ..] = n.bounds;
         slot.contains(&point(px(x + 1.0), px(y + 1.0)))
     };
@@ -1506,7 +1506,8 @@ fn a_tab_row_names_folders_only_where_files_read_alike(cx: &mut TestAppContext) 
 /// at once, and the panes of a tab shown anew never travel.
 #[gpui::test]
 fn a_new_pane_slides_in_from_its_edge(cx: &mut TestAppContext) {
-    use crate::kit::Pace;
+    use slopty_kit::kit::Pace;
+
     use crate::workspace::panes::ARRIVE_TRAVEL;
 
     let (view, cx) = workspace(cx);
@@ -1568,7 +1569,7 @@ fn a_new_pane_slides_in_from_its_edge(cx: &mut TestAppContext) {
 /// `docs/MEASUREMENTS.md` ("A new pane's slide").
 #[gpui::test]
 fn a_sliding_pane_builds_no_other_pane(cx: &mut TestAppContext) {
-    use crate::kit::Pace;
+    use slopty_kit::kit::Pace;
     const FRAMES: u32 = 20;
     let (view, cx) = workspace(cx);
     view.update(cx, |v, _| {

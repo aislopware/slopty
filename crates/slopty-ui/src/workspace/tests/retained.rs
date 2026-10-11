@@ -1,6 +1,6 @@
 //! GPUI draws a view again only when something it read changed. After each step of the
 //! interactions below, what the window shows must be what the same state drawn from scratch
-//! shows ([`crate::retained::stale`]): a view left showing an old state fails here.
+//! shows ([`slopty_kit::retained::stale`]): a view left showing an old state fails here.
 //!
 //! The workspace's clocks (a spinner, an age) run on its own clock, which these tests hold
 //! still between steps, so a frame and the frame drawn from scratch after it are drawn at the
@@ -15,7 +15,7 @@ use super::*;
 #[track_caller]
 fn fresh(cx: &mut VisualTestContext, step: &str) {
     cx.run_until_parked();
-    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
     if let Some(stale) = stale {
         panic!("{step}: the window shows a stale frame. {stale}");
     }
@@ -256,7 +256,7 @@ fn the_area_built_again_replays_a_shell_typed_into(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let now = Instant::now();
     let shown = gpui::PresentedFrame { submitted_at: now, presented_at: Some(now) };
-    cx.update(|_w, cx| crate::shown::presented(shown, cx));
+    cx.update(|_w, cx| slopty_kit::shown::presented(shown, cx));
     let terminals: Vec<Entity<TerminalView>> = shells
         .iter()
         .filter_map(|(session, _)| view.read_with(cx, |v, _| v.terminal(*session).cloned()))

@@ -21,11 +21,10 @@ use gpui::{
     Div, ElementId, InteractiveElement as _, ParentElement as _, Pixels, Stateful,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Mark;
+use slopty_kit::kit::{self, Pace};
 use slopty_theme::{Curve, Theme, alpha};
-
-use crate::colors::hsla;
-use crate::icons::Mark;
-use crate::kit::{self, Pace};
 
 /// Every tab's slot, in points: `MonoCode`'s `w-56`, the same for every tab whatever its words.
 pub(super) const TAB_SLOT: f32 = 224.0;
@@ -136,8 +135,13 @@ pub(super) fn pane_tab(
 pub(super) fn lead(theme: &Theme, mark: impl Into<Mark>, shown: bool) -> Stateful<Div> {
     let s = theme.surfaces;
     let ink = if shown { s.text } else { s.text_secondary };
-    crate::palette::lead_mark(theme, mark, hsla(ink), crate::icons::IconSize::Inline.slot(theme))
-        .when(!shown, |el| el.opacity(alpha::STRONG))
+    crate::palette::lead_mark(
+        theme,
+        mark,
+        hsla(ink),
+        slopty_kit::icons::IconSize::Inline.slot(theme),
+    )
+    .when(!shown, |el| el.opacity(alpha::STRONG))
 }
 
 /// `close`, a tab's [`kit::close_box`], laid over the tab's end, [`slopty_theme::Spacing::xs`]
@@ -201,7 +205,7 @@ pub(super) fn lone(
     shared: bool,
 ) -> Stateful<Div> {
     let ink = if focused { theme.surfaces.text } else { theme.surfaces.text_secondary };
-    let slot = crate::icons::IconSize::Inline.slot(theme);
+    let slot = slopty_kit::icons::IconSize::Inline.slot(theme);
     div()
         .id("lone-title")
         .min_w_0()
@@ -367,10 +371,10 @@ pub(super) fn growing(el: impl gpui::IntoElement, growth: f32) -> Div {
 #[cfg(test)]
 mod tests {
     use gpui::{InteractiveElement as _, Styled as _, div, px};
+    use slopty_kit::colors::hsla;
     use slopty_theme::{Theme, Variant};
 
     use super::{TAB_FLOOR, TAB_SLOT, pane_tab, tab};
-    use crate::colors::hsla;
 
     /// The shown tab is a selected pill in the text's tone; the rest are bare words in the
     /// secondary tone. Both are the density's tab tall at the small radius, in a slot of one

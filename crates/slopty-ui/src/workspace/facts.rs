@@ -179,7 +179,7 @@ impl WorkspaceView {
     pub(super) fn shell_progress(
         &self,
         session: SessionId,
-    ) -> Option<crate::kit::progress::Progress> {
+    ) -> Option<slopty_kit::kit::progress::Progress> {
         self.facts.progress.get(&session).copied()
     }
 
@@ -359,7 +359,7 @@ pub(super) struct Facts {
     pages: std::collections::HashMap<ItemId, PageFacts>,
     folders: std::collections::HashMap<ItemId, FolderFacts>,
     /// Each shell's program's progress report (`OSC 9;4`), while one is reported.
-    progress: std::collections::HashMap<SessionId, crate::kit::progress::Progress>,
+    progress: std::collections::HashMap<SessionId, slopty_kit::kit::progress::Progress>,
     /// The readouts' last tick ([`WorkspaceView::keep_time`]): the monotonic clock, and the
     /// wall clock in Unix milliseconds for what a worker stamped.
     ticked: Option<(Instant, u64)>,

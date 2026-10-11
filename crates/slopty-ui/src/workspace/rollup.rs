@@ -13,10 +13,9 @@ use gpui::{
     Div, InteractiveElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{Status, status_icon};
 use slopty_theme::Theme;
-
-use crate::colors::hsla;
-use crate::icons::{Status, status_icon};
 
 /// What a group of tiles adds up to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -118,7 +117,7 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
     match shown {
         Shown::NeedsYou(n) => slot
             .children((n > 1 && !compact).then(|| {
-                crate::kit::tabular(crate::kit::meta(div(), theme))
+                slopty_kit::kit::tabular(slopty_kit::kit::meta(div(), theme))
                     .flex_none()
                     .child(SharedString::from(n.to_string()))
             }))

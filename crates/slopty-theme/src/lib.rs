@@ -968,7 +968,7 @@ pub struct Surfaces {
     /// GitHub's merged is.
     pub merged_fill: Rgb,
     /// A machine's or a project's own colour, on its glyph alone, picked by a hash of its id
-    /// (`slopty_ui::kit::identity_ink`). Eight hues near the status fills' lightness at under
+    /// (`slopty_kit::kit::identity_ink`). Eight hues near the status fills' lightness at under
     /// half their chroma (0.06 dark, 0.07 light), each kept clear of every status hue: a tint that
     /// tells machines apart side by side and never competes with a state.
     pub identity: [Rgb; IDENTITY_HUES],
@@ -1561,7 +1561,7 @@ impl Curve {
 /// and the palette open on their first frame, as Zed's do: latency comes first, and an overlay that
 /// takes longer to arrive than a key takes to type reads as waiting, where words an agent is
 /// writing are read as they come and lift with its pace. What moves is opacity and a small
-/// translate. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`), but for what
+/// translate. Under Reduce Motion all of it lands at once (`slopty_kit::kit::motion`), but for what
 /// says work is live: the working mark breathes in opacity over [`Self::breath`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Motion {

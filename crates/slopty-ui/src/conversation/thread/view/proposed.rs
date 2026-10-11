@@ -13,13 +13,13 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, div, px, relative,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::kit;
 use slopty_proto::thread::{Clipped, ItemBody, ItemId, Patch, Request};
 
 use super::tools::{opened_at, tidy};
 use super::{ThreadView, ThreadViewEvent, path_patch};
-use crate::colors::hsla;
 use crate::conversation::lines;
-use crate::kit;
 
 /// The key a request's drawn change and its "Show all" are kept under, apart from any call's.
 fn key(request: &Request) -> ItemId {
@@ -69,9 +69,9 @@ impl ThreadView {
                 .px(px(theme.spacing.sm))
                 .min_h(px(kit::Row::One.height(theme)))
                 .text_size(px(theme.typography.small()))
-                .child(crate::icons::symbol(
+                .child(slopty_kit::icons::symbol(
                     theme,
-                    crate::icons::file_mark(path),
+                    slopty_kit::icons::file_mark(path),
                     px(theme.typography.icon()),
                     hsla(s.text_muted),
                 ))

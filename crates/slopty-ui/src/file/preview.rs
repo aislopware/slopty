@@ -25,12 +25,12 @@ use parking_lot::Mutex;
 mod pages;
 
 pub use pages::{CTX as PAGES_CTX, NextScreen, PreviousScreen, ScrollDown, ScrollUp};
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::size_label;
 
 use super::FileView;
 use super::decode::{self, Pdf, PictureSize, PreviewError};
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit::size_label;
 
 /// What a file tile says of a picture or PDF it cannot show, over the reason.
 pub(crate) const CANNOT_SHOW: &str = "Cannot show this file";
@@ -723,7 +723,7 @@ impl FileView {
                     .w_full()
                     .aspect_ratio(w / h.max(1.0))
                     .bg(hsla(s.elevated))
-                    .border(crate::kit::HAIR)
+                    .border(slopty_kit::kit::HAIR)
                     .border_color(hsla(s.border))
                     .role(Role::Image)
                     .aria_label(SharedString::from(format!(

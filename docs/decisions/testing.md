@@ -84,7 +84,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   socket turns it on at start-up (`SLOPTY_TEST_SOCKET` set, `e2e` feature) and `dump.a11y`
   is the tree trimmed to `{role, label, value, focused, bounds}` per node, depth first in
   reading order, bounds in window points (GPUI stores them in device pixels; the walker
-  divides by the scale factor). Headless tests read `slopty_ui::a11y::tree(window)`, the
+  divides by the scale factor). Headless tests read `slopty_kit::a11y::tree(window)`, the
   same shape.
   *iOS bridge (`gpui_ios/src/ios/a11y.rs`):* UIKit has no accesskit adapter, so the bridge
   mirrors the tree as `UIAccessibilityElement`s on the Metal view: one element per node
@@ -107,7 +107,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   are `Image`s. The grid is `Role::Terminal` with the program title as its label and *the
   cursor row's text* as its value (`TerminalView::cursor_row_text`, computed only while the
   tree is active): a screen reader should hear the line being worked on, not 24 rows.
-  *Focus order (macOS):* `slopty_ui::a11y::tab_stop` makes an element focusable at tab index
+  *Focus order (macOS):* `slopty_kit::a11y::tab_stop` makes an element focusable at tab index
   0, so the ring is render order, which is reading order (top bar, then items by z, each
   title bar left to right, the conversation's attention row, the composer, its send button).
   Tab and ⇧Tab walk the ring only while a control is focused (a terminal's Tab is the
@@ -1121,7 +1121,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   wall clock, so it read "6h 38m" when the golden was taken and "11h 26m" a few hours later,
   with digits of other widths each hour. Every readout of a time (a turn's elapsed time, a
   record's stamp, a limit's reset, an author's age, an agent's age in the navigator) now reads
-  `slopty_ui::clock::now`. That is the system clock unless
+  `slopty_kit::clock::now`. That is the system clock unless
   `Command::PinClock` pins it, and the test pins it a minute after its transcript's first record.
   What is kept or sent (a backup's time, a visit counted) still reads the system clock. The
   same pin holds the working marks still: under Reduce Motion a working mark and companion
@@ -1135,7 +1135,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
 - ✅ **The goldens that moved run to run hold still** (2026-10-05). Four goldens differed
   under their tolerance in every run. Each now matches to the pixel, with no tolerance changed.
   - `terminal-failed-block(-dark)` said how long `ls` took (9 to 17 ms). A command's duration
-    is measured by `slopty_ui::clock::since`, which counts nothing while the clock is pinned,
+    is measured by `slopty_kit::clock::since`, which counts nothing while the clock is pinned,
     and the test pins it. The failing command sleeps 0.3 s first: the app learns a command ran
     only from a frame showing it running, so a command over between two frames is never timed
     and its block says no duration at all, which moved the golden too.

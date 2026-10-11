@@ -9,7 +9,7 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    layout, `simulate_keystrokes`/`simulate_click`, a channel for the worker. Read the UI like
    a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
    for colours and borders, view accessors (`rows()`, `active_item()`, a stream's `zoom()`),
-   `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
+   `slopty_kit::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
    the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
    behaviour gets a test here first.
    **Retained frames.** GPUI draws only the views that heard of a change, so a view left out

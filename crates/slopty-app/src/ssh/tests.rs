@@ -1039,7 +1039,7 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
     let tree = {
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        cx.update(|window, _cx| slopty_ui::a11y::tree(window))
+        cx.update(|window, _cx| slopty_kit::a11y::tree(window))
     };
     assert!(tree.iter().any(|n| n.is("Button", Some("Sign in and install"))), "{tree:#?}");
     assert!(!tree.iter().any(|n| n.value.as_deref() == Some("hunter2")), "never read out");

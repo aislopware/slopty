@@ -57,15 +57,15 @@ pub use settings::actions::{OpenAbout, OpenKeyboardShortcuts, OpenSettings};
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_platform::notify::{Notifier, Tap};
 use slopty_proto::WorkerMsg;
 use slopty_proto::server::Liveness;
 use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Density, Spacing, Theme, Typography};
-use slopty_ui::a11y::tab_stop;
-use slopty_ui::colors::hsla;
-use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::{TerminalView, TerminalViewEvent};
@@ -981,7 +981,7 @@ impl Workspace {
         if self.reduce_motion != on {
             tracing::info!(on, "reduce motion");
             self.reduce_motion = on;
-            slopty_ui::icons::motion_setting_changed(cx);
+            slopty_kit::icons::motion_setting_changed(cx);
             self.view.update(cx, WorkspaceView::motion_setting_changed);
             cx.set_reduce_motion(on);
             cx.refresh_windows();
@@ -2732,7 +2732,7 @@ impl Workspace {
             let other = entry_row(
                 theme,
                 "connect-another-server",
-                slopty_ui::icons::Symbol::Link,
+                slopty_kit::icons::Symbol::Link,
                 "Connect to another server",
                 "One that lists other machines",
             )
@@ -2885,7 +2885,7 @@ impl Workspace {
     /// only what can be chosen stands on a step, and a status on one with a magnifier read as
     /// a search field to type in.
     fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
-        use slopty_ui::icons::{IconSize, Status, Symbol, icon, status_icon};
+        use slopty_kit::icons::{IconSize, Status, Symbol, icon, status_icon};
         let theme = &self.theme;
         let (s, spacing, ty) = (theme.surfaces, theme.spacing, &theme.typography);
         let section = div().id("add-worker-tailnet").flex().flex_col().gap(px(spacing.sm));
@@ -3072,7 +3072,7 @@ impl Workspace {
     /// what it waits on or what to do, and a missing line's button. A line that holds is its
     /// name alone; what it says of itself is under Details ([`Self::this_mac_details`]).
     fn this_mac_line(&self, line: this_mac::Line, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
-        use slopty_ui::icons::status_mark;
+        use slopty_kit::icons::status_mark;
         let theme = &self.theme;
         let s = theme.surfaces;
         let status = line.status();
@@ -3820,7 +3820,7 @@ fn frame_nominal() -> std::time::Duration {
         .ok()
         .and_then(|hz| hz.parse::<f64>().ok())
         .filter(|hz| hz.is_finite() && *hz > 0.0)
-        .map_or_else(slopty_ui::frames::default_nominal, |hz| {
+        .map_or_else(slopty_kit::frames::default_nominal, |hz| {
             std::time::Duration::from_secs_f64(1.0 / hz)
         })
 }
@@ -3834,8 +3834,8 @@ fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpu
 /// A server or a worker the tailnet found, as a row to press, the palette's: its kind's glyph,
 /// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
+    use slopty_kit::icons::{Drawn, Symbol, beside};
     use slopty_net::discover::Answer;
-    use slopty_ui::icons::{Drawn, Symbol, beside};
     let s = theme.surfaces;
     let (glyph, what, verb) = match host {
         Host::Server => (Symbol::ServerRack, "Server", "Connect to"),
@@ -3914,7 +3914,7 @@ const SET_UP_SERVER_LABEL: &str = "Set up the server";
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
 fn this_mac_row(theme: &Theme, listed: bool, choosing: bool) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::Symbol;
+    use slopty_kit::icons::Symbol;
     if choosing {
         // The first run's choice says what it does in a line at the body's size.
         let line = kit::typed(div(), theme.roles().chrome)
@@ -3928,7 +3928,7 @@ fn this_mac_row(theme: &Theme, listed: bool, choosing: bool) -> gpui::Stateful<g
 
 /// A phone or iPad's way in as a row to press: the code it scans, opened from the add panel.
 fn phone_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::Symbol;
+    use slopty_kit::icons::Symbol;
     entry_row(theme, "connect-device", Symbol::Iphone, invite::TITLE, invite::ROW_META)
 }
 
@@ -3938,7 +3938,7 @@ fn phone_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
 fn entry_row(
     theme: &Theme,
     id: &'static str,
-    glyph: slopty_ui::icons::Symbol,
+    glyph: slopty_kit::icons::Symbol,
     title: &'static str,
     meta: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
@@ -3949,11 +3949,11 @@ fn entry_row(
 fn entry_row_saying(
     theme: &Theme,
     id: &'static str,
-    glyph: slopty_ui::icons::Symbol,
+    glyph: slopty_kit::icons::Symbol,
     title: &'static str,
     line: gpui::Div,
 ) -> gpui::Stateful<gpui::Div> {
-    use slopty_ui::icons::{Drawn, Symbol, beside};
+    use slopty_kit::icons::{Drawn, Symbol, beside};
     let s = theme.surfaces;
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
@@ -4192,7 +4192,7 @@ pub fn open_workspace(
     // The chrome's glyphs read and drawn on a background thread while the window is made, so
     // the first frame does not pay for Core Graphics' first context (docs/MEASUREMENTS.md,
     // "Tabler glyphs drawn on demand").
-    slopty_ui::icons::prewarm(&Theme::default());
+    slopty_kit::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
@@ -4207,7 +4207,7 @@ pub fn open_workspace(
         async {}
     })
     .detach();
-    if let Err(e) = slopty_ui::fonts::install(cx) {
+    if let Err(e) = slopty_kit::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }
     // Every window and the terminal draw text at the weight it is set in: AppKit's smoothing
@@ -4218,7 +4218,7 @@ pub fn open_workspace(
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
     kit::sync(&Theme::default(), cx);
-    slopty_ui::frames::install(cx, frame_nominal());
+    slopty_kit::frames::install(cx, frame_nominal());
     let settings_path = slopty_settings::path();
     let settings_seen = settings::Seen::of(&settings_path);
     let loaded = Settings::load(&settings_path);
@@ -5045,7 +5045,7 @@ mod tests {
         cx.dispatch_action(OpenAbout);
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let about = tree.iter().find(|n| n.is("Group", Some("About"))).expect("the About page");
         let said = about.description.as_deref().unwrap_or_default();
         assert!(said.contains(env!("CARGO_PKG_VERSION")), "{said}");
@@ -5068,7 +5068,7 @@ mod tests {
         cx.simulate_click(at.center(), gpui::Modifiers::none());
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let listed = |label: &str| tree.iter().any(|n| n.is("ListItem", Some(label)));
         assert!(listed(ssh::UPDATE_ALL) == ssh::OFFERED, "{tree:#?}");
         assert!(listed(finder::TITLE) == finder::OFFERED, "{tree:#?}");
@@ -5340,7 +5340,7 @@ mod tests {
         assert_eq!(field.as_deref(), Some("100.64.0.3"), "the field takes the one that is ready");
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        let said = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        let said = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         for (label, description) in [
             ("Copy the tailnet grant for hub", "Server, needs a tailnet grant"),
             ("Install this build on old-hub", "Server, runs a different build"),

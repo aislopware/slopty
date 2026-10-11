@@ -9,11 +9,11 @@ use gpui::{
     AnyElement, Div, Hsla, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     StyledText, TextRun, div, px,
 };
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::highlight;
 use slopty_theme::{Rgb, Theme, alpha};
 
 use super::diff::{Block, Kind, Line, TAB_SPACES};
-use crate::colors::{hsla, hsla_alpha};
-use crate::highlight;
 
 /// What every line is drawn with.
 #[derive(Clone, Copy, Debug)]
@@ -41,7 +41,7 @@ impl Ink<'_> {
         self.code()
             .overflow_hidden()
             .rounded(px(self.theme.radii.sm))
-            .border(crate::kit::HAIR)
+            .border(slopty_kit::kit::HAIR)
             .border_color(hsla(self.theme.surfaces.stroke))
     }
 
@@ -76,7 +76,7 @@ impl Ink<'_> {
         let digits = f32::from(u8::try_from(self.digits.max(2)).unwrap_or(u8::MAX));
         // A tabular figure is about 0.62 of the size wide in the mono face.
         let width = self.theme.typography.small() * 0.62 * digits;
-        crate::kit::tabular(div())
+        slopty_kit::kit::tabular(div())
             .flex_none()
             .w(px(width))
             .flex()
@@ -168,7 +168,7 @@ impl Ink<'_> {
             .w_full()
             .px(px(self.theme.spacing.sm))
             .py(px(self.theme.spacing.xxs))
-            .map(|el| crate::kit::inset(el, self.theme))
+            .map(|el| slopty_kit::kit::inset(el, self.theme))
             .text_color(hsla(s.text_muted))
             .text_size(px(self.theme.typography.small()))
             .overflow_hidden()

@@ -401,7 +401,7 @@ fn a_steer_stands_between_the_folds_of_its_turn(cx: &mut TestAppContext) {
     for drawn in ["fold-1-0", "item-s", "fold-1"] {
         assert!(cx.debug_bounds(drawn).is_some(), "{drawn}");
     }
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Button", Some("Ran a command"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("Button", Some("Worked 4 s: Read a file"))), "{tree:#?}");
     let at = cx.debug_bounds("fold-1-0").expect("the first fold").center();
@@ -428,7 +428,7 @@ fn a_turns_work_is_open_under_its_line_while_it_runs_and_folds_when_done(cx: &mu
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let line = tree.iter().any(|n| n.is("Button", Some("Working: Ran a command")));
     assert!(line, "what it did so far: {tree:#?}");
     assert!(cx.debug_bounds("tool-x").is_some(), "its call under it");
@@ -449,7 +449,7 @@ fn a_turns_work_is_open_under_its_line_while_it_runs_and_folds_when_done(cx: &mu
     cx.run_until_parked();
     assert!(cx.debug_bounds("tool-x").is_none(), "folded once the turn is done");
     assert!(cx.debug_bounds("item-a").is_some(), "over its answer");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let line = tree.iter().any(|n| n.is("Button", Some("Worked 4 s: Ran a command")));
     assert!(line, "{tree:#?}");
     let rows = view.read_with(cx, |v, _| v.rows().len());
@@ -486,7 +486,7 @@ fn a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end(cx: &mut
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Link", Some("Open /w/src/lib.rs"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("Button", Some("Read src/lib.rs"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("Button", Some("Count lines, Failed"))), "{tree:#?}");
@@ -539,7 +539,7 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let card = "Changed 1 file, 2 added, 1 removed";
     assert!(tree.iter().any(|n| n.is("Group", Some(card))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("Button", Some("Review src/a.rs"))), "{tree:#?}");

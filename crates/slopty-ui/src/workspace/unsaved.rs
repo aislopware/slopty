@@ -335,7 +335,7 @@ impl WorkspaceView {
         kept.stale = true;
         kept.failures = kept.failures.saturating_add(1);
         if kept.failures == FAILS_SAID {
-            self.show_notice(format!("{NOT_KEPT}: {}", crate::kit::first_line(why)), cx);
+            self.show_notice(format!("{NOT_KEPT}: {}", slopty_kit::kit::first_line(why)), cx);
         }
     }
 

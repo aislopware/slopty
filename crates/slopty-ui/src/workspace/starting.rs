@@ -25,6 +25,10 @@ use gpui::{
 };
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::ItemId;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::Status;
+use slopty_kit::kit;
 use slopty_proto::thread::wire::{Setup, Start};
 use slopty_proto::thread::{AgentId, IntentId, ThreadId};
 
@@ -33,12 +37,8 @@ use super::actions::StartThread;
 use super::area::{Handed, Placed};
 use super::projects::agent_label;
 use super::tile::title_ink;
-use crate::colors::hsla;
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{Draft, DraftSent, Place, ThreadView, ThreadViewEvent};
-use crate::draw::Draw;
-use crate::icons::Status;
-use crate::kit;
 
 /// How many first messages ↑ can bring back in a new start's composer.
 const RECALLED: usize = 50;
@@ -505,7 +505,7 @@ impl WorkspaceView {
             worker,
             cwd: cwd.clone(),
             worktree,
-            at: crate::clock::now(cx),
+            at: slopty_kit::clock::now(cx),
         };
         starting.chosen = Chosen { model, mode, effort, attachments: attachments.clone() };
         self.start_went(went, Some(chips), cx);
@@ -701,7 +701,7 @@ impl WorkspaceView {
         let Some(starting) = self.starting.tiles.remove(&tile.item) else { return };
         tracing::debug!(item = %tile.item, sent = starting.sent, "close a thread on its way");
         // Closed, its words are let go: only a quit or a crash leaves them for the next start.
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         self.drafts.set_start((starting.worker, &starting.agent, &starting.cwd), "", now);
         self.drafts_changed(cx);
         self.drop_starting_tile(tile, cx);
@@ -762,7 +762,7 @@ impl WorkspaceView {
                 .text_color(ink)
                 .font_family(theme.typography.ui_family.clone())
                 .map(|el| {
-                    let lead = crate::icons::Mark::agent(&starting.agent.0);
+                    let lead = slopty_kit::icons::Mark::agent(&starting.agent.0);
                     let tab = super::tab_look::lone(
                         theme,
                         lead,
@@ -771,7 +771,7 @@ impl WorkspaceView {
                         placed.shared,
                     );
                     el.child(tab).children(status.map(|st| {
-                        div().ml_auto().child(crate::icons::status_mark(theme, Some(st)))
+                        div().ml_auto().child(slopty_kit::icons::status_mark(theme, Some(st)))
                     }))
                 })
         });
@@ -825,8 +825,11 @@ impl WorkspaceView {
                     ..self.start_place(starting.worker, &starting.cwd, starting.worktree)
                 }
                 .said();
-                let mark =
-                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary));
+                let mark = slopty_kit::icons::notice_status(
+                    theme,
+                    Status::Working,
+                    hsla(s.text_secondary),
+                );
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));
                 let notice =
                     kit::notice(theme, mark, format!("Starting {label}"), Some(place.into()))
@@ -895,8 +898,11 @@ impl WorkspaceView {
         };
         match seen {
             SetupSeen::Running(setup) => {
-                let mark =
-                    crate::icons::notice_status(theme, Status::Working, hsla(s.text_secondary));
+                let mark = slopty_kit::icons::notice_status(
+                    theme,
+                    Status::Working,
+                    hsla(s.text_secondary),
+                );
                 let title = format!("Setting up from {}", setup.from);
                 let newest = setup.tail.last().map(|l| {
                     line(l)
@@ -924,7 +930,7 @@ impl WorkspaceView {
                     .into_any_element()
             }
             SetupSeen::Failed { setup, code } => {
-                let mark = crate::icons::notice_status(theme, Status::Failed, hsla(s.error));
+                let mark = slopty_kit::icons::notice_status(theme, Status::Failed, hsla(s.error));
                 let title = format!("Setup from {} failed", setup.from);
                 let detail = code.map(|c| SharedString::from(format!("exit {c}")));
                 let tail = (!setup.tail.is_empty()).then(|| {

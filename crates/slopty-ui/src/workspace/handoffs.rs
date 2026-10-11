@@ -26,6 +26,7 @@ use gpui::{
 use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
+use slopty_kit::colors::hsla;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::handoff::{EditFile, EditOutcome, HandoffEvent, HandoffId, OfferReason, Wary};
@@ -34,7 +35,6 @@ use slopty_proto::terminal::TermRequest;
 
 use super::WorkspaceView;
 use super::toast::ToastKind;
-use crate::colors::hsla;
 use crate::file::FileView;
 
 /// How long a held-back page's notice stays: longer than a word, since it waits on a choice.
@@ -360,10 +360,12 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .whitespace_nowrap()
-            .map(crate::kit::hint_timing)
+            .map(slopty_kit::kit::hint_timing)
             .tooltip(move |_window, cx| {
-                cx.new(|_| crate::kit::Hint::new(url.clone(), "", Rc::clone(&hint_theme)).mono())
-                    .into()
+                cx.new(|_| {
+                    slopty_kit::kit::Hint::new(url.clone(), "", Rc::clone(&hint_theme)).mono()
+                })
+                .into()
             })
             .child(
                 // The asker is a shell's title, as long as a program likes: it gives way, cut

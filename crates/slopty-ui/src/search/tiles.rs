@@ -15,10 +15,10 @@ use gpui::{
     div, px, uniform_list,
 };
 use slopty_core::{ItemId, SessionId};
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::find::Query;
 
 use super::{ProjectSearch, ProjectSearchEvent};
-use crate::colors::hsla;
-use crate::kit::find::Query;
 
 /// What the surface searches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -167,8 +167,8 @@ impl ProjectSearch {
                 .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.set_scope(scope, cx)))
                 .child(label);
-            let el = if on { crate::kit::selected(el, theme, true) } else { el };
-            crate::a11y::tab_stop(el, s.focus)
+            let el = if on { slopty_kit::kit::selected(el, theme, true) } else { el };
+            slopty_kit::a11y::tab_stop(el, s.focus)
         };
         div()
             .id("search-scope")
@@ -186,7 +186,7 @@ impl ProjectSearch {
 
     /// What the files row holds while the tiles are searched: what is searched, in words.
     pub(super) fn every_tile(&self) -> AnyElement {
-        crate::kit::meta(div(), &self.theme)
+        slopty_kit::kit::meta(div(), &self.theme)
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -232,8 +232,8 @@ impl ProjectSearch {
         let chosen = self.tiles.at == ix;
         let pad = crate::palette::list_pad(theme);
         let icon = match hit.open {
-            TileOpen::Session(_) => crate::icons::Symbol::Terminal,
-            TileOpen::File(_) => crate::icons::Symbol::DocText,
+            TileOpen::Session(_) => slopty_kit::icons::Symbol::Terminal,
+            TileOpen::File(_) => slopty_kit::icons::Symbol::DocText,
         };
         let total = usize::try_from(hit.total).unwrap_or(usize::MAX);
         let label = format!("{}, {}", hit.title, super::count_label(total));
@@ -263,10 +263,10 @@ impl ProjectSearch {
                 this.tiles.at = ix;
                 this.open_tile(cx);
             }))
-            .child(crate::icons::icon(
+            .child(slopty_kit::icons::icon(
                 theme,
                 icon,
-                crate::icons::IconSize::Inline,
+                slopty_kit::icons::IconSize::Inline,
                 hsla(s.text_muted),
             ))
             .child(
@@ -280,7 +280,7 @@ impl ProjectSearch {
                     .child(SharedString::from(hit.title.clone())),
             )
             .child(
-                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary))
+                slopty_kit::kit::tabular(slopty_kit::kit::pill(theme, s.text_secondary))
                     .flex_none()
                     .child(SharedString::from(hit.total.to_string())),
             );

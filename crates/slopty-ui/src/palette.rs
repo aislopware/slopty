@@ -19,12 +19,11 @@ use gpui::{
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_core::SessionId;
+use slopty_kit::colors::hsla;
+use slopty_kit::fuzzy::{Fuzzy, Rank, best_first};
+use slopty_kit::icons::{self, IconSize, Mark, Status, Symbol};
+use slopty_kit::kit::Pace;
 use slopty_theme::Theme;
-
-use crate::colors::hsla;
-use crate::fuzzy::{Fuzzy, Rank, best_first};
-use crate::icons::{self, IconSize, Mark, Status, Symbol};
-use crate::kit::Pace;
 
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
@@ -110,7 +109,7 @@ pub(crate) fn quiet_line(
     text: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
-    crate::kit::inset_x(div(), theme)
+    slopty_kit::kit::inset_x(div(), theme)
         .id(id)
         .debug_selector(move || id.to_owned())
         .role(gpui::accesskit::Role::Status)
@@ -136,12 +135,12 @@ pub(crate) const LIST_WIDTH: f32 = 560.0;
 /// under it.
 pub(crate) const LIST_ANCHOR: f32 = 0.12;
 
-/// The layer a list typed at is laid out on: [`crate::kit::anchor`]'s, the list
+/// The layer a list typed at is laid out on: [`slopty_kit::kit::anchor`]'s, the list
 /// [`LIST_ANCHOR`] down the window rather than a dialog's way down.
 pub(crate) fn list_anchor(theme: &Theme, window: &Window) -> gpui::Div {
     let height = f32::from(window.viewport_size().height);
     let safe_top = window.insets().effective().top;
-    crate::kit::anchor(theme, window).pt(px(height * LIST_ANCHOR) + safe_top)
+    slopty_kit::kit::anchor(theme, window).pt(px(height * LIST_ANCHOR) + safe_top)
 }
 
 /// The height of a floating list's query row: 40 on the Mac, `MonoCode`'s quick-open input.
@@ -163,12 +162,12 @@ pub(crate) const fn list_pad(theme: &Theme) -> f32 {
 }
 
 /// `text`, a meta line whose facts are joined by a spaced middle dot, with each dot in
-/// [`crate::kit::separator_ink`]: one run of text, so the line still ends in one ellipsis.
+/// [`slopty_kit::kit::separator_ink`]: one run of text, so the line still ends in one ellipsis.
 pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::StyledText {
     const SEPARATOR: &str = " \u{b7} ";
     let text: SharedString = text.into();
     let ink = gpui::HighlightStyle {
-        color: Some(crate::kit::separator_ink(theme)),
+        color: Some(slopty_kit::kit::separator_ink(theme)),
         ..Default::default()
     };
     let dots: Vec<_> = text
@@ -196,7 +195,7 @@ pub(crate) fn field_row(
         .h(px(query_height(theme)))
         .pl(px(theme.spacing.sm + theme.spacing.xxs))
         .pr(px(theme.spacing.md))
-        .border_b(crate::kit::HAIR)
+        .border_b(slopty_kit::kit::HAIR)
         .border_color(hsla(s.stroke))
         .flex()
         .items_center()
@@ -250,7 +249,7 @@ impl Plate {
 
     /// Whether the keyboard is in the list (as it is unless said otherwise): the plate is then
     /// the keyed wash with the focus line, the keyboard's cursor, and else the selected wash
-    /// ([`crate::kit::selected`]).
+    /// ([`slopty_kit::kit::selected`]).
     pub(crate) fn keyed(&self, keyed: bool) {
         self.0.borrow_mut().away = !keyed;
     }
@@ -298,7 +297,7 @@ impl Plate {
                 move |bounds, (), window, _cx| {
                     let glide = glide.borrow();
                     if glide.seated == Some(key) {
-                        crate::kit::paint_chosen(&theme, bounds, radius, !glide.away, window);
+                        slopty_kit::kit::paint_chosen(&theme, bounds, radius, !glide.away, window);
                     }
                 },
             )
@@ -338,12 +337,12 @@ impl Plate {
                 let fill = gpui::fill(plate, hsla(theme.surfaces.keyed));
                 window.paint_quad(fill.corner_radii(gpui::Corners::all(radius)));
             } else {
-                crate::kit::paint_chosen(&theme, plate, radius, keyed, window);
+                slopty_kit::kit::paint_chosen(&theme, plate, radius, keyed, window);
             }
         })
     }
 
-    /// [`Self::under`] as a segmented control's thumb ([`crate::kit::paint_thumb`]): the
+    /// [`Self::under`] as a segmented control's thumb ([`slopty_kit::kit::paint_thumb`]): the
     /// raised surface sliding from option to option.
     /// `moves` and `now` as for [`Self::under_on`].
     pub(crate) fn under_thumb(
@@ -354,7 +353,7 @@ impl Plate {
     ) -> impl IntoElement + use<> {
         let theme = theme.clone();
         self.under_painted(moves, now, move |plate, window| {
-            crate::kit::paint_thumb(&theme, plate, window);
+            slopty_kit::kit::paint_thumb(&theme, plate, window);
         })
     }
 
@@ -369,7 +368,7 @@ impl Plate {
         gpui::canvas(
             |_, _, _| {},
             move |region, (), window, cx| {
-                let moving = moves && crate::kit::motion(cx);
+                let moving = moves && slopty_kit::kit::motion(cx);
                 let mut glide = glide.borrow_mut();
                 let now = now.unwrap_or_else(|| cx.background_executor().now());
                 let Some(plate) = glide.frame(now, moving) else {
@@ -1105,7 +1104,7 @@ enum Line {
     Match(usize),
 }
 
-/// The quiet label over a group of rows ([`crate::kit::label`]) on the one edge grid: the
+/// The quiet label over a group of rows ([`slopty_kit::kit::label`]) on the one edge grid: the
 /// palette's sections, the pickers', the inbox's, the empty workspace's workers. A heading, not
 /// a row, to a screen reader.
 ///
@@ -1119,8 +1118,9 @@ pub(crate) fn section_heading(
 ) -> gpui::Stateful<gpui::Div> {
     let text = text.into();
     let above = if first { theme.spacing.sm } else { theme.spacing.lg };
-    let label = crate::kit::typed(crate::kit::label(theme, text.clone()), theme.roles().section);
-    crate::kit::inset_x(label, theme)
+    let label =
+        slopty_kit::kit::typed(slopty_kit::kit::label(theme, text.clone()), theme.roles().section);
+    slopty_kit::kit::inset_x(label, theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
@@ -1342,7 +1342,7 @@ pub fn files_query(query: &str) -> Option<&str> {
 
 /// The items `query` keeps, in their order.
 ///
-/// Every word of the query is found, fuzzily ([`crate::fuzzy`]), in the label or in where the
+/// Every word of the query is found, fuzzily ([`slopty_kit::fuzzy`]), in the label or in where the
 /// line is (its worker and directory); an empty query keeps all. So a worker's name finds its
 /// tiles, a directory the shells in it, and "nwt" "New terminal".
 #[must_use]
@@ -1403,7 +1403,7 @@ pub struct CommandPalette {
     /// What the field was opened with ([`Self::seed`]): Esc on it untouched closes.
     seeded: SharedString,
     input: Entity<InputState>,
-    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
+    /// What its whole surface tracks: Tab stays inside it ([`slopty_kit::a11y::trap`]).
     scope: FocusHandle,
     /// The matches ([`Self::matches`]), worked out when the field, the path lines or the found
     /// files change, never for a frame alone: the plate's glide draws many.
@@ -1937,7 +1937,7 @@ impl CommandPalette {
         let trailing = trailing.filter(|(text, tone)| !tone.is_some_and(|t| t.label() == text));
         let places =
             [(item.worker.clone(), false), (item.cwd.clone(), true), (item.place.clone(), false)];
-        let mut context = crate::kit::meta(div(), theme)
+        let mut context = slopty_kit::kit::meta(div(), theme)
             .debug_selector(move || format!("palette-context-{ix}"))
             .flex_1()
             .min_w_0()
@@ -1950,8 +1950,8 @@ impl CommandPalette {
             places.into_iter().filter_map(|(text, path)| Some((text?, path))).enumerate()
         {
             if n > 0 {
-                context =
-                    context.child(div().text_color(crate::kit::separator_ink(theme)).child("·"));
+                context = context
+                    .child(div().text_color(slopty_kit::kit::separator_ink(theme)).child("·"));
             }
             context = context.child(
                 // A path in the UI face, as every other context in the chrome is; mono is
@@ -1962,7 +1962,7 @@ impl CommandPalette {
                     .child(SharedString::from(text)),
             );
         }
-        let row = crate::kit::sheet_row(theme, crate::kit::Row::One)
+        let row = slopty_kit::kit::sheet_row(theme, slopty_kit::kit::Row::One)
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("palette-item-{ix}"))
             .role(gpui::accesskit::Role::ListBoxOption)
@@ -2016,9 +2016,9 @@ impl CommandPalette {
                         .flex_none()
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(crate::kit::drawn_keys(&text)))
+                        .child(SharedString::from(slopty_kit::kit::drawn_keys(&text)))
                 } else {
-                    crate::kit::meta(crate::kit::tabular(div()), theme)
+                    slopty_kit::kit::meta(slopty_kit::kit::tabular(div()), theme)
                         .debug_selector(move || format!("palette-trailing-{ix}"))
                         .flex_none()
                         .when_some(tone, |el, tone| el.text_color(hsla(tone.word(theme))))
@@ -2091,7 +2091,7 @@ impl CommandPalette {
     pub fn leave(&mut self, cx: &mut Context<Self>) -> Duration {
         self.leaving = true;
         cx.notify();
-        if !crate::kit::motion(cx) {
+        if !slopty_kit::kit::motion(cx) {
             return Duration::ZERO;
         }
         if self.sheet { sheet_leaving_time() } else { Pace::Exit.duration() }
@@ -2168,7 +2168,7 @@ impl Render for CommandPalette {
         } else {
             backdrop
         };
-        let dialog = crate::kit::dialog(&theme, crate::kit::Overlay::List);
+        let dialog = slopty_kit::kit::dialog(&theme, slopty_kit::kit::Overlay::List);
         let dialog = if sheet {
             // A sheet from the bottom: the window's width, from under the status bar down to
             // the keyboard, its top corners rounded as a sheet's are. The scrim sets it off, so
@@ -2183,13 +2183,18 @@ impl Render for CommandPalette {
                 .rounded_b(px(0.0))
                 .shadow_none()
         } else {
-            let ceiling = crate::kit::Overlay::List.bounds().1;
+            let ceiling = slopty_kit::kit::Overlay::List.bounds().1;
             dialog.max_w(px(LIST_WIDTH)).max_h(px(ceiling.min(height * SHARE)))
         };
         // Glass has no Esc: the field ends in Cancel, as iOS search does.
         let cancel = (!self.chords).then(|| {
-            crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
-                .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(PaletteEvent::Dismiss)))
+            slopty_kit::kit::button(
+                &theme,
+                "palette-cancel",
+                "Cancel",
+                slopty_kit::kit::ButtonKind::Link,
+            )
+            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(PaletteEvent::Dismiss)))
         });
         // The typed text starts on the rows' text: the edge grid.
         let field = field_row(&theme, &self.input, "Command")
@@ -2256,7 +2261,7 @@ impl Render for CommandPalette {
                 .debug_selector(|| "palette-scrim".to_owned())
                 .absolute()
                 .inset_0()
-                .bg(crate::kit::scrim(&theme))
+                .bg(slopty_kit::kit::scrim(&theme))
         });
         let (panel, scrim) = if self.leaving {
             (leave_panel(panel, sheet, cx), scrim.map(|scrim| leave_scrim(scrim, cx)))
@@ -2273,8 +2278,8 @@ impl Render for CommandPalette {
             root
         } else {
             let home = self.input.read(cx).focus_handle(cx);
-            crate::a11y::hold(&self.scope, &home, cx);
-            let root = crate::a11y::trap(root, &self.scope);
+            slopty_kit::a11y::hold(&self.scope, &home, cx);
+            let root = slopty_kit::a11y::trap(root, &self.scope);
             // While an input method composes in the field, the arrows and Esc are its own.
             root.capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
                 if !this.composing(cx) {
@@ -2294,7 +2299,7 @@ impl Render for CommandPalette {
             // Tab walks the palette's stops rather than typing into its field. Off the field,
             // where the field's Esc binding does not reach, Esc closes the palette all the same.
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if crate::a11y::cycle(ev, window, cx) {
+                if slopty_kit::a11y::cycle(ev, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
@@ -2329,9 +2334,9 @@ impl Render for CommandPalette {
 /// field has the keys from the first frame either way: only paint moves.
 fn enter_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
     if !sheet {
-        return crate::kit::fade_in(panel, "palette-open", cx);
+        return slopty_kit::kit::fade_in(panel, "palette-open", cx);
     }
-    if !crate::kit::motion(cx) {
+    if !slopty_kit::kit::motion(cx) {
         return panel.into_any_element();
     }
     panel
@@ -2346,7 +2351,7 @@ fn enter_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui:
 /// the sheet goes back down. Under Reduce Motion it is gone at once, as its owner drops it at
 /// once.
 fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
-    if !crate::kit::motion(cx) {
+    if !slopty_kit::kit::motion(cx) {
         return panel.opacity(0.0).into_any_element();
     }
     if sheet {
@@ -2363,7 +2368,7 @@ fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui:
 
 /// The sheet's scrim coming up with it.
 fn enter_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
-    if !crate::kit::motion(cx) {
+    if !slopty_kit::kit::motion(cx) {
         return scrim.into_any_element();
     }
     scrim
@@ -2373,7 +2378,7 @@ fn enter_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
 
 /// The sheet's scrim going with it.
 fn leave_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
-    if !crate::kit::motion(cx) {
+    if !slopty_kit::kit::motion(cx) {
         return scrim.opacity(0.0).into_any_element();
     }
     scrim
@@ -2523,7 +2528,7 @@ mod tests {
         (palette, cx)
     }
 
-    /// A line ranks by how well the query names it ([`crate::fuzzy`]): a label spelled whole
+    /// A line ranks by how well the query names it ([`slopty_kit::fuzzy`]): a label spelled whole
     /// leads, and letters in order find a line by its words' heads. The group whose best line
     /// is best leads the list. `>` keeps only the commands. The label shows what matched in
     /// `text` over the rest in `text_secondary`.
@@ -2613,16 +2618,16 @@ mod tests {
             .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
         let rows = cx.debug_bounds("palette-rows").expect("the rows");
         let faded = |cx: &mut VisualTestContext| {
-            cx.update(|window, _| crate::retained::faded_edges(window, rows))
+            cx.update(|window, _| slopty_kit::retained::faded_edges(window, rows))
         };
         assert_eq!(faded(cx), gpui::Edges { bottom: true, ..gpui::Edges::default() }, "more below");
         let sheet = cx.debug_bounds("palette").expect("the sheet");
         assert_eq!(
-            cx.update(|window, _| crate::retained::faded_edges(window, sheet)),
+            cx.update(|window, _| slopty_kit::retained::faded_edges(window, sheet)),
             gpui::Edges::default(),
             "the sheet's surface does not fade"
         );
-        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
         assert_eq!(stale, None, "the frame shown is what a frame from scratch paints");
         palette.update(cx, |p, cx| p.step(-1, cx));
         cx.run_until_parked();

@@ -42,16 +42,16 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::RopeExt as _;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::ButtonKind;
 use slopty_proto::git::{Branch, Branches};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
-use crate::colors::hsla;
 use crate::conversation::attach::{self, Attach, Attachment};
 use crate::conversation::menu::{self, Token};
-use crate::icons::Symbol;
-use crate::kit::ButtonKind;
 
 /// Rows the menu shows before it scrolls.
 const MENU_ROWS: f32 = 8.0;

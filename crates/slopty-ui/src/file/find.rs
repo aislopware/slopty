@@ -1,6 +1,6 @@
 //! A file tile's find and replace over its text, as plain functions.
 //!
-//! The matches of a query ([`crate::kit::find::Query`]), and what a replace makes of one match
+//! The matches of a query ([`slopty_kit::kit::find::Query`]), and what a replace makes of one match
 //! or all of them, `$1` and `${name}` expanded for a regular expression.
 
 use std::ops::Range;
@@ -86,8 +86,9 @@ pub fn rows(text: &str, matches: &[Range<usize>]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use slopty_kit::kit::find::Query;
+
     use super::*;
-    use crate::kit::find::Query;
 
     fn query(needle: &str) -> Query {
         Query { needle: needle.to_owned(), ..Query::default() }

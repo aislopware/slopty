@@ -422,7 +422,7 @@ mod tests {
     #[ignore = "timing, run by hand with --ignored --nocapture"]
     fn timing_of_a_keystrokes_parse() -> Result<(), String> {
         let syntax = Syntax::for_token("rust").ok_or("rust")?;
-        let one = include_str!("../workspace.rs");
+        let one = include_str!("../../../slopty-ui/src/workspace.rs");
         let text: String = one.lines().cycle().take(2_000).collect::<Vec<_>>().join("\n");
         let first = std::time::Instant::now();
         let lists = parsed(&text, syntax);
@@ -461,7 +461,7 @@ mod tests {
     #[ignore = "measurement, run by hand with --ignored --nocapture"]
     fn memory_of_a_parse_kept() -> Result<(), String> {
         let syntax = Syntax::for_token("rust").ok_or("rust")?;
-        let one = include_str!("../workspace.rs");
+        let one = include_str!("../../../slopty-ui/src/workspace.rs");
         let mut text = String::new();
         for line in one.lines().cycle() {
             if text.len() + line.len() >= crate::highlight::COLOURED_BYTES {
@@ -506,7 +506,7 @@ mod tests {
     #[ignore = "timing, run by hand with --ignored --nocapture"]
     fn timing_of_a_frame_and_a_keystroke() -> Result<(), String> {
         let syntax = Syntax::for_token("rust").ok_or("rust")?;
-        let one = include_str!("../workspace.rs");
+        let one = include_str!("../../../slopty-ui/src/workspace.rs");
         let text: String = one.lines().cycle().take(2_000).collect::<Vec<_>>().join("\n");
         let mut h = EditorHighlighter::new(syntax, Theme::default());
         h.text = Rope::from(text.as_str());

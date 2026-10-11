@@ -76,7 +76,7 @@ fn the_breadcrumb_goes_between_projects(cx: &mut TestAppContext) {
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let crumbs: Vec<String> =
         tree.into_iter().filter(|n| n.role == "Button").filter_map(|n| n.label).collect();
     assert!(crumbs.iter().any(|l| l == "studio"), "the project alone: {crumbs:#?}");
@@ -184,7 +184,7 @@ fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
         let near = |a: f32, p: Pixels| f32::from(p).mul_add(-scale, a).abs() < 1.0;
         near(q.bounds.origin.x.0, b.origin.x) && near(q.bounds.size.width.0, b.size.width)
     };
-    let selected = crate::colors::hsla(theme.surfaces.selected);
+    let selected = slopty_kit::colors::hsla(theme.surfaces.selected);
     let fill = |q: &gpui::Quad| {
         (!q.background.is_transparent()).then(|| q.background.as_solid()).flatten()
     };
@@ -200,7 +200,7 @@ fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
     let band = |q: &gpui::Quad| {
         let top = q.bounds.origin.y.0 / scale;
         top < f32::from(bar.bottom()) - 0.5
-            && q.bounds.size.height.0 / scale > f32::from(crate::kit::HAIR)
+            && q.bounds.size.height.0 / scale > f32::from(slopty_kit::kit::HAIR)
     };
     assert!(!quads.iter().any(|q| at(bar, q) && band(q) && fill(q).is_some()), "on the ground");
     // Each tab's words are set on the chrome's line, not the window's 16 pt one.
@@ -215,7 +215,8 @@ fn the_shown_title_tab_is_a_pill_on_the_ground(cx: &mut TestAppContext) {
 /// no control, and is gone after; under Reduce Motion it is gone at once.
 #[gpui::test]
 fn a_closed_title_tab_folds_away(cx: &mut TestAppContext) {
-    use crate::kit::Pace;
+    use slopty_kit::kit::Pace;
+
     use crate::workspace::title_tabs::TitleTabsHost as _;
 
     let (view, cx) = workspace(cx);
@@ -271,7 +272,7 @@ fn a_closed_title_tab_folds_away(cx: &mut TestAppContext) {
 /// both land at once.
 #[gpui::test]
 fn an_opened_tab_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
-    use crate::kit::Pace;
+    use slopty_kit::kit::Pace;
 
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));

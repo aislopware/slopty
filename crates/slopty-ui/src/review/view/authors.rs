@@ -136,8 +136,8 @@ impl ReviewView {
         let own = self.own();
         let opens = Opens { thread: run.thread, turn: run.turn };
         let id = SharedString::from(format!("review-author-{at}-{hunk}-{ix}"));
-        let tag = authorship::tag(&self.theme, id, run, writer, own, crate::clock::now(cx))
-            .bg(crate::colors::hsla(self.theme.content()))
+        let tag = authorship::tag(&self.theme, id, run, writer, own, slopty_kit::clock::now(cx))
+            .bg(slopty_kit::colors::hsla(self.theme.content()))
             // A press on the tag is the tag's: it starts no comment on the line under it.
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .when(writer.is_some() || own == Some(run.thread), |el| {

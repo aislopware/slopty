@@ -480,7 +480,7 @@ now being a tile.
   it has the keyboard, so the two states are exactly "has the caret" and "does not", read from
   the focus handle rather than a flag of our own; (2) an empty note keeps the textarea, since
   the "write…" placeholder is the editor's and there is nothing to render anyway; (3) the style
-  is one function for every Markdown surface (`slopty_ui::markdown::style`, factored out of
+  is one function for every Markdown surface (`slopty_kit::markdown::style`, factored out of
   `terminal::conversation`), with a `scale` the note passes its zoom so headings and code blocks
   grow with the canvas instead of staying at chrome size — the chrome passes `1.0` and reads as
   it did; (4) a click on the rendered note focuses the editor with the caret **at the end of the

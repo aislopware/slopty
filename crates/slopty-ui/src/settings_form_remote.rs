@@ -19,13 +19,13 @@ use gpui::{
 };
 use slopty_client::server::ServerCaller;
 use slopty_core::WorkerId;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
 use slopty_proto::orchestration::{Outcome, Verb};
 use slopty_proto::settings::{DaemonSettings, SettingEdit};
 
 use super::SettingsForm;
 use super::schema::{Row, Section, daemons, rows, shared};
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
 
 /// A machine whose daemon's settings the form can edit.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -364,12 +364,12 @@ impl SettingsForm {
             .px(px(spacing.sm))
             .h(px(theme.density.row))
             .rounded(px(theme.radii.sm))
-            .map(|el| crate::kit::field(el, theme))
+            .map(|el| slopty_kit::kit::field(el, theme))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text))
             .cursor_pointer()
             .child(SharedString::from(name))
-            .child(crate::icons::icon(
+            .child(slopty_kit::icons::icon(
                 theme,
                 Symbol::ChevronDown,
                 IconSize::Inline,
@@ -399,7 +399,7 @@ impl SettingsForm {
         div()
             .relative()
             .flex_none()
-            .child(crate::a11y::tab_stop(pick, s.focus))
+            .child(slopty_kit::a11y::tab_stop(pick, s.focus))
             .children(menu)
             .into_any_element()
     }
@@ -418,7 +418,7 @@ impl SettingsForm {
             (Reading::Ready, None) => (remote.problems.first()?.clone(), s.error),
         };
         Some(
-            crate::kit::meta(div(), theme)
+            slopty_kit::kit::meta(div(), theme)
                 .id("settings-machine-said")
                 .debug_selector(|| "settings-machine-said".to_owned())
                 .role(gpui::accesskit::Role::Status)
@@ -444,7 +444,7 @@ impl SettingsForm {
                     .flex()
                     .items_center()
                     .gap(px(spacing.sm))
-                    .child(crate::kit::meta(div(), theme).flex_none().child("Settings of"))
+                    .child(slopty_kit::kit::meta(div(), theme).flex_none().child("Settings of"))
                     .child(self.machine_pick(false, cx)),
             )
             .children(self.machine_status())
@@ -458,21 +458,21 @@ impl SettingsForm {
         let this = cx.entity().downgrade();
         // One of a set: the machine on show is ticked.
         let on_show = self.remote.as_ref().map(|r| &r.machine);
-        let mut menu = crate::kit::Menu::new();
+        let mut menu = slopty_kit::kit::Menu::new();
         if HOSTS_DAEMONS {
             let to = this.clone();
             menu.push(
-                crate::kit::MenuItem::new("this", THIS_DEVICE, move |_w, cx| {
+                slopty_kit::kit::MenuItem::new("this", THIS_DEVICE, move |_w, cx| {
                     let _gone = to.update(cx, |form, cx| form.pick_machine(None, cx));
                 })
-                .mark(crate::kit::menu::Mark::Radio(on_show.is_none())),
+                .mark(slopty_kit::kit::menu::Mark::Radio(on_show.is_none())),
             );
         }
         for (n, machine) in self.machines.list.iter().enumerate() {
             let to = this.clone();
             let picked = machine.clone();
             menu.push(
-                crate::kit::MenuItem::new(
+                slopty_kit::kit::MenuItem::new(
                     format!("machine-{n}"),
                     machine.name.clone(),
                     move |_w, cx| {
@@ -480,10 +480,10 @@ impl SettingsForm {
                         let _gone = to.update(cx, |form, cx| form.pick_machine(Some(picked), cx));
                     },
                 )
-                .mark(crate::kit::menu::Mark::Radio(on_show == Some(machine))),
+                .mark(slopty_kit::kit::menu::Mark::Radio(on_show == Some(machine))),
             );
         }
-        let panel = crate::kit::MenuPanel::new(
+        let panel = slopty_kit::kit::MenuPanel::new(
             "settings-machines",
             "Machines",
             std::rc::Rc::new(menu),

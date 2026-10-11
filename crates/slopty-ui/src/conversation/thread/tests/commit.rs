@@ -392,7 +392,7 @@ fn a_gitlab_repository_s_sheet_speaks_of_merge_requests(cx: &mut TestAppContext)
     let gitlab = GitStatus { forge: Some(Forge::GitLab), ..status() };
     answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(gitlab)));
     answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(None));
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter().any(|n| n.is("Button", Some("Open merge request"))),
         "the way to open one, in GitLab's words"
@@ -407,7 +407,7 @@ fn a_gitlab_repository_s_sheet_speaks_of_merge_requests(cx: &mut TestAppContext)
         let _asked = hub.git_op("/w", GitOp::PullStatus, cx);
     });
     answer(&hub, cx, last(&sent, &GitOp::PullStatus), GitDone::PullStatus(Some(Box::new(mr))));
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Link", Some("Merge request 12"))), "{tree:#?}");
 }
 
@@ -721,7 +721,7 @@ fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) 
         window.refresh();
     });
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let end = crate::conversation::thread::commit::end_and_remove("Claude Code");
     assert!(
         tree.iter().any(|n| n.label.as_deref() == Some(end.as_str())),
@@ -839,7 +839,7 @@ fn a_sheet_with_words_stays_and_its_words_come_back(cx: &mut TestAppContext) {
         window.refresh();
     });
     cx.run_until_parked();
-    let nodes = cx.update(|window, _cx| crate::a11y::tree(window));
+    let nodes = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(
         nodes.iter().any(|n| n.value.as_deref() == Some("Half a message")),
         "the words came back: {nodes:#?}"

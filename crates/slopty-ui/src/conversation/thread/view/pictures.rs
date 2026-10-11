@@ -14,13 +14,13 @@ use gpui::{
     AnyElement, Context, InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit;
 use slopty_proto::thread::Image;
 use slopty_proto::thread::wire::Expanded;
 
 use super::ThreadView;
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit;
 
 /// The tallest a picture is drawn, in points.
 const PICTURE_HEIGHT: f32 = 120.0;
@@ -87,7 +87,7 @@ impl ThreadView {
                 let shown = self.picture(image, cx);
                 let selector = format!("picture-{}", image.digest);
                 let opened = image.clone();
-                crate::a11y::tab_stop(
+                slopty_kit::a11y::tab_stop(
                     div()
                         .id(SharedString::from(selector.clone()))
                         .debug_selector(move || selector)

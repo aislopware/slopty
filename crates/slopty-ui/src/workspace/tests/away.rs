@@ -260,7 +260,7 @@ fn a_link_in_doubt_sets_its_tiles_back_until_it_is_live(cx: &mut TestAppContext)
     let [(shell, tile), ..] = three_shells(&view, cx, &studio);
     let fresh = |cx: &mut VisualTestContext, step: &str| {
         cx.run_until_parked();
-        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
         assert!(stale.is_none(), "{step}: the window shows a stale frame. {stale:?}");
     };
     let in_doubt: &'static str =

@@ -1033,8 +1033,8 @@ pub fn hold_steps(cx: &mut App, until: Instant) {
 }
 
 /// Until when the working marks' steps are held for a typed key's echo, if they are.
-#[cfg(test)]
-pub(crate) fn steps_held_until(cx: &mut App) -> Option<Instant> {
+#[cfg(any(test, feature = "e2e"))]
+pub fn steps_held_until(cx: &mut App) -> Option<Instant> {
     SpinClock::get(cx).hold_until
 }
 

@@ -14,12 +14,12 @@ use gpui::{
     ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, Window, div, img, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit;
 use slopty_theme::Theme;
 
 use super::attach::Attachment;
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
-use crate::kit;
 
 /// The widest an attachment's chip grows, in points; a longer name is cut short.
 const ATTACHMENT_WIDTH: f32 = 240.0;
@@ -85,10 +85,10 @@ fn remove_button(theme: &Theme, chip: &Attachment, side: Pixels, remove: Remove)
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(remove)
         .child(
-            crate::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
+            slopty_kit::icons::icon(theme, Symbol::Xmark, IconSize::Inline, hsla(s.text_muted))
                 .size(px(theme.typography.icon())),
         );
-    crate::a11y::tab_stop(button, s.focus).into_any_element()
+    slopty_kit::a11y::tab_stop(button, s.focus).into_any_element()
 }
 
 /// A pasted picture's chip: the picture itself in a small square on the hairline, its ✕ on a
@@ -152,7 +152,7 @@ fn file_chip(theme: &Theme, chip: &Attachment, remove: Remove) -> AnyElement {
     let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
     // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
     let mark = if chip.landed() {
-        crate::icons::icon(theme, Symbol::Doc, IconSize::Inline, hsla(s.text_muted))
+        slopty_kit::icons::icon(theme, Symbol::Doc, IconSize::Inline, hsla(s.text_muted))
             .size(px(theme.typography.icon()))
             .into_any_element()
     } else {

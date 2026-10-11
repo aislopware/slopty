@@ -17,11 +17,10 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_core::WallMs;
+use slopty_kit::colors::hsla;
 use slopty_proto::thread::wire::{AuthorRun, Authors};
 use slopty_proto::thread::{AgentId, ThreadId, TurnId};
 use slopty_theme::Theme;
-
-use crate::colors::hsla;
 
 /// A thread that wrote lines, as a worker here knows it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -135,7 +134,7 @@ pub fn tag(
     let (who, rest) = parts(run, writer, own, now);
     let selector = id.to_string();
     let who = who.map(|who| {
-        let fit = crate::kit::fit_label(format!("{selector}-who"), who, theme);
+        let fit = slopty_kit::kit::fit_label(format!("{selector}-who"), who, theme);
         div().min_w_0().max_w(px(TITLE_MAX)).child(fit)
     });
     let rest = if who.is_some() { format!("\u{b7} {rest}") } else { rest };

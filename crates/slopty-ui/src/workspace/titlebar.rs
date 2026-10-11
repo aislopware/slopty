@@ -38,6 +38,10 @@ use gpui::{
     div, px,
 };
 use slopty_client::layout::{GroupKey, Tab, TabId, TileRef, WorkerKey};
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{Mark, Status, Symbol};
+use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
@@ -48,10 +52,6 @@ use super::navigator::Mode;
 use super::rollup::Rollup;
 use super::title_tabs::TitleTab;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{Mark, Status, Symbol};
-use crate::kit;
 
 /// The bar's height under `theme`'s density: a finger's target and a hairline's room round
 /// it at least, so its buttons fit it on touch.
@@ -598,7 +598,7 @@ impl WorkspaceView {
             .on_click(
                 cx.listener(move |this, _ev, window, cx| this.toggle_menu(which, window, cx)),
             );
-        crate::a11y::tab_stop(switch, s.focus).into_any_element()
+        slopty_kit::a11y::tab_stop(switch, s.focus).into_any_element()
     }
 
     /// A phone's title: the focused tile's, as an iOS navigation bar names its screen, its kind
@@ -666,7 +666,7 @@ impl WorkspaceView {
                     .text_ellipsis()
                     .child(SharedString::from(title)),
             )
-            .children(state.map(|st| crate::icons::status_mark(theme, Some(st))))
+            .children(state.map(|st| slopty_kit::icons::status_mark(theme, Some(st))))
             .into_any_element()
     }
 

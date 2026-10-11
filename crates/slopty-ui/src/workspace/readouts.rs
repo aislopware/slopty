@@ -31,16 +31,16 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::update::Release;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{IconSize, Symbol, icon};
+use slopty_kit::kit::{self, meta, separator, tabular};
 use slopty_platform::notify::Alerts;
 use slopty_theme::Theme;
 
 use super::WorkspaceView;
 use super::rollup::META_SEPARATOR;
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{IconSize, Symbol, icon};
-use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
 
 /// What the server being down costs, said under the pointer: workers are reached at the
@@ -296,7 +296,7 @@ impl WorkspaceView {
         let tile = self.focused();
         let worker = tile.map(|t| t.worker).or_else(|| self.readout_worker())?;
         let agent = tile.and_then(|t| self.item(t)).and_then(|i| self.item_agent(i));
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let (_, reading) = self.faces.threads.meters().shown(worker, agent, now)?;
         let (text, warn) = plan_words(reading, now);
         let label = SharedString::from(format!("{PLAN_USAGE} {text}"));
@@ -418,7 +418,7 @@ impl WorkspaceView {
             .group_hover(group.clone(), gpui::Styled::visible)
             // Its own focus, as the navigator's row actions: not any focused ancestor's.
             .focus(gpui::Styled::visible)
-            .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).visible())
+            .focus_visible(move |st| st.outline_ring(slopty_kit::a11y::ring(s.focus)).visible())
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 cx.stop_propagation();
                 this.cancel_transfer(xfer, cx);
@@ -483,7 +483,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let rise = self.rise(window);
-        let now = crate::clock::now(cx);
+        let now = slopty_kit::clock::now(cx);
         let rows: Vec<gpui::AnyElement> = self
             .faces
             .threads

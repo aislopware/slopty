@@ -237,10 +237,10 @@ fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
     };
     let theme = Theme::default();
     for one in [bare, home, root] {
-        let want = navigator::row_height(&theme, crate::kit::Row::One);
+        let want = navigator::row_height(&theme, slopty_kit::kit::Row::One);
         assert!((height(cx, one) - want).abs() < 0.5, "{one:?}");
     }
-    let two = navigator::row_height(&theme, crate::kit::Row::Two);
+    let two = navigator::row_height(&theme, slopty_kit::kit::Row::Two);
     assert!((height(cx, work) - two).abs() < 0.5);
     let meta = |id: ItemId| format!("nav-meta-{}", id.as_uuid());
     assert!(cx.debug_bounds(Box::leak(meta(bare.item).into_boxed_str())).is_none());

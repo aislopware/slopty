@@ -21,6 +21,10 @@ use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
 use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
+use slopty_kit::colors::{hsla, hsla_alpha};
+use slopty_kit::keys;
+use slopty_kit::kit::FindBar;
+use slopty_kit::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Query, Tally, Toggle};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, MouseEvent};
@@ -30,10 +34,6 @@ use slopty_proto::terminal::{
 use slopty_theme::{Colors, Theme, alpha};
 use tokio::sync::mpsc;
 
-use crate::colors::{hsla, hsla_alpha};
-use crate::keys;
-use crate::kit::FindBar;
-use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Query, Tally, Toggle};
 use crate::terminal::copy_mode::{self, Command, Motion};
 use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
 use crate::terminal::scrollbar::Visibility;
@@ -492,7 +492,7 @@ pub struct TerminalView {
     /// exited), which says more than the lines below and takes their pill's place.
     covered: bool,
     /// The program's progress report as the tile's header last heard of it.
-    progress_told: Option<crate::kit::progress::Progress>,
+    progress_told: Option<slopty_kit::kit::progress::Progress>,
     /// The person ran the restored session's command again or put its chip away.
     restored_seen: bool,
 }
@@ -1031,13 +1031,13 @@ impl TerminalView {
                 .py(px(spacing.xxs))
                 .rounded(px(radii.xs))
                 .cursor_pointer()
-                .when(accent, |el| crate::kit::solid(el, theme))
+                .when(accent, |el| slopty_kit::kit::solid(el, theme))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 })
                 .child(label);
-            crate::a11y::tab_stop(row, s.focus)
+            slopty_kit::a11y::tab_stop(row, s.focus)
         };
         Some(
             div()
@@ -1052,7 +1052,7 @@ impl TerminalView {
                 .px(px(spacing.sm))
                 .py(px(spacing.xs))
                 .rounded(px(radii.sm))
-                .map(|el| crate::kit::elevate(el, theme))
+                .map(|el| slopty_kit::kit::elevate(el, theme))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text))
                 .font_family(theme.typography.ui_family.clone())
@@ -1083,7 +1083,7 @@ impl TerminalView {
                 .px(px(spacing.sm))
                 .py(px(spacing.xs))
                 .rounded(px(radii.xs))
-                .map(|el| crate::kit::elevate(el, theme))
+                .map(|el| slopty_kit::kit::elevate(el, theme))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .font_family(theme.typography.ui_family.clone())
@@ -1678,11 +1678,11 @@ impl TerminalView {
             Some(self.render_block_facts(prompt, cx).into_any_element())
         } else {
             self.took(prompt).map(|elapsed| {
-                crate::kit::tabular(div())
+                slopty_kit::kit::tabular(div())
                     .debug_selector(|| "block-header-took".to_owned())
                     .flex_none()
                     .pl(px(theme.spacing.sm))
-                    .child(SharedString::from(crate::kit::duration(elapsed)))
+                    .child(SharedString::from(slopty_kit::kit::duration(elapsed)))
                     .into_any_element()
             })
         };
@@ -1712,7 +1712,7 @@ impl TerminalView {
                 // The grid's own background, the program's when it set one: the header stands
                 // where the top row was, parted from the output under it by the block hairline.
                 .bg(hsla(Colors::new(&theme.terminal, self.state.colors()).theme.bg))
-                .border_b(crate::kit::HAIR)
+                .border_b(slopty_kit::kit::HAIR)
                 .border_color(super::element::separator_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
@@ -1770,7 +1770,7 @@ impl TerminalView {
         };
         let took = self
             .duration(prompt)
-            .map(|d| (SharedString::from(crate::kit::duration(d)), s.text_muted));
+            .map(|d| (SharedString::from(slopty_kit::kit::duration(d)), s.text_muted));
         status.into_iter().chain(took).collect()
     }
 
@@ -1789,10 +1789,10 @@ impl TerminalView {
             .map_or_else(|| theme.typography.icon_large(), |m| f32::from(m.line_height));
         let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon_large());
         // No taller than the line it ends.
-        let more = crate::kit::icon_button(
+        let more = slopty_kit::kit::icon_button(
             theme,
             "block-more",
-            crate::icons::Symbol::Ellipsis,
+            slopty_kit::icons::Symbol::Ellipsis,
             "Block actions",
         )
         .size(px(button.min(line)))
@@ -1802,7 +1802,7 @@ impl TerminalView {
             let block = this.state.command_block(prompt);
             this.open_block_menu(block, ev.position(), cx);
         }));
-        let mut row = crate::kit::tabular(div())
+        let mut row = slopty_kit::kit::tabular(div())
             .id("block-facts")
             .debug_selector(|| "block-facts".to_owned())
             .flex_none()
@@ -1854,7 +1854,7 @@ impl TerminalView {
                 .occlude()
                 .pr(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.xs))
-                .when(!on_band, |el| crate::kit::raised(el, theme))
+                .when(!on_band, |el| slopty_kit::kit::raised(el, theme))
                 .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
         )
@@ -1865,21 +1865,26 @@ impl TerminalView {
         let has_selection = self.selection_has_text();
         let items = Self::block_menu_items(menu.block.as_ref(), has_selection, menu.attach);
         let this = cx.entity().downgrade();
-        let mut rows = crate::kit::Menu::new();
+        let mut rows = slopty_kit::kit::Menu::new();
         for item in items {
             let (this, block) = (this.clone(), menu.block.clone());
-            rows.push(crate::kit::MenuItem::new(item.key(), item.label(), move |window, cx| {
-                let _gone = this.update(cx, |v, cx| {
-                    v.block_menu_pick(item, block.clone(), window, cx);
-                });
-            }));
+            rows.push(slopty_kit::kit::MenuItem::new(
+                item.key(),
+                item.label(),
+                move |window, cx| {
+                    let _gone = this.update(cx, |v, cx| {
+                        v.block_menu_pick(item, block.clone(), window, cx);
+                    });
+                },
+            ));
         }
         let label = if menu.block.is_some() { "Command block" } else { "Terminal" };
-        let panel = crate::kit::MenuPanel::new("block-menu", label, Rc::new(rows), &self.theme, {
-            move |window, cx| {
-                let _gone = this.update(cx, |v, cx| v.close_block_menu(window, cx));
-            }
-        });
+        let panel =
+            slopty_kit::kit::MenuPanel::new("block-menu", label, Rc::new(rows), &self.theme, {
+                move |window, cx| {
+                    let _gone = this.update(cx, |v, cx| v.close_block_menu(window, cx));
+                }
+            });
         deferred(
             anchored()
                 .position(menu.at)
@@ -2656,7 +2661,7 @@ impl TerminalView {
                     // running between two frames has too; this view's own only for a block the
                     // worker did not see start.
                     let elapsed = took.unwrap_or_else(|| {
-                        started.map_or(Duration::ZERO, |t| crate::clock::since(t, cx))
+                        started.map_or(Duration::ZERO, |t| slopty_kit::clock::since(t, cx))
                     });
                     tracing::info!(
                         session = %self.session,
@@ -2684,7 +2689,7 @@ impl TerminalView {
     /// The program's progress report (`OSC 9;4`) in the kit's language, which the tile's
     /// header draws; `None` while nothing is reported.
     #[must_use]
-    pub fn progress(&self) -> Option<crate::kit::progress::Progress> {
+    pub fn progress(&self) -> Option<slopty_kit::kit::progress::Progress> {
         super::progress::shown(self.state.progress())
     }
 
@@ -2739,7 +2744,7 @@ impl TerminalView {
                 .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
                 .child(label)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.run_restored(cx)));
-            crate::a11y::tab_stop(button, s.focus)
+            slopty_kit::a11y::tab_stop(button, s.focus)
         });
         let dismiss = div()
             .id("terminal-restored-dismiss")
@@ -2755,7 +2760,7 @@ impl TerminalView {
             .child("✕")
             .on_click(cx.listener(|this, _ev, _window, cx| this.dismiss_restored(cx)));
         Some(
-            crate::kit::pill_frame(theme)
+            slopty_kit::kit::pill_frame(theme)
                 .debug_selector(|| "terminal-restored".to_owned())
                 .absolute()
                 .top(px(spacing.xs))
@@ -2763,11 +2768,11 @@ impl TerminalView {
                 .max_w(relative(0.6))
                 .occlude()
                 .pr(px(spacing.xxs))
-                .map(|el| crate::kit::elevate(el, theme))
+                .map(|el| slopty_kit::kit::elevate(el, theme))
                 .font_family(theme.typography.ui_family.clone())
                 .child(div().flex_none().text_color(hsla(s.text_secondary)).child("Restored"))
                 .children(run)
-                .child(crate::a11y::tab_stop(dismiss, s.focus)),
+                .child(slopty_kit::a11y::tab_stop(dismiss, s.focus)),
         )
     }
 
@@ -2801,7 +2806,7 @@ impl TerminalView {
             if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
         let pill = FootPill {
             id: "lines-below",
-            icon: crate::icons::Symbol::ArrowDown,
+            icon: slopty_kit::icons::Symbol::ArrowDown,
             words: count,
             act: BACK_TO_LIVE,
         };
@@ -2838,26 +2843,26 @@ impl TerminalView {
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.xs))
             .rounded(px(theme.radii.md))
-            .map(|el| crate::kit::elevate(el, theme))
+            .map(|el| slopty_kit::kit::elevate(el, theme))
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
             .hover(move |el| el.bg(hsla(s.hover)))
             .child(
-                crate::icons::icon(
+                slopty_kit::icons::icon(
                     theme,
                     pill.icon,
-                    crate::icons::IconSize::Inline,
+                    slopty_kit::icons::IconSize::Inline,
                     hsla(s.text_secondary),
                 )
                 .size(px(theme.typography.icon())),
             )
-            .child(crate::chrome_text::ChromeText::new(pill.words, small))
+            .child(slopty_kit::chrome_text::ChromeText::new(pill.words, small))
             .child(
                 div()
                     .text_color(hsla(s.accent))
-                    .child(crate::chrome_text::ChromeText::new(pill.act, small)),
+                    .child(slopty_kit::chrome_text::ChromeText::new(pill.act, small)),
             )
             .on_click(cx.listener(move |this, _ev, window, cx| click(this, window, cx)));
         Some(
@@ -2868,7 +2873,7 @@ impl TerminalView {
                 .bottom(px(theme.spacing.lg))
                 .flex()
                 .justify_center()
-                .child(crate::a11y::tab_stop(element, s.focus)),
+                .child(slopty_kit::a11y::tab_stop(element, s.focus)),
         )
     }
 
@@ -3417,7 +3422,7 @@ impl TerminalView {
         // track beside it pages towards the click.
         let now = cx.background_executor().now();
         if event.button == MouseButton::Left
-            && let Some(thumb) = self.thumb(now, crate::kit::motion(cx))
+            && let Some(thumb) = self.thumb(now, slopty_kit::kit::motion(cx))
         {
             if thumb.contains(&event.position) {
                 self.thumb_drag = Some(event.position.y - thumb.origin.y);
@@ -3793,7 +3798,7 @@ impl TerminalView {
         self.state.command_block(self.block_at_row(row)?)
     }
 
-    /// The scrollbar's thumb, while any of the bar shows (`moves`: [`crate::kit::motion`]).
+    /// The scrollbar's thumb, while any of the bar shows (`moves`: [`slopty_kit::kit::motion`]).
     fn thumb(&self, now: Instant, moves: bool) -> Option<Bounds<Pixels>> {
         if self.scrollbar_opacity(now, moves) <= 0.0 {
             return None;
@@ -3808,7 +3813,7 @@ impl TerminalView {
     }
 
     /// How much of the overlay scrollbar shows at `now`, 0 to 1: none without history, else
-    /// as [`Visibility`] rules. Where chrome may not move (`moves` is [`crate::kit::motion`]),
+    /// as [`Visibility`] rules. Where chrome may not move (`moves` is [`slopty_kit::kit::motion`]),
     /// it goes at once after its linger rather than fading.
     pub(super) fn scrollbar_opacity(&self, now: Instant, moves: bool) -> f32 {
         if self.state.history_len() == 0 {
@@ -4320,7 +4325,7 @@ impl SelectionText {
 struct FootPill {
     /// Its element id and debug selector.
     id: &'static str,
-    icon: crate::icons::Symbol,
+    icon: slopty_kit::icons::Symbol,
     /// What is so.
     words: SharedString,
     /// What a click does, in the accent.
@@ -4581,7 +4586,7 @@ mod tests {
         };
         let mut out = Vec::new();
         for q in &quads {
-            let hair = crate::kit::hair_painted(scale);
+            let hair = slopty_kit::kit::hair_painted(scale);
             if !(near(q.bounds.size.height, hair)
                 && near(q.bounds.size.width, bounds.size.width)
                 && near(q.bounds.origin.x, bounds.origin.x))
@@ -4821,7 +4826,7 @@ mod tests {
         assert_eq!(header.origin, terminal.origin, "over the top row");
         assert_eq!(header.size.width, terminal.size.width);
         assert_eq!(header.size.height, line_height, "one row high");
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(
             tree.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("seq 2")),
             "the header names the command: {tree:?}"
@@ -5921,7 +5926,7 @@ mod tests {
         };
 
         right_click(cx);
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Menu", Some("Command block"))), "{tree:#?}");
         for label in [
             "Copy command",
@@ -6239,7 +6244,7 @@ mod tests {
         };
 
         right_click(cx);
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Menu", Some("Terminal"))), "{tree:#?}");
         let items: Vec<_> =
             tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
@@ -6258,7 +6263,7 @@ mod tests {
             cx.notify();
         });
         right_click(cx);
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let items: Vec<_> =
             tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
         assert_eq!(items, ["Copy", "Paste", "Find…", "Clear screen"]);
@@ -6598,7 +6603,7 @@ mod tests {
         let label = |cx: &mut VisualTestContext| {
             cx.update(|window, _cx| window.set_a11y_active(true));
             cx.run_until_parked();
-            let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+            let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
             tree.into_iter()
                 .find(|n| {
                     n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("below"))
@@ -7141,7 +7146,7 @@ mod tests {
         cx.run_until_parked();
         let shown = |cx: &mut VisualTestContext| {
             view.read_with(cx, |v, cx| {
-                v.scrollbar_opacity(cx.background_executor().now(), crate::kit::motion(cx))
+                v.scrollbar_opacity(cx.background_executor().now(), slopty_kit::kit::motion(cx))
             })
         };
         let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
@@ -8069,7 +8074,7 @@ mod tests {
         with_command_blocks(&view, cx);
         cx.update(|window, _cx| window.set_a11y_active(true));
         cx.run_until_parked();
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let grid =
             tree.iter().find(|n| n.role == "Terminal").unwrap_or_else(|| panic!("{tree:#?}"));
         assert_eq!(grid.label.as_deref(), Some("shell"));
@@ -8685,7 +8690,7 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 0, "painted, not yet shown");
         let now = Instant::now();
         let frame = gpui::PresentedFrame { submitted_at: now, presented_at: Some(now) };
-        cx.update(|_window, cx| crate::shown::presented(frame, cx));
+        cx.update(|_window, cx| slopty_kit::shown::presented(frame, cx));
         assert_eq!(view.read_with(cx, |v, _| v.latency().echoed), 1, "presented: timed");
         assert!(!view.read_with(cx, |v, _| v.latency_waiting()), "nothing left to time");
     }
@@ -9391,7 +9396,7 @@ mod tests {
     /// terminal's while it lasts.
     #[gpui::test]
     fn a_progress_report_is_told_not_drawn_on_the_edge(cx: &mut TestAppContext) {
-        use crate::kit::progress::Progress;
+        use slopty_kit::kit::progress::Progress;
         let (view, _rx, cx) = terminal(cx);
         let progress = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.progress());
         assert_eq!(progress(cx), None, "nothing reported");
@@ -9404,7 +9409,7 @@ mod tests {
         assert_eq!(progress(cx), Some(Progress::Busy));
         let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
         let before = renders(cx);
-        cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(6));
+        cx.background_executor.advance_clock(slopty_kit::icons::SPIN_STEP.saturating_mul(6));
         cx.run_until_parked();
         assert_eq!(renders(cx), before, "the terminal draws nothing for it");
         report(&view, cx, ProgressState::None, None);

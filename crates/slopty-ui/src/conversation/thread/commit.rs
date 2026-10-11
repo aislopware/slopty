@@ -38,6 +38,9 @@ use gpui::{
 use gpui_kit::component::input::{self, Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::threads::Mirror;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::RequestId;
 use slopty_proto::git::{
     CheckBucket, Forge, GitOp, GitStatus, PullCheck, PullComments, PullStatus,
@@ -48,9 +51,6 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::git::{self, Method, Pull, Repo, Said};
 use super::hub::{HubEvent, ThreadHub};
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
-use crate::kit::{self, ButtonKind};
 
 /// File rows shown before the list scrolls.
 const FILES_SHOWN: usize = 8;
@@ -602,7 +602,7 @@ impl CommitSheet {
     // ----- drawing: pieces -------------------------------------------------------------
 
     fn icon(&self, name: Symbol, tone: Rgb) -> Div {
-        crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
+        slopty_kit::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
             .size(px(self.theme.typography.icon()))
     }
 
@@ -632,7 +632,7 @@ impl CommitSheet {
         let s = self.theme.surfaces;
         let id = id.into();
         let selector = id.to_string();
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             div()
                 .id(ElementId::Name(id))
                 .debug_selector(move || selector)

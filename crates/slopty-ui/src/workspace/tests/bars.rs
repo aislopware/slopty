@@ -34,7 +34,7 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     tree.into_iter().filter_map(|n| n.label).collect()
 }
 
@@ -226,7 +226,7 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let width = f32::from(checkout.size.width);
     assert!(width > padding + 10.0, "the checkout's name is drawn, not only its padding: {width}");
     let roles = cx
-        .update(|window, _cx| crate::a11y::tree(window))
+        .update(|window, _cx| slopty_kit::a11y::tree(window))
         .into_iter()
         .filter(|n| n.label.as_deref() == Some("notes"))
         .map(|n| n.role)
@@ -295,12 +295,12 @@ fn the_keyboard_reaches_a_machines_menu(cx: &mut TestAppContext) {
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Button", Some("Machine actions, laptop"))), "{nodes:#?}");
     let button = cx.debug_bounds(leak(format!("nav-machine-menu-{laptop_key}"))).expect("laid out");
-    let ring = crate::colors::hsla(Theme::default().surfaces.focus);
+    let ring = slopty_kit::colors::hsla(Theme::default().surfaces.focus);
     let ringed = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
         // A stop's ring stands its gap and its width clear all round, as `a11y::tab_stop` draws it.
-        let reach = crate::a11y::RING + slopty_theme::stroke::FOCUS;
+        let reach = slopty_kit::a11y::RING + slopty_theme::stroke::FOCUS;
         let around = 2.0_f32.mul_add(reach, f32::from(button.size.width));
         quads.iter().any(|q| {
             let at = point(px(q.bounds.center().x.0 / scale), px(q.bounds.center().y.0 / scale));
@@ -675,7 +675,7 @@ fn a_palette_row_says_where_the_tile_is(cx: &mut TestAppContext) {
         .find(|l| matches!(l.run, PaletteRun::Session(s) if s == waiting))
         .expect("the tile's line");
     assert_eq!(line.context(), "studio · oss/slopty");
-    assert_eq!(line.status, Some(crate::icons::Status::NeedsYou));
+    assert_eq!(line.status, Some(slopty_kit::icons::Status::NeedsYou));
     let found = crate::palette::filter("slopty", &lines);
     assert!(found.iter().any(|l| std::ptr::eq(*l, line)), "a directory finds its shells");
 
@@ -689,7 +689,7 @@ fn a_palette_row_says_where_the_tile_is(cx: &mut TestAppContext) {
     );
     assert!(title.right() <= context.left(), "after the title: {title:?} {context:?}");
     assert!(context.right() <= row.right(), "inside the row: {context:?} {row:?}");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Image", Some("Needs you"))), "the mark leads: {tree:#?}");
 }
 
@@ -927,7 +927,7 @@ fn removing_a_machine_asks_first_and_says_what_stays(cx: &mut TestAppContext) {
     assert_eq!(said.also, ["Its one open shell or agent ends."]);
     cx.update(|window, _| window.set_a11y_active(true));
     cx.run_until_parked();
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("AlertDialog", Some("Remove studio?"))), "an alert");
     click(cx, "remove-machine-cancel");
     assert!(words(cx).is_none() && removed.get() == 0, "Cancel removes nothing");

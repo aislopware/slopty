@@ -44,6 +44,8 @@ use gpui::{
 use slopty_client::pacing::{PacingStats, PaintRate, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
+use slopty_kit::colors::hsla;
+use slopty_kit::{keys, kit};
 use slopty_proto::ClientMsg;
 use slopty_proto::drag::DragInput;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
@@ -54,9 +56,7 @@ use slopty_proto::screen::{
 use slopty_theme::Theme;
 use tokio::sync::{mpsc, watch};
 
-use crate::colors::hsla;
 use crate::outbox::Outbox;
-use crate::{keys, kit};
 
 mod driver;
 mod drop;
@@ -585,7 +585,7 @@ pub struct HudInput<'a> {
     /// clock probes have placed the worker's clock ([`ScreenStats::clock`]).
     pub capture: &'a Spread,
     /// The UI's own frame times, when the app installed a probe.
-    pub ui: Option<&'a crate::frames::FrameStats>,
+    pub ui: Option<&'a slopty_kit::frames::FrameStats>,
 }
 
 /// The five lines of the stats overlay: what is on screen, how it got there, what the sound
@@ -608,8 +608,8 @@ pub struct HudInput<'a> {
 /// spacing of those paints and its jitter, and the two cadence faults —
 /// `skip` (a frame the display never saw) and `repeat` (a paint that showed the picture again).
 /// Line five is the UI: draw time of the whole window (p50 / p95 / p99 / max over the last
-/// [`crate::frames::RING`] frames), the spacing of frames, and how many went over the display
-/// period or were dropped ([`crate::frames::hud_line`]). Pure so it can be checked without a
+/// [`slopty_kit::frames::RING`] frames), the spacing of frames, and how many went over the display
+/// period or were dropped ([`slopty_kit::frames::hud_line`]). Pure so it can be checked without a
 /// window.
 #[must_use]
 pub fn hud_lines(input: &HudInput<'_>) -> String {
@@ -641,7 +641,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         ),
         _ => "capture –".to_owned(),
     };
-    let ui = crate::frames::hud_line(input.ui);
+    let ui = slopty_kit::frames::hud_line(input.ui);
     let stripes = input.seams.map_or_else(String::new, |(together, apart)| {
         format!("  ·  stripes {together} together {apart} apart")
     });
@@ -1440,9 +1440,9 @@ impl ScreenView {
         // Degraded is grey and a hollow triangle, since it asks nothing of the person; stalled
         // is the filled one in red. Amber means "needs you" alone.
         let (glyph, ink) = if health == Health::Stalled {
-            (crate::icons::Symbol::ExclamationmarkTriangleFill, s.error_fill)
+            (slopty_kit::icons::Symbol::ExclamationmarkTriangleFill, s.error_fill)
         } else {
-            (crate::icons::Symbol::ExclamationmarkTriangle, s.text_secondary)
+            (slopty_kit::icons::Symbol::ExclamationmarkTriangle, s.text_secondary)
         };
         let view = view.clone();
         let mark = div()
@@ -1461,12 +1461,17 @@ impl ScreenView {
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_secondary))
             .child(
-                crate::icons::icon(theme, glyph, crate::icons::IconSize::Inline, hsla(ink))
-                    .size(px(theme.typography.icon() * k)),
+                slopty_kit::icons::icon(
+                    theme,
+                    glyph,
+                    slopty_kit::icons::IconSize::Inline,
+                    hsla(ink),
+                )
+                .size(px(theme.typography.icon() * k)),
             )
             .child(health.word());
         Some(
-            crate::a11y::tab_stop(mark, s.focus)
+            slopty_kit::a11y::tab_stop(mark, s.focus)
                 .on_click(move |_ev, _w, cx| view.update(cx, |v, cx| v.set_hud(true, cx)))
                 .into_any_element(),
         )
@@ -1611,7 +1616,7 @@ impl ScreenView {
         if !elapsed.is_zero() {
             // The frame and pacing percentiles sort their rings: once a HUD period, never
             // per paint.
-            let ui = crate::frames::stats(cx);
+            let ui = slopty_kit::frames::stats(cx);
             let stats = self.handle.stats();
             let secs = elapsed.as_secs_f64();
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
@@ -2289,7 +2294,7 @@ impl ScreenView {
             return None;
         }
         let id = format!("trackpad-{}", header.stream);
-        let icon = crate::icons::Symbol::Cursorarrow;
+        let icon = slopty_kit::icons::Symbol::Cursorarrow;
         let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad);
         let view = view.clone();
         Some(
@@ -3504,8 +3509,8 @@ impl ScreenView {
             return Some(self.unlock_line());
         }
         let icon = match self.source {
-            SourceState::Away => crate::icons::Symbol::Display,
-            _ => crate::icons::Symbol::Lock,
+            SourceState::Away => slopty_kit::icons::Symbol::Display,
+            _ => slopty_kit::icons::Symbol::Lock,
         };
         let unlock = (self.source == SourceState::Locked).then(|| {
             kit::button(theme, "screen-unlock-here", UNLOCK_HERE, kit::ButtonKind::Secondary)
@@ -3567,10 +3572,10 @@ impl ScreenView {
         let theme = &self.theme;
         let pill = kit::elevate(kit::pill_frame(theme), theme)
             .child(
-                crate::icons::icon(
+                slopty_kit::icons::icon(
                     theme,
-                    crate::icons::Symbol::Lock,
-                    crate::icons::IconSize::Inline,
+                    slopty_kit::icons::Symbol::Lock,
+                    slopty_kit::icons::IconSize::Inline,
                     hsla(theme.surfaces.text_muted),
                 )
                 .size(px(theme.typography.icon())),
@@ -3639,7 +3644,11 @@ impl ScreenView {
         let details = kit::icon_button(
             theme,
             "stream-stats-details",
-            if open { crate::icons::Symbol::ChevronUp } else { crate::icons::Symbol::ChevronDown },
+            if open {
+                slopty_kit::icons::Symbol::ChevronUp
+            } else {
+                slopty_kit::icons::Symbol::ChevronDown
+            },
             "Details",
         )
         .aria_expanded(open)
@@ -4234,7 +4243,7 @@ mod tests {
         view.update(cx, ScreenView::toggle_hud_details);
         cx.run_until_parked();
         assert!(cx.debug_bounds("stream-trend-rtt").is_some());
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Image", Some("Round trip 7 ms"))), "{tree:#?}");
         assert!(tree.iter().any(|n| n.is("Image", Some("Frame age \u{2013}"))), "{tree:#?}");
     }
@@ -4687,7 +4696,7 @@ mod tests {
         cx.update(|window, _cx| window.set_a11y_active(true));
         let statuses = |cx: &mut gpui::VisualTestContext| {
             cx.update(|window, _cx| {
-                crate::a11y::tree(window)
+                slopty_kit::a11y::tree(window)
                     .into_iter()
                     .filter(|n| n.role == "Status")
                     .filter_map(|n| n.label)

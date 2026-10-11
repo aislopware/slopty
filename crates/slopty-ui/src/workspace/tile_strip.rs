@@ -22,14 +22,14 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::layout::TileRef;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 
 use super::WorkspaceView;
 use super::context_menus::Pressed;
 use super::tile::{HeaderBits, Seat, spoken_heading};
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::kit;
 
 impl WorkspaceView {
     /// Where a tab's one tile is, for its tab to say after its title, as its pane's header did:

@@ -17,13 +17,13 @@ use std::collections::HashMap;
 use gpui::{AppContext as _, Context, Entity, FocusHandle, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ItemId, SessionId};
+use slopty_kit::kit::find::Query;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::search::SearchEvent;
 use slopty_proto::terminal::TermRequest;
 
 use super::WorkspaceView;
-use crate::kit::find::Query;
 use crate::search::{ProjectSearch, ProjectSearchEvent, TileHit, TileOpen};
 
 /// The surface and what it hands back to when it closes.

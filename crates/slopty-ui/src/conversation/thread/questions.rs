@@ -33,10 +33,9 @@ use gpui_kit::component::questionnaire::{
     QuestionnaireState, QuestionnaireSubmission, QuestionnaireSubmit, QuestionnaireTitle,
 };
 use gpui_kit::component::{Sizable as _, Size};
+use slopty_kit::colors::hsla;
 use slopty_proto::thread::detail::{Answer, Question};
 use slopty_theme::Theme;
-
-use crate::colors::hsla;
 
 /// What a question with answers calls the field for one of one's own.
 pub const OTHER: &str = "Other";
@@ -269,7 +268,7 @@ impl Questions {
                 .child(QuestionnaireTitle::new(state, name.clone()))
                 .children(several)
                 .children(answers)
-                .child(crate::kit::field(
+                .child(slopty_kit::kit::field(
                     QuestionnaireInput::new(state, name.clone()).min_h(field),
                     theme,
                 ))

@@ -8,8 +8,8 @@
 //! saved yet shows in it too. A box ticked in the preview changes its line in the editor, and a
 //! file that was saved before the tick is saved again at once, since a tick is the whole edit.
 //!
-//! The rows are the text's segments ([`crate::markdown::segments`]) in a gpui `list`, so a long
-//! file lays out only the rows in view, and a change measures again only the rows it touched.
+//! The rows are the text's segments ([`slopty_kit::markdown::segments`]) in a gpui `list`, so a
+//! long file lays out only the rows in view, and a change measures again only the rows it touched.
 
 use std::rc::Rc;
 
@@ -20,9 +20,9 @@ use gpui::{
     list, px,
 };
 use gpui_kit::component::text::TextView;
+use slopty_kit::markdown::Segment;
 
 use super::{FileView, FileViewEvent};
-use crate::markdown::Segment;
 
 /// How far past the view's edges the preview measures its rows, in points, so a scroll lands on
 /// rows already sized.
@@ -77,7 +77,7 @@ impl Reading {
         if text == self.segmented {
             return;
         }
-        let new = crate::markdown::segments(text);
+        let new = slopty_kit::markdown::segments(text);
         let old = &self.segments;
         let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
         let (old_rest, new_rest) = (old.get(head..).unwrap_or(&[]), new.get(head..).unwrap_or(&[]));
@@ -163,7 +163,7 @@ impl FileView {
     /// file with nothing else unsaved is saved at once.
     pub fn toggle_task(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.text(cx);
-        let Some(flipped) = crate::markdown::toggle_task(&text, ix) else { return };
+        let Some(flipped) = slopty_kit::markdown::toggle_task(&text, ix) else { return };
         let clean = !self.dirty && self.trouble.is_none();
         self.editor.update(cx, |e, cx| e.set_value(flipped, window, cx));
         self.edited(cx);
@@ -218,16 +218,16 @@ impl FileView {
                 SharedString::from(format!("file-md-{id}-{ix}")),
                 SharedString::from(prose.clone()),
             )
-            .style(crate::markdown::style(&self.theme, &mono))
+            .style(slopty_kit::markdown::style(&self.theme, &mono))
             .selectable(true)
             .into_any_element(),
             Segment::Task(task) => {
                 let file = cx.entity();
-                let toggle: crate::markdown::Toggle =
+                let toggle: slopty_kit::markdown::Toggle =
                     Rc::new(move |ix, window, cx: &mut gpui::App| {
                         file.update(cx, |f, cx| f.toggle_task(ix, window, cx));
                     });
-                crate::markdown::task_row(
+                slopty_kit::markdown::task_row(
                     format!("file-task-{id}-{}", task.ix),
                     task,
                     &self.theme,
@@ -236,13 +236,13 @@ impl FileView {
                 )
             }
             Segment::Code { lang, body } => {
-                let run = self.can_run.then(|| -> crate::markdown::Run {
+                let run = self.can_run.then(|| -> slopty_kit::markdown::Run {
                     let file = cx.entity();
                     Rc::new(move |code: String, cx: &mut gpui::App| {
                         file.update(cx, |_f, cx| cx.emit(FileViewEvent::RunBlock(code)));
                     })
                 });
-                crate::markdown::code_block(
+                slopty_kit::markdown::code_block(
                     (format!("file-code-copy-{id}-{ix}"), format!("file-code-run-{id}-{ix}")),
                     lang,
                     body,

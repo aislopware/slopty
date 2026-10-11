@@ -15,13 +15,13 @@ use gpui::{
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol};
+use slopty_kit::kit;
 use slopty_proto::thread::{Cap, Delivery};
 use slopty_theme::{Rgb, Theme};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol};
-use crate::kit;
 
 /// What the composer says before anything is typed, while the thread has not said its agent.
 pub(super) const PLACEHOLDER: &str = "Ask\u{2026}";
@@ -263,12 +263,12 @@ impl ThreadView {
     ) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             chip.role(Role::Button)
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(
-                    crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                    slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
                         .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                 )
                 .on_click(click),
@@ -299,12 +299,12 @@ impl ThreadView {
             .chip("thread-model", format!("Model, {name}"))
             .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
-            crate::a11y::tab_stop(
+            slopty_kit::a11y::tab_stop(
                 squared(chip, theme, false)
                     .role(Role::Button)
                     .cursor_pointer()
                     .child(
-                        crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                        slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
                             .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
@@ -349,12 +349,12 @@ impl ThreadView {
             self.chip("thread-mode", format!("Mode, {words}")).child(SharedString::from(words));
         if switch {
             return Some(
-                crate::a11y::tab_stop(
+                slopty_kit::a11y::tab_stop(
                     squared(chip, theme, false)
                         .role(Role::Button)
                         .cursor_pointer()
                         .child(
-                            crate::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
+                            slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
                                 .slot(px(IconSize::Inline.slot(theme)), hsla(s.text_muted)),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
@@ -386,10 +386,10 @@ impl ThreadView {
         if used.is_none() && meters.limits.is_empty() {
             return None;
         }
-        let hint = meter_words(meters, crate::clock::now(cx)).join("\n");
+        let hint = meter_words(meters, slopty_kit::clock::now(cx)).join("\n");
         let hint_theme = theme.clone();
         Some(
-            crate::a11y::tab_stop(
+            slopty_kit::a11y::tab_stop(
                 self.chip("thread-meter", hint.replace('\n', ", "))
                     .role(Role::Label)
                     .hover(move |el| el.text_color(hsla(s.text_secondary)))
@@ -465,7 +465,7 @@ impl ThreadView {
                 this.submit(Delivery::Queue, window, cx);
             }))
         });
-        crate::a11y::tab_stop(el, s.focus).into_any_element()
+        slopty_kit::a11y::tab_stop(el, s.focus).into_any_element()
     }
 
     /// The composer's shell, which what stands in its place shares: a message's frame
@@ -593,7 +593,7 @@ impl ThreadView {
     ) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        crate::a11y::tab_stop(
+        slopty_kit::a11y::tab_stop(
             div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
@@ -605,7 +605,12 @@ impl ThreadView {
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))),
+                .child(slopty_kit::icons::icon(
+                    theme,
+                    icon,
+                    IconSize::Inline,
+                    hsla(s.text_secondary),
+                )),
             s.focus,
         )
     }

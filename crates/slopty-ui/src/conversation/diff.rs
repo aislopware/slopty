@@ -14,9 +14,8 @@
 use std::ops::Range;
 use std::rc::Rc;
 
+use slopty_kit::highlight::{self, Span, Syntax};
 use slopty_proto::thread::Patch;
-
-use crate::highlight::{self, Span, Syntax};
 
 /// What a line of a diff is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -19,13 +19,13 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     px, relative,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{Cap, IntentId, ThreadId};
 
 use super::{ThreadView, ThreadViewEvent};
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit::{self, ButtonKind};
 
 /// The share of the thread's height the sheet takes.
 const SHEET: f32 = 0.55;

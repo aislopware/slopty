@@ -24,12 +24,12 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::layout::TileRef;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::Symbol;
 
 use super::WorkspaceView;
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::Symbol;
 
 /// How long a pointing or a word stays up.
 pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
@@ -66,7 +66,7 @@ pub(super) struct Toast {
 #[derive(Default)]
 struct Kept {
     /// What it left out.
-    dropped: crate::kit::Dropped,
+    dropped: slopty_kit::kit::Dropped,
     /// Where its count was drawn: a press there toggles what it opened, so the click away
     /// leaves it be.
     count: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
@@ -132,7 +132,7 @@ pub(super) enum ToastKind {
         /// Which.
         tile: TileRef,
         /// Its state, whose mark leads the line.
-        status: crate::icons::Status,
+        status: slopty_kit::icons::Status,
         /// What happened there ("needs approval"), after the tile's name. The name is read as
         /// the notice is drawn, not as it is raised: a tile that comes to need the person may
         /// learn its agent or its thread's name a moment later, and the notice then says what
@@ -221,7 +221,7 @@ impl WorkspaceView {
                 })
                 .unwrap_or(false);
             if fades {
-                cx.background_executor().timer(crate::kit::Pace::Fade.duration()).await;
+                cx.background_executor().timer(slopty_kit::kit::Pace::Fade.duration()).await;
                 let _gone = this.update(cx, |this, cx| {
                     if this.drop_toasts(|shown| shown.seq == seq) {
                         cx.notify();
@@ -432,7 +432,10 @@ impl WorkspaceView {
                             cx.notify();
                         }
                     }));
-                mark = Some(crate::icons::status_mark(theme, Some(crate::icons::Status::Failed)));
+                mark = Some(slopty_kit::icons::status_mark(
+                    theme,
+                    Some(slopty_kit::icons::Status::Failed),
+                ));
                 ("failed", None, vec![copy, dismiss])
             }
             ToastKind::Offered(offer) => {
@@ -502,7 +505,7 @@ impl WorkspaceView {
                         this.dismiss_attention(tile);
                         this.focus_tile(tile, cx);
                     }));
-                mark = Some(crate::icons::status_mark(theme, Some(*status)));
+                mark = Some(slopty_kit::icons::status_mark(theme, Some(*status)));
                 ("attention", None, vec![go])
             }
         };
@@ -525,7 +528,11 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
-            .h(px(if in_bar { crate::kit::icon_button_side(theme) } else { theme.density.hit }))
+            .h(px(if in_bar {
+                slopty_kit::kit::icon_button_side(theme)
+            } else {
+                theme.density.hit
+            }))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
@@ -534,15 +541,15 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .map(|el| {
                 if in_bar {
-                    crate::kit::typed(el, theme.roles().metadata)
+                    slopty_kit::kit::typed(el, theme.roles().metadata)
                         .text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla(s.hover_strong)).text_color(hsla(s.text)))
                 } else {
-                    crate::kit::raised(el, theme).text_color(hsla(s.text))
+                    slopty_kit::kit::raised(el, theme).text_color(hsla(s.text))
                 }
             })
             .children(icon.map(|icon| {
-                crate::icons::symbol(
+                slopty_kit::icons::symbol(
                     theme,
                     icon,
                     px(theme.typography.icon()),
@@ -565,14 +572,20 @@ impl WorkspaceView {
             return notice.into_any_element();
         }
         if shown.leaving {
-            let out = Animation::new(crate::kit::Pace::Fade.duration())
-                .with_easing(crate::kit::ease_out());
+            let out = Animation::new(slopty_kit::kit::Pace::Fade.duration())
+                .with_easing(slopty_kit::kit::ease_out());
             return notice
                 .with_animation(("toast-out", shown.seq), out, |el, t| el.opacity(1.0 - t))
                 .into_any_element();
         }
         let rise = theme.spacing.xxs;
-        crate::kit::slide_fade(notice, ("toast-in", shown.seq), rise, crate::kit::Pace::Toast, cx)
+        slopty_kit::kit::slide_fade(
+            notice,
+            ("toast-in", shown.seq),
+            rise,
+            slopty_kit::kit::Pace::Toast,
+            cx,
+        )
     }
 
     /// Take down the held-back pages `which` picks.
@@ -587,7 +600,7 @@ impl WorkspaceView {
     pub(super) fn attention_toast(
         &mut self,
         tile: TileRef,
-        status: crate::icons::Status,
+        status: slopty_kit::icons::Status,
         what: &str,
         cx: &mut Context<Self>,
     ) {
@@ -675,16 +688,17 @@ impl WorkspaceView {
         };
         let key = |shown: &Shown| SharedString::from(format!("notice-{}", shown.seq));
         let id = place.map_or_else(String::new, |t| t.item.as_uuid().to_string());
-        let mut row = crate::kit::priority_row(SharedString::from(format!("notice-row-{id}")))
+        let mut row = slopty_kit::kit::priority_row(SharedString::from(format!("notice-row-{id}")))
             .dropped(&dropped)
             .fit_content()
             .h(px(theme.density.hit))
             .gap(px(theme.spacing.xs))
-            .title_priority(crate::kit::Priority::ESSENTIAL);
+            .title_priority(slopty_kit::kit::Priority::ESSENTIAL);
         // The older the notice, the sooner it goes behind the count.
         for (age, shown) in older.iter().enumerate() {
             let rank = u8::try_from(age).unwrap_or(u8::MAX);
-            let priority = crate::kit::Priority(crate::kit::Priority::LOW.0.saturating_add(rank));
+            let priority =
+                slopty_kit::kit::Priority(slopty_kit::kit::Priority::LOW.0.saturating_add(rank));
             row = row.item(key(shown), priority, self.render_one(shown, cx));
         }
         let floor = px(theme.typography.ui_size * NEWEST_FLOOR_EM);
@@ -701,14 +715,14 @@ impl WorkspaceView {
                 .aria_label(aria)
                 .aria_expanded(open)
                 .h(px(if place.is_none() {
-                    crate::kit::icon_button_side(theme)
+                    slopty_kit::kit::icon_button_side(theme)
                 } else {
                     theme.density.hit
                 }))
                 .flex()
                 .items_center()
                 .px(px(theme.spacing.sm))
-                .when(place.is_some(), |el| crate::kit::raised(el, theme))
+                .when(place.is_some(), |el| slopty_kit::kit::raised(el, theme))
                 .when(place.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover_strong))))
                 .rounded(px(theme.radii.sm))
                 .text_color(hsla(s.text_secondary))

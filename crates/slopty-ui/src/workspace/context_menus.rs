@@ -14,13 +14,13 @@ use std::rc::Rc;
 use gpui::{App, Context, Pixels, Point, SharedString, Window};
 use slopty_client::groups::GroupKey;
 use slopty_client::layout::{Drop, Side, Tab, TabId, TileRef, WorkerKey};
+use slopty_kit::draw::Draw;
 use slopty_proto::items::ItemKind;
 
 use super::actions::{CloseItem, ReloadPage, RenameItem, ZoomPane};
 use super::faces::Face;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
-use crate::draw::Draw;
 
 /// The menu a press opened: its name, as a screen reader says it, and its rows.
 #[derive(Clone, Debug)]
@@ -115,7 +115,7 @@ impl WorkspaceView {
         E: gpui::InteractiveElement + gpui::ParentElement + gpui::Styled,
     {
         let this = cx.weak_entity();
-        crate::kit::menu_press(el, move |at, window, cx| {
+        slopty_kit::kit::menu_press(el, move |at, window, cx| {
             let _gone = this.update(cx, |this, cx| {
                 let entries = this.tile_entries(tile, pressed, cx);
                 if !entries.is_empty() {
@@ -137,7 +137,7 @@ impl WorkspaceView {
         E: gpui::InteractiveElement + gpui::ParentElement + gpui::Styled,
     {
         let this = cx.weak_entity();
-        crate::kit::menu_press(el, move |at, window, cx| {
+        slopty_kit::kit::menu_press(el, move |at, window, cx| {
             let _gone = this.update(cx, |this, cx| {
                 let entries = this.project_entries(&key, new_shell.clone(), cx);
                 let menu = ContextMenu { name: PROJECT_MENU, entries };
@@ -152,7 +152,7 @@ impl WorkspaceView {
         E: gpui::InteractiveElement + gpui::ParentElement + gpui::Styled,
     {
         let this = cx.weak_entity();
-        crate::kit::menu_press(el, move |at, window, cx| {
+        slopty_kit::kit::menu_press(el, move |at, window, cx| {
             let _gone = this.update(cx, |this, cx| {
                 this.open_menu_at(MenuKind::Machine(key), at, window, cx);
             });

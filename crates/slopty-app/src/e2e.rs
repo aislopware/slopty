@@ -30,8 +30,8 @@ use slopty_e2e::{
     BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
     LatencyInfo, ProjectInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
+use slopty_kit::icons::Status;
 use slopty_proto::items::ItemKind;
-use slopty_ui::icons::Status;
 use slopty_ui::project::ProjectView;
 use slopty_ui::screen::ScreenView;
 use slopty_ui::workspace::{KeyTarget, WorkerStatus};
@@ -818,7 +818,7 @@ fn apply(
             Reply::Ok
         }
         Command::PinClock { at_ms } => {
-            slopty_ui::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
+            slopty_kit::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
             // Nothing that showed a time was told: every view is built again.
             window.refresh();
             Reply::Ok
@@ -856,7 +856,7 @@ fn apply(
             Reply::Ok
         }
         Command::FramesReset => {
-            slopty_ui::frames::reset(cx);
+            slopty_kit::frames::reset(cx);
             Reply::Ok
         }
         Command::Reveal { session } => {
@@ -980,13 +980,13 @@ const fn mouse_button(button: Button) -> MouseButton {
 }
 
 /// Where the frame shown differs from the same state drawn from scratch
-/// ([`slopty_ui::retained::stale`]), with where the pointer was and whether the keyboard was
+/// ([`slopty_kit::retained::stale`]), with where the pointer was and whether the keyboard was
 /// the last input: what a hover reads, and so what a stale hover is judged by.
 #[cfg(feature = "e2e")]
 fn stale(window: &mut Window, cx: &mut App) -> Option<String> {
     let pointer = window.mouse_position();
     let keyboard = window.last_input_was_keyboard();
-    slopty_ui::retained::stale(window, cx, STALE_LINES).map(|stale| {
+    slopty_kit::retained::stale(window, cx, STALE_LINES).map(|stale| {
         let (x, y) = (f32::from(pointer.x), f32::from(pointer.y));
         format!("{stale}\n(pointer at {x},{y}, last input from the keyboard: {keyboard})")
     })
@@ -1057,7 +1057,7 @@ fn render(_window: &mut Window, _cx: &mut App, _path: &str, _scale: Option<f32>)
 /// frame here, so every other frame of a run is drawn as a person's would be.
 #[cfg(feature = "e2e")]
 fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
-    let frames = frame_info(slopty_ui::frames::stats(cx));
+    let frames = frame_info(slopty_kit::frames::stats(cx));
     window.draw(cx).clear(cx);
     let stale = stale(window, cx);
     window.set_a11y_active(true);
@@ -1081,7 +1081,7 @@ fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dum
 /// The accessibility tree of the last frame, trimmed for the dump.
 #[cfg(feature = "e2e")]
 fn a11y_nodes(window: &Window) -> Vec<slopty_e2e::A11yNode> {
-    slopty_ui::a11y::tree(window)
+    slopty_kit::a11y::tree(window)
         .into_iter()
         .map(|n| slopty_e2e::A11yNode {
             role: n.role,
@@ -1185,7 +1185,7 @@ fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
 }
 
 /// The frame probe's numbers, microseconds.
-fn frame_info(stats: Option<slopty_ui::frames::FrameStats>) -> FrameInfo {
+fn frame_info(stats: Option<slopty_kit::frames::FrameStats>) -> FrameInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     stats.map_or_else(FrameInfo::default, |s| FrameInfo {
         frames: s.frames,
@@ -1261,7 +1261,7 @@ impl Workspace {
             notice: view.toast_text(),
             project: view.project_name(),
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
-            frames: frame_info(slopty_ui::frames::stats(cx)),
+            frames: frame_info(slopty_kit::frames::stats(cx)),
             pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
             ..Dump::default()
         };

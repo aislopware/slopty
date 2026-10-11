@@ -106,7 +106,8 @@ fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     let marks: Option<Vec<_>> = view.read_with(cx, |v, cx| {
         v.palette.clone().map(|p| p.read(cx).matches().iter().map(|l| l.icon).collect())
     });
-    let (claude, codex) = (crate::icons::AgentMark::Claude, crate::icons::AgentMark::Blossom);
+    let (claude, codex) =
+        (slopty_kit::icons::AgentMark::Claude, slopty_kit::icons::AgentMark::Blossom);
     assert_eq!(marks, Some(vec![Some(claude.into()), Some(codex.into())]), "each its own mark");
     cx.simulate_input("codex");
     cx.simulate_keystrokes("enter");
@@ -878,7 +879,7 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     click(cx, "thread-add-menu-also-claude-code");
     cx.update(|window, _| window.set_a11y_active(true));
     settle(cx);
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     let asked = "What should Codex and Claude Code each do in a new worktree of atlas?";
     let heads: Vec<_> =
         tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();
@@ -957,7 +958,7 @@ fn the_place_chip_starts_a_worktree_from_a_branch_picked(cx: &mut TestAppContext
     cx.update(|window, _| window.set_a11y_active(true));
     settle(cx);
     let roles = |cx: &mut VisualTestContext, label: &str| -> Vec<String> {
-        let tree = cx.update(|window, _| crate::a11y::tree(window));
+        let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
         tree.iter().filter(|n| n.label.as_deref() == Some(label)).map(|n| n.role.clone()).collect()
     };
     let place = "Place, in atlas on studio";
@@ -1014,13 +1015,13 @@ fn the_place_chip_starts_a_worktree_from_a_branch_picked(cx: &mut TestAppContext
     click(cx, "thread-menu-1");
     assert_eq!(roles(cx, "Base branch, feature"), ["Button"], "from the one checked out");
     click(cx, "thread-base");
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     let listed: Vec<_> =
         tree.iter().filter(|n| n.role == "ListBoxOption").filter_map(|n| n.label.clone()).collect();
     assert_eq!(listed, ["main", "feature", "develop"], "the default, the checked out, the rest");
     click(cx, "thread-menu-2");
     let asked = "What should Codex do in a new worktree of atlas from develop?";
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Heading", Some(asked))), "the question says where");
     // Back in the folder the base goes with the worktree; a new worktree again starts from
     // the branch checked out until one is picked.
@@ -1120,7 +1121,7 @@ fn a_start_tile_says_its_worktrees_setup_and_takes_it_again(cx: &mut TestAppCont
     settle(cx);
     assert!(shows(cx, "setting-up"), "where the setup came from");
     assert!(shows(cx, "setup-line"), "and its newest line");
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Status", Some("Setting up from conductor.json"))));
     let words: Vec<String> = tree.iter().filter_map(|n| n.label.clone()).collect();
     assert!(words.iter().any(|w| w == "added 312 packages"), "the newest: {words:?}");
@@ -1135,7 +1136,7 @@ fn a_start_tile_says_its_worktrees_setup_and_takes_it_again(cx: &mut TestAppCont
     assert!(!shows(cx, "setting-up"), "it ran");
     assert!(shows(cx, "setup-failed"), "it failed, said on the tile");
     assert!(shows(cx, "setup-tail"), "with its last lines");
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     assert!(
         tree.iter().any(|n| n.is("Group", Some("Setup from conductor.json failed, exit 1"))),
         "how"
@@ -1729,7 +1730,7 @@ fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppC
     settle(cx);
     cx.update(|window, _| window.set_a11y_active(true));
     settle(cx);
-    let tree = cx.update(|window, _| crate::a11y::tree(window));
+    let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     let asked = "What should Claude Code do with #123 in a new worktree of atlas?";
     let heads: Vec<_> =
         tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();

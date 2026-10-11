@@ -20,13 +20,13 @@ use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::Symbol;
+use slopty_kit::kit::ButtonKind;
 use slopty_proto::thread::wire::Start;
 use slopty_proto::thread::{AgentId, Drive, Liveness, ThreadState};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
-use crate::colors::hsla;
-use crate::icons::Symbol;
-use crate::kit::ButtonKind;
 
 /// The button that frees an exited agent's worktree.
 pub const REMOVE_WORKTREE: &str = "Remove worktree";

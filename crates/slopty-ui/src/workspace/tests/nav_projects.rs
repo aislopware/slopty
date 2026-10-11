@@ -71,7 +71,7 @@ fn a_projects_board_heads_its_group(cx: &mut TestAppContext) {
     assert!(head < board && board < row, "{head} {board} {row}");
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let label = "Board, 1 of 2 merged";
     assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{tree:#?}");
     // What waits on the person is the row's mark, not words that push the count out.
@@ -111,7 +111,7 @@ fn a_boards_row_carries_where_its_goal_stands(cx: &mut TestAppContext) {
     assert!(line.top() >= words.bottom() - px(0.5), "under the words: {words:?} {line:?}");
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     let label = "Board, No tasks yet, Store merged, wiring the board";
     assert!(tree.iter().any(|n| n.is("Button", Some(label))), "its first line: {tree:#?}");
 }

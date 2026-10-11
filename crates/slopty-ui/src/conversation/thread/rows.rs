@@ -498,7 +498,7 @@ impl Fold {
         if self.running {
             return "Working".to_owned();
         }
-        let took = self.took.map(crate::kit::duration);
+        let took = self.took.map(slopty_kit::kit::duration);
         match (self.ended, took) {
             (Ended::Complete, Some(t)) => format!("Worked {t}"),
             (Ended::Stopped, Some(t)) => format!("Stopped after {t}"),
@@ -575,7 +575,7 @@ impl Fold {
             return None;
         }
         match (self.ended, self.took) {
-            (Ended::Complete, took) => took.map(crate::kit::duration),
+            (Ended::Complete, took) => took.map(slopty_kit::kit::duration),
             _ => Some(self.lead()),
         }
     }

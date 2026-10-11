@@ -57,7 +57,7 @@ in it until checked here.
   or touches a credential.
 - **Design.** Minimal and modern, in MonoCode's school: one ground, panes meeting at hairlines,
   square where it is structure, rounding that grows with size. Every colour, size and spacing
-  comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/kit.rs` enforce
+  comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/lints.rs` enforce
   it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on
   buttons.
 - **Autonomy.** The user hands over whole goals and reviews only the results. Work

@@ -17,10 +17,10 @@ use gpui::{
     AnimationExt as _, AnyElement, Context, FocusHandle, InteractiveElement as _, IntoElement as _,
     MouseButton, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
+use slopty_kit::colors::hsla;
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_net::HostAddr;
 use slopty_theme::{Rgb, Theme, Variant};
-use slopty_ui::colors::hsla;
-use slopty_ui::kit::{self, ButtonKind};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 pub(crate) mod actions {

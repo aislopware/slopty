@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 use slopty_client::groups::{self, Claim, Facts, Group, GroupKey, Grouped, Matcher, fact};
 use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_kit::icons::{GitGlyph, Mark, Symbol};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::RepoId;
@@ -29,7 +30,6 @@ use slopty_proto::thread::ThreadId;
 
 use super::WorkspaceView;
 use super::faces::ThreadPlace;
-use crate::icons::{GitGlyph, Mark, Symbol};
 
 /// Tiles and the groups they fell into.
 #[derive(Debug, Default)]
@@ -144,14 +144,14 @@ pub(super) fn listing_group(projects: &Grouping, claims: &[Claim], facts: &Facts
 
 /// What a group of `fact` is drawn with: a repository's glyph, a folder for a folder and a
 /// declared project (a project is a folder first), a machine's, a branch's, else a grid for any
-/// other grouping. A machine's own header wears its form ([`crate::icons::machine`]).
+/// other grouping. A machine's own header wears its form ([`slopty_kit::icons::machine`]).
 pub(super) fn group_glyph(fact: &str) -> Mark {
     match fact {
         fact::REPO => GitGlyph::Repo.into(),
         fact::FOLDER | fact::PROJECT => Symbol::Folder.into(),
         fact::MACHINE => Symbol::ServerRack.into(),
         fact::BRANCH => GitGlyph::Branch.into(),
-        fact::AGENT => crate::icons::AGENT.into(),
+        fact::AGENT => slopty_kit::icons::AGENT.into(),
         _ => Symbol::SquareGrid2x2.into(),
     }
 }

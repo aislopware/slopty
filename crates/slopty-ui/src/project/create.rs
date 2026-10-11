@@ -20,15 +20,15 @@ use gpui::{
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_client::layout::WorkerKey;
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::colors::hsla;
+use slopty_kit::icons::{IconSize, Symbol, icon};
+use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::project::Autonomy;
 use slopty_proto::thread::AgentId;
 use slopty_theme::Theme;
 
 use super::view::{AUTONOMY, VERIFIER, VERIFIER_HINT};
-use crate::a11y::tab_stop;
-use crate::colors::hsla;
-use crate::icons::{IconSize, Symbol, icon};
-use crate::kit::{self, ButtonKind};
 
 /// What the sheet makes: the goal, and the orchestrator that takes it.
 #[derive(Clone, Debug, PartialEq, Eq)]

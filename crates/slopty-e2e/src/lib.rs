@@ -712,7 +712,7 @@ pub struct Dump {
     pub pointer: Option<String>,
 }
 
-/// The UI frame-time probe (`slopty_ui::frames`), in microseconds.
+/// The UI frame-time probe (`slopty_kit::frames`), in microseconds.
 ///
 /// How long the window took to draw each frame and how evenly frames came, over the last 1024
 /// frames; the counters run since the last reset. `dropped` counts display slots lost to draws

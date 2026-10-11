@@ -22,6 +22,12 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_kit::a11y::tab_stop;
+use slopty_kit::chrome_text::ChromeText;
+use slopty_kit::colors::hsla;
+use slopty_kit::draw::Draw;
+use slopty_kit::icons::{Drawn, GitGlyph, IconSize, Symbol, icon};
+use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::{RepoChanges, RepoId};
 use slopty_theme::Typography;
@@ -29,12 +35,6 @@ use slopty_theme::Typography;
 use super::tile::place_name;
 use super::titlebar::MenuKind;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
-use crate::a11y::tab_stop;
-use crate::chrome_text::ChromeText;
-use crate::colors::hsla;
-use crate::draw::Draw;
-use crate::icons::{Drawn, GitGlyph, IconSize, Symbol, icon};
-use crate::kit;
 
 /// The most room a project's name takes in the bar, in ems: a long name ends in an ellipsis
 /// rather than push the tabs and the bell off.
