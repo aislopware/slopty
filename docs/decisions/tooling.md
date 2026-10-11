@@ -1634,7 +1634,7 @@ more full-window layer.
   - No Linux job deletes the image's SDKs any more: x86_64 has 82 GB free without it, and it
     took 92–106 s a job.
 
-- ✅ **Six test threads on a hosted Mac: the worker shard's only** (2026-10-11,
+- ❌ **Six test threads on a hosted Mac: tried twice, reverted** (2026-10-11,
   `.research/ci-speed-2026-10-11.md` item 7). The same tests took three to six times as long
   on the macOS runner as on Linux (client 104 against 18 test-s, net 61 against 14), more than
   three cores against four and an M1 VM against EPYC explain, so the tests seemed to wait: on
@@ -1642,7 +1642,7 @@ more full-window layer.
   `NEXTEST_TEST_THREADS=6` on its three cores; the timing tests take every slot
   (`threads-required = "num-test-threads"`), so they still ran alone. The bar: nextest's wall
   time 20 % lower over ten runs, with no new timing failure.
-  - ✅ **The worker shard** (`slopty-worker`, `slopty-workerd` and the crates under them): a
+  - ❌ **The worker shard** (`slopty-worker`, `slopty-workerd` and the crates under them): a
     median 139.4 s over ten runs at six threads, against 176.1 s over three at three threads
     on the same 1090 tests once the trial ended (142.8, 176.1, 228.7 s): −21 %. Its tests
     wait on the daemons and agents they start. Its one failure in thirteen runs was a race in
@@ -1658,6 +1658,12 @@ more full-window layer.
     three threads afterwards gave the like-for-like figure above.
   - A same-runner A/B of three against six threads lost its runner twice (38130090331,
     38134936380).
+  - Taken for the worker shard alone (bac92dd6), its first run failed: the VideoToolbox group,
+    which runs one test at a time beside the main run, decoded a frame with error -19092 in
+    `quality_changes_decode_without_a_refresh` (run 38143863116) while six main tests ran on the
+    three cores, a test that had never failed. A red gate run costs a lane 20 minutes and more,
+    so a flake one run in thirty outweighs 35 s a run: reverted, a new timing failure as the
+    bar says.
 
 - ✅ **A remote check lints on Linux** (2026-10-11, `.research/ci-speed-2026-10-11.md` item 3).
   A remote check was one macOS job: about 105 s of setup, then fmt, host clippy, the tests,

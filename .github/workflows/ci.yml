@@ -230,13 +230,9 @@ jobs:
       # is told apart as a slow host or a full one (the test shards' times swing ±100 s).
       - if: runner.os == 'macOS'
         run: sysctl hw.model machdep.cpu.brand_string hw.ncpu hw.memsize
-      # The worker shard's tests mostly wait on the processes they start, so six run on its three
-      # cores; the other shards' contend, and keep nextest's default (docs/decisions/tooling.md,
-      # "Six test threads on a hosted Mac: the worker shard's only").
-      - run: |
-          if [ "${{ matrix.shard }}" = worker ]; then export NEXTEST_TEST_THREADS=6; fi
-          xtask gate --ci --lane ${{ matrix.lane }} \
-            ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
+      - run: >-
+          xtask gate --ci --lane ${{ matrix.lane }}
+          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
