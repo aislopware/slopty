@@ -160,6 +160,19 @@ jobs:
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # The icon test's verdicts (xtask/src/icon/tests.rs): on inputs it passed on before it
+      # skips actool and ictool, 103 s beside the shard's other tests. Keyed by the runner's
+      # image and the icon's sources; the test hashes those and the document it generates.
+      - if: matrix.shard == 'rest'
+        id: image
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+      - if: matrix.shard == 'rest'
+        uses: actions/cache@v4
+        with:
+          path: target/verdicts
+          key: >-
+            verdicts-${{ runner.os }}-${{ steps.image.outputs.version }}-${{
+            hashFiles('assets/icon.svg', 'xtask/src/icon.rs', 'xtask/src/icon/**') }}
       # Every package of every platform, for the cache entry the lane saves.
       - if: matrix.lane == 'clippy-host' || matrix.shard == 'worker'
         run: cargo fetch --locked

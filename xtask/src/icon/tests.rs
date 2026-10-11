@@ -294,12 +294,24 @@ fn the_document_has_a_glass_layer_per_lit_dot_and_the_cursor_its_own_group() {
 /// What ships: actool's `Assets.car` and fallback `.icns`, and the system renderer's picture
 /// at every `.icns` size and in every appearance. The prompt reads everywhere, the cursor on
 /// its own from 32 px up, the unlit dots stay visible, and the green is the brand's.
+///
+/// A pass is kept as a verdict named by everything it depends on ([`verdict`]), and the same
+/// inputs are not compiled and drawn again: beside a test shard's other tests actool and ictool
+/// took 103 s (run 38121577149), against 9 s alone (run 38123807675).
 #[test]
 fn compiles_and_the_prompt_reads_at_every_size_and_appearance() {
     let sh = Shell::new().expect("shell");
     let dir = scratch("compile");
     let art = art();
     let document = art.write_document(&sh, &dir).expect("document");
+    let (verdict, sum) = verdict(&sh, &document, &dir);
+    // Only a verdict that reads back as this digest stands for a pass: one missing, unreadable
+    // or holding anything else runs the whole check.
+    if std::fs::read_to_string(&verdict).is_ok_and(|kept| kept == sum) {
+        eprintln!("passed before on the same document, code, Xcode and image: {verdict}");
+        std::fs::remove_dir_all(&dir).expect("clean scratch");
+        return;
+    }
     let resources = dir.join("Resources");
     compile_macos(&sh, &document, &resources).expect("actool compiles the document");
 
@@ -380,5 +392,41 @@ fn compiles_and_the_prompt_reads_at_every_size_and_appearance() {
         );
         assert!(r.cursor >= 1.8, "{rendition:?}: the cursor {:.2}:1 over its neighbour", r.cursor);
     }
+    std::fs::create_dir_all(verdict.parent().expect("the verdicts' directory")).expect("verdicts");
+    std::fs::write(&verdict, &sum).expect("the verdict");
     std::fs::remove_dir_all(&dir).expect("clean scratch");
+}
+
+/// Where a pass of the test above is kept, `target/verdicts/icon-<sha256>`, and the digest it
+/// holds: hashed over the document it compiles, the code that made it and judges it, and the
+/// Xcode, macOS and runner image that compile and draw it. Any of them changing runs the test
+/// in full again.
+fn verdict(sh: &Shell, document: &Utf8Path, dir: &Utf8Path) -> (Utf8PathBuf, String) {
+    let mut files = vec![document.join("icon.json")];
+    let assets = std::fs::read_dir(document.join("Assets")).expect("the layers");
+    let mut layers: Vec<Utf8PathBuf> = assets
+        .map(|e| Utf8PathBuf::from_path_buf(e.expect("a layer").path()).expect("utf-8"))
+        .collect();
+    layers.sort();
+    files.extend(layers);
+    let mut inputs = String::new();
+    for file in &files {
+        inputs.push_str(file.file_name().expect("a name"));
+        inputs.push_str(&std::fs::read_to_string(file).expect("a document file"));
+    }
+    for code in
+        [include_str!("../icon.rs"), include_str!("tests.rs"), include_str!("tests/colour.rs")]
+    {
+        inputs.push_str(code);
+    }
+    inputs.push_str(&cmd!(sh, "xcodebuild -version").read().expect("Xcode's version"));
+    inputs.push_str(&cmd!(sh, "sw_vers -productVersion").read().expect("macOS's version"));
+    // A hosted runner's image, which the Actions cache of verdicts is keyed by too.
+    inputs.push_str(&std::env::var("ImageVersion").unwrap_or_default());
+    let hashed = dir.join("verdict-inputs");
+    std::fs::write(&hashed, inputs).expect("the inputs");
+    let sum = cmd!(sh, "shasum -a 256 {hashed}").read().expect("shasum");
+    let sum = sum.split_whitespace().next().expect("a digest").to_owned();
+    let root = crate::tools::repo_root().expect("root");
+    (root.join("target/verdicts").join(format!("icon-{sum}")), sum)
 }

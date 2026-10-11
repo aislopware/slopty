@@ -1721,3 +1721,13 @@ more full-window layer.
   - Freed of sccache, the Actions cache keys the registry and git checkouts by the manifests
     and the lock again (`add-rust-environment-hash-key`): its single entry had stayed nine days
     stale, and every Mac job downloaded what came since.
+
+- ✅ **The icon test keeps its verdict** (2026-10-11). Alone on a Mac runner the icon test
+  takes 9 s (run 38123807675); beside the rest shard's other tests, six threads on three
+  cores, actool's and ictool's services starved for 103 s (run 38121577149). Its inputs seldom
+  change, so a pass is kept in `target/verdicts/icon-<sha256>`, holding that digest, hashed
+  over the document the test generates, the icon module's and the test's own code, and the
+  Xcode, macOS and runner image that compile and draw it. The same inputs skip actool and
+  ictool; any change, and a verdict missing, unreadable or holding another digest, runs the
+  whole check. The rest shard keeps the directory in the Actions cache, keyed by the image and
+  the icon's sources.
