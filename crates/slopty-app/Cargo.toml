@@ -50,6 +50,7 @@ slopty-settings.workspace = true
 slopty-tailnet.workspace = true
 slopty-theme.workspace = true
 slopty-kit.workspace = true
+slopty-terminal.workspace = true
 slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true

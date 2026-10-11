@@ -60,11 +60,11 @@ use slopty_proto::project::ProjectId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_proto::thread::wire::{NoteChoice, RequestCard};
 use slopty_proto::thread::{AskId, ThreadId};
+use slopty_terminal::TerminalView;
 
 use super::agents::{agent_ask_text, agent_status_word};
 use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
-use crate::terminal::TerminalView;
 
 /// What a note's answer says when its request was no longer open: answered elsewhere, or the
 /// terminal asks by now.

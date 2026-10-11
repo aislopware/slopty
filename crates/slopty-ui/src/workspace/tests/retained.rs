@@ -76,7 +76,7 @@ fn the_pane_keys_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
 
 /// A sash dragged step by step: each step is the frame drawn from scratch, and builds each
 /// shell it resizes at most twice, once at its new bounds and once more in the next frame
-/// where its grid took new rows ([`crate::terminal::TerminalView::fitted`]), never more.
+/// where its grid took new rows ([`slopty_terminal::TerminalView::fitted`]), never more.
 #[gpui::test]
 fn a_sash_drag_is_drawn_as_from_scratch_and_builds_each_shell_once(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);

@@ -265,12 +265,12 @@ const APP: &[Option<&str>] = &[None];
 #[expect(clippy::too_many_lines, reason = "the one table of every default chord")]
 pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
+    use slopty_terminal as t;
 
     use crate::conversation::{
         AllowRequest, AskAside, CycleDensity, DenyRequest, EditLastQueued, Interrupt, QueueMessage,
         ResumeAgent, ReviewChanges,
     };
-    use crate::terminal as t;
 
     fn c(
         scope: Scope,
@@ -479,7 +479,7 @@ pub fn defaults() -> Vec<Command> {
         c(Search, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[SEARCH]),
     ]);
     // The terminal's own, declared beside its view.
-    out.extend(crate::terminal::commands().into_iter().map(|command| Command {
+    out.extend(slopty_terminal::commands().into_iter().map(|command| Command {
         scope: Terminal,
         name: Cow::Borrowed(command.name),
         action: command.action,
@@ -847,7 +847,7 @@ const KIT_ROOT: &str = "Root";
 
 /// The views that take every key the table leaves them: a terminal's program and a remote
 /// window's worker.
-const KEY_TAKERS: [&str; 2] = [crate::terminal::CTX, "Screen"];
+const KEY_TAKERS: [&str; 2] = [slopty_terminal::CTX, "Screen"];
 
 /// What gives the chords without ⌘ that `others` bind around every view back to the views
 /// that take every key. GPUI runs a key's binding before any view hears the key, so gpui-kit's

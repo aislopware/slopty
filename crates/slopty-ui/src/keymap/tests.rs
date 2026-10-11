@@ -275,9 +275,8 @@ fn the_kits_keys_around_a_shell_go_to_the_program(cx: &mut TestAppContext) {
     use slopty_proto::ClientMsg;
     use slopty_proto::input::{KeyCode, Mods};
     use slopty_proto::terminal::{TermRequest, TermSize};
+    use slopty_terminal::TerminalView;
     use tokio::sync::mpsc;
-
-    use crate::terminal::TerminalView;
 
     let (tx, mut rx) = mpsc::channel(64);
     cx.update(|cx| {

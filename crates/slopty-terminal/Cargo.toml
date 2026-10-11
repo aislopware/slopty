@@ -1,0 +1,46 @@
+[package]
+name = "slopty-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty's terminal view: a session's grid drawn from the term stream, its find, copy mode and paste"
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui-kit.workspace = true
+# A picture the program draws (kitty graphics, iTerm2, sixel) handed to GPUI as a frame (`view`).
+image.workspace = true
+rustc-hash.workspace = true
+# A client view of the term stream: the session's state, its pacing, the clipboard it pastes
+# from and the files dropped on it.
+slopty-client.workspace = true
+slopty-core.workspace = true
+slopty-grid.workspace = true
+# The chrome kit the view's bars, pills and menus are drawn with.
+slopty-kit.workspace = true
+slopty-platform.workspace = true
+slopty-predict.workspace = true
+slopty-proto.workspace = true
+slopty-theme.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[features]
+# The paint probe's counters (`family_picks`, `rows_prepared`) for the views' tests above it;
+# this crate's own tests get them through `cfg(test)`.
+e2e = [  ]
+
+[dev-dependencies]
+anyhow.workspace = true
+gpui = { workspace = true, features = [ "test-support" ] }
+# The platform's own text system (Core Text), for the grid's paint oracle to shape and
+# rasterise real glyphs (`view::paint_oracle`).
+gpui_platform = { workspace = true, features = [ "font-kit" ] }
+# The kit's test reach (`a11y::tree`, the retained-frame oracle).
+slopty-kit = { workspace = true, features = [ "e2e" ] }
+tempfile.workspace = true

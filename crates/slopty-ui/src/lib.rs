@@ -1,7 +1,6 @@
-//! GPUI views and elements, drawn with the chrome kit (`slopty-kit`).
+//! GPUI views and elements, drawn with the chrome kit (`slopty-kit`), around the terminal
+//! (`slopty-terminal`).
 //!
-//! * [`terminal`] — the terminal view (an entity owning a `TermState`) and its element (the
-//!   painter). Rows are painted straight from the grid; no intermediate widget tree.
 //! * [`add_worker`] — a worker put on a machine over SSH, step by step, for the add sheet and a
 //!   tile on a different build.
 //! * [`workspace`] — every worker's items as tiles in scrollable columns, the titlebar, actions.
@@ -50,7 +49,6 @@ pub mod screen;
 pub mod search;
 pub mod settings_editor;
 pub mod settings_form;
-pub mod terminal;
 pub mod window_frame;
 #[expect(
     unreachable_pub,

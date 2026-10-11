@@ -12,6 +12,7 @@ use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::{CaptureTarget, ScreenRequest};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
+use slopty_terminal::TerminalView;
 
 use super::actions::{
     AddWindow, Applies, CloseItem, EqualizePanes, FocusDown, FocusLeft, FocusRight, FocusUp,
@@ -31,7 +32,6 @@ use super::{
 use crate::file::FileView;
 use crate::palette::PaletteItem;
 use crate::screen::ScreenView;
-use crate::terminal::TerminalView;
 
 /// The smallest terminal text ⌘- goes to, in points.
 pub(super) const FONT_MIN: f32 = 8.0;
@@ -885,7 +885,7 @@ impl WorkspaceView {
     /// the focused file tile.
     pub fn find_in_active(
         &mut self,
-        action: &crate::terminal::Find,
+        action: &slopty_terminal::Find,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

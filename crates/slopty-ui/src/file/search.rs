@@ -21,11 +21,11 @@ use slopty_kit::kit::FindBar;
 use slopty_kit::kit::find::{
     PLACEHOLDER as FIND_PLACEHOLDER, Query, REPLACE_PLACEHOLDER, Tally, Toggle,
 };
+use slopty_terminal::{CloseFind, FindNext, FindPrev};
 
 use super::find::{self, MATCHES_MAX};
 use super::{FileView, FileViewEvent};
 use crate::search::{ToggleMatchCase, ToggleRegex, ToggleWholeWord};
-use crate::terminal::{CloseFind, FindNext, FindPrev};
 
 /// The key context of the find bar; its keys are bound in it.
 pub const SEARCH_CTX: &str = "FileSearch";

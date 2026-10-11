@@ -1,8 +1,9 @@
 //! A shell's command block handed to an agent as context: the thread it goes to, whatever the
 //! agent and whichever tile holds it, and that it lands in the thread's draft.
 
+use slopty_terminal::TerminalViewEvent;
+
 use super::*;
-use crate::terminal::TerminalViewEvent;
 
 /// A shell's block goes to the agent tile focused last on the same worker: that tile comes up
 /// on its thread, and the draft holds the block's Markdown after what was typed there. With no

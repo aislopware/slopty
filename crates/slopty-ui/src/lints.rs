@@ -7,12 +7,16 @@ use slopty_kit::kit::*;
 
 mod overflow;
 
-/// Every crate the chrome is drawn in: the kit, the views, and the app's own sheets.
-const CHROME: [&str; 3] = ["slopty-kit/src", "slopty-ui/src", "slopty-app/src"];
+/// Every crate the chrome is drawn in: the kit, the terminal, the views, and the app's own sheets.
+const CHROME: [&str; 4] =
+    ["slopty-kit/src", "slopty-terminal/src", "slopty-ui/src", "slopty-app/src"];
 
-/// The chrome of the kit and the views, without the app's.
+/// The chrome of the kit, the terminal and the views, without the app's.
 fn ui_lines() -> Vec<(String, usize, String)> {
-    ["slopty-kit/src", "slopty-ui/src"].into_iter().flat_map(chrome_lines).collect()
+    ["slopty-kit/src", "slopty-terminal/src", "slopty-ui/src"]
+        .into_iter()
+        .flat_map(chrome_lines)
+        .collect()
 }
 
 /// Chrome text is sentence case, whatever it is doing: a label, a button's accessible name,
@@ -61,9 +65,9 @@ fn chrome_text_is_sentence_case() {
         crate::picker::NOTHING_MATCHES,
         crate::picker::NOTHING_TO_JUMP_TO,
         crate::picker::LOADING_WINDOWS,
-        crate::terminal::BACK_TO_LIVE,
-        crate::terminal::COPY_MODE,
-        crate::terminal::COPY_MODE_DONE,
+        slopty_terminal::BACK_TO_LIVE,
+        slopty_terminal::COPY_MODE,
+        slopty_terminal::COPY_MODE_DONE,
         crate::workspace::RECONNECTING,
         crate::workspace::SESSION_ENDED,
         crate::workspace::CLOSE_TILE,
@@ -194,11 +198,13 @@ fn a_floating_layer_wears_the_one_elevation() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// The sweeps read the kit as well as the views and the app: the kit's own lift, the one place
-/// a scrim may be chosen, is what the elevation check flags in `slopty-kit/src/kit.rs` once its
-/// waiver is left out. A fault written anywhere in the kit fails the sweeps the same way.
+/// The sweeps read the kit and the terminal as well as the views and the app: the kit's own lift,
+/// the one place a scrim may be chosen, is what the elevation check flags in
+/// `slopty-kit/src/kit.rs` once its waiver is left out, and every root yields its `lib.rs`. A
+/// fault written anywhere in either fails the sweeps the same way (the terminal's own:
+/// `overflow::the_sweeps_flag_the_terminal`).
 #[test]
-fn the_sweeps_read_the_kit() {
+fn the_sweeps_read_the_kit_and_the_terminal() {
     let mut read = CHROME.into_iter().flat_map(chrome_lines);
     let lifted = read.any(|(file, _, line)| {
         file.ends_with("slopty-kit/src/kit.rs") && own_elevation(&line).is_some()

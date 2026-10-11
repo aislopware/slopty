@@ -3451,8 +3451,8 @@ impl Render for ScreenView {
             .cursor(styled)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
-            .on_action(cx.listener(|this, _: &crate::terminal::SendEscape, _window, cx| {
-                this.press(crate::terminal::escape(), cx);
+            .on_action(cx.listener(|this, _: &slopty_terminal::SendEscape, _window, cx| {
+                this.press(slopty_terminal::escape(), cx);
             }))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
             .on_mouse_move(cx.listener(Self::mouse_move))

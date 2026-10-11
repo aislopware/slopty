@@ -1203,7 +1203,7 @@ fn frame_info(stats: Option<slopty_kit::frames::FrameStats>) -> FrameInfo {
 }
 
 /// A terminal's keystroke → glass numbers, microseconds.
-fn latency_info(s: &slopty_ui::terminal::latency::LatencyStats) -> LatencyInfo {
+fn latency_info(s: &slopty_terminal::latency::LatencyStats) -> LatencyInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     LatencyInfo {
         echoed: s.echoed,
@@ -1488,7 +1488,7 @@ impl Workspace {
 
 /// The measured face for the dump.
 #[expect(clippy::cast_possible_truncation, reason = "device pixels; f32 carries them")]
-fn face_info(m: &slopty_ui::terminal::CellMetrics) -> FaceInfo {
+fn face_info(m: &slopty_terminal::CellMetrics) -> FaceInfo {
     let f = m.face;
     FaceInfo {
         size: m.face_size,

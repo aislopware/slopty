@@ -3565,7 +3565,7 @@ display scenarios need Screen Recording.
 
 ## 2026-09-25 — keystroke to glass, hop by hop
 
-The meter now splits every key into hops on one clock (`slopty_ui::terminal::latency`,
+The meter now splits every key into hops on one clock (`slopty_terminal::latency`,
 `LatencyInfo::echo_hops_us` / `predicted_hops_us` in the self-test `dump`). An echoed key runs
 key → its echo's batch left the link (the worker's round trip plus the hand-over to the UI
 thread) → applied to the grid → painted → submitted to the GPU → on the glass. A predicted key
@@ -5538,7 +5538,7 @@ told. Load average 9–19.
 D=$PWD/target/e2e-predict SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock \
   SLOPTY_WORKER_SOCKET=$D/run/worker.sock SLOPTY_E2E_BIN_DIR=$PWD/target/debug \
   SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
-  RUST_LOG=info,slopty_ui::terminal::view=debug \
+  RUST_LOG=info,slopty_terminal::view=debug \
   cargo nextest run -p slopty-e2e --test smooth --no-capture -E 'test(typing_over_a_shaped)'
 ```
 
@@ -5896,7 +5896,7 @@ cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p 
 D=$PWD/target/e2e-typing; mkdir -p $D/run $D/artifacts
 SLOPTY_DATA_DIR=$D SLOPTY_PTYD_SOCKET=$D/run/ptyd.sock SLOPTY_WORKER_SOCKET=$D/run/worker.sock \
   SLOPTY_E2E_BIN_DIR=$PWD/target/debug SLOPTY_E2E_ARTIFACTS=$D/artifacts SLOPTY_SMOOTH_E2E=1 \
-  RUST_LOG=info,slopty_ui::terminal::view=debug \
+  RUST_LOG=info,slopty_terminal::view=debug \
   cargo nextest run -p slopty-e2e --test smooth --no-capture --test-threads 1 \
   -E 'test(typing_over_a_shaped) | test(typing_is_timed)'
 ```
@@ -11731,7 +11731,7 @@ glyph is a sprite in the scene as on the glass. Release, mac-studio, gpui-fast `
 runs started at a load average of 18.5 and 17.3 (a first run at 48–90 gave the same medians):
 
 ```sh
-cargo test -p slopty-ui --release --lib terminal_frames_cost -- --ignored --nocapture
+cargo test -p slopty-terminal --release --lib terminal_frames_cost -- --ignored --nocapture
 ```
 
 p50 / p95 in µs, runs 1 and 2:
@@ -16233,6 +16233,46 @@ Step 2 takes the terminal (18,000 lines) out of that harness.
 Lines: `slopty-kit` holds 14,762 of Rust with its unit tests, and `slopty-ui` is that much
 smaller, less the lints. The lints move out of the kit into `slopty-ui/src/lints.rs` and
 `lints/overflow.rs` (1,725 lines), so the views' harness still builds them.
+
+## 2026-10-11 — slopty-ui split, step 2: the terminal as a crate
+
+The same measure as step 1: CI's `tests ui` build, whose last unit is still `slopty-ui`'s test
+harness. The terminal is on the input and frame path, so its frame cost and a key's way to the
+glass are measured before and after on the same runner type (`macos-26`).
+
+```
+# before: gate run 38155184770 (e2df19e0, the cuts landed, the move not), artifact timings-ui
+gh run download 38155184770 -n timings-ui -D target/remote/A/timings/ui-step2-before
+# after: the first gate run with slopty-terminal, the same artifact
+# the terminal's frames, fat LTO (release), before (the test was in slopty-ui) and after
+cargo xtask remote --name A-perf-frames --probe \
+  'cargo test -p slopty-terminal --release --lib terminal_frames_cost -- --ignored --nocapture'
+# a key to the glass, the app in its e2e build (dev profile)
+cargo xtask remote --name A-perf-typing --e2e smooth \
+  -E 'test(typing_is_timed_with_and_without_the_local_echo_on_the_mac)'
+```
+
+| | before | after |
+|---|---|---|
+| `tests ui` cargo build | 214.3 s | |
+| slopty-ui lib test harness | 101.6 s (ends the build) | |
+| slopty-terminal lib / harness | — | |
+| units, core-seconds | 467.8 | |
+| of those, Slopty's own crates | 191.5 | |
+
+Frame cost, p50 / p95 µs, 200 × 60, `terminal_frames_cost` (before: run 38135254468):
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed |
+| --- | --- | --- | --- | --- |
+| unchanged | 207.5 / 255.8 | 22.5 / 23.0 | 662.5 / 887.3 | 133.7 / 166.5 |
+| a key echoed | 230.5 / 275.9 | 31.5 / 39.7 | 630.1 / 790.8 | 162.3 / 243.7 |
+| a line of output a frame | 321.5 / 413.6 | 121.1 / 154.8 | 765.9 / 965.0 | 442.1 / 555.7 |
+| scrolling a line a frame | 312.8 / 364.5 | 90.9 / 98.6 | 731.8 / 917.8 | 421.7 / 509.5 |
+
+A key to the glass, scenario (d), 60 keys, p50 / p95 ms (before: run 38135246342): echo 19.4 /
+30.3 with no prediction; its hops key → arrived 1.6 / 7.7, applied → painted 1.1 / 2.7,
+submitted → glass 16.1 / 22.4. With prediction always on, the runner's tail (echo p95 95.7)
+is the shared Mac's, not the app's.
 
 ## 2026-10-11 — the wire stamp recompiled the workspace on every gate run
 

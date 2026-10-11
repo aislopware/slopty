@@ -26,9 +26,9 @@ use gpui::{Menu, MenuItem, OsAction};
 #[must_use]
 pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+    use slopty_terminal::{Find, FindNext, FindPrev};
     use slopty_ui::file::SaveFile;
     use slopty_ui::folder::{SAVE_TO_FILES, SaveToFiles, UPLOAD_FROM_FILES, UploadFromFiles};
-    use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
         AddWindow, CloseItem, CloseOtherTabs, EqualizePanes, FocusDown, FocusLeft, FocusRight,
         FocusUp, FontLarger, FontReset, FontSmaller, GoBack, GoForward, MoveDown, MoveLeft,

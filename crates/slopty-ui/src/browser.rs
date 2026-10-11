@@ -43,9 +43,9 @@ use slopty_kit::icons::{IconSize, Symbol};
 use slopty_kit::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Tally};
 use slopty_kit::kit::{self, ButtonKind, FindBar};
 use slopty_proto::transfer::TunnelRefusal;
+use slopty_terminal::{CloseFind, FindNext, FindPrev};
 use slopty_theme::Theme;
 
-use crate::terminal::{CloseFind, FindNext, FindPrev};
 use crate::workspace::actions::{PageCut, PageRedo, PageSelectAll, PageUndo, UndoClose};
 
 /// The key context of a page's area; the keymap binds the page's own edits under it, where

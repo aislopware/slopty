@@ -7790,6 +7790,7 @@ dependencies = [
  "slopty-proto",
  "slopty-settings",
  "slopty-tailnet",
+ "slopty-terminal",
  "slopty-theme",
  "slopty-ui",
  "tempfile",
@@ -8413,6 +8414,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopty-terminal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui-kit",
+ "gpui_platform",
+ "image",
+ "rustc-hash 2.1.3",
+ "slopty-client",
+ "slopty-core",
+ "slopty-grid",
+ "slopty-kit",
+ "slopty-platform",
+ "slopty-predict",
+ "slopty-proto",
+ "slopty-theme",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "slopty-testkit"
 version = "0.1.0"
 dependencies = [
@@ -8473,7 +8497,6 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "regex",
- "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "similar 3.2.0",
@@ -8483,9 +8506,9 @@ dependencies = [
  "slopty-grid",
  "slopty-kit",
  "slopty-platform",
- "slopty-predict",
  "slopty-proto",
  "slopty-settings",
+ "slopty-terminal",
  "slopty-theme",
  "tempfile",
  "tokio",

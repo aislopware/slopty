@@ -10,7 +10,7 @@ use slopty_client::Effect;
 use slopty_grid::LineIndex;
 
 use super::{CopyMode, FootPill, TerminalView};
-use crate::terminal::copy_mode::{self, Command, Mode};
+use crate::copy_mode::{self, Command, Mode};
 
 /// What the foot of the grid says while copy mode is on.
 pub const COPY_MODE: &str = "Copy mode";
@@ -353,8 +353,7 @@ mod tests {
     fn copy_mode_takes_over_a_pointer_selection(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx, &[], ["abc def", "", "$ "], (2, 2));
         view.update(cx, |v, _| {
-            v.selection =
-                Some(crate::terminal::Selection::run((LineIndex(0), 0), (LineIndex(0), 2)));
+            v.selection = Some(crate::Selection::run((LineIndex(0), 0), (LineIndex(0), 2)));
         });
         cx.dispatch_action(CopyMode);
         cx.simulate_keystrokes("w e y");

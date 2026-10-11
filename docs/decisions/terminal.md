@@ -46,7 +46,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   tracking (zed's terminal element reshapes every frame; we won't).
 
 - ✅ **Font metrics follow ghostty's `src/font/Metrics.zig`**, ported as the pure function
-  `slopty_ui::terminal::metrics` (`Face` in, `Metrics` out; no window, no IO), verified
+  `slopty_terminal::metrics` (`Face` in, `Metrics` out; no window, no IO), verified
   2026-09-05 against the vendored Zig. The derivation, all in **device pixels** (the face is
   measured at `font_size × scale`, and `Grid` divides back to points so a cell is a whole
   number of device pixels):
@@ -71,7 +71,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (Until 2026-09-06 GPUI's `TextSystem` exposed neither the line gap nor the `post` table, so
   those estimates always applied in production; the fork now exposes them, see "The font's
   own line gap and underline" below.) Two fonts, two sizes, two displays, in device pixels
-  (`cargo nextest run -p slopty-ui terminal::metrics`; ghostty's formula recomputed
+  (`cargo nextest run -p slopty-terminal metrics`; ghostty's formula recomputed
   independently gives the same numbers). The first four JetBrains Mono rows are the face
   without its `post` table (the estimates); the "tables" rows are what the app measures:
 
@@ -90,7 +90,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | Menlo | 15 | 1 | 9 | 17 | 4 | 14 / 1 | 9 / 1 |
   | Menlo | 15 | 2 | 18 | 35 | 7 | 30 / 2 | 19 / 2 |
 
-  Consequences in the element (`crates/slopty-ui/src/terminal/element.rs`): the row height is
+  Consequences in the element (`crates/slopty-terminal/src/element.rs`): the row height is
   the font's own, so `typography.mono_line_height` **defaults to 1.0** and now means ghostty's
   `adjust-cell-height` percentage rather than a multiplier over the point size; underline and
   strikethrough are painted as quads at these offsets because GPUI hardcodes its own
@@ -343,7 +343,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the prompt-start row's top edge from the same prepaint pass as the selection
   (`separator_color`: fg at `alpha::FAINT` (12 %), the theme's `surfaces.error` token at
   `alpha::STRONG` (70 %) when the status is non-zero; `crates/slopty-theme/src/lib.rs`,
-  `crates/slopty-ui/src/terminal/element.rs`), never on line 0. Search bar and selection are
+  `crates/slopty-terminal/src/element.rs`), never on line 0. Search bar and selection are
   untouched. Headless:
   `cmd_up_and_down_walk_the_prompts_and_separators_follow` (separator rows and colours read
   from `painted_quads`, the three jumps and the return to following output) and

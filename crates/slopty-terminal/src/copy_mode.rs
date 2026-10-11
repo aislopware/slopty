@@ -10,7 +10,7 @@ use gpui::Keystroke;
 use slopty_client::TermState;
 use slopty_grid::{CellWidth, Line, LineFlags, LineIndex};
 
-use crate::terminal::Selection;
+use crate::Selection;
 
 /// What copy mode reads of the grid. [`TermState`] is the one the app has; the tests use a
 /// list of lines.

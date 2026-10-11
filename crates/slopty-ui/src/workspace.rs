@@ -129,6 +129,7 @@ pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
 /// badge's description and what "+" is called.
 #[cfg(test)]
 pub(crate) const CHROME_WORDS: [&str; 1] = [agents::SHOW_PROMPT];
+use slopty_terminal::TerminalView;
 pub use titlebar::titlebar_height;
 use tokio::sync::mpsc;
 
@@ -137,7 +138,6 @@ use crate::folder::FolderView;
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
-use crate::terminal::TerminalView;
 
 /// How long a shell command or an agent's turn has to run before its end, unwatched, is worth a
 /// mark: shorter ones end before the person has looked away.

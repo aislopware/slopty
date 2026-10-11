@@ -32,6 +32,7 @@ pub mod transfers;
 #[cfg(target_os = "macos")]
 pub use drop_in::Carried;
 pub use drop_in::DropIn;
+use slopty_terminal::{ClipHook, ClipPaste};
 
 use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
@@ -40,7 +41,6 @@ use crate::conversation::Attach;
 use crate::conversation::attach::Target;
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
-use crate::terminal::{ClipHook, ClipPaste};
 
 /// How long a paste waits for a worker's clipboard bytes before it gives up. The pasting app's
 /// main thread waits with it, so this is as long as a paste may hang.
@@ -339,7 +339,7 @@ impl WorkspaceView {
     }
 
     /// What a shell of `key` asks on ⌘V and ⌃V: files on the clipboard, which it pastes as a
-    /// drop ([`crate::terminal::TerminalViewEvent::PasteFiles`]); else a picture and no text,
+    /// drop ([`slopty_terminal::TerminalViewEvent::PasteFiles`]); else a picture and no text,
     /// which goes to the worker's pasteboard ahead of the chord, with this client's offer when
     /// the worker has not heard it.
     pub(super) fn clip_hook(&self, key: WorkerKey) -> Option<ClipHook> {

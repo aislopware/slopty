@@ -169,7 +169,7 @@ fn pasted(sent: Vec<ClientMsg>, shell: SessionId) -> Vec<String> {
 fn paste_in(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, shell: SessionId) {
     view.update_in(cx, |v, window, cx| {
         let terminal = v.terminal(shell).expect("attached").clone();
-        terminal.update(cx, |t, cx| t.paste_clipboard(&crate::terminal::Paste, window, cx));
+        terminal.update(cx, |t, cx| t.paste_clipboard(&slopty_terminal::Paste, window, cx));
     });
     cx.run_until_parked();
 }

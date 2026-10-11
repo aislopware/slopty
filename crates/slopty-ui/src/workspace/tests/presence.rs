@@ -38,7 +38,7 @@ fn presence_names_the_seat_the_terminals_in_view_and_the_focused_one(cx: &mut Te
 /// needs the person is `Attention`.
 #[gpui::test]
 fn a_program_s_notification_is_its_own_event_apart_from_an_agent_s(cx: &mut TestAppContext) {
-    use crate::terminal::TerminalViewEvent;
+    use slopty_terminal::TerminalViewEvent;
 
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");

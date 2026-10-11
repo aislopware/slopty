@@ -30,9 +30,9 @@ use slopty_predict::Prediction;
 use slopty_proto::terminal::{Placement, TermSize};
 use slopty_theme::{Colors, Rgb, Theme, alpha};
 
-use crate::terminal::metrics::{self, Grid};
-use crate::terminal::sprite;
-use crate::terminal::view::TerminalView;
+use crate::metrics::{self, Grid};
+use crate::sprite;
+use crate::view::TerminalView;
 
 /// Cell geometry for one layout.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -849,7 +849,7 @@ struct ShapeCache {
 impl gpui::Global for ShapeCache {}
 
 /// What the tests read back about the element's work; nothing in a release build.
-#[cfg(test)]
+#[cfg(any(test, feature = "e2e"))]
 #[derive(Default)]
 struct Probe {
     /// How many times the installed fonts were listed.
@@ -866,7 +866,7 @@ struct Probe {
     sprite_masks: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "e2e"))]
 impl gpui::Global for Probe {}
 
 /// Sprite tiles remembered before the table starts over (every cell size adds its own).
@@ -1452,7 +1452,7 @@ impl Element for TerminalElement {
         if !cx.has_global::<ShapeCache>() {
             cx.set_global(ShapeCache::default());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         if !cx.has_global::<Probe>() {
             cx.set_global(Probe::default());
         }
@@ -1463,11 +1463,11 @@ impl Element for TerminalElement {
         let known_family = self.view.read(cx).font_family();
         let family = known_family.unwrap_or_else(|| {
             let candidates = self.view.read(cx).theme().typography.mono_families.clone();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "e2e"))]
             let listed = cx.global::<ShapeCache>().families.len();
             let picked =
                 cx.update_global::<ShapeCache, _>(|cache, _| cache.family(window, &candidates));
-            #[cfg(test)]
+            #[cfg(any(test, feature = "e2e"))]
             if cx.global::<ShapeCache>().families.len() > listed {
                 cx.global_mut::<Probe>().picks = cx.global::<Probe>().picks.saturating_add(1);
             }
@@ -1536,11 +1536,11 @@ impl Element for TerminalElement {
         // Shaping reads the view's rows in place (no copy of the grid per frame) while the
         // cache is out of the app: put it back before anything else touches `cx`.
         let mut cache = std::mem::take(cx.global_mut::<ShapeCache>());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         let sprite_masks = cache.sprites.len();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         let mut shaped = 0_usize;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         let mut built = 0_usize;
         // What this view built of its rows last frame, and what it builds of them in this one.
         let mut rows_before = self.view.update(cx, |view, _cx| view.take_row_cache());
@@ -1550,7 +1550,7 @@ impl Element for TerminalElement {
         let sprite_thickness = (f32::from(grid.underline.thickness) * scale).round().max(1.0);
         // Textures for the placed images are made (and stale ones dropped) before the read.
         let placed = self.view.update(cx, |view, _cx| view.placed_images(window));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         let mut caption_texts: Vec<String> = Vec::new();
         // A viewport that moved since the last frame brings the scrollbar up in this one.
         let now = cx.background_executor().now();
@@ -1696,7 +1696,7 @@ impl Element for TerminalElement {
                 let parts = if let Some((_, _, parts)) = kept {
                     parts
                 } else {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "e2e"))]
                     {
                         built = built.saturating_add(1);
                     }
@@ -1797,7 +1797,7 @@ impl Element for TerminalElement {
                             let key = segment_hash(base, word, blink_off);
                             (col, key).hash(&mut words);
                             let shaped_word = cache.words.get_or_shape(key, || {
-                                #[cfg(test)]
+                                #[cfg(any(test, feature = "e2e"))]
                                 {
                                     shaped = shaped.saturating_add(1);
                                 }
@@ -1873,7 +1873,7 @@ impl Element for TerminalElement {
                         let style = &CellStyle::DEFAULT;
                         let mut run = text_run(text.len(), style, look(false), &mut cache.contrast);
                         run.color = hsla_alpha(palette.theme.fg, alpha::TINT);
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "e2e"))]
                         caption_texts.push(text.clone());
                         let shaped = text_system.shape_line(
                             SharedString::from(text),
@@ -2037,7 +2037,7 @@ impl Element for TerminalElement {
                 hitbox,
             }
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         {
             let masks = cache.sprites.len().saturating_sub(sprite_masks);
             let probe = cx.global_mut::<Probe>();
@@ -2685,14 +2685,16 @@ pub(super) fn sprite_masks(cx: &App) -> usize {
 }
 
 /// How many times the installed fonts were listed (tests: once for every view of the app).
-#[cfg(test)]
-pub(crate) fn family_picks(cx: &App) -> usize {
+#[cfg(any(test, feature = "e2e"))]
+#[must_use]
+pub fn family_picks(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.picks)
 }
 
 /// How many rows the last prepaint built (tests: only the rows inside the clip).
-#[cfg(test)]
-pub(crate) fn rows_prepared(cx: &App) -> usize {
+#[cfg(any(test, feature = "e2e"))]
+#[must_use]
+pub fn rows_prepared(cx: &App) -> usize {
     cx.try_global::<Probe>().map_or(0, |probe| probe.rows_prepared)
 }
 
@@ -3333,7 +3335,7 @@ mod tests {
         use slopty_grid::{LineIndex, RowUpdate, Style, TermModes};
         use slopty_proto::terminal::{Frame, TermEvent};
 
-        use crate::terminal::scrollbar::{FADE, LINGER};
+        use crate::scrollbar::{FADE, LINGER};
 
         cx.update(gpui_kit::init);
         let (tx, _rx) = tokio::sync::mpsc::channel(64);

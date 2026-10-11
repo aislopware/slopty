@@ -18,12 +18,12 @@ use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
 use slopty_proto::thread::ThreadId;
+use slopty_terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 
 use super::attention::About;
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::file::{FileView, FileViewEvent};
 use crate::screen::ScreenView;
-use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 
 /// How long a quote waits for the composer it is for to be made, its face brought up or its
 /// tile opened for it (an opened tile comes back from the worker first).

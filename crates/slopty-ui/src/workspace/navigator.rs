@@ -4019,7 +4019,7 @@ impl WorkspaceView {
         let figure = t.progress.and_then(progress_figure).map(|figure| {
             readout(theme, figure).debug_selector(move || format!("nav-progress-{id}"))
         });
-        let bar = t.progress.and_then(crate::terminal::progress::shown).map(|progress| {
+        let bar = t.progress.and_then(slopty_terminal::progress::shown).map(|progress| {
             div().debug_selector(move || format!("nav-progress-bar-{id}")).w(px(NAV_BAR_W)).child(
                 kit::progress::Bar::new(theme, format!("nav-progress-{id}-bar"), progress)
                     .label("Progress")

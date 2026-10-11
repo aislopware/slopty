@@ -37,10 +37,10 @@ use slopty_proto::transfer::ClipMsg;
 use slopty_theme::{Colors, Theme, alpha};
 use tokio::sync::mpsc;
 
-use crate::terminal::copy_mode::{self, Command, Motion};
-use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
-use crate::terminal::scrollbar::Visibility;
-use crate::terminal::{latency, url};
+use crate::copy_mode::{self, Command, Motion};
+use crate::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
+use crate::scrollbar::Visibility;
+use crate::{latency, url};
 
 /// Hits asked for per search; the worker counts every hit regardless.
 const SEARCH_MAX: u32 = 5_000;
@@ -490,9 +490,9 @@ pub struct TerminalView {
     /// unchanged (`Window::paint_keyed`); off, every row is painted afresh every frame.
     keyed_paint: bool,
     /// Times this view was rendered rather than replayed from the view cache (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "e2e"))]
     renders: u32,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "e2e"))]
     drawn_focused: Option<bool>,
     predictor: Predictor,
     /// Keystroke → paint, predicted and echoed (see [`latency`]). Shared with the element,
@@ -692,10 +692,9 @@ impl TerminalView {
             font_family: None,
             row_cache: RowCache::default(),
             keyed_paint: true,
-            #[cfg(test)]
-            #[cfg(test)]
+            #[cfg(any(test, feature = "e2e"))]
             renders: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "e2e"))]
             drawn_focused: None,
             predictor: predictor(),
             latency: Rc::default(),
@@ -2398,13 +2397,15 @@ impl TerminalView {
     }
 
     /// Times this view was rendered rather than replayed from the view cache.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "e2e"))]
+    #[must_use]
     pub const fn renders(&self) -> u32 {
         self.renders
     }
 
     /// Whether its last drawing was of a view with the keyboard (`None`: not drawn yet).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "e2e"))]
+    #[must_use]
     pub const fn drawn_focused(&self) -> Option<bool> {
         self.drawn_focused
     }
@@ -4240,7 +4241,7 @@ impl Render for TerminalView {
             self.file_drag_left(cx);
         }
         let focused = self.focus.is_focused(window);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "e2e"))]
         {
             self.renders = self.renders.saturating_add(1);
             self.drawn_focused = Some(focused);
@@ -4606,7 +4607,7 @@ mod tests {
     use slopty_proto::terminal::{Frame, ProgressState, TermRequest};
 
     use super::*;
-    use crate::terminal::element::separator_color;
+    use crate::element::separator_color;
 
     /// A focused terminal in a headless window with the Terminal bindings, drawn once.
     fn terminal(
@@ -5257,9 +5258,8 @@ mod tests {
         };
         view.update_in(cx, |view, _window, cx| view.apply(frame(1, ["foo bar", "bar", "foo"]), cx));
         cx.run_until_parked();
-        let words = |cx: &mut VisualTestContext| {
-            cx.update(|_window, cx| crate::terminal::element::cached_words(cx))
-        };
+        let words =
+            |cx: &mut VisualTestContext| cx.update(|_window, cx| crate::element::cached_words(cx));
         assert_eq!(words(cx), 2, "foo and bar");
         view.update_in(cx, |view, _window, cx| view.apply(frame(2, ["bar foo", "foo", "bar"]), cx));
         cx.run_until_parked();
@@ -5274,9 +5274,8 @@ mod tests {
     #[gpui::test]
     fn a_frame_builds_only_the_rows_that_changed(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
-        let built = |cx: &mut VisualTestContext| {
-            cx.update(|_window, cx| crate::terminal::element::rows_built(cx))
-        };
+        let built =
+            |cx: &mut VisualTestContext| cx.update(|_window, cx| crate::element::rows_built(cx));
         cursor_at_the_prompt(&view, cx);
         // The first key switches the window to keyboard modality, which GPUI redraws for once.
         cx.simulate_keystrokes("z");
@@ -6287,7 +6286,7 @@ mod tests {
         cx.run_until_parked();
         let tick = view.read_with(cx, |v, _| {
             let m = v.metrics.expect("laid out");
-            let ticks = crate::terminal::element::block_ticks(
+            let ticks = crate::element::block_ticks(
                 &m,
                 v.state.block_marks(),
                 LineIndex(0),
@@ -6422,7 +6421,7 @@ mod tests {
         let captions = |cx: &mut VisualTestContext| {
             view.update(cx, |_v, cx| cx.notify());
             cx.run_until_parked();
-            cx.update(|_window, cx| crate::terminal::captions_drawn(cx))
+            cx.update(|_window, cx| crate::captions_drawn(cx))
         };
         assert_eq!(captions(cx), Vec::<String>::new());
         view.update(cx, |v, _cx| {
@@ -7242,7 +7241,7 @@ mod tests {
     /// it draws once to go, and no frame of a fade is asked for.
     #[gpui::test]
     fn the_scrollbar_goes_without_a_fade_under_reduce_motion(cx: &mut TestAppContext) {
-        use crate::terminal::scrollbar::{FADE, LINGER};
+        use crate::scrollbar::{FADE, LINGER};
         let (view, _rx, cx) = terminal(cx);
         cx.update(|_w, cx| cx.set_reduce_motion(true));
         view.update_in(cx, |view, _window, cx| {
@@ -7281,7 +7280,7 @@ mod tests {
     /// pages, and the text under the bar is not selected by those clicks.
     #[gpui::test]
     fn the_scrollbar_drags_and_pages_the_viewport(cx: &mut TestAppContext) {
-        use crate::terminal::scrollbar::{FADE, LINGER};
+        use crate::scrollbar::{FADE, LINGER};
         let (view, _rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(history_frame(0, &["hello wor", "second", "third row"]), cx);
@@ -8815,9 +8814,8 @@ mod tests {
     #[gpui::test]
     fn a_sprite_is_masked_once(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
-        let masks = |cx: &mut VisualTestContext| {
-            cx.update(|_window, cx| crate::terminal::element::sprite_masks(cx))
-        };
+        let masks =
+            |cx: &mut VisualTestContext| cx.update(|_window, cx| crate::element::sprite_masks(cx));
         let boxed = ["╭──╮".to_owned(), "│  │".to_owned(), "╰──╯".to_owned()];
         view.update_in(cx, |view, _window, cx| view.apply(screen_of(1, 10, &boxed), cx));
         cx.run_until_parked();
@@ -8896,9 +8894,8 @@ mod tests {
         cx.simulate_resize(size(px(1000.0), px(900.0)));
         cx.run_until_parked();
         let (a, b) = (prose(0x2545_f491, 40, 90), prose(0x9e37_79b9, 40, 90));
-        let shaped = |cx: &mut VisualTestContext| {
-            cx.update(|_window, cx| crate::terminal::element::shaped_words(cx))
-        };
+        let shaped =
+            |cx: &mut VisualTestContext| cx.update(|_window, cx| crate::element::shaped_words(cx));
         let draw = |seq: u64, rows: &[String], cx: &mut VisualTestContext| {
             let started = Instant::now();
             view.update_in(cx, |view, _window, cx| view.apply(screen_of(seq, 100, rows), cx));
@@ -9233,7 +9230,7 @@ mod tests {
         let backed = run(&mut || None, cx);
         let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
         assert!(usize::try_from(drawn).is_ok_and(|d| d >= 4 * (WARM + FRAMES)), "every frame drew");
-        let shaped = cx.update(|_window, cx| crate::terminal::element::shaped_words(cx));
+        let shaped = cx.update(|_window, cx| crate::element::shaped_words(cx));
         println!(
             "MEASURE dense screen {COLS} × {ROWS}, frame applied and drawn (p50 / p95 / p99 / \
              max, {FRAMES} frames each): unchanged {unchanged} · a line a frame {flood} · a \

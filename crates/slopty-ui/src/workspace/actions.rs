@@ -390,7 +390,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 /// A terminal's key bindings in effect: the keymap's terminal scope, the terminal's own commands
-/// ([`crate::terminal::commands`]) with the file's `[keys.terminal]` over them.
+/// ([`slopty_terminal::commands`]) with the file's `[keys.terminal]` over them.
 #[must_use]
 pub fn terminal_key_bindings() -> Vec<KeyBinding> {
     crate::keymap::current().bindings(|scope| scope == Scope::Terminal)
@@ -399,7 +399,7 @@ pub fn terminal_key_bindings() -> Vec<KeyBinding> {
 /// The palette's lines for the workspace's and the terminal's actions, with their keys.
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
-    use crate::terminal::{
+    use slopty_terminal::{
         ClearScreen, CopyBlockOutput, CopyLastOutput, CopyMode, Find, NextPrompt, PrevPrompt,
         RerunLast,
     };
@@ -511,10 +511,10 @@ impl super::WorkspaceView {
             return Vec::new();
         }
         let terminal = terminal_key_bindings();
-        let block = Box::new(crate::terminal::AttachBlock);
+        let block = Box::new(slopty_terminal::AttachBlock);
         let mut lines = vec![PaletteItem::new("Attach block to agent", block, &terminal)];
         if self.terminals.get(&session).is_some_and(|t| t.read(cx).has_selection()) {
-            let selection = Box::new(crate::terminal::AttachSelection);
+            let selection = Box::new(slopty_terminal::AttachSelection);
             lines.push(PaletteItem::new("Attach selection to agent", selection, &terminal));
         }
         lines

@@ -65,10 +65,10 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::server::Liveness;
 use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
+use slopty_terminal::{TerminalView, TerminalViewEvent};
 use slopty_theme::{Density, Spacing, Theme, Typography};
 use slopty_ui::screen::{ScreenView, Sticky};
 use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
-use slopty_ui::terminal::{TerminalView, TerminalViewEvent};
 use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{
     Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
@@ -1632,7 +1632,7 @@ impl Workspace {
                         batch.push(next);
                     }
                     let disconnected = cx.update(|cx| {
-                        cx.set_global(slopty_ui::terminal::LinkArrival(arrived));
+                        cx.set_global(slopty_terminal::LinkArrival(arrived));
                         batch.into_iter().fold(false, |down, event| {
                             down | apply_link_event(&this, &view, key, event, cx)
                         })
@@ -3431,10 +3431,10 @@ impl Workspace {
             target.update(cx, |t, cx| {
                 if has_selection {
                     // Copy, then the key reads "Paste" again.
-                    t.copy(&slopty_ui::terminal::Copy, window, cx);
+                    t.copy(&slopty_terminal::Copy, window, cx);
                     t.clear_selection(cx);
                 } else {
-                    t.paste_clipboard(&slopty_ui::terminal::Paste, window, cx);
+                    t.paste_clipboard(&slopty_terminal::Paste, window, cx);
                 }
             });
         });
@@ -3450,9 +3450,9 @@ impl Workspace {
         let find = tab_stop(find, focus).on_click(move |_ev, window, cx| {
             target.update(cx, |t, cx| {
                 if finding {
-                    t.close_find(&slopty_ui::terminal::CloseFind, window, cx);
+                    t.close_find(&slopty_terminal::CloseFind, window, cx);
                 } else {
-                    t.find(&slopty_ui::terminal::Find, window, cx);
+                    t.find(&slopty_terminal::Find, window, cx);
                 }
             });
         });

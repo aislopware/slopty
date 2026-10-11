@@ -1039,7 +1039,7 @@ impl TerminalInfo {
     }
 }
 
-/// Keystroke → paint (`slopty_ui::terminal::latency`), microseconds, over the last 256 keys.
+/// Keystroke → paint (`slopty_terminal::latency`), microseconds, over the last 256 keys.
 ///
 /// `echo_*` runs from the key to the paint of the first frame the worker produced after applying
 /// it; `predicted_*` from the key to the paint that showed the local-echo guess, counted only

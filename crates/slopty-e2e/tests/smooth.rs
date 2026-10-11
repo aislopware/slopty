@@ -654,7 +654,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
     /// and as the adaptive policy decides. Where a guess lands ahead of the echo, and by how much,
     /// decides the predictor's `SLOW_LINK` (MEASUREMENTS, "the prediction threshold over a
     /// shaped link"). Misses are the app's `prediction miss` lines
-    /// (`RUST_LOG=slopty_ui::terminal::view=debug`).
+    /// (`RUST_LOG=slopty_terminal::view=debug`).
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn typing_over_a_shaped_round_trip_on_the_mac() {

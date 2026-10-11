@@ -165,6 +165,7 @@ impl Shard {
             Self::Ui => &[
                 "slopty-ui",
                 "slopty-kit",
+                "slopty-terminal",
                 "slopty-app",
                 "slopty",
                 "slopty-e2e",

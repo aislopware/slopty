@@ -36,11 +36,11 @@ use slopty_proto::drag::{DragId, Promised};
 use slopty_proto::items::ItemKind;
 #[cfg(target_os = "macos")]
 use slopty_proto::transfer::{RepRef, Source};
+#[cfg(target_os = "macos")]
+use slopty_terminal::{DropHook, DropNews, SinkDropped};
 
 use super::{Upload, WorkspaceView};
 use crate::screen::ScreenView;
-#[cfg(target_os = "macos")]
-use crate::terminal::{DropHook, DropNews, SinkDropped};
 
 /// A drag from this device over the window: the remote tile it is over, if any, and a drop
 /// waiting for its promised files.

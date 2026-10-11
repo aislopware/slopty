@@ -148,7 +148,7 @@ fn flagged_chains(
 /// Words that do not fit end in an ellipsis or fade; nothing is clipped mid-glyph.
 #[test]
 fn no_words_are_cut_mid_glyph() {
-    const AWAITING: [&str; 1] = ["slopty-ui/src/terminal/view.rs"];
+    const AWAITING: [&str; 1] = ["slopty-terminal/src/view.rs"];
     let wrong = flagged_chains(&AWAITING, cut_mid_glyph);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
@@ -165,4 +165,12 @@ fn no_ellipsis_is_asked_around_chrome_text() {
 fn a_chip_of_words_has_a_bound() {
     let wrong = flagged_chains(&[], unbounded_chip);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The sweeps read the terminal's crate: its view's chains are what the mid-glyph check flags
+/// there once the view is no longer waived as awaiting the kit.
+#[test]
+fn the_sweeps_flag_the_terminal() {
+    let wrong = flagged_chains(&[], cut_mid_glyph);
+    assert!(wrong.iter().any(|w| w.contains("slopty-terminal/src/view.rs")), "{wrong:#?}");
 }

@@ -995,7 +995,7 @@ fn tiles_not_shown_are_not_drawn(cx: &mut TestAppContext) {
         .copied()
         .find(|t| cx.debug_bounds(selector("item", t.item)).is_none())
         .expect("a tile behind another");
-    let rows = cx.update(|_window, cx| crate::terminal::rows_prepared(cx));
+    let rows = cx.update(|_window, cx| slopty_terminal::rows_prepared(cx));
     let per_grid = view.read_with(cx, |v, cx| {
         v.terminal(session_of(v, tiles[5])).and_then(|t| t.read(cx).metrics()).map(|m| m.rows)
     });
@@ -1099,7 +1099,7 @@ fn the_installed_fonts_are_listed_once_for_every_shell(cx: &mut TestAppContext) 
         .filter(|(_, tile)| cx.debug_bounds(selector("item", tile.item)).is_some())
         .count();
     assert!(drawn > 1, "shells drawn at once: {drawn}");
-    let picks = cx.update(|_window, cx| crate::terminal::family_picks(cx));
+    let picks = cx.update(|_window, cx| slopty_terminal::family_picks(cx));
     assert_eq!(picks, 1, "one walk of the installed fonts for the whole app");
 }
 

@@ -10586,8 +10586,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     rasterizer, and `slopty-theme`.
   - **The lints.** The chrome's source lints scan every crate the chrome is drawn in, so they
     live in the top crate as `slopty-ui/src/lints.rs` (with `lints/overflow.rs`) and sweep
-    `CHROME`: `slopty-kit/src`, `slopty-ui/src` and `slopty-app/src`. Their own files are not
-    swept. `lints::the_sweeps_read_the_kit` holds that the kit is read: the kit's own scrim
+    `CHROME`: `slopty-kit/src`, `slopty-terminal/src`, `slopty-ui/src` and `slopty-app/src`.
+    Their own files are not swept. `lints::the_sweeps_read_the_kit_and_the_terminal` holds that
+    the kit is read: the kit's own scrim
     is what the elevation check flags there once its waiver is left out. The kit's unit tests
     (a button, a hint, motion, sizes) stay in `kit`.
   - **Test reach.** What the views' tests read of the kit (`a11y::tree`, the retained-frame
@@ -10598,3 +10599,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     moving the views' unit tests into integration crates, since that lifts them a layer or
     grows a public API only for tests.
   - Numbers: `docs/MEASUREMENTS.md`, "slopty-ui split, step 1".
+- ✅ **The terminal is a crate of its own** (2026-10-11, the second step of splitting
+  `slopty-ui`). `slopty-terminal` holds the terminal view and its element: the grid's paint,
+  find, copy mode, links and paths, pictures, pastes, drops, latency and progress, with
+  their tests (18,000 lines). The views sit on it, and it stands on the kit:
+  `slopty-ui` → `slopty-terminal` → `slopty-kit`.
+  - **The cuts, first and on their own.** The terminal reached into the views in three
+    places, and each now points down or stays inside the terminal. The paint layers are the
+    kit's (`slopty_kit::layer::Layer`). A shell's paste is `ClipPaste::of`, beside the type
+    it builds. The terminal declares its own commands (`terminal::commands`, its key contexts
+    `CTX` and `SEARCH_CTX`), and the keymap takes them into its one table at the same place,
+    so the keymap and `[keys.terminal]` stay in `slopty-ui`. `keymap/defaults.txt` records
+    the whole default table: each command's key, action, chords and contexts, in order. It was
+    recorded before the rows moved, and `the_default_table_is_as_recorded` holds the table to
+    it. The test of the kit's keys around a shell is the keymap's (`keymap::tests`), where
+    `install` lets them through.
+  - **What it stands on.** The terminal is a client view of the term stream, so it depends on
+    `slopty-client` (the session's state, its pacing, the clipboard it pastes from, the files
+    dropped on it). Below that it uses `slopty-grid`, `slopty-predict`, `slopty-proto`,
+    `slopty-core`, `slopty-platform`, `slopty-theme` and the kit. It does not depend on
+    `slopty-settings`, `slopty-agent` or any view crate.
+  - **Test reach.** The views' tests read the paint probe's counters (`family_picks`,
+    `rows_prepared`) and how often a view was drawn (`renders`, `drawn_focused`). These sit
+    behind the crate's `e2e` feature, which `slopty-ui` turns on as a dev-dependency. The
+    terminal's own tests get them through `cfg(test)`.
+  - **The lints** sweep `slopty-terminal/src` with the rest of `CHROME`.
+    `overflow::the_sweeps_flag_the_terminal` holds that a check reads the terminal's view.
+  - Numbers: `docs/MEASUREMENTS.md`, "slopty-ui split, step 2".

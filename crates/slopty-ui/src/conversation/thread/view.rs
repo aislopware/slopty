@@ -2516,7 +2516,7 @@ impl Render for ThreadView {
                     cx.listener(|this, _: &WatchAgentScreen, _w, cx| this.watch_screen(cx)),
                 )
             })
-            .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| {
+            .on_action(cx.listener(|this, _: &slopty_terminal::Find, window, cx| {
                 this.open_find(window, cx);
             }))
             // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥

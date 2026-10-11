@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 use gpui::{App, Context};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::screen::SourceState;
+use slopty_terminal::TerminalView;
 
 use super::WorkspaceView;
 use crate::browser::BrowserView;
 use crate::file::FileView;
 use crate::folder::FolderView;
 use crate::screen::{ScreenView, StreamHeader};
-use crate::terminal::TerminalView;
 
 /// How often the running readouts' clock moves: they count whole seconds.
 const READOUT_TICK: Duration = Duration::from_secs(1);

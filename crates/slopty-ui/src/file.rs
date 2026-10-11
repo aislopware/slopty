@@ -58,10 +58,10 @@ use slopty_kit::icons::{IconSize, Symbol};
 use slopty_kit::kit::{ButtonKind, size_label};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
+use slopty_terminal::Find;
 use slopty_theme::{Theme, alpha};
 
 use crate::authorship::{self, Authored, Opens};
-use crate::terminal::Find;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 mod actions {
@@ -344,7 +344,7 @@ pub fn terminal_command(line: &str) -> Vec<String> {
 /// The shell line that pages `path` (`$PAGER`, else `less`).
 #[must_use]
 pub fn pager_command(path: &str) -> String {
-    format!("${{PAGER:-less}} {}", crate::terminal::url::shell_word(path))
+    format!("${{PAGER:-less}} {}", slopty_terminal::url::shell_word(path))
 }
 
 /// The view of one file item.
@@ -1394,7 +1394,7 @@ impl FileView {
     /// a terminal on its worker instead ($EDITOR at the tile's line, or $PAGER).
     fn too_large(&self, size: u64, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
-        let editor = crate::terminal::url::editor_command(&self.path, self.focus_line_number());
+        let editor = slopty_terminal::url::editor_command(&self.path, self.focus_line_number());
         let pager = pager_command(&self.path);
         let ways = div()
             .mt(px(theme.spacing.sm))

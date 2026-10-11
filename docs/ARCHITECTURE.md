@@ -33,8 +33,9 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      ┌────────────────────────────────────────┼─────────────────────────────┐
                      │ client (macOS app · iOS app · CLI)     ▼                              │
                      │ slopty-client: session state · line cache · prediction · items · layout│
-                     │ slopty-ui (GPUI): workspace · terminal element · surface element · chrome│
-                     │ slopty-kit: the chrome kit · icons · type · colour · motion              │
+                     │ slopty-ui (GPUI): workspace · surface element · the views · the keymap│
+                     │ slopty-terminal: the terminal view · its element · find · copy mode   │
+                     │ slopty-kit: the chrome kit · icons · type · colour · motion           │
                      │ slopty-codec (decode) → CVPixelBuffer → gpui surface (zero copy)      │
                      └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -177,7 +178,7 @@ runs, so a link-free row costs one byte and no cell carries an id. The client dr
 under the pointer underlined while ⌘ is held (the pointer a hand, an I-beam elsewhere, the
 arrow while a program reports the mouse), names the target in a chip at the tile's corner
 (`TerminalView::link_target`) and opens the URI on ⌘-click; the OSC 8 target
-wins over the plain-text URL scan (`slopty_ui::terminal::url`). OSC 52 (and iTerm2 OSC 1337
+wins over the plain-text URL scan (`slopty_terminal::url`). OSC 52 (and iTerm2 OSC 1337
 Copy) writes to the *system* clipboard become `TermEvent::ClipboardWrite`, capped at
 `MAX_OSC52_BYTES`, and every attached client puts the text on its own clipboard;
 selection/primary targets and every read (`?`) are dropped on the worker, and no message exists
@@ -249,7 +250,7 @@ rest of a multi-line prompt, `Input`, `Output`; `input` is the column of the row
 `Input` cell (libghostty's per-cell `CellSemanticContent`), where the typed command begins. The scanner also reports `C`: libghostty takes that row out of the prompt without writing a cell, so the engine keeps the line in `forced_rows` and the next frame carries it (prompt flag read from the live grid, since the render state only copies dirty rows); without this a `sleep` typed at a fresh prompt showed as running only when it ended. `slopty_worker::session=trace` logs every PTY read's bytes (`pty read`), the evidence behind the rulings in `docs/decisions/terminal.md`. The client side is in §6.
 
 **Render metrics.** The cell grid is derived exactly as ghostty derives it
-(`slopty_ui::terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
+(`slopty_terminal::metrics`, ported from `vendor/ghostty/src/font/Metrics.zig`): a pure
 function from a face — advance, ascent, descent, line gap, and the underline/strikethrough
 metrics when the font has them — to whole **device** pixels for the cell, the baseline, the
 underline, the strikethrough, the overline and the cursor (which spans both columns of a
@@ -1510,7 +1511,7 @@ since the first line, and on the viewport's top row only when the command failed
 rule there would double the tile header's hairline): the
 command-block separator, the foreground at `alpha::FAINT` (12 %), or the theme's `surfaces.error` token
 at `alpha::STRONG` (70 %) when the row's `Prompt { exit }` is non-zero
-(`separator_color` in `crates/slopty-ui/src/terminal/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
+(`separator_color` in `crates/slopty-terminal/src/element.rs`; `crates/slopty-theme/src/lib.rs`), and at the right end of a
 prompt row whose command took a second or more, its duration (`took_label`, fg at
 `alpha::TINT`; `TerminalView::took` by prompt row from `Effect::CommandFinished`,
 emptied with the epoch; the sticky block header repeats it at its right end). Terminal-context bindings: ⌘C /
