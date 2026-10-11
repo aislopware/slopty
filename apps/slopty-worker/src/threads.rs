@@ -36,6 +36,7 @@ use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
 use slopty_worker::thread::history::{self, History};
+use slopty_worker::thread::host::UnderWay;
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::screens::Screens;
@@ -351,6 +352,32 @@ pub fn start(daemon: &Daemon, asks: Observing) {
         act_as(&who, &sending, thread, id, &intent)
     });
     drop(schedule::spawn(threads.host.clone(), fire));
+    resume_starts(threads);
+}
+
+/// Why a start whose agent was opening when the worker stopped is said to have failed.
+const OPENING_LOST: &str = "The worker restarted while this start opened its agent. Look for \
+    its thread before starting it again";
+
+/// Bring each start a worker before this one left under way to an outcome.
+///
+/// No client then waits on one nobody holds. One still making or setting up its worktree is
+/// taken up again from the top, as a client's repeat of it would be: the worktree is reopened
+/// and its setup, which never finished, runs again, the one the old worker left running ended
+/// first. One whose agent was opening may have opened it, so it is said to have failed rather
+/// than open a second agent.
+fn resume_starts(threads: &Threads) {
+    for UnderWay { id, start, begun } in threads.host.starts_under_way() {
+        if begun {
+            tracing::warn!(%id, "a start was opening its agent when the worker stopped");
+            let _said = threads.host.record_start(id, refused(OPENING_LOST.to_owned()));
+            continue;
+        }
+        tracing::info!(%id, agent = %start.agent.0, "a start the worker stopped during goes on");
+        let again = threads.clone();
+        let _followed =
+            threads.starts.clone().take_up(id, |said| run_start(again, id, Box::new(start), said));
+    }
 }
 
 /// What a request needs of the connection it came on.
@@ -654,6 +681,8 @@ impl Following {
 /// Start a thread for intent `id` as `start` says, in the worktree it names once that is made
 /// and set up, telling `said` what the setup says as it goes. Its outcome is recorded with the
 /// host's starts, so a repeat of the id long after gets it back and sets nothing up again.
+/// Until then it is kept as under way ([`Host::start_under_way`]), for a worker that starts
+/// after this one stopped ([`resume_starts`]).
 async fn run_start(
     threads: Threads,
     id: IntentId,
@@ -664,8 +693,12 @@ async fn run_start(
     let say = |setup: &Setup| {
         said.send_replace(Some(setup.clone()));
     };
+    threads.host.start_under_way(id, &start);
     let outcome = match worktrees::enter(&mut start, &say).await {
-        Ok(_) => begin(&threads, id, start).await,
+        Ok(_) => {
+            threads.host.start_begins(id);
+            begin(&threads, id, start).await
+        }
         Err(worktrees::Failed::Setup(failed)) => {
             Outcome::SetupFailed { setup: failed.setup, code: failed.code }
         }

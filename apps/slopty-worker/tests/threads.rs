@@ -49,6 +49,25 @@ mod threads {
         pasteboard: String,
         addr: SocketAddr,
         dir: PathBuf,
+        /// What each daemon has over its scrubbed environment.
+        env: Vec<(String, std::ffi::OsString)>,
+    }
+
+    impl Daemons {
+        /// The worker killed outright, as a crash or an update's kill ends it, and a new one
+        /// started on the same ptyd and data: its address from then on.
+        async fn restart_worker(&mut self) {
+            let mut old = self.children.split_off(1);
+            let ended = slopty_testkit::group::end(&mut old, Child::id, |child| {
+                child.try_wait().is_ok_and(|status| status.is_some())
+            });
+            assert!(ended, "the old worker's group is gone");
+            let env: Vec<(&str, std::ffi::OsString)> =
+                self.env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            let (worker, addr) = worker_on(&self.dir, &env, &self.pasteboard).await;
+            self.children.push(worker);
+            self.addr = addr;
+        }
     }
 
     impl Drop for Daemons {
@@ -95,16 +114,28 @@ mod threads {
         }
         let leaf = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let pasteboard = format!("dev.aislopware.slopty.threads.{leaf}");
+        let (worker, addr) = worker_on(dir, env, &pasteboard).await;
+        let env = env.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
+        Daemons { children: vec![ptyd, worker], pasteboard, addr, dir: dir.to_path_buf(), env }
+    }
+
+    /// A worker on `dir`'s ptyd and data, with `env` over its scrubbed environment, and the
+    /// address it listens on.
+    async fn worker_on(
+        dir: &Path,
+        env: &[(&str, std::ffi::OsString)],
+        pasteboard: &str,
+    ) -> (Child, SocketAddr) {
         let mut worker = scrubbed(bin("slopty-worker"), dir)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .arg("--ptyd-socket")
-            .arg(&ptyd_sock)
+            .arg(dir.join("ptyd.sock"))
             .arg("--ctl-socket")
             .arg(dir.join("worker.sock"))
             .arg("--data-dir")
             .arg(dir.join("data"))
             .args(["--print-addr", "--port", "0"])
-            .env("SLOPTY_PASTEBOARD", &pasteboard)
+            .env("SLOPTY_PASTEBOARD", pasteboard)
             .env("SLOPTY_DROP_DIR", dir.join("drop"))
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -122,7 +153,7 @@ mod threads {
         } else {
             bound
         };
-        Daemons { children: vec![ptyd, worker], pasteboard, addr, dir: dir.to_path_buf() }
+        (worker, addr)
     }
 
     /// The fixture transcripts and hooks `slopty-agent` pins its decoder with.
@@ -1519,6 +1550,104 @@ mod threads {
         let runs = std::fs::read_to_string(clone.join("runs")).unwrap();
         assert_eq!(runs, "run\n", "the setup ran once, through the drop");
         let tree = clone.join(".claude/worktrees/claude-5ea7ed");
+        let seen = recorded(&record).await;
+        assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
+    }
+
+    /// A start the worker stops during (a crash, an update's kill) is taken up by the worker
+    /// that starts next, with no client asking: its setup, which never finished, runs again in
+    /// the worktree, the one the old worker left running ended first, and the agent opens. The
+    /// client back asks the same start and is answered with the thread, nothing run a third
+    /// time.
+    #[tokio::test]
+    async fn a_start_the_worker_restarts_during_is_finished_by_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (mut daemons, record) = with_claude(&root).await;
+        let clone = root.join("atlas");
+        std::fs::create_dir_all(&clone).unwrap();
+        // The setup names its group and says it is under way, then waits on a pipe the test
+        // writes to once the next worker runs it again.
+        let go = root.join("go");
+        let made = std::process::Command::new("mkfifo").arg(&go).status().unwrap();
+        assert!(made.success(), "mkfifo");
+        let setup = format!(
+            r#"{{"scripts":{{"setup":"echo $$ >> \"$SLOPTY_ROOT_PATH/runs\"\necho waiting\nread line < {}"}}}}"#,
+            go.display()
+        );
+        std::fs::write(clone.join("conductor.json"), setup).unwrap();
+        std::fs::write(clone.join(".gitignore"), "runs\n").unwrap();
+        for args in
+            [&["init", "-q", "-b", "main"][..], &["add", "."], &["commit", "-q", "-m", "c0"]]
+        {
+            let done = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&clone)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .unwrap();
+            assert!(done.success(), "git {args:?}");
+        }
+        let start = Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: clone.to_string_lossy().into_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
+            args: Vec::new(),
+            worktree: Some(NewWorktree::named("claude-4e57a7")),
+        };
+        let client = ClientId::new();
+        let id = IntentId::new();
+        let mut a = Client::connect(&daemons, client).await;
+        a.send(ThreadRequest::Start { id, start: Box::new(start.clone()) }).await;
+        a.heard(|msg| match msg {
+            WorkerMsg::SettingUp { id: at, setup } if at == id => {
+                setup.tail.iter().any(|line| line == "waiting").then_some(())
+            }
+            _ => None,
+        })
+        .await;
+        a.leave().await;
+
+        daemons.restart_worker().await;
+        let runs = clone.join("runs");
+        let groups = loop {
+            let read = std::fs::read_to_string(&runs).unwrap_or_default();
+            let groups: Vec<String> = read.lines().map(str::to_owned).collect();
+            if groups.len() >= 2 {
+                break groups;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &groups[0]])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!alive.success(), "the setup the old worker left running was ended first");
+        tokio::task::spawn_blocking(move || std::fs::write(go, "go\n")).await.unwrap().unwrap();
+
+        let mut b = Client::connect(&daemons, client).await;
+        b.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+        let outcome = b
+            .heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let ran = std::fs::read_to_string(&runs).unwrap();
+        assert_eq!(ran.lines().count(), 2, "set up again once, by the next worker: {ran}");
+        let tree = clone.join(".claude/worktrees/claude-4e57a7");
         let seen = recorded(&record).await;
         assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
     }

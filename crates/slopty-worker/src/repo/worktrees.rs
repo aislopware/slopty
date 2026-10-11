@@ -418,6 +418,7 @@ async fn set_up(
 ) -> Result<(), Failed> {
     let held = super::setup::lock(at.tree);
     let _held = held.lock().await;
+    super::setup::end_left_running(at.tree).await;
     if !super::setup::pending(at.tree) {
         return Ok(());
     }

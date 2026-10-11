@@ -237,6 +237,7 @@ pub async fn run(
     // Declared after the child, so it drops first: the group is killed while its leader is
     // unreaped, and so still this child's.
     let mut group = crate::facts::Group::of(&child);
+    let _running = Running::mark(at.tree, &child);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(failed(setup, None));
     };
@@ -347,6 +348,74 @@ pub(crate) fn settled(tree: &Path) {
     if let Some(dir) = super::git_dir(tree) {
         let _gone = std::fs::remove_file(dir.join(PENDING));
     }
+}
+
+/// The marker a worktree's git directory holds while a setup runs there.
+///
+/// It says the group the setup runs in and the kernel's mark of its leader's start
+/// (`slopty_pty::process::start_mark`), which together name that one process. A worker that
+/// stopped while the setup ran (an update, a crash) left it running with nobody reading it; the
+/// next setup there ends it first ([`end_left_running`]).
+const RUNNING: &str = "slopty-setup-running";
+
+/// How long [`end_left_running`] waits for a setup it killed to be gone.
+const LEFT_GONE_WITHIN: Duration = Duration::from_secs(5);
+
+/// A setup named in its worktree's marker while it runs; the marker goes when it ends here.
+struct Running(Option<PathBuf>);
+
+impl Running {
+    /// Name `child`, the setup leading its own group in the worktree `tree`.
+    fn mark(tree: &Path, child: &tokio::process::Child) -> Self {
+        let named = child.id().and_then(|pid| {
+            let mark = slopty_pty::process::start_mark(i32::try_from(pid).ok()?)?;
+            Some(format!("{pid} {mark}"))
+        });
+        let Some((dir, named)) = super::git_dir(tree).zip(named) else { return Self(None) };
+        let path = dir.join(RUNNING);
+        match std::fs::write(&path, named) {
+            Ok(()) => Self(Some(path)),
+            Err(e) => {
+                tracing::warn!("a running setup could not be named: {e}");
+                Self(None)
+            }
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _gone = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// End the setup a worker before this one left running in the worktree at `tree`, if it runs.
+///
+/// Its whole group is killed, and its leader waited out for [`LEFT_GONE_WITHIN`] at most. Only
+/// under the worktree's lock ([`lock`]), where no setup of this worker's runs. A process that
+/// took its id since is told apart by its start, and left alone.
+pub(crate) async fn end_left_running(tree: &Path) {
+    let Some(path) = super::git_dir(tree).map(|dir| dir.join(RUNNING)) else { return };
+    let Ok(named) = tokio::fs::read_to_string(&path).await else { return };
+    let mut words = named.split_whitespace().map(str::parse::<u64>);
+    if let (Some(Ok(pid)), Some(Ok(mark))) = (words.next(), words.next())
+        && let Ok(pid) = i32::try_from(pid)
+        && let Some(group) = rustix::process::Pid::from_raw(pid)
+    {
+        let alive = || slopty_pty::process::start_mark(pid) == Some(mark);
+        if alive() {
+            tracing::info!(pid, tree = %tree.display(), "a setup a stopped worker left running ends");
+            let _gone = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            let now = tokio::time::Instant::now();
+            let until = now.checked_add(LEFT_GONE_WITHIN).unwrap_or(now);
+            while alive() && tokio::time::Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    let _gone = tokio::fs::remove_file(&path).await;
 }
 
 /// The lock a worktree's setup is run under, so a start sent again while it runs (after a

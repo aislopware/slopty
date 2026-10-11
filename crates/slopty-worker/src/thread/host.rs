@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::wire::{Outcome, Page, TableFrame, ThreadRow};
+use slopty_proto::thread::wire::{Outcome, Page, Start, TableFrame, ThreadRow};
 use slopty_proto::thread::{
     Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Pending, PendingState, Phase,
     ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
@@ -122,6 +122,8 @@ struct Inner {
     scheduling: Arc<tokio::sync::Notify>,
     /// The threads whose start is held at Claude Code's trust dialog ([`Host::hold_start`]).
     held: Vec<ThreadId>,
+    /// The starts under way, as kept ([`Host::start_under_way`]).
+    under_way: Vec<UnderWay>,
 }
 
 /// A [`SeatEnv`], which shows as nothing more.
@@ -139,6 +141,25 @@ const SEAT_FILE: &str = "seat.json";
 /// The file in a thread's directory that keeps its start while Claude Code is held at its
 /// trust dialog ([`HeldStart`]).
 const HELD_START_FILE: &str = "held-start.json";
+
+/// The file in the threads' directory that keeps the starts under way ([`UnderWay`]).
+const UNDER_WAY_FILE: &str = "starts-under-way.json";
+
+/// A start under way, kept until its outcome is recorded ([`Host::start_under_way`]).
+///
+/// A worker that stops meanwhile (an update, a crash) leaves the next one what it needs to
+/// finish it or say it failed: no client waits on a start nobody holds.
+///
+/// It holds the start as the client sent it, which names nothing secret.
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct UnderWay {
+    /// The start's intent.
+    pub id: IntentId,
+    /// As it was asked.
+    pub start: Start,
+    /// Past its worktree's setup, its agent opening: one taken up again could open it twice.
+    pub begun: bool,
+}
 
 /// A Claude Code start held at its trust dialog, kept in its thread's directory so the person's
 /// "Trust this folder" still opens it again after the worker restarts ([`Host::hold_start`]).
@@ -416,6 +437,17 @@ impl Host {
             }
         }
         let starts = Intents::open(&dir.join("starts"))?;
+        let under_way = match std::fs::read(dir.join(UNDER_WAY_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                tracing::warn!("the starts under way are unreadable: {e}");
+                Vec::new()
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                tracing::warn!("the starts under way are unreadable: {e}");
+                Vec::new()
+            }
+        };
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 dir: dir.to_owned(),
@@ -431,6 +463,7 @@ impl Host {
                 seat_env: None,
                 scheduling: Arc::default(),
                 held,
+                under_way,
             })),
         })
     }
@@ -1005,6 +1038,7 @@ impl Host {
     /// repeat of the id gets the first outcome back.
     pub fn record_start(&self, id: IntentId, outcome: Outcome) -> Outcome {
         let mut inner = self.inner.lock();
+        inner.settle_under_way(id);
         if let Some(first) = inner.starts.outcome(&id) {
             return first.clone();
         }
@@ -1012,6 +1046,35 @@ impl Host {
             tracing::warn!("a start could not be recorded: {e}");
         }
         outcome
+    }
+
+    /// Start `id`, as `start` asks, is under way: kept until its outcome is recorded
+    /// ([`Self::record_start`]), across a restart too ([`Self::starts_under_way`]). One that
+    /// cannot be written is warned of, and is held for this run alone.
+    pub fn start_under_way(&self, id: IntentId, start: &Start) {
+        let mut inner = self.inner.lock();
+        if inner.starts.outcome(&id).is_some() || inner.under_way.iter().any(|u| u.id == id) {
+            return;
+        }
+        inner.under_way.push(UnderWay { id, start: start.clone(), begun: false });
+        inner.keep_under_way();
+    }
+
+    /// Start `id` is past its worktree's setup and opens its agent.
+    pub fn start_begins(&self, id: IntentId) {
+        let mut inner = self.inner.lock();
+        let Some(under_way) = inner.under_way.iter_mut().find(|u| u.id == id) else { return };
+        if under_way.begun {
+            return;
+        }
+        under_way.begun = true;
+        inner.keep_under_way();
+    }
+
+    /// The starts under way, those a worker before this one left included.
+    #[must_use]
+    pub fn starts_under_way(&self) -> Vec<UnderWay> {
+        self.inner.lock().under_way.clone()
     }
 
     /// Start a thread for intent `id` once: `start` makes its metadata, or says why not. A
@@ -1039,6 +1102,7 @@ impl Host {
         if let Err(e) = inner.starts.record(id, outcome.clone()) {
             tracing::warn!("a start could not be recorded: {e}");
         }
+        inner.settle_under_way(id);
         outcome
     }
 }
@@ -1075,6 +1139,31 @@ fn write_atomic(dir: &Path, name: &str, value: &impl serde::Serialize) -> io::Re
 }
 
 impl Inner {
+    /// Start `id` has its outcome: it is under way no more.
+    fn settle_under_way(&mut self, id: IntentId) {
+        let before = self.under_way.len();
+        self.under_way.retain(|u| u.id != id);
+        if self.under_way.len() != before {
+            self.keep_under_way();
+        }
+    }
+
+    /// Write the starts under way, warning of a write that failed: they are held for this run
+    /// alone then.
+    fn keep_under_way(&self) {
+        let kept = if self.under_way.is_empty() {
+            match std::fs::remove_file(self.dir.join(UNDER_WAY_FILE)) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                gone => gone,
+            }
+        } else {
+            write_atomic(&self.dir, UNDER_WAY_FILE, &self.under_way)
+        };
+        if let Err(e) = kept {
+            tracing::warn!("the starts under way could not be kept: {e}");
+        }
+    }
+
     /// Open `thread`'s log if it is held and not opened yet, on its first use. One that cannot
     /// be read is let go, with a warning: its agent's own session still has everything.
     fn load(&mut self, thread: ThreadId) {

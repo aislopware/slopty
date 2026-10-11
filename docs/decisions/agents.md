@@ -2003,9 +2003,17 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   the prompt once the transcript opens its turn. A block the transcript settles first, or a
   thread read anew, lets it go. A turn with no prompt of its own in the transcript shows its
   blocks only as the transcript has them.
-  - Still open: a live text the transcript settles is replaced at the end of the list, so its
-    entry lands after a live tool call that began after it, until the thread is read again.
-    Putting it in its place takes an insert on the thread wire.
+  - **A settled text keeps its place** (2026-10-11, readiness-w 10-12, below the line). A live
+    text the transcript settled was removed and its entry added at the end of the list, so it
+    jumped past a live tool call that began after it until the thread was read again. The
+    entry now takes the live item's id (`Mapped::shown_as`, from the overlay's
+    `settle_by`, which says which entry settled each block), so it replaces the item where
+    it stands and every later change to the entry goes to that item. No wire change: a tool
+    call's block already had the call's own id. A thread read anew from the transcript gives
+    its items their entries' ids again, as it begins the thread over. Test:
+    `a_settled_live_text_keeps_its_place_before_a_later_call` (it fails without the change,
+    the text after the call); the test below now compares items with the transcript alone but
+    for those ids.
   - Test: `live_blocks_stream_after_their_prompt_then_the_transcript_settles_them`
     (`slopty-agent` observed tests; it fails without the hold, the blocks shown before the
     prompt).
@@ -2634,6 +2642,29 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     start and gets the thread, with the setup run once. Also
     `a_start_on_its_way_closes_and_outlives_its_link` (slopty-ui): the tile waits, the link
     back resends the same intent, and the answer fills the tile.
+  - **Across a worker restart** (2026-10-11, readiness-w 10-12, below the line). The start's
+    progress lived in the daemon's memory alone. A worker restarted mid-setup (an update, a
+    crash) knew nothing of it. The setup it ran was left running in its own process group with
+    nobody reading it, and the client's tile waited on an answer only its own retry could
+    bring. Now a start is kept in the threads' directory (`starts-under-way.json`,
+    `Host::start_under_way`) from when it is taken up until its outcome is recorded. It is
+    marked once it is past its worktree's setup and opening its agent. It holds the start as
+    the client sent it, which names nothing secret. A worker that starts brings each kept start
+    to an outcome, with no client asking:
+    - **Still setting up:** taken up again from the top, as a client's repeat would be. The
+      worktree is reopened and the setup, which never finished, runs again. A client back on a
+      new link follows it or gets its outcome.
+    - **Opening its agent:** it may have opened it, so it is recorded as failed, saying so,
+      rather than opening a second agent.
+    - **The setup left running.** While a setup runs, its worktree's git directory names it
+      (`slopty-setup-running`: its group, and the kernel's mark of its leader's start). The
+      next setup there, under the worktree's lock, kills that group first and waits for it to
+      go. A process that took the id since carries another mark and is left alone.
+    - Tests: `a_start_the_worker_restarts_during_is_finished_by_the_next` (apps/slopty-worker
+      `tests/threads.rs`: the worker is killed while the setup waits on a pipe, the next one
+      ends that setup and runs it again unasked, and the client's repeat gets the thread, set
+      up twice in all); `a_start_under_way_is_kept_until_its_outcome` (slopty-worker
+      `tests/threads.rs`).
 
 - ✅ **A start held at Claude Code's trust dialog is trusted on the person's press** (2026-10-10,
   readiness 10-10 rank 13, the worker's half). A start in a folder Claude Code had not trusted

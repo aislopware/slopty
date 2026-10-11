@@ -845,6 +845,50 @@ mod threads {
         assert!(sent.try_recv().is_err(), "each once");
     }
 
+    /// A start is kept from when it is taken up until its outcome is recorded, across a
+    /// restart: as asked, then marked once its agent opens, and gone with its outcome, which a
+    /// repeat of the id gets back. One already answered is not kept again.
+    #[test]
+    fn a_start_under_way_is_kept_until_its_outcome() {
+        use slopty_proto::thread::wire::{NewWorktree, Start};
+        use slopty_worker::thread::host::UnderWay;
+        let dir = tempfile::tempdir().unwrap();
+        let start = Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: "/work".to_owned(),
+            drive: None,
+            prompt: Some("Fix the build".to_owned()),
+            model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
+            args: Vec::new(),
+            worktree: Some(NewWorktree::named("fix")),
+        };
+        let (id, other) = (IntentId::new(), IntentId::new());
+        open(dir.path()).start_under_way(id, &start);
+        let kept = |begun| vec![UnderWay { id, start: start.clone(), begun }];
+        assert_eq!(open(dir.path()).starts_under_way(), kept(false), "across a restart");
+
+        let host = open(dir.path());
+        host.start_under_way(id, &start);
+        assert_eq!(host.starts_under_way(), kept(false), "once");
+        host.start_begins(id);
+        assert_eq!(open(dir.path()).starts_under_way(), kept(true), "its agent opening");
+
+        let host = open(dir.path());
+        let thread = ThreadId::new();
+        assert_eq!(host.record_start(id, Outcome::Started { thread }), Outcome::Started { thread });
+        assert!(host.starts_under_way().is_empty(), "settled");
+        host.start_under_way(id, &start);
+        assert!(open(dir.path()).starts_under_way().is_empty(), "an answered start is not kept");
+        assert_eq!(host.started(id), Some(Outcome::Started { thread }));
+        host.start_under_way(other, &start);
+        let refused = Outcome::Refused { reason: "no".to_owned() };
+        assert_eq!(host.record_start(other, refused.clone()), refused);
+        assert!(open(dir.path()).starts_under_way().is_empty(), "a refusal settles it too");
+    }
+
     type Sent = (ThreadId, IntentId, Intent);
 
     /// What the scheduler sent next.
