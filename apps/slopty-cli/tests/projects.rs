@@ -84,8 +84,21 @@ mod tests {
             }
         };
         tokio::time::timeout(STEP, ready).await.expect("ptyd socket");
+        let worker = worker_daemon(dir, server, &path, name).await;
+        vec![ptyd, worker]
+    }
+
+    /// The worker of [`daemons`] alone, as it starts again over the ptyd it left: under
+    /// `name`, with `path` as its `PATH`, once it says its address.
+    async fn worker_daemon(
+        dir: &Path,
+        server: SocketAddr,
+        path: &std::ffi::OsStr,
+        name: &str,
+    ) -> Child {
+        let ptyd_sock = dir.join("ptyd.sock");
         let mut worker = scrubbed(bin("slopty-worker"), &dir.join("home"))
-            .env("PATH", &path)
+            .env("PATH", path)
             .env("SLOPTY_WORKER_NAME", name)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
@@ -107,7 +120,7 @@ mod tests {
             .await
             .expect("the worker prints its address")
             .unwrap();
-        vec![ptyd, worker]
+        worker
     }
 
     /// Wait until `done` holds, checking every 50 ms.
@@ -1452,5 +1465,468 @@ mod tests {
             ]
         );
         server.shutdown().await;
+    }
+
+    /// What the walk of a person's day found wrong, each said as it is found; the walk fails
+    /// with all of them at its end, so one run names every one.
+    #[derive(Default)]
+    struct Findings(Vec<String>);
+
+    impl Findings {
+        /// `holds`, or `what` is found.
+        fn check(&mut self, holds: bool, what: &str) {
+            if !holds {
+                eprintln!("FINDING {what}");
+                self.0.push(what.to_owned());
+            }
+        }
+
+        /// Everything found, for a walk that cannot go on.
+        fn so_far(&self) -> String {
+            format!("found so far: {:#?}", self.0)
+        }
+    }
+
+    /// [`until`] for at most `within`, without failing: what it found, if it did.
+    async fn soon<T>(within: Duration, mut done: impl AsyncFnMut() -> Option<T>) -> Option<T> {
+        let waited = tokio::time::timeout(within, async {
+            loop {
+                if let Some(found) = done().await {
+                    return found;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        waited.await.ok()
+    }
+
+    /// The card of task `task` once `done` holds of it, within `within`.
+    async fn card_of(
+        hub: &Hub,
+        project: &ProjectId,
+        task: u32,
+        within: Duration,
+        done: impl Fn(&slopty_proto::project::TaskCard) -> bool,
+    ) -> Option<slopty_proto::project::TaskCard> {
+        soon(within, async || {
+            let card =
+                status(hub, project).await.tasks.into_iter().find(|c| c.id == TaskId(task))?;
+            done(&card).then_some(card)
+        })
+        .await
+    }
+
+    /// A stand-in `gh` in `programs`: no pull request is open, a new one is number 1, and
+    /// reading it says it is open; each call is kept in `log`. No one's GitHub is reached.
+    fn stand_in_gh(programs: &Path, log: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let view = r#"{"number":1,"url":"https://example.com/o/demo/pull/1","title":"Ship",
+"state":"OPEN","isDraft":false,"headRefName":"slopty/demo/goal","headRefOid":"0123",
+"baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE",
+"mergeStateStatus":"CLEAN","statusCheckRollup":[]}"#;
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> \"{log}\"\ncase \"$1 $2\" in\n\
+             'pr list') echo '[]' ;;\n\
+             'pr create') echo 'https://example.com/o/demo/pull/1' ;;\n\
+             'pr view') echo '{view}' ;;\n\
+             *) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
+            log = log.display(),
+            view = view.replace('\n', ""),
+        );
+        let gh = programs.join("gh");
+        std::fs::write(&gh, script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A person's day, walked on the server, two workers and the CLI with stand-in agents, to
+    /// find what breaks, stalls, needs a nudge or shows the wrong state. A Linux box is added
+    /// beside the studio; a goal is handed to an orchestrator in the studio's clone, which
+    /// starts a task on each machine; the Linux one asks the person a question, and its worker
+    /// restarts under it; both finish, come home, are verified, reviewed and merged into the
+    /// goal's branch; the goal lands as a pull request; and another device reads it all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_person_s_day_across_two_workers() {
+        use std::time::Instant;
+
+        use slopty_proto::orchestration::{ThreadOf, ThreadView};
+        use slopty_proto::project::Task;
+
+        const GOAL: &str = "Ship the Linux part and the Mac part.";
+        let soonish = Duration::from_secs(20);
+        let mut found = Findings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_out(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join("a.txt"), "one\n").unwrap();
+        git_out(&seed, &["add", "."]);
+        git_out(&seed, &["commit", "-q", "-m", "first"]);
+        git_out(&root, &["clone", "-q", "--bare", "seed", "forge.git"]);
+        let url = "https://example.com/o/demo.git";
+        let forge = root.join("forge.git");
+        let reach = format!("url.file://{}.insteadOf={url}", forge.display());
+        git_out(&root, &["-c", &reach, "clone", "-q", url, "demo"]);
+        let studio_clone = root.join("demo");
+        let person_main = git_out(&studio_clone, &["rev-parse", "main"]);
+        let config = format!("[url \"file://{}\"]\n\tinsteadOf = {url}\n", forge.display());
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.gitconfig"), &config).unwrap();
+        std::fs::write(root.join("home/.claude.json"), "{}").unwrap();
+        let programs = root.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let gh_log = root.join("gh.log");
+        stand_in_gh(&programs, &gh_log);
+
+        // Each machine's task agent reports done on its branch once its gate is there.
+        let reporting = |task: u32, gate: &Path, record: &Path| {
+            let branch = format!("worktree-slopty-demo-{task}");
+            let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": branch } }]);
+            vec![
+                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+            ]
+        };
+        let (go_studio, go_linux) = (root.join("go-studio"), root.join("go-linux"));
+        let studio_env = reporting(2, &go_studio, &root.join("studio-task.json"));
+        let started = Instant::now();
+        let (server, _studio, studio) = fleet_with(&root, "", &studio_env).await;
+        eprintln!("MEASURE the studio online with Claude Code: {:?}", started.elapsed());
+        let hub = server.hub().clone();
+        let addr = server.quic_addr();
+
+        // A Linux box is added. Its task's agent asks the person a question as it starts.
+        let linux_dir = root.join("linux");
+        let linux_home = linux_dir.join("home");
+        std::fs::create_dir_all(&linux_home).unwrap();
+        std::fs::write(linux_home.join(".gitconfig"), &config).unwrap();
+        std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
+        let question = json!({
+            "questions": [{
+                "question": "Which file holds the Linux part?",
+                "header": "File",
+                "options": [{ "label": "linux.txt" }, { "label": "work.txt" }],
+                "multiSelect": false,
+            }],
+        });
+        let hooks = json!([
+            hook("SessionStart", &json!({ "source": "startup" })),
+            hook(
+                "PermissionRequest",
+                &json!({ "tool_name": "AskUserQuestion", "tool_input": question }),
+            ),
+            hook("PostToolUse", &json!({ "tool_name": "AskUserQuestion", "tool_input": question })),
+            hook("Stop", &json!({ "stop_hook_active": false })),
+        ]);
+        let mut linux_env = reporting(1, &go_linux, &root.join("linux-task.json"));
+        linux_env.push(("STUB_HOOKS".to_owned(), hooks.to_string()));
+        let added = Instant::now();
+        let mut linux = daemons(&linux_dir, addr, &programs, "", "linux-box", &linux_env).await;
+        let linux_worker = registered_with_claude(&hub, "linux-box").await;
+        eprintln!("MEASURE a worker added, to online with Claude Code: {:?}", added.elapsed());
+        let listed = slopty(&root, addr, &["workers"]).await;
+        found.check(listed.contains("linux-box"), "`slopty workers` does not list the box added");
+
+        // The goal, handed to an orchestrator started in the studio's clone, as the app does.
+        let (orch_record, orch_inbox) = (root.join("orchestrator.json"), root.join("inbox.jsonl"));
+        let go_orch = root.join("go-orchestrator");
+        let starts = json!([
+            { "name": "task_start", "arguments": {
+                "title": "The Linux part", "brief": "Write linux.txt.", "worker": "linux-box" } },
+            { "name": "task_start", "arguments": {
+                "title": "The Mac part", "brief": "Write mac.txt.", "worker": "projects-test" } },
+        ]);
+        let spawn = Verb::SpawnAgent {
+            worker: studio,
+            cwd: studio_clone.to_string_lossy().into_owned(),
+            prompt: None,
+            args: Vec::new(),
+            env: vec![
+                ("STUB_MCP_CALLS".to_owned(), starts.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), go_orch.to_string_lossy().into_owned()),
+                ("STUB_RECORD".to_owned(), orch_record.to_string_lossy().into_owned()),
+                ("STUB_INBOX".to_owned(), orch_inbox.to_string_lossy().into_owned()),
+            ],
+            size: None,
+            session: None,
+            autonomy: None,
+            worktree: None,
+        };
+        let opened = hub.dispatch(spawn).await;
+        let Outcome::Opened(orchestrator) = opened else { panic!("the orchestrator: {opened:?}") };
+        let project = ProjectId::new("demo").unwrap();
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Ship both parts".to_owned(),
+                goal: Some(GOAL.to_owned()),
+                autonomy: slopty_proto::project::Autonomy::Ask,
+                repo: studio_clone.to_string_lossy().into_owned(),
+                target: String::new(),
+                verifier: Some("test -f linux.txt || test -f mac.txt".to_owned()),
+                push: false,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        let goal_branch = Task::goal_branch(&project);
+        let target = status(&hub, &project).await.project.target;
+        found.check(target == goal_branch, &format!("the goal lands on {target:?}"));
+        let branched = soon(soonish, async || {
+            let made = std::process::Command::new("git")
+                .current_dir(&studio_clone)
+                .args(["rev-parse", "--verify", "--quiet", &goal_branch])
+                .output()
+                .ok()?;
+            made.status.success().then_some(())
+        })
+        .await;
+        found.check(branched.is_some(), "the goal's branch is not made in the clone");
+        let heard = soon(soonish, async || {
+            let inbox = std::fs::read_to_string(&orch_inbox).unwrap_or_default();
+            let record = std::fs::read_to_string(&orch_record).unwrap_or_default();
+            (inbox.contains(GOAL) || record.contains(GOAL)).then_some(())
+        })
+        .await;
+        found.check(heard.is_some(), "the goal never reaches the orchestrator");
+
+        // The orchestrator starts a task on each machine.
+        let known = status(&hub, &project).await.project.repo_id.is_some();
+        eprintln!("the project knows its repository as its orchestrator starts tasks: {known}");
+        std::fs::write(&go_orch, "").unwrap();
+        let asked = Instant::now();
+        let both = soon(STEP, async || {
+            let tasks = status(&hub, &project).await.tasks;
+            let on = |task: u32| {
+                tasks.iter().find(|c| c.id == TaskId(task))?.assignment.as_ref().map(|a| a.term)
+            };
+            Some((on(1)?, on(2)?))
+        })
+        .await;
+        let Some((linux_agent, studio_agent)) = both else {
+            let now = status(&hub, &project).await;
+            let steps: Vec<_> = now.tasks.iter().map(|c| (c.id, c.state, &c.step)).collect();
+            let timeline: Vec<_> = now.timeline.iter().map(|e| &e.what).collect();
+            panic!("the tasks never started: {steps:#?}\n{timeline:#?}\n{}", found.so_far());
+        };
+        eprintln!("MEASURE the orchestrator's two tasks started: {:?}", asked.elapsed());
+        let learned = soon(soonish, async || status(&hub, &project).await.project.repo_id).await;
+        found.check(learned.is_some(), "the project never learns its repository");
+        found.check(linux_agent.worker == linux_worker, "the Linux part runs off the Linux box");
+        found.check(studio_agent.worker == studio, "the Mac part runs off the studio");
+
+        // The Linux task's question waits on the person, and the board can answer it.
+        let blocked = card_of(&hub, &project, 1, soonish, |c| c.state == TaskState::Blocked).await;
+        found.check(blocked.is_some(), "a task's question does not show it waits on the person");
+        let read = Verb::ReadThread {
+            of: ThreadOf::Task { project: project.clone(), task: TaskId(1) },
+            view: ThreadView::Messages,
+            after: None,
+            hold: true,
+        };
+        let request = match hub.dispatch(read).await {
+            Outcome::Thread(read) => read.requests.into_iter().next(),
+            other => {
+                found.check(false, &format!("the question's thread is not read: {other:?}"));
+                None
+            }
+        };
+        found.check(request.is_some(), "the question is not open to answer from the board");
+        if let Some(request) = request {
+            eprintln!("the question as the board reads it: {request:?}");
+            let given: Vec<Value> = request
+                .questions
+                .iter()
+                .map(|q| json!({ "question": q, "answer": "linux.txt" }))
+                .collect();
+            let pick = Value::Array(given).to_string();
+            let answer = Verb::AnswerRequest {
+                of: ThreadOf::Task { project: project.clone(), task: TaskId(1) },
+                ask: request.ask,
+                choice: pick,
+                message: None,
+            };
+            let answered = hub.dispatch(answer).await;
+            let took = matches!(answered, Outcome::Done);
+            found.check(took, &format!("the board's answer is refused: {answered:?}"));
+            let heard = soon(soonish, async || {
+                let seen: Value =
+                    serde_json::from_slice(&std::fs::read(root.join("linux-task.json")).ok()?)
+                        .ok()?;
+                let asked =
+                    seen["hooks"].as_array()?.iter().find(|h| h["event"] == "PermissionRequest")?;
+                asked["outputs"].to_string().contains("allow").then_some(())
+            })
+            .await;
+            found.check(heard.is_some(), "the board's answer never reaches the agent");
+            let going =
+                card_of(&hub, &project, 1, soonish, |c| c.state != TaskState::Blocked).await;
+            found.check(going.is_some(), "answered, the task still waits on the person");
+        }
+
+        // The Linux worker restarts mid-task, its agent at work on its brief; it lives on in
+        // ptyd. The brief's Enter follows its paste by `SUBMIT_PAUSE` (200 ms): a restart
+        // inside that span loses the Enter, which nothing types again (an open item of
+        // `.research/readiness-w-2026-10-12b.md`), so the restart comes a second on.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let worker_pid = linux[1].id().unwrap();
+        slopty_testkit::group::kill(worker_pid);
+        let _ended = linux[1].wait().await;
+        let away = soon(soonish, async || {
+            let listed = hub.directory().into_iter().find(|w| w.worker == linux_worker)?;
+            (listed.liveness != Liveness::Online).then_some(())
+        })
+        .await;
+        found.check(away.is_some(), "the box's worker gone still reads online");
+        let card = status(&hub, &project).await.tasks.into_iter().find(|c| c.id == TaskId(1));
+        let kept = card.as_ref().is_some_and(|c| c.state != TaskState::Failed);
+        found.check(kept, "its worker away, the task is failed");
+        let back = Instant::now();
+        let path = slopty_testkit::env::path_with(&programs);
+        linux[1] = worker_daemon(&linux_dir, addr, &path, "linux-box").await;
+        let again = registered_with_claude(&hub, "linux-box").await;
+        eprintln!("MEASURE the box's worker back online: {:?}", back.elapsed());
+        found.check(again == linux_worker, "the box restarted is another worker");
+        let terms = soon(soonish, async || {
+            match hub.dispatch(Verb::ListTerminals { worker: Some(linux_worker) }).await {
+                Outcome::Terminals { terminals, .. } => {
+                    terminals.iter().any(|(_, s)| s.id == linux_agent.session).then_some(())
+                }
+                _ => None,
+            }
+        })
+        .await;
+        found.check(terms.is_some(), "the task's agent is gone after its worker restarted");
+        let card = status(&hub, &project).await.tasks.into_iter().find(|c| c.id == TaskId(1));
+        let same = card.as_ref().and_then(|c| c.assignment.as_ref()).map(|a| a.term);
+        found.check(same == Some(linux_agent), "the restart lost the task's agent");
+
+        // Both agents commit their part, where each was started, and report.
+        let records = [root.join("linux-task.json"), root.join("studio-task.json")];
+        for (record, file) in records.iter().zip(["linux.txt", "mac.txt"]) {
+            let cwd = soon(soonish, async || {
+                let seen: Value = serde_json::from_slice(&std::fs::read(record).ok()?).ok()?;
+                let argv: Vec<&str> =
+                    seen["argv"].as_array()?.iter().filter_map(Value::as_str).collect();
+                let named = argv.iter().enumerate().find_map(|(at, arg)| {
+                    arg.strip_prefix("--worktree=")
+                        .or_else(|| (*arg == "--worktree").then(|| argv.get(at + 1).copied())?)
+                })?;
+                let cwd = PathBuf::from(seen["cwd"].as_str()?);
+                Some(cwd.join(".claude/worktrees").join(named))
+            })
+            .await;
+            let Some(tree) = cwd else {
+                let seen = std::fs::read_to_string(record).unwrap_or_default();
+                let cards = status(&hub, &project).await.tasks;
+                panic!("no worktree in {record:?}: {seen}\n{cards:#?}\n{}", found.so_far());
+            };
+            let branch = git_out(&tree, &["branch", "--show-current"]);
+            eprintln!("an agent runs in {} on {branch:?}", tree.display());
+            std::fs::write(tree.join(file), "done\n").unwrap();
+            git_out(&tree, &["add", "."]);
+            git_out(&tree, &["commit", "-q", "-m", file]);
+        }
+        let reported = Instant::now();
+        std::fs::write(&go_linux, "").unwrap();
+        std::fs::write(&go_studio, "").unwrap();
+        let ready = |c: &slopty_proto::project::TaskCard| {
+            c.state == TaskState::Done && c.verified.as_ref().is_some_and(|r| r.passed)
+        };
+        for task in [1, 2] {
+            let card = card_of(&hub, &project, task, STEP, ready).await;
+            found.check(card.is_some(), &format!("task {task} is never ready to merge"));
+        }
+        eprintln!("MEASURE both reported to both ready: {:?}", reported.elapsed());
+        // Its brief went in once the question was answered and its turn ended.
+        let briefed = soon(soonish, async || {
+            let seen: Value =
+                serde_json::from_slice(&std::fs::read(root.join("linux-task.json")).ok()?).ok()?;
+            let typed = seen["typed"].as_array()?;
+            typed.iter().any(|t| t == "Write linux.txt.").then_some(())
+        })
+        .await;
+        found.check(
+            briefed.is_some(),
+            "its brief never reaches the agent that asked a question first",
+        );
+
+        // The person reviews each task's change in the orchestrator's clone: the Linux one
+        // brought home as `slopty/demo/1`, the studio's on its own branch there.
+        for (task, file, branch) in
+            [(1, "linux.txt", "slopty/demo/1"), (2, "mac.txt", "worktree-slopty-demo-2")]
+        {
+            let range = format!("{goal_branch}...{branch}");
+            let changed = std::process::Command::new("git")
+                .current_dir(&studio_clone)
+                .args(["diff", "--name-only", &range])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .unwrap_or_default();
+            found.check(changed == file, &format!("task {task}'s change reads {changed:?}"));
+        }
+
+        // Merged one after the other into the goal's branch, never the person's main.
+        for task in [1, 2] {
+            let asked =
+                hub.dispatch(Verb::TaskMerge { project: project.clone(), task: TaskId(task) });
+            let took = matches!(asked.await, Outcome::Task(_));
+            found.check(took, &format!("the merge of task {task} is refused"));
+            let merged =
+                card_of(&hub, &project, task, STEP, |c| c.state == TaskState::Merged).await;
+            found.check(merged.is_some(), &format!("task {task} never merges"));
+        }
+        for file in ["linux.txt", "mac.txt"] {
+            let shown = std::process::Command::new("git")
+                .current_dir(&studio_clone)
+                .args(["cat-file", "-e", &format!("{goal_branch}:{file}")])
+                .status()
+                .is_ok_and(|s| s.success());
+            found.check(shown, &format!("{file} is not on the goal's branch"));
+        }
+        let main_now = git_out(&studio_clone, &["rev-parse", "main"]);
+        found.check(main_now == person_main, "the person's main moved");
+
+        // The goal lands as a pull request on the forge.
+        let landed = hub.dispatch(Verb::ProjectLand { project: project.clone(), into: None }).await;
+        let opened = matches!(&landed, Outcome::PullOpened { number: 1, .. });
+        found.check(opened, &format!("the goal does not land: {landed:?}"));
+        let pushed = std::process::Command::new("git")
+            .current_dir(&forge)
+            .args(["rev-parse", &goal_branch])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+        let ours = git_out(&studio_clone, &["rev-parse", &goal_branch]);
+        found.check(pushed == ours, "the goal's branch is not on the forge as merged");
+        let gh = std::fs::read_to_string(&gh_log).unwrap_or_default();
+        let asked_into = gh.contains(&format!("pr create --head {goal_branch} --base main"));
+        found.check(asked_into, &format!("the pull request is not into main: {gh}"));
+        let shown = soon(soonish, async || status(&hub, &project).await.project.landed).await;
+        found.check(shown.is_some(), "the board does not show the pull request");
+
+        // Another device: a CLI with nothing of its own reads the same day.
+        let other = root.join("other-device");
+        let read = scrubbed(bin("slopty"), &other)
+            .arg("--server")
+            .arg(addr.to_string())
+            .arg("--data-dir")
+            .arg(other.join("data"))
+            .args(["--json", "project", "status", "demo"])
+            .env("RUST_LOG", "warn")
+            .kill_on_drop(true)
+            .output();
+        let read = tokio::time::timeout(STEP, read).await.expect("slopty answers").unwrap();
+        let said = String::from_utf8_lossy(&read.stdout);
+        found.check(read.status.success(), "another device cannot read the project");
+        let all = said.matches("\"merged\"").count() + said.matches("\"Merged\"").count();
+        found.check(all >= 2, "another device does not see both tasks merged");
+        found.check(said.contains("pull/1"), "another device does not see the pull request");
+
+        server.shutdown().await;
+        assert!(found.0.is_empty(), "{}", found.so_far());
     }
 }

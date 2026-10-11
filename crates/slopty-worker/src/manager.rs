@@ -80,6 +80,8 @@ struct Adoption {
     /// The lost shell's screen, to replay with the divider under it: ptyd holds nothing of
     /// the new shell but its first output.
     screen: Option<Vec<u8>>,
+    /// The directory it was started in ([`session::SessionStart::cwd`]).
+    cwd: Option<String>,
 }
 
 /// An [`Entry`] taken out of the table's lock, to be summarised.
@@ -272,6 +274,7 @@ impl Worker {
             pid: info.pid,
             exited: info.exited,
             command: recipe.as_ref().map(|r| r.command.clone()).unwrap_or_default(),
+            cwd: recipe.as_ref().and_then(|r| r.cwd.clone()),
             restored: recipe.and_then(|r| r.restored),
             screen: None,
         };
@@ -444,8 +447,9 @@ impl Worker {
             typed: None,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
+        let cwd = recipe.cwd.clone();
         self.inner.keeper.opened(id, recipe);
-        let adoption = Adoption { pid, command: req.command.clone(), ..Adoption::default() };
+        let adoption = Adoption { pid, command: req.command.clone(), cwd, ..Adoption::default() };
         self.adopt(id, req.size, adoption).await
     }
 
@@ -559,11 +563,12 @@ impl Worker {
             size: recipe.size,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
+        let cwd = plan.cwd.map(|cwd| cwd.to_string_lossy().into_owned());
         self.inner.keeper.opened(
             id,
             Recipe {
                 command: plan.command.clone(),
-                cwd: plan.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+                cwd: cwd.clone(),
                 restored: Some(plan.restored.clone()),
                 agent: plan.agent,
                 ..recipe.clone()
@@ -575,6 +580,7 @@ impl Worker {
             exited: None,
             restored: Some(plan.restored),
             screen: Some(screen),
+            cwd,
         };
         let handle = self.adopt(id, recipe.size, adoption).await?;
         if let Some(line) = plan.launch
@@ -596,7 +602,7 @@ impl Worker {
         size: TermSize,
         adoption: Adoption,
     ) -> Result<SessionHandle, WorkerError> {
-        let Adoption { pid, command, exited, restored, screen } = adoption;
+        let Adoption { pid, command, exited, restored, screen, cwd } = adoption;
         let attached = self.inner.ptyd.lock().await.attach(id).await?;
         if attached.dropped > 0 {
             tracing::warn!(session = %id, dropped = attached.dropped, "output lost before the backlog; the replay starts mid-stream");
@@ -618,6 +624,7 @@ impl Worker {
             touched: Some(self.inner.changes.toucher()),
             restored,
             divide,
+            cwd,
         })?;
         let started_ms = attached.started_ms;
         self.inner

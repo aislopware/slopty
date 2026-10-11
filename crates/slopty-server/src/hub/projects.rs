@@ -2091,7 +2091,7 @@ impl Hub {
             if let Outcome::Error { code, message } = &ended
                 && *code != ErrorCode::Interrupted
             {
-                hub.start_failed((&at, task), message);
+                hub.start_failed((&at, task), (kind, worker), message);
             }
         });
         match card {
@@ -2129,7 +2129,23 @@ impl Hub {
 
     /// A start answered before it was done failed: its card says so through its step, and the
     /// orchestrator hears why.
-    fn start_failed(&self, (project, task): (&ProjectId, TaskId), why: &str) {
+    fn start_failed(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        (kind, worker): (slopty_proto::project::StepKind, WorkerId),
+        why: &str,
+    ) {
+        // A step that failed said so already; a start that failed after its last step (the
+        // agent's own start) says it on that step, or the card would show it done and wait.
+        let said = self.inner.state.lock().projects.task(project, task).is_ok_and(|card| {
+            card.step
+                .as_ref()
+                .is_some_and(|s| matches!(s.state, slopty_proto::project::StepState::Failed { .. }))
+        });
+        if !said {
+            let failed = slopty_proto::project::StepState::Failed { why: why.to_owned() };
+            self.step_now((project, task), kind, worker, failed);
+        }
         let words = format!(
             "task {task} could not start: {why}. Start it again with task_start once that is put right."
         );

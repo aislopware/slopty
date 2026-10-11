@@ -164,6 +164,7 @@ mod orchestrate {
             touched: None,
             restored: None,
             divide: false,
+            cwd: None,
         })
         .unwrap();
         until_screen(&handle, |s| last_row(s) == "$").await;

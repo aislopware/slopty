@@ -669,6 +669,10 @@ pub struct SessionStart {
     /// `checkpoint` is the lost shell's screen and `backlog` the new shell's first output: the
     /// divider goes between them. Not so once a worker has checkpointed the pair.
     pub divide: bool,
+    /// The directory its program was started in: the session's own until the program reports
+    /// one (OSC 7). An agent's terminal never does, and without it the session would be in no
+    /// repository, so the project it orchestrates would never learn its own.
+    pub cwd: Option<String>,
 }
 
 /// The divider between a lost shell's screen and the new shell's.
@@ -1121,6 +1125,7 @@ impl Actor {
                 | EngineEvent::ClipboardWrite { .. } => {}
             }
         }
+        let cwd = cwd.or(start.cwd);
         let (repo, branch) = place(cwd.as_deref());
         let master = Arc::new(PtyMaster::new(start.master)?);
         let (drained_tx, drained_rx) = mpsc::unbounded_channel();

@@ -466,11 +466,11 @@ impl Hub {
         (worker, clone): (WorkerId, String),
         on: Option<TaskId>,
     ) -> Result<StartFrom, String> {
-        let target = {
+        let named = {
             let state = self.inner.state.lock();
-            state.projects.project(project).ok().map(|record| record.target.clone())
+            state.projects.project(project).ok().map(|r| (r.target.clone(), r.base.clone()))
         };
-        let Some(target) = target else { return Err(format!("no project {project}")) };
+        let Some((target, base)) = named else { return Err(format!("no project {project}")) };
         let (from, branch, into) = if let Some(on) = on {
             let Some(Landed { worker, clone, branch }) = self.landed(project, on)? else {
                 return Err(format!("task {on}'s work is in no clone the server knows"));
@@ -487,6 +487,10 @@ impl Hub {
                 Some(Err((_, why))) => return Err(why),
             }
         };
+        // A goal's own branch is in the orchestrator's clone alone until it lands: what it
+        // holds beyond the branch it was made from is what the other clone lacks, and with
+        // nothing beyond, the task starts from that branch as the forge has it.
+        let target = base.filter(|_| on.is_none()).unwrap_or(target);
         let back = Trip { from, to: (worker, clone), branch, into, target };
         Ok(if back.there() {
             StartFrom::There(back.branch)

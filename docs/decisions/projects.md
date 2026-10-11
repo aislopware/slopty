@@ -3378,3 +3378,31 @@ reordering and edited allows are gone" in `agents.md`.*
     - the TUI-found half of `a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`
       (`slopty-worker`, the stand-in daemon);
     - `codex_and_pi_are_known_by_name_and_say_what_they_hold` (`slopty-agent::typed`).
+
+**A goal's tasks go where the goal is, across machines.** ✅ 2026-10-12 (the day walk,
+`.research/readiness-w-2026-10-12b.md`)
+- **An agent's terminal is in the directory it started in.** A project learns its repository
+  from its orchestrator's terminal, and a session is in a repository only once its program
+  reports a directory (OSC 7). Shells report one; an agent's TUI never does. So every goal the
+  app started, whose orchestrator is an agent, never learned its repository. Its tasks then
+  started in the project's path as written, the person's own checkout and branch, with no
+  worktree, on every machine. A session now starts in its program's own directory
+  (`SessionStart::cwd`, filled for a new spawn, a reopen and an adoption) until the program
+  reports another.
+- **A goal's branch is sent as what it holds beyond its base.** A goal's branch is in the
+  orchestrator's clone alone until it lands. A task placed on another machine measured that
+  branch against itself, found nothing new, and was told to start from it as `origin` has it,
+  which `origin` never had. The trip now measures against `Project::base`: nothing beyond it
+  starts the task from the base as the forge has it, and merged work beyond it is sent.
+- **A start that fails late says so on its card.** A start that failed after its last step
+  (the agent's own start) left the card Planned on a step marked done, and only the
+  orchestrator heard. The running step now turns Failed with the reason, unless a step already
+  failed.
+- **Orchestration follows the agents it starts.** A server-started task's question, asked with
+  no device keeping the thread table, went straight to its TUI: the board showed Blocked with
+  nothing to answer. A `SpawnAgent` that opens a terminal now makes orchestration follow it, so
+  the question waits on the board for as long as its hook waits, as the hold's own
+  documentation already said.
+- Tests: `a_person_s_day_across_two_workers` (`slopty-cli`, `projects`) walks all four, and
+  `a_program_that_reports_no_directory_is_where_it_was_started` (`slopty-worker`,
+  `session_actor`) covers the first at its own layer.

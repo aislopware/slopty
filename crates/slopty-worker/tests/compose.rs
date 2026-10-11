@@ -109,6 +109,7 @@ mod compose {
                 touched: None,
                 restored: None,
                 divide: false,
+                cwd: None,
             })
             .unwrap();
             let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();

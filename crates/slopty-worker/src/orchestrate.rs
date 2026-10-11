@@ -625,7 +625,12 @@ impl Orchestrator {
                     None => None,
                 };
                 match self.spawn_agent(spawn, prompt, session).await? {
-                    Outcome::Opened(term) => Ok(opened(term, made)),
+                    Outcome::Opened(term) => {
+                        // Orchestration follows what it started, so its prompts wait for an
+                        // answer on the board rather than only in its terminal.
+                        inner.conversations.follow(term.session);
+                        Ok(opened(term, made))
+                    }
                     other => Ok(other),
                 }
             }

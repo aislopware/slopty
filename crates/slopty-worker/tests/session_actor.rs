@@ -69,6 +69,7 @@ mod actor {
             touched: None,
             restored: None,
             divide: false,
+            cwd: None,
         })
         .unwrap();
         (handle, child, tap_rx)
@@ -809,6 +810,7 @@ mod actor {
             touched: None,
             restored: Some(restored.clone()),
             divide: false,
+            cwd: None,
         })
         .unwrap();
         assert_eq!(reopened.snapshot().await.unwrap().restored, Some(restored));
@@ -3281,5 +3283,49 @@ exec cat > "$0/raw""#;
     async fn drop_footprint_streamed_large() {
         let grew = drop_footprint(true, 64 << 20).await;
         println!("MEASURE drop of 64 MiB streamed: peak footprint +{} KiB", grew >> 10);
+    }
+
+    /// A program that never reports its directory, as an agent's TUI does not, is in the one it
+    /// was started in, and so in that repository: the project such an agent orchestrates
+    /// learns where its tasks go.
+    #[tokio::test]
+    async fn a_program_that_reports_no_directory_is_where_it_was_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("demo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let pty = Pty::open(size(40, 6)).unwrap();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "true".to_owned()],
+            cwd: Some(repo.clone()),
+            env: Vec::new(),
+            size: size(40, 6),
+        };
+        let slopty_pty::Spawned { mut child, term } = pty.spawn(&spec).unwrap();
+        let (tap, _tap_rx) = mpsc::channel(64);
+        let root = repo.to_string_lossy().into_owned();
+        let session = session::spawn(SessionStart {
+            id: SessionId::new(),
+            master: pty.into_master(),
+            term,
+            checkpoint: Vec::new(),
+            backlog: Vec::new(),
+            tap,
+            size: size(40, 6),
+            scrollback_lines: 100,
+            exited: None,
+            port_hints: None,
+            moves: None,
+            touched: None,
+            restored: None,
+            divide: false,
+            cwd: Some(root.clone()),
+        })
+        .unwrap();
+        let snap = session.snapshot().await.unwrap();
+        let place = (snap.cwd.as_deref(), snap.repo.as_deref(), snap.branch.as_deref());
+        assert_eq!(place, (Some(root.as_str()), Some(root.as_str()), Some("main")));
+        child.wait().await.unwrap();
+        session.close();
     }
 }
