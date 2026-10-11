@@ -226,6 +226,10 @@ jobs:
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
       # and fails on a leak, on more than its budget, or on running out.
+      # What a Mac shard ran on, and at its end how hard it pressed the machine, so a slow run
+      # is told apart as a slow host or a full one (the test shards' times swing ±100 s).
+      - if: runner.os == 'macOS'
+        run: sysctl hw.model machdep.cpu.brand_string hw.ncpu hw.memsize
       # The worker shard's tests mostly wait on the processes they start, so six run on its three
       # cores; the other shards' contend, and keep nextest's default (docs/decisions/tooling.md,
       # "Six test threads on a hosted Mac: the worker shard's only").
@@ -246,6 +250,8 @@ jobs:
           if-no-files-found: ignore
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
+      - if: always() && runner.os == 'macOS'
+        run: sysctl vm.swapusage vm.loadavg && vm_stat | grep -E 'Pageouts|Swapouts|Compressions'
       # A red run never promotes, so once a newer push to `gate` waits behind it, its lanes
       # still running only hold the queue: in two days 13 red runs held a newer push a median
       # 12 minutes that way (.research/dev-speed-2026-10-06.md item 6). The newer run, which
