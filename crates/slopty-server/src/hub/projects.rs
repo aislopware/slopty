@@ -1416,15 +1416,17 @@ impl Hub {
         }
     }
 
-    /// Every worker's facts, or one's.
-    pub(super) fn worker_facts(&self, only: Option<WorkerId>) -> Outcome {
-        let mut guard = self.inner.state.lock();
-        let state = &mut *guard;
+    /// Every worker's facts, or one's, each online worker asked for its own first when it has
+    /// not been on this registration ([`Self::ask_facts`]).
+    pub(super) async fn worker_facts(&self, only: Option<WorkerId>) -> Outcome {
         if let Some(worker) = only
-            && !state.workers.contains_key(&worker)
+            && !self.inner.state.lock().workers.contains_key(&worker)
         {
             return super::unknown_worker(worker);
         }
+        self.ask_facts(only).await;
+        let mut guard = self.inner.state.lock();
+        let state = &mut *guard;
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         let mut out: Vec<(String, WorkerFacts)> = state
@@ -1440,6 +1442,51 @@ impl Hub {
         drop(guard);
         out.sort_by(|(a, x), (b, y)| a.cmp(b).then(x.worker.cmp(&y.worker)));
         Outcome::Facts(out.into_iter().map(|(_, f)| f).collect())
+    }
+
+    /// Ask each online worker (`only`, else all) not yet asked on its registration for its own
+    /// facts, all at once, and keep what each answers.
+    ///
+    /// A worker gathers them only once asked (`slopty_worker::facts::Kept`), and from then on
+    /// keeps them current itself ([`slopty_proto::server::ToServer::Facts`]). So a fleet nobody
+    /// reads the facts of probes nothing, and the first read waits for the gathering, up to the
+    /// worker's own bound.
+    async fn ask_facts(&self, only: Option<WorkerId>) {
+        let asked: Vec<(WorkerId, u64)> = {
+            let mut state = self.inner.state.lock();
+            state
+                .workers
+                .values_mut()
+                .filter(|e| only.is_none_or(|w| w == e.info.worker))
+                .filter(|e| e.link.is_some() && !e.facts_asked)
+                .map(|e| {
+                    e.facts_asked = true;
+                    (e.info.worker, e.generation)
+                })
+                .collect()
+        };
+        let mut answers = tokio::task::JoinSet::new();
+        for (worker, generation) in asked {
+            let hub = self.clone();
+            answers.spawn(async move {
+                let verb = Verb::WorkerFacts { worker: Some(worker) };
+                (worker, generation, hub.forward(None, verb).await)
+            });
+        }
+        while let Some(answered) = answers.join_next().await {
+            let Ok((worker, generation, outcome)) = answered else { continue };
+            let Outcome::Facts(said) = outcome else {
+                tracing::info!(%worker, ?outcome, "a worker did not say its facts");
+                continue;
+            };
+            let own = said.into_iter().find(|f| f.worker == worker);
+            let mut state = self.inner.state.lock();
+            if let (Some(own), Some(entry)) = (own, state.workers.get_mut(&worker))
+                && entry.generation == generation
+            {
+                entry.facts = placement::bounded(own.facts);
+            }
+        }
     }
 
     /// Every worker as a start in `project` sees it: its facts, the fleet's live agents on it,

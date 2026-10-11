@@ -236,7 +236,7 @@ pub async fn run(
     };
     // Declared after the child, so it drops first: the group is killed while its leader is
     // unreaped, and so still this child's.
-    let mut group = crate::facts::Group::of(&child);
+    let mut group = crate::warden::Group::of(&child);
     let _running = Running::mark(at.tree, &child);
     let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(failed(setup, None));

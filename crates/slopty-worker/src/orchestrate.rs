@@ -359,9 +359,9 @@ struct Inner {
     /// The `settings.toml` the daemon follows, whose `[worker]` another device reads and edits
     /// ([`Verb::Settings`]), once the daemon gave it.
     settings_file: std::sync::OnceLock<PathBuf>,
-    /// This worker's facts, which a clone made for the server joins
-    /// ([`crate::facts::clone_made`]).
-    facts: std::sync::OnceLock<tokio::sync::watch::Sender<slopty_proto::project::Facts>>,
+    /// This worker's facts, which the server asks for ([`Verb::WorkerFacts`]) and a clone made
+    /// for it joins ([`crate::facts::Kept::clone_made`]).
+    facts: std::sync::OnceLock<crate::facts::Kept>,
     /// What has the daemon exit for its service manager to start it again
     /// ([`Verb::RestartWorker`]), once the daemon gave it: only a daemon a service manager
     /// keeps alive gives one.
@@ -443,9 +443,10 @@ impl Orchestrator {
         }
     }
 
-    /// Tell `facts` of every clone made for the server from now on, so this worker's `repos`
-    /// fact holds it across a restart of the server. The first one given stays.
-    pub fn set_facts(&self, facts: tokio::sync::watch::Sender<slopty_proto::project::Facts>) {
+    /// Answer the server's ask for this worker's facts from `facts`, and tell it of every clone
+    /// made for the server from now on, so this worker's `repos` fact holds it across a restart
+    /// of the server. The first one given stays.
+    pub fn set_facts(&self, facts: crate::facts::Kept) {
         if self.inner.facts.set(facts).is_err() {
             tracing::warn!("the facts were given twice; the first stays");
         }
@@ -539,11 +540,23 @@ impl Orchestrator {
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
             | Verb::TaskRestart { .. }
-            | Verb::WorkerFacts { .. }
             | Verb::TaskGet { .. }
             | Verb::TaskReport { .. }
             | Verb::WorkingOn { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
+            }
+            Verb::WorkerFacts { worker } => {
+                if let Some(worker) = worker {
+                    self.mine(worker)?;
+                }
+                let facts = match self.inner.facts.get() {
+                    Some(kept) => kept.asked(crate::facts::ASKED_WAIT).await,
+                    None => slopty_proto::project::Facts::new(),
+                };
+                Ok(Outcome::Facts(vec![slopty_proto::project::WorkerFacts {
+                    worker: inner.id,
+                    facts,
+                }]))
             }
             Verb::Settings { of, edits } => self.settings(of, edits).await,
             Verb::OpenTerminal { worker, cwd, command, env, name, size, session, worktree } => {
@@ -1049,7 +1062,7 @@ impl Orchestrator {
                 })
                 .await?;
                 if let Some(facts) = self.inner.facts.get() {
-                    crate::facts::clone_made(facts, &path, &repo);
+                    facts.clone_made(&path, &repo);
                 }
                 Ok(Outcome::Cloned { path: path.to_string_lossy().into_owned(), repo })
             }

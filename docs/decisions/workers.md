@@ -1497,3 +1497,54 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     covers both halves: the rescued shell counts once by `--sessions`, no process is a child of
     the new ptyd, and the shell ends with `Exit::UNKNOWN`. Also
     `session_actor::an_end_with_no_status_is_told_as_unknown`.
+
+- ✅ **A worker probes its facts only once they are asked for, never runs rustup, and a warden
+  ends what it started** (2026-10-12).
+  - **What was wrong.** Every worker that registered with a server gathered its facts at once
+    (`facts::watch`): a login shell, `rustup target list --installed`, and a `--version` of
+    every toolchain, whose `/usr/bin/git`, `python3` and `swift` on a Mac are Xcode's shims,
+    each an `xcodebuild -sdk … -find`. Each probe runs in a process group of its own so that a
+    timeout kills what it started, which also put it out of reach of anything that killed the
+    worker. On CI's Macs every test's worker did this, its probes outlived the test, and
+    `rustup`, run in a checkout whose `rust-toolchain.toml` names a toolchain it lacked,
+    installed that toolchain first: 1.3–2.5 GB of it resident through the whole test step of a
+    7 GB VM (MEASUREMENTS 2026-10-11, "what holds a Mac test shard's memory").
+  - **Gathered when asked.** A worker now knows only its clones at start (a walk of one folder,
+    which placement beside a clone needs before anybody asks). Everything else is gathered the
+    first time the server asks (`facts::Kept::asked`), and kept current every ten minutes from
+    then on. The server asks through the verb a reader already sends, `Verb::WorkerFacts`,
+    forwarded to each online worker not yet asked on its registration, all at once
+    (`Hub::ask_facts`). The worker answers once its first gathering is done or after 15 s
+    (`ASKED_WAIT`) with what it has, and pushes the rest as it comes. No wire type changed: the
+    verb names one worker and its answer is the `Outcome::Facts` a reader gets. Placement does
+    not ask, since it reads the agents from the worker's capabilities and the clones are
+    already known. A fleet nobody reads the facts of probes nothing: no GUI client asks for
+    them since the capabilities carry the agents.
+  - **Rust targets from rustup's files.** `rust_targets` reads
+    `$RUSTUP_HOME/toolchains/<active>/lib/rustlib/components`, whose `rust-std-<target>` lines
+    are what `rustup target list --installed` prints. The active toolchain is chosen as rustup
+    chooses it: `RUSTUP_TOOLCHAIN`, then the nearest `rustup override` or `rust-toolchain`
+    file up from the worker's folder, then `default_toolchain` in `settings.toml`; a name
+    without a host takes `default_host_triple`. A toolchain not installed has no targets,
+    where rustup would have installed it.
+  - **The warden.** The worker starts its own binary as `slopty-worker --warden`, in a process
+    group of its own, and tells it of every group it starts commands in and ends them in
+    (`warden::Group`, which the facts' probes and a worktree's setup use). The warden reads
+    that from a pipe whose write end only the worker holds, so the pipe closes exactly when the
+    worker is gone, by `SIGKILL` and crashes included; the warden then kills every group still
+    listed and exits. Not chosen: probes in the worker's own group, which a timeout could then
+    not kill whole (an `xcrun` shim's `xcodebuild`, a Node wrapper's child); a kqueue
+    `NOTE_EXIT` wrapper around each probe, a process per probe where one per worker does; and
+    `PR_SET_PDEATHSIG`, Linux-only and tied to the spawning thread.
+  - **The ptyd that outlived the worker shard** (pid 26326 in gate run 38157096222) was the
+    daemons of `threads::a_trusted_mod_streams_live_blocks_that_the_transcript_settles`, which
+    hung on the live-id assertion fixed the same day and was ended by nextest at 180 s. nextest
+    kills the test's own process group, which the test's daemons, each leading a group of its
+    own, are outside of, and the test's `Drop` that ends them never ran.
+  - Tests: `warden::the_groups_still_listed_die_when_the_worker_goes`,
+    `facts::the_rust_targets_are_the_active_toolchain_s_read_from_rustup_s_files`
+    (`slopty-worker`); `server_link::a_probe_running_when_the_worker_is_killed_dies_with_it`
+    and `server_link::the_worker_gathers_its_facts_once_the_server_asks` (`slopty-workerd`);
+    `a_worker_s_reported_facts_are_shown_under_the_server_s` (`slopty-server`, asked once a
+    registration); `a_worker_s_own_facts_are_listed_and_a_task_runs_where_it_says`
+    (`slopty-cli`) reads them through `slopty workers`.

@@ -11,11 +11,12 @@
 //! (`os`, `arch`, `cpus`, `memory_mb`, `encoders`, `displays`, `load` and the rest), so none of
 //! those is here.
 //!
-//! None of this is on a path anyone waits on. [`watch()`] gathers on a task of its own, once the
-//! daemon is up and every [`REFRESH`] after, and publishes a map only when it differs from the
-//! last. Every command is bounded by a timeout, the independent ones run at once, and each runs
-//! at utility priority in a process group of its own, which a timeout kills whole. A tool
-//! that is missing or does not answer in time is only absent.
+//! None of this is on a path anyone waits on. [`watch()`] gathers on a task of its own, once
+//! someone first reads the facts ([`Kept::asked`]) and every [`REFRESH`] after, and publishes a
+//! map only when it differs from the last. Every command is bounded by a timeout, the
+//! independent ones run at once, and each runs at utility priority in a process group of its
+//! own, which a timeout kills whole, and the warden too once the worker is gone
+//! ([`crate::warden`]). A tool that is missing or does not answer in time is only absent.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -102,12 +103,63 @@ const TOOLCHAINS: &[Tool] = &[
     Tool::version("git", "git"),
 ];
 
-/// Keep `facts` current until nobody watches it: gathered now and every [`REFRESH`], with the
-/// ACP agents `own` reads of the person's settings then.
-pub async fn watch<F>(facts: watch::Sender<Facts>, own: F)
+/// How long a reader waits for the facts gathered the first time ([`Kept::asked`]); what is
+/// still missing then follows as it comes.
+pub const ASKED_WAIT: Duration = Duration::from_secs(15);
+
+/// This worker's facts, and the ask that has them gathered.
+///
+/// Nothing is probed until someone reads them ([`Self::asked`]): the server asks once a client
+/// or an agent reads the fleet's facts. Every worker a test starts would otherwise run a dozen
+/// probes it never needed, and a worker would start with them. Only the clones are known from
+/// the start, being a walk of one folder, so a task is placed beside one before anybody asked.
+#[derive(Clone, Debug, Default)]
+pub struct Kept {
+    facts: watch::Sender<Facts>,
+    wanted: Arc<tokio::sync::Notify>,
+    gathered: watch::Sender<bool>,
+}
+
+impl Kept {
+    /// What follows the facts as they change.
+    #[must_use]
+    pub fn subscribe(&self) -> watch::Receiver<Facts> {
+        self.facts.subscribe()
+    }
+
+    /// The facts, gathered for the first time on the first ask: waits for that up to `wait`,
+    /// and answers what is known then.
+    pub async fn asked(&self, wait: Duration) -> Facts {
+        self.wanted.notify_one();
+        let mut gathered = self.gathered.subscribe();
+        let _in_time = tokio::time::timeout(wait, gathered.wait_for(|done| *done)).await;
+        self.facts.borrow().clone()
+    }
+
+    /// The server had a clone of `repo` made at `path`: [`REPOS`] holds it from now on, before
+    /// the next gathering finds it.
+    pub fn clone_made(&self, path: &Path, repo: &slopty_proto::terminal::RepoId) {
+        clone_made(&self.facts, path, repo);
+    }
+}
+
+/// Keep `kept` current until nobody follows it.
+///
+/// The clones are known at once; everything else once it is first asked for ([`Kept::asked`])
+/// and every [`REFRESH`] after, with the ACP agents `own` reads of the person's settings then.
+pub async fn watch<F>(kept: Kept, own: F)
 where
     F: Fn() -> OwnAcp + Send + Sync + 'static,
 {
+    let Kept { facts, wanted, gathered } = kept;
+    let root = crate::repo::cloning::clones_root(&slopty_platform::dirs::home());
+    let mut first = Facts::from([(REPOS.to_owned(), clones(&root).await)]);
+    with_made(&facts, &mut first).await;
+    publish(&facts, first);
+    tokio::select! {
+        () = wanted.notified() => {}
+        () = facts.closed() => return,
+    }
     let own = Arc::new(own);
     let mut tick = tokio::time::interval(REFRESH);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -119,27 +171,27 @@ where
         let read = Arc::clone(&own);
         let own_now = tokio::task::spawn_blocking(move || read()).await.unwrap_or_default();
         let mut next = gather(own_now).await;
-        // A clone made while this gathered ([`clone_made`]) stays until its folder is gone.
-        let made_meanwhile = facts.borrow().get(REPOS).cloned();
-        if let (Some(Fact::Map(made)), Some(Fact::Map(found))) =
-            (made_meanwhile, next.get_mut(REPOS))
-        {
-            let there = tokio::task::spawn_blocking(move || still_there(made)).await;
-            for (key, path) in there.unwrap_or_default() {
-                found.entry(key).or_insert(path);
-            }
-        }
+        with_made(&facts, &mut next).await;
         publish(&facts, next);
+        gathered.send_replace(true);
+    }
+}
+
+/// `next` with every clone made while it was gathered ([`clone_made`]), until its folder is
+/// gone.
+async fn with_made(facts: &watch::Sender<Facts>, next: &mut Facts) {
+    let made_meanwhile = facts.borrow().get(REPOS).cloned();
+    if let (Some(Fact::Map(made)), Some(Fact::Map(found))) = (made_meanwhile, next.get_mut(REPOS)) {
+        let there = tokio::task::spawn_blocking(move || still_there(made)).await;
+        for (key, path) in there.unwrap_or_default() {
+            found.entry(key).or_insert(path);
+        }
     }
 }
 
 /// The server had a clone of `repo` made at `path`: [`REPOS`] holds it from now on, before the
 /// next gathering finds it.
-pub fn clone_made(
-    facts: &watch::Sender<Facts>,
-    path: &Path,
-    repo: &slopty_proto::terminal::RepoId,
-) {
+fn clone_made(facts: &watch::Sender<Facts>, path: &Path, repo: &slopty_proto::terminal::RepoId) {
     let path = path.to_string_lossy().into_owned();
     facts.send_if_modified(|now| {
         let repos = now.entry(REPOS.to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
@@ -234,7 +286,7 @@ pub async fn gather(own: OwnAcp) -> Facts {
         versions(&search, &stand_ins, &AGENTS),
         acp_agents(&search, &stand_ins, acp),
         versions(&search, &stand_ins, TOOLCHAINS),
-        rust_targets(&search),
+        rust_targets(),
         gpus(&search),
         power(),
         clones(&clones_root),
@@ -359,12 +411,109 @@ fn version_in(text: &str, after: Option<&str>) -> Option<String> {
     Some(found.chars().take(VERSION_MAX).collect())
 }
 
-/// The Rust targets rustup has installed, when it is here.
-async fn rust_targets(search: &SearchPath) -> Option<Vec<String>> {
-    let rustup = search.resolve("rustup")?;
-    let listed = search.command(&rustup, &["target", "list", "--installed"]);
-    let ran = run(listed, VERSION_WAIT, LISTING_MAX).await.filter(|ran| ran.ok)?;
-    Some(ran.out.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect())
+/// The Rust targets the active toolchain has a standard library for, as `rustup target list
+/// --installed` lists them, when rustup is here.
+///
+/// They are read from rustup's own files, never by running it: rustup in a folder whose
+/// `rust-toolchain.toml` names a toolchain it lacks installs that first, which on a CI Mac held
+/// gigabytes for minutes, once for every worker a test started.
+async fn rust_targets() -> Option<Vec<String>> {
+    let home = std::env::var_os("RUSTUP_HOME")
+        .filter(|home| !home.is_empty())
+        .map_or_else(|| slopty_platform::dirs::home().join(".rustup"), PathBuf::from);
+    let named = std::env::var("RUSTUP_TOOLCHAIN").ok().filter(|name| !name.is_empty());
+    let here = std::env::current_dir().ok();
+    let read = move || installed_targets(&home, named.as_deref(), here.as_deref());
+    tokio::task::spawn_blocking(read).await.ok().flatten()
+}
+
+/// rustup's `settings.toml`, as much of it as says which toolchain is active.
+#[derive(Debug, Default, serde::Deserialize)]
+struct Rustup {
+    default_host_triple: Option<String>,
+    default_toolchain: Option<String>,
+    /// A folder's toolchain, set by `rustup override`.
+    #[serde(default)]
+    overrides: BTreeMap<String, String>,
+}
+
+/// A `rust-toolchain.toml`.
+#[derive(Debug, serde::Deserialize)]
+struct ToolchainFile {
+    toolchain: PinnedToolchain,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PinnedToolchain {
+    channel: Option<String>,
+    path: Option<String>,
+}
+
+/// The targets of the toolchain rustup under `home` takes as active, the way it chooses: the
+/// one `named` (`RUSTUP_TOOLCHAIN`), else the nearest of a folder's override and its
+/// `rust-toolchain` file from `here` up, else the default. `None` when there is none, or it is
+/// not installed.
+fn installed_targets(home: &Path, named: Option<&str>, here: Option<&Path>) -> Option<Vec<String>> {
+    let rustup = std::fs::read_to_string(home.join("settings.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Rustup>(&text).ok())
+        .unwrap_or_default();
+    let pinned = || here?.ancestors().find_map(|dir| pinned_in(dir, &rustup));
+    let name = named.map(str::to_owned).or_else(pinned).or(rustup.default_toolchain)?;
+    let toolchain = toolchain_dir(home, &name, rustup.default_host_triple.as_deref())?;
+    let components = std::fs::read_to_string(toolchain.join("lib/rustlib/components")).ok()?;
+    let mut targets: Vec<String> = components
+        .lines()
+        .filter_map(|component| component.trim().strip_prefix("rust-std-"))
+        .map(str::to_owned)
+        .collect();
+    targets.sort();
+    targets.dedup();
+    Some(targets)
+}
+
+/// The toolchain `dir` pins: its `rustup override`, else its `rust-toolchain.toml` or
+/// `rust-toolchain` file (TOML, or the bare name the old form holds).
+fn pinned_in(dir: &Path, rustup: &Rustup) -> Option<String> {
+    if let Some(name) = rustup.overrides.get(dir.to_string_lossy().as_ref()) {
+        return Some(name.clone());
+    }
+    ["rust-toolchain.toml", "rust-toolchain"].into_iter().find_map(|file| {
+        let text = std::fs::read_to_string(dir.join(file)).ok()?;
+        match toml::from_str::<ToolchainFile>(&text) {
+            Ok(ToolchainFile { toolchain }) => toolchain.path.or(toolchain.channel),
+            Err(_) => {
+                Some(text.trim().to_owned()).filter(|name| !name.is_empty() && !name.contains('\n'))
+            }
+        }
+    })
+}
+
+/// Where the toolchain `name` is installed under `home`: a path as it is, else its own folder,
+/// else the folder of its name for `host` (`stable` is `stable-aarch64-apple-darwin`), else the
+/// first one for any host.
+fn toolchain_dir(home: &Path, name: &str, host: Option<&str>) -> Option<PathBuf> {
+    if Path::new(name).is_absolute() {
+        return Some(PathBuf::from(name));
+    }
+    let toolchains = home.join("toolchains");
+    let exact = toolchains.join(name);
+    if exact.is_dir() {
+        return Some(exact);
+    }
+    let hosted = host.map(|host| toolchains.join(format!("{name}-{host}")));
+    if let Some(hosted) = hosted.filter(|dir| dir.is_dir()) {
+        return Some(hosted);
+    }
+    let prefix = format!("{name}-");
+    let mut any: Vec<PathBuf> = std::fs::read_dir(&toolchains)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect();
+    any.sort();
+    any.into_iter().next()
 }
 
 /// The chip, whose GPU it is (`Apple M2 Ultra`).
@@ -715,9 +864,9 @@ pub(crate) struct Ran {
 /// Run `command` for at most `wait`, keeping the first `cap` bytes it prints.
 ///
 /// It runs in a process group of its own, which is killed whole when it runs over or when the
-/// caller stops waiting (a worker shutting down drops it): a tool's wrapper script dies with
-/// whatever it started. Past the cap its output is read and dropped, so it finishes rather than
-/// blocking on a full pipe.
+/// caller stops waiting (a worker shutting down drops it), and by the warden when the worker is
+/// gone ([`crate::warden`]): a tool's wrapper script dies with whatever it started. Past the cap
+/// its output is read and dropped, so it finishes rather than blocking on a full pipe.
 pub(crate) async fn run(
     mut command: tokio::process::Command,
     wait: Duration,
@@ -732,7 +881,7 @@ pub(crate) async fn run(
     let mut child = command.spawn().ok()?;
     // Declared after the child, so it drops first: the group is killed while its leader is
     // unreaped, and so still this child's.
-    let mut group = Group::of(&child);
+    let mut group = crate::warden::Group::of(&child);
     let mut stdout = child.stdout.take()?;
     let finished = tokio::time::timeout(wait, async {
         let mut kept = Vec::new();
@@ -746,34 +895,6 @@ pub(crate) async fn run(
     })
     .await;
     finished.ok().flatten()
-}
-
-/// A child's process group, killed whole when dropped unless the child was reaped.
-pub(crate) struct Group(Option<rustix::process::Pid>);
-
-impl Group {
-    /// The group `child` leads.
-    pub(crate) fn of(child: &tokio::process::Child) -> Self {
-        Self(
-            child
-                .id()
-                .and_then(|id| i32::try_from(id).ok())
-                .and_then(rustix::process::Pid::from_raw),
-        )
-    }
-
-    /// Its leader was reaped: its id may name another group from now on, so it is not killed.
-    pub(crate) const fn reaped(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for Group {
-    fn drop(&mut self) {
-        if let Some(group) = self.0 {
-            let _gone = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
-        }
-    }
 }
 
 /// `bytes` as text, trimmed, without the half of a character a cap cut off.
@@ -905,6 +1026,61 @@ mod tests {
         assert_eq!(search.dirs, [Path::new("/bin"), Path::new("/usr/bin")]);
         assert_eq!(search.resolve("sh").as_deref(), Some(Path::new("/bin/sh")));
         assert_eq!(search.resolve("no-such-program-anywhere"), None);
+    }
+
+    /// The Rust targets are the active toolchain's, read from rustup's files and chosen as rustup
+    /// chooses: `RUSTUP_TOOLCHAIN`, else the nearest override or toolchain file up from the
+    /// folder, else the default; a toolchain that is not installed has none.
+    #[test]
+    fn the_rust_targets_are_the_active_toolchain_s_read_from_rustup_s_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("rustup");
+        let host = "aarch64-apple-darwin";
+        let toolchain = |name: &str, components: &str| {
+            let rustlib = home.join("toolchains").join(name).join("lib/rustlib");
+            std::fs::create_dir_all(&rustlib).unwrap();
+            std::fs::write(rustlib.join("components"), components).unwrap();
+        };
+        toolchain(&format!("stable-{host}"), "cargo-x\nrust-std-aarch64-apple-darwin\nrustc-x\n");
+        toolchain(
+            &format!("nightly-{host}"),
+            "rust-std-wasm32-wasip2\nrust-std-aarch64-apple-darwin\nrust-src\n",
+        );
+        toolchain("1.93.0-x86_64-unknown-linux-gnu", "rust-std-x86_64-unknown-linux-gnu\n");
+        let pinned = tmp.path().join("pinned");
+        let overridden = tmp.path().join("overridden");
+        let legacy = tmp.path().join("legacy");
+        let missing = tmp.path().join("missing");
+        for dir in [&pinned, &overridden, &legacy, &missing] {
+            std::fs::create_dir_all(dir.join("deep")).unwrap();
+        }
+        std::fs::write(pinned.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"nightly\"\n")
+            .unwrap();
+        std::fs::write(legacy.join("rust-toolchain"), "1.93.0\n").unwrap();
+        std::fs::write(missing.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"beta\"\n")
+            .unwrap();
+        let settings = format!(
+            "default_host_triple = \"{host}\"\ndefault_toolchain = \"stable-{host}\"\n\
+             profile = \"default\"\nversion = \"12\"\n\n[overrides]\n\"{}\" = \"nightly-{host}\"\n",
+            overridden.display()
+        );
+        std::fs::write(home.join("settings.toml"), settings).unwrap();
+
+        let targets =
+            |named: Option<&str>, here: &Path| installed_targets(&home, named, Some(here));
+        let stable = Some(vec!["aarch64-apple-darwin".to_owned()]);
+        let nightly = Some(vec!["aarch64-apple-darwin".to_owned(), "wasm32-wasip2".to_owned()]);
+        assert_eq!(targets(None, tmp.path()), stable, "the default");
+        assert_eq!(targets(None, &pinned.join("deep")), nightly, "the file up from the folder");
+        assert_eq!(targets(None, &overridden.join("deep")), nightly, "the override");
+        assert_eq!(
+            targets(None, &legacy.join("deep")),
+            Some(vec!["x86_64-unknown-linux-gnu".to_owned()]),
+            "the old file's bare name, found for its own host"
+        );
+        assert_eq!(targets(Some("nightly"), &legacy), nightly, "RUSTUP_TOOLCHAIN over all");
+        assert_eq!(targets(None, &missing), None, "a toolchain not installed has none");
+        assert_eq!(installed_targets(&tmp.path().join("none"), None, None), None, "no rustup");
     }
 
     /// macOS's stand-ins run only with something behind them; every other program runs.

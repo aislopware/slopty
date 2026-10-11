@@ -321,6 +321,9 @@ struct Entry {
     branches: HashMap<SessionId, AgentBranch>,
     /// What the worker reported it is and has.
     facts: Facts,
+    /// Its facts were asked for on this registration: a worker gathers them only once asked
+    /// ([`Hub::ask_facts`]), and keeps them current from then on.
+    facts_asked: bool,
     /// The key its terminals' tokens are made under, once it registered.
     session_key: Option<SessionKey>,
 }
@@ -364,6 +367,7 @@ impl Hub {
                 link: None,
                 branches: HashMap::new(),
                 facts: Facts::new(),
+                facts_asked: false,
                 session_key: None,
             };
             state.workers.insert(entry.info.worker, entry);
@@ -690,6 +694,7 @@ impl Hub {
             entry.generation = generation;
             entry.link = link;
             entry.session_key = Some(key);
+            entry.facts_asked = false;
             entry.branches.retain(|session, _| !gone.contains(session));
             (reshaped, gone, opened)
         } else {
@@ -702,6 +707,7 @@ impl Hub {
                 link,
                 branches,
                 facts,
+                facts_asked: false,
                 session_key: Some(key),
             };
             state.workers.insert(worker, entry);
@@ -942,7 +948,7 @@ impl Hub {
             Verb::TaskRestart { project, task, agent, worker } => {
                 self.task_restart(caller, key, project, task, (agent, worker)).await
             }
-            Verb::WorkerFacts { worker } => self.worker_facts(worker),
+            Verb::WorkerFacts { worker } => self.worker_facts(worker).await,
             Verb::TaskGet { project, task } => self.task_get(&project, task),
             Verb::WorkingOn { session } => self.working_on(session),
             verb @ Verb::SpawnAgent { .. } => self.spawn_agent(caller, from, key, verb).await,
@@ -1980,7 +1986,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskSpawn { .. }
         | Verb::TaskRestart { .. }
         | Verb::TaskTell { .. }
-        | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }
         | Verb::WorkingOn { .. }
         | Verb::TaskReport { .. }
@@ -2019,7 +2024,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::RestartWorker { worker }
         | Verb::PullOf { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
-        Verb::Settings { of, .. } => *of,
+        // Asked of one worker by the server alone ([`Hub::ask_facts`]).
+        Verb::Settings { of, .. } | Verb::WorkerFacts { worker: of } => *of,
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }

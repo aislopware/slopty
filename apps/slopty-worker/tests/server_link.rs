@@ -609,10 +609,58 @@ mod tests {
         assert!(at_once.elapsed() < Duration::from_secs(5), "{:?}", at_once.elapsed());
     }
 
-    /// Once registered, the worker tells the server what it has, its toolchains among it. What
-    /// the server fills in itself from the registration is left to it.
+    /// A probe the worker is running when it is killed outright dies with it: its warden kills
+    /// the probe's process group, which no kill of the worker reaches.
     #[tokio::test]
-    async fn the_server_hears_the_workers_facts() {
+    async fn a_probe_running_when_the_worker_is_killed_dies_with_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        // A `claude` that hangs on the first thing it is asked, as one stuck on the network.
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let pids = dir.path().join("probe.pid");
+        let claude = programs.join("claude");
+        let script = format!("#!/bin/sh\necho $$ >> '{}'\nexec /bin/sleep 600\n", pids.display());
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
+
+        let probe = tokio::time::timeout(STEP, async {
+            loop {
+                let said = std::fs::read_to_string(&pids).unwrap_or_default();
+                if let Some(pid) = said.lines().next().and_then(|l| l.trim().parse::<u32>().ok()) {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker asks its agents what they are");
+        // Killed outright, as a crash or a test's teardown ends it. The probe leads a process
+        // group of its own, as every command the worker runs for itself does.
+        drop(daemons);
+        let gone = tokio::time::timeout(STEP, async {
+            while !slopty_testkit::group::gone(probe) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if gone.is_err() {
+            slopty_testkit::group::kill(probe);
+        }
+        assert!(gone.is_ok(), "the probe outlived the worker");
+    }
+
+    /// Once registered, the worker tells the server only the clones it has: its toolchains and
+    /// the rest are gathered when the server first asks, and answered then. What the server
+    /// fills in itself from the registration is left to it.
+    #[tokio::test]
+    async fn the_worker_gathers_its_facts_once_the_server_asks() {
         use slopty_proto::project::Fact;
 
         let dir = tempfile::tempdir().unwrap();
@@ -629,10 +677,10 @@ mod tests {
         let _daemons =
             daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        let (mut peer, _reg) = Peer::welcome(link).await;
+        let (mut peer, registration) = Peer::welcome(link).await;
 
         peer.heard(|m| matches!(m, ToServer::Facts(_))).await;
-        let facts = peer
+        let unasked = peer
             .heard
             .iter()
             .find_map(|m| match m {
@@ -640,6 +688,14 @@ mod tests {
                 _ => None,
             })
             .expect("heard above");
+        assert!(unasked.keys().eq(["repos"]), "nothing probed before the ask: {unasked:?}");
+
+        let worker = registration.worker;
+        let asked = peer.ask(Verb::WorkerFacts { worker: Some(worker) }).await;
+        let Outcome::Facts(said) = asked else { panic!("{asked:?}") };
+        let [own] = said.as_slice() else { panic!("{said:?}") };
+        assert_eq!(own.worker, worker);
+        let facts = &own.facts;
         let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
         assert!(
             matches!(toolchains.get("cargo"), Some(Fact::Text(v)) if !v.is_empty()),

@@ -361,9 +361,10 @@ impl Drop for Joined {
 }
 
 /// Register with the server at `addr` on a task of its own that dials and keeps dialing
-/// (`server::run`), registering with the daemon's [`Daemon::caps`], and gather this worker's
-/// facts for it on another ([`slopty_worker::facts::watch`]), the person's own ACP agents
-/// read from the settings under `data_dir` each time. `None` when no endpoint could be bound.
+/// (`server::run`), registering with the daemon's [`Daemon::caps`], and keep this worker's
+/// facts for it on another ([`slopty_worker::facts::watch`]), gathered once the server asks, the
+/// person's own ACP agents read from the settings under `data_dir` each time. `None` when no
+/// endpoint could be bound.
 fn join_server(
     daemon: &Daemon,
     addr: slopty_net::HostAddr,
@@ -401,10 +402,11 @@ fn join_server(
     if let Some(restart) = &daemon.restart {
         orchestrator.set_restart(Arc::clone(restart));
     }
-    let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
-    orchestrator.set_facts(facts_tx.clone());
+    let kept = slopty_worker::facts::Kept::default();
+    orchestrator.set_facts(kept.clone());
+    let facts = kept.subscribe();
     let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
-    let facts_task = tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
+    let facts_task = tokio::spawn(slopty_worker::facts::watch(kept, own));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };
     let run = tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
     Some(Joined(vec![facts_task.abort_handle(), run.abort_handle()]))
@@ -586,13 +588,53 @@ const PANICKED: i32 = 101;
 /// One connection's hold on the curtain.
 type CurtainLink = slopty_worker::screen::curtain::Link<slopty_worker::screen::curtain::Native>;
 
+/// What this binary is started with to be the daemon's warden ([`slopty_worker::warden`]).
+const WARDEN_ARG: &str = "--warden";
+
+/// Start this binary as the daemon's warden, in a process group of its own, so that every
+/// group the daemon runs commands in ends with the daemon however it ends
+/// ([`slopty_worker::warden`]). A thread waits on it, reaping it should it end first.
+fn start_warden() {
+    use std::os::unix::process::CommandExt as _;
+    let started = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .arg(WARDEN_ARG)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+    });
+    let mut warden = match started {
+        Ok(warden) => warden,
+        Err(e) => {
+            tracing::warn!(error = %e, "no warden: what the worker starts may outlive it");
+            return;
+        }
+    };
+    if let Some(pipe) = warden.stdin.take() {
+        slopty_worker::warden::ward(pipe);
+    }
+    let waited = std::thread::Builder::new().name("slopty-warden".to_owned()).spawn(move || {
+        let _ended = warden.wait();
+    });
+    if let Err(e) = waited {
+        tracing::warn!(error = %e, "nothing waits on the warden");
+    }
+}
+
 /// The daemon: `src/main.rs` is this and nothing else.
 pub fn main() -> Result<std::process::ExitCode> {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == WARDEN_ARG) {
+        slopty_worker::warden::serve(std::io::stdin().lock());
+        return Ok(std::process::ExitCode::SUCCESS);
+    }
     #[cfg(target_os = "macos")]
     if let Some(code) = dnd::helper_main() {
         return Ok(code);
     }
     slopty_crash::install(slopty_crash::Process::Worker, &slopty_platform::dirs::data_dir());
+    start_warden();
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
     slopty_platform::user_interactive_thread();

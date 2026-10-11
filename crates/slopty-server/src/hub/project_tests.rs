@@ -447,22 +447,35 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
 }
 
 /// What a worker reports of itself is a fact `slopty workers` shows, beside what the server
-/// knows of it, whose word wins.
+/// knows of it, whose word wins. The worker is asked for it on the first read of its
+/// registration, which waits for its answer, and not again.
 #[tokio::test]
 async fn a_worker_s_reported_facts_are_shown_under_the_server_s() {
+    use slopty_proto::project::WorkerFacts;
+
     let hub = Hub::new("server".to_owned(), Vec::new());
-    let (linux, lease, _rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     let labels = BTreeMap::from([("fast-disk".to_owned(), Fact::Bool(true))]);
-    lease.handle(ToServer::Facts(BTreeMap::from([
+    let own = BTreeMap::from([
         ("labels".to_owned(), Fact::Map(labels)),
         ("os".to_owned(), Fact::Text("pretend".to_owned())),
-    ])));
-    let Outcome::Facts(all) = hub.dispatch(Verb::WorkerFacts { worker: Some(linux) }).await else {
-        panic!("facts")
-    };
+    ]);
+    let reader = hub.clone();
+    let read =
+        tokio::spawn(async move { reader.dispatch(Verb::WorkerFacts { worker: None }).await });
+    let Some(FromServer::Request { id, verb, .. }) = rx.recv().await else { panic!("asked") };
+    assert_eq!(verb, Verb::WorkerFacts { worker: Some(linux) }, "the worker, by name");
+    let said = Outcome::Facts(vec![WorkerFacts { worker: linux, facts: own }]);
+    lease.handle(ToServer::Reply { id, outcome: said });
+    let Outcome::Facts(all) = read.await.unwrap() else { panic!("facts") };
     let facts = &all.first().unwrap().facts;
     assert_eq!(facts.get("os"), Some(&Fact::Text("linux".to_owned())), "the server's word wins");
     assert!(facts.contains_key("labels") && facts.contains_key("cpus"));
+
+    let again = hub.dispatch(Verb::WorkerFacts { worker: Some(linux) }).await;
+    let Outcome::Facts(again) = again else { panic!("{again:?}") };
+    assert!(again.first().is_some_and(|f| f.facts.contains_key("labels")), "{again:?}");
+    assert!(rx.try_recv().is_err(), "asked once on a registration");
 }
 
 /// The worker's table moving the thread of the agent in `session` to where `status` says, as

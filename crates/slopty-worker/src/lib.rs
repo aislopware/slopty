@@ -38,6 +38,7 @@ pub mod search;
 pub mod session;
 pub mod thread;
 pub mod wake;
+pub mod warden;
 pub mod xfer;
 
 pub use items::ItemStore;

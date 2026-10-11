@@ -649,6 +649,9 @@ pub enum Verb {
         launch: TaskLaunch,
     },
     /// What the workers are and have; answered with [`Outcome::Facts`].
+    ///
+    /// The server forwards it to each worker it has not asked yet on its registration, naming
+    /// that worker: a worker gathers its own facts only once asked.
     WorkerFacts {
         /// This worker only; every one when absent.
         worker: Option<WorkerId>,
