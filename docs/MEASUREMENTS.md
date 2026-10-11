@@ -16033,3 +16033,34 @@ gh run view <id> --json jobs --jq '.jobs[0] | "\(.startedAt) \(.completedAt)"'
 gh api "repos/aislopware/slopty/actions/runs/<id>/jobs" --jq '.jobs[] | .name as $n | .steps[] | "\($n) \(.name) \(.started_at) \(.completed_at)"'
 gh api --allow-escape-sequences "repos/aislopware/slopty/actions/jobs/<job>/logs" | grep -a 'Cache \(hits\|misses\) (Rust)\|✓ nextest'
 ```
+
+## 2026-10-11 — The gate warm on the new layout; the Actions cache's upload limit
+
+- **A warm run** (38118291368, c8a8eac1, every lane green): the xtask binary came from the
+  cache in every job (setup 0–4 s). The Mac jobs took 1541 s against 2459 s before the
+  layout (38112080050), −37 %, in three jobs instead of five:
+
+  | job (s) | before | warm, new layout |
+  | --- | --- | --- |
+  | tests ui | 467 | 606 |
+  | tests worker | 602 | 586 |
+  | tests rest | 483 | 349 |
+  | host clippy | 368 (Mac) | 201 (arm Linux) |
+  | iOS clippy + rustdoc | 539 (Mac) | 160 + 141 (arm Linux) |
+
+  The ui shard is the critical path. Its build took 404 s, against 275 s before, because the
+  gpui-kit sync in that commit rebuilt gpui-base (56 s) and gpui-component (105 s) on its
+  chain; then slopty-ui's library (52 s) and, the tail, its own test harness (111 s), a second
+  compile of the whole crate (`cargo-timing.html`, 738 units, 387 s wall). The rest shard's
+  build was 138 s with the pure crates gone to Linux.
+- **The Actions cache takes 200 uploads a minute per repository** (GitHub's documented limit;
+  1500 downloads). The first runs on the layout wrote thousands of new units from seven jobs at
+  once, and sccache counted most of their misses as write errors: iOS clippy 916 of 1191, then
+  479 of 484 (38114630412, 38117219424). Each run still lands up to 200 a minute, so the cache
+  warms over a few runs: iOS clippy's misses went 1191 → 484 → 312, rustdoc's 678 → 115 → 150.
+  A cold key space costs several runs, not one; reads (1500 a minute) showed no errors.
+- **The worker's tests on Linux** (runs 38117683319, 38118844337): 601 of 616 passed on
+  `ubuntu-24.04` as they were; with the fifteen fixed (`docs/decisions/tooling.md`, "The worker's
+  tests run on Linux too"), 614 passed in 41 s of nextest, against 140 s for the worker shard's
+  run on the Mac (six threads). The whole Linux lane with them took 313 s, 2499 tests, on a
+  fresh runner (38119296064). `slopty-deploy`'s 39 tests passed there too (38117710882).

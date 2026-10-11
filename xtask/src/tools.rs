@@ -32,7 +32,7 @@ pub const SERVER_CRATES: [&str; 8] = [
 /// The crates that build for Linux and must go on doing so: [`SERVER_CRATES`], the worker with
 /// every crate under it, and the CLI with the client core, for `slopty worker install` and
 /// `slopty hook` on a Linux worker (`docs/decisions/platform.md`, "Linux seams").
-pub const LINUX_CRATES: [&str; 28] = [
+pub const LINUX_CRATES: [&str; 29] = [
     "slopty-core",
     "slopty-crash",
     "slopty-proto",
@@ -55,14 +55,14 @@ pub const LINUX_CRATES: [&str; 28] = [
     "slopty-workerd",
     "slopty-client",
     "slopty-cli",
-    // Pure crates, which CI tests on Linux alone (`gate::LINUX_ONLY_TESTS`), and the test kit,
-    // which it tests on both. Not the deploy crate yet: its sshd test times out on a Linux
-    // runner (run 38112204055).
+    // Pure crates, which CI tests on Linux alone (`gate::LINUX_ONLY_TESTS`), and the deploy
+    // crate and the test kit, which it tests on both.
     "slopty-grid",
     "slopty-predict",
     "slopty-shape",
     "slopty-push",
     "slopty-theme",
+    "slopty-deploy",
     "slopty-testkit",
 ];
 
