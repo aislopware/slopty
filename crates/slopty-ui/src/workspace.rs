@@ -984,6 +984,9 @@ pub struct WorkspaceView {
     /// How this device's notes stand, with the app's way to fix them, while they do not reach
     /// the person: a phone's navigator says so ([`readouts`]).
     notes_door: Option<(slopty_platform::notify::Alerts, MenuRun)>,
+    /// Whether the server can push to this phone, once it said: with notes allowed here and
+    /// this false, nothing reaches the person while the app is away ([`readouts`]).
+    pushable: Option<bool>,
     /// A tapped note whose machine was still being dialled, and when it was tapped: it goes
     /// where it leads once that machine has sent what it holds ([`attention`]).
     parked_tap: Option<(slopty_platform::notify::Tap, Instant)>,
@@ -1259,6 +1262,7 @@ impl WorkspaceView {
             more_entries: Vec::new(),
             server_entries: Vec::new(),
             notes_door: None,
+            pushable: None,
             parked_tap: None,
             show_stats: false,
             desktop: desktop::Desktop::of(saved.as_ref()),
@@ -1535,6 +1539,15 @@ impl WorkspaceView {
     ) {
         self.notes_door = Some((alerts, door));
         cx.notify();
+    }
+
+    /// The server's word on whether it can push to this phone while the person is away from
+    /// every client. With notes allowed here and this false, the navigator's notes line says
+    /// they reach nobody, since the fix is on the server's machine, not here.
+    pub fn set_pushable(&mut self, pushable: bool, cx: &mut Context<Self>) {
+        if self.pushable.replace(pushable) != Some(pushable) {
+            cx.notify();
+        }
     }
 
     /// Save the layout to `path` whenever it changes (debounced).

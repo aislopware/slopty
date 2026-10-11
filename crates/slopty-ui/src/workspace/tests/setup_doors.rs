@@ -105,7 +105,8 @@ fn a_remote_window_on_a_mac_that_takes_no_input_says_so(cx: &mut TestAppContext)
 
 /// A device whose notes were never asked for says so under its navigator's header, and its
 /// line asks, once a press; notes turned off say that instead, and its door goes to the
-/// system's settings. Notes that reach the person say nothing.
+/// system's settings. Notes allowed here that the server cannot push to this phone say they
+/// reach nobody, with no door. Notes that reach the person say nothing.
 #[gpui::test]
 fn a_phone_s_navigator_asks_for_notes_until_they_reach_the_person(cx: &mut TestAppContext) {
     use slopty_platform::notify::Alerts;
@@ -155,4 +156,31 @@ fn a_phone_s_navigator_asks_for_notes_until_they_reach_the_person(cx: &mut TestA
         cx.run_until_parked();
         assert!(cx.debug_bounds("nav-notes").is_none(), "{quiet:?} says nothing");
     }
+
+    // Allowed here, but the server says it cannot push to this phone: the notes reach nobody,
+    // and the fix is on the server's machine, so the line has no door.
+    view.update_in(cx, |v, _w, cx| {
+        v.set_notes(Alerts::Allowed, door(&asked), cx);
+        v.set_pushable(false, cx);
+    });
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref() == Some(readouts::NOTES_UNPUSHABLE)),
+        "it says the server cannot reach it: {nodes:#?}"
+    );
+    assert!(cx.debug_bounds("nav-notes-door").is_none(), "nothing to press here");
+    view.update_in(cx, |v, _w, cx| v.set_notes(Alerts::Denied, door(&opened), cx));
+    cx.run_until_parked();
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref() == Some(readouts::NOTES_OFF_LINE)),
+        "off here is said first, with its door: {nodes:#?}"
+    );
+    view.update_in(cx, |v, _w, cx| {
+        v.set_notes(Alerts::Allowed, door(&asked), cx);
+        v.set_pushable(true, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("nav-notes").is_none(), "pushed to again: nothing to say");
 }

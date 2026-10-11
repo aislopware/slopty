@@ -551,6 +551,9 @@ impl Workspace {
             // What speaks for the agents and threads of the workers this client reaches only
             // through the server.
             Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),
+            // Notes allowed here reach nobody while the server cannot push to this phone: the
+            // navigator says so beside the notes' own line.
+            Change::Pushable(now) => self.view.update(cx, |v, cx| v.set_pushable(now, cx)),
         }
     }
 

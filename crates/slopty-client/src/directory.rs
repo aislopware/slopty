@@ -75,6 +75,9 @@ pub enum Change {
     /// A notice the server picked this client to show. Once notices flow they are the only
     /// trigger of an OS notification or an alert, so two devices never both alert.
     Notice(Box<Notice>),
+    /// Whether the server can push to this phone while the person is away from every client
+    /// ([`FromServer::Pushable`]), replacing the last. Only a client that said a phone hears it.
+    Pushable(bool),
 }
 
 /// Whether to dial a worker now, and where.
@@ -184,8 +187,8 @@ impl Directory {
             | FromServer::Reply { .. }
             | FromServer::Projects { .. }
             | FromServer::Deliver { .. }
-            | FromServer::Pushes(_)
-            | FromServer::Pushable(_) => Vec::new(),
+            | FromServer::Pushes(_) => Vec::new(),
+            FromServer::Pushable(now) => vec![Change::Pushable(now)],
             FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
             FromServer::Present(present) => vec![Change::Present(present)],
             FromServer::Notice(notice) => vec![Change::Notice(notice)],
@@ -389,6 +392,17 @@ mod tests {
             d.apply(FromServer::Worker(info(id, "100.64.0.9:45550", Liveness::Online))),
             Vec::<Change>::new()
         );
+    }
+
+    /// The server's word on whether it can push to this phone is a change of its own, each
+    /// replacing the last; the workers' `Pushes` is not this client's.
+    #[test]
+    fn whether_the_server_can_push_here_is_a_change() {
+        let mut d = linked();
+        assert_eq!(d.apply(FromServer::Pushable(false)), vec![Change::Pushable(false)]);
+        assert_eq!(d.apply(FromServer::Pushable(true)), vec![Change::Pushable(true)]);
+        assert_eq!(d.apply(FromServer::Pushes(true)), Vec::<Change>::new());
+        assert_eq!(d.workers().count(), 0, "the directory is untouched");
     }
 
     #[test]

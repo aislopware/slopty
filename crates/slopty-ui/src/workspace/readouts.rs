@@ -654,24 +654,31 @@ impl WorkspaceView {
 impl WorkspaceView {
     /// This device's notes in its navigator, under the server's line, while they do not reach
     /// the person: never asked for, the line asks ([`NOTES_ASK`]); turned off, it says so and
-    /// opens the system's settings. The app sets it only where pushes are the way an agent
-    /// reaches the person (a phone, an iPad).
+    /// opens the system's settings. Allowed here while the server says it cannot push to this
+    /// phone (no APNs key named there, or its token gone), it says the notes reach nobody,
+    /// with no door: the fix is on the server's machine. The app sets it only where pushes are
+    /// the way an agent reaches the person (a phone, an iPad).
     pub(super) fn notes_line(&self) -> Option<gpui::AnyElement> {
         let (alerts, door) = self.notes_door.as_ref()?;
         let (glyph, text, action) = match alerts {
-            Alerts::Unasked => (Symbol::Bell, NOTES_ASK, NOTES_ALLOW),
-            Alerts::Denied => (Symbol::BellSlash, NOTES_OFF_LINE, NOTES_TURN_ON),
+            Alerts::Unasked => (Symbol::Bell, NOTES_ASK, Some(NOTES_ALLOW)),
+            Alerts::Denied => (Symbol::BellSlash, NOTES_OFF_LINE, Some(NOTES_TURN_ON)),
+            Alerts::Allowed if self.pushable == Some(false) => {
+                (Symbol::BellSlash, NOTES_UNPUSHABLE, None)
+            }
             Alerts::Allowed | Alerts::Unavailable => return None,
         };
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let run = Rc::clone(door);
-        let action = SharedString::from(action);
-        let el = button("nav-notes-door", action.clone(), theme)
-            .flex_none()
-            .text_color(hsla(s.accent))
-            .child(action);
-        let door = tab_stop(el, s.focus).on_click(move |_ev, window, cx| run(window, cx));
+        let door = action.map(|action| {
+            let run = Rc::clone(door);
+            let action = SharedString::from(action);
+            let el = button("nav-notes-door", action.clone(), theme)
+                .flex_none()
+                .text_color(hsla(s.accent))
+                .child(action);
+            tab_stop(el, s.focus).on_click(move |_ev, window, cx| run(window, cx))
+        });
         Some(
             div()
                 .id("nav-notes")
@@ -697,7 +704,7 @@ impl WorkspaceView {
                         .child(div().text_color(hsla(s.text_secondary)).child(text))
                         .child(div().text_color(hsla(s.text_muted)).child(NOTES_MEANS)),
                 )
-                .child(door)
+                .children(door)
                 .into_any_element(),
         )
     }
@@ -711,7 +718,9 @@ pub(super) const NOTES_ALLOW: &str = "Allow";
 pub(super) const NOTES_OFF_LINE: &str = "Notifications are off";
 /// Its door: the system's settings, where they are turned on.
 pub(super) const NOTES_TURN_ON: &str = "Turn on";
-/// What either costs, under it.
+/// What it says while notes are allowed here and the server cannot push to this phone.
+pub(super) const NOTES_UNPUSHABLE: &str = "The server can't send notifications to this phone";
+/// What each costs, under it.
 pub(super) const NOTES_MEANS: &str = "Nothing reaches you here while Slopty is away.";
 
 /// Where a popover rises from the foot bar, as offsets from the window's edges.

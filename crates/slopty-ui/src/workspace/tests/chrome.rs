@@ -484,7 +484,10 @@ fn agents_at_their_turn_draw_no_section_and_no_clock(cx: &mut TestAppContext) {
 
 /// With the navigator hidden where it docks, a worker holding tiles of its own (of no project)
 /// stands on the rail for them, marked with what wants the person once something does; it goes
-/// to that tile. A rail of a machine's loose tiles alone was an empty column before.
+/// to that tile. A rail of a machine's loose tiles alone was an empty column before. The title
+/// bar runs over it, so its top is the bar's own row and it draws no top cell of its own
+/// (`MonoCode`'s compact rail under a title bar above it): its first square stands its padding
+/// under the bar's line, the full width across the rail.
 #[gpui::test]
 fn the_rail_shows_a_worker_with_its_own_tiles_and_what_waits(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -498,6 +501,13 @@ fn the_rail_shows_a_worker_with_its_own_tiles_and_what_waits(cx: &mut TestAppCon
     cx.run_until_parked();
     let rail = cx.debug_bounds("nav-rail").expect("the rail in its place");
     assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5, "{rail:?}");
+    let bar = cx.debug_bounds("titlebar").expect("the title bar");
+    assert!((rail.top() - bar.bottom()).abs() < px(0.5), "under the bar: {rail:?} {bar:?}");
+    assert!(bar.left() <= rail.left() && bar.right() > rail.right(), "the bar runs over it");
+    let search = cx.debug_bounds("nav-rail-search").expect("its first square");
+    let theme = view.read_with(cx, |v, _| v.theme.clone());
+    let pad = theme.spacing.xs + theme.spacing.xxs;
+    assert!((search.top() - rail.top() - px(pad)).abs() < px(0.5), "no top cell: {search:?}");
     let glyph = leak(format!("nav-rail-{}", laptop.key));
     assert!(cx.debug_bounds(glyph).is_some(), "at rest and well, it stands for its tiles");
     let badge = leak(format!("nav-rail-{}-rollup", laptop.key));

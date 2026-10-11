@@ -1796,7 +1796,21 @@ impl SettingsForm {
                             .text_color(hsla(s.text))
                             .child(row.label()),
                     )
-                    .child(div().flex_none().child(self.control(ix, row, cx))),
+                    .child(
+                        // A typed field's share of the row is the row's, so it is set here: a
+                        // share of this wrapper, which takes its size from the field, cut every
+                        // field to that share of its own width.
+                        div()
+                            .flex_none()
+                            .when(
+                                matches!(
+                                    row.field.kind,
+                                    Kind::Text | Kind::List | Kind::Colour | Kind::Map(_)
+                                ),
+                                |el| el.max_w(gpui::relative(FIELD_SHARE)),
+                            )
+                            .child(self.control(ix, row, cx)),
+                    ),
             )
             .children(under)
             .children(self.map_entries(ix, row, cx))
@@ -2200,7 +2214,7 @@ impl SettingsForm {
             .id(("settings-field", ix))
             .debug_selector(move || format!("settings-field-{ix}"))
             .w(px(if row.field.kind == Kind::Colour { FIELD_WIDTH } else { TEXT_WIDTH }))
-            .max_w(gpui::relative(FIELD_SHARE))
+            .max_w_full()
             .gap(px(spacing.xs))
             .px(px(crate::kit::FIELD_INSET))
             .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
@@ -2939,6 +2953,13 @@ mod map_tests {
         let sm = Theme::default().spacing.sm;
         assert!(f32::from(band.size.width) >= 16.0 * sm, "all sixteen: {band:?}");
         assert!(band.left() >= field.left() && band.right() <= field.right(), "in the field");
+        // A colour's field is its whole width, so its hex reads whole beside its swatch.
+        let cursor = rows()
+            .iter()
+            .position(|r| r.table() == "colors.light" && r.key() == "cursor")
+            .expect("the light cursor colour");
+        let colour = cx.debug_bounds(leak(format!("settings-field-{cursor}"))).expect("its field");
+        assert!((f32::from(colour.size.width) - FIELD_WIDTH).abs() < 0.5, "{colour:?}");
     }
 
     /// The Agents page writes its keys to their own tables: a step of the live agents to
@@ -2969,9 +2990,10 @@ mod map_tests {
         let text = |cx: &mut VisualTestContext| form.read_with(cx, |f, _| f.text().to_owned());
         assert_eq!(text(cx), "[server.projects]\nlive_agents = 25\n");
 
-        // A path's field is wide enough to read one whole, wider than a colour's.
+        // A path's field is wide enough to read one whole, wider than a colour's, its share
+        // the row's and not its own (which cut every field to that share of itself).
         let wide = cx.debug_bounds(leak(format!("settings-field-{key}"))).expect("its field");
-        assert!(f32::from(wide.size.width) > FIELD_WIDTH, "{wide:?}");
+        assert!((f32::from(wide.size.width) - TEXT_WIDTH).abs() < 0.5, "{wide:?}");
         click(cx, leak(format!("settings-field-{key}")));
         cx.simulate_input("/Users/me/keys/AuthKey.p8");
         cx.executor().advance_clock(SETTLE);
