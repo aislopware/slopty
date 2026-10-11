@@ -3865,3 +3865,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Goldens: `server_client_restart_worker` and every summary or event golden that carries an
     exit.
 
+
+- ✅ **A frame that finds a prompt erased visits the clean rows its status reaches**
+  (2026-10-11, three `terminal` fuzzer inputs from the arm Linux Deep run).
+  - The fuzzer reported "deadly signal", but it was not a trap in libghostty: replayed with
+    `ReleaseSafe`, each input failed the harness's own check, a viewer's prompt row reading
+    `Prompt { exit: None }` where the terminal reads `Prompt { exit: Some(0) }`, cells equal.
+  - The cause was ours. A diff with nothing scrolled visits only the rows libghostty marks
+    dirty. When one of them has lost its prompt flag (`ED` clears the row; in the inputs, the
+    cursor sent up with `VPA` while in a prompt, whose line feed re-flags the row below as a
+    continuation), the engine drops its start through `remark`. That can hand a `D` above to
+    the next prompt below, whose row is clean. The row went into `remarked_rows`
+    after the dirty-only walk had already planned past it, so it was skipped, and the set is
+    cleared at the end of every frame without a hold. That prompt kept the old status until
+    something else redrew it.
+  - Now the walk visits every row while a remarked row lies ahead of it on the screen, and
+    only dirty rows otherwise. The case needs an erase, so the usual diff stays dirty-only.
+    Rejected: scanning every dirty row for an erased prompt before the walk. It reads each
+    dirty row twice, every frame, to cover a case this one handles when it happens.
+  - In a shipped build libghostty is `ReleaseFast`, so a safety check it would have hit
+    there is undefined behaviour, not a trap. Only the worker parses VT, so a crash there ends
+    every session's engine on that worker until it restarts, while ptyd keeps the shells.
+    These inputs hit no such check.
+  - Tests: engine `a_prompt_erased_hands_its_status_down_in_the_same_frame`; the inputs are
+    `fuzz/regressions/terminal/frame-erased-prompt-hands-status-to-clean-row-{1,2,3}`.

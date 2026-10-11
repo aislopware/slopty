@@ -1281,7 +1281,13 @@ impl GhosttyEngine {
         // A line's wrap is the row above's (see `row_above_wraps`): the clean rows below a
         // visited row whose wrap changed, and their wrap now.
         let mut rewrapped_below: Vec<(u16, bool)> = Vec::new();
-        while let Some((at, row)) = next_row(&mut row_iter, sparse, y) {
+        loop {
+            // A prompt found erased on a row visited remarks the rows a status reaches below
+            // it, which may be clean: until those are reached, every row is visited.
+            let below = first.saturating_add(u64::from(y))..first.saturating_add(u64::from(rows));
+            let dirty_only =
+                sparse && (hold.is_some() || self.remarked_rows.range(below).next().is_none());
+            let Some((at, row)) = next_row(&mut row_iter, dirty_only, y) else { break };
             if at != y {
                 self.shown.carry(&mut shown, first, y..at);
                 y = at;
@@ -4977,6 +4983,31 @@ mod tests {
                 (1, SemanticMark::Prompt { exit: None, input: None }),
             ]
         );
+        assert!(e.take_frame(0).unwrap().is_none(), "sent once");
+    }
+
+    /// A prompt erased between a `D` and the prompt below it hands that prompt the status, and
+    /// the frame that finds it erased says so although the prompt's row is clean: in a frame
+    /// that visits only the dirty rows, the remarked row below was skipped and then forgotten
+    /// (three inputs of the `terminal` fuzzer).
+    #[test]
+    fn a_prompt_erased_hands_its_status_down_in_the_same_frame() {
+        let mut e = engine(20, 8);
+        e.write(b"x\x1b]133;D;1\x07\r\n\x1b]133;A\x07$ \r\n\r\n\x1b]133;A\x07$ \r\n");
+        let prompt = |exit| SemanticMark::Prompt { exit, input: None };
+        let f = e.take_frame(0).unwrap().expect("the prompts");
+        let marks: Vec<(u16, SemanticMark)> =
+            f.updates.iter().map(|u| (u.row, u.line.mark)).collect();
+        assert!(marks.contains(&(1, prompt(Some(1)))), "{marks:?}");
+        assert!(marks.contains(&(3, prompt(None))), "the prompt above took the status: {marks:?}");
+        // Erase above the blank row: the first prompt's row is cleared whole, the second's is
+        // not touched, and the cursor goes back below it.
+        e.write(b"\x1b[3;1H\x1b[1J\x1b[6;1H");
+        let f = e.take_frame(0).unwrap().expect("the erase");
+        let below = f.updates.iter().find(|u| u.row == 3).map(|u| u.line.mark);
+        assert_eq!(below, Some(prompt(Some(1))), "the clean prompt below is sent again");
+        let whole = e.full_frame(0).unwrap();
+        assert_eq!(whole.updates.get(3).map(|u| u.line.mark), Some(prompt(Some(1))));
         assert!(e.take_frame(0).unwrap().is_none(), "sent once");
     }
 
