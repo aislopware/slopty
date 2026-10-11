@@ -90,8 +90,6 @@ ListItem │ Toggle curtain
 Button │ Keys for Toggle curtain
 ListItem │ Show or hide the navigator │ ⌘B
 Button │ Keys for Show or hide the navigator │ ⌘B
-ListItem │ Toggle navigator lens
-Button │ Keys for Toggle navigator lens
 ListItem │ Find │ ⌘F
 Button │ Keys for Find │ ⌘F
 ListItem │ Focus next │ ⌃⇥

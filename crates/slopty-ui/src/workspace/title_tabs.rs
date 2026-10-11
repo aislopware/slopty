@@ -36,7 +36,7 @@ use slopty_client::layout::tiling::TabId;
 use slopty_theme::{Curve, Theme, stroke};
 
 use super::area::{self, DropSpots};
-use super::tab_look;
+use super::tab_look::{self, Clock};
 use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
@@ -123,33 +123,19 @@ pub(super) struct Drops<'a> {
     pub field: Option<gpui::AnyElement>,
 }
 
-/// The project whose tabs are on show, as a number its key hashes to, and the instant the frame
-/// stands for; `moves` off (Reduce Motion, a test's frame) closes a tab at once.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Clock {
-    pub project: u64,
-    pub now: Instant,
-    pub moves: bool,
-}
-
 /// How the title tabs move, worked out as the row is built from the tabs it drew last, while
 /// motion is on: one gone from the same project since leaves a bare ghost of its title at its
-/// last width, which narrows to nothing; one new since grows from nothing to its slot; and
-/// tabs whose order changed slide from where they stood to their new place (`MonoCode`'s
-/// `tab-opening` and its reorder). Another project's tabs shown anew move nothing. Read and
-/// written while the row is built, which never writes its host.
+/// last width, which narrows to nothing; the rest move as every row of tabs does
+/// ([`tab_look::Motion`]). The row is the project's. Read and written while the row is built,
+/// which never writes its host.
 #[derive(Debug, Default)]
 pub(super) struct Closing(RefCell<Folding>);
 
 #[derive(Debug, Default)]
 struct Folding {
-    project: Option<u64>,
-    last: Vec<(TabId, SharedString)>,
+    titles: Vec<(TabId, SharedString)>,
     ghosts: Vec<Ghost>,
-    /// Tabs opened, and when.
-    opening: Vec<(TabId, Instant)>,
-    /// Tabs sliding to a new place: how far left of it they stood, and since when.
-    slides: Vec<(TabId, Pixels, Instant)>,
+    motion: tab_look::Motion<TabId>,
 }
 
 /// How the row moves in one frame ([`Folding::step`]).
@@ -157,16 +143,14 @@ struct Folding {
 struct Moves {
     /// The ghosts: the tab each stands before (none past the last), its title and its width.
     ghosts: Vec<(Option<TabId>, SharedString, Pixels)>,
-    /// The tabs still growing, and how far along (0 to 1).
-    opening: Vec<(TabId, f32)>,
-    /// The tabs still sliding, and how far left of their place they stand.
-    slides: Vec<(TabId, Pixels)>,
+    /// How the tabs themselves move.
+    tabs: tab_look::Moves<TabId>,
 }
 
 impl Moves {
     /// Whether anything moves, so the next frame is drawn.
     const fn any(&self) -> bool {
-        !self.ghosts.is_empty() || !self.opening.is_empty() || !self.slides.is_empty()
+        !self.ghosts.is_empty() || self.tabs.any()
     }
 }
 
@@ -189,92 +173,38 @@ impl Folding {
         widths: &[(TabId, gpui::Bounds<Pixels>)],
         clock: Clock,
     ) -> Moves {
-        let now: Vec<(TabId, SharedString)> =
-            tabs.iter().map(|t| (t.id, t.title.clone())).collect();
         let stays = |id: TabId| tabs.iter().any(|t| t.id == id);
-        if self.project == Some(clock.project) && clock.moves {
-            self.start_moves(&now, widths, clock.now);
-            for (i, (id, title)) in self.last.iter().enumerate() {
+        let same = !self.motion.last(clock).is_empty();
+        if same && clock.moves {
+            for (i, (id, title)) in self.titles.iter().enumerate() {
                 if stays(*id) {
                     continue;
                 }
                 let Some((_, at)) = widths.iter().find(|(t, _)| t == id) else { continue };
-                let before = self.last.iter().skip(i).map(|(t, _)| *t).find(|t| stays(*t));
+                let before = self.titles.iter().skip(i).map(|(t, _)| *t).find(|t| stays(*t));
                 let (title, width) = (title.clone(), at.size.width);
                 self.ghosts.push(Ghost { before, title, width, start: clock.now });
             }
         } else {
             self.ghosts.clear();
-            self.opening.clear();
-            self.slides.clear();
         }
-        self.project = Some(clock.project);
-        self.last = now;
-        let (length, slide) = (Pace::Sheet.duration(), Pace::Settle);
-        let curve = Curve::TAB;
-        let along = |start: Instant, length: std::time::Duration| {
-            let gone = clock.now.saturating_duration_since(start);
-            (gone.as_secs_f32() / length.as_secs_f32()).min(1.0)
-        };
-        let live = |start: Instant, length| clock.now.saturating_duration_since(start) < length;
-        self.ghosts.retain(|g| clock.moves && live(g.start, length));
-        self.opening.retain(|(_, start)| live(*start, length));
-        self.slides.retain(|(.., start)| live(*start, slide.duration()));
+        self.titles = tabs.iter().map(|t| (t.id, t.title.clone())).collect();
+        let ids: Vec<TabId> = tabs.iter().map(|t| t.id).collect();
+        let left = |id: TabId| widths.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
+        let moved = self.motion.step(&ids, left, clock);
+        let length = Pace::Sheet.duration();
+        let gone = |start: Instant| clock.now.saturating_duration_since(start);
+        self.ghosts.retain(|g| clock.moves && gone(g.start) < length);
         Moves {
             ghosts: self
                 .ghosts
                 .iter()
                 .map(|g| {
-                    let t = curve.at(along(g.start, length));
-                    (g.before, g.title.clone(), g.width * (1.0 - t))
+                    let along = (gone(g.start).as_secs_f32() / length.as_secs_f32()).min(1.0);
+                    (g.before, g.title.clone(), g.width * (1.0 - Curve::TAB.at(along)))
                 })
                 .collect(),
-            opening: self
-                .opening
-                .iter()
-                .map(|(id, start)| (*id, curve.at(along(*start, length))))
-                .collect(),
-            slides: self
-                .slides
-                .iter()
-                .map(|(id, dx, start)| {
-                    (*id, *dx * (1.0 - slide.curve().at(along(*start, slide.duration()))))
-                })
-                .collect(),
-        }
-    }
-
-    /// Start what `now` moves against the tabs drawn last: a tab new since grows, and when the
-    /// tabs on both lists stand in another order, each that moved slides from where it stood
-    /// (by `widths`, last frame's) to the place of the tab that stood there before.
-    fn start_moves(
-        &mut self,
-        now: &[(TabId, SharedString)],
-        widths: &[(TabId, gpui::Bounds<Pixels>)],
-        at: Instant,
-    ) {
-        let had = |id: TabId| self.last.iter().any(|(t, _)| *t == id);
-        let new: Vec<TabId> = now.iter().map(|(t, _)| *t).filter(|t| !had(*t)).collect();
-        // A first frame has nothing it grew from.
-        if !self.last.is_empty() {
-            self.opening.extend(new.iter().map(|id| (*id, at)));
-        }
-        let stays = |id: TabId| now.iter().any(|(t, _)| *t == id);
-        let before: Vec<TabId> = self.last.iter().map(|(t, _)| *t).filter(|t| stays(*t)).collect();
-        let after: Vec<TabId> = now.iter().map(|(t, _)| *t).filter(|t| had(*t)).collect();
-        if before == after {
-            return;
-        }
-        let left = |id: TabId| widths.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
-        for (i, id) in after.iter().enumerate() {
-            let (Some(from), Some(to)) = (left(*id), before.get(i).and_then(|t| left(*t))) else {
-                continue;
-            };
-            let dx = from - to;
-            if dx != px(0.0) {
-                self.slides.retain(|(t, ..)| t != id);
-                self.slides.push((*id, dx, at));
-            }
+            tabs: moved,
         }
     }
 }
@@ -519,24 +449,13 @@ pub(super) fn render<V: TitleTabsHost>(
                 .children(mark);
             // A tab opened grows from nothing to its slot, its floor growing with it; a tab moved
             // slides into its place.
-            let sliding = moves.slides.iter().find(|(t, _)| *t == id).map(|(_, dx)| *dx);
-            let el = match sliding {
+            let el = match moves.tabs.slide(id) {
                 Some(dx) => el.left(dx),
                 None => el,
             };
-            // A tab opened grows from nothing to its slot, its floor growing with it: a slot that
-            // widens round the whole tab, which keeps its own width inside (`MonoCode`'s
-            // `tab-opening`).
-            let growing = moves.opening.iter().find(|(t, _)| *t == id).map(|(_, t)| *t);
-            let el = match growing {
-                Some(t) => div()
+            let el = match moves.tabs.growth(id) {
+                Some(t) => tab_look::growing(el, t)
                     .debug_selector(move || format!("title-tab-opening-{n}"))
-                    .flex_initial()
-                    .flex_shrink(1.0)
-                    .w(px(tab_look::TAB_SLOT * t))
-                    .min_w(px(tab_look::TAB_FLOOR * t))
-                    .overflow_hidden()
-                    .child(el)
                     .into_any_element(),
                 None => el.into_any_element(),
             };

@@ -316,7 +316,6 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "toggle_system_keys", ws::ToggleSystemKeys, &[], W),
         c(Workspace, "toggle_curtain", ws::ToggleCurtain, &[], W),
         c(Workspace, "toggle_navigator", ws::ToggleNavigator, &["cmd-b"], W),
-        c(Workspace, "toggle_navigator_lens", ws::ToggleNavigatorLens, &[], W),
         c(Workspace, "find", t::Find, &["cmd-f"], W),
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
         c(Workspace, "focus_next", ws::FocusNext, &["ctrl-tab"], &[RING]),

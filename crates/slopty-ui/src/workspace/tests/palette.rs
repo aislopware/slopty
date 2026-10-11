@@ -273,6 +273,29 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
 }
 
+/// A project on show with nothing open in it asks what to work on there, by its name; with no
+/// project on show the question names none.
+#[gpui::test]
+fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _fake = connect(&view, cx, 1, "studio");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    let heading = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.iter().find(|n| n.role == "Heading").and_then(|n| n.label.clone())
+    };
+    assert_eq!(heading(cx).as_deref(), Some(EMPTY_QUESTION), "no project on show");
+    let atlas = slopty_client::groups::GroupKey::new("project", "atlas");
+    view.update_in(cx, |v, _w, cx| {
+        v.layout_action(cx, |l| {
+            l.show_project(&atlas);
+            l.set_name(&atlas, Some("Atlas".to_owned()));
+        });
+    });
+    assert_eq!(heading(cx).as_deref(), Some("What should we work on in Atlas?"), "named");
+}
+
 /// The composer's foot says where ↵ sends the goal (the machine, the folder, the agent), so
 /// nothing starts somewhere unseen; pressed, it opens "New goal…"'s sheet holding what was
 /// typed, and the words move there.
@@ -537,27 +560,15 @@ fn the_palette_finds_an_agent_by_what_its_thread_last_said(cx: &mut TestAppConte
     assert!(!found(cx, "login redirect"), "by neither");
 }
 
-/// The navigator's grouping is a command, and a screen reader hears it as one: an option named
-/// for what it does next, which turns to the other once chosen.
+/// The navigator lists by project and nothing else: the palette offers no other grouping.
 #[gpui::test]
-fn the_lens_is_an_option_named_for_what_it_does(cx: &mut TestAppContext) {
+fn the_navigator_offers_no_other_grouping(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    let _studio = connect(&view, cx, 1, "studio");
-    let option = |cx: &mut VisualTestContext, named: &str| {
-        open_palette(cx);
-        cx.simulate_keystrokes("g r o u p");
-        let nodes = tree(cx);
-        let found = nodes.iter().any(|n| {
-            n.role == "ListBoxOption" && n.label.as_deref().is_some_and(|l| l.starts_with(named))
-        });
-        assert!(found, "{named}: {nodes:#?}");
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
-    };
-    option(cx, navigator::BY_MACHINE);
-    let lens = view.read_with(cx, |v, _| v.navigator().group_by.clone());
-    assert_eq!(lens, ["machine"], "chosen, it turns");
-    option(cx, navigator::BY_PROJECT);
+    let studio = connect(&view, cx, 1, "studio");
+    let _tile = nav_rows::in_repo(&view, cx, &studio, 1, ("/w/a", "/w/a", "main"));
+    let lines = view.update(cx, |v, cx| v.palette_lines(cx));
+    let grouping: Vec<_> = lines.iter().filter(|l| l.label.starts_with("Group the")).collect();
+    assert!(grouping.is_empty(), "{:?}", grouping.iter().map(|l| &l.label).collect::<Vec<_>>());
 }
 
 /// The palette offers what the focus can do, as the dispatch tree last drawn says: nothing

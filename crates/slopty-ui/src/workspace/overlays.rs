@@ -126,7 +126,6 @@ impl WorkspaceView {
             super::actions::palette_items().into_iter().map(|line| self.sound_line(line, cx)),
         );
         items.extend(self.attach_lines(cx));
-        items.extend(self.group_lines());
         items.extend(self.scope_lines());
         items.extend(self.pin_lines());
         items.extend(self.clipboard_lines());

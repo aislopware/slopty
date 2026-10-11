@@ -5267,11 +5267,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under it only what has no project (its windows, displays, notes, pages and home-directory
     shells). A row's second line says its machine only when its
     project spans several, then what it does, its directory below the project's root and its
-    branch. An attention row says `project · machine`. The palette's "Group the navigator by
-    machine" (⌘-less, the `toggle_navigator_lens` command) brings back one block per worker;
-    "Group the navigator by <fact>" appears for every fact a tile has, and "Group the navigator
-    by project" goes back. The chain is kept with the device's layout
-    (`layout::Navigator::group_by`).
+    branch. An attention row says `project · machine`. The palette's grouping lines ("by
+    machine", "by <fact>", "by project", kept with the layout) were deleted on 2026-10-11: the
+    navigator lists by project, with *Machines* under it, and nothing else ("The navigator
+    lists by project alone").
   - **The filter takes facets.** `machine:devbox`, `project:atlas`, `agent:codex`,
     `branch:main`, `is:waiting` (also `working`, `running`, `failed`, `unseen`) and any fact
     key, beside free text.
@@ -5336,7 +5335,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_navigators_grouping_is_saved_and_restored`; ui `nav_rows::`
     `a_project_header_says_the_machines_it_spans`,
     `a_row_names_its_machine_only_where_its_project_spans_several`,
-    `group_by_machine_brings_back_the_workers_blocks`, `any_fact_a_tile_has_is_a_grouping`,
     `the_filter_takes_a_facet`, `an_away_worker_shows_on_its_projects_rows_and_in_workers`,
     `the_rail_keeps_the_projects_in_view`, `the_rail_scrolls_its_projects`,
     `a_shell_that_changes_checkout_moves_row_not_tile`; `pins::`
@@ -9927,7 +9925,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     helper opened takes over while it is still on show, the one before leaving the tiling
     again. Reading through the tasks leaves one tab, as the file preview does for files.
   - **The navigator** still sets a helper the person opened in under its orchestrator's row.
-  - `slopty_client::layout::Tiling::arrive_beside` is no longer called; lane W deletes it.
+  - `slopty_client::layout::Tiling::arrive_beside` is no longer called, and was deleted on
+    2026-10-11 (e7b06bfe).
   - Tests: `workspace::tests::seating::{task_agents_arriving_take_no_place,
     a_task_agent_opens_on_demand_as_one_preview_tab, a_tile_the_person_has_seen_stays_where_it_is}`.
 
@@ -10294,8 +10293,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   mark, three launcher rows, "Recent" and "Machines". With work handed to orchestrators, the
   first thing an empty workspace asks is what should get done. Ruled:
   - **One question and a composer.** "What should we work on?" at the empty heading role
-    (18/24, regular) over a boxed composer (the field's ground at `radii.md`), in the reading
-    column (`thread::view::COLUMN`), centred both ways. The composer takes the keyboard when the
+    (18/24, regular), or "What should we work on in {project}?" while a project is on show with
+    nothing open in it (its name as the title bar says it; MonoCode's `EmptySession`), over a
+    boxed composer (the field's ground at `radii.md`), in the reading column
+    (`thread::view::COLUMN`), centred both ways. The composer takes the keyboard when the
     page first shows with nothing else holding it, and ↵ on the bare workspace gives it back.
   - **↵ starts a goal.** What is written there goes as "New goal…"'s Create sends it, with what
     the sheet would open holding: its first agent on its first machine, the folder from the
@@ -10333,6 +10334,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     in another order slide from where they stood to their places over `Motion::settle`
     (160 ms, MonoCode's reorder). No close shows while a tab is carried. Under Reduce Motion
     every one lands at once, as the fold already did.
+  - **Pane tabs move alike.** A pane's tab row grows a tab opened in it and slides tabs put in
+    another order, by the same rule (`tab_look::Motion`, one per row: the title bar's keyed by
+    its project, each pane's by its pane), so the two levels of tabs never move two ways. A
+    pane tab that closes still leaves at once; only the title bar folds a closed tab away.
   - Tests: `chrome_text::tests::a_label_fades_only_while_it_is_cut`,
     `kit::tests::a_tabs_title_fades_over_its_end`,
-    `workspace::tests::tab_strip::an_opened_tab_grows_and_a_moved_one_slides`.
+    `workspace::tests::tab_strip::an_opened_tab_grows_and_a_moved_one_slides`,
+    `workspace::tests::tiles::a_pane_tab_opened_grows_and_a_moved_one_slides`.
+
+- ✅ **A machine's glyph turns into its chevron** (2026-10-11, the MonoCode port's §1b). A
+  project's header already swapped its glyph for the fold's chevron under the pointer, as
+  MonoCode's folder row does; a machine's header still stood a chevron at its row's end beside
+  "+" and "…". Now its glyph turns into the chevron in the same place, and the end keeps "+"
+  and "…" alone (its least width two buttons, not three). A click on the row folds it, as
+  before. On touch, with no hover, the chevron still stands at rest after the readouts.
+  - Test: `workspace::tests::nav_rows::a_machines_glyph_turns_into_its_chevron_under_the_pointer`.
+
+- ✅ **The navigator lists by project alone** (2026-10-11, the readiness audit's grouping
+  lenses). The palette offered "Group the navigator by machine", by project again, and by any
+  fact a tile had (agent, branch, a label), with the chain kept in the layout. Each repeated
+  what is already there: the project listing holds *Machines* under it with each machine's loose
+  work, the filter's facets (`machine:`, `branch:`, `agent:`) narrow by any fact without
+  regrouping, and scope narrows to one project. A second way to list the same tiles was a
+  second layout to keep correct for every row, fold and drop. Ruled:
+  - **Deleted**: the palette's grouping lines, the `toggle_navigator_lens` command and the
+    `GroupNavigatorBy` action, and `layout::Navigator::group_by` with `Navigator::by_project`.
+    The navigator reads the project grouping and nothing else.
+  - Test: `workspace::tests::palette::the_navigator_offers_no_other_grouping`.

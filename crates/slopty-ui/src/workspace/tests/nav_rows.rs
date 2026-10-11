@@ -7,7 +7,6 @@ use gpui::Modifiers;
 use slopty_client::groups::{self, GroupKey, fact};
 use slopty_core::WallMs;
 
-use super::super::actions::{GroupNavigatorBy, ToggleNavigatorLens};
 use super::*;
 use crate::icons::Status;
 
@@ -952,70 +951,6 @@ fn a_row_names_its_machine_only_where_its_project_spans_several(cx: &mut TestApp
     assert_eq!(meta(site), "src · main", "one machine: its header says where");
 }
 
-/// "Group the navigator by machine" brings back each worker's own block with every tile of it,
-/// and the palette's line then goes back by project; the grouping is kept with the layout.
-#[gpui::test]
-fn group_by_machine_brings_back_the_workers_blocks(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let laptop = connect(&view, cx, 2, "laptop");
-    let origin = "github.com/aislopware/slopty";
-    let here =
-        clone_of(&view, cx, &studio, 1, ("/w/oss/slopty", "/w/oss/slopty", "main"), Some(origin));
-    let there = clone_of(
-        &view,
-        cx,
-        &laptop,
-        1,
-        ("/Users/c/slopty", "/Users/c/slopty", "main"),
-        Some(origin),
-    );
-    assert!(shown(cx, repo_key(origin)), "by project until asked");
-    let lines = view.read_with(cx, |v, _| v.group_lines());
-    assert_eq!(lines.first().map(|l| l.label.as_str()), Some(navigator::BY_MACHINE));
-
-    view.update_in(cx, |v, w, cx| v.toggle_navigator_lens(&ToggleNavigatorLens, w, cx));
-    cx.run_until_parked();
-    assert!(!shown(cx, repo_key(origin)), "no project headers");
-    let order = view.read_with(cx, |v, _| v.navigator_tiles());
-    assert_eq!(order, [here, there], "each under its worker, in the workers' order");
-    let studio_row = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("studio");
-    let laptop_row = cx.debug_bounds(leak(format!("nav-worker-{}", laptop.key))).expect("laptop");
-    let here_row = cx.debug_bounds(selector("nav-tile", here.item)).expect("here");
-    assert!(studio_row.bottom() <= here_row.top() && here_row.bottom() <= laptop_row.top());
-    let headings = view.read_with(cx, |v, _| v.navigator_headings());
-    assert!(headings.is_empty(), "a lone section has no heading: {headings:?}");
-    let lines = view.read_with(cx, |v, _| v.group_lines());
-    assert_eq!(lines.first().map(|l| l.label.as_str()), Some(navigator::BY_PROJECT));
-    let saved = view.read_with(cx, |v, _| v.to_save().navigator.group_by);
-    assert_eq!(saved, ["machine"], "kept with the layout");
-}
-
-/// Any fact a tile has is a grouping: "by branch" lists a group per branch, with what has no
-/// branch under its worker; the palette offers it because a tile has a branch.
-#[gpui::test]
-fn any_fact_a_tile_has_is_a_grouping(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let main = in_repo(&view, cx, &studio, 1, ("/w/a", "/w/a", "main"));
-    let fix = in_repo(&view, cx, &studio, 2, ("/w/b", "/w/b", "fix"));
-    let note = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/plan".into() }, 3);
-    let labels: Vec<String> =
-        view.read_with(cx, |v, _| v.group_lines().into_iter().map(|l| l.label).collect());
-    assert!(labels.iter().any(|l| l == "Group the navigator by branch"), "{labels:?}");
-    assert!(!labels.iter().any(|l| l.ends_with("by cwd")), "a directory is no grouping");
-    let chain = vec!["branch".to_owned(), "machine".to_owned()];
-    view.update_in(cx, |v, w, cx| {
-        v.group_navigator_by(&GroupNavigatorBy { chain }, w, cx);
-    });
-    cx.run_until_parked();
-    assert!(shown(cx, "nav-group-branch:main") && shown(cx, "nav-group-branch:fix"));
-    let headings = view.read_with(cx, |v, _| v.navigator_headings());
-    assert_eq!(headings, ["Branches", "Machines"]);
-    let order = view.read_with(cx, |v, _| v.navigator_tiles());
-    assert_eq!(order, [fix, main, note], "by name, then what has no branch under its worker");
-}
-
 /// The filter takes facets: a machine by its name, a project by its name, any fact a tile has,
 /// with words beside them; a facet nothing has leaves nothing.
 #[gpui::test]
@@ -1329,4 +1264,31 @@ fn a_selection_is_the_wash_docked_or_drawn(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row in the drawer");
     assert!(fill_at(cx, row, wash), "in the drawer, the wash");
+}
+
+/// Under the pointer a machine's glyph turns into its fold's chevron in the same place, as a
+/// project's does, so the row's end keeps "+" and "…" alone; a click on the row folds it.
+#[gpui::test]
+fn a_machines_glyph_turns_into_its_chevron_under_the_pointer(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    let row = leak(format!("nav-worker-{key}"));
+    let at = cx.debug_bounds(row).expect("the machine's row");
+    cx.simulate_mouse_move(at.center(), None, Modifiers::default());
+    cx.run_until_parked();
+    let fold = cx.debug_bounds(leak(format!("nav-worker-fold-{key}"))).expect("its chevron");
+    let name = cx.debug_bounds(leak(format!("nav-worker-name-{key}"))).expect("its name");
+    assert!(fold.right() <= name.left(), "in the glyph's place, before the name: {fold:?}");
+    assert!(fold.left() >= at.left(), "inside the row: {fold:?} {at:?}");
+    let slot = cx.debug_bounds(leak(format!("nav-worker-slot-{key}"))).expect("its end");
+    assert!(!slot.contains(&fold.center()), "not at the row's end: {slot:?}");
+    let folded = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.nav.folded.contains(&GroupKey::machine(key)))
+    };
+    assert!(!folded(cx));
+    cx.simulate_click(at.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(folded(cx), "a click on the row folds it");
 }

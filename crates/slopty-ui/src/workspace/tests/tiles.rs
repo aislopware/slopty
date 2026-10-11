@@ -935,6 +935,70 @@ fn four_tabs(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Ti
     tabs
 }
 
+/// A pane's tab opened grows from nothing to its slot, and a tab put in another order slides
+/// from where it stood into its new place, as the title bar's do; under Reduce Motion both land
+/// at once.
+#[gpui::test]
+fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
+    use crate::kit::Pace;
+
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1600.0), px(800.0)));
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let fake = connect(&view, cx, 1, "studio");
+    let (a, b) = (
+        opens(&view, cx, &fake, SessionId::new(), fake.me, 1),
+        opens(&view, cx, &fake, SessionId::new(), fake.me, 2),
+    );
+    one_pane(&view, cx, &[a, b]);
+    let pane = pos_of(&view, cx, a).pane;
+    let step = |cx: &mut VisualTestContext, at: Duration| {
+        view.update(cx, |v, _| v.hold_clock(Some(at)));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+    };
+    let bounds = |cx: &mut VisualTestContext, tile: TileRef| {
+        cx.debug_bounds(selector("tab", tile.item)).expect("drawn")
+    };
+    let slot = |cx: &mut VisualTestContext, tile: TileRef| {
+        cx.debug_bounds(selector("tab-opening", tile.item)).map(|b| b.size.width)
+    };
+    let grow = Pace::Sheet.duration();
+    let c = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
+    one_pane(&view, cx, &[a, c]);
+    assert!(slot(cx, c).is_some_and(|w| w < px(1.0)), "it starts from nothing: {:?}", slot(cx, c));
+    step(cx, grow.checked_div(2).unwrap_or_default());
+    let half = slot(cx, c).expect("still growing");
+    assert!(half > px(1.0) && half < px(224.0), "growing: {half:?}");
+    step(cx, grow);
+    assert!(slot(cx, c).is_none(), "grown");
+    assert_eq!(bounds(cx, c).size.width, px(224.0), "its slot once grown");
+
+    // Out to a split and back: the same pane's tabs, `a` now last.
+    let (was, place) = (bounds(cx, a).left(), bounds(cx, c).left());
+    view.update(cx, |v, cx| {
+        let right = Some(slopty_client::layout::tree::Side::Right);
+        assert!(v.layout.place(a, slopty_client::layout::Drop { pane, edge: right }));
+        assert!(v.layout.place(a, slopty_client::layout::Drop { pane, edge: None }));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let at = bounds(cx, a).left();
+    assert!((f32::from(at - was)).abs() < 1.0, "it leaves from where it stood: {at:?} {was:?}");
+    step(cx, grow.saturating_add(Pace::Settle.duration()));
+    let landed = bounds(cx, a).left();
+    assert!((f32::from(landed - place)).abs() < 1.0, "in its new place: {landed:?} {place:?}");
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    let d = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
+    one_pane(&view, cx, &[a, d]);
+    assert!(slot(cx, d).is_none(), "no growing under Reduce Motion");
+    assert_eq!(bounds(cx, d).size.width, px(224.0), "whole at once");
+}
+
 /// Whether `tab`'s tab lies wholly inside its pane's tile.
 fn tab_in_view(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tab: TileRef) -> bool {
     let tile = view.read_with(cx, |v, _| v.tile_bounds(tab)).expect("the pane is drawn");

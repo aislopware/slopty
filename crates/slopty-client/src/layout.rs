@@ -19,8 +19,8 @@ use slopty_core::ItemId;
 pub use tiling::{Drop, Pos, Project, SavedTiling, TabId, Tiling, TilingConfig};
 pub use tree::{Laid, Pane, PaneId, Room, Sash, Side, SplitAxis, Tab, TabFrame};
 
+use crate::groups::Frecency;
 pub use crate::groups::GroupKey;
-use crate::groups::{DEFAULT_CHAIN, Frecency};
 
 /// An opaque worker identity: whatever the caller keys its workers by, squeezed into 128 bits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -241,10 +241,6 @@ pub struct Navigator {
     pub shown: bool,
     /// Its width, in points, from [`Navigator::MIN_WIDTH`] to [`Navigator::MAX_WIDTH`].
     pub width: f32,
-    /// The fact keys it groups the tiles by, the first a tile has winning
-    /// ([`crate::groups::group`]): [`DEFAULT_CHAIN`] by project, `["machine"]` by machine, or
-    /// any fact a tile reports.
-    pub group_by: Vec<String>,
     /// The groups pinned above the rest, by key, in the order they were pinned (`MonoCode`'s
     /// pinned projects).
     pub pinned: Vec<GroupKey>,
@@ -271,23 +267,9 @@ impl Navigator {
     }
 }
 
-impl Navigator {
-    /// The chain the navigator groups by before the person picks another: by project.
-    #[must_use]
-    pub fn by_project() -> Vec<String> {
-        DEFAULT_CHAIN.iter().map(|&k| k.to_owned()).collect()
-    }
-}
-
 impl Default for Navigator {
     fn default() -> Self {
-        Self {
-            shown: true,
-            width: Self::DEFAULT_WIDTH,
-            group_by: Self::by_project(),
-            pinned: Vec::new(),
-            muted: Vec::new(),
-        }
+        Self { shown: true, width: Self::DEFAULT_WIDTH, pinned: Vec::new(), muted: Vec::new() }
     }
 }
 

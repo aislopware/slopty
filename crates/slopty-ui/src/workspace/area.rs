@@ -158,7 +158,20 @@ pub(super) struct Drawn {
     /// Each pane's tab row: where it is scrolled, and the tab it last brought into view at the
     /// width it last had.
     pub tab_rows: RefCell<HashMap<PaneId, (gpui::ScrollHandle, ItemId, f32)>>,
+    /// Each pane's tab row's motion ([`super::tab_look::Motion`]).
+    pub tab_moves: RefCell<HashMap<PaneId, TabRowMoves>>,
 }
+
+/// A pane's tab row as it moves: its tabs growing and sliding, and where each tab lay last
+/// frame, which a moved one slides from.
+#[derive(Debug, Default)]
+pub(super) struct TabRowMoves {
+    pub motion: super::tab_look::Motion<ItemId>,
+    pub spots: TabSpots,
+}
+
+/// Where each of a pane's tabs lay last frame, written as each is laid out.
+pub(super) type TabSpots = Rc<RefCell<Vec<(ItemId, Bounds<Pixels>)>>>;
 
 /// What a body takes from its tile: what its kind is laid out by.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -711,15 +724,16 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
+        let asked = self.empty_question();
         let question = kit::typed(div(), theme.roles().empty_heading)
             .id("empty-question")
             .debug_selector(|| "empty-question".to_owned())
             .role(gpui::accesskit::Role::Heading)
-            .aria_label(EMPTY_QUESTION)
+            .aria_label(asked.clone())
             .w_full()
             .pb(px(spacing.md))
             .text_color(hsla(s.text))
-            .child(EMPTY_QUESTION);
+            .child(asked.clone());
         // Where ↵ sends the goal, said inside the box: nothing starts somewhere unseen, and a
         // press opens the sheet that changes it.
         let foot = self.page_goal_place(cx).map(|place| {
@@ -759,7 +773,7 @@ impl WorkspaceView {
                 .child(
                     gpui_kit::component::input::Textarea::new(goal)
                         .appearance(false)
-                        .aria_label(EMPTY_QUESTION),
+                        .aria_label(asked.clone()),
                 )
                 // The foot's words start where the goal's text does: the field pads its text
                 // by the inset, and the chip pads its words by its own.
@@ -829,6 +843,16 @@ impl WorkspaceView {
     /// Whether no tab is on show: the start page shows.
     pub(super) fn bare(&self) -> bool {
         self.layout.shown_tab().is_none()
+    }
+
+    /// The empty workspace's question: in the project on show, by its name, when one is, else
+    /// [`EMPTY_QUESTION`].
+    pub(super) fn empty_question(&self) -> SharedString {
+        let name = self.project_name();
+        if name.is_empty() {
+            return EMPTY_QUESTION.into();
+        }
+        format!("What should we work on in {name}?").into()
     }
 
     /// Where work stands or stood across the workers that are up, one entry per directory on

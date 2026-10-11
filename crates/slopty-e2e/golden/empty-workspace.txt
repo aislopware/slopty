@@ -12,8 +12,8 @@ Button │ More
 Navigation │ Projects
 Button │ Search
 Button │ New agent
-Heading │ What should we work on?
-MultilineTextInput │ What should we work on?
+Heading │ What should we work on in studio?
+MultilineTextInput │ What should we work on in studio?
 Button │ studio · ~ · Claude Code
 Button │ New terminal
 Button │ Add a window or display

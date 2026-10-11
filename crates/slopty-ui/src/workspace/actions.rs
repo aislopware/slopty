@@ -99,8 +99,6 @@ actions!(
         ToggleCurtain,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
-        /// Group the navigator's tiles by the machine each runs on, or back by project.
-        ToggleNavigatorLens,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.
         FocusNext,
         /// Move the keyboard focus to the previous control.
@@ -336,16 +334,6 @@ pub struct NewAgentOn {
     pub agent: slopty_proto::thread::AgentId,
     /// On which machine.
     pub worker: slopty_client::layout::WorkerKey,
-}
-
-/// "Group the navigator by …": the fact keys it groups the tiles by, the first a tile has
-/// winning ([`slopty_client::groups`]). The palette offers a line for each fact a tile in the
-/// layout has.
-#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct GroupNavigatorBy {
-    /// The chain, `["agent", "machine"]` for "by agent".
-    pub chain: Vec<String>,
 }
 
 /// "Scope to `project`": narrow the navigator, the attention sections, the inbox and the

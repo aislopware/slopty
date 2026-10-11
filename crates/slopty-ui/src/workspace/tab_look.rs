@@ -9,17 +9,23 @@
 //! the text's full tone, the rest are bare words in `text_secondary` that take the hover wash
 //! and the full tone under the pointer. A tab leads with one 14 pt mark, and ends in a 20 pt
 //! close laid over its end.
+//!
+//! A row's tabs move alike ([`Motion`]): one that opens grows from nothing to its slot over
+//! 200 ms on [`Curve::TAB`] (`MonoCode`'s `tab-opening`), and tabs put in another order slide to
+//! their places over 160 ms. Under Reduce Motion each lands at once.
+
+use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Div, ElementId, InteractiveElement as _, ParentElement as _, Stateful,
+    Div, ElementId, InteractiveElement as _, ParentElement as _, Pixels, Stateful,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use slopty_theme::{Theme, alpha};
+use slopty_theme::{Curve, Theme, alpha};
 
 use crate::colors::hsla;
 use crate::icons::Mark;
-use crate::kit;
+use crate::kit::{self, Pace};
 
 /// Every tab's slot, in points: `MonoCode`'s `w-56`, the same for every tab whatever its words.
 pub(super) const TAB_SLOT: f32 = 224.0;
@@ -207,6 +213,155 @@ pub(super) fn lone(
         .children(shared.then(|| focus_dot(theme, focused)))
         .child(crate::palette::lead_mark(theme, mark, hsla(ink), slot))
         .child(div().min_w_0().overflow_hidden().child(title))
+}
+
+/// The row whose tabs are on show, as a number its key hashes to (a project's, a pane's), and
+/// the instant the frame stands for; `moves` off (Reduce Motion, a test's frame) lands every
+/// tab at once.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Clock {
+    pub row: u64,
+    pub now: Instant,
+    pub moves: bool,
+}
+
+/// How a row's tabs move, worked out as the row is built from the tabs it drew last, while
+/// motion is on: one new since grows from nothing to its slot, and tabs whose order changed
+/// slide from where they stood to their new place. Another row's tabs shown anew move nothing.
+#[derive(Debug)]
+pub(super) struct Motion<K> {
+    row: Option<u64>,
+    last: Vec<K>,
+    /// Tabs opened, and when.
+    opening: Vec<(K, Instant)>,
+    /// Tabs sliding to a new place: how far left of it they stood, and since when.
+    slides: Vec<(K, Pixels, Instant)>,
+}
+
+impl<K> Default for Motion<K> {
+    fn default() -> Self {
+        Self { row: None, last: Vec::new(), opening: Vec::new(), slides: Vec::new() }
+    }
+}
+
+/// How a row's tabs move in one frame ([`Motion::step`]).
+#[derive(Debug)]
+pub(super) struct Moves<K> {
+    /// The tabs still growing, and how far along (0 to 1).
+    pub opening: Vec<(K, f32)>,
+    /// The tabs still sliding, and how far left of their place they stand.
+    pub slides: Vec<(K, Pixels)>,
+}
+
+impl<K> Default for Moves<K> {
+    fn default() -> Self {
+        Self { opening: Vec::new(), slides: Vec::new() }
+    }
+}
+
+impl<K: Copy + PartialEq> Moves<K> {
+    /// Whether anything moves, so the next frame is drawn.
+    pub const fn any(&self) -> bool {
+        !self.opening.is_empty() || !self.slides.is_empty()
+    }
+
+    /// How far tab `id` stands left of its place, while it slides.
+    pub fn slide(&self, id: K) -> Option<Pixels> {
+        self.slides.iter().find(|(t, _)| *t == id).map(|(_, dx)| *dx)
+    }
+
+    /// How far tab `id` has grown, while it grows.
+    pub fn growth(&self, id: K) -> Option<f32> {
+        self.opening.iter().find(|(t, _)| *t == id).map(|(_, t)| *t)
+    }
+}
+
+impl<K: Copy + PartialEq> Motion<K> {
+    /// The tabs as the row drew them last, while it is the row `clock` stands for.
+    pub fn last(&self, clock: Clock) -> &[K] {
+        if self.row == Some(clock.row) { &self.last } else { &[] }
+    }
+
+    /// How the row moves at `clock.now` with tabs `now`, `left` saying where each lay last
+    /// frame.
+    pub fn step(
+        &mut self,
+        now: &[K],
+        left: impl Fn(K) -> Option<Pixels>,
+        clock: Clock,
+    ) -> Moves<K> {
+        if self.row == Some(clock.row) && clock.moves {
+            self.start(now, left, clock.now);
+        } else {
+            self.opening.clear();
+            self.slides.clear();
+        }
+        self.row = Some(clock.row);
+        self.last.clear();
+        self.last.extend_from_slice(now);
+        let (grow, slide) = (Pace::Sheet.duration(), Pace::Settle.duration());
+        let live = |start: Instant, length| clock.now.saturating_duration_since(start) < length;
+        self.opening.retain(|(_, start)| live(*start, grow));
+        self.slides.retain(|(.., start)| live(*start, slide));
+        let along = |start: Instant, length: Duration| {
+            let gone = clock.now.saturating_duration_since(start);
+            (gone.as_secs_f32() / length.as_secs_f32()).min(1.0)
+        };
+        let settle = Pace::Settle.curve();
+        Moves {
+            opening: self
+                .opening
+                .iter()
+                .map(|(id, start)| (*id, Curve::TAB.at(along(*start, grow))))
+                .collect(),
+            slides: self
+                .slides
+                .iter()
+                .map(|(id, dx, start)| (*id, *dx * (1.0 - settle.at(along(*start, slide)))))
+                .collect(),
+        }
+    }
+
+    /// Start what `now` moves against the tabs drawn last: a tab new since grows, and when the
+    /// tabs on both lists stand in another order, each that moved slides from where it stood
+    /// (by `left`, last frame's) to the place of the tab that stood there before.
+    fn start(&mut self, now: &[K], left: impl Fn(K) -> Option<Pixels>, at: Instant) {
+        let had = |id: K| self.last.contains(&id);
+        // A first frame has nothing it grew from.
+        if !self.last.is_empty() {
+            let new: Vec<K> = now.iter().copied().filter(|t| !had(*t)).collect();
+            self.opening.extend(new.into_iter().map(|id| (id, at)));
+        }
+        let before: Vec<K> = self.last.iter().copied().filter(|t| now.contains(t)).collect();
+        let after: Vec<K> = now.iter().copied().filter(|t| had(*t)).collect();
+        if before == after {
+            return;
+        }
+        for (i, id) in after.iter().enumerate() {
+            let (Some(from), Some(to)) = (left(*id), before.get(i).and_then(|t| left(*t))) else {
+                continue;
+            };
+            let dx = from - to;
+            if dx != px(0.0) {
+                self.slides.retain(|(t, ..)| t != id);
+                self.slides.push((*id, dx, at));
+            }
+        }
+    }
+}
+
+/// `el`, a tab opened `growth` of the way (0 to 1): inside a slot that widens round the whole
+/// tab from nothing to [`TAB_SLOT`], its floor growing with it, while the tab keeps its own
+/// width inside (`MonoCode`'s `tab-opening`).
+#[must_use]
+pub(super) fn growing(el: impl gpui::IntoElement, growth: f32) -> Div {
+    div()
+        .flex_initial()
+        .flex_shrink(1.0)
+        .w(px(TAB_SLOT * growth))
+        .min_w(px(TAB_FLOOR * growth))
+        .overflow_hidden()
+        .child(el)
 }
 
 #[cfg(test)]

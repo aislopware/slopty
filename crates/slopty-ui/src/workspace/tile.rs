@@ -1795,6 +1795,27 @@ impl WorkspaceView {
             let shared = files.iter().filter(|(_, n, _)| n == name).count() > 1;
             shared.then(|| (name.clone(), dir.clone()))
         };
+        // A tab opened grows to its slot and tabs put in another order slide to their places,
+        // among the pane's own tabs, on the layout's clock.
+        let (moves, spots) = {
+            let mut rows = self.drawn.tab_moves.borrow_mut();
+            let row = rows.entry(placed.pane).or_default();
+            let clock = tab_look::Clock {
+                row: placed.pane.get(),
+                now: self.clock_instant(),
+                moves: self.animate && kit::motion(cx),
+            };
+            let ids: Vec<ItemId> = column.iter().map(|t| t.item).collect();
+            let mut spots = row.spots.borrow_mut();
+            let left = |id: ItemId| spots.iter().find(|(t, _)| *t == id).map(|(_, b)| b.left());
+            let moves = row.motion.step(&ids, left, clock);
+            spots.retain(|(t, _)| ids.contains(t));
+            drop(spots);
+            (moves, std::rc::Rc::clone(&row.spots))
+        };
+        if moves.any() {
+            cx.later(|window, _cx| window.request_animation_frame());
+        }
         let tabs: Vec<gpui::AnyElement> = column
             .iter()
             .copied()
@@ -1853,31 +1874,45 @@ impl WorkspaceView {
                 let close = tab_look::close(theme, close, shown, TAB_GROUP);
                 let el = div().id(SharedString::from(format!("tab-{}", id.as_uuid())));
                 let el = tab_look::pane_tab(theme, el, shown, true);
-                Some(
-                    Self::tile_menu_press(el, tab, Pressed::Tab, cx)
-                        .debug_selector(move || format!("tab-{}", id.as_uuid()))
-                        .group(TAB_GROUP)
-                        .role(Role::Tab)
-                        .aria_label(label)
-                        .aria_selected(shown)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                                if ev.click_count == 2 {
-                                    this.keep_or_rename(tab, window, cx);
-                                } else {
-                                    this.begin_move(tab, ev, cx);
-                                }
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .child(lead)
-                        .child(div().flex_initial().min_w_0().overflow_hidden().child(name))
-                        .children(unsaved)
-                        .children(folder)
-                        .child(close)
+                let el = match moves.slide(id) {
+                    Some(dx) => el.left(dx),
+                    None => el,
+                };
+                let spots = std::rc::Rc::clone(&spots);
+                let spot = super::area::spot(move |b| {
+                    let mut spots = spots.borrow_mut();
+                    spots.retain(|(t, _)| *t != id);
+                    spots.push((id, b));
+                });
+                let el = Self::tile_menu_press(el, tab, Pressed::Tab, cx)
+                    .debug_selector(move || format!("tab-{}", id.as_uuid()))
+                    .group(TAB_GROUP)
+                    .role(Role::Tab)
+                    .aria_label(label)
+                    .aria_selected(shown)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                            if ev.click_count == 2 {
+                                this.keep_or_rename(tab, window, cx);
+                            } else {
+                                this.begin_move(tab, ev, cx);
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(lead)
+                    .child(div().flex_initial().min_w_0().overflow_hidden().child(name))
+                    .children(unsaved)
+                    .children(folder)
+                    .child(close)
+                    .child(spot);
+                Some(match moves.growth(id) {
+                    Some(t) => tab_look::growing(el, t)
+                        .debug_selector(move || format!("tab-opening-{}", id.as_uuid()))
                         .into_any_element(),
-                )
+                    None => el.into_any_element(),
+                })
             })
             .collect();
         // Tabs that do not fit scroll, as Zed's tab bar does, and the shown one is brought

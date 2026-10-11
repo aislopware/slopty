@@ -90,7 +90,7 @@ use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{PullSeen, PullStands};
 use slopty_theme::{Rgb, Theme};
 
-use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
+use super::actions::ToggleNavigator;
 use super::agents::{
     Step, Waiting, agent_ask_text, agent_mark_of, agent_status_text, agent_status_word, needs_human,
 };
@@ -106,7 +106,7 @@ use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{GitGlyph, IconSize, Mark, Status, Symbol, icon, status_mark};
 use crate::kit::{self, meta, tabular};
-use crate::palette::{PaletteItem, Plate};
+use crate::palette::Plate;
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
 /// the pair reads as one row.
@@ -151,18 +151,6 @@ pub(super) const EARLIER_SHOWN: usize = 8;
 
 /// A board's words while it has no task.
 const NO_TASKS: &str = "No tasks yet";
-
-/// The palette's name for [`ToggleNavigatorLens`] while the navigator groups by anything but
-/// the machine.
-pub(super) const BY_MACHINE: &str = "Group the navigator by machine";
-
-/// The palette's name for going back to grouping by project.
-pub(super) const BY_PROJECT: &str = "Group the navigator by project";
-
-/// The facts a tile has that the palette never offers to group by: the default chain's own
-/// links, and its directory, which names a place on one machine.
-const NOT_A_GROUPING: [&str; 5] =
-    [fact::PROJECT, fact::REPO, fact::FOLDER, fact::MACHINE, fact::CWD];
 
 /// The section of what waits on the person, and what the bell is called.
 pub(super) const NEEDS_YOU: &str = "Needs you";
@@ -1260,38 +1248,6 @@ impl WorkspaceView {
         }
     }
 
-    /// Group the navigator by machine, or back by project (kept with the layout).
-    pub fn toggle_navigator_lens(
-        &mut self,
-        _: &ToggleNavigatorLens,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let by = if self.grouped_by_machine() {
-            Navigator::by_project()
-        } else {
-            vec![fact::MACHINE.to_owned()]
-        };
-        self.group_navigator(by, cx);
-    }
-
-    /// "Group the navigator by …": the chain the action names (kept with the layout).
-    pub fn group_navigator_by(
-        &mut self,
-        by: &GroupNavigatorBy,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.group_navigator(by.chain.clone(), cx);
-    }
-
-    fn group_navigator(&mut self, group_by: Vec<String>, cx: &mut Context<Self>) {
-        let nav = self.navigator().clone();
-        self.set_navigator(Navigator { group_by, ..nav });
-        self.layout_touched(cx);
-        cx.notify();
-    }
-
     /// Pin `key` above the rest, at the end of the pinned, or take its pin out.
     pub(super) fn toggle_pinned(&mut self, key: &GroupKey, cx: &mut Context<Self>) {
         let mut nav = self.navigator().clone();
@@ -1308,45 +1264,6 @@ impl WorkspaceView {
         self.set_navigator(nav);
         self.layout_touched(cx);
         cx.notify();
-    }
-
-    /// Whether the navigator lists the workers' own blocks and nothing else.
-    fn grouped_by_machine(&self) -> bool {
-        self.navigator().group_by.first().map(String::as_str) == Some(fact::MACHINE)
-    }
-
-    /// The palette's lines that regroup the navigator: by machine (the keymap's line, which
-    /// goes back by project once it is by machine), by project whenever it is by anything
-    /// else, and by each other fact a tile in the layout has ("by agent", "by branch", "by
-    /// labels.team"), each with the machine after it for the tiles that lack it.
-    pub(super) fn group_lines(&self) -> Vec<PaletteItem> {
-        let keys = super::actions::key_bindings();
-        let current = &self.navigator().group_by;
-        let mut lines = vec![if self.grouped_by_machine() {
-            PaletteItem::new(BY_PROJECT, Box::new(ToggleNavigatorLens), &keys)
-        } else {
-            PaletteItem::new(BY_MACHINE, Box::new(ToggleNavigatorLens), &keys)
-        }];
-        let by_project = Navigator::by_project();
-        if *current != by_project && !self.grouped_by_machine() {
-            let action = GroupNavigatorBy { chain: by_project };
-            lines.push(PaletteItem::new(BY_PROJECT, Box::new(action), &[]));
-        }
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for tile in self.layout.tiles() {
-            let Some(item) = self.item(tile) else { continue };
-            seen.extend(self.tile_facts(tile, item).into_keys());
-        }
-        for key in seen.into_iter().filter(|k| !NOT_A_GROUPING.contains(&k.as_str())) {
-            let chain = vec![key.clone(), fact::MACHINE.to_owned()];
-            if *current == chain {
-                continue;
-            }
-            let label = format!("Group the navigator by {key}");
-            let action = GroupNavigatorBy { chain };
-            lines.push(PaletteItem::new(&label, Box::new(action), &[]));
-        }
-        lines
     }
 
     /// How the navigator sits in `window`.
@@ -1643,23 +1560,16 @@ impl WorkspaceView {
         })
     }
 
-    /// The navigator's blocks as the filter and the scope leave them: the groups of the
-    /// layout's chain before the machine, then each worker with the tiles that belong to
-    /// nothing else. A tile is kept when it has every facet of the filter and its words, its
-    /// project's name or its worker's name hold the rest. A block's tiles come in order of
-    /// attention; the groups by name, the workers in their own order.
+    /// The navigator's blocks as the filter and the scope leave them: the projects, then each
+    /// worker with the tiles that belong to nothing else. A tile is kept when it has every
+    /// facet of the filter and its words, its project's name or its worker's name hold the
+    /// rest. A block's tiles come in order of attention; the groups by name, the workers in
+    /// their own order.
     fn nav_listing(&self, projects: &Grouping, cx: &gpui::App) -> Listing {
         let query = Query::parse(&self.nav.filter.query);
         let now = SystemTime::now();
         let clock = cx.background_executor().now();
-        let chain = self.navigator().group_by.clone();
-        let regrouped;
-        let grouping = if chain == groups::DEFAULT_CHAIN {
-            projects
-        } else {
-            regrouped = self.grouping(projects.tiles.clone(), &chain);
-            &regrouped
-        };
+        let grouping = projects;
         let scope = self.nav.scope.as_ref();
         // What every group's tiles add up to, and the machines each spans, before the filter.
         let spans: Vec<std::collections::BTreeSet<WorkerKey>> =
@@ -1758,13 +1668,11 @@ impl WorkspaceView {
             tiles.sort_by_key(|(class, _)| *class);
             tiles.into_iter().map(|(_, t)| t).collect()
         };
-        // Under the default chain a declared project leads its group with its board, and is
-        // listed with its board alone where none of its tiles is here.
-        let boarded = chain.first().is_some_and(|f| f == fact::PROJECT);
-        let mut boards: BTreeMap<GroupKey, NavBoard> =
-            if boarded { self.nav_boards(&query, scope) } else { BTreeMap::new() };
+        // A declared project leads its group with its board, and is listed with its board
+        // alone where none of its tiles is here.
+        let mut boards: BTreeMap<GroupKey, NavBoard> = self.nav_boards(&query, scope);
         let (mut threads, mut thread_groups, mut loose_threads) =
-            if boarded { self.nav_threads(&query, scope, projects) } else { Default::default() };
+            self.nav_threads(&query, scope, projects);
         let mut blocks: Vec<(String, NavBlock)> = Vec::new();
         for (((group, tiles), machines), seen) in
             grouping.grouped.groups.iter().zip(by_group).zip(&spans).zip(&checkouts)
@@ -1907,10 +1815,9 @@ impl WorkspaceView {
                 head.parent.clone_from(parent);
             }
         }
-        let first = chain.first().map_or(fact::PROJECT, String::as_str);
         let mut listing = Listing {
             groups: blocks.into_iter().map(|(_, b)| b).collect(),
-            heading: section_name(first),
+            heading: section_name(fact::PROJECT),
             workers: Vec::new(),
         };
         let spanned: std::collections::BTreeSet<WorkerKey> = scope
@@ -3338,10 +3245,11 @@ impl WorkspaceView {
 
     /// A worker's header: the server icon (crossed out, in the warn fill, while it is away),
     /// the name, then on the right edge what is wrong with its link or its round trip when it
-    /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron,
-    /// "+" and "…" take the readouts' place; nothing moves when either shows. A finger has no
-    /// hover, so on touch the chevron stands at rest after the readouts and "+" and "…" are the
-    /// long press's: the menu "…" opens, which leads with "New shell here".
+    /// is slow, led by what a folded worker's tiles add up to. Under the pointer its glyph turns
+    /// into the fold's chevron, and "+" and "…" take the readouts' place; nothing moves when
+    /// either shows. A finger has no hover, so on touch the chevron stands at rest after the
+    /// readouts and "+" and "…" are the long press's: the menu "…" opens, which leads with "New
+    /// shell here".
     fn worker_header(&self, worker: &NavHeader, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -3531,15 +3439,37 @@ impl WorkspaceView {
                 .focus(|st| st.opacity(1.0))
                 .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.focus)).opacity(1.0))
         };
+        // Under the pointer the machine's glyph turns into the fold's chevron in its place, as a
+        // project's does (`MonoCode`'s folder row); a finger has no hover, so on touch the
+        // chevron stands at rest after the readouts.
         let chevron = lead_slot(theme, disclosure(theme, chevron, s.text_muted))
-            .when(!touch, |el| el.invisible().group_hover(group.clone(), gpui::Styled::visible));
+            .debug_selector(move || format!("nav-worker-fold-{key}"));
+        let (lead, chevron) = if touch {
+            (lead, Some(chevron))
+        } else {
+            let lead = div()
+                .relative()
+                .flex_none()
+                .size(px(LEAD_SLOT))
+                .child(div().group_hover(group.clone(), gpui::Styled::invisible).child(lead))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .invisible()
+                        .group_hover(group.clone(), gpui::Styled::visible)
+                        .child(chevron),
+                )
+                .into_any_element();
+            (lead, None)
+        };
         let hover = div()
             .when(!touch, |el| el.absolute().top_0().bottom_0().right_0())
             .flex()
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xxs))
-            .child(chevron)
+            .children(chevron)
             .children(add.map(|add| revealed(add, menu_up)))
             .children(menu.map(|menu| revealed(menu, menu_up)));
         let rest =
@@ -4332,9 +4262,10 @@ fn header_actions_width(theme: &Theme) -> f32 {
     theme.typography.icon_large().mul_add(2.0, theme.spacing.xxs)
 }
 
-/// The least a machine's header's trailing part takes: the chevron, "+" and "…" side by side.
+/// The least a machine's header's trailing part takes: "+" and "…" side by side (the chevron
+/// stands in its glyph's place).
 fn machine_actions_width(theme: &Theme) -> f32 {
-    theme.typography.icon_large().mul_add(3.0, theme.spacing.xxs * 2.0)
+    theme.typography.icon_large().mul_add(2.0, theme.spacing.xxs)
 }
 
 #[cfg(test)]

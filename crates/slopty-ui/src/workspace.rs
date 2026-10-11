@@ -1734,8 +1734,8 @@ impl WorkspaceView {
                 let closing = self.layout.shown_project().map(|project| {
                     let mut hasher = std::hash::DefaultHasher::new();
                     std::hash::Hash::hash(project.home(), &mut hasher);
-                    let clock = title_tabs::Clock {
-                        project: std::hash::Hasher::finish(&hasher),
+                    let clock = tab_look::Clock {
+                        row: std::hash::Hasher::finish(&hasher),
                         now: self.clock_instant(),
                         moves: self.animate && crate::kit::motion(cx),
                     };
@@ -2214,7 +2214,6 @@ impl gpui::Render for WorkspaceView {
             .when(!self.to_review().is_empty(), |el| el.on_action(cx.listener(Self::review_next)))
             .on_action(cx.listener(Self::review_pull_number))
             .on_action(cx.listener(Self::remove_machine))
-            .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
             .on_action(cx.listener(Self::share_clipboard))
@@ -2283,7 +2282,6 @@ impl gpui::Render for WorkspaceView {
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
-            .on_action(cx.listener(Self::toggle_navigator_lens))
             .child(Self::measure_width(cx))
             .child(Self::render_follow(cx))
             .child(self.render_frame(area, window, cx))
