@@ -15,6 +15,10 @@ name: E2E
 # (docs/decisions/tooling.md, "The app's e2e runs on a schedule").
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: The commit to test; `promote` names the one it pushed to main
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,7 +31,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   # `.cargo/config.toml` wraps rustc in sccache; on a runner it caches to the Actions cache.
+  # `promote` dispatches this on `gate`, whose cache the test shards fill: a run on main read
+  # main's, which nothing else fills, and built the app and daemons for 600 s
+  # (.research/ci-speed-2026-10-11.md item 10).
   SCCACHE_GHA_ENABLED: "true"
+  # The server stays up to the end, so the last step's statistics count the run: idle for ten
+  # minutes while the tests ran, it had exited and shown none.
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   e2e-app:
@@ -38,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.sha || github.sha }}
           submodules: recursive
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
@@ -53,6 +64,9 @@ jobs:
           cache-targets: false
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
+      # As the gate's lanes compile them, so the compile cache's entries are theirs
+      # (xtask/src/ci_profile.rs).
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -65,6 +79,7 @@ jobs:
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
+          restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
       - uses: actions/cache@v4
         with:
           path: vendor/ghostty/zig-pkg

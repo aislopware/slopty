@@ -30,7 +30,21 @@ use crate::tools::{
     HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, quiet_step, workspace_packages,
 };
 
-pub fn run(sh: &Shell, crates: &[String], quick: bool) -> Result<()> {
+/// Which part of the checks to run. A remote check runs the two on runners of their own, side by
+/// side: the lints on Linux and the tests on Linux or a Mac, as the crates need
+/// (`docs/decisions/tooling.md`, "A remote check lints on Linux").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Part {
+    /// Every check.
+    #[default]
+    All,
+    /// fmt, clippy, rustdoc, shear and typos: no test.
+    Lint,
+    /// The tests alone.
+    Tests,
+}
+
+pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()> {
     if crates.is_empty() {
         bail!("name the crates to check: `cargo xtask check -p <crate> [-p <crate>…]`");
     }
@@ -48,6 +62,22 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool) -> Result<()> {
     let built = selected(names().chain([WORKSPACE_HACK]));
     let (p, b) = (&packages, &built);
     let host = TRIPLES[0];
+    if part == Part::Tests {
+        if cfg!(target_os = "macos") {
+            nextest(sh, b)?;
+        } else {
+            // As CI's linux lane tests them: without the workspace hack, whose features pull in
+            // the client's GPUI, and with the binaries the tests spawn built first.
+            let tested = crate::gate::linux_tested();
+            let names: Vec<&str> = names().collect();
+            if let Some(other) = names.iter().find(|c| !tested.contains(c)) {
+                bail!("{other}'s tests run on a Mac, not on Linux (`gate::linux_tested`)");
+            }
+            crate::gate::linux_tests(sh, crate::gate::NEXTEST_CI_PROFILE, &names, false)?;
+        }
+        println!("✔ tested {} ({:.1?})", crates.join(", "), started.elapsed());
+        return Ok(());
+    }
     quiet_step("cargo fmt", cmd!(sh, "cargo +nightly fmt {p...} -- --check"))?;
     // The live `slopty-e2e` targets, which no test build takes, are linted here.
     let live: &[&str] = if names().any(|c| c == crate::e2e::LIVE_PACKAGE) {
@@ -55,23 +85,23 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool) -> Result<()> {
     } else {
         &[]
     };
-    quiet_step(
-        &format!("clippy {host}"),
-        cmd!(
-            sh,
-            "cargo clippy --keep-going {b...} --all-targets {live...} --target {host} -- -D warnings"
-        ),
-    )?;
+    {
+        let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
+        quiet_step(
+            &format!("clippy {host}"),
+            cmd!(
+                sh,
+                "{cargo} clippy --keep-going {b...} --all-targets {live...} --target {host} -- -D warnings"
+            ),
+        )?;
+    }
     if !quick {
         clippy_ios(sh, &names().collect::<Vec<_>>())?;
         lint_linux(sh, &names().collect::<Vec<_>>())?;
     }
-    // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
-    let runner = crate::runner::command()?;
-    quiet_step(
-        "nextest",
-        cmd!(sh, "cargo nextest run {b...} --no-tests=pass").env(crate::runner::RUNNER_VAR, runner),
-    )?;
+    if part == Part::All {
+        nextest(sh, b)?;
+    }
     if !quick {
         rustdoc(sh, &names().collect::<Vec<_>>())?;
     }
@@ -81,6 +111,17 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool) -> Result<()> {
     quiet_step("typos", cmd!(sh, "typos {d...}"))?;
     println!("✔ checked {} ({:.1?})", crates.join(", "), started.elapsed());
     Ok(())
+}
+
+/// nextest on `built`, the crates and [`WORKSPACE_HACK`] as `-p` arguments.
+fn nextest(sh: &Shell, built: &[String]) -> Result<()> {
+    // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
+    let runner = crate::runner::command()?;
+    quiet_step(
+        "nextest",
+        cmd!(sh, "cargo nextest run {built...} --no-tests=pass")
+            .env(crate::runner::RUNNER_VAR, runner),
+    )
 }
 
 /// Clippy on both iOS triples for those of `crates` that build there, beside [`WORKSPACE_HACK`].
@@ -94,19 +135,27 @@ pub fn clippy_ios(sh: &Shell, crates: &[&str]) -> Result<()> {
     let ios: Vec<String> =
         TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
     let i = &ios;
+    let (cargo, _env) = crate::tools::apple_cargo(sh, true)?;
     quiet_step(
         "clippy ios + ios-sim",
-        cmd!(sh, "cargo clippy --keep-going {a...} {i...} -- -D warnings"),
+        cmd!(sh, "{cargo} clippy --keep-going {a...} {i...} -- -D warnings"),
     )
 }
 
 /// rustdoc on `crates` with warnings denied and the private items in, as CI's rustdoc lane.
 pub fn rustdoc(sh: &Shell, crates: &[&str]) -> Result<()> {
     let b = selected(crates.iter().copied().chain([WORKSPACE_HACK]));
-    let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
+    let _flags = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
+    // For the host's Apple triple, as CI's rustdoc lane documents it, which off a Mac is no
+    // host at all.
+    let host = TRIPLES[0];
+    let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
     quiet_step(
         "rustdoc",
-        cmd!(sh, "cargo doc --keep-going {b...} --no-deps --document-private-items"),
+        cmd!(
+            sh,
+            "{cargo} doc --keep-going {b...} --no-deps --document-private-items --target {host}"
+        ),
     )
 }
 

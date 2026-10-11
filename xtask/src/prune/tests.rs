@@ -557,8 +557,10 @@ fn a_directory_a_build_holds_sheds_its_earlier_objects() {
 /// A child process holding a session's lock as rustc 1.98 does on macOS: `fcntl(F_SETLK)`, a
 /// write lock. Another process, because a process drops its `fcntl` locks on a file when it
 /// closes any descriptor of it, which the pass does in this one. Released when dropped.
+#[cfg(target_os = "macos")]
 struct FcntlHolder(std::process::Child);
 
+#[cfg(target_os = "macos")]
 impl FcntlHolder {
     fn hold(lock: &Utf8Path) -> Self {
         use std::io::BufRead as _;
@@ -576,6 +578,7 @@ impl FcntlHolder {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for FcntlHolder {
     fn drop(&mut self) {
         drop(self.0.stdin.take());
@@ -583,9 +586,11 @@ impl Drop for FcntlHolder {
     }
 }
 
+#[cfg(target_os = "macos")]
 const HOLD: &str = "XTASK_PRUNE_TEST_HOLD";
 
 /// Not a test: the child [`FcntlHolder`] runs, which holds the lock until its stdin closes.
+#[cfg(target_os = "macos")]
 #[test]
 #[ignore = "the child process of FcntlHolder"]
 fn hold_an_fcntl_lock() {
@@ -601,6 +606,7 @@ fn hold_an_fcntl_lock() {
 }
 
 /// Holds a session's lock as a later rustc reading a finished session does: `flock`, shared.
+#[cfg(target_os = "macos")]
 fn flock_shared(lock: &Utf8Path) -> File {
     let file = File::open(lock).unwrap();
     file.try_lock_shared().unwrap();
@@ -611,6 +617,9 @@ fn flock_shared(lock: &Utf8Path) -> File {
 /// own lock: a finished session and a `-working` one with their lock files, a lock file whose
 /// session is gone and a session whose lock file is. A session a compile holds stays, locked
 /// either way rustc locks, and so does a cache used two hours ago and every unit.
+// rustc's incremental session locks as a Mac takes them, where incremental builds live; CI
+// builds without incremental caches.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_busy_directory_sweeps_its_idle_caches_session_by_session() {
     let fx = Fixture::new("busy-caches");

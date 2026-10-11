@@ -37,7 +37,10 @@ on:
         description: "yes: every check (iOS and Linux clippy, rustdoc); no: fmt, host clippy, tests"
         default: "no"
       runner:
-        description: The runner image (macos-26, ubuntu-24.04, ubuntu-24.04-arm)
+        description: The runner image of the probe and the e2e case (macos-26, ubuntu-24.04, ubuntu-24.04-arm)
+        default: macos-26
+      test_runner:
+        description: The runner image of the tests (`remote` picks Linux when every crate tests there)
         default: macos-26
       probe:
         description: A shell command to run after setup, for trying a step on a runner
@@ -55,24 +58,26 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # The Actions cache is the Mac lanes' (10 GB, full); a Linux run keeps its compile cache on
-  # the runner, as the gate's linux job does.
-  SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
 
 jobs:
-  check:
-    name: check (${{ inputs.name }})
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+  # The checks of the crates named, in two jobs side by side (`xtask check --part`): the lints on
+  # an arm Linux runner, as the gate's Apple and Linux lint lanes run them, and the tests on Linux
+  # when every crate tests there, else on a Mac. Only what needs a Mac takes one of the five
+  # (docs/decisions/tooling.md, "A remote check lints on Linux").
+  lint:
+    if: inputs.packages != ''
+    name: lint (${{ inputs.name }})
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      # The gate's Apple lint lanes run on this image too, so a check reads their compile cache.
+      SCCACHE_GHA_ENABLED: "true"
     # A step with no shell named runs `bash -e`, without pipefail, so a failed check piped
     # through `tee` passed (run 38107934242).
     defaults:
       run:
         shell: bash
     steps:
-      # A hosted Ubuntu image leaves about 14 GB free; these SDKs are what no step here uses.
-      - if: runner.os == 'Linux'
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.sha }}
@@ -80,7 +85,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.18.0
-      # `xtask check` lints the host, both iOS triples and Linux (`tools::lint_linux`).
+      # Host clippy and rustdoc for the Mac; with --full, both iOS triples and Linux.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -100,6 +105,94 @@ jobs:
           save-if: false
       - uses: cargo-bins/cargo-binstall@main
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # zig compiles the build scripts' C for every triple linted here.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+      # Linux clippy (--full) builds libghostty-vt for the Linux triples.
+      - if: inputs.full == 'yes'
+        id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - if: inputs.full == 'yes'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-clippy-linux-${{ steps.ghostty.outputs.key }}
+      - if: inputs.full == 'yes'
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - if: inputs.full == 'yes'
+        working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: >-
+          cargo xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
+          --lane rustdoc
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: mkdir -p target/remote
+      - env:
+          PACKAGES: ${{ inputs.packages }}
+          FULL: ${{ inputs.full }}
+        run: |
+          args=(--part lint)
+          for p in $PACKAGES; do args+=(-p "$p"); done
+          [ "$FULL" = yes ] || args+=(--quick)
+          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/lint.log
+      - if: always()
+        run: $SCCACHE_PATH --show-stats
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-lint
+          path: target/remote
+          if-no-files-found: ignore
+          retention-days: 3
+
+  test:
+    if: inputs.packages != ''
+    name: test (${{ inputs.name }})
+    runs-on: ${{ inputs.test_runner }}
+    timeout-minutes: 60
+    env:
+      # A Mac's tests read the gate's test shards' compile cache; Linux keeps its own on the
+      # runner, as the gate's linux job does.
+      SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.test_runner, 'macos') && 'true' || 'false' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # As the gate's linux job: the shells the PTY tests check, tmux, and the receive buffer a
+      # worker's socket asks for, with Ubuntu's completion directories made safe for zsh.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
+          sudo sysctl -w net.core.rmem_max=8388608
+          { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha }}
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: false
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
@@ -108,11 +201,106 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      # The gate lanes' builds of libghostty-vt, read only: iOS clippy's holds the most triples.
+      # The gate's builds of libghostty-vt, read only: a test shard's on a Mac, the linux job's
+      # on Linux. A hit needs no zig packages.
+      - id: prebuilt
+        uses: actions/cache/restore@v4
+        with:
+          path: target/ghostty-prebuilt
+          key: >-
+            ghostty-prebuilt-${{ runner.os }}-${{ runner.os == 'Linux' && 'linux'
+            || 'testsworker' }}-${{ steps.ghostty.outputs.key }}
+          restore-keys: ghostty-prebuilt-${{ runner.os }}-
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: cargo xtask setup --lane tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: mkdir -p target/remote
+      - env:
+          PACKAGES: ${{ inputs.packages }}
+          # An accept writes every changed snapshot and lets its assertion pass.
+          INSTA_UPDATE: ${{ inputs.snapshots == 'accept' && 'always' || 'no' }}
+          INSTA_FORCE_PASS: ${{ inputs.snapshots == 'accept' && '1' || '0' }}
+        run: |
+          args=(--part tests)
+          for p in $PACKAGES; do args+=(-p "$p"); done
+          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/test.log
+      # The snapshots the tests wrote, as a patch on the commit checked, which `remote` applies
+      # to the tree it came from. Only what an accept writes: anything else in the runner's tree
+      # (zig's cache) is not ours to bring back, and `remote` refuses a patch with it.
+      - if: always()
+        run: |
+          accepted=(crates/slopty-e2e/golden ':(glob)**/*.snap')
+          git add --intent-to-add -- "${accepted[@]}"
+          git diff --binary -- "${accepted[@]}" > target/remote/changes.patch
+      - if: always()
+        run: $SCCACHE_PATH --show-stats
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-test
+          path: target/remote
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # A probe (a shell command tried on a runner) or an `xtask e2e` case, on the runner named.
+  run:
+    if: inputs.probe != '' || inputs.e2e != ''
+    name: run (${{ inputs.name }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    env:
+      # A Mac reads and fills the gate's compile cache; Linux keeps its own on the runner.
+      SCCACHE_GHA_ENABLED: ${{ startsWith(inputs.runner, 'macos') && 'true' || 'false' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.sha }}
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+          targets: >-
+            aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
+            x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: false
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: false
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
         with:
           path: target/ghostty-prebuilt
-          key: ghostty-prebuilt-${{ runner.os }}-clippy-ios-${{ steps.ghostty.outputs.key }}
+          key: ghostty-prebuilt-${{ runner.os }}-testsui-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-
       - uses: actions/cache/restore@v4
         with:
@@ -121,25 +309,32 @@ jobs:
       - working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
+      # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
+      - if: contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+        id: xcodegen
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/xcodegen
+          key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
+      - if: >-
+          contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+          && steps.xcodegen.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
+      - if: contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+        run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       - run: >-
           cargo xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
           --lane tests --lane rustdoc
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
-      - if: inputs.packages != ''
-        env:
-          PACKAGES: ${{ inputs.packages }}
-          FULL: ${{ inputs.full }}
-          # An accept writes every changed snapshot and lets its assertion pass.
-          INSTA_UPDATE: ${{ inputs.snapshots == 'accept' && 'always' || 'no' }}
-          INSTA_FORCE_PASS: ${{ inputs.snapshots == 'accept' && '1' || '0' }}
-        run: |
-          args=()
-          for p in $PACKAGES; do args+=(-p "$p"); done
-          [ "$FULL" = yes ] || args+=(--quick)
-          cargo xtask check "${args[@]}" 2>&1 | tee target/remote/check.log
-      - if: ${{ !cancelled() && inputs.probe != '' }}
+      - if: inputs.probe != ''
         env:
           PROBE: ${{ inputs.probe }}
         run: bash -c "$PROBE" 2>&1 | tee target/remote/probe.log
@@ -155,12 +350,13 @@ jobs:
           [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
           [ "$CASE" = ios ] && args+=(--sim "$SIM")
           cargo xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
-      # What the run wrote into the tree (accepted goldens and snapshots), as a patch on the
-      # commit checked, which `remote` applies to the tree it came from.
+      # The goldens and snapshots the run accepted, as a patch on the commit checked, which
+      # `remote` applies to the tree it came from; nothing else of the runner's tree.
       - if: always()
         run: |
-          git add --intent-to-add --all
-          git diff --binary --ignore-submodules=all > target/remote/changes.patch
+          accepted=(crates/slopty-e2e/golden ':(glob)**/*.snap')
+          git add --intent-to-add -- "${accepted[@]}"
+          git diff --binary -- "${accepted[@]}" > target/remote/changes.patch
       - if: ${{ always() && inputs.e2e != '' }}
         uses: actions/upload-artifact@v4
         with:
@@ -171,7 +367,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: logs-run
           path: target/remote
           if-no-files-found: ignore
           retention-days: 3

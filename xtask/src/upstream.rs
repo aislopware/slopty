@@ -10,7 +10,8 @@
 //! `xtask/upstream.toml` records where each source stands (`base`, the upstream commit last
 //! taken, its date, and `checked`, the day a sync last confirmed it current). `check` fetches the
 //! upstreams and reports the drift; `sync` rebases or merges each fork onto its upstream, imports
-//! zed into gpui-fast, re-pins libghostty-rs to the ghostty fork, build-checks, pushes, moves
+//! zed into gpui-fast, re-pins libghostty-rs to the ghostty fork, build-checks every fork in one
+//! run on a macOS runner (this Mac compiles nothing: [`check_on_runner`]), pushes, moves
 //! `vendor/ghostty` and this workspace's `Cargo.lock` pins and rewrites the base lines ([`plan`]
 //! orders it). Once a source was last known current longer ago than its own `check_every_days`,
 //! the gate asks its upstream for the branch head (`git ls-remote`, no fetch) and warns when it
@@ -28,6 +29,7 @@ mod ghostty;
 mod watch;
 mod zed;
 
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -236,9 +238,12 @@ fn selected(only: Option<&str>) -> Result<Vec<&'static str>> {
 /// One step of a sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
-    /// Take the upstream into the fork's local branch and build-check it; for libghostty-rs,
-    /// also pin the ghostty head and regenerate the bindings. Nothing leaves the machine.
+    /// Take the upstream into the fork's local branch and run its checks that compile nothing;
+    /// for libghostty-rs, also pin the ghostty head. Nothing leaves the machine.
     Take(&'static str),
+    /// Build-check every taken fork on a runner, in one run, from a branch [`CHECK_BRANCH`] on
+    /// each fork; libghostty-rs's bindings are regenerated there and come back as a patch.
+    Check,
     /// Push the fork's branch and confirm the remote holds it.
     Push(&'static str),
     /// Move `vendor/ghostty` to the ghostty fork's pushed head.
@@ -247,28 +252,27 @@ enum Step {
     MovePins,
 }
 
-/// The steps of a sync of `names`, in order. Every fork is taken and checked before it is
-/// pushed. ghostty is the exception to pushing right after its take: its check is the binding's
-/// build against it, so it is published only after libghostty-rs was taken, and then in the
-/// order the pins demand: the ghostty fork, `vendor/ghostty`, the binding that pins it, the
-/// lock that pins the binding. A failure anywhere before leaves every published pin as it was.
+/// The steps of a sync of `names`, in order. Every fork is taken, then all are build-checked in
+/// one runner job, and only then pushed: one macOS job a sync rather than one a fork, and nothing
+/// is published before every fork checked. ghostty's check is the binding's build against it, so
+/// the pushes go in the order the pins demand: the ghostty fork, `vendor/ghostty`, the binding
+/// that pins it, the lock that pins the binding. A failure anywhere before leaves every
+/// published pin as it was.
 fn plan(names: &[&'static str], no_push: bool) -> Result<Vec<Step>> {
     let has = |name: &str| names.contains(&name);
     ensure!(!has(GHOSTTY) || has(LIBGHOSTTY_RS), "ghostty syncs with libghostty-rs, which pins it");
-    let mut steps = Vec::new();
-    for name in ORDER.into_iter().filter(|name| has(name)) {
-        steps.push(Step::Take(name));
-        if no_push || name == GHOSTTY {
-            continue;
-        }
+    let mut steps: Vec<Step> = ORDER.into_iter().filter(|name| has(name)).map(Step::Take).collect();
+    steps.push(Step::Check);
+    if no_push {
+        return Ok(steps);
+    }
+    for name in ORDER.into_iter().filter(|name| has(name) && *name != GHOSTTY) {
         if name == LIBGHOSTTY_RS && has(GHOSTTY) {
             steps.extend([Step::Push(GHOSTTY), Step::MoveSubmodule]);
         }
         steps.push(Step::Push(name));
     }
-    if !no_push {
-        steps.push(Step::MovePins);
-    }
+    steps.push(Step::MovePins);
     Ok(steps)
 }
 
@@ -424,9 +428,10 @@ fn sync_all(
                 } else {
                     None
                 };
-                let done = take(sh, dir, name, fork, zed, pin.as_ref())?;
+                let done = take(sh, dir, name, fork, zed, pin)?;
                 taken.push((name, done));
             }
+            Step::Check => check_on_runner(sh, root, config, &mut taken)?,
             Step::Push(name) => push(sh, config.fork(name)?, taken_of(&taken, name)?)?,
             Step::MoveSubmodule => {
                 let head = &taken_of(&taken, GHOSTTY)?.head;
@@ -476,11 +481,7 @@ fn ghostty_source(
     taken: &[(&str, Taken)],
 ) -> Result<GhosttySource> {
     if let Ok(done) = taken_of(taken, GHOSTTY) {
-        return Ok(GhosttySource {
-            tree: done.dir.clone(),
-            head: done.head.clone(),
-            fork: fork.url.clone(),
-        });
+        return Ok(GhosttySource { head: done.head.clone(), fork: fork.url.clone() });
     }
     let tree = main.join(&fork.checkout);
     let head = {
@@ -488,7 +489,7 @@ fn ghostty_source(
         cmd!(sh, "git rev-parse HEAD").read()?
     };
     ghostty::ensure_on_fork(sh, &tree, fork, &head)?;
-    Ok(GhosttySource { tree, head, fork: fork.url.clone() })
+    Ok(GhosttySource { head, fork: fork.url.clone() })
 }
 
 /// What this sync took for `name`.
@@ -532,6 +533,9 @@ fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken
         "a [patch] went unused: its version no longer meets what the graph asks for (move the \
          fork's compat crates with gpui-kit's gpui-pre), and the lock would carry two GPUIs"
     );
+    // The workspace hack carries the graph's feature union, which a fork's new dependency
+    // moves: gpui-fast's cbindgen for every target moved once_cell's (a312659f).
+    step("cargo hakari generate", &cmd!(sh, "cargo hakari generate"))?;
     // The fuzz crate is a workspace of its own with its own lock: left behind, it built the
     // engine against an older binding of the same vendored ghostty, and its own zig build too.
     let fuzz_lock = root.join("fuzz").join("Cargo.lock");
@@ -745,10 +749,10 @@ fn ghostty_pin_report(sh: &Shell, main: &Utf8Path, ghostty: &Fork, fork_head: &s
 }
 
 /// The ghostty source libghostty-rs is pinned to and build-checked against.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GhosttySource {
-    /// A work tree holding `head`, handed to the build as `GHOSTTY_SOURCE_DIR`.
-    tree: Utf8PathBuf,
+    /// The commit, which the runner fetches from `fork` and hands the build as
+    /// `GHOSTTY_SOURCE_DIR`.
     head: String,
     /// The ghostty fork, which the pin must name.
     fork: String,
@@ -765,17 +769,20 @@ struct Taken {
     fork_head: String,
     /// The local branch's head after the take: what the push publishes.
     head: String,
+    /// For libghostty-rs, the ghostty it is pinned to and checked against.
+    ghostty: Option<GhosttySource>,
 }
 
 /// Take the upstream into one fork's local branch in `dir`, import zed (from its clone) when
-/// given, pin ghostty when given, and build-check. Nothing leaves the machine.
+/// given, pin ghostty when given, and run the checks that compile nothing ([`LOCAL_CHECKS`]).
+/// Nothing leaves the machine.
 fn take(
     sh: &Shell,
     dir: Utf8PathBuf,
     name: &str,
     fork: &Fork,
     zed: Option<(&Import, Utf8PathBuf)>,
-    ghostty: Option<&GhosttySource>,
+    ghostty: Option<GhosttySource>,
 ) -> Result<Taken> {
     let _dir = sh.push_dir(&dir);
     println!("▶ {name}: {dir}");
@@ -813,22 +820,164 @@ fn take(
         None => None,
     };
 
-    let _source = match ghostty {
-        Some(source) => {
-            ghostty::repin(sh, &dir, &source.fork, &source.tree, &source.head)?;
-            Some(sh.push_env("GHOSTTY_SOURCE_DIR", &source.tree))
-        }
-        None => None,
-    };
+    if let Some(source) = &ghostty {
+        ghostty::repin(sh, &dir, &source.fork, &source.head)?;
+    }
     refresh_lock(sh)?;
-    for (title, command) in build_checks(name) {
+    for (fork_name, title, command) in LOCAL_CHECKS {
+        if fork_name != name {
+            continue;
+        }
         let mut words = command.split(' ');
         let program = words.next().unwrap_or_default();
         step(title, &cmd!(sh, "{program} {words...}"))?;
     }
     let head = cmd!(sh, "git rev-parse {branch}").read()?;
-    Ok(Taken { dir, upstream, zed, fork_head: fork_head.sha, head })
+    Ok(Taken { dir, upstream, zed, fork_head: fork_head.sha, head, ghostty })
 }
+
+/// The branch on each fork a sync's runner check fetches the taken head from. Never the fork's
+/// own branch: nothing is published before every fork checked.
+const CHECK_BRANCH: &str = "sync-check";
+
+/// The name the runner check goes by (`cargo xtask remote --name`), under `target/remote/`.
+const CHECK_NAME: &str = "upstream";
+
+/// The file the runner check leaves libghostty-rs's regenerated bindings in, as a patch on the
+/// taken head, beside its log.
+const BINDINGS_PATCH: &str = "libghostty-rs-bindings.patch";
+
+/// Build-check every taken fork on a macOS runner, in one `check.yml` run ([`crate::remote`]):
+/// each taken head goes to [`CHECK_BRANCH`] on its fork, the runner fetches it to the path this
+/// Mac keeps the fork at, inside the checkout, so the workspace's `.cargo/config.toml` (sccache,
+/// the deployment targets, the optimised libghostty-vt) applies there as it did here, and runs
+/// [`build_checks`]. libghostty-rs's bindings are regenerated there against the ghostty it pins,
+/// and what changed comes back as a patch that is committed onto the pin here: the tree pushed is
+/// the tree checked. This Mac compiles nothing (`docs/decisions/tooling.md`, "Every compile
+/// runs on a runner").
+fn check_on_runner(
+    sh: &Shell,
+    root: &Utf8Path,
+    config: &Config,
+    taken: &mut [(&'static str, Taken)],
+) -> Result<()> {
+    let mut forks = Vec::new();
+    for (name, done) in taken.iter() {
+        let fork = config.fork(name)?;
+        {
+            let _dir = sh.push_dir(&done.dir);
+            let remote = remote_for(sh, &fork.url)?;
+            let refspec = format!("{}:refs/heads/{CHECK_BRANCH}", done.head);
+            step(
+                &format!("push {} to {} {CHECK_BRANCH}", short(&done.head), repo_slug(&fork.url)),
+                &cmd!(sh, "git push --quiet --force {remote} {refspec}"),
+            )?;
+        }
+        if *name == GHOSTTY {
+            continue;
+        }
+        forks.push(RunnerFork {
+            name,
+            url: fork.url.clone(),
+            sha: done.head.clone(),
+            dir: fork.checkout.to_string(),
+            ghostty: done.ghostty.as_ref().map(|g| (g.fork.clone(), g.head.clone())),
+        });
+    }
+    if forks.is_empty() {
+        return Ok(());
+    }
+    let opts = crate::remote::RemoteOpts {
+        name: CHECK_NAME.to_owned(),
+        packages: Vec::new(),
+        e2e: None,
+        filter: None,
+        goldens: crate::remote::Goldens::default(),
+        sim: "iphone".to_owned(),
+        only: Vec::new(),
+        full: false,
+        accept_snapshots: false,
+        attach: None,
+        runner: "macos-26".to_owned(),
+        probe: Some(runner_script(&forks)),
+        head: true,
+        workflow_ref: None,
+    };
+    let checkout = Shell::new()?;
+    checkout.change_dir(root);
+    crate::remote::run(&checkout, &opts).context("the forks' build checks on a runner")?;
+    let Some((_, binding)) = taken.iter_mut().find(|(name, _)| *name == LIBGHOSTTY_RS) else {
+        return Ok(());
+    };
+    let patch =
+        root.join("target/remote").join(CHECK_NAME).join("logs/logs-run").join(BINDINGS_PATCH);
+    ensure!(patch.exists(), "the runner left no {BINDINGS_PATCH}");
+    ghostty::take_bindings(sh, &binding.dir, &patch)?;
+    let _dir = sh.push_dir(&binding.dir);
+    let branch = &config.fork(LIBGHOSTTY_RS)?.branch;
+    binding.head = cmd!(sh, "git rev-parse {branch}").read()?;
+    Ok(())
+}
+
+/// A fork as the runner check fetches and checks it.
+struct RunnerFork {
+    name: &'static str,
+    url: String,
+    sha: String,
+    /// Where this Mac keeps it, relative to the checkout.
+    dir: String,
+    /// For libghostty-rs, the ghostty fork and the commit it pins.
+    ghostty: Option<(String, String)>,
+}
+
+/// The shell script the runner check runs from the checkout's root: each fork fetched at its
+/// taken head and checked in a subshell, every fork run even when one fails, and the run failed
+/// naming those that did.
+fn runner_script(forks: &[RunnerFork]) -> String {
+    let mut script = String::from(
+        "set -uo pipefail\n\
+         export root=$PWD; failed=\"\"\n\
+         fetch() { rm -rf \"$1\" && git init -q \"$1\" && git -C \"$1\" fetch -q --depth 1 \"$2\" \"$3\" \
+         && git -C \"$1\" checkout -q --detach FETCH_HEAD \
+         && git -C \"$1\" submodule update -q --init --recursive --depth 1; }\n\
+         export -f fetch\n",
+    );
+    for fork in forks {
+        let (name, url, sha, dir) = (fork.name, &fork.url, &fork.sha, &fork.dir);
+        let _written = writeln!(script, "echo \"▶ {name} at {sha}\"");
+        // A shell of its own, so `-e` stops it at the first failure: inside a subshell whose
+        // status `||` tests, bash ignores `-e`.
+        let _written = writeln!(script, "bash -euo pipefail <<'FORK' || failed=\"$failed {name}\"");
+        let _written = writeln!(script, "fetch \"$root/{dir}\" {url} {sha}");
+        if let Some((ghostty_url, ghostty_sha)) = &fork.ghostty {
+            let tree = format!("$root/{}-sync", ghostty::WORKTREE);
+            let _written = writeln!(script, "fetch \"{tree}\" {ghostty_url} {ghostty_sha}");
+            let _written = writeln!(script, "export GHOSTTY_SOURCE_DIR=\"{tree}\"");
+        }
+        let _written = writeln!(script, "cd \"$root/{dir}\"");
+        if fork.name == LIBGHOSTTY_RS {
+            let _written = writeln!(script, "{}", ghostty::REGENERATE);
+            let _written =
+                writeln!(script, "git diff --binary > \"$root/target/remote/{BINDINGS_PATCH}\"");
+        }
+        for (title, command) in build_checks(name) {
+            let _written = writeln!(script, "echo \"▶ {title}\"\n{command}");
+        }
+        script.push_str("FORK\n");
+    }
+    script.push_str(
+        "if [ -n \"$failed\" ]; then echo \"✘ build checks failed:$failed\"; exit 1; fi\n\
+         echo \"✔ every fork built and passed its checks\"\n",
+    );
+    script
+}
+
+/// The checks of a fork that compile nothing, run here as [`take`] finishes: the fork, a title,
+/// and a program with its arguments, space-separated.
+const LOCAL_CHECKS: [(&str, &str, &str); 1] = [
+    // gpui-fast's own rule that upstream files hold only small hooks.
+    (GPUI_FAST, "check-upstream", "script/check-upstream"),
+];
 
 /// Push a taken fork's branch, leased on the head the take started from, and confirm the remote
 /// now holds what was taken.
@@ -977,14 +1126,12 @@ fn refresh_lock(sh: &Shell) -> Result<()> {
     Ok(())
 }
 
-/// The per-fork checks run inside the checkout once it holds the upstream: a program and its
-/// arguments, space-separated. Cargo runs `--locked`: the lock [`refresh_lock`] left is the one
+/// The per-fork build checks [`check_on_runner`] runs inside the fork's checkout on a runner: a
+/// title and a shell command. Cargo runs `--locked`: the lock [`refresh_lock`] left is the one
 /// pushed, and a check must not rewrite it behind the push.
 fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
     match name {
         GPUI_FAST => &[
-            // gpui-fast's own rule that upstream files hold only small hooks.
-            ("check-upstream", "script/check-upstream"),
             (
                 "check gpui + gpui_ios (ios-sim)",
                 "cargo check --locked -p gpui -p gpui_ios --target aarch64-apple-ios-sim",
@@ -1419,23 +1566,24 @@ mod tests {
 
     #[test]
     fn a_sync_checks_everything_before_it_publishes_a_pin() {
-        use Step::{MovePins, MoveSubmodule, Push, Take};
+        use Step::{Check, MovePins, MoveSubmodule, Push, Take};
         let all = plan(&ORDER, false).expect("plan");
         assert_eq!(
             all,
             [
                 Take(GPUI_FAST),
-                Push(GPUI_FAST),
                 Take("gpui-kit"),
-                Push("gpui-kit"),
                 Take(GHOSTTY),
                 Take(LIBGHOSTTY_RS),
+                Check,
+                Push(GPUI_FAST),
+                Push("gpui-kit"),
                 Push(GHOSTTY),
                 MoveSubmodule,
                 Push(LIBGHOSTTY_RS),
                 MovePins,
             ],
-            "ghostty is published after the binding built against it, then in pin order"
+            "every fork checked in one runner job before any is published, then in pin order"
         );
         let only = selected(Some(GHOSTTY)).expect("selected");
         assert_eq!(
@@ -1443,6 +1591,7 @@ mod tests {
             Some(vec![
                 Take(GHOSTTY),
                 Take(LIBGHOSTTY_RS),
+                Check,
                 Push(GHOSTTY),
                 MoveSubmodule,
                 Push(LIBGHOSTTY_RS),
@@ -1452,15 +1601,59 @@ mod tests {
         );
         assert_eq!(
             plan(&[LIBGHOSTTY_RS], false).ok(),
-            Some(vec![Take(LIBGHOSTTY_RS), Push(LIBGHOSTTY_RS), MovePins]),
+            Some(vec![Take(LIBGHOSTTY_RS), Check, Push(LIBGHOSTTY_RS), MovePins]),
             "the binding alone pins vendor/ghostty as it stands and leaves it there"
         );
         assert_eq!(
             plan(&only, true).ok(),
-            Some(vec![Take(GHOSTTY), Take(LIBGHOSTTY_RS)]),
+            Some(vec![Take(GHOSTTY), Take(LIBGHOSTTY_RS), Check]),
             "--no-push takes and checks, and neither pushes nor moves a pin"
         );
         assert!(plan(&[GHOSTTY], false).is_err(), "ghostty without the binding that pins it");
+    }
+
+    /// The runner fetches each fork at its taken head where this Mac keeps it, regenerates the
+    /// binding's bindings against the ghostty it pins before checking it, and fails naming every
+    /// fork that failed, after running them all.
+    #[test]
+    fn the_runner_checks_every_fork_at_its_taken_head() {
+        let forks = [
+            RunnerFork {
+                name: GPUI_FAST,
+                url: "https://github.com/aislopware/gpui-fast.git".to_owned(),
+                sha: "a".repeat(40),
+                dir: ".research/gpui-fast".to_owned(),
+                ghostty: None,
+            },
+            RunnerFork {
+                name: LIBGHOSTTY_RS,
+                url: "https://github.com/aislopware/libghostty-rs.git".to_owned(),
+                sha: "b".repeat(40),
+                dir: ".research/libghostty-rs".to_owned(),
+                ghostty: Some((
+                    "https://github.com/aislopware/ghostty.git".to_owned(),
+                    "c".repeat(40),
+                )),
+            },
+        ];
+        let script = runner_script(&forks);
+        let fetch = format!(
+            "fetch \"$root/.research/gpui-fast\" https://github.com/aislopware/gpui-fast.git {}",
+            "a".repeat(40)
+        );
+        assert!(script.contains(&fetch), "{script}");
+        assert!(script.contains("export GHOSTTY_SOURCE_DIR=\"$root/.research/ghostty-sync\""));
+        let regenerate = script.find(ghostty::REGENERATE).unwrap_or(usize::MAX);
+        let test = script.find("cargo test --locked -p libghostty-vt").unwrap_or(0);
+        assert!(regenerate < test, "the bindings are regenerated before the binding is checked");
+        assert!(script.contains(BINDINGS_PATCH), "and come back as a patch");
+        assert!(!script.contains("check-upstream"), "the checks that compile nothing stay here");
+        for (title, _) in build_checks(GPUI_FAST) {
+            assert!(script.contains(title), "{title}");
+        }
+        assert_eq!(script.matches("<<'FORK' || failed=").count(), 2, "every fork runs: {script}");
+        assert_eq!(script.matches("\nFORK\n").count(), 2, "each in a shell of its own: {script}");
+        assert!(script.contains("exit 1"), "and a failed one fails the run");
     }
 
     #[test]

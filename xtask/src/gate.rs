@@ -77,7 +77,7 @@ const NEXTEST_PROFILE: &str = "gate";
 
 /// The nextest profile of the tests lane on a hosted runner: `gate`'s, less the tests that read
 /// hardware a runner's virtual Mac does not have.
-const NEXTEST_CI_PROFILE: &str = "ci";
+pub const NEXTEST_CI_PROFILE: &str = "ci";
 
 /// A lane as `--lane` names it. The tools lane carries the fmt check with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -121,9 +121,11 @@ impl LaneId {
                 "committed",
             ],
             Self::Tests | Self::Linux => &["cargo-nextest"],
-            // Linux clippy compiles each triple's C with zig (`tools::lint_linux`).
-            Self::ClippyLinux => &["cargo-zigbuild"],
-            Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => &[],
+            // Linux clippy compiles each triple's C with zig (`tools::lint_linux`), and so do the
+            // Apple lints on CI's Linux runners (`tools::apple_cargo`).
+            Self::ClippyLinux | Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => {
+                &["cargo-zigbuild"]
+            }
         }
     }
 }
@@ -236,12 +238,28 @@ impl Only {
     }
 }
 
-/// A shell in `tree` on lane `name`'s target dir. With `share` it runs beside other lanes and
-/// gets its share of the cores; alone, cargo takes them all.
-fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str, share: bool) -> Result<Shell> {
+/// A shell in `tree` for lane `name`. With `share` it runs beside other lanes and gets its share
+/// of the cores; alone, cargo takes them all.
+///
+/// Here each lane builds into a target dir of its own under `target/gate/`, since lanes run side
+/// by side and cargo serialises builds that share one. On a hosted runner (`own_dir` false) the
+/// lane has the runner to itself and builds into the checkout's `target/`, as a remote check and
+/// the e2e do: sccache keys every unit by each `CARGO_*` variable in rustc's environment, so a
+/// `CARGO_TARGET_DIR` per lane gave every lane, every check and the e2e compile cache entries
+/// none of the others could read (`docs/decisions/tooling.md`, "One compile cache key space on
+/// CI").
+fn lane_shell(
+    tree: &Utf8Path,
+    gate_dir: &Utf8Path,
+    name: &str,
+    share: bool,
+    own_dir: bool,
+) -> Result<Shell> {
     let sh = Shell::new()?;
     sh.change_dir(tree);
-    sh.set_var("CARGO_TARGET_DIR", gate_dir.join(name.replace(' ', "-")));
+    if own_dir {
+        sh.set_var("CARGO_TARGET_DIR", gate_dir.join(name.replace(' ', "-")));
+    }
     // `.cargo/config.toml` names it relative to the tree, which here is the snapshot, whose
     // sync deletes what the index does not hold; the checkout's is the one every build shares.
     if let Some(target) = gate_dir.parent() {
@@ -303,7 +321,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     };
     let inputs = inputs.as_ref();
     let share = only.lanes.len() != 1;
-    let lane = |name: &str| lane_shell(&tree, &gate_dir, name, share);
+    let lane = |name: &str| lane_shell(&tree, &gate_dir, name, share, !only.ci);
     let checkout = || -> Result<Shell> {
         let sh = Shell::new()?;
         sh.change_dir(&root);
@@ -524,7 +542,7 @@ pub fn land_checks(base: &str, full: bool) -> Result<()> {
     cached(Some(&inputs), &tree, &lane, |_| {
         println!("▶ checks before the push: {}", packages.join(" "));
         let names: Vec<&str> = packages.iter().map(String::as_str).collect();
-        let shell = |name| lane_shell(&tree, &gate_dir, name, false);
+        let shell = |name| lane_shell(&tree, &gate_dir, name, false, true);
         std::thread::scope(|scope| {
             let host = scope.spawn(|| {
                 let lint = clippy_affected(&shell("clippy host")?, &names);
@@ -962,9 +980,15 @@ fn test_lane(
     only: Option<&[String]>,
     shard: Option<Shard>,
 ) -> Result<()> {
+    // On a hosted Mac a shard leaves the crates CI tests on Linux alone to the linux lane.
+    let mac_ci = profile == NEXTEST_CI_PROFILE && cfg!(target_os = "macos");
     let packages = shard.map_or_else(
         || vec!["--workspace".to_owned()],
-        |s| selected(s.packages().iter().copied().chain([WORKSPACE_HACK])),
+        |s| {
+            let own = s.packages().iter().copied();
+            let own = own.filter(|p| !(mac_ci && LINUX_ONLY_TESTS.contains(p)));
+            selected(own.chain([WORKSPACE_HACK]))
+        },
     );
     let p = &packages;
     // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
@@ -1052,6 +1076,26 @@ fn test_lane(
     print!("{}", ptys.report());
     both(both(tests, videotoolbox), ptys.verdict())
 }
+
+/// The crates whose tests CI runs on Linux alone, in the linux lane, and no test shard runs on a
+/// hosted Mac: neither their code nor their tests name a target OS or vendor (`unix` is both
+/// hosts), so a Mac's run of their tests reaches no code path Linux's does not, and the same tests
+/// took three to six times as long on the virtual Mac (`.research/ci-speed-2026-10-11.md`
+/// item 6). A full gate here still runs them in their shard.
+const LINUX_ONLY_TESTS: [&str; 12] = [
+    "slopty-proto",
+    "slopty-server",
+    "slopty-engine",
+    "slopty-media",
+    "slopty-core",
+    "slopty-settings",
+    "slopty-tools",
+    "slopty-grid",
+    "slopty-predict",
+    "slopty-shape",
+    "slopty-push",
+    "slopty-theme",
+];
 
 /// The nextest test group of the tests that code through VideoToolbox (`.config/nextest.toml`).
 const VIDEOTOOLBOX: &str = "group(videotoolbox)";
@@ -1211,7 +1255,7 @@ fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
 
 /// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`] and
 /// [`LINUX_UNRUN`].
-fn linux_tested() -> Vec<&'static str> {
+pub fn linux_tested() -> Vec<&'static str> {
     LINUX_CRATES
         .iter()
         .copied()
@@ -1224,11 +1268,19 @@ fn linux_tested() -> Vec<&'static str> {
 /// theirs whose tests build there. Without the workspace hack, whose
 /// features pull in the client's GPUI, which no Linux build takes.
 fn linux_lane(sh: &Shell, profile: &str) -> Result<()> {
-    let tested = linux_tested();
+    linux_tests(sh, profile, &linux_tested(), true)
+}
+
+/// [`linux_lane`] on `tested`, some of [`linux_tested`]: their tests built, with the binaries a
+/// Linux worker and server install and the tests spawn when `install` is set or a test spawns
+/// one, and run under nextest's `profile`. A remote check of crates that all test on Linux runs
+/// this on a Linux runner (`xtask check --part tests`), where building the daemons for
+/// `slopty-core` alone took 230 s of a 240 s check (run 38111839587).
+pub fn linux_tests(sh: &Shell, profile: &str, tested: &[&str], install: bool) -> Result<()> {
     let p = &selected(tested.iter().copied());
     let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
     quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run {timings...}"))?;
-    let mut spawned = tested.clone();
+    let mut spawned = tested.to_vec();
     for (_, package) in SPAWNED_BINS {
         if !spawned.contains(&package) {
             spawned.push(package);
@@ -1237,10 +1289,12 @@ fn linux_lane(sh: &Shell, profile: &str) -> Result<()> {
     let spawned = selected(spawned);
     let bins = spawned_bin_args();
     // The binaries a Linux worker and server install, which the tests also spawn.
-    quiet_step(
-        "the Linux worker, server and spawned binaries",
-        cmd!(sh, "cargo build --profile test {spawned...} --examples {bins...}"),
-    )?;
+    if install || tested.iter().any(|p| SPAWNING.contains(p)) {
+        quiet_step(
+            "the Linux worker, server and spawned binaries",
+            cmd!(sh, "cargo build --profile test {spawned...} --examples {bins...}"),
+        )?;
+    }
     let _fresh = sh.push_env(BINS_FRESH, "1");
     nextest_step(profile, cmd!(sh, "cargo nextest run {p...} --profile {profile}"))
 }
@@ -1546,19 +1600,25 @@ fn lint_linux_xtask(sh: &Shell) -> Result<()> {
 pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
     let live = crate::e2e::LIVE;
+    let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
     let workspace = quiet_step(
         &format!("clippy {host}"),
         cmd!(
             sh,
-            "cargo clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
+            "{cargo} clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
         ),
     );
+    // No fuzz target calls Apple code, so off a Mac the fuzz crate is linted for the host, with
+    // the host's own C++ compiler for libFuzzer: zig's Darwin headers lack the `sys/syscall.h`
+    // it includes (run 38110275409).
+    let (fuzz_cargo, fuzz_target): (&str, &[&str]) =
+        if cfg!(target_os = "macos") { (cargo, &["--target", host]) } else { ("cargo", &[]) };
     let fuzz = if sh.path_exists("fuzz/Cargo.toml") {
         quiet_step(
-            &format!("clippy {host} (fuzz)"),
+            "clippy (fuzz)",
             cmd!(
                 sh,
-                "cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
+                "{fuzz_cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets {fuzz_target...} -- -D warnings"
             ),
         )
     } else {
@@ -1585,9 +1645,10 @@ pub fn lint_ios(sh: &Shell) -> Result<()> {
         .collect();
     let ios: Vec<String> =
         TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
+    let (cargo, _env) = crate::tools::apple_cargo(sh, true)?;
     quiet_step(
         "clippy ios + ios-sim",
-        cmd!(sh, "cargo clippy --keep-going --workspace {excludes...} {ios...} -- -D warnings"),
+        cmd!(sh, "{cargo} clippy --keep-going --workspace {excludes...} {ios...} -- -D warnings"),
     )
 }
 
@@ -1605,12 +1666,13 @@ pub fn doc(sh: &Shell, open: bool) -> Result<()> {
 fn rustdoc_for(sh: &Shell, open: bool, target: Option<&str>) -> Result<()> {
     let open: &[&str] = if open { &["--open"] } else { &[] };
     let target: Vec<&str> = target.map_or_else(Vec::new, |t| vec!["--target", t]);
-    let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
+    let _flags = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
+    let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
     quiet_step(
         "rustdoc",
         cmd!(
             sh,
-            "cargo doc --keep-going --workspace --no-deps --document-private-items {target...} {open...}"
+            "{cargo} doc --keep-going --workspace --no-deps --document-private-items {target...} {open...}"
         ),
     )
 }
@@ -1778,6 +1840,22 @@ mod tests {
         assert!(state.trim().is_empty() || state.starts_with('Z'), "the group's sleep: {state}");
     }
 
+    /// Here a lane builds into a target dir of its own; on a runner it leaves the environment's
+    /// alone, so its compile cache keys are those of a remote check and the e2e.
+    #[test]
+    fn a_lane_on_a_runner_keeps_the_checkout_s_target_dir() {
+        let tree = camino::Utf8Path::new("/tmp/tree");
+        let gate = tree.join("target").join("gate");
+        let here = super::lane_shell(tree, &gate, "clippy host", false, true).expect("a shell");
+        assert_eq!(here.var("CARGO_TARGET_DIR").ok(), Some(gate.join("clippy-host").to_string()));
+        let runner = super::lane_shell(tree, &gate, "clippy host", false, false).expect("a shell");
+        assert_eq!(
+            runner.var("CARGO_TARGET_DIR").ok(),
+            std::env::var("CARGO_TARGET_DIR").ok(),
+            "inherited, never set"
+        );
+    }
+
     /// The probe names a test the encoder's module has.
     #[test]
     fn the_encoder_probe_is_a_test_of_the_codec() {
@@ -1836,6 +1914,24 @@ mod tests {
         assert!(deep.contains("max-parallel: 1"), "the deep checks leave the gate macOS runners");
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
+        for only in super::LINUX_ONLY_TESTS {
+            assert!(tested.contains(&only), "{only} runs on no Mac, so the linux lane tests it");
+            let dir = repo_root().expect("repo root").join("crates").join(only);
+            let mut sources = Vec::new();
+            super::rust_sources(dir.join("src").as_std_path(), &mut sources);
+            super::rust_sources(dir.join("tests").as_std_path(), &mut sources);
+            assert!(!sources.is_empty(), "{only} is at {dir}");
+            for file in sources {
+                let text = std::fs::read_to_string(&file).expect("a source");
+                for cfg in ["target_os", "target_vendor", "cfg(windows"] {
+                    assert!(
+                        !text.contains(cfg),
+                        "{}: {cfg}, so a Mac tests it too",
+                        file.display()
+                    );
+                }
+            }
+        }
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
         let (all, unrun, libs) =
             (crate::tools::LINUX_CRATES, crate::tools::LINUX_UNRUN, crate::tools::LINUX_UNTESTED);
@@ -1848,10 +1944,19 @@ mod tests {
     /// `promote` on the main it pushed: a schedule checked out a commit days old.
     #[test]
     fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
+        use clap::ValueEnum as _;
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
-        assert!(workflow.contains("{ lane: clippy-host, os: macos-26 }"), "host clippy on CI");
+        assert!(
+            workflow.contains("{ lane: clippy-host, os: ubuntu-24.04-arm,"),
+            "host clippy on CI, on Linux"
+        );
+        assert_eq!(
+            workflow.matches(", os: macos-26,").count(),
+            Shard::value_variants().len(),
+            "only the test shards take one of the five macOS runners"
+        );
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
         assert!(e2e.contains("run: cargo xtask e2e app --review"), "the app's e2e on CI");
         assert!(
@@ -1859,7 +1964,9 @@ mod tests {
             "never beside every land's run, and never on a schedule's stale commit"
         );
         assert!(
-            workflow.contains("gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref main"),
+            workflow.contains(
+                "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$GITHUB_SHA\""
+            ),
             "promote starts it on the main it pushed"
         );
         assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));

@@ -112,10 +112,15 @@ pub fn move_submodule(sh: &Shell, main: &Utf8Path, fork: &Fork, head: &str) -> R
     Ok(())
 }
 
-/// Pin libghostty-rs (checked out at `dir`, on its branch) to ghostty `head`, whose source is
-/// `tree`, regenerate the bindings from that source and commit both. Nothing happens when the
-/// pin is already `head`.
-pub fn repin(sh: &Shell, dir: &Utf8Path, fork: &str, tree: &Utf8Path, head: &str) -> Result<()> {
+/// The command that regenerates libghostty-rs's bindings from the ghostty `GHOSTTY_SOURCE_DIR`
+/// names. It compiles, so it runs on the sync's runner (`super::check_on_runner`).
+pub const REGENERATE: &str =
+    "cargo run --locked --quiet -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings";
+
+/// Pin libghostty-rs (checked out at `dir`, on its branch) to ghostty `head` and commit it. The
+/// bindings are regenerated on the runner, and [`take_bindings`] adds them to this commit.
+/// Nothing happens when the pin is already `head`.
+pub fn repin(sh: &Shell, dir: &Utf8Path, fork: &str, head: &str) -> Result<()> {
     let _dir = sh.push_dir(dir);
     let path = dir.join(BUILD_RS);
     let script = sh.read_file(&path)?;
@@ -126,34 +131,40 @@ pub fn repin(sh: &Shell, dir: &Utf8Path, fork: &str, tree: &Utf8Path, head: &str
     }
     sh.write_file(&path, repinned(&script, head, fork)?)?;
     ensure!(pinned(&sh.read_file(&path)?)? == head, "{path} did not take the new pin");
-    {
-        let _source = sh.push_env("GHOSTTY_SOURCE_DIR", tree);
-        step(
-            "regenerate bindings",
-            &cmd!(
-                sh,
-                "cargo run --quiet -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings"
-            ),
-        )?;
-    }
-    cmd!(sh, "git add -- {BUILD_RS} {BINDINGS}").run()?;
-    let unchanged = cmd!(sh, "git diff --cached --quiet -- {BINDINGS}").run().is_ok();
-    let subject = if unchanged {
-        format!("build: pin ghostty {}", short(head))
-    } else {
-        format!("build: pin ghostty {} and regenerate bindings", short(head))
-    };
-    let body = format!(
-        "Moves GHOSTTY_COMMIT from {} to {} on {}.{}",
-        short(&old),
-        short(head),
-        fork,
-        if unchanged { " Bindings are unchanged." } else { "" }
-    );
+    cmd!(sh, "git add -- {BUILD_RS}").run()?;
+    let subject = format!("build: pin ghostty {}", short(head));
+    let body = format!("Moves GHOSTTY_COMMIT from {} to {} on {}.", short(&old), short(head), fork);
     step(&subject, &cmd!(sh, "git commit --quiet -m {subject} -m {body}"))?;
     let staged = cmd!(sh, "git status --porcelain").read()?;
     if !staged.is_empty() {
         bail!("{dir} still has changes after the pin commit:\n{staged}");
+    }
+    Ok(())
+}
+
+/// Commit the bindings the runner regenerated (`patch`, a diff on the head it checked) onto
+/// libghostty-rs at `dir`: folded into the pin commit [`repin`] made, or a commit of their own
+/// when the pin did not move. An empty patch changes nothing.
+pub fn take_bindings(sh: &Shell, dir: &Utf8Path, patch: &Utf8Path) -> Result<()> {
+    let _dir = sh.push_dir(dir);
+    if std::fs::metadata(patch)?.len() == 0 {
+        println!("  bindings unchanged");
+        return Ok(());
+    }
+    cmd!(sh, "git apply --index {patch}").run().context("applying the regenerated bindings")?;
+    let stray = cmd!(sh, "git diff --cached --name-only").read()?;
+    ensure!(
+        stray.lines().all(|file| file == BINDINGS),
+        "the runner's patch changes more than {BINDINGS}: {stray}"
+    );
+    let last = cmd!(sh, "git log -1 --format=%s").read()?;
+    if let Some(pin) = last.strip_prefix("build: pin ghostty ") {
+        let subject = format!("build: pin ghostty {pin} and regenerate bindings");
+        let body = cmd!(sh, "git log -1 --format=%b").read()?;
+        step(&subject, &cmd!(sh, "git commit --quiet --amend -m {subject} -m {body}"))?;
+    } else {
+        let subject = "build: regenerate the bindings";
+        step(subject, &cmd!(sh, "git commit --quiet -m {subject}"))?;
     }
     Ok(())
 }

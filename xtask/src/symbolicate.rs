@@ -366,6 +366,7 @@ mod tests {
     }
 
     /// The pc here, in a function inlined into [`outer`].
+    #[cfg(target_os = "macos")]
     #[expect(clippy::inline_always, reason = "the test needs a frame inlined into another")]
     #[inline(always)]
     fn inner() -> usize {
@@ -378,6 +379,7 @@ mod tests {
         pc
     }
 
+    #[cfg(target_os = "macos")]
     #[inline(never)]
     fn outer() -> usize {
         std::hint::black_box(inner())
@@ -385,6 +387,8 @@ mod tests {
 
     /// A dSYM of this very test binary, found by its UUID, resolves an address inside a function
     /// inlined into another to both of them, with their file and line.
+    // A dSYM is a Mac's: `dsymutil` of a Mach-O test binary.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_dsym_found_by_uuid_resolves_inlined_frames() {
         let sh = Shell::new().unwrap();

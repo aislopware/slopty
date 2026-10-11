@@ -47,6 +47,7 @@ mod upstream;
 mod vault;
 mod vm;
 mod watchdog;
+mod zig_cc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -91,6 +92,9 @@ enum Cmd {
         /// fmt, host clippy, nextest, shear and typos only: no iOS or Linux clippy, no rustdoc.
         #[arg(long)]
         quick: bool,
+        /// Only the lints, or only the tests (a remote check runs each on a runner of its own).
+        #[arg(long, value_enum, default_value_t)]
+        part: check::Part,
     },
     /// The pre-commit gate on the staged tree: fmt, taplo, deny, hakari, shear, typos, committed
     /// and host clippy, then the next step. The other lanes run in CI once `land` pushes.
@@ -339,6 +343,10 @@ enum Cmd {
 
 /// `cargo xtask`: `src/main.rs` is this and nothing else.
 pub fn main() -> Result<()> {
+    // Run through a link named as zig's compiler for an iOS triple (`tools::apple_cargo`).
+    if let Some(compiled) = zig_cc::as_compiler() {
+        return compiled;
+    }
     let cli = Cli::parse();
     let sh = Shell::new()?;
     sh.change_dir(tools::repo_root()?);
@@ -349,8 +357,8 @@ pub fn main() -> Result<()> {
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         #[cfg(not(target_os = "macos"))]
         Cmd::Ime { .. } => anyhow::bail!("input sources are macOS's"),
-        Cmd::Check { packages, quick } => {
-            let checked = check::run(&sh, &packages, quick);
+        Cmd::Check { packages, quick, part } => {
+            let checked = check::run(&sh, &packages, quick, part);
             prune::auto();
             checked
         }

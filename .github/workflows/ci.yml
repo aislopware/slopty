@@ -30,11 +30,12 @@ jobs:
   # side by side on one of them took 80 minutes cold, each lane compiling the world on its own
   # target dir while swapping. Here each lane takes the whole runner (docs/decisions/tooling.md).
   # The tests lane, whose CPU-bound build bounded every run, runs as three shards of packages
-  # (`xtask gate --shard`, whose test checks that this matrix lists each). That keeps the Free
-  # plan's five concurrent macOS jobs: rustdoc runs before iOS clippy on its runner, and what
-  # needs no Mac runs on Linux, where twenty jobs run at once: the tools lane, which reads only
-  # text, and clippy for Linux, which had made iOS clippy the last job in 7 of 18 runs
-  # (.research/dev-speed-2026-10-05.md).
+  # (`xtask gate --shard`, whose test checks that this matrix lists each). Only they need a Mac:
+  # the plan runs five macOS jobs at once, shared with the remote checks and the e2e, and twenty
+  # jobs in all. Everything else runs on Linux: the tools lane, which reads only text; clippy for
+  # Linux; and clippy and rustdoc for the Apple triples, which never link, cross-checked from an
+  # arm runner with zig compiling the C build scripts compile (`tools::apple_cargo`;
+  # docs/decisions/tooling.md, "Apple targets are linted on Linux").
   gate:
     name: gate (${{ matrix.lane }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
@@ -57,19 +58,17 @@ jobs:
             disk-floor-gb: 5
             targets: >-
               x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
-          - { lane: clippy-host, os: macos-26 }
-          - { lane: clippy-ios, os: macos-26 }
-          - { lane: tests, shard: ui, os: macos-26 }
-          - { lane: tests, shard: worker, os: macos-26 }
-          - { lane: tests, shard: rest, os: macos-26 }
+          - { lane: clippy-host, os: ubuntu-24.04-arm, targets: aarch64-apple-darwin }
+          - lane: clippy-ios
+            os: ubuntu-24.04-arm
+            targets: aarch64-apple-ios, aarch64-apple-ios-sim
+          - { lane: rustdoc, os: ubuntu-24.04-arm, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: ui, os: macos-26, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: worker, os: macos-26, targets: aarch64-apple-darwin }
+          - { lane: tests, shard: rest, os: macos-26, targets: aarch64-apple-darwin }
     env:
       SLOPTY_DISK_FLOOR_GB: ${{ matrix.disk-floor-gb }}
     steps:
-      # Linux clippy's target dir grows to about 19 GB (three triples' build scripts and
-      # metadata), and a hosted Ubuntu image keeps about 14 GB free: these SDKs are what the
-      # image holds that no step here uses, as in the linux job.
-      - if: matrix.lane == 'clippy-linux'
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -80,13 +79,12 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.18.0
+      # Each lane's own triples, and clippy only where it lints: a test shard needs neither.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
-          components: rustfmt, clippy
-          targets: >-
-            ${{ matrix.targets
-            || 'aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim' }}
+          components: ${{ matrix.lane != 'tests' && 'rustfmt, clippy' || '' }}
+          targets: ${{ matrix.targets }}
       # The canonical formatter is nightly rustfmt; only the tools lane formats.
       - if: matrix.lane == 'tools'
         uses: dtolnay/rust-toolchain@nightly
@@ -94,9 +92,9 @@ jobs:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
       # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. The action keys an entry by the runner's OS, so there are two: the Linux tools
-      # lane saves its own, and host clippy saves the one every Mac lane reads, after
-      # `cargo fetch` (below) has every package in it. A cache is read by its own branch and the
+      # quota. The action keys an entry by the runner's OS and architecture, so there are three:
+      # the tools lane saves x86_64 Linux's, host clippy arm Linux's and the worker shard the
+      # Macs', each after `cargo fetch` (below) has every package in it. A cache is read by its own branch and the
       # ones based on main, so the Deep workflow saves its own on main. The toolchains are left
       # out of the key, since none of this depends on them. A key per lane saved 5 × 270 MB on
       # each lockfile change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS
@@ -109,14 +107,16 @@ jobs:
           cache-on-failure: true
           save-if: >-
             ${{ github.ref == 'refs/heads/gate'
-            && (matrix.lane == 'tools' || matrix.lane == 'clippy-host') }}
+            && (matrix.lane == 'tools' || matrix.lane == 'clippy-host'
+            || matrix.shard == 'worker') }}
       - uses: cargo-bins/cargo-binstall@main
       # Every proc-macro dependency unoptimised: sccache cannot cache one, and the workspace's
       # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
       # overrides from config files only.
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      # libghostty-vt-sys builds its library with zig in every lane that compiles, the version it
-      # pins: Homebrew's `zig` moved to 0.17, which Ghostty's build.zig does not take.
+      # libghostty-vt-sys builds its library with zig in the lanes that build it, and the Apple
+      # lints on Linux compile their build scripts' C with it: the version libghostty-vt pins, as
+      # Homebrew's `zig` moved to 0.17, which Ghostty's build.zig does not take.
       - if: matrix.lane != 'tools'
         uses: mlugg/setup-zig@v2
         with:
@@ -127,13 +127,15 @@ jobs:
       # libghostty-vt built once per set of inputs (`LIBGHOSTTY_VT_SYS_PREBUILT_DIR`), the head
       # of the build in most lanes: kept per lane, since each builds its own triples, and keyed
       # by the ghostty revision and the binding's, which a new entry needs. The build checks
-      # every other input itself, so an entry for another zig or SDK is never used.
-      - if: matrix.lane != 'tools'
+      # every other input itself, so an entry for another zig or SDK is never used. The Apple
+      # lints on Linux skip that build (`DOCS_RS`, `tools::apple_cargo`): they never link it.
+      - if: matrix.lane == 'clippy-linux' || matrix.lane == 'tests'
         id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - if: matrix.lane != 'tools'
+      - if: matrix.lane == 'clippy-linux' || matrix.lane == 'tests'
+        id: prebuilt
         uses: actions/cache@v4
         with:
           path: target/ghostty-prebuilt
@@ -143,18 +145,23 @@ jobs:
       # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
       # by the root manifest's hash (which pins every package's), and fetched again with
       # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
-      # (run 37080698786).
-      - if: matrix.lane != 'tools'
+      # (run 37080698786). Only a lane that builds libghostty-vt needs them: one whose build of
+      # it came from the cache does not.
+      - if: >-
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests')
+          && steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: matrix.lane != 'tools'
+      - if: >-
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests')
+          && steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      # Every package of every platform, for the Mac lanes' cache entry this lane saves.
-      - if: matrix.lane == 'clippy-host'
+      # Every package of every platform, for the cache entry the lane saves.
+      - if: matrix.lane == 'clippy-host' || matrix.shard == 'worker'
         run: cargo fetch --locked
       # binstall asks the GitHub API where a tool's release is. Unauthenticated, that hit the
       # runner's shared rate limit in a third of the test lanes, timed out and compiled nextest
@@ -163,19 +170,20 @@ jobs:
       - run: cargo xtask setup --lane ${{ matrix.lane }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # rustdoc on iOS clippy's runner, before it: it named 10 red runs in two days and iOS
-      # clippy none, so it reports first (.research/dev-speed-2026-10-06.md item 3). Host
-      # clippy's runner carries the fuzz crate's clippy and was the longer of the two.
-      - if: matrix.lane == 'clippy-ios'
-        run: cargo xtask gate --ci --lane rustdoc
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
-      # and fails on a leak, on more than its budget, or on running out. iOS clippy runs even
-      # when rustdoc failed, so one run names both.
-      - if: ${{ !cancelled() }}
-        run: >-
-          cargo xtask gate --ci --lane ${{ matrix.lane }}
-          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
+      # and fails on a leak, on more than its budget, or on running out.
+      # A trial (.research/ci-speed-2026-10-11.md item 7): six test threads on the three-core
+      # Mac, since the same tests took three to six times as long there as on Linux, more than
+      # the cores explain, so they mostly wait. Kept if nextest's wall time falls 20 % or more
+      # with no new timing failure over ten runs (docs/decisions/tooling.md, "Six test threads
+      # on a hosted Mac, on trial").
+      - run: |
+          if [ "${{ runner.os }}" = macOS ] && [ "${{ matrix.lane }}" = tests ]; then
+            export NEXTEST_TEST_THREADS=6
+          fi
+          cargo xtask gate --ci --lane ${{ matrix.lane }} \
+            ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
@@ -218,9 +226,6 @@ jobs:
       SCCACHE_GHA_ENABLED: "false"
       SLOPTY_DISK_FLOOR_GB: 5
     steps:
-      # A hosted Ubuntu image leaves about 14 GB free, which a test build can outgrow.
-      # These SDKs are what the image holds that no step here uses.
-      - run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
       # The shells whose integration the PTY tests check besides the image's bash, tmux for the
       # marks that cross a real one, and the receive buffer a worker's socket asks for (4 MiB),
       # which Ubuntu caps at 208 KiB. The image leaves completion directories group-writable, so
@@ -335,7 +340,8 @@ jobs:
       # The app's e2e on the main just promoted, once four hours have passed since the last one
       # started and none is queued or running, since each holds a macOS slot the gate's five
       # jobs share. A schedule cannot do it: this job's push is not an event to GitHub, so a
-      # scheduled run checked out the last commit a person pushed (e2e.yml).
+      # scheduled run checked out the last commit a person pushed (e2e.yml). Dispatched on
+      # `gate` with the commit, so it reads the compile cache the test shards just filled.
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -346,8 +352,8 @@ jobs:
           if [ "${busy:-0}" -gt 0 ]; then
             echo "the app's e2e is still running; none started" >> "$GITHUB_STEP_SUMMARY"
           elif [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 14400 ]; then
-            gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref main
-            echo "the app's e2e started on main" >> "$GITHUB_STEP_SUMMARY"
+            gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$GITHUB_SHA"
+            echo "the app's e2e started on the main just promoted" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   # A tag, gated, is built into a release by `cargo xtask dist`: the app, the Mac CLI and

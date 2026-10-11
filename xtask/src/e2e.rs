@@ -285,6 +285,10 @@ const SMOOTH_IOS: &[Suite] =
     &[Suite::live("slopty-e2e", "smooth").only("test(~on_the_simulator)").serial()];
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
+    // The simulator cases' tools, before a minute of compiling.
+    if matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos) {
+        crate::ios::preflight(sh, true)?;
+    }
     let suites: Vec<&Suite> = match opts.case {
         Case::App => APP.iter().collect(),
         Case::Worker => WORKER.iter().collect(),
