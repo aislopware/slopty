@@ -434,36 +434,6 @@ fn an_arrival_is_a_background_tab_and_the_focus_stays() {
     assert!(!tiling.on_show(t(3)));
 }
 
-/// A lead's helper from elsewhere lands right of the lead in its tab, and the next one joins
-/// the first's pane as a tab, so many keep one column; the focus stays where it was, in the
-/// lead's tab and in the workspace. A lead not placed, a tile placed already, or a phone leave
-/// it to arrive as any tile does.
-#[test]
-fn a_leads_helpers_arrive_beside_it_in_one_column() {
-    let mut tiling = mac();
-    tiling.new_tab(t(1), &home("web"));
-    tiling.new_tab(t(9), &home("web"));
-    let helps = |tile: TileRef| [t(2), t(3)].contains(&tile);
-    assert!(tiling.arrive_beside(t(2), t(1), helps));
-    assert!(tiling.arrive_beside(t(3), t(1), helps));
-    assert_eq!(tiling.focused(), Some(t(9)), "the focus stays");
-    assert!(!tiling.on_show(t(2)), "in the lead's tab, not the one on show");
-    let lead = tiling.position(t(1)).unwrap();
-    let tab = tiling.tab_of(lead.tab).unwrap();
-    assert_eq!(tab.panes().count(), 2, "the lead and one column of helpers");
-    assert_eq!(tab.pane_of(t(2)), tab.pane_of(t(3)), "the second joins the first");
-    assert_eq!(tab.focus(), lead.pane, "the lead keeps its tab's focus");
-    tiling.focus(t(1));
-    assert!(rect_of(&tiling, t(2)).x > rect_of(&tiling, t(1)).x, "right of the lead");
-
-    assert!(!tiling.arrive_beside(t(4), t(7), helps), "a lead not placed");
-    assert!(!tiling.arrive_beside(t(2), t(1), helps), "placed already");
-    let mut phone = Tiling::new(TilingConfig::default());
-    phone.set_area(390.0, 800.0);
-    phone.new_tab(t(1), &home("web"));
-    assert!(!phone.arrive_beside(t(2), t(1), helps), "a phone's one pane");
-}
-
 /// A project comes back on the tab it was left on, whichever way it is gone to; a project
 /// left with no tab and no name goes.
 #[test]

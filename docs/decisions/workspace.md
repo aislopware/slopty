@@ -2257,7 +2257,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   (2026-10-09, MonoCode audit row 21, M27 `queueWorkerPanes` and
   `OrchestrationSidebarAgents`). Superseded on 2026-10-10 by "Task agents are rows, not
   tiles" in `ui.md`: a helper no longer takes a pane; only the navigator's nesting of one the
-  person opened stays.
+  person opened stays. `Tiling::arrive_beside` and its test were deleted on 2026-10-11.
   - **Their tiles.** Any other tile from elsewhere is a background tab of its project. A
     task's agent started by an orchestrator instead takes a pane right of the orchestrator's
     tile, in that tile's tab. The next ones join that pane as its tabs, so a lead with many
