@@ -232,6 +232,9 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     for gone in ["empty-agent", "empty-recent", "empty-workers", "empty-worker-0", "empty-mark"] {
         assert!(cx.debug_bounds(gone).is_none(), "{gone}: no launcher, lists or mark");
     }
+    for gone in ["title-tabs-forward", "title-tabs-back"] {
+        assert!(cx.debug_bounds(gone).is_none(), "{gone}: no tabs, nothing to scroll to");
+    }
     let page = cx.debug_bounds("empty-workspace").expect("the page");
     let goal = cx.debug_bounds("empty-goal").expect("the composer");
     assert!((goal.center().y - page.center().y).abs() < page.size.height / 4.0, "centred");

@@ -482,7 +482,9 @@ impl Driver {
     ///
     /// In a design review (`--review`) the same frame is also drawn at 2x beside the 1x renders
     /// in the artifacts, as `<name>@2x.png`: what a Retina Mac shows, which is what the person
-    /// judges by. A golden stays 1x and passes or fails on its numbers.
+    /// judges by. A window that already draws at 2x or more (a Retina Mac, the iOS simulator) is
+    /// copied there as it is, since its render is that picture. A golden stays at the window's
+    /// scale and passes or fails on its numbers.
     ///
     /// # Errors
     ///
@@ -490,17 +492,23 @@ impl Driver {
     pub async fn render(&mut self, path: &Path) -> Result<Frame> {
         let frame = self.rendered(path, None).await?;
         if crate::snapshot::Accept::from_env() == crate::snapshot::Accept::Review {
-            self.review_at_2x(path).await?;
+            self.review_at_2x(path, frame.scale).await?;
         }
         Ok(frame)
     }
 
-    /// The render at `path` drawn again at 2x into the artifacts as `<name>@2x.png`.
-    async fn review_at_2x(&mut self, path: &Path) -> Result<()> {
+    /// The render at `path`, drawn at `scale`, into the artifacts as `<name>@2x.png`: drawn again
+    /// at 2x when the window draws at less, else the render itself.
+    async fn review_at_2x(&mut self, path: &Path, scale: f32) -> Result<()> {
         let dir = crate::harness::artifacts_dir();
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let name = path.file_stem().and_then(|n| n.to_str()).context("a render names a file")?;
-        let _frame = self.rendered(&dir.join(format!("{name}@2x.png")), Some(2.0)).await?;
+        let at = dir.join(format!("{name}@2x.png"));
+        if scale >= 2.0 {
+            std::fs::copy(path, &at).with_context(|| format!("copy to {}", at.display()))?;
+        } else {
+            let _frame = self.rendered(&at, Some(2.0)).await?;
+        }
         Ok(())
     }
 

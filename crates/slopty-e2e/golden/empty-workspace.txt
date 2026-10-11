@@ -6,7 +6,6 @@ Button │ Forward
 Group │ Where
 Button │ studio
 TabList
-Button │ Scroll tabs forward
 Button │ Needs you
 Button │ More
 Navigation │ Projects

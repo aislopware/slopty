@@ -466,6 +466,8 @@ pub(super) fn render<V: TitleTabsHost>(
         })
         .collect();
     items.extend(ghosts_before(None));
+    // An empty row has nothing past its ends, though its own padding outruns its zero width.
+    let any = !items.is_empty();
     let strip = div()
         .id("title-tabs")
         .debug_selector(|| "title-tabs".to_owned())
@@ -481,13 +483,13 @@ pub(super) fn render<V: TitleTabsHost>(
     // A chevron floats over an end while tabs lie past it, as the row is laid out in this
     // frame ([`PastEnd`]); the wheel draws the row again, so it follows the row as it scrolls.
     let back = PastEnd {
-        child: Some(chevron(theme, scroll, false, cx)),
+        child: any.then(|| chevron(theme, scroll, false, cx)),
         scroll: scroll.clone(),
         forward: false,
         shown: false,
     };
     let forward = PastEnd {
-        child: Some(chevron(theme, scroll, true, cx)),
+        child: any.then(|| chevron(theme, scroll, true, cx)),
         scroll: scroll.clone(),
         forward: true,
         shown: false,
