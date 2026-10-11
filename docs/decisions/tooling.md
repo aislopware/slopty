@@ -1677,3 +1677,19 @@ more full-window layer.
   38115014839). A remote check's lint job also installs only the two tools of the tools lane it
   runs (`xtask setup --tool`): taplo, which it never runs, has no build for arm Linux and
   compiled for 84 s.
+
+- ✅ **The worker's tests run on Linux too** (2026-10-11). `slopty-worker` and `slopty-workerd`
+  ship for Linux, and their tests built and were linted there but had never run. On a Linux
+  runner 601 of 616 passed at once (run 38117683319). The other fifteen assumed the Mac, none a
+  bug in the worker:
+  - Ubuntu's `/etc/bash.bashrc`, which Debian's bash reads before any rcfile, even under
+    `--norc` once the shell integration's `--rcfile` stands in for it, set its own `PS1` over
+    the tests' (eleven orchestration tests and one server-link test);
+  - two clipboard tests put Apple types on the board, which only a Mac's takes
+    (`type_on_board`), and are the Mac's;
+  - two drag tests and one server-link test spelled the Mac's names for a PNG and the host's
+    OS.
+
+  With those fixed all 614 passed in 41 s of nextest (run 38118844337), and `LINUX_UNRUN` is
+  gone: the Linux lane runs them beside the other crates. They stay in the worker shard on the
+  Mac too, since the worker ships for macOS, where its PTY, process and clipboard paths differ.
