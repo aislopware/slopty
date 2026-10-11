@@ -20,7 +20,7 @@ use slopty_e2e::snapshot::{
     PixelRect, assert_matches_apart, assert_matches_masked, golden_dir, luma_distance,
     luma_histogram,
 };
-use slopty_e2e::{Command, Driver, Dump, ScreenInfo, Stack};
+use slopty_e2e::{A11yNode, Command, Driver, Dump, ScreenInfo, Stack};
 
 use super::gallery::{STEP, first_shell, settled};
 
@@ -215,17 +215,22 @@ fn header_status(dump: &Dump, heading: &str) -> PixelRect {
     [px(left), px(hy - 6.0), px((right - left).max(0.0)), px(hh + 12.0)]
 }
 
-/// The readouts a stream keeps live, the foot bar's frame time and the stats overlay's
-/// figures: what they say follows the load on this Mac (59 fps one run, 60 the next), so a
-/// golden masks them, in pixels and in words.
+/// The readouts a stream keeps live, the foot bar's frame time, the stats overlay's figures and
+/// the header's health mark: what they say follows the load on this Mac (59 fps one run, 60 the
+/// next, "Frames late" while a runner is busy), so a golden masks them, in pixels and in words.
 fn live_readouts(dump: &Dump) -> Vec<PixelRect> {
     let scale = dump.window.scale;
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
     let px = |points: f32| (points * scale).round().max(0.0) as u32;
+    let figures = |n: &&A11yNode| {
+        (n.role == "Status" || n.role == "Label") && n.label.as_deref().is_some_and(is_live)
+    };
+    let health = |n: &&A11yNode| {
+        n.role == "Button" && n.label.as_deref().is_some_and(|l| HEALTH.contains(&l))
+    };
     dump.a11y
         .iter()
-        .filter(|n| n.role == "Status" || n.role == "Label")
-        .filter(|n| n.label.as_deref().is_some_and(is_live))
+        .filter(|n| figures(n) || health(n))
         .map(|n| {
             let [x, y, w, h] = n.bounds;
             [px(x), px(y), px(w), px(h)]
@@ -247,6 +252,10 @@ fn overlay_band(dump: &Dump, body: PixelRect) -> Option<PixelRect> {
     let right = px(x + w);
     Some([body[0], px(y), right.saturating_sub(body[0]), px(h)])
 }
+
+/// The words of a stream's health mark in its header (slopty-ui's `screen::health::Health`):
+/// a frame missing the display on a busy runner raises "Frames late" for a second or two.
+const HEALTH: [&str; 3] = ["Stalled", "Low bandwidth", "Frames late"];
 
 /// A label made of figures that move: one of its parts, as the readouts join them with " · ",
 /// is a rate or a time.
