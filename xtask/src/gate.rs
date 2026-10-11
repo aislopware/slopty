@@ -15,8 +15,9 @@
 //! parallel **lanes**, each on its own target dir under `target/gate/` (cargo serialises
 //! concurrent builds that share one), so the wall time is the longest lane, not the sum.
 //!
-//! The tool checks (fmt, deny, hakari, shear, typos, taplo, committed) take seconds, so they run
-//! first, side by side, and a failure among them stops the gate before a compile starts.
+//! The tool checks (fmt, deny, hakari, shear, typos, taplo, committed, the CI profile) take
+//! seconds, so they run first, side by side, and a failure among them stops the gate before a
+//! compile starts.
 //!
 //! A lane whose inputs are exactly those of its last pass is not run again ([`pass`]): the
 //! index entries it reads, the toolchain, the environment and the tools. `--since-pass` goes
@@ -301,6 +302,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
         // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
         fmt(sh, true)?;
         hakari(sh, true)?;
+        crate::ci_profile::write(sh)?;
         shear(sh, true)?;
         typos(sh, true)?;
     }
@@ -762,9 +764,9 @@ fn tools_extra(checkout: &Shell, message: Option<&str>) -> Result<String> {
     Ok(extra)
 }
 
-/// deny, hakari, shear and typos on the snapshot (each in a shell from `on_tree`) and
-/// `committed` on the checkout's history and the pending `message`, side by side; every failure
-/// is reported.
+/// the locks and the CI profile, deny, hakari, shear and typos on the snapshot (each in a shell
+/// from `on_tree`) and `committed` on the checkout's history and the pending `message`, side by
+/// side; every failure is reported.
 fn tools_lane(
     on_tree: impl Fn() -> Result<Shell> + Sync,
     checkout: &Shell,
@@ -773,7 +775,12 @@ fn tools_lane(
     let on_tree = &on_tree;
     let results: Vec<Result<()>> = std::thread::scope(|scope| {
         let handles = [
-            scope.spawn(move || locked(&on_tree()?)),
+            // The CI profile reads the graph `cargo fetch` just completed.
+            scope.spawn(move || {
+                let tree = on_tree()?;
+                locked(&tree)?;
+                crate::ci_profile::check(&tree)
+            }),
             scope.spawn(move || deny(&on_tree()?)),
             scope.spawn(move || hakari(&on_tree()?, false)),
             scope.spawn(move || shear(&on_tree()?, false)),

@@ -63,6 +63,37 @@ pub fn render(names: &BTreeSet<String>) -> String {
     text
 }
 
+/// The tools lane's check: the profile names every proc macro `Cargo.lock` brings in, and
+/// nothing else. A dependency bump that adds one would compile it optimised on CI again until
+/// the file is written anew. A check of the text here, not a test: `cargo metadata` over the
+/// whole graph took 9–48 s inside a Mac test shard, and seconds on Linux beside the other tool
+/// checks.
+pub fn check(sh: &Shell) -> Result<()> {
+    let names = proc_macros(sh)?;
+    let kept = std::fs::read_to_string(sh.current_dir().join(PATH))
+        .with_context(|| format!("read {PATH}"))?;
+    match stale(&names, &kept) {
+        Some(why) => anyhow::bail!("{PATH} is stale ({why}): run `cargo xtask ci-profile`"),
+        None => Ok(()),
+    }
+}
+
+/// Why `kept` is not the profile for `names`; `None` when it is.
+fn stale(names: &BTreeSet<String>, kept: &str) -> Option<String> {
+    if !names.contains("serde_derive") || names.contains("syn") {
+        return Some("cargo metadata named the wrong crates as proc macros".to_owned());
+    }
+    let missing: Vec<&str> = names
+        .iter()
+        .filter(|n| !kept.contains(&format!("[profile.dev.package.{n}]")))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        return Some(format!("it lacks {}", missing.join(", ")));
+    }
+    (kept != render(names)).then(|| "it names crates that are no proc macro".to_owned())
+}
+
 /// `cargo xtask ci-profile`: write the profile for the dependencies `Cargo.lock` holds now.
 pub fn write(sh: &Shell) -> Result<()> {
     let path = Utf8PathBuf::from(PATH);
@@ -74,20 +105,25 @@ pub fn write(sh: &Shell) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PATH, proc_macros, render};
-    use crate::tools::repo_root;
+    use std::collections::BTreeSet;
 
-    /// The profile names every proc macro `Cargo.lock` brings in, and nothing else: a dependency
-    /// bump that adds one compiles it optimised on CI again until the file is written anew.
+    use super::{render, stale};
+
+    fn names(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|n| (*n).to_owned()).collect()
+    }
+
     #[test]
-    fn the_ci_profile_names_every_proc_macro() {
-        let root = repo_root().unwrap();
-        let sh = xshell::Shell::new().unwrap();
-        sh.change_dir(&root);
-        let names = proc_macros(&sh).unwrap();
-        assert!(names.contains("serde_derive"), "{names:?}");
-        assert!(!names.contains("syn"), "a library, cached and kept optimised");
-        let kept = std::fs::read_to_string(root.join(PATH)).unwrap();
-        assert!(kept == render(&names), "{PATH} is stale: run `cargo xtask ci-profile`");
+    fn a_profile_naming_every_proc_macro_and_no_other_is_fresh() {
+        let macros = names(&["serde_derive", "thiserror-impl"]);
+        assert_eq!(stale(&macros, &render(&macros)), None);
+        // A bump that brings a new macro, and one that drops one.
+        let grown = names(&["serde_derive", "thiserror-impl", "strum_macros"]);
+        assert!(stale(&grown, &render(&macros)).is_some_and(|w| w.contains("strum_macros")));
+        let shrunk = names(&["serde_derive"]);
+        assert!(stale(&shrunk, &render(&macros)).is_some_and(|w| w.contains("no proc macro")));
+        // A metadata read that went wrong is never taken for a fresh profile.
+        assert!(stale(&names(&["syn", "serde_derive"]), "").is_some());
+        assert!(stale(&BTreeSet::new(), &render(&BTreeSet::new())).is_some());
     }
 }
