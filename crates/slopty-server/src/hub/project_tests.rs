@@ -2722,6 +2722,52 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     );
 }
 
+/// A pi task runs under Slopty's gate in the mode its project's level maps to, and is held
+/// there as Codex is: its row at that mode or a milder one, or in a mode the gate does not know
+/// (which lets nothing through), stays; switched to one that lets more through, it is closed.
+#[tokio::test]
+async fn a_pi_task_switched_past_its_level_is_closed() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    linux_lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let docs = new_task(&hub).await;
+    let launch = TaskLaunch { pin: None, agent: AgentId::named(AgentId::PI) };
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task: docs, launch });
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::StartThread { start, seat, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(start.mode.as_deref(), Some("ask"), "its gate at the project's level");
+    let thread = slopty_proto::thread::ThreadId::new();
+    answer(&linux_lease, id, Outcome::ThreadStarted { thread, worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let mut row = ladder::tests::row(slopty_proto::thread::Phase::Idle, 1, None);
+    row.id = thread;
+    row.agent = AgentId::named(AgentId::PI);
+    row.facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.to_string());
+    for kept in ["ask", "unheard-of"] {
+        row.meters.mode = Some(kept.to_owned());
+        linux_lease.handle(ladder::tests::snapshot(vec![row.clone()]));
+        let quiet = tokio::time::timeout(Duration::from_millis(100), request(&mut linux_rx)).await;
+        assert!(quiet.is_err(), "{kept}: nothing closes {quiet:?}");
+    }
+    row.meters.mode = Some("edits".to_owned());
+    linux_lease.handle(ladder::tests::snapshot(vec![row]));
+    let (_, close) = request(&mut linux_rx).await;
+    assert_eq!(close, Verb::Close { term: TermRef { worker: linux, session: seat } });
+    let said = status(&hub).await.timeline.into_iter().rev().find_map(|e| match e.what {
+        Moment::Note { text } if e.task == Some(docs) => Some(text),
+        _ => None,
+    });
+    assert_eq!(
+        said.as_deref(),
+        Some(
+            "its pi runs with its gate in edits mode, past what the person allows its project \
+             (its autonomy), so it was closed"
+        )
+    );
+}
+
 /// A project carries the goal the person handed over and how far its agents go before they
 /// ask: the goal kept trimmed, the autonomy changed by the person alone. The goal goes to the
 /// orchestrator once as the person's first words, with its role, and is on the timeline as

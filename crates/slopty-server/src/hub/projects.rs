@@ -679,6 +679,15 @@ const fn pi_mode(level: Autonomy) -> &'static str {
     }
 }
 
+/// Whether pi's gate in `mode` lets through more than it does at `level`
+/// ([`slopty_agent::pi::modes`]). A mode the gate does not know lets nothing through, so it is
+/// no looser.
+fn pi_looser(level: Autonomy, mode: &str) -> bool {
+    use slopty_agent::pi::modes::{ASK, EDITS, OWN};
+    let rank = |m: &str| [ASK, EDITS, OWN].iter().position(|known| *known == m);
+    rank(mode).zip(rank(pi_mode(level))).is_some_and(|(mode, level)| mode > level)
+}
+
 /// The branch `term`'s terminal has checked out, as its worker last said; none on a detached
 /// `HEAD` or outside a repository.
 fn checked_out(state: &State, term: TermRef) -> Option<String> {
@@ -2110,9 +2119,11 @@ impl Hub {
                 let role = agent_role(record, card, at.as_ref(), on.as_ref().map(|o| o.0));
                 let level = record.autonomy;
                 // Held to its project's level: Claude Code by its permission mode, Codex by its
-                // approval policy and sandbox, each as its own reports say them.
-                let held_by_server =
-                    launch.agent.is(AgentId::CLAUDE_CODE) || launch.agent.is(AgentId::CODEX);
+                // approval policy and sandbox, pi by its gate's mode, each as its own reports
+                // say them. An ACP agent's modes are its own, and it starts at its default.
+                let held_by_server = [AgentId::CLAUDE_CODE, AgentId::CODEX, AgentId::PI]
+                    .into_iter()
+                    .any(|held| launch.agent.is(held));
                 let at = at.unwrap_or(Place { path: named, worktree: None });
                 Ok::<_, Outcome>((level, role, at, on, held_by_server))
             })()
@@ -2388,23 +2399,29 @@ impl Hub {
         self.close_looser(state, term, &why);
     }
 
-    /// What a Codex thread at `term` says its approval policy and sandbox are, at its start
-    /// and at each change: held to its level as [`Self::permission_mode`] holds Claude Code, a
-    /// Codex past that level's approval policy, or with a sandbox past its workspace, is closed
-    /// and the timeline says why. Its own configuration, or a switch in its TUI, set that.
-    pub(super) fn codex_settings(
+    /// What a Codex or pi thread at `term` says its mode (and Codex its sandbox) is, at its
+    /// start and at each change: held to its level as [`Self::permission_mode`] holds Claude
+    /// Code. A Codex past that level's approval policy, or with a sandbox past its workspace,
+    /// and a pi whose gate lets through more than the level's mode, are closed and the timeline
+    /// says why. Codex's own configuration, a switch in its TUI, or the thread's mode switched
+    /// in Slopty set that.
+    pub(super) fn held_settings(
         &self,
         state: &mut State,
         term: TermRef,
-        (mode, sandbox): &super::ladder::CodexSettings,
+        agent: &AgentId,
+        (mode, sandbox): &super::ladder::Settings,
     ) {
         let Some(level) = Self::held_level(state, term) else { return };
-        let Some(looser) = codex::looser_settings(level, mode.as_deref(), sandbox.as_deref())
-        else {
-            return;
+        let looser = if agent.is(AgentId::PI) {
+            mode.as_deref().filter(|m| pi_looser(level, m)).map(|m| format!("its gate in {m} mode"))
+        } else {
+            codex::looser_settings(level, mode.as_deref(), sandbox.as_deref())
         };
+        let Some(looser) = looser else { return };
+        let agent = if agent.is(AgentId::PI) { "pi" } else { "Codex" };
         let why = format!(
-            "its Codex runs with {looser}, past what the person allows its project (its \
+            "its {agent} runs with {looser}, past what the person allows its project (its \
              autonomy), so it was closed"
         );
         self.close_looser(state, term, &why);

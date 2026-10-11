@@ -2872,6 +2872,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Not Slopty answering.** A call let through is the level the person set, as Claude Code's
     own `acceptEdits` and `auto` are. Every call the level does not cover still goes to the
     person, and nothing is answered in their place.
+  - **Held there by the server** (2026-10-11). A project's pi task is watched as a task's
+    Codex is (`Board::settings_moves`, `Hub::held_settings`): its row's mode is the gate's,
+    and a switch to one that lets more through than the level's mode (`edits` or `own` at
+    Ask, `own` at Edits) closes it by its seat, and the timeline says why. A mode the gate
+    does not know lets nothing through, so it stays. Test:
+    `a_pi_task_switched_past_its_level_is_closed` (`hub/project_tests.rs`).
   - ACP tasks start in their agent's default mode, ruled kept (2026-10-11). An ACP agent
     names its modes itself, and they are known only once its session exists. A table of ids
     guessed per agent would be the per-agent polish the orchestrator-first ruling drops, and a

@@ -1727,8 +1727,9 @@ impl Lease {
                 let mut moved = Vec::new();
                 state.board.take(worker, frame);
                 hub.follow_orchestrators(&mut state, worker);
-                for (seat, settings) in state.board.codex_moves(worker) {
-                    hub.codex_settings(&mut state, TermRef { worker, session: seat }, &settings);
+                for (seat, agent, settings) in state.board.settings_moves(worker) {
+                    let term = TermRef { worker, session: seat };
+                    hub.held_settings(&mut state, term, &agent, &settings);
                 }
                 for (term, status) in state.board.seat_moves(worker) {
                     hub.adopt(&mut state, term);

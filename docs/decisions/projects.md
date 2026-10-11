@@ -2664,9 +2664,9 @@ reordering and edited allows are gone" in `agents.md`.*
     in its terminal since 2026-10-10, when a start stopped naming its arguments.)
   - **As it runs.** A task's Codex is watched as locked, as Claude Code's terminal is. Its row
     says the effective policy (the thread's mode) and sandbox (its `sandbox` fact), read from
-    the app-server whether the TUI or a thread runs it (`Board::codex_moves`). A policy past
+    the app-server whether the TUI or a thread runs it (`Board::settings_moves`). A policy past
     `on-request` (`never`, `granular`), or a sandbox past the workspace (`dangerFullAccess`,
-    `externalSandbox`), closes it, and the timeline says why (`Hub::codex_settings`). That is
+    `externalSandbox`), closes it, and the timeline says why (`Hub::held_settings`). That is
     how a thread whose configuration names no sandbox is held, and how a switch made in the
     TUI is caught. A terminal an agent opened or typed into is held the same way.
   - Rejected: reading the person's `config.toml` on the worker to predict the policy. Codex
@@ -3296,7 +3296,7 @@ reordering and edited allows are gone" in `agents.md`.*
     has no such override (`codex-rs/tui/src/daemon_startup.rs`, `config_exclusion`: "command-line
     configuration overrides (-c, --enable, --disable, or --search)", in 0.160.0 and on main).
     So it ran an app-server of its own that the daemon, the only one the worker follows, never
-    saw. The worker kept no row of it. `Board::codex_moves` never saw its policy or sandbox,
+    saw. The worker kept no row of it. `Board::settings_moves` never saw its policy or sandbox,
     so a switch to full access in its TUI went unseen, and the board had no status for it. The
     tools' `env_vars` were also resolved in whichever process spawned the MCP server, not
     from the seat.
@@ -3306,7 +3306,7 @@ reordering and edited allows are gone" in `agents.md`.*
     `developerInstructions`, the tools with the seat's values as their own `env`, the approval
     policy, and `sandbox: workspace-write` for every server task. Its row carries the seat, the
     policy as its mode and the sandbox as a fact, so a policy or sandbox past the level closes
-    it by its seat (`Hub::codex_settings`, `Verb::Close` of a seat).
+    it by its seat (`Hub::held_settings`, `Verb::Close` of a seat).
   - **The person's TUI.** Joining it opens `codex resume <thread>` with nothing else on its line
     (`slopty_agent::codex::shared::tui`), so Codex's TUI attaches to the daemon's thread as one
     more client rather than loading the session a second time. A row's seat now wins over the

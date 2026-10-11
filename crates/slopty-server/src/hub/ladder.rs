@@ -89,8 +89,8 @@ pub(super) struct Board {
     /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
     /// with the seat it was told under and whether it had stopped.
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
-    /// Each Codex thread's approval policy and sandbox last said ([`Self::codex_moves`]).
-    codex_said: HashMap<(WorkerId, ThreadId), CodexSettings>,
+    /// Each Codex or pi thread's mode and sandbox last said ([`Self::settings_moves`]).
+    settings_said: HashMap<(WorkerId, ThreadId), Settings>,
     /// The hold on the server's machine that the seats and the tables imply.
     awake: Awake,
     /// The phones notices are pushed to when the person is at no client.
@@ -100,8 +100,9 @@ pub(super) struct Board {
     ready_due: HashMap<slopty_proto::project::ProjectId, u64>,
 }
 
-/// A Codex thread's approval policy and sandbox, as its row says them.
-pub(super) type CodexSettings = (Option<String>, Option<String>);
+/// A seated thread's mode (Codex's approval policy, pi's gate) and its sandbox (Codex's
+/// alone), as its row says them.
+pub(super) type Settings = (Option<String>, Option<String>);
 
 /// How long a take-back the push queue could not take waits before it is tried again.
 pub(crate) const TAKE_BACK_RETRY: Duration = Duration::from_secs(2);
@@ -775,23 +776,29 @@ impl Board {
         moves
     }
 
-    /// Each Codex thread on `worker` at a seat, hanging from no other, whose approval policy
-    /// (its mode) or sandbox (its fact) moved since last asked, with that seat: what holds a
-    /// task's Codex to asking (`Hub::codex_settings`). One gone from the table is forgotten.
-    pub(super) fn codex_moves(&mut self, worker: WorkerId) -> Vec<(SessionId, CodexSettings)> {
+    /// Each Codex or pi thread on `worker` at a seat, hanging from no other, whose mode or
+    /// sandbox (its fact) moved since last asked, with that seat and its agent: what holds a
+    /// task's Codex or pi to its project's level (`Hub::held_settings`). One gone from the table
+    /// is forgotten.
+    pub(super) fn settings_moves(
+        &mut self,
+        worker: WorkerId,
+    ) -> Vec<(SessionId, AgentId, Settings)> {
         let Some(table) = self.tables.get(&worker) else { return Vec::new() };
-        let codex: Vec<(&ThreadRow, SessionId)> = table
+        let held: Vec<(&ThreadRow, SessionId)> = table
             .values()
-            .filter(|r| r.agent.is(AgentId::CODEX) && root_of(table, r) == r.id)
+            .filter(|r| r.agent.is(AgentId::CODEX) || r.agent.is(AgentId::PI))
+            .filter(|r| root_of(table, r) == r.id)
             .filter_map(|r| Some((r, seat_of(r)?)))
             .collect();
-        self.codex_said.retain(|(w, id), _| *w != worker || codex.iter().any(|(r, _)| r.id == *id));
+        self.settings_said
+            .retain(|(w, id), _| *w != worker || held.iter().any(|(r, _)| r.id == *id));
         let mut moves = Vec::new();
-        for (row, seat) in codex {
+        for (row, seat) in held {
             let now = (row.meters.mode.clone(), row.facts.get("sandbox").cloned());
-            if self.codex_said.get(&(worker, row.id)) != Some(&now) {
-                self.codex_said.insert((worker, row.id), now.clone());
-                moves.push((seat, now));
+            if self.settings_said.get(&(worker, row.id)) != Some(&now) {
+                self.settings_said.insert((worker, row.id), now.clone());
+                moves.push((seat, row.agent.clone(), now));
             }
         }
         moves
