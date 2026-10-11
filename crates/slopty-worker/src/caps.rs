@@ -110,6 +110,14 @@ pub async fn follow_agents(
     files.mark_changed();
     let mut moved = crate::fswatch::follow_folders(lists, crate::fswatch::Limits::default());
     let mut settings = crate::fswatch::follow(files, crate::fswatch::Limits::default());
+    // Looked in only once both followers watch their lists: a follower takes a path as it is
+    // when it takes the list, so an install before that is no event, and only a look after it
+    // is sure to see it.
+    for mut taken in [moved.status(), settings.status()] {
+        if taken.wait_for(|status| status.lists > 0).await.is_err() {
+            return;
+        }
+    }
     let mut own = own_acp.borrow_and_update().clone();
     let mut acp_followed = true;
     loop {
