@@ -863,13 +863,29 @@ impl Sshd {
         let config = format!(
             "Port {port}\nListenAddress 127.0.0.1\nHostKey {host}\nAuthorizedKeysFile {keys}\n\
              PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\n\
-             StrictModes no\nPerSourcePenalties no\nPidFile {pid}\n",
+             StrictModes no\nPidFile {pid}\n",
             host = at("host").display(),
             keys = at("authorized_keys").display(),
             pid = at("sshd.pid").display(),
         );
-        std::fs::write(at("sshd_config"), config).unwrap();
-        let sshd = tokio::process::Command::new(Self::PROGRAM)
+        // A source's penalties would hold the test's own retries back; an sshd older than
+        // OpenSSH 9.8 (Ubuntu 24.04's 9.6) has no such option and refuses the whole file.
+        let penalties = format!("{config}PerSourcePenalties no\n");
+        std::fs::write(at("sshd_config"), &penalties).unwrap();
+        let tested = tokio::process::Command::new(Self::PROGRAM)
+            .arg("-t")
+            .arg("-f")
+            .arg(at("sshd_config"))
+            .output()
+            .await
+            .unwrap();
+        let said = String::from_utf8_lossy(&tested.stderr).into_owned();
+        if !tested.status.success() && said.contains("PerSourcePenalties") {
+            std::fs::write(at("sshd_config"), config).unwrap();
+        } else {
+            assert!(tested.status.success(), "sshd takes the test's config: {said}");
+        }
+        let mut sshd = tokio::process::Command::new(Self::PROGRAM)
             .arg("-D")
             .arg("-f")
             .arg(at("sshd_config"))
@@ -879,9 +895,13 @@ impl Sshd {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        let log = || std::fs::read_to_string(at("sshd.log")).unwrap_or_default();
         let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
         while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-            assert!(tokio::time::Instant::now() < deadline, "sshd listens on {port}");
+            if let Ok(Some(status)) = sshd.try_wait() {
+                panic!("sshd ended with {status} before it listened: {}", log());
+            }
+            assert!(tokio::time::Instant::now() < deadline, "sshd listens on {port}: {}", log());
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         Some(Self { dir, port, _daemon: sshd })
