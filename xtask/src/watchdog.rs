@@ -182,26 +182,35 @@ fn listed() -> Option<Vec<Proc>> {
 }
 
 /// A sample of each test process under the run that has gone on for [`EARLY`] and wasn't
-/// sampled yet. Cargo and nextest themselves are left out: they run as long as the run.
+/// sampled yet, and the host's state after them.
 fn early(under: &[Proc], sampled: &mut HashSet<u32>) -> String {
     let mut text = String::new();
-    let long = under.iter().filter(|proc| {
-        let ours = proc.command.contains("nextest")
-            || proc.command.starts_with("cargo")
-            || proc.command.starts_with("ps ");
-        !ours && seconds(&proc.etime).is_some_and(|age| age >= EARLY.as_secs())
-    });
-    for proc in long.take(SAMPLED) {
-        if sampled.insert(proc.pid) {
-            let command: String = proc.command.chars().take(200).collect();
-            let _written = writeln!(text, "\n⏱ {} has run {}: {command}", proc.pid, proc.etime);
-            text.push_str(&sample(proc));
-        }
+    for proc in due(under, sampled) {
+        let command: String = proc.command.chars().take(200).collect();
+        let _written = writeln!(text, "\n⏱ {} has run {}: {command}", proc.pid, proc.etime);
+        text.push_str(&sample(proc));
     }
     if !text.is_empty() {
         text.push_str(&host());
     }
     text
+}
+
+/// The test processes under the run that have gone on for [`EARLY`] and weren't sampled yet, at
+/// most [`SAMPLED`], marked sampled. Cargo and nextest themselves are left out: they run as long
+/// as the run.
+fn due<'a>(under: &'a [Proc], sampled: &mut HashSet<u32>) -> Vec<&'a Proc> {
+    under
+        .iter()
+        .filter(|proc| {
+            let ours = proc.command.contains("nextest")
+                || proc.command.starts_with("cargo")
+                || proc.command.starts_with("ps ");
+            !ours && seconds(&proc.etime).is_some_and(|age| age >= EARLY.as_secs())
+        })
+        .take(SAMPLED)
+        .filter(|proc| sampled.insert(proc.pid))
+        .collect()
 }
 
 fn report(title: &str, under: &[Proc], held: Duration) -> String {
@@ -424,7 +433,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        Proc, STUCK_POLLS, Stuck, descendants, early, leaves, named, parse, seconds, stuck_exiting,
+        Proc, STUCK_POLLS, Stuck, descendants, due, leaves, named, parse, seconds, stuck_exiting,
     };
 
     fn proc(pid: u32, ppid: u32, command: &str) -> Proc {
@@ -472,11 +481,11 @@ mod tests {
         let young = proc(13, 11, "worker-tests fsevents");
         let under = vec![runner, long, young];
         let mut sampled = HashSet::new();
-        let first = early(&under, &mut sampled);
-        assert!(first.contains("⏱ 12 has run 02:40"), "{first}");
-        assert!(!first.contains("⏱ 11 "), "{first}");
-        assert!(!first.contains("⏱ 13 "), "{first}");
-        assert!(early(&under, &mut sampled).is_empty(), "sampled once");
+        // Which are due, not their samples: `sample` and the host's log read the real machine,
+        // which took 3–43 s beside the other tests.
+        let pids = |due: Vec<&Proc>| due.iter().map(|p| p.pid).collect::<Vec<_>>();
+        assert_eq!(pids(due(&under, &mut sampled)), [12]);
+        assert_eq!(pids(due(&under, &mut sampled)), [0_u32; 0], "sampled once");
     }
 
     /// The run's tests are found stuck only when there is one and every one is exiting; what a
