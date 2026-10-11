@@ -129,12 +129,6 @@ pub enum Command {
         /// `off` to `max`.
         level: String,
     },
-    /// Compact the context.
-    Compact {
-        /// What the summary should keep.
-        #[serde(default, rename = "customInstructions", skip_serializing_if = "Option::is_none")]
-        custom_instructions: Option<String>,
-    },
     /// The session's entries after `since`, or all of them.
     GetEntries {
         /// The last entry id held.
