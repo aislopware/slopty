@@ -8,7 +8,7 @@
 //! [`Task::home_branch`] (`docs/decisions/projects.md`). Merging it stays with the
 //! orchestrator.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use slopty_core::{WallMs, WorkerId, XferId};
 use slopty_proto::orchestration::{
@@ -625,7 +625,8 @@ pub(super) fn server_branches(
     project: &ProjectId,
 ) -> Vec<((WorkerId, String), Vec<String>)> {
     let Ok(tasks) = state.projects.project_tasks(project) else { return Vec::new() };
-    let mut named: HashMap<(WorkerId, String), Vec<String>> = HashMap::new();
+    // Ordered, so the cleanups they become are asked, and kept, the same way every time.
+    let mut named: BTreeMap<(WorkerId, String), Vec<String>> = BTreeMap::new();
     for task in tasks {
         let Ok(Some(trip)) = route_in(state, project, task, None) else { continue };
         if trip.there() {

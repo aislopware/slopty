@@ -522,6 +522,7 @@ async fn a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_wo
     let (worker, lease, mut rx) =
         worker_on(&hub, "studio", Os::MacOs, vec![summary(orchestrating)]);
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
+    project_tests::in_its_repo(&lease, orchestrating);
     let task = new_task(&hub).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
     let term = opened(&lease, &request(&mut rx).await);
@@ -584,17 +585,33 @@ async fn a_let_go_project_cleans_up_a_kept_worktree_and_its_checkout_once_the_wo
         worktree: format!("{}/slopty", slopty_proto::project::VERIFY_PLACES),
         landed: Vec::new(),
     };
+    // The branches the project made in its clones go with it, by worker and repository: the
+    // target sent to the task's worktree, and the task's brought home.
+    let home = Verb::DropBranches {
+        worker,
+        repo: "~/src/slopty".to_owned(),
+        branches: vec!["slopty/slopty/1".to_owned()],
+    };
+    let target = Verb::DropBranches {
+        worker,
+        repo: path.clone(),
+        branches: vec!["slopty/slopty/target".to_owned()],
+    };
+    let all = [remove, target, home, checkout];
     let waiting: Vec<Verb> = hub.projects_file(0).cleanups.iter().map(Cleanup::verb).collect();
-    assert_eq!(waiting, [remove.clone(), checkout.clone()]);
+    assert_eq!(waiting, all);
     let (file, known) = (hub.projects_file(0), hub.directory());
     drop(hub);
     let hub = Hub::new("server".to_owned(), known);
     hub.adopt_projects(file);
     let (_, lease, mut rx) = worker_again(&hub, worker, "studio", Os::MacOs, Vec::new());
-    for want in [remove, checkout] {
+    for want in all {
         let (id, verb) = request(&mut rx).await;
         assert_eq!(verb, want);
-        let gone = Outcome::WorktreeRemoved { branch: None, branch_removed: false };
+        let gone = match verb {
+            Verb::DropBranches { .. } => Outcome::Done,
+            _ => Outcome::WorktreeRemoved { branch: None, branch_removed: false },
+        };
         answer(&lease, id, gone);
     }
     for _ in 0..500 {

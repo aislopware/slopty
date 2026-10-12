@@ -1284,6 +1284,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     announce(&lease, orchestrator, true);
     let orchestrator = TermRef { worker, session: orchestrator };
     create(&hub, Some(orchestrator)).await;
+    in_its_repo(&lease, orchestrator.session);
     let deliver = |rx: &mut mpsc::Receiver<FromServer>| {
         let got = rx.try_recv();
         got.ok()
@@ -1705,6 +1706,7 @@ async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker: linux, session: orchestrator })).await;
+    in_its_repo(&lease, orchestrator);
     let as_orchestrator = Speaker::Proven(orchestrator);
     let limit = |review| Verb::ProjectSet {
         project: project(),
@@ -2216,6 +2218,13 @@ async fn a_task_starts_on_its_dependency_s_checked_branch() {
 }
 
 /// A shell in the clone at `path` of the repository `origin`, cloned from `url`.
+/// The orchestrator's terminal `session` says it is in the project's repository, as its worker's
+/// summary does once it identified it: the project learns it, and its tasks go in worktrees of
+/// it rather than being refused.
+pub(super) fn in_its_repo(lease: &Lease, session: SessionId) {
+    lease.handle(ToServer::SessionChanged(in_repo(session, "~/src/slopty", None)));
+}
+
 pub(super) fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> SessionSummary {
     SessionSummary {
         repo: Some(path.to_owned()),
@@ -2908,6 +2917,7 @@ async fn the_orchestrator_says_where_the_goal_stands() {
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker, session: orchestrator })).await;
+    in_its_repo(&lease, orchestrator);
     let say = |summary: &str, done| Verb::ProjectProgress {
         project: project(),
         summary: summary.to_owned(),
@@ -3242,4 +3252,60 @@ async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
     answer(&lease, id, Outcome::ThreadStarted { thread: thread.id, worktree: None });
     let started = resuming.await.unwrap();
     assert!(matches!(started, Outcome::ThreadStarted { thread: t, .. } if t == thread.id));
+}
+
+/// A project whose orchestrator has not said which repository it works in refuses a start that
+/// names no directory, rather than run the task in the project's path, the person's own
+/// checkout. Once the orchestrator's terminal names it, the same start goes in a worktree of
+/// it.
+#[tokio::test]
+async fn a_start_before_the_project_knows_its_repository_is_refused() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    create(&hub, Some(TermRef { worker, session: orchestrator })).await;
+    let task = new_task(&hub).await;
+    let start = || Verb::TaskSpawn { project: project(), task, launch: claude() };
+    let refused = hub.dispatch(start()).await;
+    let said = matches!(&refused, Outcome::Error { code: ErrorCode::Unplaced, message }
+        if message.contains("has not said yet"));
+    assert!(said, "{refused:?}");
+    in_its_repo(&lease, orchestrator);
+    let asked = spawn(&hub, start());
+    let started = request(&mut rx).await;
+    let shown = format!("{:?}", started.1);
+    assert!(shown.contains("slopty-slopty-1"), "in a worktree of its own: {shown}");
+    opened(&lease, &started);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+}
+
+/// A project with no orchestrator, named by no path on a worker, has nowhere to run a task
+/// that names no directory: the start is refused in words, never sent to the worker's home.
+#[tokio::test]
+async fn a_start_with_nowhere_to_run_is_refused() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_worker, _lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let made = hub
+        .dispatch(Verb::ProjectCreate {
+            project: project(),
+            title: "Projects".to_owned(),
+            repo: "github.com/o/demo".to_owned(),
+            target: "main".to_owned(),
+            verifier: None,
+            push: false,
+            orchestrator: None,
+            limits: LimitsChange::default(),
+            metadata: None,
+            goal: None,
+            autonomy: Autonomy::Ask,
+        })
+        .await;
+    assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+    let task = new_task(&hub).await;
+    let refused =
+        hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: claude() }).await;
+    let said = matches!(&refused, Outcome::Error { code: ErrorCode::Invalid, message }
+        if message.contains("is no path on a worker"));
+    assert!(said, "{refused:?}");
 }

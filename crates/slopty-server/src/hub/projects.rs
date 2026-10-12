@@ -1949,7 +1949,11 @@ impl Hub {
     ) -> Result<Wanted, Outcome> {
         state.projects.task(project, task)?;
         let pin = launch.pin;
-        let repo = state.projects.project(project)?.repo_id.as_ref();
+        let record = state.projects.project(project)?;
+        if let Some(refused) = unplaceable(record, task, launch) {
+            return Err(refused);
+        }
+        let repo = record.repo_id.as_ref();
         let clone =
             launch.cwd.trim().is_empty() && repo.is_some_and(|id| id.keys().next().is_some());
         let fetchable = repo.is_some_and(|id| id.url.is_some());
@@ -2205,7 +2209,15 @@ impl Hub {
                 let held_by_server = [AgentId::CLAUDE_CODE, AgentId::CODEX, AgentId::PI]
                     .into_iter()
                     .any(|held| launch.agent.is(held));
-                let at = at.unwrap_or(Place { path: named, worktree: None });
+                let at = match (at, named) {
+                    (Some(at), _) => at,
+                    (None, Some(path)) => Place { path, worktree: None },
+                    (None, None) => {
+                        return Err(unplaceable(record, task, &launch).unwrap_or_else(|| {
+                            error(ErrorCode::Invalid, &format!("task {task} has nowhere to start"))
+                        }));
+                    }
+                };
                 Ok::<_, Outcome>((level, role, at, on, held_by_server))
             })()
             .map(|(level, role, at, on, held)| {
@@ -2624,16 +2636,51 @@ fn restart_prompt(brief: &str, thread: Option<ThreadId>) -> Option<String> {
 }
 
 /// Where a start that goes beside no clone runs: the folder it names, else the project's
-/// repository when that is a path on a machine, else the worker's home.
-fn named_dir(cwd: &str, project: &Project) -> String {
+/// repository when that is a path on a machine. None for neither: an agent started in the
+/// worker's home would work on nothing.
+fn named_dir(cwd: &str, project: &Project) -> Option<String> {
     let repo = project.repo.trim();
     if !cwd.trim().is_empty() {
-        cwd.to_owned()
+        Some(cwd.to_owned())
     } else if repo.starts_with('/') || repo.starts_with('~') {
-        repo.to_owned()
+        Some(repo.to_owned())
     } else {
-        "~".to_owned()
+        None
     }
+}
+
+/// Why a start of `task` that names no directory has nowhere to go, while `project`'s
+/// repository is not known.
+///
+/// A project with an orchestrator learns its repository from the orchestrator's terminal, and
+/// its tasks go in worktrees of clones of it. Until then a start is refused rather than run in
+/// the project's path itself, which is the person's own checkout, on their branch, shared with
+/// every other task started so. A project with no orchestrator runs its tasks in its path as
+/// named; one named by no path has nowhere to run them.
+fn unplaceable(project: &Project, task: TaskId, launch: &Launch) -> Option<Outcome> {
+    if !launch.cwd.trim().is_empty() || project.repo_id.is_some() {
+        return None;
+    }
+    if project.orchestrator.is_some() {
+        return Some(error(
+            ErrorCode::Unplaced,
+            &format!(
+                "task {task} goes in a worktree of the project's repository, which its \
+                 orchestrator's terminal has not said yet: start it again once it has, or \
+                 name a directory for it"
+            ),
+        ));
+    }
+    named_dir(&launch.cwd, project).is_none().then(|| {
+        error(
+            ErrorCode::Invalid,
+            &format!(
+                "task {task} names no directory, and the project's repository {} is no path on \
+                 a worker: name a directory for it",
+                project.repo.trim()
+            ),
+        )
+    })
 }
 
 /// `agent` as a worker's facts name it: a worker must have it installed to be chosen.
