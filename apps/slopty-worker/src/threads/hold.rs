@@ -99,6 +99,7 @@ pub async fn ask(
     }
     let (reply, decided) = oneshot::channel();
     let Some((prompt, reach, wait)) = hold(daemon, session, hook, reply, relay_wait) else {
+        tracing::info!(%session, "permission left to the TUI: nobody here can answer it");
         return Decision::Pass;
     };
     let id = prompt.ask;

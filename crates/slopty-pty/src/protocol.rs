@@ -159,11 +159,13 @@ pub enum PtydRequest {
         /// The new build's `slopty-ptyd`.
         program: PathBuf,
     },
-    /// Type `parts` into the session's program, in order, each after its pause: input the
-    /// worker hands over whole, such as a pasted prompt and the Enter that submits it, so a
-    /// worker that goes in between loses none of it. `delivery` names it: one this ptyd took for
-    /// the session already is not typed again, so a worker that cannot tell whether its
-    /// delivery went sends it again. No reply: it rides the attached worker's taps.
+    /// Type `parts` into the session's program, in order, each after its pause, behind any
+    /// delivery still typing: input the worker hands over whole, such as a pasted prompt and
+    /// the Enter that submits it, so a worker that goes in between loses none of it, and a
+    /// handover to a new build carries what is left of it ([`Heir::typing`]). `delivery` names
+    /// it: one this ptyd took for the session already is not typed again, so a worker that
+    /// cannot tell whether its delivery went sends it again. Answered `Ok` once taken (or
+    /// taken before), before anything is typed.
     Deliver {
         /// The session it is about.
         id: SessionId,
@@ -277,6 +279,12 @@ pub struct Heir {
     /// An adopted child's start as the kernel recorded it when it was adopted
     /// ([`crate::process::start_mark`]): it is that child only while its pid carries this mark.
     pub orphan_mark: Option<u64>,
+    /// The deliveries taken for it ([`PtydRequest::Deliver`]), the newest last: the new build
+    /// takes none of them again.
+    pub delivered: Vec<u64>,
+    /// What those deliveries still have to type, in order, the first part from where it was
+    /// left: the new build types it.
+    pub typing: Vec<Part>,
 }
 
 /// ptyd → the worker.

@@ -208,6 +208,8 @@ mod golden {
             attached: true,
             orphan: true,
             orphan_mark: Some(1_759_000_000_123_456),
+            delivered: vec![7],
+            typing: vec![Part { after_ms: 200, bytes: b"\r".to_vec() }],
         };
         insta::assert_snapshot!("succession_heir", hex(&codec::encode(&heir).expect("encodes")));
     }

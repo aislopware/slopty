@@ -81,10 +81,7 @@ impl Actor {
         }
         let Some(Pasting { client, text, plan, .. }) = self.pasting.take() else { return };
         self.tell_paste(client, &text, Some(&plan));
-        while self.pasting.is_none() {
-            let Some((client, req, at)) = self.held.pop_front() else { break };
-            self.request(client, req, at);
-        }
+        self.release_held();
     }
 
     /// Tell the program of `client`'s paste of `text` with what of `plan` is here.

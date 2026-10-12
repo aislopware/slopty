@@ -596,7 +596,8 @@ impl Host {
         // What waits to be sent, whether the tree is to review and the person's own marks
         // (how far they have seen it, what they were writing) are the worker's, which no
         // agent's session has: they stay.
-        // One that was being typed may be in the terminal already, so it is not typed again.
+        // One that was being sent went to ptyd whole or not at all, under a delivery named for
+        // it: it waits to go again, and ptyd types it only if it never took it.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
         state.pending.clone_from(&hosted.log.state().pending);
@@ -606,8 +607,7 @@ impl Host {
         let first = hosted.own.first;
         for pending in state.pending.iter_mut().filter(|p| Some(p.intent) != first) {
             if pending.state == PendingState::Sending {
-                pending.state =
-                    PendingState::Held { reason: super::compose::TYPED_NOT_SENT.to_owned() };
+                pending.state = PendingState::Waiting;
             }
         }
         hosted.log.reset(state)?;

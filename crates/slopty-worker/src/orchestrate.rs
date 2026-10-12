@@ -58,7 +58,8 @@ use slopty_proto::terminal::{
 };
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
-use slopty_pty::protocol::Part;
+/// One part of a delivery ptyd types ([`Deliver`]).
+pub use slopty_pty::protocol::Part;
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -109,12 +110,13 @@ const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 /// this is long; past it the prompt is left unsent, never typed blind.
 pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
 
-/// Between a pasted prompt and the Enter that submits it. Ink-based TUIs (Claude Code) read
-/// a paste and an Enter that arrive in one read as one paste, and the Enter is swallowed.
+/// Between typed or pasted words and the Enter that submits them. Ink-based TUIs (Claude
+/// Code) read a paste and an Enter that arrive in one read as one paste, and the Enter is
+/// swallowed.
 ///
-/// ptyd keeps the pause, not this worker: the paste and its Enter are one delivery
-/// ([`Worker::deliver`]), so a worker that goes in between loses neither.
-const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
+/// ptyd keeps the pause, not this worker: the words and their Enter are one delivery
+/// ([`deliver_entry`]), so a worker that goes in between loses neither.
+pub const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
 
 /// How long a worker that started again waits for a session an older worker still lets go of
 /// before it takes up the agent in it ([`Orchestrator::take_up`]).
@@ -661,14 +663,19 @@ impl Orchestrator {
                     ),
                     None => None,
                 };
-                match self.spawn_agent(spawn, prompt, session).await? {
-                    Outcome::Opened(term) => {
-                        // Orchestration follows what it started, so its prompts wait for an
-                        // answer on the board rather than only in its terminal.
-                        inner.conversations.follow(term.session);
-                        Ok(opened(term, made))
+                // Orchestration follows what it starts, so its prompts wait for an answer on
+                // the board rather than only in its terminal; followed before it starts, since
+                // an agent may ask before its spawn has returned here, and a prompt nobody
+                // follows goes back to the TUI at once.
+                let session = session.unwrap_or_else(SessionId::new);
+                inner.conversations.follow(session);
+                match self.spawn_agent(spawn, prompt, Some(session)).await {
+                    Ok(Outcome::Opened(term)) => Ok(opened(term, made)),
+                    Ok(other) => Ok(other),
+                    Err(failed) => {
+                        inner.conversations.forget(session);
+                        Err(failed)
                     }
-                    other => Ok(other),
                 }
             }
             Verb::SendInput { term, input } => {
@@ -735,6 +742,7 @@ impl Orchestrator {
             | Verb::DropBranches { .. }
             | Verb::BranchOff { .. }
             | Verb::PullOf { .. }
+            | Verb::GoalCheck { .. }
             | Verb::OnOrigin { .. }) => Box::pin(self.repository(verb)).await,
             Verb::StartThread { worker, start, seat, env, role } => {
                 self.mine(worker)?;
@@ -1314,6 +1322,17 @@ impl Orchestrator {
                     .map_err(|failed| worktree_failed(&failed))?;
                 Ok(Outcome::Done)
             }
+            Verb::GoalCheck { worker, repo, target } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                crate::repo::worktrees::goal_place(git, &repo, &target)
+                    .await
+                    .map_err(|failed| worktree_failed(&failed))?;
+                Ok(Outcome::Done)
+            }
             Verb::PullOf { worker, repo, branch } => {
                 self.mine(worker)?;
                 let programs = crate::repo::commit::Programs::here().await;
@@ -1585,8 +1604,8 @@ fn at_its_prompt(agent: &SessionAgent) -> bool {
 /// [`PROMPT_READY_WITHIN`] has passed. Never typed blind: when the agent never gets there, or
 /// has ended, the prompt is left unsent, owed no more, and the log says why.
 ///
-/// The paste and the Enter that submits it go to ptyd as one delivery ([`submit`]), judged
-/// once, as it starts: an agent asks the person something only inside a turn, and its turn
+/// The paste and the Enter that submits it go to ptyd as one delivery ([`deliver_entry`]),
+/// judged once, as it starts: an agent asks the person something only inside a turn, and its turn
 /// starts with this Enter.
 async fn type_when_ready(handle: SessionHandle, brief: Brief, mut feed: AgentFeed, worker: Worker) {
     let session = handle.id();
@@ -1597,12 +1616,29 @@ async fn type_when_ready(handle: SessionHandle, brief: Brief, mut feed: AgentFee
     let mut held = not_ready();
     let left = loop {
         if feed.agents.status(session).is_some_and(|a| at_its_prompt(&a)) {
-            match may_type(&handle, &*feed.agents, true) {
-                Ok(()) => break None,
+            let guard = || may_type(&handle, &*feed.agents, true);
+            let words = crate::Words::Paste(brief.text.clone());
+            match deliver_entry(&handle, &worker, brief.delivery, words, guard).await {
+                Ok(()) => {
+                    tracing::info!(%session, "typed the agent's first prompt");
+                    return;
+                }
                 Err(refused) if refused.code == ErrorCode::AgentExited => {
                     break Some(refused.message);
                 }
-                Err(refused) => held = refused,
+                Err(refused)
+                    if matches!(
+                        refused.code,
+                        ErrorCode::AwaitsPerson | ErrorCode::AgentNotReady
+                    ) =>
+                {
+                    tracing::debug!(%session, why = %refused.message, "first prompt waits");
+                    held = refused;
+                }
+                Err(failed) => {
+                    tracing::warn!(%session, error = %failed.message, "first prompt not typed; owed until the worker starts again");
+                    return;
+                }
             }
         }
         let reported = async {
@@ -1648,34 +1684,79 @@ async fn type_when_ready(handle: SessionHandle, brief: Brief, mut feed: AgentFee
     if let Some(why) = left {
         tracing::warn!(%session, %why, "first prompt left unsent");
         worker.brief_settled(session, brief.delivery);
-        return;
-    }
-    tracing::info!(%session, "typing the agent's first prompt");
-    if let Err(e) = submit(&handle, &brief, &worker).await {
-        tracing::warn!(%session, error = %e.message, "first prompt not typed; owed until the worker starts again");
     }
 }
 
-/// Hand ptyd `brief` pasted and an Enter [`SUBMIT_PAUSE`] after it, as one delivery under the
-/// brief's name: once ptyd has it, it is typed whole whatever becomes of this worker, and sent
-/// again by the next it is typed no second time. The session's mark is set first, as
-/// [`write_input`] sets it.
-async fn submit(handle: &SessionHandle, brief: &Brief, worker: &Worker) -> Result<(), Failure> {
+/// What hands ptyd the parts of an entry to type whole ([`Worker::deliver`]).
+pub trait Deliver: Send + Sync {
+    /// Have ptyd type `parts` into `session` as delivery `delivery`, and return once it took
+    /// them.
+    fn deliver_parts(
+        &self,
+        session: SessionId,
+        delivery: u64,
+        parts: Vec<Part>,
+    ) -> BoxFuture<'_, Result<(), WorkerError>>;
+}
+
+impl Deliver for Worker {
+    fn deliver_parts(
+        &self,
+        session: SessionId,
+        delivery: u64,
+        parts: Vec<Part>,
+    ) -> BoxFuture<'_, Result<(), WorkerError>> {
+        Box::pin(Self::deliver(self, session, delivery, parts))
+    }
+}
+
+/// Type `words` and an Enter [`SUBMIT_PAUSE`] after them into `handle`'s session, as one
+/// delivery named `delivery` that ptyd types whole.
+///
+/// Once ptyd has it, it is typed whatever becomes of this worker, a worker sending it again
+/// under the same name has it typed no second time, and every input to the session waits
+/// until it is typed, so nothing lands between the words and their Enter. `guard` is asked right
+/// before, after the session's mark is set where the cursor stands (as [`write_input`] sets it).
+///
+/// This is the one way the worker types something and submits it: a spawned agent's brief, a
+/// thread's message, a command.
+///
+/// # Errors
+///
+/// What `guard` refuses, with nothing typed; the session gone; the link to ptyd failing, with
+/// nothing typed.
+pub async fn deliver_entry(
+    handle: &SessionHandle,
+    deliver: &dyn Deliver,
+    delivery: u64,
+    words: crate::Words,
+    guard: impl Fn() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let enter = keys::parse("enter", 0).map_err(|why| Failure::new(ErrorCode::Invalid, why))?;
+    guard()?;
     if handle.mark().is_none() {
         handle.mark_if_unset(position(handle).await?);
     }
-    let entry = handle.entry(brief.text.clone(), enter).await?;
+    guard()?;
+    let entry = handle.entry(words, enter).await?;
     let pause = u32::try_from(SUBMIT_PAUSE.as_millis()).unwrap_or(u32::MAX);
     let parts =
-        vec![Part { after_ms: 0, bytes: entry.paste }, Part { after_ms: pause, bytes: entry.key }];
-    worker.deliver(handle.id(), brief.delivery, parts).await?;
-    Ok(())
+        vec![Part { after_ms: 0, bytes: entry.words }, Part { after_ms: pause, bytes: entry.key }];
+    match deliver.deliver_parts(handle.id(), delivery, parts).await {
+        Ok(()) => {
+            handle.entered(Some(SUBMIT_PAUSE));
+            Ok(())
+        }
+        Err(e) => {
+            handle.entered(None);
+            Err(e.into())
+        }
+    }
 }
 
 /// A name for a delivery no other of its session's has had, before or after a restart: the
 /// random half of a fresh time-ordered id.
-fn delivery_name() -> u64 {
+pub(crate) fn delivery_name() -> u64 {
     SessionId::new().as_uuid().as_u64_pair().1
 }
 

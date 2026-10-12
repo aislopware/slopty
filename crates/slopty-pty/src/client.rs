@@ -144,16 +144,15 @@ impl PtydClient {
     }
 
     /// Hand ptyd input to type whole, `parts` in order under the name `delivery`
-    /// ([`PtydRequest::Deliver`]). Fire-and-forget, like [`Self::output`]: once the socket took
-    /// it, ptyd types it whether or not this worker stays.
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
+    /// ([`PtydRequest::Deliver`]), and return once ptyd took it: from then it is typed whether
+    /// or not this worker stays, before anything typed into the master after the pauses.
     pub async fn deliver(
         &mut self,
         id: SessionId,
         delivery: u64,
         parts: Vec<crate::protocol::Part>,
     ) -> Result<(), PtyError> {
-        self.send(&codec::encode(&PtydRequest::Deliver { id, delivery, parts })?).await
+        self.expect_ok(&PtydRequest::Deliver { id, delivery, parts }).await
     }
 
     /// Kill and forget.

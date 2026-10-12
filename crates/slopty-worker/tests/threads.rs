@@ -14,7 +14,6 @@ mod threads {
         ItemBody, ItemId, PartKey, Pending, PendingState, TableState, ThreadId, ThreadMeta,
         ThreadState, TreeRef, Turn, TurnId, TurnState, Usage, UserMessage,
     };
-    use slopty_worker::thread::compose::TYPED_NOT_SENT;
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::{Follower, Host, Seated, schedule};
 
@@ -536,8 +535,9 @@ mod threads {
 
     /// What the worker adds to a thread and its agent never tells (the intent a message came
     /// from, each turn's snapshots, what waits to be sent) outlives the thread being read again
-    /// from the agent's session, after a worker restart too. A message that was being typed is
-    /// not typed again.
+    /// from the agent's session, after a worker restart too. A message that was being sent
+    /// waits to go again: its delivery is named for it, so ptyd types it only if it never took
+    /// it.
     #[tokio::test]
     async fn what_the_worker_owns_outlives_a_read_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -581,8 +581,11 @@ mod threads {
         assert_eq!(intent_of(&again, "p1"), Some(sent));
         assert_eq!(again.turns.first().and_then(|t| t.before.clone()), Some(tree));
         let states: Vec<_> = again.pending.iter().map(|p| (p.intent, p.state.clone())).collect();
-        let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
-        assert_eq!(states, [(waiting, PendingState::Waiting), (sending, typed)]);
+        assert_eq!(
+            states,
+            [(waiting, PendingState::Waiting), (sending, PendingState::Waiting)],
+            "the one being sent goes again, under its own delivery"
+        );
     }
 
     /// Where a thread was branched from outlives the agent's own account of it: a meta that

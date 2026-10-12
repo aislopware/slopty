@@ -1,7 +1,8 @@
-//! The composer of an observed agent on a real terminal: a session actor over an in-process
-//! PTY whose program records every byte it is given (`cat`, in raw mode, into a file), with
-//! the agent's status played by the test. What is judged is the bytes that arrived and the
-//! thread's pending list, never the time.
+//! The composer of an observed agent on a real terminal: a worker's session on a real
+//! `slopty-ptyd`, whose program records every byte it is given (`cat`, in raw mode, into a
+//! file), with the agent's status played by the test. What the composer submits ptyd types
+//! whole. What is judged is the bytes that arrived and the thread's pending list, never the
+//! time.
 
 #[cfg(test)]
 mod compose {
@@ -13,25 +14,26 @@ mod compose {
     use slopty_agent::status::{AgentSource, AgentStatus, BlockReason, SessionAgent};
     use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::input::CellMetrics;
-    use slopty_proto::terminal::{TermRequest, TermSize};
+    use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};
     use slopty_proto::thread::{
         Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Pending,
         PendingState, ThreadId, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
     };
-    use slopty_pty::{Pty, SpawnSpec};
-    use slopty_worker::orchestrate::Agents;
-    use slopty_worker::session::{self, SessionHandle, SessionStart};
+    use slopty_worker::orchestrate::{Agents, BoxFuture, Deliver, Part};
+    use slopty_worker::session::SessionHandle;
     use slopty_worker::thread::compose::{DRAFT, RETRY, TAKEN_BACK, Terminals};
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::{Composer, Host};
-    use tokio::sync::mpsc;
+    use slopty_worker::{Worker, WorkerError};
+    use tokio::process::{Child, Command};
 
     /// Long enough for any step on a loaded machine; the tests judge what arrives.
     const BOUND: Duration = Duration::from_secs(20);
 
     /// The one terminal, and the agent in it as the test says.
     struct Terminal {
+        worker: Worker,
         handle: SessionHandle,
         agent: parking_lot::Mutex<Option<AgentStatus>>,
         source: parking_lot::Mutex<AgentSource>,
@@ -57,13 +59,68 @@ mod compose {
         }
     }
 
+    impl Deliver for Terminal {
+        fn deliver_parts(
+            &self,
+            session: SessionId,
+            delivery: u64,
+            parts: Vec<Part>,
+        ) -> BoxFuture<'_, Result<(), WorkerError>> {
+            Box::pin(self.worker.deliver(session, delivery, parts))
+        }
+    }
+
+    /// The worker's own table, which the test does not consult: the composer reads the agent
+    /// from [`Terminal`].
+    struct NoAgents;
+
+    impl Agents for NoAgents {
+        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
+            None
+        }
+
+        fn forget(&self, _session: SessionId) {}
+    }
+
+    /// `name` from this build (`slopty_testkit::bins`), found from the profile directory: this
+    /// package has no binary of its own to name.
+    fn bin(name: &str) -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let profile = exe.ancestors().find(|dir| dir.parent() == Some(target)).unwrap();
+        slopty_testkit::bins::bin(&profile.join("slopty-worker-tests").to_string_lossy(), name)
+    }
+
+    /// A ptyd on its own socket in `dir`.
+    async fn ptyd(dir: &Path) -> (Child, PathBuf) {
+        let socket = dir.join("ptyd.sock");
+        let mut child = Command::new(bin("slopty-ptyd"));
+        slopty_testkit::env::scrub(child.as_std_mut(), &dir.join("home"));
+        let child = child
+            .arg("--socket")
+            .arg(&socket)
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(BOUND, async {
+            while tokio::net::UnixStream::connect(&socket).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("ptyd listens");
+        (child, socket)
+    }
+
     struct Rig {
         terminal: Arc<Terminal>,
         host: Host,
         composer: Composer,
         thread: ThreadId,
         record: PathBuf,
-        _child: slopty_pty::Child,
+        _ptyd: Child,
+        _reports: slopty_worker::manager::Reports,
         _dir: tempfile::TempDir,
     }
 
@@ -79,51 +136,47 @@ mod compose {
                 rows: 24,
                 metrics: CellMetrics { cell_width: 8, cell_height: 16 },
             };
-            let pty = Pty::open(size).unwrap();
-            let spec = SpawnSpec {
+            let (ptyd, socket) = ptyd(dir.path()).await;
+            let (worker, reports) =
+                Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
+                    .await
+                    .unwrap();
+            let open = OpenSession {
+                size,
+                cwd: Some(dir.path().to_string_lossy().into_owned()),
                 command: vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
                     r#"stty raw -echo; printf ready >"$0"; exec cat >>"$0""#.to_owned(),
                     record.to_string_lossy().into_owned(),
                 ],
-                cwd: Some(dir.path().to_path_buf()),
                 env: vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())],
-                size,
+                title: None,
+                attach: false,
             };
-            let slopty_pty::Spawned { child, term } = pty.spawn_with(&spec, None).unwrap();
-            let (tap, mut taps) = mpsc::channel(64);
-            tokio::spawn(async move { while taps.recv().await.is_some() {} });
-            let handle = session::spawn(SessionStart {
-                id: SessionId::new(),
-                master: pty.into_master(),
-                term,
-                checkpoint: Vec::new(),
-                backlog: Vec::new(),
-                tap,
-                size,
-                scrollback_lines: 100,
-                exited: None,
-                port_hints: None,
-                moves: None,
-                touched: None,
-                restored: None,
-                divide: false,
-                cwd: None,
-            })
-            .unwrap();
+            let handle = worker.open(&open).await.unwrap();
             let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
             let mut observed = Observed::new("s1", "", Some(handle.id()), "/", WallMs::ZERO);
             let Some(Out::Begin(meta)) = observed.drain().into_iter().next() else { panic!() };
             let thread = meta.id;
             host.create(*meta).unwrap();
             let terminal = Arc::new(Terminal {
+                worker,
                 handle,
                 agent: parking_lot::Mutex::new(Some(AgentStatus::Idle)),
                 source: parking_lot::Mutex::new(AgentSource::Hook),
             });
             let composer = Composer::new(host.clone(), Arc::<Terminal>::clone(&terminal));
-            let rig = Self { terminal, host, composer, thread, record, _child: child, _dir: dir };
+            let rig = Self {
+                terminal,
+                host,
+                composer,
+                thread,
+                record,
+                _ptyd: ptyd,
+                _reports: reports,
+                _dir: dir,
+            };
             // The recorder is listening once its shell has written its word and gone raw.
             rig.recorded("ready").await;
             std::fs::write(&rig.record, "").unwrap();
@@ -221,6 +274,10 @@ mod compose {
         let held = rig.until(|s| s.pending.iter().any(|p| p.state != PendingState::Waiting)).await;
         let held = held.pending.first().unwrap();
         assert_eq!(held.state, PendingState::Held { reason: DRAFT.to_owned() });
+        // The person's keys wait behind the first message's Enter, and nothing of the second
+        // is typed into their draft.
+        rig.recorded("hello there\rhalf").await;
+        tokio::time::sleep(RETRY * 2).await;
         assert_eq!(read(&rig.record), "hello there\rhalf", "nothing typed into the draft");
         rig.enter();
         rig.recorded("hello there\rhalf\rsecond\r").await;

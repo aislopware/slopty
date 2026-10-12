@@ -1,9 +1,13 @@
 //! The composer of an observed agent: what a person sends a thread whose agent's own TUI runs
 //! in a terminal here, typed into that terminal by the worker.
 //!
-//! It types as a person would: a message as a paste (bracketed where
-//! the TUI asked for it), [`SUBMIT_PAUSE`], then Enter; a command (`/model opus`) as typed
-//! text, the pause, then Enter; an interrupt as Esc. Every write goes through the guard
+//! It types as a person would: a message as a paste (bracketed where the TUI asked for it), the
+//! pause a TUI needs ([`crate::orchestrate::SUBMIT_PAUSE`]), then Enter; a command
+//! (`/model opus`) as typed text, the pause, then Enter; an interrupt as Esc. Words and their
+//! Enter are one delivery ptyd types whole ([`deliver_entry`]): a worker that restarts in
+//! between loses neither, and nothing a person types lands between them. A message's delivery
+//! is named for its intent, so one sent again after a restart, unsure it went, is typed no
+//! second time. Every write goes through the guard
 //! orchestration's own input does ([`may_type`]): nothing is typed while the agent asks a
 //! person something, before its hooks have spoken, once it has exited, or while a person has a
 //! line typed and unsent in the terminal. Nothing it types ever clears that line.
@@ -36,12 +40,8 @@ use slopty_proto::thread::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::Host;
-use crate::orchestrate::{Agents, Failure, may_type, write_input};
+use crate::orchestrate::{Agents, Deliver, Failure, deliver_entry, may_type, write_input};
 use crate::session::SessionHandle;
-
-/// Between the text and the Enter that submits it: a TUI that reads the two in one read takes
-/// them as one paste and swallows the Enter.
-pub const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
 
 /// The newest items a message that went is looked for among, to see the transcript took it.
 const SHOWN_WITHIN: usize = 64;
@@ -53,15 +53,12 @@ pub const RETRY: Duration = Duration::from_millis(250);
 /// Why a message is held while a person's line is typed and unsent in the terminal.
 pub const DRAFT: &str = "Your draft in the terminal is in the way";
 
-/// Why a message stays: it was typed in, and the person's draft came in before its Enter.
-pub const TYPED_NOT_SENT: &str = "Typed into the terminal but not sent: your draft is in the way";
-
 /// Why a message is back in the list: Claude Code took it back into its input before it began
 /// (Esc right after Enter), so it is in the terminal, unsent, and not typed again.
 pub const TAKEN_BACK: &str = "Not taken: Claude Code put it back in its input";
 
 /// The terminals the composer types into, and their agents as the guard reads them.
-pub trait Terminals: Agents {
+pub trait Terminals: Agents + Deliver {
     /// The terminal `session`, while it is open.
     fn terminal(&self, session: SessionId) -> Option<SessionHandle>;
 }
@@ -135,13 +132,12 @@ impl Composer {
                 let Some(at) = pending.iter().position(|p| p.intent == *which) else {
                     return refused("That message has already gone");
                 };
-                let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
                 let back = PendingState::Held { reason: TAKEN_BACK.to_owned() };
                 match (intent, pending.get(at).map(|p| &p.state)) {
                     (_, Some(PendingState::Sending)) => {
                         return refused("That message is being typed");
                     }
-                    (Intent::Edit { .. }, Some(state)) if *state == typed || *state == back => {
+                    (Intent::Edit { .. }, Some(state)) if *state == back => {
                         return refused("That message is already in the terminal");
                     }
                     (Intent::Edit { text, .. }, Some(_)) => {
@@ -165,9 +161,7 @@ impl Composer {
                 };
                 match &promoted.state {
                     PendingState::Sending => return refused("That message is being typed"),
-                    PendingState::Held { reason }
-                        if reason == TYPED_NOT_SENT || reason == TAKEN_BACK =>
-                    {
+                    PendingState::Held { reason } if reason == TAKEN_BACK => {
                         return refused("That message is already in the terminal");
                     }
                     _ => {}
@@ -327,7 +321,7 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
             Next::Gone => return,
             Next::Message { intent, text, delivery } => {
                 c.host.typed(thread, intent, &text);
-                let left = send(&c, session, &text).await;
+                let left = send(&c, session, intent, &text).await;
                 let after = c.host.update(thread, |state| {
                     let went = state.pending.iter().find(|p| p.intent == intent).cloned();
                     let (actions, turns) = sent(state, intent, left.as_deref());
@@ -441,10 +435,9 @@ fn taken_back(
     Some((vec![Action::PendingSet(pending)], Next::Wait { held: false }))
 }
 
-/// Whether `pending` was typed into the terminal and stays there unsent ([`TYPED_NOT_SENT`],
-/// [`TAKEN_BACK`]).
+/// Whether `pending` was typed into the terminal and stays there unsent ([`TAKEN_BACK`]).
 fn in_terminal(pending: &Pending) -> bool {
-    matches!(&pending.state, PendingState::Held { reason } if reason == TYPED_NOT_SENT || reason == TAKEN_BACK)
+    matches!(&pending.state, PendingState::Held { reason } if reason == TAKEN_BACK)
 }
 
 /// `pending` with message `intent` in `state`.
@@ -473,20 +466,25 @@ fn sent(state: &ThreadState, intent: IntentId, left: Option<&str>) -> (Vec<Actio
     (vec![Action::PendingSet(pending)], state.turns.len())
 }
 
-/// Type `text` into `session` as a message: `None` once it went, else why it stays.
-async fn send(c: &Composer, session: SessionId, text: &str) -> Option<String> {
+/// Type `text` into `session` as message `intent`, pasted and submitted as one delivery named
+/// for the intent: `None` once ptyd took it, else why it stays, with nothing of it typed.
+async fn send(c: &Composer, session: SessionId, intent: IntentId, text: &str) -> Option<String> {
     let Some(handle) = c.terminals.terminal(session) else {
         return Some("The agent's terminal is closed".to_owned());
     };
     let guard = || guard_input(c, session);
-    if let Err(refused) = write_input(&handle, &Input::Paste(text.to_owned()), guard).await {
-        return Some(refused.message);
-    }
-    tokio::time::sleep(SUBMIT_PAUSE).await;
-    match write_input(&handle, &Input::Keys(vec!["enter".to_owned()]), guard).await {
+    let words = crate::Words::Paste(text.to_owned());
+    let delivery = delivery_of(intent);
+    match deliver_entry(&handle, &*c.terminals, delivery, words, guard).await {
         Ok(()) => None,
-        Err(_refused) => Some(TYPED_NOT_SENT.to_owned()),
+        Err(refused) => Some(refused.message),
     }
+}
+
+/// The delivery a message goes as: named for its intent, the same before and after a restart.
+const fn delivery_of(intent: IntentId) -> u64 {
+    let (high, low) = intent.as_uuid().as_u64_pair();
+    high ^ low
 }
 
 /// [`Composer::guard`] as the input path's guard takes it.
@@ -501,13 +499,9 @@ async fn type_job(c: &Composer, session: SessionId, job: Job) {
     let typed = match &job {
         Job::Key(key) => write_input(&handle, &Input::Keys(vec![(*key).to_owned()]), guard).await,
         Job::Command(command) => {
-            match write_input(&handle, &Input::Text(command.clone()), guard).await {
-                Ok(()) => {
-                    tokio::time::sleep(SUBMIT_PAUSE).await;
-                    write_input(&handle, &Input::Keys(vec!["enter".to_owned()]), guard).await
-                }
-                Err(refused) => Err(refused),
-            }
+            let words = crate::Words::Typed(command.clone());
+            let delivery = crate::orchestrate::delivery_name();
+            deliver_entry(&handle, &*c.terminals, delivery, words, guard).await
         }
     };
     if let Err(refused) = typed {

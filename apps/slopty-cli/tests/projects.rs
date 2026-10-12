@@ -11,7 +11,7 @@ mod tests {
 
     use serde_json::{Value, json};
     use slopty_core::WorkerId;
-    use slopty_proto::orchestration::{Outcome, Verb};
+    use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
     use slopty_proto::project::{
         LimitsChange, Moment, Natives, ProjectId, ProjectStatus, TaskId, TaskLaunch, TaskSpec,
         TaskState,
@@ -23,6 +23,20 @@ mod tests {
     use tokio::process::{Child, Command};
 
     const STEP: Duration = Duration::from_secs(60);
+
+    /// What the daemons log: enough of a question's path (each hook heard, a prompt held or
+    /// left to the TUI, a brief waiting, ptyd taking and typing a delivery) that a run that
+    /// fails names its cause. The runner shows a test's output only when it fails.
+    const DAEMON_LOG: &str = "info,slopty_workerd::ctl=debug,slopty_workerd::threads::hold=debug,\
+slopty_worker::orchestrate=debug,slopty_ptyd=debug";
+
+    /// The in-process server's log on this test's output, beside its daemons'.
+    fn server_log() {
+        let _first = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .with_test_writer()
+            .try_init();
+    }
 
     /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
@@ -67,6 +81,7 @@ mod tests {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = scrubbed(bin("slopty-ptyd"), &dir.join("home"))
             .env("PATH", &path)
+            .env("RUST_LOG", DAEMON_LOG)
             .envs(env.iter().cloned())
             .arg("--socket")
             .arg(&ptyd_sock)
@@ -99,6 +114,7 @@ mod tests {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut worker = scrubbed(bin("slopty-worker"), &dir.join("home"))
             .env("PATH", path)
+            .env("RUST_LOG", DAEMON_LOG)
             .env("SLOPTY_WORKER_NAME", name)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
@@ -1467,6 +1483,39 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// A goal's place is checked on its machine before anything starts for it: a folder that is
+    /// no repository, or a branch it lacks, is refused in plain words through the server, and a
+    /// clone is fine, as it is with the branch named.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_goal_s_place_is_checked_on_its_machine_before_anything_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let clone = root.join("demo");
+        std::fs::create_dir_all(&clone).unwrap();
+        git_out(&clone, &["init", "-q", "-b", "main"]);
+        git_out(&clone, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let (server, _daemons, worker) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+        let check = |repo: &Path, target: &str| Verb::GoalCheck {
+            worker,
+            repo: repo.to_string_lossy().into_owned(),
+            target: target.to_owned(),
+        };
+
+        let said = hub.dispatch(check(&plain, "")).await;
+        let Outcome::Error { code: ErrorCode::Invalid, message } = said else { panic!("{said:?}") };
+        assert!(message.contains("is not in a git repository"), "{message}");
+        assert!(!message.contains("fatal"), "not git's words: {message}");
+        let said = hub.dispatch(check(&clone, "release")).await;
+        let Outcome::Error { code: ErrorCode::Invalid, message } = said else { panic!("{said:?}") };
+        assert!(message.contains("has no branch release"), "{message}");
+        assert_eq!(hub.dispatch(check(&clone, "")).await, Outcome::Done);
+        assert_eq!(hub.dispatch(check(&clone, "main")).await, Outcome::Done);
+        server.shutdown().await;
+    }
+
     /// What the walk of a person's day found wrong, each said as it is found; the walk fails
     /// with all of them at its end, so one run names every one.
     #[derive(Default)]
@@ -1553,6 +1602,7 @@ mod tests {
 
         const GOAL: &str = "Ship the Linux part and the Mac part.";
         let soonish = Duration::from_secs(20);
+        server_log();
         let mut found = Findings::default();
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();

@@ -1,5 +1,6 @@
 //! One PTY-backed child, its output ring and the last worker's checkpoint.
 
+use std::collections::VecDeque;
 use std::os::fd::{AsRawFd as _, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -115,6 +116,11 @@ struct State {
     /// The deliveries taken ([`Session::deliver`]), the newest last, at most
     /// [`DELIVERIES_KEPT`].
     delivered: Vec<u64>,
+    /// What the deliveries taken still have to type, in order: a part leaves only once it is
+    /// all written, so a handover finds here exactly what is left.
+    typing: VecDeque<Part>,
+    /// A task types [`Self::typing`] now.
+    typer: bool,
 }
 
 /// How many deliveries a session remembers taking: a worker sends one again only right after
@@ -172,6 +178,8 @@ impl Session {
                 checkpoint: Vec::new(),
                 attached_by: None,
                 delivered: Vec::new(),
+                typing: VecDeque::new(),
+                typer: false,
             },
             reader: Reader::Drain,
             exited: None,
@@ -207,6 +215,8 @@ impl Session {
                 checkpoint: Vec::new(),
                 attached_by: Some(conn),
                 delivered: Vec::new(),
+                typing: VecDeque::new(),
+                typer: false,
             },
             reader: Reader::Pause,
             exited: None,
@@ -240,6 +250,8 @@ impl Session {
             attached,
             orphan,
             orphan_mark,
+            delivered,
+            typing,
             // Taken already: it is `master`.
             ..
         } = heir;
@@ -267,7 +279,9 @@ impl Session {
                 ring: Ring::holding(backlog_bytes, &backlog, dropped),
                 checkpoint,
                 attached_by: None,
-                delivered: Vec::new(),
+                delivered,
+                typing: typing.into(),
+                typer: false,
             },
             reader: if attached { Reader::Pause } else { Reader::Drain },
             exited,
@@ -279,6 +293,8 @@ impl Session {
             None if watched => session.watch(Watch::Orphan, events),
             None => {}
         }
+        // What the build before was typing goes on, from the part it had not finished.
+        session.type_owed();
         if attached {
             let kept = Arc::clone(&session);
             tokio::spawn(async move {
@@ -451,31 +467,110 @@ impl Session {
         }
     }
 
-    /// Type `parts` into the program in order, each after its pause, unless delivery
-    /// `delivery` was taken already (`PtydRequest::Deliver`). It runs on a task of its own, so
-    /// it finishes whatever becomes of the worker that sent it.
-    pub fn deliver(self: &Arc<Self>, delivery: u64, parts: Vec<Part>) {
+    /// Type `parts` into the program in order, each after its pause, behind whatever earlier
+    /// deliveries still type, unless delivery `delivery` was taken already
+    /// (`PtydRequest::Deliver`): `false` then. They are typed on a task of their own, so they
+    /// finish whatever becomes of the worker that sent them, and what is left of them goes to
+    /// the next build with the session ([`Self::heir`]).
+    pub fn deliver(self: &Arc<Self>, delivery: u64, parts: Vec<Part>) -> bool {
         {
             let mut state = self.state.lock();
             if state.delivered.contains(&delivery) {
                 tracing::info!(session = %self.id, delivery, "delivery taken already");
-                return;
+                return false;
             }
             if state.delivered.len() >= DELIVERIES_KEPT {
                 state.delivered.remove(0);
             }
             state.delivered.push(delivery);
+            tracing::info!(session = %self.id, delivery, parts = parts.len(), "delivery taken");
+            state.typing.extend(parts);
         }
-        let session = Arc::clone(self);
-        tokio::spawn(async move {
-            for part in parts {
-                tokio::time::sleep(Duration::from_millis(u64::from(part.after_ms))).await;
-                if let Err(e) = session.master.write_all(&part.bytes).await {
-                    tracing::warn!(session = %session.id, delivery, error = %e, "delivery not typed");
-                    return;
+        self.type_owed();
+        true
+    }
+
+    /// Start typing what the deliveries owe, unless a task does already.
+    fn type_owed(self: &Arc<Self>) {
+        {
+            let mut state = self.state.lock();
+            if state.typer || state.typing.is_empty() {
+                return;
+            }
+            state.typer = true;
+        }
+        tokio::spawn(Arc::clone(self).typer());
+    }
+
+    /// Type [`State::typing`] until it is empty. Each part's pause is waited out, then its
+    /// bytes are written under the lock as far as the tty takes them, and the part leaves the
+    /// queue only once it is all written: a handover, which records the queue on this one
+    /// thread between two polls, finds every byte either typed or still queued.
+    async fn typer(self: Arc<Self>) {
+        loop {
+            let front = self.state.lock().typing.front().map(|part| part.after_ms);
+            let Some(pause) = front else {
+                self.typed_out();
+                return;
+            };
+            tokio::time::sleep(Duration::from_millis(u64::from(pause))).await;
+            loop {
+                match self.type_front() {
+                    Typed::Whole => break,
+                    Typed::Part => {
+                        if let Err(e) = self.master.writable().await {
+                            tracing::warn!(session = %self.id, error = %e, "delivery not typed");
+                            self.state.lock().typing.clear();
+                            self.typed_out();
+                            return;
+                        }
+                    }
+                    Typed::Nothing => {
+                        self.typed_out();
+                        return;
+                    }
                 }
             }
-        });
+        }
+    }
+
+    /// Write the front part as far as the tty takes it, under the lock: [`Typed::Whole`] once it
+    /// is all written and gone from the queue. A write that fails drops the queue.
+    fn type_front(&self) -> Typed {
+        let mut state = self.state.lock();
+        let Some(part) = state.typing.front_mut() else {
+            return Typed::Nothing;
+        };
+        // Waited out: a handover from here on does not wait for it again.
+        part.after_ms = 0;
+        match self.master.try_write(&part.bytes) {
+            Ok(n) if n >= part.bytes.len() => {
+                state.typing.pop_front();
+                tracing::debug!(session = %self.id, bytes = n, "delivery part typed");
+                Typed::Whole
+            }
+            Ok(n) => {
+                part.bytes.drain(..n);
+                Typed::Part
+            }
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "delivery not typed");
+                state.typing.clear();
+                Typed::Nothing
+            }
+        }
+    }
+
+    /// The typer stops, unless a part came in since it looked: then it goes on.
+    fn typed_out(self: &Arc<Self>) {
+        let more = {
+            let mut state = self.state.lock();
+            state.typer = false;
+            !state.typing.is_empty()
+        };
+        if more {
+            self.type_owed();
+        }
     }
 
     /// Replace the checkpoint with one from connection `conn`, if it holds the master; the
@@ -564,6 +659,8 @@ impl Session {
             attached: state.attached_by.is_some(),
             orphan: self.orphan,
             orphan_mark: self.mark.filter(|_| self.orphan),
+            delivered: state.delivered.clone(),
+            typing: state.typing.iter().cloned().collect(),
         }
     }
 
@@ -614,4 +711,14 @@ fn exit_of(status: std::process::ExitStatus) -> Exit {
 /// Process `pid`'s start mark ([`slopty_pty::process::start_mark`]).
 fn mark_of(pid: u32) -> Option<u64> {
     i32::try_from(pid).ok().and_then(slopty_pty::process::start_mark)
+}
+
+/// How far [`Session::type_front`] got with the front part.
+enum Typed {
+    /// All of it went, and it left the queue.
+    Whole,
+    /// Some of it is still to go once the tty takes input.
+    Part,
+    /// The queue is empty, or a write failed and it was dropped.
+    Nothing,
 }

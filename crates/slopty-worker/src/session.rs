@@ -176,7 +176,8 @@ enum Cmd {
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     ShareClipboard { clip: Arc<dyn ForSessions> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
-    Entry { text: String, then: KeyEvent, reply: oneshot::Sender<Result<Entry, WorkerError>> },
+    Entry { text: Words, then: KeyEvent, reply: oneshot::Sender<Result<Entry, WorkerError>> },
+    Entered { after: Option<Duration> },
     Exited { exit: Exit },
     Launch { line: String },
     Master { reply: oneshot::Sender<std::io::Result<OwnedFd>> },
@@ -384,6 +385,7 @@ impl std::fmt::Debug for Cmd {
             Self::ShareClipboard { .. } => "ShareClipboard",
             Self::Read { .. } => "Read",
             Self::Entry { .. } => "Entry",
+            Self::Entered { .. } => "Entered",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
             Self::Master { .. } => "Master",
@@ -526,18 +528,28 @@ impl SessionHandle {
         rx.await.map_err(|_gone| WorkerError::SessionClosed)?
     }
 
-    /// `text` pasted and `then` pressed after it, as the program's terminal encodes them now,
-    /// for ptyd to type whole ([`crate::Worker::deliver`]). The program hears it as a viewer's
+    /// `text` and `then` pressed after it, as the program's terminal encodes them now, for
+    /// ptyd to type whole ([`crate::Worker::deliver`]). The program hears it as a viewer's
     /// typing: a resuming line still owed to its first prompt is not typed.
+    ///
+    /// From here every input to the session waits, in order, until [`Self::entered`] says
+    /// ptyd has typed the entry: nothing a person types lands between its words and its key.
     ///
     /// # Errors
     ///
     /// The engine failing to encode either; [`WorkerError::SessionClosed`] once the actor is
     /// gone.
-    pub async fn entry(&self, text: String, then: KeyEvent) -> Result<Entry, WorkerError> {
+    pub async fn entry(&self, text: Words, then: KeyEvent) -> Result<Entry, WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Entry { text, then, reply })?;
         rx.await.map_err(|_gone| WorkerError::SessionClosed)?
+    }
+
+    /// The entry [`Self::entry`] encoded was handed to ptyd, which types its last part `after`
+    /// from now; `None` when it was not, and nothing of it is typed. The input held behind it
+    /// goes once it is typed.
+    pub fn entered(&self, after: Option<Duration>) {
+        let _gone = self.send(Cmd::Entered { after });
     }
 
     /// The session's [`Activity`], marked seen as of now: `changed()` wakes on what happens
@@ -627,14 +639,32 @@ impl SessionHandle {
     }
 }
 
-/// A paste and the key that submits it, encoded for the program ([`SessionHandle::entry`]).
+/// The words of an entry ([`SessionHandle::entry`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Words {
+    /// Pasted: bracketed when the program asked for that.
+    Paste(String),
+    /// Typed as a keyboard's input method commits text (a command such as `/model opus`).
+    Typed(String),
+}
+
+/// Words and the key that submits them, encoded for the program ([`SessionHandle::entry`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
-    /// The paste, bracketed when the program asked for that.
-    pub paste: Vec<u8>,
+    /// The words.
+    pub words: Vec<u8>,
     /// The key.
     pub key: Vec<u8>,
 }
+
+/// The longest input waits behind an entry the worker never says it handed to ptyd
+/// ([`SessionHandle::entered`]): a worker whose delivery hangs does not hold the person's
+/// typing for long.
+const ENTRY_HOLD: Duration = Duration::from_secs(2);
+
+/// Past an entry's last part, as the worker reckons it from ptyd's answer: ptyd starts typing
+/// before it answers, so this only covers the scheduling of its typing task.
+const ENTRY_SLACK: Duration = Duration::from_millis(50);
 
 /// What the actor hands ptyd so the session outlives this worker: a copy of every byte read from
 /// the master, now and then the engine's whole state (see `Actor::checkpoint`), and the size.
@@ -1040,6 +1070,8 @@ struct Actor {
     arrivals: Option<watch::Receiver<u64>>,
     /// A paste event waiting for the paster's copy, and the viewers' input behind it.
     pasting: Option<paste::Pasting>,
+    /// Until when an entry ptyd types holds the input behind it ([`SessionHandle::entry`]).
+    entering: Option<tokio::time::Instant>,
     held: VecDeque<(ClientId, TermRequest, tokio::time::Instant)>,
     /// The program asks for drops (Kitty drag and drop), and the drag or drop under way.
     drops: dnd::Drops,
@@ -1220,6 +1252,7 @@ impl Actor {
             clip: None,
             arrivals: None,
             pasting: None,
+            entering: None,
             held: VecDeque::new(),
             drops: dnd::Drops::new(drop_target),
         })
@@ -1292,6 +1325,10 @@ impl Actor {
                 }
                 () = sleep_until_due(self.pasting.as_ref().map(paste::Pasting::until)) => {
                     self.paste_progress(true);
+                }
+                () = sleep_until_due(self.entering) => {
+                    self.entering = None;
+                    self.release_held();
                 }
                 turn = turn_of(&mut self.compress_turn) => {
                     self.compress_turn = None;
@@ -2311,8 +2348,11 @@ impl Actor {
                     self.send_to(old, &TermEvent::Driver { you: false });
                 }
             }
-            // Input waits, in order, behind a paste waiting for the paster's copy.
-            Cmd::Request { client, req, at } if self.pasting.is_some() && req.is_input() => {
+            // Input waits, in order, behind a paste waiting for the paster's copy, and behind
+            // an entry ptyd types.
+            Cmd::Request { client, req, at }
+                if (self.pasting.is_some() || self.entering.is_some()) && req.is_input() =>
+            {
                 self.held.push_back((client, req, at));
             }
             Cmd::Request { client, req, at } => self.request(client, req, at),
@@ -2386,7 +2426,20 @@ impl Actor {
                 let _ignored = reply.send(self.read(read));
             }
             Cmd::Entry { text, then, reply } => {
-                let _ignored = reply.send(self.entry(&text, &then));
+                let entry = self.entry(text, &then);
+                if entry.is_ok() {
+                    self.entering = tokio::time::Instant::now().checked_add(ENTRY_HOLD);
+                }
+                let _ignored = reply.send(entry);
+            }
+            Cmd::Entered { after } => {
+                let until = after.and_then(|after| {
+                    tokio::time::Instant::now().checked_add(after.saturating_add(ENTRY_SLACK))
+                });
+                self.entering = until;
+                if until.is_none() {
+                    self.release_held();
+                }
             }
             Cmd::Launch { line } => {
                 let until = tokio::time::Instant::now().checked_add(FIRST_PROMPT_WAIT);
@@ -2442,15 +2495,29 @@ impl Actor {
     }
 
     /// [`SessionHandle::entry`].
-    fn entry(&mut self, text: &str, then: &KeyEvent) -> Result<Entry, WorkerError> {
+    fn entry(&mut self, text: Words, then: &KeyEvent) -> Result<Entry, WorkerError> {
         if self.launch.take().is_some() {
             tracing::info!(session = %self.id, "an entry came before the first prompt; the agent is not resumed");
         }
-        let mut paste = Vec::new();
-        self.engine.encode_paste(text, &mut paste)?;
+        let words = match text {
+            Words::Paste(text) => {
+                let mut words = Vec::new();
+                self.engine.encode_paste(&text, &mut words)?;
+                words
+            }
+            Words::Typed(text) => text.into_bytes(),
+        };
         let mut key = Vec::new();
         self.engine.encode_key(then, &mut key)?;
-        Ok(Entry { paste, key })
+        Ok(Entry { words, key })
+    }
+
+    /// Send on the input held behind a paste or an entry, in order, while nothing holds it.
+    fn release_held(&mut self) {
+        while self.pasting.is_none() && self.entering.is_none() {
+            let Some((client, req, at)) = self.held.pop_front() else { break };
+            self.request(client, req, at);
+        }
     }
 
     fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {

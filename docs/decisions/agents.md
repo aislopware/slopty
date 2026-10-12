@@ -252,14 +252,18 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   byte, and `apps/slopty-worker/tests/threads.rs` over the link).
   - **The same keystrokes the face typed from the client.** A message is a paste (bracketed
     where the TUI asked), 200 ms, then Enter. A model is `/model <id>` typed, the pause, then
-    Enter. An interrupt is Esc. All of it goes through orchestration's guard (`may_type`) at
+    Enter. An interrupt is Esc. The words and their Enter are one delivery ptyd types whole
+    (`orchestrate::deliver_entry`, the path a spawned agent's brief takes too; 2026-10-12,
+    `docs/decisions/projects.md`): the worker keeps no pause of its own between them. All of it goes through orchestration's guard (`may_type`) at
     the moment it is written. Nothing is typed while the agent asks a person, before its hooks
     have spoken, once it has exited, or over a person's unsent line. Nothing it types clears
     that line.
   - **A message waits in the thread's pending list until it goes**, where a client shows it,
     edits it or withdraws it. Its entry leaves once the Enter is written. The item the agent
     makes of it carries the intent (`UserMessage::intent`): the host marks the first person's
-    item whose words are the typed ones, so a client confirms its own bubble by id.
+    item whose words are the typed ones, so a client confirms its own bubble by id. A
+    message's delivery is named for its intent: one being sent when the worker restarts waits
+    to go again, and ptyd types it only if it never took it.
     - A steer goes as soon as the guard lets it, into the turn under way.
     - A queued message waits until the agent is at rest by its hooks, and then goes, one per
       turn. The next waits until the agent has taken the last one: it was seen working since,
@@ -268,9 +272,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - One the guard holds is `Held` with why, "Your draft in the terminal is in the way" for a
       person's line, and goes once the way is clear (tried again every 250 ms, since a draft
       says nothing when it is sent).
-    - When a person starts a line between the paste and the Enter, the Enter is not sent and
-      the message stays, saying it was typed and not sent. It is never typed again, and it
-      cannot be edited, since its text is already in the terminal.
+    - What a person types while a message is being typed waits, in order, until its Enter
+      is typed (the session holds input behind an entry): it starts their next line, never
+      joins the message. The state "typed and not sent" is deleted with the pause it
+      described.
   - **An interrupt and a model are checked before they are taken.** Esc is refused over a
     draft, while a person is asked, and when the agent is not working. A model must be in the
     thread's catalogue (`ThreadMeta::models`). For Claude Code the catalogue is the aliases

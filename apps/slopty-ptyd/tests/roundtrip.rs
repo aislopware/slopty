@@ -521,6 +521,70 @@ mod roundtrip {
         worker.shutdown().await.unwrap();
     }
 
+    /// A delivery part-way typed when ptyd hands its sessions to a new build is finished by
+    /// the new build, from the part it had not typed, and the new build knows it took it: sent
+    /// again by a worker unsure it went, it is typed no second time.
+    #[tokio::test]
+    async fn a_delivery_goes_on_across_a_handover_and_is_typed_once() {
+        use slopty_pty::protocol::Part;
+        let daemon = start().await;
+        let out = tempfile::tempdir().unwrap();
+        let said = out.path().join("said");
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let id = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "read a; read b; echo \"$a,$b\" > said".into(),
+            ],
+            cwd: Some(out.path().to_path_buf()),
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(id, spec).await.unwrap();
+        let brief = || {
+            vec![
+                Part { after_ms: 0, bytes: b"one\r".to_vec() },
+                Part { after_ms: 1500, bytes: b"two\r".to_vec() },
+            ]
+        };
+        client.deliver(id, 1, brief()).await.unwrap();
+
+        let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let program = PathBuf::from(env!("CARGO_BIN_EXE_slopty-ptyd"));
+        asker.succeed(program).await.expect("no answer: the new build runs");
+        // The old image may still take a connection as it goes; the new build's answers.
+        let (mut next, listed) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok((mut next, _)) = PtydClient::connect(&daemon.socket).await
+                    && let Ok(listed) = next.list().await
+                {
+                    break (next, listed);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the new build listens");
+        let info = listed.into_iter().find(|s| s.id == id).expect("kept");
+        assert_eq!(info.delivered, [1], "the delivery taken came across");
+        next.deliver(id, 1, brief()).await.unwrap();
+
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        let line = loop {
+            if let Ok(line) = std::fs::read_to_string(&said)
+                && line.ends_with('\n')
+            {
+                break line;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the second part never came");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(line.trim(), "one,two", "finished by the new build, and typed once");
+        next.shutdown().await.unwrap();
+    }
+
     /// A handover that cannot happen is refused with why, and leaves every session as it was,
     /// still read into its ring, and the daemon taking requests again: a build that hands
     /// sessions on another way, one that is not there, and one whose `exec` fails after it said

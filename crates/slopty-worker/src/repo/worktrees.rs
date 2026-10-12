@@ -762,6 +762,7 @@ pub async fn branch_off(git: &Path, clone: &Path, branch: &str) -> Result<(), Fa
     if !server_named(branch) {
         return Err(Failed::NotOne(format!("{branch} is no branch Slopty names")));
     }
+    goal_place(git, clone, "").await?;
     let reference = format!("refs/heads/{branch}");
     let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
     if bundle::run(git, clone, &verify).await.is_ok() {
@@ -769,6 +770,48 @@ pub async fn branch_off(git: &Path, clone: &Path, branch: &str) -> Result<(), Fa
     }
     bundle::run(git, clone, &["branch", "--no-track", "--end-of-options", branch, "HEAD"]).await?;
     Ok(())
+}
+
+/// Whether a goal can start from `folder` (`Verb::GoalCheck`).
+///
+/// It can from a folder in a git repository with a checkout and a commit checked out, that has
+/// the branch `target` (its own or `origin`'s) when one is named. A blank `target` asks for
+/// none: the goal gets a branch of its own off what is checked out ([`branch_off`]). Why not
+/// is [`Failed::NotOne`], in a sentence a person reads rather than git's words.
+pub async fn goal_place(git: &Path, folder: &Path, target: &str) -> Result<(), Failed> {
+    let shown = folder.display();
+    let not = |why: String| Err(Failed::NotOne(why));
+    match tokio::fs::metadata(folder).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return not(format!("there is no folder {shown} on this machine"));
+        }
+        Err(e) => return not(format!("{shown} cannot be read here: {e}")),
+        Ok(meta) if !meta.is_dir() => return not(format!("{shown} is a file, not a folder")),
+        Ok(_) => {}
+    }
+    let Ok(bare) = bundle::run(git, folder, &["rev-parse", "--is-bare-repository"]).await else {
+        return not(format!(
+            "{shown} is not in a git repository, and a goal's work lands on a branch of one"
+        ));
+    };
+    if bare.trim() == "true" {
+        return not(format!("{shown} is a bare repository, with no checkout to work in"));
+    }
+    let head = ["rev-parse", "-q", "--verify", "HEAD^{commit}"];
+    if bundle::run(git, folder, &head).await.is_err() {
+        return not(format!("{shown} has no commit yet, so a goal has nothing to start from"));
+    }
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(());
+    }
+    for reference in [format!("refs/heads/{target}"), format!("refs/remotes/origin/{target}")] {
+        let verify = ["rev-parse", "-q", "--verify", "--end-of-options", reference.as_str()];
+        if bundle::run(git, folder, &verify).await.is_ok() {
+            return Ok(());
+        }
+    }
+    not(format!("{shown} has no branch {target} for the goal's work to land on"))
 }
 
 /// Whether `branch` is one the server names: under `slopty/`, with no part git would read as
@@ -980,6 +1023,51 @@ mod tests {
         let stray = branch_off(git, &clone, "main-copy").await;
         assert!(matches!(stray, Err(Failed::NotOne(_))), "{stray:?}");
         assert!(!has_branch(&clone, "main-copy"));
+    }
+
+    /// A goal starts only from a folder in a git repository with a commit checked out, that
+    /// has the branch named for its work; each place it cannot start from says why in plain
+    /// words, never git's, and a project's own branch is not made there either.
+    #[tokio::test]
+    async fn a_goal_starts_only_where_its_work_can_land() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let why = |placed: Result<(), Failed>| match placed {
+            Err(Failed::NotOne(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        let nowhere = tmp.path().join("nowhere");
+        let said = why(goal_place(git, &nowhere, "").await);
+        assert!(said.starts_with("there is no folder"), "{said}");
+
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "x").expect("write");
+        assert!(why(goal_place(git, &file, "").await).ends_with("is a file, not a folder"));
+
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(&plain).expect("mkdir");
+        let said = why(goal_place(git, &plain, "").await);
+        assert!(said.contains("is not in a git repository"), "{said}");
+        assert!(!said.contains("fatal"), "not git's words: {said}");
+        let made = branch_off(git, &plain, "slopty/p/goal").await;
+        assert!(matches!(made, Err(Failed::NotOne(_))), "{made:?}");
+
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        git_in(&empty, &["init", "-q", "-b", "main"]);
+        assert!(why(goal_place(git, &empty, "").await).contains("has no commit yet"));
+
+        let bare = tmp.path().join("bare.git");
+        git_in(tmp.path(), &["init", "-q", "--bare", &bare.to_string_lossy()]);
+        assert!(why(goal_place(git, &bare, "").await).contains("is a bare repository"));
+
+        git_in(&empty, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let inside = empty.join("src");
+        std::fs::create_dir_all(&inside).expect("mkdir");
+        goal_place(git, &empty, "").await.expect("a branch of its own");
+        goal_place(git, &inside, "main").await.expect("a folder inside, onto main");
+        let said = why(goal_place(git, &empty, "release").await);
+        assert!(said.ends_with("has no branch release for the goal's work to land on"), "{said}");
     }
 
     /// The server's branches go when it drops them: one absent is passed over, one a worktree

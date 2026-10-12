@@ -248,6 +248,7 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
     if daemon.worker.get_opened(session).await.is_err() {
         return Err("no such session".to_owned());
     }
+    tracing::debug!(%session, event = ?hook.event, "hook");
     daemon.follows.lock().board.heard(session, &hook);
     let native = hook.report(session);
     let (mut event, branch, mode) = {

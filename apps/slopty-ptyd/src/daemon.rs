@@ -809,13 +809,11 @@ impl Connection {
                 }
             }
             PtydRequest::Deliver { id, delivery, parts } => {
-                // No reply by contract: it rides the attached worker's taps.
-                if let Some(session) = self.session(id) {
-                    session.deliver(delivery, parts);
-                } else {
-                    tracing::debug!(session = %id, "delivery to no session");
-                }
-                Ok(())
+                let Some(session) = self.session(id) else {
+                    return self.error(Some(id), PtydError::NoSuchSession).await;
+                };
+                session.deliver(delivery, parts);
+                self.reply(&PtydEvent::Ok, None).await
             }
             PtydRequest::Succeed { program } => {
                 let (failed, why) = oneshot::channel();

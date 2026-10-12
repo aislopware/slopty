@@ -101,6 +101,17 @@ impl Terminals for Typing {
     }
 }
 
+impl orchestrate::Deliver for Typing {
+    fn deliver_parts(
+        &self,
+        session: SessionId,
+        delivery: u64,
+        parts: Vec<orchestrate::Part>,
+    ) -> orchestrate::BoxFuture<'_, Result<(), slopty_worker::WorkerError>> {
+        Box::pin(self.worker.deliver(session, delivery, parts))
+    }
+}
+
 /// The daemon's threads and what serves them.
 ///
 /// The adapter answers for them, the composer types what is sent to them, and their turns

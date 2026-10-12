@@ -3433,15 +3433,48 @@ restart.** ✅ 2026-10-12 (open items 1, 2 and 4 of `.research/readiness-w-2026-
   is kept owed in the session's recipe (`Recipe::orchestrated`), on disk before any of it is
   typed. The worker that starts next drops it if ptyd lists its name, and otherwise types it,
   under the same name, once the agent is at its prompt, so a brief ptyd took just as the old
-  worker died is not typed again. Known gap: the names do not cross a ptyd succession (adding
-  them to the handover would change its fingerprint and end every session on the next update),
-  so a worker killed in the same instant as a ptyd update could type a brief twice.
+  worker died is not typed again.
+- **Across a ptyd update too.** ptyd answers a delivery once it took it and types its parts
+  from a queue in the session's state, each part leaving the queue only once all of it is
+  written. A handover to a new build records the names taken and what is left of the queue
+  (`Heir::delivered`, `Heir::typing`), and the new build types the rest. The handover
+  changed with it, so the update that brings this ends the sessions once.
+- **One path for everything typed and submitted.** The thread composer (a person's message,
+  a `/model` command) goes the same way (`orchestrate::deliver_entry`); no worker sleeps
+  between words and their Enter anywhere. While ptyd types an entry, the session holds every
+  other input behind it, so a person's keystroke never lands between the words and the
+  Enter.
 - **Followed again after a restart.** The sessions whose agent orchestration started carry that
   in their recipe. A worker that starts again takes them up (`Orchestrator::take_up`): it follows
   each again, so a question waits on the board as before, and guards each as an agent's
   terminal. A session reopened after its shell was lost is a new program, and is not taken up.
+- **Followed before it starts.** Orchestration follows an agent's session before ptyd spawns
+  it, under an id picked first, and forgets it when the spawn fails. Following it once the
+  spawn had returned left a window (the open's bookkeeping and the brief kept on disk) in
+  which an agent that asks at once, as a task agent asking the person a question does, found
+  nobody following it: its prompt went straight back to its TUI, no request reached the board,
+  and its brief waited on a question nobody could answer. Gate run 38194386318 lost that race.
+  A walk that fails now prints the daemons' log of the question's path: each hook heard, a
+  prompt held or left to the TUI, a brief that waits, and ptyd taking and typing a delivery.
 - Tests: `a_start_before_the_project_knows_its_repository_is_refused` and
   `a_start_with_nowhere_to_run_is_refused` (`slopty-server`);
-  `a_delivery_finishes_without_its_worker_and_is_typed_once` (`slopty-ptyd`, `roundtrip`);
+  `a_delivery_finishes_without_its_worker_and_is_typed_once` and
+  `a_delivery_goes_on_across_a_handover_and_is_typed_once` (`slopty-ptyd`, `roundtrip`);
   `a_brief_is_owed_until_its_own_delivery` (`slopty-worker`, `restore`); and the day walk, which
   again restarts the Linux worker right after the answer and checks the brief arrives once.
+
+**A goal's place is checked before anything starts for it, and refused in plain words.** ✅
+2026-10-12 (the app's day walk: a folder that was no repository started the orchestrator first,
+then was refused in git's words, "fatal: not a git repository", with the agent's tile left)
+
+- `Verb::GoalCheck { worker, repo, target }` asks the machine whether a goal can start from a
+  folder: one there, in a git repository that is not bare and has a commit checked out, with the
+  branch `target` (its own or `origin`'s) when one is named. It changes nothing. The app asks it
+  before it starts the orchestrator, so a goal refused has nothing started for it.
+- Each refusal is one plain clause naming the folder (there is no folder; a file, not a folder;
+  not in a git repository; a bare repository; no commit yet; no branch `target`), never git's
+  output. The project's own branch (`Verb::BranchOff`) checks the place the same way first, and
+  the server passes that refusal on as the worker said it.
+- Tests: `a_goal_starts_only_where_its_work_can_land` (`slopty-worker`, `repo::worktrees`);
+  `a_project_with_no_target_lands_on_a_branch_of_its_own` (`slopty-server`); and
+  `a_goal_s_place_is_checked_on_its_machine_before_anything_starts` (`slopty-cli`, `projects`).
