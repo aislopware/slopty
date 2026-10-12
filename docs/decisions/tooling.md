@@ -1900,3 +1900,19 @@ more full-window layer.
   - `land` then sweeps: every `check/*` branch a day old whose runs are all done goes, under the
     same lease, its age its newest run's or else its commit's (`remote::sweep`). A wrapper killed
     before its run ended leaves its branch to it.
+
+- ✅ **Checks run where they return soonest: this Mac and the runners together** (2026-10-12).
+  Supersedes "Every compile runs on a runner" for a lane's own checks. The person found
+  development much slower once everything ran remote, and asked to share the work between this
+  Mac and the runners, as fast as possible, without the Mac overheating.
+  - The numbers behind it: remote checks since 10-11 took p50 6 min and p90 22 min over 404
+    runs, and the wait for a runner Mac slot was p90 23 min, up to 90 min. An incremental local
+    check took 40–55 s on 2026-09-12. The gate itself got faster (push to main, median 24 min on
+    10-06, 8 min on 10-12), so the loss was in each check and the Mac queue.
+  - Until the router is built: a lane runs `cargo clippy` and `cargo nextest` on its own crates
+    here, one cargo at a time (cargo's lock on `target/` serialises them), under `nice -n 19`
+    with `CARGO_BUILD_JOBS=4`, half of the eight performance cores, so the person's Parsec
+    session keeps the rest. Wide checks, Linux, iOS and goldens stay on runners.
+  - Next: `cargo xtask remote` picks local, remote or both per check by what returns soonest,
+    yields when the Mac is hot or in use, and records latency and thermal state in
+    MEASUREMENTS.

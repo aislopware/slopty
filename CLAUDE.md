@@ -13,9 +13,12 @@ Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs
 
 ## Hard lines
 
-- Nothing compiles on this Mac; its cores and disk are the person's. Builds and tests run on
-  GitHub runners (`cargo xtask remote`). Landing is `cargo gate`, commit, `cargo xtask land`;
-  CI's gate decides (`docs/DEV.md`). Parallel agents share this checkout: the `lanes` skill.
+- Checks run where they return soonest: this Mac for a lane's own crates and Mac-only tests,
+  GitHub runners (`cargo xtask remote`) for wide, Linux and iOS work. The Mac is the person's and
+  they use it over Parsec, so local cargo runs one at a time under `nice -n 19` with
+  `CARGO_BUILD_JOBS=4`, and never makes it hot or felt; `target/` stays under 30 GB. Landing
+  is `cargo gate`, commit, `cargo xtask land`; CI's gate decides (`docs/DEV.md`). Parallel
+  agents share this checkout: the `lanes` skill.
 - Pre-release: no backward compatibility, no versioning. Replace cleanly and delete the old.
 - Rust everywhere, scripts too. Latest toolchain, dependencies and forks; lints never loosened.
 - Slopty drives an agent only through its published doors, never by reading its screen, never
