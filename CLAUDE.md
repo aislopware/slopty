@@ -127,5 +127,14 @@ in it until checked here.
 - A second, granted 2026-10-06: design mockups an image model generates for reference (Codex's
   image generation) may be opened for design review, kept under `.research/mockups-*/`. They are
   generated pictures of a design, not anybody's screen; nothing else above changes.
+- A third, granted 2026-10-12: Delta (delta.dev, Zed Industries), the design Slopty clones, may
+  be downloaded and taken apart for reference: its public builds' bundled assets and strings,
+  and renders of it made headless or on a GitHub runner, kept under `.research/mockups-delta/`
+  and opened for design review. Values only: none of its code, icons or assets enter Slopty.
+  The same day the person asked for it to be signed in and tried: it may run on this Mac, signed
+  in with the person's GitHub, and only its own windows are captured. It is tried on scratch
+  folders and never granted organisation or private-repository access. Its only key is the
+  person's own LLM proxy (CPA, `cpa2.jmango360.dev`), which they asked to add as a custom provider:
+  pasted from `$CPA_API_KEY` through the clipboard, never typed or printed.
 - Daemons started for a measurement are killed when it ends. Worktrees and ports are shared
   with other sessions.
