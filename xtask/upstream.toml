@@ -19,9 +19,9 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "b8f0c026553711c1e049fee501932d3801f23567"
-base_date = "2026-10-09"
-checked = "2026-10-11"
+base = "5ae2355035b956afc4ee37a32a1283f9c848fb50"
+base_date = "2026-10-12"
+checked = "2026-10-12"
 check_every_days = 0
 
 # zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
@@ -33,7 +33,7 @@ upstream_branch = "main"
 checkout = ".research/zed-main"
 base = "93d745668805029476e6d7fbb19652116fed51de"
 base_date = "2026-10-10"
-checked = "2026-10-11"
+checked = "2026-10-12"
 check_every_days = 7
 
 [gpui-kit]
@@ -43,7 +43,7 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "4e2a00eea7212baa9b5edf1f73753760deb2780b"
+base = "369f7a8f5a6602da980f008cf726467588ad517f"
 base_date = "2026-10-12"
 checked = "2026-10-12"
 # It lands several changes a day, so every gate asks.
@@ -66,9 +66,9 @@ fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
 strategy = "merge"
-base = "b1d9492cfa5d0d22c534a00e81bea623957113e7"
+base = "aeda37b305ee3d897ff1bfeddfe39d7fa9366a74"
 base_date = "2026-10-11"
-checked = "2026-10-11"
+checked = "2026-10-12"
 check_every_days = 1
 paths = [
     "src/terminal/",
@@ -90,7 +90,7 @@ checkout = ".research/libghostty-rs"
 strategy = "rebase"
 base = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54"
 base_date = "2026-10-09"
-checked = "2026-10-11"
+checked = "2026-10-12"
 check_every_days = 7
 
 # noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
