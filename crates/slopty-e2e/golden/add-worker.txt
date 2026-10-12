@@ -1,26 +1,21 @@
 Window │ e2e-worker (focused)
 Group │ Workspace
+Group │ Terminal
+Heading │ terminal Terminal
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Tab │ Terminal
+Button │ Close tile
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
 Group │ Where
 Button │ e2e-worker
-TabList
-Tab │ Terminal
-Button │ Close tab
-Heading │ terminal Terminal
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ e2e-worker
-Group │ Terminal
 Group
 Terminal │ shell │ ~ %
-Group │ Status
-Button │ Show the tab's terminal
 Heading │ Add a machine
 Button │ Use this Mac
 Status │ No machine found yet

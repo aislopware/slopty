@@ -1,35 +1,27 @@
 Window │ e2e-worker
 Group │ Workspace
+Group │ main.rs
+Heading │ file main.rs
 Button │ Navigator
 Button │ Back
 Button │ Forward
-Group │ Where
-Button │ e2e-worker
-TabList
-Tab │ main.rs, 2 tiles
-Button │ Close tab
-Button │ Needs you
-Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ project
-Button │ e2e-worker
-Group │ main.rs
-Heading │ file main.rs
 Tab │ Terminal
 Button │ Close tile
 Tab │ main.rs
+Button │ Drag the file out
 Label │ Edited
 Button │ Close tile
+Status │ Rust, Spaces: 4, Ln 2, Col 2
 Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Group │ Where
+Button │ e2e-worker
+Button │ Needs you
+Button │ More
 Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited, changed on disk
 Status │ Changed on disk
 Button │ Compare
 Button │ Reload
 Button │ Overwrite
 MultilineTextInput │ Text of $SCRATCH/project/main.rs │ // edited⏎xfn main() {⏎    println!("hello");⏎} (focused)
-Status │ Rust, Spaces: 4, Ln 2, Col 2
-Group │ Status
-Button │ Show the tab's terminal

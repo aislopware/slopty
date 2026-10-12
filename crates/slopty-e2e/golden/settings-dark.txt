@@ -3,20 +3,14 @@ Group │ Workspace
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Group │ Window
 Group │ Where
 Button │ e2e-worker
-TabList
-Tab │ Terminal, 3 tiles
-Button │ Close tab
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
+Button │ Back
 TextInput │ Search settings (focused)
 TabList │ Sections
 Heading │ App
@@ -29,7 +23,6 @@ Tab │ Network
 Heading │ Help
 Tab │ Keyboard
 Tab │ About
-Button │ Back
 Heading │ Appearance
 TabPanel │ Appearance
 Heading │ Interface
@@ -40,7 +33,7 @@ RadioButton │ Dark
 SpinButton │ Text size │ 14 pt
 Button │ Decrease
 Button │ Increase
-SpinButton │ Reading size │ 14 pt
+SpinButton │ Reading size │ 15 pt
 Button │ Decrease
 Button │ Increase
 Heading │ Light terminal colours

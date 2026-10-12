@@ -1,12 +1,10 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Heading │ Needs you
 Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Run touch refused.txt, Needs you
 Button │ Deny
@@ -16,20 +14,23 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Needs approval
-Image │ Claude Code
-Button │ Close tile
 Image │ Needs you
-TabList
-Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
-Image │ Claude Code
-Button │ Close tab
+Button │ Close tile
+Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Heading │ Claude Code Do these steps in order with the named tools, then reply "done". 1) Read…
-Label │ work
+Button │ Back
+Button │ Forward
+Tab │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Status │ Needs approval: Run touch refused.txt
 Image │ Needs you
+Button │ Close tile
 Button │ Show terminal
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
+Status │ 1 new
 Button │ More
-Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
 Group │ Thread
 Article │ You: Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
 Button │ Copy message
@@ -47,9 +48,10 @@ Group │ Changed 1 file, 2 added, 1 removed
 Button │ Review
 Button │ Review notes.txt
 MultilineTextInput │ Message (focused)
-Button │ Add to the message
-Button │ Model, Opus 5.5
+Button │ Commit on work
+Label │ 2 added, 1 removed
 Label │ Context 34% of 200k
+Label │ Runs on e2e-worker
+Button │ Model, Opus 5.5
+Button │ Attach
 Button │ Send
-Group │ Status
-Button │ Show the tab's terminal

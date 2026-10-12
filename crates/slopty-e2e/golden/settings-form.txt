@@ -3,20 +3,14 @@ Group │ Workspace
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Group │ Window
 Group │ Where
 Button │ e2e-worker
-TabList
-Tab │ Terminal
-Button │ Close tab
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
+Button │ Back
 TextInput │ Search settings (focused)
 TabList │ Sections
 Heading │ App
@@ -29,7 +23,6 @@ Tab │ Network
 Heading │ Help
 Tab │ Keyboard
 Tab │ About
-Button │ Back
 Heading │ Terminal
 TabPanel │ Terminal
 Heading │ Font

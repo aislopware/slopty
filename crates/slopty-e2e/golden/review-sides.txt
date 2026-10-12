@@ -1,49 +1,36 @@
 Window │ project
 Group │ Workspace (focused)
+Group │ Changes
+Heading │ changes Changes
 Button │ Navigator
 Button │ Back
 Button │ Forward
-Group │ Where
-Button │ project
-TabList
-Tab │ Changes, 2 tiles
-Button │ Close tab
-Button │ Needs you
-Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ project
-Button │ e2e-worker
-Group │ Changes
-Heading │ changes Changes
 Tab │ project
 Button │ Close tile
 Tab │ Changes
 Button │ Close tile
 Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Group │ Where
+Button │ project
+Button │ Needs you
+Button │ More
 Group │ Review
 Toolbar
 Button │ Showing uncommitted
+Button │ Go to a file, 4 files
 Button │ Collapse all files
 Button │ Refresh
 Button │ Commit…
-List │ Files
-ListItem │ art/authors.txt
-ListItem │ art/logo.png
-ListItem │ capture.log
-ListItem │ deploy.sh
+CheckBox │ Viewed
 Button │ art/authors.txt
 CheckBox │ Viewed
 Button │ art/logo.png
-CheckBox │ Viewed
 Image │ Before: art/logo.png
 Image │ After: art/logo.png
+CheckBox │ Viewed
 Button │ capture.log
-CheckBox │ Viewed
 Button │ Open the whole file
-Button │ deploy.sh
 CheckBox │ Viewed
-Group │ Status
-Button │ Show the tab's terminal
+Button │ deploy.sh

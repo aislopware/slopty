@@ -1,12 +1,10 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Heading │ Needs you
 Button │ Claude Code, Wants to run a command, Needs you
 Heading │ Machines
@@ -14,44 +12,46 @@ Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Claude Code, Needs approval
-Image │ Claude Code
-Button │ Close tile
 Image │ Needs you
+Button │ Close tile
 Button │ Fix the login redirect
 Image │ Claude Code
 Button │ Close tile
-TabList
-Tab │ Fix the login redirect, 2 tiles
-Image │ Needs you
-Button │ Close tab
-Button │ More
 Group │ Claude Code
 Heading │ Claude Code
-Image │ Claude Code
-Label │ home
+Button │ Back
+Button │ Forward
+Tab │ Claude Code
 Status │ Needs approval: Wants to run a command
 Image │ Needs you
+Button │ Close tile
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Dialog │ Wants to run a command
 Button │ Answer in the terminal
 MultilineTextInput │ Message
-Button │ Add to the message
+Button │ Commit on home
+Label │ Runs on e2e-worker
 Button │ Model, Claude
+Button │ Attach
 Button │ Send
 Group │ Fix the login redirect
 Heading │ Claude Code Fix the login redirect
+Tab │ Fix the login redirect
 Image │ Claude Code
-Label │ home
+Button │ Close tile
 Button │ Show terminal
 Button │ Close tile
-Group │ Thread
-Heading │ What should Claude Code do in home?
-Label │ Place, in home on e2e-worker
-MultilineTextInput │ Message (focused)
-Button │ Add to the message
-Button │ Model, Claude
-Button │ Send
-Group │ Status
+Group │ Window
 Button │ Show the tab's terminal
+Button │ Needs you
+Status │ 1 new
+Button │ More
+Group │ Thread
+Label │ Place, in home on e2e-worker
+MultilineTextInput │ What should Claude Code do in home? (focused)
+Label │ Runs on e2e-worker
+Button │ Model, Claude
+Button │ Attach
+Button │ Send

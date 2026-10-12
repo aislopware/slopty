@@ -1,22 +1,17 @@
 Window │ e2e-worker
+Heading │ terminal Terminal
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Tab │ Terminal
+Button │ Close tile
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
 Group │ Where
 Button │ e2e-worker
-TabList
-Tab │ Terminal
-Button │ Close tab
-Heading │ terminal Terminal
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ e2e-worker
-Group │ Status
-Button │ Show the tab's terminal
 Heading │ Connect a phone or iPad
 Button │ Copy link
 Button │ Done

@@ -1,12 +1,10 @@
 Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Heading │ Ready to merge
 Button │ Mirror the merge queue, Ship the project board, Ready to merge
 Button │ Merge
@@ -24,57 +22,53 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
-TabList
+Group │ Orchestrator
+Heading │ Claude Code Orchestrator
+Button │ Back
+Button │ Forward
 Tab │ Orchestrator
 Image │ Claude Code
-Button │ Close tab
-Heading │ Claude Code Orchestrator
+Button │ Close tile
 Button │ Show terminal
 Button │ Board
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
+Status │ 1 new
 Button │ More
-Group │ Orchestrator
 Group │ Thread
+Status
+Status │ Claude Code. Nothing said yet; write below to start
 MultilineTextInput │ Message
-Button │ Add to the message
+Button │ Commit on repo
+Label │ Runs on studio
 Button │ Model, Claude
+Button │ Attach
 Button │ Send
 Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
 Heading
 Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
-RadioGroup │ Autonomy
-RadioButton │ Ask: an edit or a command the agent's rules do not allow asks you
-RadioButton │ Edits: edits in a task's worktree go without asking
-RadioButton │ Own: agents go on their own within their sandbox
-Group │ Review limit: 3
-Button │ Fewer tasks waiting on you
-Button │ More tasks waiting on you
+Button │ Project settings
 ProgressIndicator │ 1 of 6 merged │ 17%
 List │ Needs you
 Heading │ Needs you
 ListItem │ Draw the lanes, Needs you, Which lanes come first?
-Image │ Needs you
 List │ Working
 Heading │ Working
 ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts
-Image │ Waiting
+Label │ slopty/board/1
 Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch slopty/board/1
 List │ Up next
 Heading │ Up next
 ListItem │ Hold it to goldens, Up next, after #1 · reads only
-Image │ Up next
 ListItem │ Check the wire goldens, Up next
-Image │ Up next
 Log
 List │ Ready to merge
 Heading │ Ready to merge
 ListItem │ Mirror the merge queue, Ready to merge
-Image │ Ready to merge
-Group │ Verifier passed e5b0d17 over c08d4c1
 Button │ Merge #6
 List │ Merged
 Button │ Show Merged 1
-Group │ Status
-Button │ Show the tab's terminal
-Status │ Ship the project board: #5 Check the wire goldens: its verifier failed

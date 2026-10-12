@@ -1,12 +1,10 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
@@ -16,12 +14,10 @@ Button │ RELEASE.md
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
-TabList
-Tab │ Terminal, 3 tiles
-Button │ Close tab
-Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
+Button │ Back
+Button │ Forward
 Tab │ Terminal
 Button │ Close tile
 Tab │ RELEASE.md
@@ -31,9 +27,12 @@ Group (focused)
 Terminal │ shell │ ~ %
 Group │ Terminal 2
 Heading │ terminal Terminal 2
-Label │ ~
+Tab │ Terminal 2
 Button │ Close tile
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
+Button │ More
 Group
 Terminal │ shell
-Group │ Status
-Button │ Show the tab's terminal

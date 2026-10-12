@@ -3,19 +3,16 @@ Group │ Workspace (focused)
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Group │ Window
 Group │ Where
 Button │ studio
-TabList
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
 Heading │ What should we work on?
-MultilineTextInput │ What should we work on?
-Button │ studio · ~ · Claude Code
+Button │ studio · Claude Code
+Heading │ Start
 Button │ New terminal
 Button │ Add a window or display
-Group │ Status
-Button │ Show the tab's terminal
+Button │ New goal
+MultilineTextInput │ What should we work on?
+Button │ Send

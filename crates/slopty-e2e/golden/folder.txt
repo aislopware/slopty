@@ -1,28 +1,22 @@
 Window │ project
 Group │ Workspace
+Group │ project
+Heading │ folder project
 Button │ Navigator
 Button │ Back
 Button │ Forward
-Group │ Where
-Button │ project
-TabList
-Tab │ project, 2 tiles
-Button │ Close tab
-Button │ Needs you
-Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ project
-Group │ project
-Heading │ folder project
 Tab │ project
 Button │ Close tile
 Tab │ project
 Button │ Close tile
 Button │ Enclosing folder
 Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Group │ Where
+Button │ project
+Button │ Needs you
+Button │ More
 Group │ Folder $SCRATCH/project │ 3 items (focused)
 Navigation │ $SCRATCH/project
 Link │ /
@@ -34,5 +28,3 @@ ListBox │ Entries
 ListBoxOption │ src
 ListBoxOption │ .env
 ListBoxOption │ README.md
-Group │ Status
-Button │ Show the tab's terminal

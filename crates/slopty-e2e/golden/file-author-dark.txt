@@ -1,12 +1,10 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Heading │ To review
 Button │ Retry the refresh, The refresh now retries three times with one key, and saves the token., Done
 Heading │ Projects
@@ -24,28 +22,31 @@ Image │ Claude Code
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
-TabList
-Tab │ refresh.rs, 3 tiles
-Image │ Done
-Button │ Close tab
-Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
-Label │ ~
+Button │ Back
+Button │ Forward
+Tab │ Terminal
 Button │ Close tile
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
+Status │ 1 new
+Button │ More
 Group
 Terminal │ shell │ ~ %
 Group │ refresh.rs
 Heading │ file refresh.rs
 Tab │ Retry the refresh
+Status │ Turn finished
 Image │ Done
 Button │ Close tile
 Tab │ refresh.rs
+Button │ Drag the file out
 Button │ Close tile
+Status │ Rust, Spaces: 4, Ln 3, Col 1
 Button │ Close tile
 Document │ File $SCRATCH/repo/src/refresh.rs │ 6 lines, Rust
 MultilineTextInput │ Text of $SCRATCH/repo/src/refresh.rs │ pub fn refresh(client: &Client, token: &Token) -> Result<Token> {⏎    let key = IdempotencyKey::new();⏎    let fresh = retry(3, || client.post_with("/refresh", token, &key))?;⏎    store.save(&fresh)?;⏎    Ok(fresh)⏎} (focused)
-Status │ Rust, Spaces: 4, Ln 3, Col 1
 Link │ Written in Retry the refresh · turn 1 · 2h
-Group │ Status
-Button │ Show the tab's terminal

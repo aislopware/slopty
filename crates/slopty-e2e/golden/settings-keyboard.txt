@@ -3,20 +3,14 @@ Group │ Workspace
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Group │ Window
 Group │ Where
 Button │ e2e-worker
-TabList
-Tab │ Terminal
-Button │ Close tab
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ e2e-worker
 Group │ Settings
 Group │ Settings sections
+Button │ Back
 TextInput │ Search settings (focused)
 TabList │ Sections
 Heading │ App
@@ -29,7 +23,6 @@ Tab │ Network
 Heading │ Help
 Tab │ Keyboard
 Tab │ About
-Button │ Back
 Heading │ Keyboard
 TabPanel │ Keyboard
 Heading │ General
@@ -39,8 +32,8 @@ ListItem │ New agent │ ⌘T
 Button │ Keys for New agent │ ⌘T
 ListItem │ New terminal │ ⇧⌘T
 Button │ Keys for New terminal │ ⇧⌘T
-ListItem │ New agent…
-Button │ Keys for New agent…
+ListItem │ New agent on…
+Button │ Keys for New agent on…
 ListItem │ Show or hide the tab's terminal │ ⌥⌘T
 Button │ Keys for Show or hide the tab's terminal │ ⌥⌘T
 ListItem │ New note │ ⇧⌘N
@@ -61,8 +54,8 @@ ListItem │ Remove this worktree
 Button │ Keys for Remove this worktree
 ListItem │ Remove merged worktrees
 Button │ Keys for Remove merged worktrees
-ListItem │ Run
-Button │ Keys for Run
+ListItem │ Run a script…
+Button │ Keys for Run a script…
 ListItem │ Save a copy…
 Button │ Keys for Save a copy…
 ListItem │ Close tile │ ⌘W
@@ -93,6 +86,8 @@ ListItem │ Toggle curtain
 Button │ Keys for Toggle curtain
 ListItem │ Show or hide the navigator │ ⌘B
 Button │ Keys for Show or hide the navigator │ ⌘B
+ListItem │ Component preview
+Button │ Keys for Component preview
 ListItem │ Find │ ⌘F
 Button │ Keys for Find │ ⌘F
 ListItem │ Focus next │ ⌃⇥

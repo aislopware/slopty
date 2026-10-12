@@ -1,42 +1,32 @@
 Window │ slopty
 Group │ Workspace (focused)
+Group │ Changes
+Heading │ changes Changes
 Button │ Navigator
 Button │ Back
 Button │ Forward
-Group │ Where
-Button │ slopty
-TabList
-Tab │ Changes, 2 tiles
-Button │ Close tab
-Button │ Needs you
-Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ slopty
-Button │ e2e-worker
-Group │ Changes
-Heading │ changes Changes
 Tab │ project
 Button │ Close tile
 Tab │ Changes
 Button │ Close tile
 Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Group │ Where
+Button │ slopty
+Button │ Needs you
+Button │ More
 Group │ Review
 Toolbar
 Button │ Showing uncommitted
+Button │ Go to a file, 1 file
 Button │ Collapse all files
 Button │ Refresh
 Button │ Pull request 42, Changes requested
 Button │ Commit…
-List │ Files
-ListItem │ src/refresh.rs
-Button │ src/refresh.rs
 CheckBox │ Viewed
+Button │ src/refresh.rs
 Comment │ ana: Three tries with no pause between them will meet the rate limit.
 Link │ Open on the forge
 Comment │ lin: Name the key for what it guards.
 Link │ Open on the forge
-Group │ Status
-Button │ Show the tab's terminal

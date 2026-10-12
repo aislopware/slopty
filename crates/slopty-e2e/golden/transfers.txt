@@ -1,29 +1,20 @@
 Window │ drop-here
 Group │ Workspace
+Group │ drop-here
+Heading │ terminal drop-here
 Button │ Navigator
 Button │ Back
 Button │ Forward
+Tab │ drop-here
+Button │ Close tile
+Button │ Stop upload │ ↑ 0%
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
 Group │ Where
 Button │ drop-here
-TabList
-Tab │ drop-here
-Button │ Close tab
-Tab │ nc -l 47310
-Button │ Close tab
-Heading │ terminal drop-here
-Button │ Stop upload │ ↑ 0%
 Button │ Needs you
 Button │ More
-Navigation │ Projects
-Button │ Search
-Button │ New goal
-Button │ New agent
-Button │ drop-here
-Button │ e2e-worker, checking
-Group │ drop-here
 Group (focused)
 Terminal │ shell │ ~/drop-here %
-Group │ Status
-Button │ 1 port
-Button │ Show the tab's terminal
 Status │ Port 47310 is taken here; forwarded on 47311

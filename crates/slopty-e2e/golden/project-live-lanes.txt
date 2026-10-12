@@ -1,12 +1,10 @@
 Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Heading │ Projects
 Button │ Ship the project board
 Button │ Fold
@@ -21,44 +19,44 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
-TabList
+Group │ Orchestrator
+Heading │ Claude Code Orchestrator
+Button │ Back
+Button │ Forward
 Tab │ Orchestrator
 Image │ Claude Code
-Button │ Close tab
-Heading │ Claude Code Orchestrator
+Button │ Close tile
 Button │ Show terminal
 Button │ Board
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
 Button │ More
-Group │ Orchestrator
 Group │ Thread
+Status
+Status │ Claude Code. Nothing said yet; write below to start
 MultilineTextInput │ Message
-Button │ Add to the message
+Button │ Commit on repo
+Label │ Runs on studio
 Button │ Model, Claude
+Button │ Attach
 Button │ Send
 Group │ Project board │ Working 1, Up next 1 (focused)
 Heading
 Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
-RadioGroup │ Autonomy
-RadioButton │ Ask: an edit or a command the agent's rules do not allow asks you
-RadioButton │ Edits: edits in a task's worktree go without asking
-RadioButton │ Own: agents go on their own within their sandbox
-Group │ Review limit: 3
-Button │ Fewer tasks waiting on you
-Button │ More tasks waiting on you
+Button │ Project settings
 ProgressIndicator │ 0 of 2 merged │ 0%
 List │ Working
 Heading │ Working
 ListItem │ Read a pull request's checks, Working, studio · macOS, worktree-slopty-board-1, PR #42, clippy (macos) failed
-Image │ Working
-Label │ PR #42
 Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1
 Button │ Fix CI #1
+Label │ PR #42
+Label │ worktree-slopty-board-1
 Label │ clippy (macos) failed
 List │ Up next
 Heading │ Up next
 ListItem │ Draw the pipeline row, Up next
-Image │ Up next
-Group │ Status
-Button │ Show the tab's terminal

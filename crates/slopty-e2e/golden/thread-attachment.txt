@@ -1,27 +1,29 @@
 Window │ e2e-worker
 Group │ Workspace
 Navigation │ Navigator
-Button │ Back
-Button │ Forward
 Button │ Navigator
 Button │ Search
-Button │ New goal
 Button │ New agent
+Button │ New goal
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Do these steps in order, using the named tools, then reply "done". 1)…
 Image │ Claude Code
 Button │ Close tile
-TabList
+Group │ Do these steps in order, using the named tools, then reply "done". 1)…
+Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
+Button │ Back
+Button │ Forward
 Tab │ Do these steps in order, using the named tools, then reply "done". 1)…
 Image │ Claude Code
-Button │ Close tab
-Heading │ Claude Code Do these steps in order, using the named tools, then reply "done". 1)…
-Label │ home
+Button │ Close tile
 Button │ Show terminal
+Button │ Close tile
+Group │ Window
+Button │ Show the tab's terminal
+Button │ Needs you
 Button │ More
-Group │ Do these steps in order, using the named tools, then reply "done". 1)…
 Group │ Thread
 Article │ You: Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs…
 Button │ Copy message
@@ -38,9 +40,10 @@ Status │ Run a short background echo after a one-second sleep: Completed
 Status │ Attaching screen-recording.mov, 0%
 Button │ Remove screen-recording.mov
 MultilineTextInput │ Message (focused)
-Button │ Add to the message
-Button │ Model, Opus 5.5
+Button │ Commit on home
+Label │ 2 added, 0 removed
 Label │ Context 34% of 200k
+Label │ Runs on e2e-worker
+Button │ Model, Opus 5.5
+Button │ Attach
 Button │ Send
-Group │ Status
-Button │ Show the tab's terminal
