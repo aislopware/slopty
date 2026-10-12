@@ -5,8 +5,9 @@
 //!
 //! The one golden where a mark's size or centring shows, light and dark: a Claude Code agent
 //! waiting on the person, another at work, and a Codex, a pi and an `opencode` thread at rest,
-//! each its own tile, in the docked navigator. The agents are stand-ins: hooks handed to the
-//! worker's control socket for Claude Code, recordings for the rest
+//! each its own tile, in the docked navigator. Beside that navigator the component preview
+//! then makes the design-system pair, `design-system` and `design-system-dark`. The agents are
+//! stand-ins: hooks handed to the worker's control socket for Claude Code, recordings for the rest
 //! ([`crate::showcase::Threads`]).
 
 use slopty_e2e::{Command, Dump};
@@ -81,5 +82,39 @@ async fn each_agent_wears_its_mark_in_the_navigator() {
     let drv = &mut t.stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     golden(drv, &dir, "agent-marks-dark").await;
+
+    // The design system on one page beside this navigator, both themes: every surface over its
+    // samples and every control in its states, with a toast up (`crate::components`).
+    drv.ok(&Command::Resize { width: DESIGN.0, height: DESIGN.1 }).await.unwrap();
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        .await
+        .unwrap();
+    drv.type_text(PREVIEW).await.unwrap();
+    drv.wait_for("its line", STEP, |d| {
+        d.a11y.iter().any(|n| {
+            n.role == "ListBoxOption" && n.label.as_deref().is_some_and(|l| l.starts_with(PREVIEW))
+        })
+    })
+    .await
+    .unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    drv.wait_for("the preview beside the navigator", STEP, |d| {
+        d.a11y_node("Group", Some(PREVIEW)).is_some() && marked(d)
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "design-system-dark").await;
+    t.stack.set_appearance("light").unwrap();
+    let drv = &mut t.stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
+    golden(drv, &dir, "design-system").await;
     t.end().await;
 }
+
+/// The design-system pair's window: room for the navigator, the thread, the board and the
+/// review side by side, and the controls' column.
+const DESIGN: (f32, f32) = (1600.0, 1000.0);
+/// The page's name in the palette and to a screen reader.
+const PREVIEW: &str = "Component preview";

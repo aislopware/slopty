@@ -28,6 +28,7 @@ pub mod add_worker;
 pub mod authorship;
 pub mod browser;
 pub mod clipboard;
+pub mod components;
 pub mod conversation;
 pub mod file;
 pub mod folder;

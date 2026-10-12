@@ -30,6 +30,7 @@ workspace.toggle_own_window workspace::ToggleOwnWindow [ctrl-cmd-n] Workspace &&
 workspace.toggle_system_keys workspace::ToggleSystemKeys [] Workspace && !Screen
 workspace.toggle_curtain workspace::ToggleCurtain [] Workspace && !Screen
 workspace.toggle_navigator workspace::ToggleNavigator [cmd-b] Workspace && !Screen
+workspace.component_preview workspace::OpenComponentPreview [] Workspace && !Screen
 workspace.find terminal::Find [cmd-f] Workspace && !Screen
 workspace.focus_next workspace::FocusNext [ctrl-tab] Workspace
 workspace.focus_previous workspace::FocusPrev [ctrl-shift-tab] Workspace

@@ -1503,6 +1503,12 @@ const WATCH: &str = "Watch the agent's screen";
 async fn watch_line(drv: &mut Driver) {
     let started = tokio::time::Instant::now();
     loop {
+        // An empty thread's field is named by its question; it is "Message" once the turn came.
+        drv.wait_for("the thread's composer", STEP, |d| {
+            d.a11y_node("MultilineTextInput", Some("Message")).is_some()
+        })
+        .await
+        .unwrap();
         click(drv, "MultilineTextInput", "Message").await;
         drv.wait_for("the composer focused", STEP, |d| {
             d.a11y_node("MultilineTextInput", Some("Message")).is_some_and(|n| n.focused)

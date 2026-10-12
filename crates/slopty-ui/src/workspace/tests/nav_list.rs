@@ -371,9 +371,26 @@ fn a_scroll_of_the_navigator_composites_its_layer(cx: &mut TestAppContext) {
         scroll_list(&view, cx, -12.0);
     }
     cx.update(|window, _| window.reset_layout_stats());
-    for _ in 0..FRAMES {
+    let mut trail = Vec::new();
+    for frame in 0..FRAMES {
+        let before = cx.update(|window, _| window.layout_stats());
+        let started = std::time::Instant::now();
         scroll_list(&view, cx, -12.0);
+        let after = cx.update(|window, _| window.layout_stats());
+        trail.push(format!(
+            "{frame}: composited +{} repainted +{} rebuilt +{} views +{} in {:?}",
+            after.layer_frames_composited.saturating_sub(before.layer_frames_composited),
+            after.layer_frames_repainted.saturating_sub(before.layer_frames_repainted),
+            after.layer_rebuilds_for_input.saturating_sub(before.layer_rebuilds_for_input),
+            after.views_built.saturating_sub(before.views_built),
+            started.elapsed(),
+        ));
     }
     let stats = cx.update(|window, _| window.layout_stats());
-    assert_eq!((stats.layer_frames_composited, stats.layers_demoted), (FRAMES, 0));
+    assert_eq!(
+        (stats.layer_frames_composited, stats.layers_demoted),
+        (FRAMES, 0),
+        "{stats:#?}\n{}",
+        trail.join("\n")
+    );
 }

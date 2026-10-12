@@ -11616,7 +11616,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
     well hung off the words' edge (`kit::hung`, Delta's 9: the line 9 left of the edge, the
     lines on it), where four edges stood in 63 pt.
-  - Tests: `slopty-ui` `conversation::thread::tests::composing::{the_foot_spans_the_pane_with_equal_ends,
+  - **A thread opened over a terminal takes 60/40** (§2.6.1): beside or split from a focused
+    terminal, the thread gets `Share::THREAD`, the larger part, because it is what is read and
+    the terminal what is glanced at. Where the terminal's 40 would fall under the least pane's
+    520, the thread goes below it at the same share. Anything else still parts evenly.
+  - **The design system on one page: the component preview**, Zed's own. From the palette
+    ("Component preview") a page takes the panes' place, as the settings do, beside the
+    navigator and under the window's top line. Its surfaces are the real views over samples
+    written as the worker and the server send them, not pictures of them: a thread mid-turn
+    (the person's ask, prose, a plan, a read, an edit with its diff, a command, a notice, a
+    question, the composer and its foot), a board with a task in every lane, the turn's
+    review, and the settings' own form. Beside them the controls stand in each state they
+    take: every kind of button, icon buttons and toggles off and on, the send at rest and
+    armed, tick boxes, key caps, fields empty and filled, the filter, every state mark, every
+    lane's phase, the pills, progress going and failed, and a menu; a toast is up while the
+    page is. It is what the `design-system` golden pair renders (at 1600 by 1000, beside the
+    marks' navigator), so one picture shows whether a token or a component change reads
+    everywhere. It leaves by its Done and as the settings do, when the person turns to the
+    work. The tab bar is not on it, since the page stands in the panes' place; tabs have
+    their own goldens.
+  - Tests: `slopty-ui` `workspace::tests::agent_tile::a_thread_over_a_terminal_splits_60_40`,
+    `workspace::tests::component_page::the_component_preview_shows_every_surface_then_leaves`,
+    `conversation::thread::tests::composing::{the_foot_spans_the_pane_with_equal_ends,
     the_field_follows_the_last_turn}`,
     `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`,
     `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
@@ -11639,4 +11660,5 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the_filter_waits_hidden_until_search_its_keys_or_typing}`,
     `workspace::tests::nav_projects::an_unchosen_run_wears_its_bar_alone`,
     `workspace::tests::projects::{the_board_is_one_grouped_list,
-    a_ready_rows_title_and_project_keep_their_own_slots}`.
+    a_ready_rows_title_and_project_keep_their_own_slots}`. Goldens: `design-system` and
+    `design-system-dark` (`slopty-e2e` `app::marks`).

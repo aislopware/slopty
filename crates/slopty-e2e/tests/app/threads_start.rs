@@ -13,8 +13,9 @@ use slopty_e2e::{Driver, Dump};
 const STEP: Duration = Duration::from_secs(30);
 /// The palette's one start, as it begins.
 const LINE: &str = "New agent on\u{2026}";
-/// The new thread's composer, which writes its first message.
-const FIELD: &str = "Message";
+/// The new thread's composer, which writes its first message: named by the question it asks,
+/// "What should Claude Code do in ~?".
+const FIELD: &str = "What should Claude Code do";
 
 /// Wait until the server says the worker has Claude Code: the palette offers what the
 /// worker's facts list, and a worker lists it once its facts are gathered.
@@ -93,7 +94,9 @@ async fn a_palette_start_opens_the_agents_terminal_on_its_thread() {
     drv.wait_for("the palette closed", STEP, |d| !palette_up(d)).await.unwrap();
     drv.wait_for("the first message's field", STEP, |d| {
         d.a11y.iter().any(|n| {
-            n.role == "MultilineTextInput" && n.focused && n.label.as_deref() == Some(FIELD)
+            n.role == "MultilineTextInput"
+                && n.focused
+                && n.label.as_deref().is_some_and(|l| l.starts_with(FIELD))
         })
     })
     .await

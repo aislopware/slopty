@@ -99,6 +99,8 @@ actions!(
         ToggleCurtain,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
+        /// Show every component of the design system in its states, in the panes' place.
+        OpenComponentPreview,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.
         FocusNext,
         /// Move the keyboard focus to the previous control.
@@ -461,6 +463,7 @@ pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
         w(crate::screen::TRACKPAD_MODE, Box::new(crate::screen::ToggleTrackpad)),
         w(crate::screen::REMOTE_GESTURES, Box::new(crate::screen::ToggleRemoteGestures)),
         w("Show or hide the navigator", Box::new(ToggleNavigator)),
+        w(crate::components::COMPONENT_PREVIEW, Box::new(OpenComponentPreview)),
         w("Name this tile", Box::new(RenameItem)),
         w(super::project_search::SEARCH_IN_FILES, Box::new(SearchInFiles)),
         w("Forwarded ports", Box::new(ListPorts)),

@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{App, Context, SharedString, WeakEntity, Window};
 use slopty_client::layout::tiling::TabId;
-use slopty_client::layout::{Drop, GroupKey, Pos, Side, Tab, TileRef, WorkerKey};
+use slopty_client::layout::{Drop, GroupKey, Pos, Share, Side, Tab, TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::RequestId;
 use slopty_proto::items::ItemKind;
@@ -197,12 +197,15 @@ impl WorkspaceView {
     /// show, in a tab of its own project.
     pub(super) fn open_as(&mut self, tile: TileRef, opening: Opening) {
         let home = self.home_here(tile);
+        // A thread opened over a terminal takes the larger share, 60/40: it is what is read,
+        // the terminal what is glanced at (`.research/warp-composition-2026-10-12.md` §2.6.1).
+        let share = if self.thread_over_terminal(tile) { Share::THREAD } else { Share::Even };
         match opening {
-            Opening::Beside => self.layout.open_beside(tile, &home),
+            Opening::Beside => self.layout.open_beside_with(tile, &home, share),
             Opening::Tab => {
                 self.layout.new_tab(tile, &home);
             }
-            Opening::Split(side) => self.layout.split_focused(tile, side, &home),
+            Opening::Split(side) => self.layout.split_focused_with(tile, side, &home, share),
             Opening::Terminal => {
                 if !self.layout.set_terminal(tile) {
                     self.layout.new_tab(tile, &home);
@@ -223,6 +226,16 @@ impl WorkspaceView {
             }
             Opening::Inline => self.inline_arrived(tile),
         }
+    }
+
+    /// Whether `tile` is an agent's thread opening while a terminal has the focus.
+    fn thread_over_terminal(&self, tile: TileRef) -> bool {
+        let thread = self.item(tile).is_some_and(|i| matches!(i.kind, ItemKind::Thread { .. }));
+        let terminal = self
+            .focused()
+            .and_then(|f| self.item(f))
+            .is_some_and(|i| matches!(i.kind, ItemKind::Terminal { .. }));
+        thread && terminal
     }
 
     /// The project what is opened here goes to: the one on show, else `tile`'s own.

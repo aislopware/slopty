@@ -48,6 +48,7 @@ mod browsers;
 mod clone_here;
 mod cluster;
 mod commands;
+mod component_page;
 mod context_menus;
 mod desktop;
 mod drafts;
@@ -944,6 +945,9 @@ pub struct WorkspaceView {
     approvals: approvals::Approvals,
     /// The settings, as a page in the panes' place while they are up ([`settings_page`]).
     settings: Option<Entity<crate::settings_editor::SettingsEditor>>,
+    /// The component preview, as a page in the panes' place while it is up
+    /// ([`component_page`]).
+    components: Option<Entity<crate::components::ComponentPreview>>,
     /// Agents' turns under way, and the ones that ended unread.
     turns: turns::Turns,
     /// The app's rows in the "…" menu.
@@ -1225,6 +1229,7 @@ impl WorkspaceView {
             machine_remove: None,
             approvals: approvals::Approvals::default(),
             settings: None,
+            components: None,
             turns: turns::Turns::default(),
             more_entries: Vec::new(),
             server_entries: Vec::new(),
@@ -1651,6 +1656,9 @@ impl WorkspaceView {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         self.set_threads_theme(&theme, cx);
+        if let Some(page) = &self.components {
+            page.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
+        }
         for view in self.projects.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
@@ -2227,6 +2235,7 @@ impl gpui::Render for WorkspaceView {
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
+            .on_action(cx.listener(Self::open_component_preview))
             .child(Self::measure_width(cx))
             .child(Self::render_follow(cx))
             .child(self.render_frame(area, window, cx))
@@ -2331,7 +2340,7 @@ impl WorkspaceView {
             None => (None, None, None),
         };
         // The settings take the panes' place.
-        let page = self.render_settings_page();
+        let page = self.render_settings_page().or_else(|| self.render_component_page());
         let area = page.unwrap_or(area);
         // The panes meet the frame's edges and each other on the one ground; on a Mac and an
         // iPad their top tab bars are the window's top line, under the safe area's top.
@@ -2375,7 +2384,7 @@ impl WorkspaceView {
     pub(super) fn own_top_line(&self) -> bool {
         self.phone
             || self.workers.is_empty()
-            || self.settings.is_some()
+            || self.paged()
             || self.layout.shown_tab().is_none()
             || self.layout.frame().panes.is_empty()
     }

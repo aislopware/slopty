@@ -694,3 +694,42 @@ fn a_claude_thread_where_policy_keeps_the_hooks_off_says_so(cx: &mut TestAppCont
     settle(cx);
     assert_eq!(shown(cx), 0, "from the thread too");
 }
+
+/// A thread opened while a terminal has the focus takes the larger share, 60/40: it is what is
+/// read, the terminal what is glanced at (`.research/warp-composition-2026-10-12.md` §2.6.1).
+#[gpui::test]
+fn a_thread_over_a_terminal_splits_60_40(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    // Room for both side by side: the terminal's 40 % above the least pane's width.
+    cx.simulate_resize(size(px(2000.0), px(1000.0)));
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    settle(cx);
+    let tab = pos_of(&view, cx, shell).tab;
+    let thread = arrives(&view, cx, &studio, ItemKind::Thread { thread: ThreadId::new() }, 2);
+    // An arrived item waits in a background tab; this one is opened from the terminal instead.
+    view.update_in(cx, |v, _w, cx| {
+        v.layout.remove(thread);
+        v.focus_tile(shell, cx);
+    });
+    settle(cx);
+    view.update_in(cx, |v, _w, cx| {
+        v.open_as(thread, tabs::Opening::Beside);
+        v.layout_touched(cx);
+    });
+    settle(cx);
+    assert_eq!(pos_of(&view, cx, thread).tab, tab, "in the terminal's tab");
+    let share = |cx: &mut VisualTestContext, a: TileRef, b: TileRef| {
+        let (a, b) = (
+            cx.debug_bounds(selector("item", a.item)).expect("the first"),
+            cx.debug_bounds(selector("item", b.item)).expect("the second"),
+        );
+        let beside = (a.top() - b.top()).abs() < px(1.0);
+        let (a, b) =
+            if beside { (a.size.width, b.size.width) } else { (a.size.height, b.size.height) };
+        f32::from(a) / f32::from(b)
+    };
+    let ratio = share(cx, thread, shell);
+    assert!((1.3..2.2).contains(&ratio), "the thread the larger share: {ratio}");
+}

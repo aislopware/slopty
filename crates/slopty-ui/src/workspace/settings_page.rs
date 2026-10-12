@@ -38,11 +38,13 @@ impl WorkspaceView {
         self.settings.as_ref()
     }
 
-    /// The person turned to the work: the settings page, if up, closes the way its Back does.
-    pub(super) fn leave_settings(&self, cx: &mut Context<Self>) {
+    /// The person turned to the work: the settings page, if up, closes the way its Back does,
+    /// and the component preview leaves.
+    pub(super) fn leave_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(editor) = &self.settings {
             editor.update(cx, |editor, cx| editor.close(cx));
         }
+        self.leave_component_preview(cx);
     }
 
     /// Tell the page whether the navigator draws its section list: only a docked one does.

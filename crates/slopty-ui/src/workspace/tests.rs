@@ -1645,6 +1645,7 @@ mod away;
 mod bars;
 mod bodies;
 mod clone_start;
+mod component_page;
 mod context_menus;
 mod cwd;
 mod desktop;

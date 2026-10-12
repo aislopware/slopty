@@ -83,7 +83,7 @@ impl WorkspaceView {
         let safe = window.insets().effective();
         let has_workers = !self.workers.is_empty();
         let docked = self.nav.drawn == Some(Mode::Docked);
-        let tabbed = has_workers && self.layout.shown_tab().is_some() && self.settings.is_none();
+        let tabbed = has_workers && self.layout.shown_tab().is_some() && !self.paged();
         let toggle = tabbed.then(|| self.terminal_toggle(cx));
         let divider = tabbed.then(|| {
             div().flex_none().w(kit::HAIR).h(px(theme.typography.ui_size)).bg(hsla(s.stroke))
