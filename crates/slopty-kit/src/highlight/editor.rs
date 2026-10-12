@@ -9,6 +9,13 @@
 //! from each edited line down to the first line after it that starts in the state it started
 //! in before, where everything below is as it was, and its lines land in the lists unless a
 //! newer edit has overtaken it.
+//!
+//! A parse lands in steps, so a long file shows coloured where the person looks within a frame
+//! or two rather than after the whole text: first the rows on show (the last range the editor
+//! styled), then [`CHUNK`] rows at a time down the text, the editor drawn again only when a step
+//! reaches the rows on show. Rows on show past where the parse has reached are coloured from a
+//! guess, parsed alone from the grammar's first state, until the parse reaches them and puts
+//! the true colours in their place.
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -24,6 +31,12 @@ use gpui_kit::component::input::{
 use slopty_theme::Theme;
 
 use super::{LineParser, LineState, Span, Syntax, Token};
+
+/// How many rows a parse step colours before it lands and the next begins.
+///
+/// About 15 ms of a release build's parse at 80–160 µs a row (`docs/MEASUREMENTS.md`), so the
+/// rows on show are never more than a step from their turn.
+pub const CHUNK: usize = 128;
 
 /// How long typing must pause before the text is parsed again. Below a keystroke's gap at
 /// speed, so colours catch up between words, not between letters.
@@ -55,6 +68,60 @@ struct Parsed {
     generation: u64,
     /// A parse has landed: colours show, and the next waits for typing to pause.
     landed: bool,
+    /// The rows on show past where the parse had reached, parsed alone from the grammar's
+    /// first state: their first row and each row's spans. Drawn where a row has no spans of
+    /// its own yet; dropped by the next edit.
+    guess: Option<(usize, Vec<Arc<[Span]>>)>,
+}
+
+impl Parsed {
+    /// The first row the parse has not coloured: the text's end once it has all.
+    fn frontier(&self) -> usize {
+        self.lines.iter().position(Option::is_none).unwrap_or(self.lines.len())
+    }
+
+    /// A row's spans: its own once parsed, else the guess's.
+    fn spans(&self, row: usize) -> Option<&Arc<[Span]>> {
+        self.lines.get(row).and_then(Option::as_ref).or_else(|| {
+            let (first, guessed) = self.guess.as_ref()?;
+            guessed.get(row.checked_sub(*first)?)
+        })
+    }
+}
+
+/// What a parse does next.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Step {
+    /// Guess the rows on show, which lie past where the parse has reached.
+    Guess(Range<usize>),
+    /// Parse on down the text, this many rows at most.
+    Parse(usize),
+}
+
+/// The next step of a parse that has reached `frontier`, the editor showing rows `seen`:
+/// the rows on show first. Rows on show the parse reaches in a step are parsed to their end
+/// in one; rows past it are guessed once, unless guessed already (`guessed`).
+fn next_step(frontier: usize, seen: Option<Range<usize>>, guessed: Option<&Range<usize>>) -> Step {
+    match seen.filter(|seen| seen.end > frontier && !seen.is_empty()) {
+        Some(seen) if seen.start <= frontier.saturating_add(CHUNK) => {
+            Step::Parse(seen.end.saturating_sub(frontier).max(CHUNK))
+        }
+        Some(seen) if guessed.is_none_or(|g| g.start > seen.start || g.end < seen.end) => {
+            Step::Guess(seen)
+        }
+        _ => Step::Parse(CHUNK),
+    }
+}
+
+/// Rows `rows` of `text` parsed alone, from the grammar's first state: a guess at their colours
+/// until the parse reaches them.
+fn guess(text: &Rope, syntax: Syntax, rows: Range<usize>) -> Vec<Arc<[Span]>> {
+    let parser = LineParser::new(syntax);
+    let total = text.lines_len();
+    let mut state = parser.start();
+    rows.take_while(|row| *row < total)
+        .map(|row| Arc::from(parser.line(&line_text(text, row, total), &mut state)))
+        .collect()
 }
 
 /// What one parse coloured: each line it parsed, with its spans and the state the line
@@ -68,6 +135,8 @@ pub struct EditorHighlighter {
     /// The text as of the last edit, for mapping byte ranges to lines.
     text: Rope,
     parsed: Rc<RefCell<Parsed>>,
+    /// The rows the editor last styled: the rows on show, which a parse colours first.
+    seen: Rc<std::cell::Cell<Option<(usize, usize)>>>,
     /// The parse waiting out [`SETTLE`] or running; dropped (cancelled) by the next edit.
     parsing: Option<Task<()>>,
 }
@@ -82,7 +151,14 @@ impl EditorHighlighter {
     /// Nothing parsed yet: plain text until the first parse lands.
     #[must_use]
     pub fn new(syntax: Syntax, theme: Theme) -> Self {
-        Self { syntax, theme, text: Rope::new(), parsed: Rc::default(), parsing: None }
+        Self {
+            syntax,
+            theme,
+            text: Rope::new(),
+            parsed: Rc::default(),
+            seen: Rc::default(),
+            parsing: None,
+        }
     }
 
     /// The style of one span in this theme; the default style for plain text.
@@ -109,6 +185,7 @@ fn splice(parsed: &mut Parsed, edit: &InputEdit) {
     let new_rows =
         edit.new_end_position.row.saturating_sub(edit.start_position.row).saturating_add(1);
     lines.splice(start..old_end, std::iter::repeat_n(None, new_rows));
+    parsed.guess = None;
     let first = start.saturating_add(1).min(starts.len());
     let last = old_end.max(first).min(starts.len());
     starts.splice(first..last, std::iter::repeat_n(None, new_rows.saturating_sub(1)));
@@ -129,13 +206,15 @@ const RECENT_STATES: usize = 64;
 
 /// Parse `text` again where `lines` has a line not parsed yet, from that line (or the nearest
 /// line above it whose start is known) down to the first line after it that is parsed and
-/// starts in the state it started in before (`starts`): what follows is as it was.
+/// starts in the state it started in before (`starts`): what follows is as it was. At most
+/// `budget` rows: whether rows are left to parse once it is spent.
 fn reparse(
     text: &Rope,
     syntax: Syntax,
     lines: &[Option<Arc<[Span]>>],
     starts: &[Option<Arc<LineState>>],
-) -> Parse {
+    budget: usize,
+) -> (Parse, bool) {
     let parser = LineParser::new(syntax);
     let rows = text.lines_len();
     let parsed = |row: usize| lines.get(row).is_some_and(Option::is_some);
@@ -162,6 +241,9 @@ fn reparse(
             known(from).filter(|_| from > 0).map_or_else(|| parser.start(), |s| (**s).clone());
         row = from;
         loop {
+            if out.len() >= budget {
+                return (out, true);
+            }
             let spans = parser.line(&line_text(text, row, rows), &mut state);
             out.push((row, Arc::from(spans), keep(&state)));
             row = row.saturating_add(1);
@@ -170,7 +252,7 @@ fn reparse(
             }
         }
     }
-    out
+    (out, false)
 }
 
 /// A parse's lines put in the lists it was made from.
@@ -204,11 +286,17 @@ impl InputHighlighter for EditorHighlighter {
             let mut parsed = self.parsed.borrow_mut();
             if let Some(edit) = &edit {
                 splice(&mut parsed, edit);
+                // One entry a row of the text, whatever the edit said: a parse that steps
+                // down the text stops where the lists end.
+                let rows = text.lines_len();
+                parsed.lines.resize(rows, None);
+                parsed.starts.resize(rows, None);
             } else {
                 // The text set whole, nothing of it known.
                 let rows = text.lines_len();
                 parsed.lines = vec![None; rows];
                 parsed.starts = vec![None; rows];
+                parsed.guess = None;
             }
             parsed.generation = parsed.generation.wrapping_add(1);
             // Until colours show, the first parse starts at once; after that an edit waits
@@ -218,25 +306,67 @@ impl InputHighlighter for EditorHighlighter {
         let syntax = self.syntax;
         let rope = text.clone();
         let shared = Rc::clone(&self.parsed);
+        let seen = Rc::clone(&self.seen);
         let executor = cx.background_executor().clone();
         self.parsing = Some(cx.spawn(async move |editor, cx| {
             if let Some(settle) = settle {
                 executor.timer(settle).await;
             }
-            let (lines, starts) = {
-                let parsed = shared.borrow();
-                (parsed.lines.clone(), parsed.starts.clone())
-            };
-            let parse =
-                executor.spawn(async move { reparse(&rope, syntax, &lines, &starts) }).await;
-            {
-                let mut parsed = shared.borrow_mut();
-                if parsed.generation != generation {
+            loop {
+                let rows = rope.lines_len();
+                let shown = seen.get().map(|(start, end)| start.min(rows)..end.min(rows));
+                let (step, lines, starts, frontier) = {
+                    let parsed = shared.borrow();
+                    let guessed = parsed
+                        .guess
+                        .as_ref()
+                        .map(|(first, rows)| *first..first.saturating_add(rows.len()));
+                    let frontier = parsed.frontier();
+                    let step = next_step(frontier, shown.clone(), guessed.as_ref());
+                    let lists = matches!(step, Step::Parse(_))
+                        .then(|| (parsed.lines.clone(), parsed.starts.clone()));
+                    let (lines, starts) = lists.unwrap_or_default();
+                    (step, lines, starts, frontier)
+                };
+                let rope = rope.clone();
+                let more = match step {
+                    Step::Guess(rows) => {
+                        let first = rows.start;
+                        let guessed =
+                            executor.spawn(async move { guess(&rope, syntax, rows) }).await;
+                        let mut parsed = shared.borrow_mut();
+                        if parsed.generation != generation {
+                            return;
+                        }
+                        parsed.guess = Some((first, guessed));
+                        true
+                    }
+                    Step::Parse(budget) => {
+                        let (parse, more) = executor
+                            .spawn(async move { reparse(&rope, syntax, &lines, &starts, budget) })
+                            .await;
+                        // The editor draws again only for colours it shows.
+                        let reaches = shown
+                            .as_ref()
+                            .is_none_or(|shown| parse.iter().any(|(row, ..)| shown.contains(row)));
+                        let mut parsed = shared.borrow_mut();
+                        if parsed.generation != generation {
+                            return;
+                        }
+                        land(&mut parsed, parse);
+                        // A step that left the parse where it was has nothing more to give.
+                        let more = more && parsed.frontier() > frontier;
+                        if !reaches && more {
+                            continue;
+                        }
+                        more
+                    }
+                };
+                let _gone = editor.update(cx, |_, cx| cx.notify());
+                if !more {
                     return;
                 }
-                land(&mut parsed, parse);
             }
-            let _gone = editor.update(cx, |_, cx| cx.notify());
         }));
     }
 
@@ -263,11 +393,13 @@ impl InputHighlighter for EditorHighlighter {
             }
         };
         let mut row = self.text.offset_to_point(range.start.min(self.text.len())).row;
+        let last = self.text.offset_to_point(end).row;
+        self.seen.set(Some((row, last.saturating_add(1))));
         let mut at = self.text.line_start_offset(row);
         while at < end {
             let line_end = self.text.line_end_offset(row);
             let mut from = at;
-            if let Some(Some(line)) = parsed.lines.get(row) {
+            if let Some(line) = parsed.spans(row) {
                 for span in line.iter() {
                     let to = from.saturating_add(span.len).min(line_end);
                     if to <= from {
@@ -300,7 +432,7 @@ impl InputHighlighter for EditorHighlighter {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::component::input::Point;
+    use gpui_kit::component::input::{EditorState, Point};
 
     use super::*;
 
@@ -329,7 +461,7 @@ mod tests {
         let rows = rope.lines_len();
         let mut parsed =
             Parsed { lines: vec![None; rows], starts: vec![None; rows], ..Parsed::default() };
-        let parse = reparse(&rope, syntax, &parsed.lines, &parsed.starts);
+        let (parse, _) = reparse(&rope, syntax, &parsed.lines, &parsed.starts, usize::MAX);
         land(&mut parsed, parse);
         parsed
     }
@@ -403,7 +535,7 @@ mod tests {
             text = next;
             splice(&mut lists, &edit);
             let rope = Rope::from(text.as_str());
-            let parse = reparse(&rope, syntax, &lists.lines, &lists.starts);
+            let (parse, _) = reparse(&rope, syntax, &lists.lines, &lists.starts, usize::MAX);
             let rows = parse.len();
             land(&mut lists, parse);
             assert_eq!(
@@ -442,7 +574,7 @@ mod tests {
             let (lines, starts) = (lists.lines.clone(), lists.starts.clone());
             let mut after = Parsed { lines, starts, ..Parsed::default() };
             splice(&mut after, &edit);
-            let parse = reparse(&rope, syntax, &after.lines, &after.starts);
+            let (parse, _) = reparse(&rope, syntax, &after.lines, &after.starts, usize::MAX);
             rows = parse.len();
             std::hint::black_box(parse);
         }
@@ -531,6 +663,110 @@ mod tests {
         let keystroke = t1.elapsed() / rounds;
         println!("60 rows styled {frame:?} a frame; a newline spliced {keystroke:?}");
         Ok(())
+    }
+
+    /// The rows on show come first: in reach of the parse they are parsed to their end in one
+    /// step; past it they are guessed once, then the parse goes on down the text.
+    #[test]
+    fn the_rows_on_show_lead_the_parse() {
+        let far = CHUNK.saturating_mul(4);
+        let screen = far..far.saturating_add(60);
+        assert_eq!(next_step(0, None, None), Step::Parse(CHUNK), "nothing on show");
+        assert_eq!(next_step(0, Some(0..60), None), Step::Parse(CHUNK), "the top, in one step");
+        let deep = CHUNK.saturating_add(40);
+        assert_eq!(next_step(0, Some(40..deep), None), Step::Parse(deep), "to their end");
+        assert_eq!(next_step(0, Some(screen.clone()), None), Step::Guess(screen.clone()));
+        let guessed = screen.clone();
+        assert_eq!(next_step(0, Some(screen.clone()), Some(&guessed)), Step::Parse(CHUNK));
+        assert_eq!(next_step(screen.end, Some(screen), None), Step::Parse(CHUNK), "parsed");
+    }
+
+    /// `rows` lines of Rust, each a keyword, a string and a comment.
+    fn source(rows: usize) -> String {
+        use std::fmt::Write as _;
+        (0..rows).fold(String::new(), |mut text, n| {
+            let _infallible = writeln!(text, "let v{n} = \"{n}\"; // {n}");
+            text
+        })
+    }
+
+    /// The highlighter of an editor in a window, its text set whole and the rows `seen` on
+    /// show; ticks the executor until the rows on show are coloured, at most `ticks` times.
+    /// How many ticks it took and how long, or `None` when it did not get there.
+    fn colour_on_show(
+        cx: &mut gpui::TestAppContext,
+        text: &str,
+        seen: Range<usize>,
+        ticks: usize,
+    ) -> (EditorHighlighter, Option<(usize, Duration)>) {
+        let syntax = Syntax::for_token("rust").expect("rust");
+        let (state, cx) = cx.add_window_view(EditorState::new);
+        let mut h = EditorHighlighter::new(syntax, Theme::default());
+        let rope = Rope::from(text);
+        h.text = rope.clone();
+        let shown =
+            rope.line_start_offset(seen.start)..rope.line_end_offset(seen.end.saturating_sub(1));
+        // The editor styles the rows on show as it paints, before the parse runs.
+        std::hint::black_box(h.styles(&shown, &Unstyled));
+        let t = std::time::Instant::now();
+        state.update_in(cx, |_, window, cx| h.update(None, &rope, false, window, cx));
+        let coloured = |h: &EditorHighlighter| {
+            h.styles(&shown, &Unstyled).iter().any(|(_, style)| style.color.is_some())
+        };
+        for tick in 0..ticks {
+            if coloured(&h) {
+                return (h, Some((tick, t.elapsed())));
+            }
+            if !cx.executor().tick() {
+                break;
+            }
+        }
+        (h, None)
+    }
+
+    /// Rows on show far down a long text are coloured from a guess a few steps after the text
+    /// is set, long before the parse reaches them, and the parse then puts the colours a whole
+    /// parse gives in their place.
+    #[gpui::test]
+    fn rows_on_show_far_down_colour_before_the_parse_reaches_them(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let rows = CHUNK.saturating_mul(12);
+        let text = source(rows);
+        let top = CHUNK.saturating_mul(10);
+        let seen = top..top.saturating_add(40);
+        let (h, got) = colour_on_show(cx, &text, seen.clone(), 50);
+        let (ticks, _) = got.expect("the rows on show coloured within 50 ticks");
+        let frontier = h.parsed.borrow().frontier();
+        assert!(frontier < seen.start, "guessed at tick {ticks}, the parse at row {frontier}");
+        cx.run_until_parked();
+        let parsed = h.parsed.borrow();
+        assert_eq!(parsed.frontier(), parsed.lines.len(), "then the whole text");
+        assert!(parsed.lines.len() > rows.saturating_sub(1), "{} rows", parsed.lines.len());
+        let syntax = Syntax::for_token("rust").expect("rust");
+        assert_eq!(colours(&parsed), super::super::spans(&text, syntax), "as a whole parse");
+    }
+
+    /// The time to a coloured viewport in a 20 000-line Rust file, before (the whole text
+    /// parsed, then landed) and now (the rows on show first), at the top and in the middle.
+    /// Run by hand; `docs/MEASUREMENTS.md` has the numbers.
+    #[gpui::test]
+    #[ignore = "timing, run by hand with --ignored --nocapture"]
+    fn timing_of_a_coloured_viewport(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_kit::init);
+        let syntax = Syntax::for_token("rust").expect("rust");
+        let one = include_str!("../../../slopty-ui/src/workspace.rs");
+        let text: String = one.lines().cycle().take(20_000).collect::<Vec<_>>().join("\n");
+        let t = std::time::Instant::now();
+        std::hint::black_box(parsed(&text, syntax));
+        let before = t.elapsed();
+        for (place, seen) in [("the top", 0..60), ("the middle", 10_000..10_060)] {
+            let (_h, got) = colour_on_show(cx, &text, seen, 10_000);
+            let (ticks, after) = got.expect("coloured");
+            println!(
+                "MEASURE a coloured viewport at {place} of 20 000 lines: before {before:?}, \
+                 now {after:?} ({ticks} ticks)"
+            );
+        }
     }
 
     #[test]

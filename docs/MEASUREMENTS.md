@@ -16580,3 +16580,35 @@ Every chrome glyph (87 Carbon files on the 32 grid) read from its markup and dra
 ```sh
 cargo test -p slopty-kit --lib icons::glyphs::tests::a_glyph_is_cheap_to_draw_on_demand -- --nocapture
 ```
+
+## 2026-10-12 — a long file coloured where the person looks
+
+The time from a 20 000-line Rust file's text reaching the file tile's highlighter to the rows
+on show being coloured, at the top of the file and in its middle (rows 10 000 to 10 060).
+Before, the first parse ran over the whole text and landed once, so nothing was coloured until
+all of it was (the "before" column: that whole parse, the same at either place). Now the rows on
+show lead (`highlight::editor::next_step`): within reach of the parse they are parsed to their
+end in one step, past it they are guessed from the grammar's first state, and the rest follows
+in steps of `CHUNK` (128) rows, the editor drawn again only for steps it shows. The test drives
+the highlighter of a real editor in a test window and ticks the executor until the rows on show
+are coloured. Release build, a macos-26 runner (Apple M1, virtual, 3 cores, load average 16 to
+19), three runs (run 38186051433).
+
+| | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| before: the whole text parsed, then landed | 1 976 ms | 1 610 ms | 1 690 ms |
+| now, at the top | 9.9 ms | 9.6 ms | 6.8 ms |
+| now, in the middle | 8.8 ms | 13.2 ms | 8.0 ms |
+
+- 160 to 240 times sooner, and about a frame at 120 Hz: the first step at the top is the 128
+  rows of `CHUNK`, the middle's guess its 60 rows, each 3 ticks of the executor.
+- A guessed row can be wrong where the text above it leaves the grammar inside a block comment
+  or a string; the parse puts the true colours in its place when it reaches the row. The test
+  `rows_on_show_far_down_colour_before_the_parse_reaches_them` holds that the colours end as a
+  whole parse gives them.
+- The whole parse costs no more in all: the steps copy the line lists (one pointer a row) and
+  find where they left off, microseconds against a step's milliseconds.
+
+```sh
+cargo test -p slopty-kit --release --lib -- --ignored --nocapture timing_of_a_coloured_viewport
+```

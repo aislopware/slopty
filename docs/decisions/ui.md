@@ -10953,3 +10953,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   in `error` over its head's wash, and no header of the tile's own. Lilex's cost on the frame
   path is measured (MEASUREMENTS, "the terminal face: Lilex against JetBrains Mono"); the
   thumb's width changes no draw. Test: `terminal::element::tests::the_scrollbar_thumb_tracks_the_viewport_and_maps_back`.
+
+- ✅ **A long file is coloured where the person looks first** (2026-10-12). The file tile's
+  first parse ran over the whole text before any colour landed: 1.6 to 2.0 s on a 20 000-line
+  file on a runner, with the rows on show plain meanwhile. Now the rows the editor last styled
+  lead the parse: in its reach they are parsed to their end in one step, past it they are
+  guessed alone from the grammar's first state until the parse reaches them, and the rest of the
+  text follows in steps of 128 rows that land as they finish, the editor drawn again only for a
+  step it shows. The rows on show are coloured in 7 to 13 ms, at the top or the middle
+  (MEASUREMENTS, "a long file coloured where the person looks"). A step that leaves the parse
+  where it was ends it, so lists that disagree with the text can never spin it. Tests:
+  `highlight::editor::tests::{the_rows_on_show_lead_the_parse,
+  rows_on_show_far_down_colour_before_the_parse_reaches_them}`.
