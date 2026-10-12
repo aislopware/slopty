@@ -24,11 +24,14 @@ use slopty_kit::icons::Mark;
 use slopty_kit::kit::{self, Pace};
 use slopty_theme::{Curve, Theme, stroke};
 
-/// The widest a tab grows with its title: Zed's tabs end near 240.
-pub(super) const TAB_SLOT: f32 = 240.0;
+/// The widest a tab grows with its title. A tab is as wide as what it says, as Zed's are, so a
+/// thread's sentence of a title is not cut while the bar has room; past this it fades
+/// (`.research/warp-composition-2026-10-12.md` §2.2.4).
+pub(super) const TAB_SLOT: f32 = 480.0;
 
-/// The least a tab gives way to while the row runs out of room.
-pub(super) const TAB_FLOOR: f32 = 120.0;
+/// The least a tab gives way to while the row runs out of room, and the least a short title's
+/// tab is: Warp's 64.
+pub(super) const TAB_FLOOR: f32 = 64.0;
 
 /// The gap between a tab's lead, its title and what follows: Zed's tab's `gap_1`.
 pub(super) const TAB_GAP: f32 = 4.0;

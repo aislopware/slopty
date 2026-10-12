@@ -1715,17 +1715,17 @@ impl WorkspaceView {
                         || (matches!(st, Status::Working) && !screen)
                         || (matches!(st, Status::Running) && agent)
                 });
-                // A file's tab wears no glyph (Zed's `tabs.file_icons: false`): its name's
-                // extension says its kind. On a Mac the shown file's tab leads with its proxy,
-                // dragged out as a document window's title icon is.
+                // Every tab leads with its kind, a file's too, so a bar of tabs reads as one
+                // (`.research/warp-composition-2026-10-12.md` §2.6.2). On a Mac the shown file's
+                // glyph is its proxy, dragged out as a document window's title icon is.
                 let file = matches!(item.kind, ItemKind::File { .. });
                 let lead = match state {
                     Some(st) => Some(self.tab_state(item, st, shown).into_any_element()),
-                    None if file => (shown && cfg!(target_os = "macos")).then(|| {
+                    None if file && shown && cfg!(target_os = "macos") => {
                         let glyph = tab_look::lead(theme, self.kind_glyph(item), shown)
                             .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
-                        self.file_proxy(item, tab, glyph.into_any_element(), cx)
-                    }),
+                        Some(self.file_proxy(item, tab, glyph.into_any_element(), cx))
+                    }
                     None => Some(
                         tab_look::lead(theme, self.kind_glyph(item), shown)
                             .debug_selector(move || format!("tab-slot-{}", id.as_uuid()))

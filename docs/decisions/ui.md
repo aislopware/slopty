@@ -11083,8 +11083,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A file wears its kind, not its language**: code, Markdown, a picture or sound, an
     archive, a binary, else the plain document (`file_types::glyph`). Material's 59 logos and
     the SVG renderer path that masked them went; `Mark::File` went with them. A file's tab
-    wears no glyph, as Zed's tabs do, but on a Mac the shown one leads with its proxy, which
-    drags the file out as a document window's title icon does.
+    wore no glyph, as Zed's tabs do (superseded: every tab leads with its kind, "Balance,
+    after the person's five spots"); on a Mac the shown one's glyph is its proxy, which drags
+    the file out as a document window's title icon does.
   - **Ink**: leads wear `icon_muted` at rest and `icon` when chosen, a state its own fill. The
     dark `icon_muted` rose from Zed's #7E879A to #9AA2B1, so a glyph carries at least 0.70 of
     its words' tone mass on both planes in both appearances (0.81 dark, 0.82 light).
@@ -11595,6 +11596,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     of its own, ← stands on the rows' words' edge, one edge down the column. Docked, the list
     and its head already take the navigator's place and header in the top line; a window too
     narrow to dock keeps the bar over the page and its list, as every page there does.
+  - **A tab is as wide as what it says, and every tab leads with its kind** (§2.2.4, §2.6.2):
+    from Warp's 64 up to 480, shrinking only as the bar runs out of room, so a thread's title
+    is not cut at a fixed 240 beside an empty bar and "NOTES.md" is not a 120 cell. A file's
+    tab now wears its kind too (it wore none, as Zed's do): one bar of tabs reads as one, and
+    on a Mac the shown file's glyph is still its proxy.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11606,6 +11612,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
     `workspace::tests::palette::the_empty_page_has_one_edge`,
     `workspace::tests::settings_page::the_settings_keep_one_rhythm`,
+    `workspace::tests::bodies::a_files_tab_wears_its_kind_and_its_proxy`,
     `workspace::tests::projects::{a_card_draws_its_pipeline_once_its_work_is_on_its_way,
     the_bar_fills_only_with_what_merged}`,
     `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;

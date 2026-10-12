@@ -441,11 +441,10 @@ fn a_window_refused_for_screen_recording_offers_the_restart(cx: &mut TestAppCont
     assert_eq!(verb, Verb::RestartWorker { worker });
 }
 
-/// A file's tab wears no glyph, its name's extension saying its kind, as Zed's tabs do; on a
-/// Mac the shown one leads with its proxy, which drags the file out. A shell's tab keeps its
-/// kind.
+/// Every tab leads with its kind, a file's too; on a Mac the shown file's glyph is its proxy,
+/// which drags the file out. A tab is as wide as what it says: a short name's tab is short.
 #[gpui::test]
-fn a_files_tab_wears_no_glyph_but_its_proxy(cx: &mut TestAppContext) {
+fn a_files_tab_wears_its_kind_and_its_proxy(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -454,7 +453,9 @@ fn a_files_tab_wears_no_glyph_but_its_proxy(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("tab-slot", shell.item)).is_some(), "a shell's kind");
-    assert!(cx.debug_bounds(selector("tab-slot", file.item)).is_none(), "no file glyph");
+    assert!(cx.debug_bounds(selector("tab-slot", file.item)).is_some(), "the file's kind");
+    let width = cx.debug_bounds(selector("tab", file.item)).expect("its tab").size.width;
+    assert!(width >= px(64.0) && width < px(120.0), "as wide as \"notes.md\": {width:?}");
     view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
     cx.run_until_parked();
     let proxy = cx.debug_bounds(selector("file-proxy", file.item));

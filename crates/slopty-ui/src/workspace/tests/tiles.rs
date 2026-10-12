@@ -912,7 +912,7 @@ fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     step(cx, grow);
     assert!(slot(cx, c).is_none(), "grown");
     let width = bounds(cx, c).size.width;
-    assert!(width >= px(120.0) && width <= px(240.0), "its own width once grown: {width:?}");
+    assert!(width >= px(64.0) && width <= px(480.0), "its own width once grown: {width:?}");
 
     // Out to a split and back: the same pane's tabs, `a` now last.
     // `a` goes last: the tabs after it close up by its width, and it ends where the last ended.
@@ -934,7 +934,7 @@ fn a_pane_tab_opened_grows_and_a_moved_one_slides(cx: &mut TestAppContext) {
     let d = opens(&view, cx, &fake, SessionId::new(), fake.me, 4);
     one_pane(&view, cx, &[a, d]);
     assert!(slot(cx, d).is_none(), "no growing under Reduce Motion");
-    assert!(bounds(cx, d).size.width >= px(120.0), "whole at once");
+    assert!(bounds(cx, d).size.width >= px(64.0), "whole at once");
 }
 
 /// Whether `tab`'s tab lies wholly inside its pane's tile.
