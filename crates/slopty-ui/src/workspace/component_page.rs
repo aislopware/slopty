@@ -1,21 +1,12 @@
 //! The component preview as a page of the workspace ([`crate::components`]): from the palette,
-//! in the panes' place under the window's own top line, as the settings are, with a toast up
-//! beside it for as long as it is, so the toast is seen in the same picture. It leaves by its
+//! in the panes' place under the window's own top line, as the settings are. It leaves by its
 //! Done and the way the settings do, when the person turns to the work.
-
-use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Entity, Window};
 
 use super::WorkspaceView;
 use super::actions::OpenComponentPreview;
-use super::toast::ToastKind;
 use crate::components::{ComponentPreview, ComponentPreviewEvent};
-
-/// The toast the preview shows while it is up.
-const TOAST: &str = "Every component, in the states it takes";
-/// Long enough to outlast any look at the page; it goes with the page.
-const TOAST_FOR: Duration = Duration::from_hours(1);
 
 impl WorkspaceView {
     /// Show the component preview in the panes' place.
@@ -38,14 +29,12 @@ impl WorkspaceView {
         })
         .detach();
         self.components = Some(page);
-        self.show_toast_for(ToastKind::Said(TOAST.to_owned()), TOAST_FOR, cx);
         cx.notify();
     }
 
-    /// The panes again, the preview's toast with it.
+    /// The panes again.
     pub(super) fn leave_component_preview(&mut self, cx: &mut Context<Self>) {
         if self.components.take().is_some() {
-            let _gone = self.drop_said(TOAST);
             cx.notify();
         }
     }

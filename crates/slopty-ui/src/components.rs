@@ -8,9 +8,8 @@
 //! its foot; a board with a task in every lane; a turn's review; and the settings' own form.
 //! Beside them stand the controls in each state they take: the buttons of every kind, the icon
 //! buttons and toggles, the send at rest and armed, tick boxes, fields, a menu, the state marks,
-//! the lanes' phases and pills, key caps and progress. The workspace shows it in the panes'
-//! place, as it shows the settings, from the palette ("Component preview"), with a toast up
-//! while it is.
+//! the lanes' phases and pills, and key caps. The workspace shows it in the panes'
+//! place, as it shows the settings, from the palette ("Component preview").
 
 mod samples;
 
@@ -26,7 +25,6 @@ use gpui_kit::component::input::{Input, InputState};
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::{Phase, Status, Symbol, status_mark};
 use slopty_kit::kit::menu::{Mark, Menu, MenuItem, MenuPanel};
-use slopty_kit::kit::progress::{Bar, Progress};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::thread::Cursor;
 use slopty_proto::thread::wire::ThreadFrame;
@@ -43,10 +41,11 @@ pub const COMPONENT_PREVIEW: &str = "Component preview";
 
 /// The controls' column: a settings group's width, so the form in it reads as on its page.
 const CONTROLS: f32 = 360.0;
-/// A line's whole width in the controls' column, inside its pads.
-const WHOLE: f32 = 320.0;
-/// Half of [`WHOLE`], a field's or a bar's, two to a line.
+/// A field's width in the controls' column, two to a line.
 const HALF: f32 = 150.0;
+/// The review's cell: a file and the head of the next, so the board over it has room for
+/// every lane.
+const REVIEW_TALL: f32 = 300.0;
 /// The settings' cell: the appearance group's switches, choices and steppers.
 const SETTINGS_TALL: f32 = 300.0;
 
@@ -277,12 +276,6 @@ impl ComponentPreview {
             div().w(px(HALF)).child(Input::new(input).aria_label(name)).into_any_element()
         };
         let fields = vec![field(&self.empty, "Empty field"), field(&self.filled, "Filled field")];
-        let search = vec![
-            kit::search_field(theme, false)
-                .w(px(WHOLE))
-                .child(kit::meta(div(), theme).child("Filter"))
-                .into_any_element(),
-        ];
         let states = [
             Status::Idle,
             Status::Running,
@@ -313,16 +306,6 @@ impl ComponentPreview {
             .into_iter()
             .map(|(words, tone)| kit::pill(theme, tone).child(words).into_any_element())
             .collect();
-        let progress = vec![
-            div()
-                .w(px(HALF))
-                .child(Bar::new(theme, "components-bar", Progress::Share(0.6)).label("Upload"))
-                .into_any_element(),
-            div()
-                .w(px(HALF))
-                .child(Bar::new(theme, "components-failed", Progress::Failed(Some(0.3))))
-                .into_any_element(),
-        ];
         let menu = Rc::new(
             Menu::new()
                 .item(
@@ -347,11 +330,9 @@ impl ComponentPreview {
             .child(self.line("Icon buttons, toggles and send", icons))
             .child(self.line("Tick boxes and keys", ticks))
             .child(self.line("Fields", fields))
-            .child(self.line("Search", search))
             .child(self.line("States", states))
             .child(self.line("Phases", phases))
             .child(self.line("Pills", pills))
-            .child(self.line("Progress", progress))
             .child(self.line("Menu", vec![menu.into_any_element()]))
             .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.stop_propagation()))
     }
@@ -400,7 +381,7 @@ impl Render for ComponentPreview {
                     .flex_col()
                     .gap(px(spacing.lg))
                     .child(self.cell("board", "Board", board).flex_1())
-                    .child(self.cell("review", "Review", review).flex_1()),
+                    .child(self.cell("review", "Review", review).flex_none().h(px(REVIEW_TALL))),
             )
             .child(
                 div()

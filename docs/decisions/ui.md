@@ -11628,9 +11628,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     question, the composer and its foot), a board with a task in every lane, the turn's
     review, and the settings' own form. Beside them the controls stand in each state they
     take: every kind of button, icon buttons and toggles off and on, the send at rest and
-    armed, tick boxes, key caps, fields empty and filled, the filter, every state mark, every
-    lane's phase, the pills, progress going and failed, and a menu; a toast is up while the
-    page is. It is what the `design-system` golden pair renders (at 1600 by 1000, beside the
+    armed, tick boxes, key caps, fields empty and filled, every state mark, every
+    lane's phase, the pills and a menu. The window's own toasts stand over it as
+    over the panes (the marks' scene has one up). It is what the `design-system` golden pair renders (at 1600 by 1000, beside the
     marks' navigator), so one picture shows whether a token or a component change reads
     everywhere. It leaves by its Done and as the settings do, when the person turns to the
     work. The tab bar is not on it, since the page stands in the panes' place; tabs have

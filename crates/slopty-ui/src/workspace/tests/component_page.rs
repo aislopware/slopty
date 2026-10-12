@@ -1,6 +1,6 @@
 //! The component preview (`crate::components`): from the palette it takes the panes' place
-//! with every surface over its samples and the controls beside them, a toast up while it is,
-//! and its Done gives the panes back with the toast gone.
+//! with every surface over its samples and the controls beside them, and its Done gives the
+//! panes back.
 
 use super::*;
 use crate::project::model::Lane;
@@ -16,9 +16,9 @@ fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// Every surface shows from its samples: the thread's plan, each lane of the board, both files
-/// of the review, the settings' form and the controls, each part named once in the
-/// accessibility tree; a toast is up beside them; Done leaves.
+/// Every surface shows from its samples: the thread's plan, each lane of the board, the review's
+/// first file, the settings' form and the controls, each part named once in the
+/// accessibility tree; Done leaves.
 #[gpui::test]
 fn the_component_preview_shows_every_surface_then_leaves(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -40,19 +40,13 @@ fn the_component_preview_shows_every_surface_then_leaves(cx: &mut TestAppContext
         let named = leak(format!("project-lane-{}", lane.selector()));
         assert!(cx.debug_bounds(named).is_some(), "the board's {} lane", lane.title());
     }
-    for file in 0..2 {
-        let head = leak(format!("review-head-{file}"));
-        assert!(cx.debug_bounds(head).is_some(), "the review's file {file}");
-    }
+    // The review's cell is the height of its first file; the second waits under it.
+    assert!(cx.debug_bounds("review-head-0").is_some(), "the review's first file");
     assert!(cx.debug_bounds("components-primary").is_some(), "the buttons");
     assert!(cx.debug_bounds("components-menu").is_some(), "the menu");
-    let toast = view.read_with(cx, |v, _| v.toast_texts());
-    assert_eq!(toast.len(), 1, "one toast with the page: {toast:?}");
 
     let done = cx.debug_bounds("components-done").expect("the page's Done").center();
     cx.simulate_click(done, Modifiers::none());
     settle(cx);
     assert!(cx.debug_bounds("components").is_none(), "the panes again");
-    let toast = view.read_with(cx, |v, _| v.toast_texts());
-    assert!(toast.is_empty(), "its toast went with it: {toast:?}");
 }

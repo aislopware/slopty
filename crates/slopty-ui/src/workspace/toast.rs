@@ -306,11 +306,6 @@ impl WorkspaceView {
         self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Failed(t) if t == text))
     }
 
-    /// Take down the word that says `text`, where it still shows.
-    pub(super) fn drop_said(&mut self, text: &str) -> bool {
-        self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Said(t) if t == text))
-    }
-
     /// A word for the human (a picture refused, a worker added).
     pub fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
         self.show_toast(ToastKind::Said(text), cx);
