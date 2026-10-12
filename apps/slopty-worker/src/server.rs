@@ -111,11 +111,12 @@ pub async fn run(
                 tracing::info!(server = %addr, why, "server link ended");
                 redialling(why.to_owned());
             }
-            // It lets go of that link within the lease's idle timeout; the redials, two
-            // seconds apart at most, find it gone.
+            // This worker's own last link is replaced at once, its key proving it is the
+            // same worker; another machine with this id and another key is refused. The redials
+            // find out whether it went.
             Err(Ended::Duplicate) => {
-                tracing::info!(server = %addr, "the server still holds our last link; retrying");
-                redialling("the server still holds this worker's last link".to_owned());
+                tracing::warn!(server = %addr, "another worker holds this worker's id; retrying");
+                redialling("another worker holds this worker's id on the server".to_owned());
             }
             // The tailnet policy may grant it later; the redials find out.
             Err(Ended::NotGranted) => {
@@ -153,7 +154,7 @@ pub async fn run(
 
 /// Why a registration did not get going.
 enum Ended {
-    /// The server has this worker on another connection still.
+    /// The server has another worker under this id, with another key.
     Duplicate,
     /// The tailnet policy does not grant this machine the worker role.
     NotGranted,

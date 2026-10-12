@@ -103,8 +103,10 @@ mod tests {
         let mut worker = dial(&server, worker_role(id)).await.unwrap();
         assert_eq!(worker.name, "test-server");
 
-        // A second live link with the same id is refused.
-        let twin = dial(&server, worker_role(id)).await.unwrap_err();
+        // A second live link with the same id and another key is refused.
+        let Role::Worker(mut twin) = worker_role(id) else { panic!("a worker's role") };
+        twin.session_key = [8; 32];
+        let twin = dial(&server, Role::Worker(twin)).await.unwrap_err();
         assert!(matches!(twin, DialError::Refused(Refusal::DuplicateWorker)), "{twin:?}");
 
         let mut client = dial(&server, client_role()).await.unwrap();

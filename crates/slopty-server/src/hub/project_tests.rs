@@ -2890,6 +2890,14 @@ async fn a_project_with_no_target_lands_on_a_branch_of_its_own() {
     assert!(refused(&broken, ErrorCode::Failed).contains("slopty/broken/goal"), "{verb:?}");
     let listed = hub.dispatch(Verb::ProjectList).await;
     assert!(!format!("{listed:?}").contains("broken"), "nothing made: {listed:?}");
+    // A place no goal can start from is refused in the worker's own plain words.
+    let plain = spawn(&hub, make("plain", Some(term)));
+    let (id, _verb) = request(&mut rx).await;
+    let message = "~/src/slopty is not in a git repository, and a goal's work lands on a branch \
+                   of one"
+        .to_owned();
+    answer(&lease, id, Outcome::Error { code: ErrorCode::Invalid, message: message.clone() });
+    assert_eq!(refused(&plain.await.unwrap(), ErrorCode::Invalid), message, "as the worker says");
 
     let made = spawn(&hub, make("slopty", Some(term)));
     let (id, verb) = request(&mut rx).await;

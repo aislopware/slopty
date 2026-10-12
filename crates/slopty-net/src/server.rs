@@ -155,9 +155,8 @@ impl ServerLink {
 /// wait for `Welcome`. Each address the name resolves to is tried in turn, IPv4 first.
 ///
 /// `addr` is usually parsed with [`HostAddr::parse_with_port`] and
-/// [`crate::endpoint::SERVER_PORT`]. A worker refused as [`Refusal::DuplicateWorker`] right
-/// after a restart is waiting out its previous connection's idle timeout, and gets in on a
-/// retry a few seconds later.
+/// [`crate::endpoint::SERVER_PORT`]. A worker back after a restart replaces its previous
+/// connection at once; [`Refusal::DuplicateWorker`] means another worker holds its id.
 pub async fn connect(
     endpoint: &Endpoint,
     addr: &HostAddr,

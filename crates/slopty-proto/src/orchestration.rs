@@ -1071,6 +1071,21 @@ pub enum Verb {
         /// The branch whose pull request it is.
         branch: String,
     },
+    /// Whether a goal can start from the folder `repo` on `worker`, asked before anything is
+    /// started for it: a folder there, in a git repository with a commit checked out, that has
+    /// the branch `target` when one is named (blank: the goal gets a branch of its own off what
+    /// is checked out, [`Verb::BranchOff`], which checks the place the same way). A client asks
+    /// it before it starts a goal's orchestrator, so nothing is started for a goal refused.
+    /// Answered with [`Outcome::Done`]; a place a goal cannot start from is
+    /// [`ErrorCode::Invalid`], saying why in a sentence a person reads. Changes nothing.
+    GoalCheck {
+        /// Where.
+        worker: WorkerId,
+        /// The folder the orchestrator would work in.
+        repo: String,
+        /// The branch its work would land on; blank for one of the goal's own.
+        target: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1191,6 +1206,7 @@ impl Verb {
             | Self::ListWindows { .. }
             | Self::ReadThread { .. }
             | Self::PullOf { .. }
+            | Self::GoalCheck { .. }
             | Self::CaptureStill { .. }
             | Self::ProjectList
             | Self::ProjectStatus { .. }

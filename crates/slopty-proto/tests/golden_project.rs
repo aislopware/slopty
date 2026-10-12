@@ -631,6 +631,14 @@ mod golden_project {
             }),
         );
         snap(
+            "goal_check",
+            &request(Verb::GoalCheck {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                target: "main".to_owned(),
+            }),
+        );
+        snap(
             "on_origin",
             &request(Verb::OnOrigin {
                 worker,

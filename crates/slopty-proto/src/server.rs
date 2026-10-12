@@ -401,7 +401,8 @@ pub enum FromServer {
 /// Why the server refused a hello.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Refusal {
-    /// A worker with this id is already connected from elsewhere.
+    /// Another worker with this id, under another key, is connected already. The same worker
+    /// back (its key the same) replaces its stale link instead.
     DuplicateWorker,
     /// The tailnet grants this node no such role here: it belongs to another user, or is
     /// tagged, and no grant names the role.

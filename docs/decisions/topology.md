@@ -186,8 +186,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - A reconnect under the same id brings it back *online* in the same entry.
     - The server refuses a second live link that claims the id (`DuplicateWorker`) instead of
       letting it take over. Two machines sharing a copied data directory would otherwise steal
-      the lease back and forth forever. A worker restarted before its old link timed out gets
-      in on a retry within 5 s.
+      the lease back and forth forever.
+    - The same worker back is let in at once (2026-10-12): a link that shows the key its
+      terminals' tokens are made under (`Registration::session_key`, in its data directory)
+      from the machine the live link is on replaces that link, which is stale. Its queue
+      closes, its connection ends and its pending requests fail. A worker restarted on its box
+      had waited out the old link's idle timeout, about 6 s of `DuplicateWorker` in a person's
+      day walked in the app, while the app itself was back in 234 ms. A copy of the data
+      directory on another machine has the key too, but another address, and is still refused.
+      Tests: `the_same_worker_back_replaces_its_stale_link_at_once` and
+      `a_second_live_link_with_the_same_id_from_another_worker_is_refused` (`slopty-server`).
   - **State.** The server keeps one file, `workers.json`, in `$SLOPTY_DATA_DIR/server`, else in
     `~/Library/Application Support/Slopty/server`; `--data-dir` overrides both. It holds the
     last-known `WorkerInfo` of every worker. The server writes it to a temporary file, fsyncs
@@ -231,8 +239,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     terminals and the clients nothing.
   - **Redial.** After a link ends the worker dials again by the rule every link follows
     (`slopty_net::redial`, since 2026-09-26): 250 ms, doubling to 2 s, forever, and a link
-    that held 10 s starts again from 250 ms. A `DuplicateWorker` refusal (the server still
-    holds the link a restart dropped) is one more failed dial. Until then the worker had
+    that held 10 s starts again from 250 ms. A `DuplicateWorker` refusal (another worker
+    holds the id) is one more failed dial. Until then the worker had
     constants of its own (a 5 s cap and a 1 s duplicate retry), and a duplicate retry doubled
     the backoff whenever the backoff happened to equal it. The lease's keep-alive is the
     server's, so the worker adds no pings of its own.

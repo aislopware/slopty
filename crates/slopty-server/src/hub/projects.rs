@@ -1069,7 +1069,8 @@ impl Hub {
     /// of its own ([`Task::goal_branch`]) made first in its repository on the orchestrator's
     /// worker at the tip of what is checked out there, so a goal never lands on the person's
     /// branch unasked and their Push moves it on. A name already taken is left for the store
-    /// to refuse, with nothing made.
+    /// to refuse, with nothing made. The worker checks the place first, as [`Verb::GoalCheck`]
+    /// does, and a place a goal cannot start from is refused in its plain words.
     pub(super) async fn goal_target(&self, mut verb: Verb) -> Result<Verb, Outcome> {
         let wanted = match &verb {
             Verb::ProjectCreate { project, repo, target, orchestrator, .. }
@@ -1095,6 +1096,10 @@ impl Hub {
             Verb::BranchOff { worker: term.worker, repo: repo.clone(), branch: branch.clone() };
         match self.forward(None, off).await {
             Outcome::Done => {}
+            // The place itself: said as the worker says it, a sentence of its own.
+            Outcome::Error { code: ErrorCode::Invalid, message } => {
+                return Err(error(ErrorCode::Invalid, &message));
+            }
             Outcome::Error { code, message } => {
                 let why =
                     format!("the project's own branch {branch} was not made in {repo}: {message}");

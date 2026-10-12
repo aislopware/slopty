@@ -634,8 +634,14 @@ impl Hub {
     /// Register a worker that connected from `ip`. `tx` carries what the server sends it; the
     /// caller queues `Welcome` on it before registering, so no forwarded request overtakes it.
     ///
-    /// A worker whose id is on a live link already is refused: a second machine claiming the
-    /// id, or the same worker back before its old connection timed out (it retries).
+    /// A worker whose id is on a live link already is refused, unless it shows the same key its
+    /// terminals' tokens are made under (`Registration::session_key`, kept in its data
+    /// directory) from the same machine: then it is the same worker back, restarted or
+    /// redialled before its old connection timed out, and the new link replaces the stale one at
+    /// once. The old link's queue closes, so its connection ends, and every request pending on
+    /// it fails. Another machine claiming the id is refused, even with a copy of the data
+    /// directory and so of the key, so two such machines never take the lease from each other
+    /// back and forth.
     pub fn register(
         &self,
         registration: Registration,
@@ -645,8 +651,15 @@ impl Hub {
         let mut state = self.inner.state.lock();
         let Registration { worker, name, listen, caps, sessions, session_key } = registration;
         let key = SessionKey::from_bytes(session_key);
-        if state.workers.get(&worker).is_some_and(|e| e.link.is_some()) {
-            return Err(Refusal::DuplicateWorker);
+        if let Some(entry) = state.workers.get(&worker)
+            && entry.link.is_some()
+        {
+            let same_machine =
+                entry.info.address.parse::<SocketAddr>().is_ok_and(|was| was.ip() == ip);
+            if entry.session_key != Some(key) || !same_machine {
+                return Err(Refusal::DuplicateWorker);
+            }
+            tracing::info!(%worker, name = %name, "the worker is back: its stale link is replaced");
         }
         state.next_generation = state.next_generation.wrapping_add(1);
         let generation = state.next_generation;
@@ -2023,6 +2036,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::BranchOff { worker, .. }
         | Verb::RestartWorker { worker }
         | Verb::PullOf { worker, .. }
+        | Verb::GoalCheck { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
         // Asked of one worker by the server alone ([`Hub::ask_facts`]).
         Verb::Settings { of, .. } | Verb::WorkerFacts { worker: of } => *of,
@@ -2245,19 +2259,52 @@ pub(crate) mod tests {
         assert_eq!(liveness(&hub, worker), Liveness::Online, "the old timer is stale");
     }
 
+    /// Another worker claiming a live worker's id is refused, and the worker keeps its link:
+    /// one with another key, and one on another machine with a copy of the key.
     #[tokio::test]
-    async fn a_second_live_link_with_the_same_id_is_refused() {
+    async fn a_second_live_link_with_the_same_id_from_another_worker_is_refused() {
         let hub = Hub::new("server".to_owned(), Vec::new());
         let worker = WorkerId::new();
         let (tx, _rx) = mpsc::channel(8);
         let first = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
         let (tx, _rx2) = mpsc::channel(8);
-        let err = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap_err();
+        let twin = Registration { session_key: [8; 32], ..registration(worker, Vec::new()) };
+        let err = hub.register(twin, ip(), tx).unwrap_err();
         assert_eq!(err, Refusal::DuplicateWorker);
+        let (tx, _rx2) = mpsc::channel(8);
+        let copied = hub.register(registration(worker, Vec::new()), [100, 64, 0, 8].into(), tx);
+        assert_eq!(copied.unwrap_err(), Refusal::DuplicateWorker, "a copied data directory");
         assert_eq!(liveness(&hub, worker), Liveness::Online, "the first keeps its lease");
         drop(first);
         let (tx, _rx3) = mpsc::channel(8);
         hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+    }
+
+    /// The same worker back on a new link while its old one still looks live (it restarted, and
+    /// the old connection has not timed out): its key proves it, so the new link replaces the
+    /// old at once. The old link's queue closes, a request pending on it fails, and its lease
+    /// ending later leaves the worker online.
+    #[tokio::test]
+    async fn the_same_worker_back_replaces_its_stale_link_at_once() {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let worker = WorkerId::new();
+        let (tx, mut old_queue) = mpsc::channel(8);
+        let old = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        let term = TermRef { worker, session: SessionId::new() };
+        let pending = tokio::spawn({
+            let hub = hub.clone();
+            async move { hub.dispatch(Verb::ReadScreen { term }).await }
+        });
+        let asked = old_queue.recv().await;
+        assert!(matches!(asked, Some(FromServer::Request { .. })), "{asked:?}");
+
+        let (tx, _new_queue) = mpsc::channel(8);
+        let _back = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        assert_eq!(old_queue.recv().await, None, "the old link's queue closes");
+        let failed = pending.await.unwrap();
+        assert!(matches!(failed, Outcome::Error { .. }), "{failed:?}");
+        drop(old);
+        assert_eq!(liveness(&hub, worker), Liveness::Online, "the old lease ending is stale");
     }
 
     #[tokio::test]
