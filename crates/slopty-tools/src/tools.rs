@@ -478,10 +478,17 @@ pub async fn call<D: Dispatch>(
     arguments: Map<String, Value>,
     progress: Option<Progress<'_>>,
 ) -> Result<CallToolResult, ErrorData> {
-    if get(name).is_none() {
+    let Some(tool) = get(name) else {
         return Err(ErrorData::invalid_params(format!("no tool is called {name}"), None));
-    }
-    Ok(match run(dispatch, name, arguments, progress).await {
+    };
+    // A change waits out a server it cannot reach, its lookups too; a read answers at once.
+    let changes = tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(false);
+    let ran = if changes {
+        run(&crate::Waiting(dispatch), name, arguments, progress).await
+    } else {
+        run(dispatch, name, arguments, progress).await
+    };
+    Ok(match ran {
         Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
         Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
     })

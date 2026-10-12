@@ -3478,3 +3478,42 @@ then was refused in git's words, "fatal: not a git repository", with the agent's
 - Tests: `a_goal_starts_only_where_its_work_can_land` (`slopty-worker`, `repo::worktrees`);
   `a_project_with_no_target_lands_on_a_branch_of_its_own` (`slopty-server`); and
   `a_goal_s_place_is_checked_on_its_machine_before_anything_starts` (`slopty-cli`, `projects`).
+
+**A person's hard day: what goes wrong is waited out, said once, and stopped with the goal.** ✅
+2026-10-12 (the hard-day walk, `a_person_s_hard_day_across_two_workers`)
+
+- **A network loss is a cut link, not a stopped box.** The walk takes the Linux box off the
+  network for 30 s through a relay it cuts and restores (`slopty_testkit::relay`), so the
+  box, its worker and its agents run on as they would. Stopping the worker (`SIGSTOP`) froze the
+  box's own hooks too, which no network loss does.
+- **An agent's change waits out a server it cannot reach.** The MCP server an agent talks to
+  holds its link for the process lifetime; a change made while the server cannot be reached at
+  all (a done report off the network, or across a server restart) goes again under its key,
+  every 4 s after the usual backoff, for up to 5 minutes (`link::OFFLINE_PATIENCE`), and
+  arrives once the box is back. A read still fails at once, and a command's own link never
+  waits. The walk found the Linux task's report lost: "cannot reach the server … no answer",
+  and the task never ready to merge.
+- **Two devices answering at once:** one answer is taken; the other is refused in words that
+  say why ("this was answered already, or went back to the agent's own terminal"), and the
+  agent hears one answer.
+- **An orchestrator that exits is on its project's timeline at once** (`Moment::AgentGone`),
+  not only once its terminal closes, and only once.
+- **And it can be resumed at once.** An agent's program exiting ends its agent in the worker's
+  table there and then (`AgentTable::exited`): a `claude` killed sends no `SessionEnd`, and an
+  exited terminal has no foreground process for the tick to find gone, so its thread had kept
+  saying it ran and a resume was refused ("its agent still runs"). The server's own check
+  passes over a thread row whose program it was told exited.
+- **A change's lookups wait as the change does.** A tool that changes something runs over
+  `slopty_tools::Waiting`, so its reads (a done report's lookup of the caller's own task)
+  wait out the server as its change does; a read tool still answers at once.
+- **Letting a goal go stops the agents the server started for its tasks** (their terminals
+  closed) before its worktrees are cleaned up, so the worktrees are no longer busy. The
+  orchestrator stays, as the person's own terminal. Before, the task agents kept working on a
+  goal nobody had any more.
+- **Measured** on a Linux runner: the server restarted, to both workers online, 254 ms; a box
+  off the network, to shown away, 6.0 s (the 5 s idle timeout); the network back, to the box
+  online, 461 ms.
+- Tests: `a_change_waits_out_a_server_it_cannot_reach` (`slopty-cli`, `link`);
+  `an_orchestrator_that_exits_is_gone_on_the_timeline_once` (`slopty-server`);
+  `an_agent_whose_program_exited_has_ended` (`slopty-agent`);
+  `a_cut_link_drops_everything_both_ways_until_restored` (`slopty-testkit`); and the walk.

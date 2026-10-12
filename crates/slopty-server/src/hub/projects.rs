@@ -297,6 +297,26 @@ fn left_by(state: &State, project: &ProjectId) -> Vec<Cleanup> {
     worktrees.chain(branches).chain(verify).collect()
 }
 
+/// Whether the program in `session` on `worker` has exited, or its terminal is gone, as the
+/// worker last said.
+fn program_gone(state: &State, worker: WorkerId, session: SessionId) -> bool {
+    let known =
+        state.workers.get(&worker).and_then(|e| e.sessions.iter().find(|s| s.id == session));
+    known.is_none_or(|s| matches!(s.state, slopty_proto::terminal::SessionState::Exited { .. }))
+}
+
+/// The terminals of the agents the server started for `project`'s tasks that still run.
+fn started_agents(state: &mut State, project: &ProjectId) -> Vec<TermRef> {
+    let Ok(status) = Hub::status_of(state, project, None) else { return Vec::new() };
+    status
+        .tasks
+        .iter()
+        .filter_map(|card| card.assignment.as_ref())
+        .filter(|a| a.spawned && a.thread.is_none() && a.ended_ms.is_none())
+        .map(|a| a.term)
+        .collect()
+}
+
 /// Stop watching the terminal `session`, and have the store forget it.
 pub(super) fn unwatch(state: &mut State, session: SessionId) {
     if state.watched.remove(&session).is_some() {
@@ -933,20 +953,39 @@ impl Hub {
 
     /// The person lets `project` go: its record, its lane's work and the reports waiting in
     /// it. Every client is sent the projects afresh, which a snapshot's first part replaces
-    /// whole, as no change says a project is gone. What it left on its workers goes, each kept
-    /// until its worker answers ([`Self::clean_up`]): its tasks' worktrees, each kept by its
-    /// worker while anything in it is not committed or a terminal works in it, with the branch
-    /// of work that did not land; the branches the server named in its clones; and its verify
-    /// checkout.
+    /// whole, as no change says a project is gone. The agents the server started for its tasks
+    /// stop, their terminals closed: a goal let go is no one's work any more. The orchestrator
+    /// stays, as the person's own terminal. What the project left on its workers then goes,
+    /// each kept until its worker answers ([`Self::clean_up`]): its tasks' worktrees, each kept
+    /// by its worker while anything in it is not committed or a terminal works in it, with the
+    /// branch of work that did not land; the branches the server named in its clones; and its
+    /// verify checkout.
     pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         let cleanups = left_by(state, project);
+        let started = started_agents(state, project);
         if let Err(refused) = state.projects.delete(project) {
             return refused;
         }
         keep(state, Keep::Forget(project.clone()));
-        self.clean_up(state, cleanups);
+        if started.is_empty() || tokio::runtime::Handle::try_current().is_err() {
+            self.clean_up(state, cleanups);
+        } else {
+            // Closed first, so a worktree an agent worked in is no longer busy as it goes.
+            let hub = self.clone();
+            tokio::spawn(async move {
+                for term in started {
+                    if let failed @ Outcome::Error { .. } =
+                        hub.forward(None, Verb::Close { term }).await
+                    {
+                        tracing::info!(%term.session, ?failed, "a let-go project's agent not closed");
+                    }
+                }
+                let mut state = hub.inner.state.lock();
+                hub.clean_up(&mut state, cleanups);
+            });
+        }
         let projects = Self::projects_snapshot(state);
         let seq = self.inner.log.lock().next.saturating_sub(1);
         for part in parts(seq, projects) {
@@ -1040,8 +1079,11 @@ impl Hub {
             let state = self.inner.state.lock();
             state.projects.project(project).map(|record| {
                 let at = record.orchestrator.zip(record.orchestrator_thread);
-                let runs =
-                    at.and_then(|(term, thread)| state.board.running_at(term.worker, thread));
+                // Its thread's row may still say it runs a moment after its program exited.
+                let runs = at.and_then(|(term, thread)| {
+                    let seat = state.board.running_at(term.worker, thread)?;
+                    (!program_gone(&state, term.worker, seat)).then_some(seat)
+                });
                 (at, runs)
             })
         };

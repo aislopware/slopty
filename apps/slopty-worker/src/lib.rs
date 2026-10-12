@@ -1014,6 +1014,11 @@ async fn run(
             while let Some((session, exit)) = exits.recv().await {
                 tracing::info!(%session, status = ?exit.status, "child exited");
                 daemon.worker.on_exit(session, exit);
+                // Whatever agent ran there has ended, killed or not: its thread hears it now.
+                let ended = daemon.agents.lock().exited(session);
+                if let Some(event) = ended {
+                    let _sent = daemon.heard.send(event);
+                }
                 if let Some(summary) = daemon.worker.summary(session).await {
                     let _sent =
                         daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));

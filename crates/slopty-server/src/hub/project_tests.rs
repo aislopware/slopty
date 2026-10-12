@@ -2857,6 +2857,33 @@ async fn a_project_carries_its_goal_and_the_person_s_autonomy() {
     assert_eq!(kept.project.autonomy, Autonomy::Own, "left out is left alone");
 }
 
+/// An orchestrator whose program exits, its terminal still open, is gone on its project's
+/// timeline at once, and its terminal closing later says it no second time.
+#[tokio::test]
+async fn an_orchestrator_that_exits_is_gone_on_the_timeline_once() {
+    use slopty_proto::terminal::{CloseReason, SessionState};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let (worker, lease, _rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    let term = TermRef { worker, session: orchestrator };
+    create(&hub, Some(term)).await;
+    let gone = |timeline: &[slopty_proto::project::TimelineEntry]| {
+        timeline
+            .iter()
+            .filter(|e| matches!(e.what, Moment::AgentGone { term: t } if t == term))
+            .count()
+    };
+    assert_eq!(gone(&status(&hub).await.timeline), 0, "running");
+
+    let exited =
+        SessionSummary { state: SessionState::Exited { status: Some(0) }, ..summary(orchestrator) };
+    lease.handle(ToServer::SessionChanged(exited));
+    assert_eq!(gone(&status(&hub).await.timeline), 1, "said as it exits");
+    lease.handle(ToServer::SessionClosed { session: orchestrator, reason: CloseReason::Requested });
+    assert_eq!(gone(&status(&hub).await.timeline), 1, "and not again as it closes");
+}
+
 /// A project made with no target lands on a branch of its own, made first in its repository
 /// on the orchestrator's worker, so a goal never lands on the person's branch unasked. One
 /// the worker could not make is the refusal, with nothing made; with no orchestrator there is

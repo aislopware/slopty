@@ -840,8 +840,9 @@ pub enum Verb {
         /// Which.
         task: TaskId,
     },
-    /// The person lets a project go: its board, its tasks and its queue. The terminals that
-    /// worked in it stay, as terminals. Answered with [`Outcome::Done`].
+    /// The person lets a project go: its board, its tasks and its queue. The agents the server
+    /// started for its tasks stop, their terminals closed; the orchestrator and every other
+    /// terminal stay. Answered with [`Outcome::Done`].
     ProjectDelete {
         /// Which.
         project: ProjectId,

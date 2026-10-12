@@ -42,10 +42,41 @@ pub trait Dispatch: Send + Sync {
         self.send(None, verb)
     }
 
+    /// Answer `verb` as part of a change: when the server cannot be reached at all, a carrier
+    /// that can wait it out does, for the lookups before the change as for the change itself,
+    /// so a change made off the network goes through once it is back. The same as
+    /// [`Self::send`] for a carrier that cannot wait.
+    fn send_waiting(
+        &self,
+        key: Option<IdempotencyKey>,
+        verb: Verb,
+    ) -> impl Future<Output = Outcome> + Send {
+        self.send(key, verb)
+    }
+
     /// Where the caller runs: the defaults a project verb takes when it names no project,
     /// task or terminal. Only a caller on its own machine has an environment to read.
     fn scope(&self) -> Scope {
         Scope::default()
+    }
+}
+
+/// `D`, every verb sent as part of a change ([`Dispatch::send_waiting`]): what a tool that
+/// changes something runs over.
+#[derive(Debug)]
+pub struct Waiting<'a, D>(pub &'a D);
+
+impl<D: Dispatch> Dispatch for Waiting<'_, D> {
+    fn send(
+        &self,
+        key: Option<IdempotencyKey>,
+        verb: Verb,
+    ) -> impl Future<Output = Outcome> + Send {
+        self.0.send_waiting(key, verb)
+    }
+
+    fn scope(&self) -> Scope {
+        self.0.scope()
     }
 }
 

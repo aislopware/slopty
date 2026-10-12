@@ -88,6 +88,15 @@ const RETRY_PAUSES: [Duration; 5] = [
     Duration::from_secs(4),
 ];
 
+/// How long a held link's change waits out a server it cannot reach at all, the box off the
+/// network or the server restarting, trying again every [`OFFLINE_PAUSE`] once
+/// [`RETRY_PAUSES`] ran out. Nothing was done, so it goes again under its key. An agent's done
+/// report made off the network arrives once the box is back, rather than failing at once.
+const OFFLINE_PATIENCE: Duration = Duration::from_secs(300);
+
+/// Between the attempts of a change waiting out a server it cannot reach.
+const OFFLINE_PAUSE: Duration = Duration::from_secs(4);
+
 /// A verb on its way, and where its answer goes. The answer brings the verb back, so a retry
 /// sends it again without copying it.
 #[derive(Debug)]
@@ -122,6 +131,9 @@ impl Waiter {
 #[derive(Debug, Clone)]
 pub struct Link {
     calls: mpsc::Sender<Call>,
+    /// How long a change waits out a server it cannot reach ([`OFFLINE_PATIENCE`] for a link
+    /// held for the process lifetime; nothing for one a command dials once).
+    patience: Duration,
 }
 
 /// How a connection ended.
@@ -161,14 +173,15 @@ impl Link {
                 };
             }
         });
-        Ok(Self { calls })
+        Ok(Self { calls, patience: Duration::ZERO })
     }
 
     /// A link held for the process lifetime: it dials in the background and redials whenever
     /// the connection drops, on the backoff every link follows ([`slopty_net::redial`]), or
     /// after [`slopty_net::redial::WRONG_BUILD`] for a server on a different build. A
-    /// call made while the server is down tries a dial at once and fails with the reason when
-    /// that does not get through.
+    /// call made while the server is down tries a dial at once; a read fails with the reason
+    /// when that does not get through, and a change waits the server out for up to
+    /// [`OFFLINE_PATIENCE`].
     ///
     /// The receiver sees everything the server pushes from the first connection on.
     pub fn persistent(
@@ -209,7 +222,7 @@ impl Link {
                 }
             }
         });
-        (Self { calls }, heard)
+        (Self { calls, patience: OFFLINE_PATIENCE }, heard)
     }
 
     /// Send `verb` once and wait for its outcome, or for the reason it could not be sent.
@@ -228,7 +241,13 @@ impl Link {
 /// other.
 impl Dispatch for Link {
     async fn send(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
-        retried(key, verb, |key, verb| self.request(key, verb)).await
+        retried(key, verb, (self.patience, false), |key, verb| self.request(key, verb)).await
+    }
+
+    /// A read waits the server out as a change does, when it is part of one: a done report's
+    /// lookup of the caller's own task, made off the network.
+    async fn send_waiting(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
+        retried(key, verb, (self.patience, true), |key, verb| self.request(key, verb)).await
     }
 
     /// The session's own: an agent started for a task finds its project and task here.
@@ -239,13 +258,17 @@ impl Dispatch for Link {
 
 /// `verb` sent by `attempt`, under `key` or a fresh key when it changes something, and sent
 /// again under the same key while a link lost its answer, or cannot reach where it goes after
-/// such a loss, for as long as [`RETRY_PAUSES`] lasts.
+/// such a loss, for as long as [`RETRY_PAUSES`] lasts. A change that could not reach the
+/// server at all goes again, every [`OFFLINE_PAUSE`] after those, for up to `patience`; so does
+/// a read when `reads` (a read that is part of a change).
 async fn retried<F: Future<Output = Answer>>(
     key: Option<IdempotencyKey>,
     mut verb: Verb,
+    (patience, reads): (Duration, bool),
     mut attempt: impl FnMut(Option<IdempotencyKey>, Verb) -> F,
 ) -> Outcome {
     let key = key.or_else(|| verb.changes().then(fresh_key));
+    let started = tokio::time::Instant::now();
     let mut pauses = RETRY_PAUSES.into_iter();
     let mut lost = false;
     loop {
@@ -256,24 +279,39 @@ async fn retried<F: Future<Output = Answer>>(
             code,
             ErrorCode::Interrupted | ErrorCode::ServerUnreachable | ErrorCode::WorkerUnreachable
         );
-        match pauses.next() {
-            Some(pause) if lost && again => {
-                // The link went down holding the verb, so there is nothing to send again.
-                let Some(back) = back else { return outcome };
-                verb = back;
-                tokio::time::sleep(pause).await;
-            }
-            _ if lost && again => {
-                let key = key.as_ref().map_or_else(String::new, |k| {
-                    format!("; sent again under idempotency key {k}, it is not done twice")
-                });
-                return Outcome::Error {
-                    code: ErrorCode::Interrupted,
-                    message: format!("{message}, and the answer to it was lost{key}"),
-                };
-            }
-            _ => return outcome,
+        let offline = *code == ErrorCode::ServerUnreachable
+            && (key.is_some() || reads)
+            && !patience.is_zero();
+        let waiting = offline && started.elapsed() < patience;
+        let pause = match pauses.next() {
+            Some(pause) if (lost && again) || waiting => Some(pause),
+            None if waiting => Some(OFFLINE_PAUSE),
+            _ => None,
+        };
+        if let Some(pause) = pause {
+            // The link went down holding the verb, so there is nothing to send again.
+            let Some(back) = back else { return outcome };
+            verb = back;
+            tokio::time::sleep(pause).await;
+            continue;
         }
+        if offline {
+            let waited = started.elapsed().as_secs();
+            return Outcome::Error {
+                code: *code,
+                message: format!("{message}, though it was tried for {waited} s"),
+            };
+        }
+        if lost && again {
+            let key = key.as_ref().map_or_else(String::new, |k| {
+                format!("; sent again under idempotency key {k}, it is not done twice")
+            });
+            return Outcome::Error {
+                code: ErrorCode::Interrupted,
+                message: format!("{message}, and the answer to it was lost{key}"),
+            };
+        }
+        return outcome;
     }
 }
 
@@ -409,7 +447,7 @@ mod tests {
         let mut sent = Vec::new();
         let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
         let write = Verb::SendInput { term, input: Input::Text("x".repeat(64)) };
-        let outcome = retried(None, write, |key, verb| {
+        let outcome = retried(None, write, (Duration::ZERO, false), |key, verb| {
             keys.push(key);
             if let Verb::SendInput { input: Input::Text(text), .. } = &verb {
                 sent.push(text.as_ptr());
@@ -424,7 +462,7 @@ mod tests {
 
         let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
         let mut tries = 0;
-        let outcome = retried(None, Verb::Close { term }, |_key, verb| {
+        let outcome = retried(None, Verb::Close { term }, (Duration::ZERO, false), |_key, verb| {
             tries += 1;
             std::future::ready((error(ErrorCode::WorkerUnreachable), Some(verb)))
         })
@@ -433,13 +471,78 @@ mod tests {
         assert_eq!(tries, 1, "an unreachable worker did nothing");
 
         let mut tries = 0;
-        let outcome = retried(None, Verb::Close { term }, |_key, _verb| {
-            tries += 1;
-            std::future::ready((error(ErrorCode::Interrupted), None))
-        })
-        .await;
+        let outcome =
+            retried(None, Verb::Close { term }, (Duration::ZERO, false), |_key, _verb| {
+                tries += 1;
+                std::future::ready((error(ErrorCode::Interrupted), None))
+            })
+            .await;
         assert!(matches!(outcome, Outcome::Error { code: ErrorCode::Interrupted, .. }));
         assert_eq!(tries, 1, "the verb went down with the link");
+    }
+
+    /// A held link's change that cannot reach the server at all waits it out under one key and
+    /// arrives once it is back; a read fails at once, as does a change on a link a command dialed
+    /// once; and past the patience a change fails, saying how long it was tried.
+    #[tokio::test(start_paused = true)]
+    async fn a_change_waits_out_a_server_it_cannot_reach() {
+        use slopty_core::{SessionId, WorkerId};
+        use slopty_proto::orchestration::TermRef;
+
+        let offline = || Outcome::Error {
+            code: ErrorCode::ServerUnreachable,
+            message: "cannot reach the server".to_owned(),
+        };
+        let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+        let started = tokio::time::Instant::now();
+        let mut keys = Vec::new();
+        let back_after = Duration::from_secs(30);
+        let outcome =
+            retried(None, Verb::Close { term }, (OFFLINE_PATIENCE, false), |key, verb| {
+                keys.push(key);
+                let answer = if started.elapsed() < back_after { offline() } else { Outcome::Done };
+                std::future::ready((answer, Some(verb)))
+            })
+            .await;
+        assert_eq!(outcome, Outcome::Done, "it arrives once the server is back");
+        assert!(keys.len() > 2 && keys.iter().all(|k| k.is_some() && *k == keys[0]), "{keys:?}");
+        assert!(started.elapsed() < back_after + OFFLINE_PAUSE, "within a pause of the return");
+
+        let mut tries = 0;
+        let read = Verb::ReadScreen { term };
+        let outcome = retried(None, read.clone(), (OFFLINE_PATIENCE, false), |_key, verb| {
+            tries += 1;
+            std::future::ready((offline(), Some(verb)))
+        })
+        .await;
+        assert_eq!((outcome, tries), (offline(), 1), "a read fails at once");
+        let started = tokio::time::Instant::now();
+        let outcome = retried(None, read, (OFFLINE_PATIENCE, true), |_key, verb| {
+            let answer = if started.elapsed() < back_after { offline() } else { Outcome::Done };
+            std::future::ready((answer, Some(verb)))
+        })
+        .await;
+        assert_eq!(outcome, Outcome::Done, "a read that is part of a change waits too");
+
+        let mut tries = 0;
+        let outcome = retried(None, Verb::Close { term }, (Duration::ZERO, false), |_key, verb| {
+            tries += 1;
+            std::future::ready((offline(), Some(verb)))
+        })
+        .await;
+        assert_eq!((outcome, tries), (offline(), 1), "a command's own link does not wait");
+
+        let started = tokio::time::Instant::now();
+        let outcome =
+            retried(None, Verb::Close { term }, (OFFLINE_PATIENCE, false), |_key, verb| {
+                std::future::ready((offline(), Some(verb)))
+            })
+            .await;
+        let Outcome::Error { code: ErrorCode::ServerUnreachable, message } = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(message.contains("though it was tried for"), "{message}");
+        assert!(started.elapsed() >= OFFLINE_PATIENCE, "it waited the patience out");
     }
 
     #[test]

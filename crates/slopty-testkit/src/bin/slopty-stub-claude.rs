@@ -29,9 +29,13 @@
 //! - It shows a prompt and takes what is typed at it, a line at a time.
 //!
 //! What it was given and what it saw goes to `STUB_RECORD` as one JSON document, replaced whole
-//! after each step: its arguments, its `SLOPTY_*` and `CLAUDE_*` environment, every variable's
-//! name with a digest of its value (to tell what it inherited without writing any value), the
-//! MCP configs, the hooks it fired, the tool's answer and the lines typed.
+//! after each step: its pid, its arguments, its `SLOPTY_*` and `CLAUDE_*` environment, every
+//! variable's name with a digest of its value (to tell what it inherited without writing any
+//! value), the MCP configs, the hooks it fired, the tool's answer and the lines typed.
+//!
+//! In `STUB_RECORD`, `STUB_MCP_CALLS`, `STUB_MCP_AFTER` and `STUB_INBOX`, `{task}` is the task
+//! the agent was started for (`SLOPTY_TASK`, `none` for no task's), so one script serves every
+//! task a machine runs, each with its own files and its own report.
 
 #![allow(
     clippy::print_stdout,
@@ -96,6 +100,7 @@ impl Record {
     fn save(&self) -> Fallible<()> {
         let Some(at) = &self.at else { return Ok(()) };
         let doc = json!({
+            "pid": std::process::id(),
             "argv": self.argv,
             "cwd": self.cwd,
             "env": self.env,
@@ -109,9 +114,18 @@ impl Record {
     }
 }
 
+/// Where a knob names the task the agent was started for.
+const TASK_PLACE: &str = concat!("{", "task", "}");
+
+/// The variable `name`, with [`TASK_PLACE`] the task the agent was started for.
+fn knob(name: &str) -> Option<String> {
+    let task = std::env::var("SLOPTY_TASK").unwrap_or_else(|_| "none".to_owned());
+    std::env::var(name).ok().map(|value| value.replace(TASK_PLACE, &task))
+}
+
 fn run(args: &[String]) -> Fallible<()> {
     let mut record = Record {
-        at: std::env::var_os("STUB_RECORD").map(PathBuf::from),
+        at: knob("STUB_RECORD").map(PathBuf::from),
         argv: args.to_vec(),
         cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
         env: std::env::vars()
@@ -126,7 +140,7 @@ fn run(args: &[String]) -> Fallible<()> {
         hook_env: Vec::new(),
     };
     let settings = settings(args);
-    if let Some(file) = std::env::var_os("STUB_INBOX") {
+    if let Some(file) = knob("STUB_INBOX") {
         record.hook_env = inbox(PathBuf::from(file), settings.clone())?;
     }
 
@@ -137,9 +151,9 @@ fn run(args: &[String]) -> Fallible<()> {
     fire_all(&settings, &script, &mut record)?;
     record.save()?;
 
-    if let Ok(calls) = std::env::var("STUB_MCP_CALLS") {
+    if let Some(calls) = knob("STUB_MCP_CALLS") {
         let calls: Vec<Value> = serde_json::from_str(&calls)?;
-        if let Some(gate) = std::env::var_os("STUB_MCP_AFTER") {
+        if let Some(gate) = knob("STUB_MCP_AFTER") {
             wait_for(Path::new(&gate))?;
         }
         for call in &calls {

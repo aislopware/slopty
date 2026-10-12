@@ -573,6 +573,13 @@ impl Record {
         }
     }
 
+    /// Whether the timeline already says the orchestrator in `term` is gone.
+    fn said_gone(&self, term: TermRef) -> bool {
+        self.timeline.iter().rev().any(|e| {
+            e.task.is_none() && matches!(e.what, Moment::AgentGone { term: gone } if gone == term)
+        })
+    }
+
     fn log(&mut self, task: Option<TaskId>, what: Moment, now: WallMs) -> TimelineEntry {
         let entry = TimelineEntry { seq: self.next_seq, at_ms: now, task, what };
         self.next_seq = self.next_seq.saturating_add(1);
@@ -2008,11 +2015,27 @@ impl Projects {
                 let entry = record.log(Some(task.id), Moment::AgentGone { term }, now);
                 updates.push(record.task_update(&task, Some(entry)));
             }
-            if record.project.orchestrator == Some(term) {
+            if record.project.orchestrator == Some(term) && !record.said_gone(term) {
                 record.project.orchestrator_spent.follow(false, now);
                 let entry = record.log(None, Moment::AgentGone { term }, now);
                 updates.push(record.record_update(Some(entry)));
             }
+        }
+        updates
+    }
+
+    /// The program in `term` exited, its terminal still open: a project whose orchestrator it
+    /// was says so on its timeline, once, as its terminal closing would, so the board shows
+    /// the person their orchestrator ended and can be resumed. Its time at work stops.
+    pub(crate) fn orchestrator_exited(&mut self, term: TermRef, now: WallMs) -> Vec<Change> {
+        let mut updates = Vec::new();
+        for record in self.records.values_mut() {
+            if record.project.orchestrator != Some(term) || record.said_gone(term) {
+                continue;
+            }
+            record.project.orchestrator_spent.follow(false, now);
+            let entry = record.log(None, Moment::AgentGone { term }, now);
+            updates.push(record.record_update(Some(entry)));
         }
         updates
     }

@@ -16,6 +16,8 @@ libc.workspace = true
 rustix.workspace = true
 # The stand-in `claude` (`slopty-stub-claude`) reads its settings and speaks MCP in JSON.
 serde_json.workspace = true
+# A link a test cuts and restores (`relay`), on the runtime the tests run on.
+tokio.workspace = true
 
 # The SoC's media and graphics counters over a span (`soc`), read through IOReport.
 [target.'cfg(target_os = "macos")'.dependencies]

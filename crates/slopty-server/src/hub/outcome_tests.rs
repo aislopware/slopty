@@ -498,14 +498,22 @@ async fn a_merged_task_s_worktree_goes_though_its_terminal_closed_unsettled() {
     answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });
     assert!(rx.try_recv().is_err(), "the third is not merged, and its terminal is open");
 
-    // Let go, the project frees what is left: the third task's worktree.
+    // Let go, the project stops the third task's agent, then frees what is left: its worktree.
     assert_eq!(hub.dispatch(Verb::ProjectDelete { project: project() }).await, Outcome::Done);
+    let mut closed = false;
     let (id, verb) = loop {
         let (id, verb) = request(&mut rx).await;
-        if matches!(verb, Verb::RemoveWorktree { .. }) {
-            break (id, verb);
+        match verb {
+            Verb::RemoveWorktree { .. } => break (id, verb),
+            Verb::Close { term } => {
+                assert_eq!(term, third, "only the agent still running");
+                closed = true;
+                answer(&lease, id, Outcome::Done);
+            }
+            _ => {}
         }
     };
+    assert!(closed, "its agent stopped before its worktree went");
     let main = vec!["main".to_owned(), "origin/main".to_owned()];
     assert_eq!(verb, Verb::RemoveWorktree { worker, worktree: third_path, landed: main });
     answer(&lease, id, Outcome::WorktreeRemoved { branch: None, branch_removed: false });

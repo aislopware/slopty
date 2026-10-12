@@ -1259,11 +1259,13 @@ fn shared(
     }
 }
 
+/// An answer or a hand-back taken, or why not: someone answered first (another device a moment
+/// before), the prompt went back to the agent's own terminal, or it was never shown here.
 fn answered(taken: bool) -> Outcome {
     if taken {
         Outcome::Done
     } else {
-        refused("the request is no longer open to this client".to_owned())
+        refused("this was answered already, or went back to the agent's own terminal".to_owned())
     }
 }
 

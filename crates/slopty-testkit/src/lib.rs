@@ -14,6 +14,8 @@
 //! - [`soc`]: what the Mac's encode engines and GPU did over a span, from `IOReport`, with no root.
 //! - [`live`]: how a live test that cannot run here skips, and why it fails instead in the VM live
 //!   lane.
+//! - [`relay`]: a link a test can cut and restore, between a daemon and the server it dials, as a
+//!   network loss is met: packets stop, and both ends keep running.
 //!
 //! And four doubles, binaries, so tests start agents without spending anyone's plan:
 //! `slopty-stub-claude`, a stand-in for `claude` that speaks the hook protocol, calls Slopty's
@@ -37,5 +39,6 @@ pub mod env;
 pub mod group;
 pub mod live;
 pub mod process;
+pub mod relay;
 pub mod soc;
 pub mod stats;

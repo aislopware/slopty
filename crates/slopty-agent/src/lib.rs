@@ -1408,6 +1408,21 @@ impl AgentTable {
         }
     }
 
+    /// The program in `session` exited: the agent that ran there has ended, whatever its last
+    /// hook said. A `claude` killed sends no `SessionEnd`, and an exited terminal has no
+    /// foreground process for [`Self::observe`] to miss, so this is how that end is heard at
+    /// once. The event that says so; `None` when no agent ran there.
+    pub fn exited(&mut self, session: SessionId) -> Option<AgentEvent> {
+        let tracker = self.sessions.remove(&session)?;
+        self.branches.remove(&session);
+        self.natives.remove(&session);
+        if tracker.status() == &AgentStatus::None {
+            return None;
+        }
+        self.note_end(session, true, false);
+        Some(Tracker::default().event(session))
+    }
+
     /// Whether the agent that ran in `session` has ended and none has started there since:
     /// the terminal's shell, if it has one, is what reads its input now.
     #[must_use]
@@ -2092,6 +2107,24 @@ mod tests {
         assert_eq!(table.snapshot().len(), 1);
         table.forget(b);
         assert_eq!(table.snapshot(), Vec::<AgentEvent>::new());
+    }
+
+    /// An agent whose program exited has ended at once, though no `SessionEnd` came: the
+    /// table says so once, and a session that ran no agent says nothing.
+    #[test]
+    fn an_agent_whose_program_exited_has_ended() {
+        let (agent, shell) = (SessionId::new(), SessionId::new());
+        let mut table = AgentTable::default();
+        table.apply(
+            agent,
+            &hook(r#"{"session_id":"x","hook_event_name":"PermissionRequest","tool_name":"Bash"}"#),
+        );
+        let ended = table.exited(agent).expect("an event");
+        assert_eq!((ended.session, ended.status), (agent, AgentStatus::None));
+        assert!(table.ended(agent), "its terminal's shell reads input now");
+        assert_eq!(table.snapshot(), Vec::<AgentEvent>::new());
+        assert!(table.exited(agent).is_none(), "said once");
+        assert!(table.exited(shell).is_none(), "no agent ran there");
     }
 
     #[test]

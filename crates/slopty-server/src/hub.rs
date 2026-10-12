@@ -1691,9 +1691,11 @@ impl Lease {
                         (was, summary.state)
                     {
                         hub.happen(Happening::SessionExited { term, status });
-                        // The program in a task's terminal ended: the node above hears.
+                        // The program in a task's terminal ended: the node above hears. An
+                        // orchestrator's ending is on its project's timeline.
                         state.projects.exited(term);
-                        hub.projects_moved(&mut state, Vec::new());
+                        let said = state.projects.orchestrator_exited(term, WallMs::now());
+                        hub.projects_moved(&mut state, said);
                     }
                 } else {
                     entry.sessions.push(summary.clone());
