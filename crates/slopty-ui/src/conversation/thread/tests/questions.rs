@@ -203,14 +203,14 @@ fn a_question_that_offers_nothing_takes_words(cx: &mut TestAppContext) {
     );
 }
 
-/// A question stands whole over the composer, the one form it is; the activity bar under it
-/// (the plan) keeps to its share and scrolls; both stand below the rows, never over them, and
-/// the composer stands whole under them. A click above their edge is the rows'.
+/// A question is a card of its own after the turns, as Delta's are: in the thread's rows,
+/// brought into view as it comes, the activity bar over the composer keeping only the plan;
+/// the composer stands whole under them.
 #[gpui::test]
-fn a_question_stands_whole_and_the_activity_bar_gives_way(cx: &mut TestAppContext) {
+fn a_question_is_a_card_in_the_thread(cx: &mut TestAppContext) {
     use slopty_proto::thread::{Clipped, Item, ItemBody, ItemId, Plan, Step, TurnId};
 
-    let (hub, sent) = hub(cx, None);
+    let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
     state.items = vec![Item {
@@ -235,8 +235,7 @@ fn a_question_stands_whole_and_the_activity_bar_gives_way(cx: &mut TestAppContex
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    let plan = cx.debug_bounds("thread-plan").expect("the plan in the tray").center();
-    cx.simulate_click(plan, Modifiers::none());
+    cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 
     let bounds = |cx: &mut VisualTestContext, s: &'static str| {
@@ -244,24 +243,15 @@ fn a_question_stands_whole_and_the_activity_bar_gives_way(cx: &mut TestAppContex
     };
     let (whole, rows) = (bounds(cx, "thread"), bounds(cx, "thread-rows"));
     let (tray, composer) = (bounds(cx, "thread-tray"), bounds(cx, "thread-composer"));
-    let (request, rest) = (bounds(cx, "request-q"), bounds(cx, "thread-activity-rest"));
-    assert!(rows.size.height > px(0.0), "the rows keep what is left: {rows:?}");
-    assert!(rows.bottom() <= tray.top() + px(0.5), "the bar is under the rows: {tray:?}");
+    let request = bounds(cx, "request-q");
     assert!(
-        tray.top() <= request.top() + px(0.5) && request.bottom() <= rest.top() + px(0.5),
-        "the question stands whole: {request:?} in {tray:?}"
+        rows.top() <= request.top() + px(0.5) && request.bottom() <= rows.bottom() + px(0.5),
+        "the question is in the rows, in view: {request:?} in {rows:?}"
     );
-    assert!(
-        rest.size.height <= whole.size.height * 0.3 + px(1.0),
-        "the open plan keeps to its share: {rest:?}"
-    );
+    assert!(request.bottom() <= tray.top() + px(0.5), "nothing of it over the composer");
+    assert!(cx.debug_bounds("thread-activity-rest").is_some(), "the bar keeps the plan");
     assert!(tray.bottom() <= composer.top() + px(0.5), "the bar is over the composer");
     assert!(composer.bottom() <= whole.bottom() + px(0.5), "which stands whole");
-
-    let above = gpui::point(tray.center().x, tray.top() - px(2.0));
-    cx.simulate_click(above, Modifiers::none());
-    assert!(intents(&sent).is_empty(), "the rows' click: {:?}", intents(&sent));
-    assert!(cx.debug_bounds("request-q").is_some(), "the request still waits");
 }
 
 /// One question with two answers that say what they mean, the agent's own "Deny", and a
@@ -289,11 +279,10 @@ fn one_question() -> (slopty_proto::thread::ThreadState, slopty_proto::thread::T
 }
 
 /// Where the room is short (a phone with its keyboard up, a small window, a large text size),
-/// the question scrolls and its row of answers stays in view, under the person's thumb: the
-/// field for one's own answer shows above the row once it has the keyboard, and a press on
-/// "Submit" is the questionnaire's, not the composer's under it.
+/// the question's card scrolls with the thread; its "Submit" is the questionnaire's, not the
+/// composer's under it, and sends what was typed as one's own answer.
 #[gpui::test]
-fn a_short_room_keeps_the_answers_row_in_view(cx: &mut TestAppContext) {
+fn a_short_room_scrolls_the_question_with_the_thread(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let (state, thread) = one_question();
     hub.update(cx, ThreadHub::connected);
@@ -301,38 +290,39 @@ fn a_short_room_keeps_the_answers_row_in_view(cx: &mut TestAppContext) {
     cx.simulate_resize(gpui::size(px(402.0), px(330.0)));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    cx.update(|window, _| window.set_a11y_active(true));
     let form = view.read_with(cx, |v, _| v.questionnaire()).expect("a questionnaire");
     let submit: &'static str =
         Box::leak(format!("questionnaire-{}-Submit", form.entity_id()).into_boxed_str());
     cx.simulate_keystrokes("down down");
     cx.simulate_input("Unified, split for renames");
     cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
 
-    let bounds = |cx: &mut VisualTestContext, s: &'static str| {
-        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn"))
-    };
-    let (tray, composer) = (bounds(cx, "thread-tray"), bounds(cx, "thread-composer"));
-    let (question, at) = (bounds(cx, "thread-question"), bounds(cx, submit));
+    let rows = cx.debug_bounds("thread-rows").expect("the rows");
+    let card = cx.debug_bounds("request-q").expect("the card");
+    let composer = cx.debug_bounds("thread-composer").expect("the composer");
+    // Taller than the room, the card shows from its foot up, the thread following its end.
     assert!(
-        tray.top() <= at.top() && at.bottom() <= tray.bottom() + px(0.5),
-        "Submit shows: {at:?} in {tray:?}"
+        card.bottom() > rows.top() && card.top() < rows.bottom(),
+        "the card is in the rows: {card:?} {rows:?}"
     );
-    assert!(at.bottom() <= composer.top() + px(0.5), "over the composer, not under it");
-    let field = cx.update(|window, _| {
-        slopty_kit::a11y::tree(window)
-            .into_iter()
-            .find(|n| n.role == "MultilineTextInput" && n.label.as_deref() == Some("Other"))
-            .map(|n| n.bounds)
-            .expect("the field")
-    });
-    let [_, top, _, height] = field;
-    assert!(
-        f32::from(question.top()) <= top + 0.5
-            && top + height <= f32::from(question.bottom()) + 0.5,
-        "the field shows above the row: {field:?} in {question:?}"
-    );
-
+    assert!(rows.bottom() <= composer.top() + px(0.5), "the rows stand over the composer");
+    // The thread scrolls to the card's foot, where its answers are.
+    for _ in 0..20 {
+        let at = cx.debug_bounds(submit);
+        if at.is_some_and(|at| at.bottom() <= rows.bottom() + px(0.5)) {
+            break;
+        }
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: rows.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-60.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+    }
+    let at = cx.debug_bounds(submit).expect("Submit is drawn");
+    assert!(at.bottom() <= rows.bottom() + px(0.5), "Submit scrolls into view: {at:?}");
     cx.simulate_click(at.center(), Modifiers::none());
     let sent = intents(&sent);
     assert!(
@@ -341,8 +331,8 @@ fn a_short_room_keeps_the_answers_row_in_view(cx: &mut TestAppContext) {
     );
 }
 
-/// With room to spare, the question stands whole as it always did: the card is as tall in a
-/// window of 600 points as in one of 900, its row of answers under the question.
+/// The question's card is as tall in a window of 600 points as in one of 900, its row of
+/// answers under the question: the room changes the thread's scroll, not the card.
 #[gpui::test]
 fn with_room_the_question_stands_whole(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);

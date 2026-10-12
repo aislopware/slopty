@@ -109,6 +109,7 @@ glyphs! {
     Flag => "octicons/goal-16",
     Fold => "octicons/fold-16",
     Folder => "octicons/file-directory-16",
+    Gearshape => "octicons/gear-16",
     GitCommit => "octicons/git-commit-16",
     GitRepo => "octicons/repo-16",
     Globe => "octicons/globe-16",

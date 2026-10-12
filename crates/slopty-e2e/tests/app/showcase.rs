@@ -2514,14 +2514,14 @@ pub async fn start_thread(t: &mut Threads, agent: &str) -> Option<String> {
     let before = threads(&look(drv).await);
     let started = tokio::time::Instant::now();
     loop {
-        palette_with(drv, "new agent\u{2026}", "New agent\u{2026}").await;
-        wait(drv, "New agent\u{2026} first", |d| first_offered(d, "New agent\u{2026}")).await;
+        palette_with(drv, "new agent on\u{2026}", "New agent on\u{2026}").await;
+        wait(drv, "New agent on\u{2026} first", |d| first_offered(d, "New agent on\u{2026}")).await;
         drv.keys("enter").await.unwrap();
         let offered = drv.wait_for(agent, Duration::from_secs(2), |d| offering(d, agent)).await;
         if offered.is_ok() {
             break;
         }
-        assert!(started.elapsed() < STEP, "New agent\u{2026} never offered {agent}");
+        assert!(started.elapsed() < STEP, "New agent on\u{2026} never offered {agent}");
         drv.keys("escape").await.unwrap();
         wait(drv, "the palette closed", |d| !palette_up(d)).await;
     }

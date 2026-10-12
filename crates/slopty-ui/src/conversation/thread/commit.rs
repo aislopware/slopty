@@ -601,8 +601,7 @@ impl CommitSheet {
     // ----- drawing: pieces -------------------------------------------------------------
 
     fn icon(&self, name: Symbol, tone: Rgb) -> Div {
-        slopty_kit::icons::icon(&self.theme, name, hsla(tone))
-            .size(px(self.theme.typography.icon()))
+        slopty_kit::icons::icon(&self.theme, name, hsla(tone)).size(px(self.theme.icon()))
     }
 
     fn mono(&self) -> SharedString {

@@ -1919,9 +1919,8 @@ impl TerminalView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let facts = self.block_facts(prompt);
-        let line =
-            self.metrics.map_or_else(|| theme.typography.icon(), |m| f32::from(m.line_height));
-        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.typography.icon());
+        let line = self.metrics.map_or_else(|| theme.icon(), |m| f32::from(m.line_height));
+        let button = 2.0_f32.mul_add(theme.spacing.xs, theme.icon());
         // No taller than the line it ends.
         let more = slopty_kit::kit::icon_button(
             theme,
@@ -2990,7 +2989,7 @@ impl TerminalView {
             .hover(move |el| el.bg(hsla(s.hover)))
             .child(
                 slopty_kit::icons::icon(theme, pill.icon, hsla(s.text_secondary))
-                    .size(px(theme.typography.icon())),
+                    .size(px(theme.icon())),
             )
             .child(slopty_kit::chrome_text::ChromeText::new(pill.words, small))
             .child(

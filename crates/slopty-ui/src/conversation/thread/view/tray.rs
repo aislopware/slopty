@@ -303,14 +303,7 @@ impl ThreadView {
             }
             sections.extend(group);
         }
-        // A question stands whole over the rest: the questionnaire is one form, its row of
-        // answers kept in view. gpui-fast's carried text measurement does not yet hold for it
-        // inside the list's rows.
-        let question = self
-            .shown_waiting(cx)
-            .filter(|request| !request.questions.is_empty())
-            .map(|request| self.asked_card(&request.id, cx).mb(px(theme.spacing.md)));
-        if sections.is_empty() && question.is_none() {
+        if sections.is_empty() {
             return None;
         }
         let max = window_h * super::TRAY;
@@ -353,16 +346,7 @@ impl ThreadView {
                 .overflow_hidden()
                 .child(rest)
         });
-        Some(
-            div()
-                .w_full()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .children(question)
-                .children(rest)
-                .into_any_element(),
-        )
+        Some(div().w_full().min_h_0().flex().flex_col().children(rest).into_any_element())
     }
 
     /// The card of `ask`, waiting on the person after the turns (a question, a request about
@@ -841,12 +825,8 @@ impl ThreadView {
                         "in_progress" => (Status::Working, s.text_muted, s.text),
                         _ => (Status::Running, s.text_muted, s.text_secondary),
                     };
-                    let mark = slopty_kit::icons::status_icon(
-                        theme,
-                        status,
-                        px(theme.typography.icon()),
-                        hsla(ink),
-                    );
+                    let mark =
+                        slopty_kit::icons::status_icon(theme, status, px(theme.icon()), hsla(ink));
                     self.section().text_color(hsla(tone)).child(Self::slot().child(mark)).child(
                         div()
                             .min_w_0()

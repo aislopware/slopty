@@ -121,7 +121,7 @@ pub(super) fn pane_tab(
 pub(super) fn lead(theme: &Theme, mark: impl Into<Mark>, shown: bool) -> Stateful<Div> {
     let s = theme.surfaces;
     let ink = if shown { s.icon } else { s.icon_muted };
-    crate::palette::lead_mark(theme, mark, hsla(ink), theme.typography.icon())
+    crate::palette::lead_mark(theme, mark, hsla(ink), theme.icon())
 }
 
 /// `close`, a tab's [`kit::close_box`], laid over the tab's end, [`slopty_theme::Spacing::xs`]

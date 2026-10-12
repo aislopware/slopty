@@ -213,3 +213,112 @@ fn a_thread_tile_says_its_checkout_and_branch_in_its_header(cx: &mut TestAppCont
         "{nodes:#?}"
     );
 }
+
+/// "!" first in a thread's empty composer opens a shell on the thread's machine, in its folder,
+/// off the tiling: no tab, no pane; the shell stands in the thread's next-turn place with the
+/// keyboard. The next message goes led by what it shows, and the shell ends with it.
+#[gpui::test]
+fn a_bang_opens_a_shell_in_the_thread_and_the_next_message_carries_it(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{Intent, ThreadFrame, ThreadRequest};
+
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    state.meta.cwd = "/w/app".to_owned();
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.thread_table(key, &table, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    // The thread itself, once its face has asked for it: its folder is what "!" opens in.
+    let frame_of =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, state: Box::new(state) };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame_of, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let tabs = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.layout().shown_project().map(|p| p.tabs().len()))
+    };
+    let before = tabs(cx);
+
+    cx.simulate_input("!");
+    cx.run_until_parked();
+    let draft = view.read_with(cx, |v, cx| v.thread_face(session).map(|t| t.read(cx).draft(cx)));
+    assert_eq!(draft.as_deref(), Some(""), "the ! is not typed");
+    let sent = studio.drain();
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            ClientMsg::OpenSession { spec: OpenSession { cwd: Some(cwd), .. }, .. } if cwd == "/w/app"
+        )),
+        "a shell in the thread's folder: {sent:?}"
+    );
+    assert!(cx.debug_bounds("inline-terminal").is_some(), "its place shows at once");
+
+    let shell = SessionId::new();
+    let inline = opens_in(&view, cx, &studio, shell, studio.me, 2, Some("/w/app"));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(inline)), "off the tiling");
+    assert_eq!(tabs(cx), before, "no tab of its own");
+    assert!(terminal_focused(&view, cx, shell), "the shell has the keyboard");
+    let card = cx.debug_bounds("inline-terminal").expect("the card");
+    let body = cx.debug_bounds(selector("item", tile.item)).expect("the tile");
+    assert!(body.contains(&card.center()), "in the thread's tile: {body:?} {card:?}");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(shell, frame(&["~/app % ls", "Cargo.toml  src", "~/app %", ""]), cx);
+    });
+    cx.run_until_parked();
+    studio.drain();
+    // Back to the composer by a press on its field, as the person goes.
+    let composer = cx.debug_bounds("thread-composer-field").expect("the composer");
+    cx.simulate_click(composer.center(), Modifiers::none());
+    cx.simulate_input("why");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let sent = studio.drain();
+    let text = sent
+        .iter()
+        .find_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                intent: Intent::Send { text, .. }, ..
+            }) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("a message went: {sent:?}"));
+    assert!(
+        text.starts_with("```console\n~/app % ls\nCargo.toml  src") && text.ends_with("```\n\nwhy"),
+        "led by what the shell shows: {text:?}"
+    );
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            ClientMsg::Term { session: s, req: TermRequest::Close } if *s == shell
+        )),
+        "the shell ends: {sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, ClientMsg::Items(ItemOp::Remove(id)) if *id == inline.item)),
+        "and its item goes: {sent:?}"
+    );
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("inline-terminal").is_none(), "its place goes");
+}

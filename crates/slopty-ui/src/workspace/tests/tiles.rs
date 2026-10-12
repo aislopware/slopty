@@ -698,7 +698,8 @@ fn the_exited_pill_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
 }
 
 /// Notices hang under the top line on its right, no wider than Delta's 465 pt, two at most (a third
-/// pushes the oldest out), and each goes after six seconds.
+/// pushes the oldest out), and each goes after six seconds. A long one runs to a second line of
+/// Delta's 19 and is cut there.
 #[gpui::test]
 fn notices_stack_two_under_the_top_line_and_go(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -714,7 +715,7 @@ fn notices_stack_two_under_the_top_line_and_go(cx: &mut TestAppContext) {
     assert_eq!(shown, vec!["two".to_owned(), long.clone()], "the oldest went");
 
     let nodes = tree(cx);
-    let [x, y, w, _] = nodes
+    let [x, y, w, h] = nodes
         .iter()
         .find(|n| n.is("Status", Some(long.as_str())))
         .map_or_else(|| panic!("the long notice is drawn: {nodes:#?}"), |n| n.bounds);
@@ -722,6 +723,10 @@ fn notices_stack_two_under_the_top_line_and_go(cx: &mut TestAppContext) {
     assert!(w <= 465.0, "capped at 465 pt: {w}");
     assert!(x > f32::from(workspace.center().x), "on the right: {x}");
     assert!(y >= Theme::default().density.header, "under the top line: {y}");
+    let theme = Theme::default();
+    let line = theme.roles().notice.line;
+    let pads = theme.spacing.xs.mul_add(2.0, 2.0);
+    assert!((h - line.mul_add(2.0, pads)).abs() < 1.0, "two lines, then cut: {h}");
 
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();

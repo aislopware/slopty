@@ -57,6 +57,7 @@ mod folder_typing;
 mod folders;
 mod grouping;
 mod handoffs;
+mod inline_shells;
 mod kept_items;
 mod machine_remove;
 mod machines;
@@ -981,6 +982,8 @@ pub struct WorkspaceView {
     zoom_hold: Option<bool>,
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
+    /// The shells behind threads' inline terminals.
+    inline: inline_shells::InlineShells,
     /// The server's projects and their boards.
     projects: projects::ProjectsState,
     /// The number the next `OpenSession` goes under, for its answer to name.
@@ -1240,6 +1243,7 @@ impl WorkspaceView {
             pending_focus: None,
             zoom_hold: None,
             faces: faces::Faces::default(),
+            inline: inline_shells::InlineShells::default(),
             projects: projects::ProjectsState {
                 looked: saved
                     .iter()
@@ -2472,8 +2476,22 @@ impl WorkspaceView {
 
 /// The tiling's constants for this device: touch's on iOS (an iPad's panes at the touch
 /// minimum, and Split View below 900 pt drawn as a phone), a pointer's on the Mac.
+///
+/// Every pane heads its own tabs with its bar, Zed's and Delta's way, so the least height a
+/// pane takes is the tiling's least for its content (about 14 rows of a terminal) and that
+/// bar: with the window's own title and status bars gone, a 600 pt window would otherwise
+/// split a new tile below into two panes of 266 pt of content.
 const fn tiling_config() -> TilingConfig {
-    if cfg!(target_os = "ios") { TilingConfig::TOUCH } else { TilingConfig::POINTER }
+    let (config, density) = if cfg!(target_os = "ios") {
+        (TilingConfig::TOUCH, slopty_theme::Density::TOUCH)
+    } else {
+        (TilingConfig::POINTER, slopty_theme::Density::COMPACT)
+    };
+    let room = slopty_client::layout::Room {
+        min_w: config.room.min_w,
+        min_h: config.room.min_h + density.header,
+    };
+    TilingConfig { room, ..config }
 }
 
 /// Write `saved` to `path` atomically; a failure is logged, never fatal: the layout is this

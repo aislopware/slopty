@@ -350,6 +350,76 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-comment-0").is_none());
 }
 
+/// A comment is Delta's card under its line, inset from the pane's sides: at least the
+/// foot's height, the commenter's colour down its left edge, a line at rest and the bar while
+/// it is being written.
+#[gpui::test]
+fn a_comment_is_a_card_with_its_commenters_edge(cx: &mut TestAppContext) {
+    let (_view, _hub, _sent, cx) = tile(cx, 800.0);
+    let theme = Theme::default();
+    let edge = |cx: &mut VisualTestContext| {
+        f32::from(cx.debug_bounds("review-comment-edge").expect("the card's edge").size.width)
+    };
+    click(cx, "review-line-1-0-2");
+    let draft = cx.debug_bounds("review-draft").expect("the field's card");
+    assert!((edge(cx) - slopty_theme::stroke::BAR).abs() < 0.01, "the bar while written");
+    assert!(f32::from(draft.size.height) >= theme.density.foot - 0.5, "{draft:?}");
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let card = cx.debug_bounds("review-comment-0").expect("the comment's card");
+    let line = cx.debug_bounds("review-line-1-0-2").expect("its line");
+    assert!((edge(cx) - slopty_theme::stroke::LINE).abs() < 0.01, "a line at rest");
+    assert!(f32::from(card.size.height) >= theme.density.foot - 0.5, "{card:?}");
+    assert!(card.top() >= line.bottom(), "under its line");
+    let inset = f32::from(card.left() - line.left());
+    assert!((inset - theme.spacing.md).abs() < 0.5, "in from the pane's side: {inset}");
+}
+
+/// A line wider than the tile keeps one row and slides sideways under a sideways scroll,
+/// every line together, within the room the widest needs; a scroll down leaves it be.
+#[gpui::test]
+fn a_long_line_slides_sideways_rather_than_wrapping(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = tile(cx, 600.0);
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
+    let long = format!("+    let words = \"{}\";", "x".repeat(400));
+    let wide = Review {
+        files: vec![file("src/long.rs", &[" fn main() {", long.as_str(), " }"], 1, 0)],
+        ..review()
+    };
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(wide)), cx));
+    cx.run_until_parked();
+    let theme = Theme::default();
+    let row = cx.debug_bounds("review-line-0-0-1").expect("the long line");
+    let tall = f32::from(row.size.height);
+    assert!((tall - theme.roles().code.line).abs() < 0.5, "one row, not wrapped: {tall}");
+
+    let wheel = |cx: &mut VisualTestContext, x: f32, y: f32| {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: row.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(x), px(y))),
+            modifiers: Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+            momentum_phase: None,
+        });
+        cx.run_until_parked();
+    };
+    assert!(view.read_with(cx, |v, _| v.slid()).abs() < f32::EPSILON, "at rest from the start");
+    wheel(cx, -200.0, 0.0);
+    let slid = view.read_with(cx, |v, _| v.slid());
+    assert!((slid - 200.0).abs() < 0.5, "slid by the scroll: {slid}");
+    wheel(cx, 0.0, -40.0);
+    assert!((view.read_with(cx, |v, _| v.slid()) - slid).abs() < 0.5, "down leaves it be");
+    wheel(cx, -100_000.0, 0.0);
+    let most = view.read_with(cx, |v, _| v.slid());
+    let advance = theme.roles().code.size * 0.6;
+    // 419 columns: the indent, the words, the quotes and the 400 letters.
+    let run = advance * 425.0;
+    assert!(most > 2_000.0 && most < run, "to the widest line's end, no further: {most}");
+    wheel(cx, 100_000.0, 0.0);
+    assert!(view.read_with(cx, |v, _| v.slid()).abs() < f32::EPSILON, "and back");
+}
+
 /// A comment keeps its lines: a pasted suggestion keeps its line ends and ⇧↵ breaks a line,
 /// where ↵ still adds the comment. They go to the agent as written.
 #[gpui::test]
@@ -712,8 +782,9 @@ fn review_with_the_agent_shows_only_where_it_has_a_door(cx: &mut TestAppContext)
 
 /// The press asks the agent for its own review of the two trees on show and says it runs;
 /// the span stays on show though the thread moves on. Once the agent rests, each finding on a
-/// line in the diff is a comment under it, marked as the agent's, one about a file not on show
-/// is a note above the diff, and the band says what came. Every one goes back as one message.
+/// line in the diff is a comment under it, marked as the agent's; the comparison row says
+/// what came, and opens a float with one about a file not on show. Every one goes back as one
+/// message.
 #[gpui::test]
 fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppContext) {
     let (view, hub, sent, cx) = door_tile(cx);
@@ -738,9 +809,16 @@ fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppCon
     assert_eq!(reviews_asked(&sent).len(), asked, "the span on show stays, not the new turn's");
     assert!(cx.debug_bounds("review-by-agent-running").is_none());
     assert!(cx.debug_bounds("review-comment-0").is_some(), "on its line");
-    assert!(cx.debug_bounds("review-note-0").is_some(), "not on show: a note");
-    let came = cx.debug_bounds("review-came").is_some();
-    assert!(came, "the band says what came");
+    assert!(cx.debug_bounds("review-findings").is_none(), "nothing stands over the diff");
+    let raised = view.read_with(cx, |v, _| v.raised());
+    assert_eq!(raised.as_deref(), Some("Raised 2 findings"), "the comparison row says what came");
+    let scope = cx.debug_bounds("review-scope").expect("the comparison");
+    let word = cx.debug_bounds("review-findings-toggle").expect("its word");
+    assert!(f32::from(word.center().y - scope.center().y).abs() < 0.5, "on the comparison's row");
+    assert!(word.left() > scope.right(), "after the comparison");
+    click(cx, "review-findings-toggle");
+    assert!(cx.debug_bounds("review-note-0").is_some(), "not on show: in the float");
+    assert!(cx.debug_bounds("review-came").is_some(), "with what came in full");
     let heard = said(cx);
     assert!(heard.iter().any(|l| l == "Claude Code raised 2 findings"), "{heard:?}");
 
@@ -758,13 +836,14 @@ fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppCon
         )
     );
     answer_send(&hub, &sent, Outcome::Accepted, cx);
-    assert!(cx.debug_bounds("review-findings").is_none(), "nothing waits after");
+    assert!(cx.debug_bounds("review-findings-toggle").is_none(), "nothing waits after");
+    assert!(cx.debug_bounds("review-findings").is_none());
 }
 
-/// Findings that would take more than a quarter of the diff's room fold to one line that says
-/// what came; it opens them and folds them again, and the code keeps the tile meanwhile.
+/// However many findings come, the diff keeps the tile: they wait behind the comparison row's
+/// word, which opens them over the diff and folds them again.
 #[gpui::test]
-fn many_findings_fold_to_one_line_that_opens_them(cx: &mut TestAppContext) {
+fn many_findings_wait_behind_the_comparison_rows_word(cx: &mut TestAppContext) {
     let (view, hub, _sent, cx) = door_tile(cx);
     let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     click(cx, "review-by-agent");
@@ -776,9 +855,12 @@ fn many_findings_fold_to_one_line_that_opens_them(cx: &mut TestAppContext) {
             )
         })
         .collect();
+    let first = cx.debug_bounds("review-line-0-0-0").expect("the diff's first line");
     answered(&hub, cx, thread, &found.join("\n"));
-    assert!(cx.debug_bounds("review-findings-toggle").is_some(), "folded to its line");
-    assert!(cx.debug_bounds("review-note-0").is_none(), "the findings wait under it");
+    assert!(cx.debug_bounds("review-findings-toggle").is_some(), "the word of what came");
+    assert!(cx.debug_bounds("review-note-0").is_none(), "the findings wait behind it");
+    let still = cx.debug_bounds("review-line-0-0-0").expect("the diff's first line");
+    assert_eq!(still.top(), first.top(), "the diff did not move");
     let heard = said(cx);
     assert!(heard.iter().any(|l| l == "Claude Code raised 6 findings"), "{heard:?}");
 
@@ -796,15 +878,20 @@ fn findings_are_let_go_and_a_review_says_how_it_came_out(cx: &mut TestAppContext
     let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
     click(cx, "review-by-agent");
     answered(&hub, cx, thread, "- Nothing placed here\n- Another loose one");
+    click(cx, "review-findings-toggle");
     assert!(cx.debug_bounds("review-note-1").is_some(), "kept, though they name no place");
     click(cx, "review-unnote-0");
     click(cx, "review-unnote-0");
     assert!(cx.debug_bounds("review-note-0").is_none());
     click(cx, "review-came-close");
     assert!(cx.debug_bounds("review-findings").is_none(), "all let go");
+    assert!(cx.debug_bounds("review-findings-toggle").is_none(), "and its word");
 
     click(cx, "review-by-agent");
     answered(&hub, cx, thread, "No issues found. The change does what it says.");
+    let raised = view.read_with(cx, |v, _| v.raised());
+    assert_eq!(raised.as_deref(), Some("Raised nothing"), "its reason waits in the float");
+    click(cx, "review-findings-toggle");
     let heard = said(cx);
     assert!(
         heard

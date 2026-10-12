@@ -14,6 +14,7 @@ pub(super) struct Asking {
     ask: AskId,
     questions: Questions,
     _answered: Subscription,
+    _grown: Subscription,
 }
 
 impl Asking {
@@ -57,12 +58,24 @@ impl ThreadView {
                         this.answer_questions(submission, cx);
                     }
                 });
-            Asking { ask, questions, _answered: answered }
+            // Its card is a row of the list: a step to the next question, a choice or a field
+            // opening changes its height, which the list measures again.
+            let grown = cx.observe(questions.state(), |this, _state, cx| this.remeasure_asked(cx));
+            Asking { ask, questions, _answered: answered, _grown: grown }
         });
         match &self.asking {
             Some(asking) if held || free => asking.questions.focus(window, cx),
             None if held => self.focus(window, cx),
             _ => {}
+        }
+    }
+
+    /// The card of what waits on the person after the turns changed: its row is measured again.
+    fn remeasure_asked(&self, cx: &mut Context<Self>) {
+        if let Some(ix) = self.rows.iter().position(|r| matches!(r, super::rows::Row::Asked { .. }))
+        {
+            self.list.remeasure_items(ix..ix.saturating_add(1));
+            cx.notify();
         }
     }
 

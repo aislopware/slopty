@@ -173,7 +173,7 @@ impl WorkspaceView {
                 self.words("crumb-worker", label)
             }
             .gap(px(spacing.xs))
-            .child(icon(theme, glyph, hsla(tint)).size(px(theme.typography.icon())))
+            .child(icon(theme, glyph, hsla(tint)).size(px(theme.icon())))
             .child(SharedString::from(worker))
             .when(more, |el| el.child(self.chevron()));
             row = row.item("worker", kit::Priority::LOW, stepped(segment.into_any_element()));
@@ -201,10 +201,7 @@ impl WorkspaceView {
                 .words("crumb-branch", SharedString::from(format!("branch {branch}")))
                 .flex_initial()
                 .gap(px(spacing.xs))
-                .child(
-                    icon(theme, GitGlyph::Branch, hsla(s.text_muted))
-                        .size(px(theme.typography.icon())),
-                )
+                .child(icon(theme, GitGlyph::Branch, hsla(s.text_muted)).size(px(theme.icon())))
                 .child(
                     div()
                         .min_w_0()
@@ -307,7 +304,7 @@ impl WorkspaceView {
     pub(super) fn chevron(&self) -> gpui::Div {
         let theme = &self.theme;
         Drawn::disclosure(theme, Symbol::ChevronDown)
-            .slot(px(theme.typography.icon()), hsla(theme.surfaces.text_muted))
+            .slot(px(theme.icon()), hsla(theme.surfaces.text_muted))
     }
 
     /// The project segment's menu: every project, the one on show ticked, the others saying

@@ -2193,7 +2193,7 @@ impl SettingsForm {
             .debug_selector(move || format!("settings-ansi-{ix}"))
             .flex_none()
             .flex()
-            .h(px(theme.typography.icon()))
+            .h(px(theme.icon()))
             .overflow_hidden()
             .rounded(px(theme.radii.xs))
             .border(slopty_kit::kit::HAIR)
@@ -2217,7 +2217,7 @@ impl SettingsForm {
                 own.or_else(|| theme_colour(row.table(), row.key())).map(|colour| {
                     div()
                         .flex_none()
-                        .size(px(theme.typography.icon()))
+                        .size(px(theme.icon()))
                         .rounded(px(theme.radii.xs))
                         .border(slopty_kit::kit::HAIR)
                         .border_color(hsla(s.border))

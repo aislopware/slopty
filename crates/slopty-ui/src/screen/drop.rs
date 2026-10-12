@@ -265,7 +265,7 @@ impl ScreenView {
         let at = self.drop?.ring?;
         let theme = &self.theme;
         let side = theme.density.hit;
-        let icon = theme.typography.icon();
+        let icon = theme.icon();
         let ring = kit::elevate(div(), theme)
             .absolute()
             .left(at.x - px(side / 2.0))

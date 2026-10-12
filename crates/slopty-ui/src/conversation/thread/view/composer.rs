@@ -269,7 +269,7 @@ impl ThreadView {
                 .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(
                     slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                        .slot(px(theme.typography.icon()), hsla(s.text_muted)),
+                        .slot(px(theme.icon()), hsla(s.text_muted)),
                 )
                 .on_click(click),
             s.focus,
@@ -305,7 +305,7 @@ impl ThreadView {
                     .cursor_pointer()
                     .child(
                         slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                            .slot(px(theme.typography.icon()), hsla(s.text_muted)),
+                            .slot(px(theme.icon()), hsla(s.text_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
                 s.focus,
@@ -355,7 +355,7 @@ impl ThreadView {
                         .cursor_pointer()
                         .child(
                             slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                                .slot(px(theme.typography.icon()), hsla(s.text_muted)),
+                                .slot(px(theme.icon()), hsla(s.text_muted)),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
                     s.focus,
@@ -596,7 +596,7 @@ impl ThreadView {
             .chip("thread-checkout", format!("{COMMIT_ON} {words}"))
             .flex_shrink_1()
             .min_w_0()
-            .px(px((kit::icon_button_side(theme) - theme.typography.glyph()) / 2.0))
+            .px(px((kit::icon_button_side(theme) - theme.glyph()) / 2.0))
             .child(self.icon(Symbol::GitRepo, s.text_muted))
             .child(kit::fit_label("thread-checkout-words", words, theme));
         Some(

@@ -1193,7 +1193,7 @@ impl WorkspaceView {
         let upload = self.header_upload(tile).map(|(xfer, upload)| {
             let figure =
                 kit::progress::Progress::Share(upload.fraction()).figure().unwrap_or_default();
-            let side = px(theme.typography.icon());
+            let side = px(theme.icon());
             let ring = kit::progress::ring(
                 theme,
                 SharedString::from(format!("upload-ring-{}", id.as_uuid())),
@@ -1385,9 +1385,7 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.xs))
                 .text_color(muted)
-                .child(
-                    slopty_kit::icons::icon(theme, machine, tint).size(px(theme.typography.icon())),
-                )
+                .child(slopty_kit::icons::icon(theme, machine, tint).size(px(theme.icon())))
                 .child(ChromeText::new(name, px(theme.typography.small())).fill())
         });
         HeaderBits {
@@ -1566,7 +1564,7 @@ impl WorkspaceView {
             .role(Role::Status)
             .aria_label(words)
             .flex_none()
-            .size(px(theme.typography.icon()))
+            .size(px(theme.icon()))
             .flex()
             .items_center()
             .justify_center()
@@ -1722,14 +1720,21 @@ impl WorkspaceView {
                 let item = self.item(tab)?;
                 let id = item.id;
                 let shown = tab == placed.tile;
-                // How it is doing leads the tab while it works or has finished, else its kind. A
-                // remote window or display on its way turns its mark in its body, so its tab
-                // keeps its kind meanwhile.
+                // How it is doing leads the tab while it works, while an agent waits on its own
+                // work (a background task, said to a screen reader as "Waiting on cargo test")
+                // or once it has finished, else its kind. A remote window or display on its way
+                // turns its mark in its body, so its tab keeps its kind meanwhile.
                 let screen =
                     matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. });
+                let agent = match item.kind {
+                    ItemKind::Terminal { session } => self.agent_state(session).is_some(),
+                    ItemKind::Thread { .. } => true,
+                    _ => false,
+                };
                 let state = self.tile_status(tab, item).filter(|st| {
                     matches!(st, Status::NeedsYou | Status::Done | Status::Failed)
                         || (matches!(st, Status::Working) && !screen)
+                        || (matches!(st, Status::Running) && agent)
                 });
                 // A file's tab wears no glyph (Zed's `tabs.file_icons: false`): its name's
                 // extension says its kind. On a Mac the shown file's tab leads with its proxy,
@@ -1988,7 +1993,7 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .text_color(muted)
                 .children(glyph.map(|glyph| {
-                    slopty_kit::icons::icon(theme, glyph, muted).size(px(theme.typography.icon()))
+                    slopty_kit::icons::icon(theme, glyph, muted).size(px(theme.icon()))
                 }))
                 .child(ChromeText::new(words, px(theme.typography.small())).fill());
             if !at.commits {
@@ -2059,10 +2064,7 @@ impl WorkspaceView {
                 let theme = std::rc::Rc::clone(&hint_theme);
                 cx.new(|_| kit::Hint::new(hint, path, theme)).into()
             })
-            .child(
-                slopty_kit::icons::icon(theme, GitGlyph::Branch, muted)
-                    .size(px(theme.typography.icon())),
-            )
+            .child(slopty_kit::icons::icon(theme, GitGlyph::Branch, muted).size(px(theme.icon())))
             .child(ChromeText::new(tree.name.clone(), px(theme.typography.small())).fill())
             .into_any_element();
         vec![("worktree", kit::Priority::LOW, worktree)]
@@ -2117,10 +2119,7 @@ impl WorkspaceView {
                 let theme = std::rc::Rc::clone(&hint_theme);
                 cx.new(|_| kit::Hint::new(line, title, theme)).into()
             })
-            .child(
-                slopty_kit::icons::icon(theme, glyph, hsla(glyph_ink))
-                    .size(px(theme.typography.icon())),
-            )
+            .child(slopty_kit::icons::icon(theme, glyph, hsla(glyph_ink)).size(px(theme.icon())))
             .child(ChromeText::new(pull.named(), px(theme.typography.small())));
         let chip = tab_stop(chip, s.focus).on_click(move |_ev, _window, cx| cx.open_url(&url));
         Some(("pr", PR_PRIORITY, chip.into_any_element()))
@@ -2874,7 +2873,7 @@ impl WorkspaceView {
             .child(slopty_kit::icons::status_icon(
                 theme,
                 status,
-                px(theme.typography.icon()),
+                px(theme.icon()),
                 hsla(status.ink(theme)),
             ))
             .child(
@@ -2951,7 +2950,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
-            .size(px(theme.typography.icon()))
+            .size(px(theme.icon()))
             .rounded(px(theme.radii.xs))
             .hover(|s| s.bg(hsla(theme.surfaces.hover)))
             .cursor_grab()

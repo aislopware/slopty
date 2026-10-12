@@ -157,30 +157,28 @@ pub struct Drawn {
 
 impl Drawn {
     /// `mark` in the icon slot: a glyph on Octicons' 16 grid across
-    /// [`slopty_theme::Typography::glyph`] (14 of 16), one on the 12 grid across its art's own
-    /// size; an agent's mark with its ink box [`slopty_theme::Spacing::xxs`] short of the slot.
+    /// [`Theme::glyph`] (14 of 16; a finger's 18 of 20), one on the 12 grid across its art's
+    /// own size ([`Theme::glyph_small`]); an agent's mark with its ink box
+    /// [`slopty_theme::Spacing::xxs`] short of the slot.
     #[must_use]
     pub fn new(theme: &Theme, mark: impl Into<Mark>) -> Self {
         let mark = mark.into();
-        let slot = theme.typography.icon();
+        let slot = theme.icon();
         let small = match mark {
             Mark::Symbol(symbol) => symbol.small_art(),
             Mark::Git(glyph) => glyph.symbol().small_art(),
             Mark::Agent(_) => false,
         };
-        let drawn = if small { theme.typography.small() } else { theme.typography.glyph() };
+        let drawn = if small { theme.glyph_small() } else { theme.glyph() };
         Self { mark, share: drawn / slot, ink: (slot - theme.spacing.xxs) / slot, turn: 0.0 }
     }
 
-    /// A small glyph's drawing: on the grid of the chrome's smaller size
-    /// ([`slopty_theme::Typography::small`], 12 pt) in the icon slot, Zed's extra-small icon: a
-    /// disclosure's chevron, or an action at the end of a line of text.
+    /// A small glyph's drawing: on the grid of [`Theme::glyph_small`] (12 pt, a finger's 14) in
+    /// the icon slot, Zed's extra-small icon: a disclosure's chevron, or an action at the end of
+    /// a line of text.
     #[must_use]
     pub fn disclosure(theme: &Theme, symbol: Symbol) -> Self {
-        Self {
-            share: theme.typography.small() / theme.typography.icon(),
-            ..Self::new(theme, symbol)
-        }
+        Self { share: theme.glyph_small() / theme.icon(), ..Self::new(theme, symbol) }
     }
 
     /// An empty state's mark, across [`crate::kit::NOTICE_MARK`]; an agent's mark with its ink
@@ -327,7 +325,7 @@ const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 
 /// glyph's file and Core Graphics' first context, about 6 ms together (`docs/MEASUREMENTS.md`,
 /// "Octicons glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
 pub fn prewarm(theme: &Theme) {
-    let slot = theme.typography.icon();
+    let slot = theme.icon();
     // Each glyph at the side it is painted at in the slot, on each display.
     let glyphs: Vec<(Symbol, u32)> = Symbol::ALL
         .iter()
@@ -358,7 +356,7 @@ pub fn prewarm(theme: &Theme) {
 /// `symbol` in the icon slot, in `color`; a slot sized again draws the mark at its size.
 #[must_use]
 pub fn icon(theme: &Theme, symbol: impl Into<Mark>, color: Hsla) -> Div {
-    Drawn::new(theme, symbol).slot(px(theme.typography.icon()), color)
+    Drawn::new(theme, symbol).slot(px(theme.icon()), color)
 }
 
 /// `symbol` in a slot `side` square, in `ink`: a row's lead at whatever size.
@@ -481,7 +479,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>) -> Stateful<Div> {
     let slot = div()
         .id("status")
         .flex_shrink_0()
-        .size(px(theme.typography.icon()))
+        .size(px(theme.icon()))
         .flex()
         .items_center()
         .justify_center();
@@ -491,7 +489,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>) -> Stateful<Div> {
                 child: Some(div().flex_none().child(status_icon(
                     theme,
                     Status::Done,
-                    px(theme.typography.icon()),
+                    px(theme.icon()),
                     hsla(Status::Done.ink(theme)),
                 ))),
                 inner: None,
@@ -500,7 +498,7 @@ pub fn status_mark(theme: &Theme, status: Option<Status>) -> Stateful<Div> {
         Some(status) => slot.role(Role::Image).aria_label(status.label()).child(status_icon(
             theme,
             status,
-            px(theme.typography.icon()),
+            px(theme.icon()),
             hsla(status.ink(theme)),
         )),
         None => slot,
@@ -1033,23 +1031,26 @@ mod tests {
         assert_eq!(AGENT, Symbol::AiAgent, "Octicons' model, not the cliched sparkles");
     }
 
-    /// A glyph is drawn at 14 in its slot of 16, on a pointer and a finger alike, with a point
-    /// of air round it; the 12-grid art (a chevron, the small cross) at its own 12.
+    /// A glyph is drawn at 14 in its slot of 16 with a point of air round it, the 12-grid art
+    /// (a chevron, the small cross) at its own 12; a finger's are 18 in 20 and 14
+    /// (`.research/design-polish-2026-10-12.md` §4.12).
     #[test]
     fn a_glyph_is_fourteen_in_a_slot_of_sixteen() {
-        for touch in [false, true] {
+        for (touch, (side, drawn, small)) in
+            [(false, (16.0, 14.0, 12.0)), (true, (20.0, 18.0, 14.0))]
+        {
             let mut theme = Theme::default();
             if touch {
                 theme.density = slopty_theme::Density::TOUCH;
             }
-            let slot = theme.typography.icon();
-            assert!((slot - 16.0).abs() < 1e-3, "touch {touch}: {slot}");
+            let slot = theme.icon();
+            assert!((slot - side).abs() < 1e-3, "touch {touch}: {slot}");
             let grid = Drawn::new(&theme, Symbol::Doc).grid(slot);
-            assert!((grid - 14.0).abs() < 1e-3, "a glyph's grid: {grid}");
+            assert!((grid - drawn).abs() < 1e-3, "a glyph's grid: {grid}");
             let chevron = Drawn::new(&theme, Symbol::ChevronRight).grid(slot);
-            assert!((chevron - 12.0).abs() < 1e-3, "the chevron's grid: {chevron}");
+            assert!((chevron - small).abs() < 1e-3, "the chevron's grid: {chevron}");
             let disclosed = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(slot);
-            assert!((disclosed - 12.0).abs() < 1e-3, "a disclosure's: {disclosed}");
+            assert!((disclosed - small).abs() < 1e-3, "a disclosure's: {disclosed}");
         }
         assert_eq!(whole_pixels(14.0 * 2.0), 28);
         assert_eq!(whole_pixels(f32::NAN), 0);
@@ -1068,7 +1069,7 @@ mod tests {
     /// sizing ([`Drawn::glyph_mask`]), so the size measured is the size drawn.
     fn painted(symbol: Symbol, scale: f32) -> Arc<Mask> {
         let theme = Theme::default();
-        let slot = theme.typography.icon();
+        let slot = theme.icon();
         Drawn::new(&theme, symbol)
             .glyph_mask(symbol, slot, scale)
             .unwrap_or_else(|| panic!("{symbol:?} is drawn"))

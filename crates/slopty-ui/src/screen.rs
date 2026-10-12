@@ -1460,10 +1460,7 @@ impl ScreenView {
             .hover(move |el| el.bg(hsla(s.hover)))
             .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_secondary))
-            .child(
-                slopty_kit::icons::icon(theme, glyph, hsla(ink))
-                    .size(px(theme.typography.icon() * k)),
-            )
+            .child(slopty_kit::icons::icon(theme, glyph, hsla(ink)).size(px(theme.icon() * k)))
             .child(health.word());
         Some(
             slopty_kit::a11y::tab_stop(mark, s.focus)
@@ -3572,7 +3569,7 @@ impl ScreenView {
                     slopty_kit::icons::Symbol::Lock,
                     hsla(theme.surfaces.text_muted),
                 )
-                .size(px(theme.typography.icon())),
+                .size(px(theme.icon())),
             )
             .text_color(hsla(theme.surfaces.text_secondary))
             .font_family(theme.typography.ui_family.clone())

@@ -282,7 +282,7 @@ fn a_tiles_row_hangs_from_its_head_by_the_indent_guide(cx: &mut TestAppContext) 
     let [(x, _, w, h)] = lines.as_slice() else { panic!("one guide down the row: {lines:?}") };
     // The head's glyph ends one gap before its name; the guide runs down its middle.
     let gap = theme.spacing.xs + theme.spacing.xxs;
-    let middle = f32::from(name.left()) - gap - theme.typography.icon() / 2.0;
+    let middle = f32::from(name.left()) - gap - theme.icon() / 2.0;
     assert!((x + w / 2.0 - middle).abs() < 1.0, "down the glyph's middle: {x} vs {middle}");
     assert!((w - f32::from(slopty_kit::kit::HAIR)).abs() < 0.5, "a hairline: {w}");
     assert!((h - f32::from(row.size.height)).abs() < 0.5, "the row's height: {h}");

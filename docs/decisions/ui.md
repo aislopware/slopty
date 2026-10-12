@@ -11246,9 +11246,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     list brings the call into view once, as the request comes, and the scroll is the person's
     after that. A request about no call that is a row (a call folded away, none at all) is a
     card of its own after the turns (`Row::Asked`), a large step under the last. A question
-    still stands whole over the composer, the one form it is: gpui-fast's carried text
-    measurement panics on its answers inside the list's rows ("measurement has not been
-    performed"), so it moves into the thread once the fork holds that.
+    is such a card too, as Delta's are, since gpui-fast b535227b holds its carried text
+    measurement inside the list's rows; the questionnaire's every change (a step, a choice,
+    its own field opening) measures its row again. Until then it stood over the composer.
   - **The card is Zed's permission card**: radius 6 in `call_border`; a head band of
     `Density.decision` (28) on `card_head` with the mark, what it asks at 14 and, for several
     questions, which one this is in 12 muted at its right; the body 12 in; the answers 28 tall
@@ -11263,7 +11263,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-ui` `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
     `…::a_request_is_answered_on_its_call_wherever_it_stands`, `…::the_plan_shows_once`,
     `…::a_plan_in_the_thread_takes_its_answer`;
-    `…::questions::a_question_stands_whole_and_the_activity_bar_gives_way`;
+    `…::questions::{a_question_is_a_card_in_the_thread, a_short_room_scrolls_the_question_with_the_thread}`;
     `conversation::thread::questions::tests::a_question_answers_are_rows_not_boxes`;
     slopty-theme `elevation_and_density`.
 - ✅ **The composer's foot says where the agent works** (2026-10-12,
@@ -11449,12 +11449,82 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     border tone; it keeps its copy and dismiss.
   - Kept as deliberate deviations: Octicons, and the word colours shifted for the dichromacy
     floor.
-  - Left for a later batch: notices as Delta's two-line cards (12 on 19);
-    comments as inline cards with the commenter's bar; the palette's scope row and "Ask" key;
-    the slash menu's 24 and the model picker's 31 rows; "!" opening an inline terminal.
+  - Left for a later batch, since taken in "Delta's comments, scopes and notices": notices as
+    Delta's two-line cards (12 on 19); comments as inline cards with the commenter's bar; the
+    palette's scope row and "Ask" key; the slash menu's 24 and the model picker's 31 rows; "!"
+    opening an inline terminal.
   - Tests: `slopty-theme` `the_type_roles_are_zeds_labels_and_headlines`,
     `elevation_and_density`; `slopty-kit` `message::tests::send_is_a_bordered_square_tinted_when_armed`;
     `slopty-ui` `conversation::thread::tests::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`,
     `…::steps::the_column_s_gutter_follows_the_tile_s_room`,
     `…::face::the_one_bordered_square_stops_a_turn_or_sends_the_draft`,
     `workspace::tests::nav_projects::a_projects_colour_runs_down_its_rows`.
+- ✅ **Delta's comments, scopes and notices** (2026-10-12, `.research/delta-signed-in-2026-10-12.md`
+  §2.5, §2.7, §2.8, §2.10 and §3, measured from the signed-in app; batch 8; closes what
+  "Measured from the signed-in app", "The review is Delta's Changes", "The board is the wide
+  pane" and "iOS at touch density" left for later).
+  - **A comment is a card under its line**: the well's ground inside the lighter line at
+    `radii.sm`, at least the foot's 36 tall, its words the prose's 15 on 21, inset 12 from the
+    pane's sides. The commenter's colour runs down its left edge, a line at rest and the 3 pt
+    bar while it is written: the person's accent, the agent's working hue for a finding, the
+    muted ink for a forge's thread.
+  - **Findings are comments**: one on a line of the diff hangs under it; the band over the diff
+    is deleted. The comparison row says what came after the comparison ("Raised 2 findings",
+    "The review didn't start" in the error's tone, the agent's mark first), and opens a float
+    with how it came out in full and the findings that name no line on show, each let go
+    there. A screen reader hears the word whole, the agent's name and reason too.
+  - **A review's lines do not wrap**: they slide sideways together under a sideways scroll, the
+    numbers standing, within the room the widest line needs (`review::view::slide`). A wrapped
+    line of code read as two.
+  - **The palette's scope row** under its field: All, Threads, Commands and Files as chips,
+    the chosen on the accent's quiet ground; the search opens on All, the commands on
+    Commands. The keys that show a tab by its number (⌘1 to ⌘4 by default) choose a scope
+    while the row shows, and each chip says its key from the binding table: the palette takes
+    the tab's action, since a bound key's action runs before any key handler could see it. The field ends in "Ask Claude Code" and a `tab` key cap: ⇥ starts the agent of
+    where the next tile goes with the words typed, in the folder last worked in.
+  - **Menu rows by kind, completed**: the slash menu's and the file mentions' rows are 24
+    (`Density.slash`), its command names at the prose's 15; the model picker's are 31
+    (`Density.picker`).
+  - **A notice is Delta's toast**: the float's plane inside its line (the error's for a
+    failure), its words the row's 12 on 19 (`TypeRoles.notice`) up to two lines and cut there,
+    its mark, glyph and actions on the first line's middle.
+  - **The board's settings are under a gear**: how far the project runs on its own and its
+    review limit open in a popover from the head's end, so the head keeps to its title and
+    place. A task's actions were already end-slot buttons; they stay shown, not hover-only,
+    since a failing check is what the person must see at a glance.
+  - **Touch**: a finger's glyph is 18 in a slot of 20 and a small one 14
+    (`Density.glyph_step`, `Theme::icon`, `Theme::glyph`, `Theme::glyph_small`); every icon
+    size reads the theme, not the typography. A notice band (a file not on disk, the
+    navigator's line about notifications) leads with its tone's 2 pt bar
+    (`stroke::NOTICE`), the navigator's on the element's ground at 12/16. A phone's file
+    facts head its bar's "…", having no tab bar to end. The self-test paints the soft
+    keyboard's room in `stage`, so a golden shows where the keys are.
+  - **A pane counts its own tab bar**: the tiling's least pane height is its content's 300
+    and the bar's 34, so a 600 pt window opens a new tile as a tab rather than two 266 pt
+    panes (`workspace::tiling_config`).
+  - **The file's facts follow a caret moved while the frame is drawn** (a line asked for, a
+    text landed): the word to them goes in the next frame, since one sent during a draw asks
+    for none.
+  - **"!" opens an inline terminal** (§3.15): typed first in an empty composer it is not a
+    letter but a shell on the thread's machine, in its folder, standing in the next turn's
+    place as a code well 12 rows tall with the keyboard. The workspace asks for it as any
+    shell and keeps its item off the tiling: no tab, no pane, no row. The next message goes
+    led by what it shows as a `console` block, and the shell ends with it; its ✕, or Esc in
+    the composer, lets it go unsent, and a shell that ends takes its place with it. After a
+    word "!" is only a letter.
+  - Tests: `slopty-theme` `the_type_roles_are_zeds_labels_and_headlines`,
+    `elevation_and_density`; `slopty-kit` `icons::tests::a_glyph_is_fourteen_in_a_slot_of_sixteen`;
+    `slopty-ui` `review::tests::{a_comment_is_a_card_with_its_commenters_edge,
+    a_long_line_slides_sideways_rather_than_wrapping,
+    the_agents_findings_become_comments_and_notes_sent_as_one,
+    many_findings_wait_behind_the_comparison_rows_word}`,
+    `workspace::tests::palette::{the_palette_scope_row_lists_one_kind_at_a_time,
+    the_palette_follows_its_query_in_the_frame_it_shows}`,
+    `workspace::tests::thread_start::tab_in_the_palette_asks_the_agent_with_its_words`,
+    `workspace::tests::tiles::notices_stack_two_under_the_top_line_and_go`,
+    `workspace::tests::projects::the_board_sets_its_autonomy`,
+    `workspace::tests::bodies::{a_file_says_its_facts_at_its_tab_bars_end,
+    a_phones_file_says_its_facts_in_its_more_menu}`,
+    `conversation::thread::tests::composing::a_bang_first_asks_for_an_inline_terminal_and_esc_lets_it_go`,
+    `conversation::thread::view::inline_shell::tests::the_block_keeps_what_the_shell_shows`,
+    `workspace::tests::thread_face::a_bang_opens_a_shell_in_the_thread_and_the_next_message_carries_it`.

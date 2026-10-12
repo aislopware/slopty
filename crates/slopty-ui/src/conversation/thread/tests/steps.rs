@@ -440,7 +440,7 @@ fn the_thread_has_one_left_edge(cx: &mut TestAppContext) {
             // The foot's first button pads its glyph by half the room round it, and hangs by
             // as much.
             let theme = slopty_theme::Theme::default();
-            (slopty_kit::kit::icon_button_side(&theme) - theme.typography.glyph()) / 2.0
+            (slopty_kit::kit::icon_button_side(&theme) - theme.glyph()) / 2.0
         } else {
             0.0
         };

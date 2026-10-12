@@ -200,7 +200,7 @@ impl ThreadView {
     // ----- menus -----------------------------------------------------------------------
 
     /// The directory the agent works in, which `@` paths are under.
-    fn root(&self, cx: &App) -> Option<String> {
+    pub(super) fn root(&self, cx: &App) -> Option<String> {
         self.state(cx).map(|s| s.meta.cwd.clone()).filter(|cwd| !cwd.is_empty())
     }
 
@@ -612,11 +612,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// One row of the menu, the keyboard's filled, a click picking it.
+    /// One row of the menu, `height` tall by what it lists (Delta's slash commands 24, its
+    /// model picker 31, its other menus 23), the keyboard's filled, a click picking it.
     pub(super) fn menu_row(
         &self,
         ix: usize,
         label: String,
+        height: f32,
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
@@ -629,7 +631,7 @@ impl ThreadView {
             .aria_label(SharedString::from(label))
             .aria_selected(selected)
             .flex_none()
-            .h(px(theme.density.row))
+            .h(px(height))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
@@ -654,12 +656,12 @@ impl ThreadView {
         let s = theme.surfaces;
         let name = format!("/{}", command.name);
         let hint = command.argument_hint.clone().filter(|h| !h.is_empty());
-        self.menu_row(ix, format!("{name} {}", command.description), cx)
+        // Delta's slash menu: the command's name at the prose's size, what it does quiet after it.
+        self.menu_row(ix, format!("{name} {}", command.description), theme.density.slash, cx)
             .child(
                 div()
                     .flex_none()
-                    .font_family(self.mono())
-                    .text_size(px(theme.typography.small()))
+                    .text_size(px(theme.typography.prose()))
                     .child(SharedString::from(name)),
             )
             .children(hint.map(|hint| {
@@ -726,7 +728,7 @@ impl ThreadView {
         let s = theme.surfaces;
         let current = now.is_some_and(|n| n == id || n == label);
         let label = if label.trim().is_empty() { id } else { label };
-        self.menu_row(ix, label.clone(), cx)
+        self.menu_row(ix, label.clone(), theme.density.menu, cx)
             .child(
                 div()
                     .flex_none()
@@ -734,7 +736,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
+                    .text_size(px(theme.roles().chrome.size))
                     .child(SharedString::from(label.clone())),
             )
             .child(
@@ -888,7 +890,7 @@ impl ThreadView {
         let current = now == Some(model.id.as_str());
         let label = if model.label.trim().is_empty() { &model.id } else { &model.label };
         let (name, provider) = crate::conversation::figures::spoken_model(label);
-        self.menu_row(ix, label.clone(), cx)
+        self.menu_row(ix, label.clone(), theme.density.picker, cx)
             .child(
                 div()
                     .flex_none()
@@ -896,7 +898,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
+                    .text_size(px(theme.roles().chrome.size))
                     .child(SharedString::from(name)),
             )
             .child(
@@ -921,7 +923,7 @@ impl ThreadView {
         let trimmed = path.trim_end_matches('/');
         let (dir, name) = trimmed.rsplit_once('/').unwrap_or(("", trimmed));
         let name = if folder { format!("{name}/") } else { name.to_owned() };
-        self.menu_row(ix, path.to_owned(), cx)
+        self.menu_row(ix, path.to_owned(), theme.density.slash, cx)
             .child(self.icon(if folder { Symbol::Folder } else { Symbol::Doc }, s.text_muted))
             .child(
                 div()
@@ -930,7 +932,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(px(theme.typography.small()))
+                    .text_size(px(theme.roles().chrome.size))
                     .child(SharedString::from(name)),
             )
             .child(

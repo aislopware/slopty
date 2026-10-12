@@ -536,6 +536,12 @@ pub enum PaletteRun {
     Group(slopty_client::layout::GroupKey),
     /// Open again the tile closed as this closing (the workspace's count of them).
     Reopen(u64),
+    /// Start the agent a new tab would (⌘T) with `words` as its first message: the field's
+    /// words, sent on the person's Tab.
+    Ask {
+        /// What was typed.
+        words: String,
+    },
     /// Open this thread: at the turn where its words were found, or where it stands.
     Thread {
         /// The thread.
@@ -564,6 +570,7 @@ impl Clone for PaletteRun {
             Self::Project(project) => Self::Project(project.clone()),
             Self::Group(group) => Self::Group(group.clone()),
             Self::Reopen(closing) => Self::Reopen(*closing),
+            Self::Ask { words } => Self::Ask { words: words.clone() },
             Self::Thread { thread, turn } => Self::Thread { thread: *thread, turn: *turn },
         }
     }
@@ -591,9 +598,55 @@ impl std::fmt::Debug for PaletteRun {
             Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
             Self::Group(group) => f.debug_tuple("Group").field(group).finish(),
             Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
+            Self::Ask { words } => f.debug_struct("Ask").field("words", words).finish(),
             Self::Thread { thread, turn } => {
                 f.debug_struct("Thread").field("thread", thread).field("turn", turn).finish()
             }
+        }
+    }
+}
+
+/// What the workspace's palette lists, chosen on its scope row or by ⌘1 to ⌘4: Delta's
+/// palette's All, Threads, Commands and Files (`.research/delta-signed-in-2026-10-12.md` §2.7).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Scope {
+    /// Every line.
+    #[default]
+    All,
+    /// Where the work is: the tiles, the threads found and worked in lately, the projects.
+    Threads,
+    /// The commands alone, every one of them.
+    Commands,
+    /// Paths: typed, or found by the worker.
+    Files,
+}
+
+impl Scope {
+    /// The four, in the row's order, which is their keys' (⌘1 to ⌘4).
+    pub const ALL: [Self; 4] = [Self::All, Self::Threads, Self::Commands, Self::Files];
+
+    /// What the row calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Threads => "Threads",
+            Self::Commands => "Commands",
+            Self::Files => "Files",
+        }
+    }
+
+    /// Whether it lists a line of `section`.
+    #[must_use]
+    pub const fn holds(self, section: Section) -> bool {
+        match self {
+            Self::All => true,
+            Self::Threads => matches!(
+                section,
+                Section::Tiles | Section::Threads | Section::Recent | Section::Projects
+            ),
+            Self::Commands => matches!(section, Section::Commands),
+            Self::Files => matches!(section, Section::Files),
         }
     }
 }
@@ -1126,7 +1179,7 @@ pub(crate) fn section_heading(
 pub(crate) fn icon_slot(theme: &Theme, name: Symbol, color: gpui::Hsla) -> gpui::Div {
     div()
         .flex_none()
-        .size(px(theme.typography.icon()))
+        .size(px(theme.icon()))
         .flex()
         .items_center()
         .justify_center()
@@ -1147,7 +1200,7 @@ pub(crate) fn lead_slot(
     mark: impl Into<Mark>,
     ink: gpui::Hsla,
 ) -> gpui::Stateful<gpui::Div> {
-    let slot = theme.typography.icon();
+    let slot = theme.icon();
     lead_drawn(theme, mark.into(), ink, slot, slot)
 }
 
@@ -1159,7 +1212,7 @@ pub(crate) fn lead_mark(
     ink: gpui::Hsla,
     side: f32,
 ) -> gpui::Stateful<gpui::Div> {
-    lead_drawn(theme, mark.into(), ink, theme.typography.icon(), side)
+    lead_drawn(theme, mark.into(), ink, theme.icon(), side)
 }
 
 /// `mark` drawn across a slot `drawn` square, centred in a slot `side` square, named to a
@@ -1187,7 +1240,7 @@ fn lead_drawn(
 
 /// A status slot holding nothing: a command's, beside lines that lead with a mark.
 fn empty_slot(theme: &Theme) -> gpui::Div {
-    div().flex_none().size(px(theme.typography.icon()))
+    div().flex_none().size(px(theme.icon()))
 }
 
 /// An age as the inbox, the palette and the navigator print it: `now` under a minute, then
@@ -1424,6 +1477,17 @@ pub struct CommandPalette {
     /// It lists the commands alone, as ⌘⇧P opens it, its field empty and saying so: Zed's
     /// command palette, with no `>` to type past.
     commands: bool,
+    /// The scope row shows, the workspace's own palette's ([`Self::set_scopes`]), and the
+    /// field's words it was opened with, to put back when the scope leaves Commands.
+    scopes: Option<&'static str>,
+    /// The keys that choose each scope, in [`Scope::ALL`]'s order: the bindings that show a
+    /// tab by its number, which choose a scope while the row shows ([`Self::set_scopes`]).
+    scope_keys: Vec<SharedString>,
+    /// What the scope row has chosen.
+    shown: Scope,
+    /// Tab in the field starts an agent with its words, said at the field's end: "Ask Claude
+    /// Code" ([`PaletteRun::Ask`]).
+    ask: Option<SharedString>,
     /// A window narrower than this (a phone's) gets the palette as a sheet from the bottom.
     sheet_below: f32,
     /// The last frame drew it as a phone's sheet.
@@ -1533,6 +1597,10 @@ impl CommandPalette {
             brief: false,
             live: false,
             commands: false,
+            scopes: None,
+            scope_keys: Vec::new(),
+            shown: Scope::All,
+            ask: None,
             sheet_below: 0.0,
             sheet: false,
             fades_in: false,
@@ -1662,6 +1730,67 @@ impl CommandPalette {
         self.input.update(cx, |input, cx| input.set_placeholder(COMMAND_HINT, window, cx));
         self.path_items.clear();
         self.refresh(cx);
+    }
+
+    /// Show the scope row, the field saying `hint` while the scope is not Commands. The keys
+    /// that show a tab by its number choose a scope instead while it shows; `bindings` says
+    /// which they are.
+    pub fn set_scopes(&mut self, hint: &'static str, bindings: &[KeyBinding]) {
+        self.scopes = Some(hint);
+        self.scope_keys = (0..Scope::ALL.len())
+            .map(|index| keys_for(&crate::workspace::SelectTab { index }, bindings).into())
+            .collect();
+    }
+
+    /// The tab asked for by its number names a scope while the row shows; else it is the
+    /// workspace's.
+    fn scope_by_number(
+        &mut self,
+        ask: crate::workspace::SelectTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match Scope::ALL.get(ask.index).copied().filter(|_| self.scopes.is_some()) {
+            Some(scope) => self.set_scope(scope, window, cx),
+            None => cx.propagate(),
+        }
+    }
+
+    /// Say at the field's end that Tab starts an agent with its words, as `label` says.
+    pub fn set_ask(&mut self, label: Option<SharedString>) {
+        self.ask = label;
+    }
+
+    /// What the scope row has chosen.
+    #[must_use]
+    pub const fn scope(&self) -> Scope {
+        self.shown
+    }
+
+    /// List what `scope` holds: Commands is ⌘⇧P's palette, every command and its field saying
+    /// so; the rest filter the search.
+    pub fn set_scope(&mut self, scope: Scope, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hint) = self.scopes else { return };
+        self.shown = scope;
+        self.commands = scope == Scope::Commands;
+        let placeholder = if self.commands { COMMAND_HINT } else { hint };
+        self.input.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
+        self.selected = 0;
+        self.reveal = true;
+        self.refresh(cx);
+        cx.notify();
+    }
+
+    /// Tab in the field: start the agent with the field's words, when it offers to. Whether
+    /// it did.
+    fn ask_with_words(&self, cx: &mut Context<Self>) -> bool {
+        let words = self.input.read(cx).value().trim().to_owned();
+        let asks = self.ask.is_some() && !self.commands && !self.leaving;
+        if !asks || words.is_empty() || commands_only(&words).is_some() {
+            return false;
+        }
+        cx.emit(PaletteEvent::Run(PaletteRun::Ask { words }));
+        true
     }
 
     /// What of `field` asks for commands alone: all of it while the palette lists commands
@@ -1823,6 +1952,10 @@ impl CommandPalette {
             out.extend(threads);
             out
         };
+        let mut out = out;
+        if self.scopes.is_some() {
+            out.retain(|(_, item)| self.shown.holds(item.section));
+        }
         let recent = if empty && (brief_now || self.commands) { lead } else { Vec::new() };
         let group = |item: &PaletteItem| group(item, &recent);
         // A heading only where there are two groups to tell apart: a list of workers, of
@@ -2161,6 +2294,77 @@ impl CommandPalette {
                 ),
         )
     }
+
+    /// The field's end while Tab starts an agent with its words: "Ask Claude Code" and a
+    /// `tab` key cap, Delta's palette's (`.research/delta-signed-in-2026-10-12.md` §2.7).
+    fn ask_hint(&self, theme: &Theme) -> Option<gpui::Div> {
+        let label = self.ask.clone().filter(|_| self.chords && !self.commands)?;
+        Some(
+            div()
+                .debug_selector(|| "palette-ask".to_owned())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .text_size(px(theme.roles().row.size))
+                .text_color(hsla(theme.surfaces.text_muted))
+                .child(label)
+                .child(slopty_kit::kit::key_cap(theme, "tab")),
+        )
+    }
+
+    /// The scope row under the field: All, Threads, Commands and Files, the one chosen on the
+    /// accent's quiet ground, each with its key, Delta's palette's 34 pt row.
+    fn scope_row(&self, theme: &Theme, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        self.scopes?;
+        let s = theme.surfaces;
+        let chips = Scope::ALL.into_iter().enumerate().map(|(ix, scope)| {
+            let chosen = scope == self.shown;
+            let keys = self.scope_keys.get(ix).cloned().filter(|k| !k.is_empty());
+            div()
+                .id(("palette-scope", ix))
+                .debug_selector(move || format!("palette-scope-{}", scope.label().to_lowercase()))
+                .role(gpui::accesskit::Role::Tab)
+                .aria_label(scope.label())
+                .aria_selected(chosen)
+                .flex_none()
+                .h(px(theme.density.button))
+                .px(px(theme.spacing.sm))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .text_size(px(theme.roles().caption.size))
+                .cursor_pointer()
+                .when(chosen, |el| el.bg(hsla(s.info_background)).text_color(hsla(s.accent)))
+                .when(!chosen, |el| {
+                    el.text_color(hsla(s.text_secondary)).hover(move |el| el.bg(hsla(s.hover)))
+                })
+                .child(scope.label())
+                .when_some(keys.filter(|_| self.chords), |el, keys| {
+                    el.child(div().text_color(hsla(s.text_muted)).child(keys))
+                })
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.set_scope(scope, window, cx);
+                }))
+        });
+        Some(
+            div()
+                .id("palette-scopes")
+                .debug_selector(|| "palette-scopes".to_owned())
+                .role(gpui::accesskit::Role::TabList)
+                .aria_label("Scope")
+                .flex_none()
+                .h(px(theme.density.title))
+                .px(px(list_pad(theme)))
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs))
+                .border_b(slopty_kit::kit::HAIR)
+                .border_color(hsla(s.stroke))
+                .children(chips),
+        )
+    }
 }
 
 impl Render for CommandPalette {
@@ -2225,7 +2429,9 @@ impl Render for CommandPalette {
             .relative()
             .gap(px(theme.spacing.md))
             .children(cancel)
-            .children(self.prompt_hint(&theme, cx));
+            .children(self.prompt_hint(&theme, cx))
+            .children(self.ask_hint(&theme));
+        let scopes = (!sheet).then(|| self.scope_row(&theme, cx)).flatten();
         let list = more_below(
             &theme,
             &self.list,
@@ -2276,6 +2482,7 @@ impl Render for CommandPalette {
             // status bar and the rows below it, as a bottom sheet's search is
             // (`.research/design-polish-2026-10-12.md` §1.19).
             .child(field)
+            .children(scopes)
             .child(list);
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
         // finger taps to close it, where a desktop's Esc would.
@@ -2319,14 +2526,28 @@ impl Render for CommandPalette {
                     this.escape(window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, ask: &crate::workspace::SelectTab, window, cx| {
+                this.scope_by_number(*ask, window, cx);
+            }))
             // Tab walks the palette's stops rather than typing into its field. Off the field,
             // where the field's Esc binding does not reach, Esc closes the palette all the same.
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                let keys = &ev.keystroke;
+                let in_field = this.input.read(cx).focus_handle(cx).is_focused(window);
+                // Tab in the field asks the agent with its words, where the palette offers to.
+                if keys.key == "tab"
+                    && !keys.modifiers.modified()
+                    && in_field
+                    && !this.composing(cx)
+                    && this.ask_with_words(cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if slopty_kit::a11y::cycle(ev, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
-                let in_field = this.input.read(cx).focus_handle(cx).is_focused(window);
                 if ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified() && !in_field {
                     cx.stop_propagation();
                     cx.emit(PaletteEvent::Dismiss);

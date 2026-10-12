@@ -88,15 +88,26 @@ impl Ink<'_> {
             .children(n.map(|n| SharedString::from(n.to_string())))
     }
 
-    /// A line's text in its grammar's colours, its changed words on the stronger wash.
+    /// A line's text in its grammar's colours, its changed words on the stronger wash, wrapped
+    /// at its column's edge.
     #[must_use]
     pub fn text(&self, line: &Line) -> AnyElement {
-        let s = self.theme.surfaces;
+        div()
+            .flex_1()
+            .min_w_0()
+            .whitespace_normal()
+            .text_color(hsla(self.theme.surfaces.text))
+            .child(self.words(line))
+            .into_any_element()
+    }
+
+    /// A line's words, styled: what [`Self::text`] wraps and [`Self::slid`] slides.
+    fn words(&self, line: &Line) -> AnyElement {
         let (text, spans) = super::diff::detab(&line.text, line.spans.as_deref());
         let text = if text.is_empty() { " ".to_owned() } else { text };
         let emph = self.emph(line.kind).filter(|_| !line.emph.is_empty());
         let coloured = spans.filter(|sp| !sp.is_empty());
-        let styled = if coloured.is_none() && emph.is_none() {
+        if coloured.is_none() && emph.is_none() {
             SharedString::from(text).into_any_element()
         } else {
             let font = gpui::font(self.mono());
@@ -106,14 +117,7 @@ impl Ink<'_> {
                 runs = washed(runs, &ranges, wash);
             }
             StyledText::new(SharedString::from(text)).with_runs(runs).into_any_element()
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .whitespace_normal()
-            .text_color(hsla(s.text))
-            .child(styled)
-            .into_any_element()
+        }
     }
 
     /// One line in a column: one gutter, Zed's unified diff's, holding the new file's number,
@@ -131,6 +135,33 @@ impl Ink<'_> {
             .when_some(wash, gpui::Styled::bg)
             .child(self.number(gutter(line)))
             .child(self.text(line))
+    }
+
+    /// One line as [`Self::unified`] draws it, but unwrapped and slid `x` points to the left
+    /// under its number, as Zed's and Delta's diffs scroll sideways: every line of a review
+    /// slides together, the gutter stays.
+    #[must_use]
+    pub fn slid(&self, line: &Line, x: f32) -> Div {
+        let wash = self.tone(line.kind);
+        let spacing = self.theme.spacing;
+        div()
+            .w_full()
+            .flex()
+            .items_start()
+            .gap(px(spacing.sm))
+            .px(px(spacing.sm))
+            .when_some(wash, gpui::Styled::bg)
+            .child(self.number(gutter(line)))
+            .child(
+                div().flex_1().min_w_0().overflow_hidden().child(
+                    div()
+                        .relative()
+                        .left(px(-x))
+                        .whitespace_nowrap()
+                        .text_color(hsla(self.theme.surfaces.text))
+                        .child(self.words(line)),
+                ),
+            )
     }
 
     /// One line in a thread's well: the text alone on the line's band, with no gutter, as
@@ -185,6 +216,13 @@ pub const fn gutter(line: &Line) -> Option<u32> {
 pub fn name_first(path: &str) -> (&str, &str) {
     let trimmed = path.trim_end_matches('/');
     trimmed.rsplit_once('/').map_or((trimmed, ""), |(dir, name)| (name, dir))
+}
+
+/// How many columns `text` takes once its tabs are spaces ([`super::diff::detab`]).
+#[must_use]
+pub fn columns(text: &str) -> usize {
+    let wider = TAB_SPACES.len().saturating_sub(1);
+    text.chars().count().saturating_add(text.matches('\t').count().saturating_mul(wider))
 }
 
 /// `ranges` of `text` moved to where they fall once its tabs are spaces ([`super::diff::detab`]).

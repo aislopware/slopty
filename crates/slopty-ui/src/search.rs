@@ -855,7 +855,7 @@ impl ProjectSearch {
                 el.child(slopty_kit::icons::status_icon(
                     theme,
                     slopty_kit::icons::Status::Working,
-                    px(theme.typography.icon()),
+                    px(theme.icon()),
                     hsla(s.text_muted),
                 ))
             })

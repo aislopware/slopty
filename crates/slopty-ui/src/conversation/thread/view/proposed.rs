@@ -72,7 +72,7 @@ impl ThreadView {
                 .child(slopty_kit::icons::symbol(
                     theme,
                     slopty_kit::icons::file_mark(path),
-                    px(theme.typography.icon()),
+                    px(theme.icon()),
                     hsla(s.text_muted),
                 ))
                 .child(

@@ -573,7 +573,9 @@ impl WorkspaceView {
             | ThreadViewEvent::KeepRun { .. }
             | ThreadViewEvent::Watch { .. }
             | ThreadViewEvent::RemoveWorktree(_)
-            | ThreadViewEvent::EndAndRemove(_) => {}
+            | ThreadViewEvent::EndAndRemove(_)
+            | ThreadViewEvent::InlineTerminal { .. }
+            | ThreadViewEvent::InlineTerminalDone { .. } => {}
         }
     }
 

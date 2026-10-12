@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use gpui::{App, AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Entity, SharedString, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
 use slopty_kit::kit::find::Query;
@@ -223,7 +223,7 @@ impl WorkspaceView {
     pub fn open_commands(&mut self, _: &OpenCommands, window: &mut Window, cx: &mut Context<Self>) {
         self.open_search("", window, cx);
         if let Some(palette) = self.palette.clone() {
-            palette.update(cx, |p, cx| p.set_commands(window, cx));
+            palette.update(cx, |p, cx| p.set_scope(palette::Scope::Commands, window, cx));
         }
     }
 
@@ -235,8 +235,16 @@ impl WorkspaceView {
         let items = self.offered_lines(window, cx);
         let recent = self.recent_thread_lines(cx);
         let theme = self.theme.clone();
+        // Tab asks the agent a new tab would start, by its name (Delta's "Ask Delta").
+        let ask =
+            self.new_tile_target().and_then(|(worker, _)| self.agent_for(worker)).map(|agent| {
+                SharedString::from(format!("Ask {}", super::projects::agent_label(&agent)))
+            });
+        let bindings = super::key_bindings(cx);
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::search(items, SEARCH_EVERYTHING, theme, window, cx);
+            p.set_scopes(SEARCH_EVERYTHING, &bindings);
+            p.set_ask(ask);
             p.set_brief(true, cx);
             p.set_recent(recent, cx);
             p.set_live(true);
@@ -511,6 +519,10 @@ impl WorkspaceView {
                         }
                     }
                 }
+                PaletteEvent::Run(PaletteRun::Ask { words }) => {
+                    this.palette_return = None;
+                    this.ask_agent(words.clone(), cx);
+                }
                 PaletteEvent::Run(PaletteRun::Reopen(closing)) => {
                     this.palette_return = None;
                     this.take_back(Some(*closing), cx);
@@ -536,6 +548,25 @@ impl WorkspaceView {
         self.pending_focus_palette = true;
         self.palette = Some(palette);
         cx.notify();
+    }
+
+    /// Start the agent a new tab would (⌘T's: the focused tile's machine and folder) with
+    /// `words` as its first message, the palette's Ask.
+    fn ask_agent(&mut self, words: String, cx: &mut Context<Self>) {
+        let Some((worker, cwd)) = self.new_tile_target() else { return };
+        if !self.reachable_for(worker, "the agent", cx) {
+            return;
+        }
+        let Some(agent) = self.agent_for(worker) else {
+            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
+            return;
+        };
+        let cwd = cwd.unwrap_or_else(|| {
+            let latest =
+                self.recent_places(Some(&agent), cx).into_iter().find(|p| p.worker == worker);
+            latest.map_or_else(|| "~".to_owned(), |p| p.cwd)
+        });
+        self.start_thread(worker, agent, cwd, Some(words), cx);
     }
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's

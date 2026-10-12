@@ -301,9 +301,7 @@ impl RenderOnce for FindBar {
                 })
         };
         let lead = |icon| {
-            crate::icons::icon(&theme, icon, hsla(s.text_muted))
-                .flex_none()
-                .size(px(theme.typography.icon()))
+            crate::icons::icon(&theme, icon, hsla(s.text_muted)).flex_none().size(px(theme.icon()))
         };
         let find_row = div()
             .flex()
@@ -373,7 +371,7 @@ impl RenderOnce for FindBar {
                     .gap(px(theme.spacing.xs))
                     // The replacement lines up under the query, past an empty lead: a word says
                     // what the row does, and no symbol says replace.
-                    .child(div().flex_none().size(px(theme.typography.icon())))
+                    .child(div().flex_none().size(px(theme.icon())))
                     .child(div().flex_1().min_w_0().child(
                         Input::new(&field).appearance(false).aria_label(REPLACE_PLACEHOLDER),
                     ))

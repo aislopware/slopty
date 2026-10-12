@@ -187,7 +187,7 @@ impl WorkspaceView {
         let title = self.thread_title(thread);
         let word = if answer.is_some() { APPROVAL } else { QUESTION };
         let mark = Drawn::new(theme, self.thread_mark(thread))
-            .slot(px(theme.typography.icon()), hsla(s.text_secondary));
+            .slot(px(theme.icon()), hsla(s.text_secondary));
         let ask = request.id.clone();
         let close = kit::close_box(theme, format!("card-close-{of}"), PUT_AWAY)
             .debug_selector({

@@ -34,7 +34,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ListAlignment, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, SharedString,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -68,17 +68,12 @@ mod file_menu;
 mod forge;
 mod gaps;
 mod keys;
+mod raised;
 pub(in crate::review) mod sides;
+mod slide;
 mod whole;
 
 pub use file_menu::{COPY_PATH, COPY_PATH_IN_REPOSITORY, revert_words};
-
-/// The most the band of the agent's findings above the diff takes before it scrolls.
-const FINDINGS_HEIGHT: f32 = 240.0;
-
-/// The share of the diff's room the findings may take drawn whole; past it they fold to one
-/// line that opens on demand.
-const FINDINGS_SHARE: f32 = 0.25;
 
 /// How far past the viewport the diff lays rows out.
 const OVERDRAW: f32 = 2048.0;
@@ -124,10 +119,6 @@ fn send_back_words(n: usize) -> String {
     }
 }
 
-/// About how wide a letter of the findings' words is, as a share of their size: how tall the
-/// band would be drawn whole is guessed from it before it is laid out.
-const LETTER: f32 = 0.55;
-
 /// What the review says while the change is read.
 const READING: &str = "Reading the changes\u{2026}";
 
@@ -161,6 +152,9 @@ pub const COLLAPSE_ALL: &str = "Collapse all files";
 
 /// The fold switch while every file is folded.
 pub const EXPAND_ALL: &str = "Expand all files";
+
+/// The scope bar's word of what the agent's review raised, after the comparison.
+const BAR_RAISED: &str = "raised";
 
 /// The scope bar's way to the agent's own review.
 const BAR_AGENT: &str = "agent";
@@ -414,8 +408,12 @@ pub struct ReviewView {
     hovered: Option<(usize, usize, usize)>,
     /// The hunk whose head is under the pointer, by its file and place.
     hunk_hovered: Option<(usize, usize)>,
-    /// The person opened the agent's findings while they are folded to their summary.
+    /// The float of what the agent's review raised is open, under the comparison row's word.
     findings_open: bool,
+    /// How far the lines are slid sideways, as asked ([`Self::slid`] keeps it in its room).
+    slide: f32,
+    /// The columns of the widest line on show, measured as the rows are built.
+    widest: usize,
     /// A file's own menu, while it is open.
     file_menu: Option<file_menu::FileMenu>,
     /// The files folded to their heads, by path: kept across the review's updates and spans.
@@ -604,6 +602,8 @@ impl ReviewView {
             hovered: None,
             hunk_hovered: None,
             findings_open: false,
+            slide: 0.0,
+            widest: 0,
             file_menu: None,
             folded: HashSet::new(),
             unfolded: HashSet::new(),
@@ -1006,6 +1006,7 @@ impl ReviewView {
         let old = self.rows.len();
         self.list.splice(0..old, rows.len());
         self.rows = rows;
+        self.widest = self.widest_line();
     }
 
     /// What hangs under `row`, whose lines are `lines`: their comments, and the field when one
@@ -1093,6 +1094,7 @@ impl ReviewView {
         let Some(intent) = self.intent(Intent::Review { from, to }, cx) else { return };
         self.pinned.clone_from(&self.asked);
         self.came = None;
+        self.findings_open = false;
         self.reviewing = Some(Reviewing { intent, after, agent });
         cx.notify();
     }
@@ -1170,11 +1172,13 @@ impl ReviewView {
         if let Some(refused) = self.came.take().and_then(|c| c.refused) {
             self.hub.update(cx, |hub, cx| hub.dismiss(refused, cx));
         }
+        self.findings_open &= !self.model.notes().is_empty();
         cx.notify();
     }
 
     fn unnote(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.model.unnote(ix);
+        self.findings_open &= self.came.is_some() || !self.model.notes().is_empty();
         self.release_pin();
         cx.notify();
     }
@@ -1541,7 +1545,7 @@ impl ReviewView {
 
     fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
         slopty_kit::icons::icon(&self.theme, name, hsla(tone))
-            .size(px(self.theme.typography.icon()))
+            .size(px(self.theme.icon()))
             .into_any_element()
     }
 
@@ -1593,6 +1597,10 @@ impl ReviewView {
             .gap(px(theme.spacing.xxs))
             .dropped(&self.scopes_dropped)
             .item("scope", kit::Priority::ESSENTIAL, self.comparison(cx));
+        let row = match self.raised_part(cx) {
+            Some(raised) => row.item(BAR_RAISED, kit::Priority::ESSENTIAL, raised),
+            None => row,
+        };
         let mut row = row.end();
         if let Some(files) = self.files_part(cx) {
             row = row.item(BAR_FILES, kit::Priority::ESSENTIAL, files);
@@ -1706,7 +1714,7 @@ impl ReviewView {
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
                         slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronDown)
-                            .slot(px(theme.typography.icon()), hsla(s.icon_muted)),
+                            .slot(px(theme.icon()), hsla(s.icon_muted)),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.scope_open = !this.scope_open;
@@ -1824,7 +1832,7 @@ impl ReviewView {
                 .child(slopty_kit::icons::status_icon(
                     theme,
                     slopty_kit::icons::Status::Working,
-                    px(theme.typography.icon()),
+                    px(theme.icon()),
                     hsla(s.text_muted),
                 ));
             return Some(hinted(pill, words).into_any_element());
@@ -1848,246 +1856,6 @@ impl ReviewView {
             .child(mark)
             .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
         Some(slopty_kit::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
-    }
-
-    /// Above the diff: how the agent's own review came out, and its findings that have no line
-    /// on show, each with the way to let it go. Drawn whole they would take more than
-    /// [`FINDINGS_SHARE`] of the diff's room, they fold to one line that says what came, and
-    /// open on demand: the change under review keeps the tile.
-    fn findings_band(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if self.came.is_none() && self.model.notes().is_empty() {
-            return None;
-        }
-        let theme = &self.theme;
-        let folds = self.findings_fold();
-        let open = !folds || self.findings_open;
-        let head = if folds { Some(self.findings_summary(open, cx)) } else { self.came_row(cx) };
-        let notes =
-            self.model.notes().iter().enumerate().map(|(ix, note)| self.note_row(ix, note, cx));
-        Some(
-            div()
-                .flex_none()
-                .w_full()
-                .px(px(theme.spacing.md))
-                .pt(px(theme.spacing.sm))
-                .child(
-                    kit::card(theme)
-                        .id("review-findings")
-                        .debug_selector(|| "review-findings".to_owned())
-                        .role(Role::List)
-                        .aria_label("The agent's review")
-                        .w_full()
-                        .max_h(px(FINDINGS_HEIGHT))
-                        .overflow_y_scroll()
-                        .text_size(px(theme.typography.small()))
-                        .line_height(gpui::relative(theme.typography.markdown_line_height))
-                        .children(head)
-                        .when(open, |el| el.children(notes)),
-                )
-                .into_any_element(),
-        )
-    }
-
-    /// Whether the findings, drawn whole, would take more than [`FINDINGS_SHARE`] of the diff's
-    /// room: the body under the switch and over the foot, less what the band itself takes.
-    fn findings_fold(&self) -> bool {
-        let theme = &self.theme;
-        let room = self.height - theme.density.header - kit::Row::Two.height(theme);
-        let band = self.findings_height().min(FINDINGS_HEIGHT) + theme.spacing.sm;
-        band > FINDINGS_SHARE * (room - band)
-    }
-
-    /// About how tall the findings are drawn whole, in points at rest: each piece of their
-    /// words in lines of the band's width at [`LETTER`] of the small size a letter.
-    fn findings_height(&self) -> f32 {
-        let theme = &self.theme;
-        let (sp, size) = (theme.spacing, theme.typography.small());
-        let line = size * theme.typography.markdown_line_height;
-        // The band's pads, a row's, the icon and the ✕ either side of the words, and their gaps.
-        let inset = (sp.md + sp.sm + theme.typography.icon() + sp.xs) * 2.0;
-        let per_line = ((self.width - inset) / (size * LETTER)).max(1.0);
-        let lines = |words: &str| {
-            let letters = f32::from(u16::try_from(words.chars().count()).unwrap_or(u16::MAX));
-            (letters / per_line).ceil().max(1.0)
-        };
-        let row = |pieces: f32, lines: f32| {
-            (pieces - 1.0).max(0.0).mul_add(sp.xxs, lines.mul_add(line, sp.xs * 2.0))
-        };
-        let head = self.came.as_ref().map_or(0.0, |came| row(1.0, lines(&came.words)));
-        let notes: f32 = self
-            .model
-            .notes()
-            .iter()
-            .map(|note| {
-                let f = &note.finding;
-                let place = f.place.as_ref().map(findings::Place::words);
-                let pieces = [place.as_deref(), Some(f.title.as_str()), Some(f.body.as_str())];
-                let said: Vec<&str> =
-                    pieces.into_iter().flatten().filter(|w| !w.is_empty()).collect();
-                let count = f32::from(u8::try_from(said.len()).unwrap_or(u8::MAX));
-                row(count, said.iter().map(|w| lines(w)).sum())
-            })
-            .sum();
-        head + notes
-    }
-
-    /// The folded findings' one line: what came, in the error's tone when the review was turned
-    /// down, the way to open or fold them, and the way to let the word go.
-    fn findings_summary(&self, open: bool, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let notes = self.model.notes().len();
-        let (words, tone) = match &self.came {
-            Some(came) if came.failed => (came.words.clone(), s.error),
-            Some(came) => (came.words.clone(), s.text_secondary),
-            None if notes == 1 => ("1 finding not in the diff".to_owned(), s.text_secondary),
-            None => (format!("{notes} findings not in the diff"), s.text_secondary),
-        };
-        let toggle = div()
-            .id("review-findings-toggle")
-            .debug_selector(|| "review-findings-toggle".to_owned())
-            .role(Role::Button)
-            .aria_label(SharedString::from(words.clone()))
-            .aria_expanded(open)
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .cursor_pointer()
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_color(hsla(tone))
-                    .child(SharedString::from(words)),
-            )
-            .child(kit::Disclosure::new(
-                "review-findings-chevron",
-                open,
-                theme,
-                px(theme.typography.icon()),
-                hsla(s.text_muted),
-            ))
-            .on_click(cx.listener(|this, _ev, _w, cx| {
-                this.findings_open = !this.findings_open;
-                cx.notify();
-            }));
-        div()
-            .debug_selector(|| "review-came".to_owned())
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.sm))
-            .min_h(px(theme.density.row))
-            .hover(move |el| el.bg(hsla(s.hover)))
-            .child(slopty_kit::a11y::tab_stop(toggle, s.focus))
-            .children(self.came.as_ref().map(|_| {
-                self.close(
-                    "review-came-close",
-                    "Dismiss",
-                    cx.listener(|this, _ev, _w, cx| this.dismiss_came(cx)),
-                )
-            }))
-            .into_any_element()
-    }
-
-    /// How the agent's review came out, in full, with the way to let the word go.
-    fn came_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        self.came.as_ref().map(|came| {
-            let tone = if came.failed { s.error } else { s.text_secondary };
-            div()
-                .debug_selector(|| "review-came".to_owned())
-                .w_full()
-                .flex()
-                .items_start()
-                .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.sm))
-                .py(px(theme.spacing.xs))
-                .child(
-                    div()
-                        .id("review-came-words")
-                        .role(Role::Status)
-                        .aria_label(SharedString::from(came.words.clone()))
-                        .min_w_0()
-                        .flex_1()
-                        .whitespace_normal()
-                        .text_color(hsla(tone))
-                        .child(SharedString::from(came.words.clone())),
-                )
-                .child(self.close(
-                    "review-came-close",
-                    "Dismiss",
-                    cx.listener(|this, _ev, _w, cx| this.dismiss_came(cx)),
-                ))
-                .into_any_element()
-        })
-    }
-
-    /// A finding with no line on show: where it is, what it says, and the way to let it go.
-    fn note_row(&self, ix: usize, note: &Note, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let finding = &note.finding;
-        let id = format!("review-note-{ix}");
-        let selector = id.clone();
-        let label = format!(
-            "{}. {}",
-            finding.title,
-            finding.place.as_ref().map(findings::Place::words).unwrap_or_default()
-        );
-        div()
-            .id(ElementId::Name(id.into()))
-            .debug_selector(move || selector)
-            .role(Role::ListItem)
-            .aria_label(SharedString::from(label))
-            .w_full()
-            .flex()
-            .items_start()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.sm))
-            .pt(px(theme.spacing.sm))
-            .pb(px(theme.spacing.xs))
-            .child(self.icon(Symbol::TextBubble, s.text_secondary))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(theme.spacing.xxs))
-                    .children(finding.place.as_ref().map(|place| {
-                        div()
-                            .font_family(self.mono())
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(place.words()))
-                    }))
-                    .child(
-                        div()
-                            .whitespace_normal()
-                            .text_color(hsla(s.text))
-                            .child(SharedString::from(finding.title.clone())),
-                    )
-                    .when(!finding.body.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .whitespace_normal()
-                                .text_color(hsla(s.text_secondary))
-                                .child(SharedString::from(finding.body.clone())),
-                        )
-                    }),
-            )
-            .child(self.close(
-                format!("review-unnote-{ix}"),
-                "Let the finding go",
-                cx.listener(move |this, _ev, _w, cx| this.unnote(ix, cx)),
-            ))
-            .into_any_element()
     }
 
     /// A quiet ✕ that lets something go.
@@ -2188,7 +1956,7 @@ impl ReviewView {
         let aside = matches!(row, Row::Comment(_) | Row::Forge(..) | Row::Draft);
         div()
             .w_full()
-            .when(aside, |el| el.px(px(theme.spacing.md)))
+            .when(aside, |el| el.px(px(theme.spacing.md)).py(px(theme.spacing.xs)))
             .child(
                 div()
                     .w_full()
@@ -2266,7 +2034,7 @@ impl ReviewView {
         let (name, dir) = lines::name_first(&file.path);
         let status = sides::head_words(file).map(SharedString::from);
         let open = !self.folded.contains(&file.path);
-        let side = px(theme.typography.icon());
+        let side = px(theme.icon());
         let fold = slopty_kit::a11y::tab_stop(
             div()
                 .id(("review-fold", at))
@@ -2421,7 +2189,7 @@ impl ReviewView {
         let id = format!("review-line-{at}-{hunk}-{ix}");
         let new = line.new.filter(|_| line.kind != Kind::Removed);
         let tag = self.author_tag((at, hunk, ix), new, cx);
-        self.pickable(id, (at, hunk, ix), ink.unified(line), tag, cx)
+        self.pickable(id, (at, hunk, ix), ink.slid(line, self.slid()), tag, cx)
     }
 
     /// Row `ix` of hunk `hunk` of the file at `at`, drawn as `lines`, as a press and a drag
@@ -2481,11 +2249,14 @@ impl ReviewView {
             }
             None => (comment.body.as_str(), ""),
         };
-        self.note()
+        // The commenter's colour down the card's edge: the person's accent, the agent's own
+        // working hue for a finding.
+        let by = if comment.by.is_some() { s.working } else { s.accent };
+        self.note(by, false)
             .debug_selector(move || format!("review-comment-{ix}"))
             // A finding and a person's comment wear the same glyph: a finding's bold first
-            // line, and the banner over the diff, say whose it is.
-            .child(self.icon(Symbol::TextBubble, s.text_muted))
+            // line, and the edge's hue, say whose it is.
+            .child(self.note_mark(Symbol::TextBubble, s.text_muted))
             .when(ranged, |el| {
                 el.child(
                     kit::tabular(div())
@@ -2520,30 +2291,61 @@ impl ReviewView {
             .into_any_element()
     }
 
+    /// The comment being written: the card a comment is, focused, its field inside.
     fn draft_row(&self) -> AnyElement {
         let s = self.theme.surfaces;
-        // A field to type in: raised off the diff, where the comments stand on the panel.
-        kit::raised(self.note(), &self.theme)
-            .rounded(px(self.theme.radii.sm))
+        self.note(s.accent, true)
             .debug_selector(|| "review-draft".to_owned())
-            .child(self.icon(Symbol::TextBubble, s.text_secondary))
+            .child(self.note_mark(Symbol::TextBubble, s.text_secondary))
             .child(div().min_w_0().flex_1().child(Textarea::new(&self.draft).aria_label("Comment")))
             .into_any_element()
     }
 
-    /// A comment's card, under its line.
-    fn note(&self) -> Div {
+    /// A comment's card under its line, Delta's (`.research/delta-signed-in-2026-10-12.md`
+    /// §2.5): the well's ground inside the lighter line at `radii.sm`, at least the foot's
+    /// height, its words the prose's 15 on 21; the commenter's colour `by` runs down its left
+    /// edge, a line at rest and the bar while it is being written (`focused`).
+    fn note(&self, by: slopty_theme::Rgb, focused: bool) -> Div {
         let theme = &self.theme;
         let s = theme.surfaces;
-        div()
+        let edge = if focused { slopty_theme::stroke::BAR } else { slopty_theme::stroke::LINE };
+        let card = kit::inset(div(), theme)
+            .relative()
             .w_full()
-            .px(px(theme.spacing.md))
-            .py(px(theme.spacing.xs))
+            .min_h(px(theme.density.foot))
             .flex()
             .items_start()
             .gap(px(theme.spacing.xs))
-            .bg(hsla(s.ground))
-            .text_size(px(theme.typography.small()))
+            .pl(px(theme.spacing.sm))
+            .pr(px(theme.spacing.xs))
+            .py(px(theme.spacing.xs))
+            .rounded(px(theme.radii.sm))
+            .border(kit::HAIR)
+            .border_color(hsla(s.stroke))
+            .overflow_hidden()
+            .font_family(theme.typography.ui_family.clone());
+        kit::typed(card, theme.roles().prose).child(
+            div()
+                .debug_selector(|| "review-comment-edge".to_owned())
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(edge))
+                .bg(hsla(by)),
+        )
+    }
+
+    /// A comment's glyph, centred on the card's first line.
+    fn note_mark(&self, glyph: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
+        let theme = &self.theme;
+        div()
+            .flex_none()
+            .h(px(theme.roles().prose.line))
+            .flex()
+            .items_center()
+            .child(self.icon(glyph, tone))
+            .into_any_element()
     }
 
     fn mono(&self) -> SharedString {
@@ -2734,10 +2536,14 @@ impl ReviewView {
             return empty(diff_mark(), self.scope.nothing().to_owned(), next);
         }
         div()
+            .id("review-body")
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                this.slide_by(ev, window, cx);
+            }))
             .child(
                 // No rule under the scope bar or over the foot: the diff fades where it slides
                 // under either, and only while some of it lies past that edge.
@@ -2807,7 +2613,6 @@ impl Render for ReviewView {
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let scopes = self.scope_bar(cx);
-        let band = self.findings_band(cx);
         let body = self.body(cx);
         let door = self.door_of(cx).is_some();
         // A folder's foot is there only for its comments.
@@ -2869,7 +2674,6 @@ impl Render for ReviewView {
             })
             .relative()
             .child(scopes)
-            .children(band)
             .child(body)
             .children(foot)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))

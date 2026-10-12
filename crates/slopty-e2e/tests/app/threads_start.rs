@@ -12,7 +12,7 @@ use slopty_e2e::{Driver, Dump};
 /// A server round trip, the agent's terminal opening, the app hearing of it.
 const STEP: Duration = Duration::from_secs(30);
 /// The palette's one start, as it begins.
-const LINE: &str = "New agent\u{2026}";
+const LINE: &str = "New agent on\u{2026}";
 /// The new thread's composer, which writes its first message.
 const FIELD: &str = "Message";
 
@@ -51,12 +51,19 @@ async fn palette_offering(drv: &mut Driver) {
     loop {
         drv.keys("cmd-shift-p").await.unwrap();
         drv.wait_for("the palette", STEP, palette_up).await.unwrap();
-        drv.type_text("new agent\u{2026}").await.unwrap();
+        drv.type_text("new agent on\u{2026}").await.unwrap();
         let shown = drv.wait_for(LINE, Duration::from_secs(2), offered).await;
         if shown.is_ok() {
             return;
         }
         assert!(started.elapsed() < STEP, "the palette never offered {LINE}");
+        // Esc lets the typed words go first, then the palette.
+        drv.keys("escape").await.unwrap();
+        drv.wait_for("the words gone", STEP, |d| {
+            d.a11y.iter().any(|n| n.role == "TextInput" && n.value.as_deref() == Some(""))
+        })
+        .await
+        .unwrap();
         drv.keys("escape").await.unwrap();
         drv.wait_for("the palette closed", STEP, |d| !palette_up(d)).await.unwrap();
     }

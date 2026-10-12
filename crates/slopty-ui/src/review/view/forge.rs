@@ -174,12 +174,13 @@ impl ReviewView {
             format!("{}: {}", first.author, kit::first_line(&first.body))
         });
         let url = thread.url.clone();
-        self.note()
+        // Someone else's words, from the forge: the edge in the muted ink.
+        self.note(s.text_muted, false)
             .id(ElementId::Name(format!("review-forge-{ix}").into()))
             .debug_selector(move || format!("review-forge-{ix}"))
             .role(Role::Comment)
             .aria_label(SharedString::from(label))
-            .child(self.icon(Symbol::ArrowTrianglePull, s.text_muted))
+            .child(self.note_mark(Symbol::ArrowTrianglePull, s.text_muted))
             .child(
                 div()
                     .min_w_0()

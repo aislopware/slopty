@@ -2040,10 +2040,9 @@ fn the_board_says_where_the_goal_stands(cx: &mut TestAppContext) {
     assert!(said.iter().any(|l| l == "Goal met. All three merged and pushed"), "{said:#?}");
 }
 
-/// The board's head shows how far the project's agents go before they ask, and sets it, on a
-/// line of its own under the place with the review limit after it, so the place keeps its
-/// line in a board beside its orchestrator: a press of another level says it to the server,
-/// the person's word. At Own it says a managed
+/// The board's head keeps how far the project's agents go before they ask in its gear's
+/// popover, the review limit under it, so the head keeps to its title and its place: a press of
+/// another level says it to the server, the person's word. At Own it says a managed
 /// Claude Code with auto mode off starts the agents asking; a press of the level already set
 /// says nothing.
 #[gpui::test]
@@ -2060,13 +2059,14 @@ fn the_board_sets_its_autonomy(cx: &mut TestAppContext) {
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
-    let place = cx.debug_bounds("project-place").expect("the place line");
+    assert!(cx.debug_bounds("project-place").is_some(), "the place line");
+    assert!(cx.debug_bounds("project-autonomy").is_none(), "not a line of the head");
+    click(cx, "project-settings");
+    let gear = cx.debug_bounds("project-settings").expect("the gear");
     let control = cx.debug_bounds("project-autonomy").expect("the control");
-    assert!(control.top() >= place.bottom(), "under the place: {place:?} {control:?}");
-    assert!((control.left() - place.left()).abs() < px(0.5), "at its edge: {control:?}");
+    assert!(control.top() >= gear.bottom(), "in the popover under it: {gear:?} {control:?}");
     let limit = cx.debug_bounds("project-review-limit").expect("the review limit");
-    assert!(limit.left() >= control.right(), "the review limit after it: {limit:?}");
-    assert!(place.size.width > control.size.width + limit.size.width, "the place keeps its line");
+    assert!(limit.top() >= control.bottom(), "the review limit under it: {limit:?}");
     assert!(cx.debug_bounds("project-autonomy-managed").is_none(), "Ask says nothing more");
 
     click(cx, "project-autonomy-own");
@@ -2136,7 +2136,8 @@ fn the_board_sets_its_review_limit_and_merges_all_ready(cx: &mut TestAppContext)
         cx.run_until_parked();
     };
 
-    // The default, three: a step either way.
+    // The default, three: a step either way, in the gear's popover.
+    click(cx, "project-settings");
     let labels_now = labels(&view, cx);
     assert!(labels_now.iter().any(|l| l == "Review limit: 3"), "{labels_now:#?}");
     click(cx, "project-review-more");

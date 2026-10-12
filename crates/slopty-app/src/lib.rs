@@ -3586,8 +3586,19 @@ impl Render for Workspace {
         self.ready_paste_key(window, cx);
         let key_bar = self.key_target.clone().map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
-        // Under the key bar, its plane; else the window's one ground.
-        let band = if key_bar.is_some() { surfaces.sidebar } else { surfaces.ground };
+        // Under the key bar, its plane; else the window's one ground. The self-test's render
+        // has no keyboard in it (the system draws it, not the app), so there the soft
+        // keyboard's room is the stage's dark, which says where the keys are rather than
+        // leaving blank ground (`.research/design-polish-2026-10-12.md` §4.12).
+        let raw = window.insets();
+        let keyboard_up = raw.ime.bottom > raw.safe_area.bottom;
+        let band = if keyboard_up && self_test() {
+            surfaces.stage
+        } else if key_bar.is_some() {
+            surfaces.sidebar
+        } else {
+            surfaces.ground
+        };
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {
@@ -3842,7 +3853,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
             ("Install this build on".to_owned(), "runs a different build".to_owned())
         }
     };
-    let glyph_size = px(theme.typography.icon());
+    let glyph_size = px(theme.icon());
     let row = kit::row(theme, kit::Row::Two)
         .id(("add-worker-found", ix))
         .debug_selector(move || format!("add-worker-found-{ix}"))
@@ -3945,7 +3956,7 @@ fn entry_row_saying(
 ) -> gpui::Stateful<gpui::Div> {
     use slopty_kit::icons::{Drawn, Symbol, icon};
     let s = theme.surfaces;
-    let glyph_size = px(theme.typography.icon());
+    let glyph_size = px(theme.icon());
     let row = kit::row(theme, kit::Row::Two)
         .id(id)
         .debug_selector(move || id.to_owned())

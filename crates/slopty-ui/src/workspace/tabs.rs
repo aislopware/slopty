@@ -39,6 +39,9 @@ pub(super) enum Opening {
     At(Drop),
     /// In the pane of the preview it replaces, beside it (`preview`).
     Into(Pos),
+    /// Nowhere on the tiling: a thread's inline terminal, drawn in its thread
+    /// ([`super::inline_shells`]).
+    Inline,
 }
 
 /// The shells asked of one worker and not come yet, the first asked first.
@@ -218,6 +221,7 @@ impl WorkspaceView {
                     self.layout.open_beside(tile, &home);
                 }
             }
+            Opening::Inline => self.inline_arrived(tile),
         }
     }
 

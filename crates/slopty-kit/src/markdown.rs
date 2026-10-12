@@ -265,7 +265,7 @@ pub fn task_row(
     // Linear's and Things' box: a notch under an icon's size beside the text, the small
     // radius and an outline, on the first line's middle. The font's tick at caption size, in
     // a 12 pt box with a sharp corner, read as an unstyled browser form.
-    let side = theme.typography.icon() * TASK_BOX;
+    let side = theme.icon() * TASK_BOX;
     let line = theme.typography.ui_size * theme.typography.markdown_line_height;
     let toggled = if done { Toggled::True } else { Toggled::False };
     let mut label = String::from(if done { "Done: " } else { "To do: " });
@@ -772,7 +772,7 @@ mod tests {
         let (_rows, cx) = cx.add_window_view(|_window, _cx| Rows);
         cx.run_until_parked();
         let theme = Theme::default();
-        let side = theme.typography.icon() * TASK_BOX;
+        let side = theme.icon() * TASK_BOX;
         let (open, done) = (
             cx.debug_bounds("task-0").expect("the open box"),
             cx.debug_bounds("task-1").expect("the done box"),

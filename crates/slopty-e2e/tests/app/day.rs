@@ -199,7 +199,17 @@ async fn new_goal(
     goal: &str,
     folder: Option<&str>,
 ) -> Option<String> {
-    let d = driver.dump().await.unwrap();
+    let mut d = driver.dump().await.unwrap();
+    // A sheet left up by a goal it refused (no folder to start in) is let go first: a press on
+    // the title bar would only fall on its scrim.
+    if node(&d, Some("Dialog"), "New goal").is_some()
+        && let Some(cancel) = node(&d, Some("Button"), "Cancel").cloned()
+    {
+        click(driver, &cancel).await;
+        d = seen(driver, STEP, |d| node(d, Some("Dialog"), "New goal").is_none())
+            .await
+            .unwrap_or_default();
+    }
     let Some(open) = node(&d, Some("Button"), "New goal").cloned() else {
         found.check(false, "the title bar has no New goal");
         return None;
@@ -424,7 +434,8 @@ async fn a_person_s_day_in_the_app_across_two_workers() {
     // A project whose orchestrator works where no repository is (made by the CLI, as the GUI
     // refuses one): a task it starts is refused as unplaced, and the board says why in words.
     let home = studio_home.to_string_lossy().into_owned();
-    let spawned = stack.slopty(&["agent", "spawn", "--cwd", &home]).await.unwrap();
+    let spawned =
+        stack.slopty(&["agent", "spawn", "--worker", "studio", "--cwd", &home]).await.unwrap();
     let term = spawned["term"].as_str().unwrap_or_default().to_owned();
     stack
         .slopty(&[
@@ -800,7 +811,8 @@ async fn a_start_that_failed_says_why_on_the_board() {
     let linux = stack.add_worker("linux-box", &linux_home, &[]).await.unwrap();
 
     let clone = home.join("demo").to_string_lossy().into_owned();
-    let spawned = stack.slopty(&["agent", "spawn", "--cwd", &clone]).await.unwrap();
+    let spawned =
+        stack.slopty(&["agent", "spawn", "--worker", "studio", "--cwd", &clone]).await.unwrap();
     let orchestrator = spawned["term"].as_str().unwrap().to_owned();
     stack
         .slopty(&[

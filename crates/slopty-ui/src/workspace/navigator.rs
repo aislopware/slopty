@@ -665,19 +665,12 @@ fn identity_run(selector: String, ink: Rgb, selected: bool) -> Div {
 
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
 fn disclosure(theme: &Theme, chevron: Symbol, ink: Rgb) -> Div {
-    slopty_kit::icons::Drawn::disclosure(theme, chevron)
-        .slot(px(theme.typography.icon()), hsla(ink))
+    slopty_kit::icons::Drawn::disclosure(theme, chevron).slot(px(theme.icon()), hsla(ink))
 }
 
 /// A square of the leading slot's side around `child`, so every row's title starts on one edge.
 fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
-    div()
-        .flex_none()
-        .size(px(theme.typography.icon()))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(child)
+    div().flex_none().size(px(theme.icon())).flex().items_center().justify_center().child(child)
 }
 
 /// A tile as its row shows it.
@@ -2355,7 +2348,7 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label("Clear filter")
                 .flex_none()
-                .size(px(theme.typography.icon()))
+                .size(px(theme.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3029,7 +3022,7 @@ impl WorkspaceView {
             // It leads with how it stands, as every row does: what it waits on is the point of
             // the row, and the agent is named in its hint.
             .child(lead_slot(theme, {
-                let side = px(theme.typography.icon());
+                let side = px(theme.icon());
                 let tone = hsla(agent.status.ink(theme));
                 slopty_kit::icons::status_icon(theme, agent.status, side, tone).into_any_element()
             }))
@@ -3094,7 +3087,7 @@ impl WorkspaceView {
         row(theme, kit::Row::One, format!("nav-ready-{key}"), label.into(), false)
             .group(row_group)
             .child(lead_slot(theme, {
-                let side = px(theme.typography.icon());
+                let side = px(theme.icon());
                 let tone = hsla(Status::Done.ink(theme));
                 slopty_kit::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
             }))
@@ -3197,7 +3190,7 @@ impl WorkspaceView {
                         .child(icon(theme, Symbol::DocOnClipboard, hsla(s.text_muted)))
                 }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
-        let side = theme.typography.icon();
+        let side = theme.icon();
         let touch = theme.density == slopty_theme::Density::TOUCH;
         // A worker on another build: Update in place of its readouts, at rest too, since it
         // links again only once updated.
@@ -3466,7 +3459,7 @@ impl WorkspaceView {
                     .child(SharedString::from(place))
             }));
         let chevron = if folded { Symbol::ChevronRight } else { Symbol::ChevronDown };
-        let side = theme.typography.icon();
+        let side = theme.icon();
         let add = group.new_shell.clone().filter(|_| !touch).map(|(worker, cwd)| {
             let add_key = key.clone();
             let el = div()
@@ -3726,7 +3719,7 @@ impl WorkspaceView {
                 "nav-earlier-chevron",
                 open,
                 theme,
-                px(theme.typography.icon()),
+                px(theme.icon()),
                 hsla(s.text_muted),
             ))
             .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -4079,13 +4072,13 @@ fn heading(
 
 /// The least the worker header's trailing part takes: the chevron and "+" side by side.
 fn header_actions_width(theme: &Theme) -> f32 {
-    theme.typography.icon().mul_add(2.0, theme.spacing.xxs)
+    theme.icon().mul_add(2.0, theme.spacing.xxs)
 }
 
 /// The least a machine's header's trailing part takes: "+" and "…" side by side (the chevron
 /// stands in its glyph's place).
 fn machine_actions_width(theme: &Theme) -> f32 {
-    theme.typography.icon().mul_add(2.0, theme.spacing.xxs)
+    theme.icon().mul_add(2.0, theme.spacing.xxs)
 }
 
 #[cfg(test)]

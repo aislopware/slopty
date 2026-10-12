@@ -292,6 +292,9 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
+    /// The head's settings, how far it runs on its own and its review limit, are open in
+    /// their popover under the gear.
+    settings_open: bool,
     /// The tasks asked to start again whose new agent the board does not show yet.
     handing: BTreeMap<TaskId, Handing>,
     /// "Open pull request" was pressed here and the project holds no pull request yet: the
@@ -339,6 +342,7 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
+            settings_open: false,
             handing: BTreeMap::new(),
             landing: false,
             resuming: false,
@@ -634,7 +638,7 @@ impl ProjectView {
         // the task's state, which nothing has changed yet.
         let id = format!("{prefix}-{}-where", node_key(node));
         let away = self.runs_away(&place).then(|| {
-            let side = px(theme.typography.icon());
+            let side = px(theme.icon());
             let selector = format!("{id}-away");
             div().debug_selector(move || selector).flex_none().child(status_icon(
                 theme,
@@ -741,6 +745,9 @@ pub(crate) const FEWER_REVIEWS: &str = "Fewer tasks waiting on you";
 pub(crate) const MORE_REVIEWS: &str = "More tasks waiting on you";
 /// The autonomy control's name, said to a screen reader.
 pub(crate) const AUTONOMY: &str = "Autonomy";
+/// The head's gear, and the popover it opens: how far the project runs on its own and how
+/// many tasks may wait on the person.
+pub(crate) const SETTINGS: &str = "Project settings";
 /// What the autonomy control says under it at Own: a company's managed Claude Code that turns
 /// auto mode off starts its agents asking, by itself.
 pub(crate) const MANAGED_OWN: &str =
@@ -921,7 +928,8 @@ impl ProjectView {
             .item("live", Priority::LOW, live)
             .item("checks", Priority::ESSENTIAL, checks_toggle)
             .item("push", Priority::ESSENTIAL, push_toggle)
-            .item("terminal", Priority::ESSENTIAL, terminal);
+            .item("terminal", Priority::ESSENTIAL, terminal)
+            .item("settings", Priority::ESSENTIAL, self.settings(project, cx));
         let meta = div()
             .id("project-place")
             .debug_selector(|| "project-place".to_owned())
@@ -943,30 +951,67 @@ impl ProjectView {
             .pb(px(sp.sm))
             .child(title)
             .child(div().flex().items_center().child(meta))
-            // How far it runs on its own, the person's two settings, on a line of their own
-            // under where it works: beside the place they cut it to a few letters in a board
-            // beside its orchestrator.
-            .child(
-                div()
-                    .id("project-runs")
-                    .debug_selector(|| "project-runs".to_owned())
-                    .pt(px(sp.xs))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(sp.sm))
-                    .child(self.autonomy(project.autonomy, cx))
-                    .child(self.review_limit(project.limits.review, cx)),
-            )
-            .children((project.autonomy == Autonomy::Own).then(|| {
-                slopty_kit::kit::typed(div(), theme.roles().metadata)
-                    .debug_selector(|| "project-autonomy-managed".to_owned())
-                    .text_color(hsla(s.text_muted))
-                    .child(MANAGED_OWN)
-            }))
             .children(self.ended_orchestrator(board, cx))
             .children(self.standing(board, cx))
             .child(self.bar(board))
+    }
+
+    /// The head's gear, Delta's board settings: the person's two settings, how far it runs on
+    /// its own and how many tasks may wait on them, in a popover under it rather than a line
+    /// of the head (`.research/design-polish-2026-10-12.md` §1.10).
+    fn settings(&self, project: &slopty_proto::project::Project, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let sp = theme.spacing;
+        let open = self.settings_open;
+        let gear = slopty_kit::kit::icon_toggle(
+            theme,
+            "project-settings",
+            Symbol::Gearshape,
+            SETTINGS,
+            open,
+        )
+        .aria_expanded(open)
+        .on_click(cx.listener(|this, _ev, _w, cx| {
+            this.settings_open = !this.settings_open;
+            cx.notify();
+        }));
+        let popover = open.then(|| {
+            let panel = slopty_kit::kit::elevate(div(), theme)
+                .id("project-settings-popover")
+                .debug_selector(|| "project-settings-popover".to_owned())
+                .role(Role::Group)
+                .aria_label(SETTINGS)
+                .occlude()
+                .mt(px(sp.xxs))
+                .rounded(px(theme.radii.lg))
+                .p(px(sp.sm))
+                .flex()
+                .flex_col()
+                .gap(px(sp.sm))
+                .child(
+                    div()
+                        .id("project-runs")
+                        .debug_selector(|| "project-runs".to_owned())
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(sp.sm))
+                        .child(self.autonomy(project.autonomy, cx))
+                        .child(self.review_limit(project.limits.review, cx)),
+                )
+                .children((project.autonomy == Autonomy::Own).then(|| {
+                    slopty_kit::kit::typed(div(), theme.roles().metadata)
+                        .debug_selector(|| "project-autonomy-managed".to_owned())
+                        .max_w(px(theme.typography.ui_size * slopty_kit::kit::NOTICE_MEASURE))
+                        .whitespace_normal()
+                        .text_color(hsla(s.text_muted))
+                        .child(MANAGED_OWN)
+                }));
+            gpui::deferred(gpui::anchored().anchor(gpui::Anchor::TopRight).child(panel))
+                .with_priority(slopty_kit::layer::Layer::Submenu.priority())
+        });
+        div().relative().flex_none().child(gear).children(popover).into_any_element()
     }
 
     /// How many of its tasks may wait on the person before its orchestrator starts no more,
@@ -1529,7 +1574,7 @@ impl ProjectView {
             .px(px(theme.spacing.inset()))
             .py(px(theme.spacing.xxs))
             .min_w_0()
-            .child(icon(theme, glyph, hsla(tone)).flex_none().size(px(theme.typography.icon())))
+            .child(icon(theme, glyph, hsla(tone)).flex_none().size(px(theme.icon())))
             .child(
                 div()
                     .flex_1()
@@ -1547,23 +1592,18 @@ impl ProjectView {
     /// the agent's neutral mark.
     fn mark(&self, phase: Option<Phase>) -> Div {
         let theme = &self.theme;
-        let slot = div()
-            .flex_none()
-            .size(px(theme.typography.icon()))
-            .flex()
-            .items_center()
-            .justify_center();
+        let slot = div().flex_none().size(px(theme.icon())).flex().items_center().justify_center();
         match phase {
             Some(phase) => slot.child(
                 div()
                     .id(phase.label())
                     .role(Role::Image)
                     .aria_label(phase.label())
-                    .child(phase.glyph(theme, px(theme.typography.icon()))),
+                    .child(phase.glyph(theme, px(theme.icon()))),
             ),
             None => slot.child(
                 icon(theme, slopty_kit::icons::AGENT, hsla(theme.surfaces.text_secondary))
-                    .size(px(theme.typography.icon())),
+                    .size(px(theme.icon())),
             ),
         }
     }
@@ -1676,10 +1716,7 @@ impl ProjectView {
             .items_center()
             .gap(px(sp.xs))
             .min_w_0()
-            .child(
-                icon(theme, Symbol::XmarkCircle, hsla(s.error_fill))
-                    .size(px(theme.typography.icon())),
-            )
+            .child(icon(theme, Symbol::XmarkCircle, hsla(s.error_fill)).size(px(theme.icon())))
             .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
             .child(
                 slopty_kit::kit::tabular(div())
@@ -1804,7 +1841,7 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        let glyph = lane.phase().glyph(theme, px(theme.typography.icon()));
+        let glyph = lane.phase().glyph(theme, px(theme.icon()));
         let head = div()
             .id(SharedString::from(head_id.clone()))
             .debug_selector(move || selector)
@@ -1830,7 +1867,7 @@ impl ProjectView {
                             format!("{head_id}-fold"),
                             !folded,
                             theme,
-                            px(theme.typography.icon()),
+                            px(theme.icon()),
                             hsla(s.text_muted),
                         ))
                     }),
@@ -1918,12 +1955,7 @@ impl ProjectView {
 
     /// The column a row's mark and a lane's glyph stand in.
     fn slot(&self) -> Div {
-        div()
-            .flex_none()
-            .size(px(self.theme.typography.icon()))
-            .flex()
-            .items_center()
-            .justify_center()
+        div().flex_none().size(px(self.theme.icon())).flex().items_center().justify_center()
     }
 
     /// A row's title: the action role (13, medium) in the text ink, on one line, ending in an
@@ -1978,7 +2010,7 @@ impl ProjectView {
                 .flex_col()
                 .gap(px(sp.xs))
                 .min_w_0()
-                .pl(px(theme.typography.icon() + sp.sm + self.number_w() + sp.sm))
+                .pl(px(theme.icon() + sp.sm + self.number_w() + sp.sm))
                 .pb(px(sp.sm))
                 .children(parts)
         })
@@ -2123,7 +2155,7 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let side = px(theme.typography.icon());
+        let side = px(theme.icon());
         // A pass is its word alone: the row's own done glyph already marks it.
         let (glyph, word, label) = match check {
             Check::Running { line, .. } => (
@@ -2173,10 +2205,7 @@ impl ProjectView {
             .cursor_pointer()
             .text_color(hsla(s.text_muted))
             .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
-            .child(
-                icon(theme, Symbol::Terminal, hsla(s.text_secondary))
-                    .size(px(theme.typography.icon())),
-            )
+            .child(icon(theme, Symbol::Terminal, hsla(s.text_secondary)).size(px(theme.icon())))
             .child("Output");
         tab_stop(link, s.focus).on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.stop_propagation();
@@ -2233,6 +2262,8 @@ impl ProjectView {
         let label = said(&[
             &card.title,
             if start_failed.is_some() { own.title() } else { state_word(card.state) },
+            // Why it failed is read with the row, as it is seen under it.
+            start_failed.as_deref().unwrap_or(""),
             asks.as_deref().unwrap_or(""),
             handing.as_deref().unwrap_or(""),
             &place_words,
@@ -2572,9 +2603,7 @@ impl ProjectView {
                 s.text_secondary
             };
             let mark = stage.failed.then(|| {
-                icon(theme, Symbol::XmarkCircle, hsla(ink))
-                    .flex_none()
-                    .size(px(theme.typography.icon()))
+                icon(theme, Symbol::XmarkCircle, hsla(ink)).flex_none().size(px(theme.icon()))
             });
             row = row.fact(
                 div()

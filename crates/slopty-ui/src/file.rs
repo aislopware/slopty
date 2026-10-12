@@ -779,6 +779,7 @@ impl FileView {
         self.focus = line.and_then(|l| usize::try_from(l).ok()).map(|l| l.saturating_sub(1));
         if self.focus.is_some() {
             self.pending_line = self.focus;
+            self.facts_follow(cx);
             // A line is a place in the source.
             if let Some(reading) = self.reading.as_mut() {
                 reading.keep_source();
@@ -970,6 +971,7 @@ impl FileView {
         self.replace(disk, cx);
         self.pending_text = Some(kept.text.to_string());
         self.pending_line = self.focus;
+        self.facts_follow(cx);
         self.changed.clear();
         self.dirty = true;
         self.edit = kept.mark.edit;
@@ -1060,6 +1062,7 @@ impl FileView {
             self.wrap = prose;
         }
         self.pending_text = Some(incoming.text.clone());
+        self.facts_follow(cx);
         self.base = Some(incoming);
         self.dirty = false;
         self.discard = false;
@@ -1316,12 +1319,20 @@ impl FileView {
     }
 
     /// Apply what waited for a window: new text, then the caret's line.
+    /// A text or a line waits to land in the editor: the facts in the tab bar draw again in
+    /// the next frame, landing it themselves if they are drawn first ([`FileFacts`]), so no
+    /// frame shows the caret's old place beside the new text.
+    fn facts_follow(&self, cx: &mut Context<Self>) {
+        self.facts.update(cx, |_, cx| cx.notify());
+    }
+
     fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.wrap != self.wrapped {
             let wrap = self.wrap;
             self.wrapped = wrap;
             self.editor.update(cx, |e, cx| e.set_soft_wrap(wrap, window, cx));
         }
+        let moved = self.pending_text.is_some();
         if let Some(text) = self.pending_text.take() {
             let caret = self.editor.read(cx).cursor();
             let scroll = self.editor.read(cx).scroll_offset();
@@ -1342,11 +1353,20 @@ impl FileView {
                 self.refresh_hits(cx);
             }
         }
-        if let Some(line) = self.pending_line.take() {
+        let landed = self.pending_line.take();
+        if let Some(line) = landed {
             self.editor.update(cx, |e, cx| {
                 let text = e.text();
                 let at = text.line_start_offset(line.min(text.lines_len().saturating_sub(1)));
                 e.set_selected_range(at..at, cx);
+            });
+        }
+        // The text or the caret moved while the frame is drawn, and the facts in the tab bar
+        // may already have been: a word to them now asks no frame, so it goes in the next.
+        if moved || landed.is_some() {
+            let facts = self.facts.downgrade();
+            window.on_next_frame(move |_window, cx| {
+                let _gone = facts.update(cx, |_, cx| cx.notify());
             });
         }
     }
@@ -1571,11 +1591,12 @@ impl FileView {
             .px(px(theme.spacing.inset()))
             .py(px(theme.spacing.xs))
             .bg(wash)
+            // Its tone down its leading edge, as every notice band has.
+            .border_l(px(slopty_theme::stroke::NOTICE))
+            .border_color(hsla(fill))
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
-            .child(
-                slopty_kit::icons::icon(theme, icon, hsla(tone)).size(px(theme.typography.icon())),
-            )
+            .child(slopty_kit::icons::icon(theme, icon, hsla(tone)).size(px(theme.icon())))
             .child(div().flex_1().min_w_0().overflow_hidden().text_color(hsla(s.text)).child(text))
             .children(actions)
             .into_any_element()
@@ -1779,8 +1800,14 @@ pub struct FileFacts {
 }
 
 impl Render for FileFacts {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let facts = self.file.upgrade().and_then(|file| file.read(cx).render_facts(cx));
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let file = self.file.upgrade();
+        // Drawn before the file's panes, the facts land what waits first: they say where the
+        // caret is in this frame, not where it was.
+        if let Some(file) = &file {
+            file.update(cx, |f, cx| f.apply_pending(window, cx));
+        }
+        let facts = file.and_then(|file| file.read(cx).render_facts(cx));
         div().flex_none().flex().items_center().children(facts)
     }
 }

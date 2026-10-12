@@ -169,7 +169,7 @@ impl ReviewView {
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
             .child(
                 slopty_kit::icons::icon(theme, Symbol::Unfold, hsla(s.text_muted))
-                    .size(px(theme.typography.icon())),
+                    .size(px(theme.icon())),
             )
             .child(SharedString::from(said))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.unfold(at, g, cx)))
@@ -182,7 +182,8 @@ impl ReviewView {
             return div().into_any_element();
         };
         let id = format!("review-context-{at}-{g}-{ix}");
-        div().debug_selector(move || id).child(self.ink(at).unified(line)).into_any_element()
+        let slid = self.ink(at).slid(line, self.slid());
+        div().debug_selector(move || id).child(slid).into_any_element()
     }
 }
 

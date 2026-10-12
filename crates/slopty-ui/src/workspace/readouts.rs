@@ -677,8 +677,13 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.xs))
                 .px(px(theme.spacing.inset()))
-                .py(px(theme.spacing.xxs))
-                .text_size(px(theme.typography.small()))
+                .py(px(theme.spacing.xs))
+                // A notice row, not stray words between the filter and the machines: the
+                // element's ground with the warning's bar down its edge, 12/16.
+                .bg(hsla(s.element))
+                .border_l(px(slopty_theme::stroke::NOTICE))
+                .border_color(hsla(s.warn_fill))
+                .map(|el| kit::typed(el, theme.roles().metadata))
                 .child(icon(theme, glyph, hsla(s.text_muted)))
                 .child(
                     div()

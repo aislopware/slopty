@@ -224,7 +224,8 @@ fn a_call_that_asks_as_it_arrives_is_answered_under_it_at_once(cx: &mut TestAppC
     assert!(card.contains(&allow.center()), "the answers sit under the call's line");
 }
 
-/// The model chip opens the agent's models, and picking one asks the agent to switch.
+/// The model chip opens the agent's models, each on a row of Delta's model picker's 31
+/// (`.research/delta-signed-in-2026-10-12.md` §2.7), and picking one asks the agent to switch.
 #[gpui::test]
 fn the_model_chip_switches_the_agent_s_model(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -246,8 +247,10 @@ fn the_model_chip_switches_the_agent_s_model(cx: &mut TestAppContext) {
     let chip = cx.debug_bounds("thread-model").expect("the model chip").center();
     cx.simulate_click(chip, Modifiers::none());
     assert!(cx.debug_bounds("thread-menu").is_some(), "the models are listed");
-    let sonnet = cx.debug_bounds("thread-menu-1").expect("both of them").center();
-    cx.simulate_click(sonnet, Modifiers::none());
+    let sonnet = cx.debug_bounds("thread-menu-1").expect("both of them");
+    let picker = slopty_theme::Theme::default().density.picker;
+    assert!((f32::from(sonnet.size.height) - picker).abs() < 0.5, "Delta's 31: {sonnet:?}");
+    cx.simulate_click(sonnet.center(), Modifiers::none());
     assert_eq!(intents(&sent), [Intent::SetModel { model: "sonnet".to_owned() }]);
     assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
 }

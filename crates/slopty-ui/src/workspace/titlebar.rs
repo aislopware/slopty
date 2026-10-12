@@ -575,6 +575,22 @@ impl WorkspaceView {
         (label.into(), rollup)
     }
 
+    /// A phone's file facts (its language, indent and caret) heading its "…": its tile has no
+    /// tab bar to end with them, and over the keyboard they stood mid-screen
+    /// (`.research/design-polish-2026-10-12.md` §1.19).
+    fn phone_file_facts(&self) -> Vec<gpui::AnyElement> {
+        let Some(tile) = self.focused() else { return Vec::new() };
+        let Some(facts) = self.file_facts(tile.item).editor else { return Vec::new() };
+        let theme = &self.theme;
+        vec![
+            kit::sheet_row(theme, kit::Row::One)
+                .debug_selector(|| "phone-file-facts".to_owned())
+                .child(facts)
+                .into_any_element(),
+            kit::list_rule(theme),
+        ]
+    }
+
     /// A phone's new tiles, leading its "…" as `entry` makes a row: the palette's names for the
     /// same actions, which the rows run as the keys do.
     fn new_entries(
@@ -675,6 +691,7 @@ impl WorkspaceView {
         };
         let head = match which {
             MenuKind::Machine(key) => self.machine_facts_rows(key),
+            MenuKind::More if self.phone => self.phone_file_facts(),
             _ => Vec::new(),
         };
         let mut menu = kit::Menu::new();

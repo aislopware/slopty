@@ -1260,7 +1260,7 @@ pub fn small_box(
         .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::Drawn::disclosure(theme, glyph)
-                .slot(px(theme.typography.icon()), hsla(s.text_secondary)),
+                .slot(px(theme.icon()), hsla(s.text_secondary)),
         );
     eased(crate::a11y::tab_stop(el, s.focus))
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
@@ -1274,7 +1274,7 @@ pub fn small_box(
 /// thread has one left edge").
 #[must_use]
 pub fn hang<E: Styled>(el: E, theme: &Theme) -> E {
-    el.ml(px(-(icon_button_side(theme) - theme.typography.glyph()) / 2.0))
+    el.ml(px(-(icon_button_side(theme) - theme.glyph()) / 2.0))
 }
 
 /// The side of [`close_box`] at a pointer's density: `MonoCode`'s `size-5`.
@@ -1319,7 +1319,7 @@ fn square_icon(
         .cursor_pointer()
         .text_color(hsla(ink))
         .active(move |el| el.bg(hsla(s.pressed)))
-        .child(crate::icons::Drawn::new(theme, icon).slot(px(theme.typography.icon()), hsla(ink)));
+        .child(crate::icons::Drawn::new(theme, icon).slot(px(theme.icon()), hsla(ink)));
     crate::a11y::tab_stop(el, s.focus)
 }
 
@@ -1404,7 +1404,7 @@ pub fn text_toggle(
 #[must_use]
 pub fn tick_box(theme: &Theme, on: bool) -> Div {
     let s = theme.surfaces;
-    let side = px(theme.typography.icon());
+    let side = px(theme.icon());
     let el = div()
         .flex_none()
         .size(side)
@@ -2122,7 +2122,7 @@ mod tests {
         theme.density = slopty_theme::Density::TOUCH;
         assert!(icon_button_side(&theme) >= 44.0, "touch: a finger's target");
         assert!(Row::One.height(&theme) >= 44.0 && Row::Two.height(&theme) > 44.0);
-        assert!(theme.typography.icon() < icon_button_side(&theme), "the icon stays its size");
+        assert!(theme.icon() < icon_button_side(&theme), "the icon stays its size");
     }
 
     /// The elevation reaches GPUI as the theme says: a float's two crisp layers of the shade

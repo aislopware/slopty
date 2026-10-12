@@ -877,6 +877,52 @@ fn the_palette_splits_into_everything_commands_and_files(cx: &mut TestAppContext
     assert!(shown(cx).iter().all(|(s, _)| *s != Section::Commands), "no command among them");
 }
 
+/// The workspace's palette has Delta's scope row under its field: All, Threads, Commands and
+/// Files, ⌘1 to ⌘4 or a press choosing one, each listing its own lines alone
+/// (`.research/delta-signed-in-2026-10-12.md` §2.7).
+#[gpui::test]
+fn the_palette_scope_row_lists_one_kind_at_a_time(cx: &mut TestAppContext) {
+    use crate::palette::{Scope, Section};
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let shown = |cx: &mut VisualTestContext| -> Vec<Section> {
+        view.read_with(cx, |v, cx| {
+            let palette = v.palette.clone().expect("open");
+            palette.read(cx).matches().into_iter().map(|l| l.section).collect()
+        })
+    };
+    let scope = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| v.palette.clone().map(|p| p.read(cx).scope()))
+    };
+    open_palette(cx);
+    let field = cx.debug_bounds("palette-field").expect("the field");
+    let row = cx.debug_bounds("palette-scopes").expect("the scope row");
+    assert!(row.top() >= field.bottom() - px(0.5), "under the field: {field:?} {row:?}");
+    let title = Theme::default().density.title;
+    assert!((f32::from(row.size.height) - title).abs() < 0.5, "Delta's 34 pt row: {row:?}");
+    assert_eq!(scope(cx), Some(Scope::All));
+    let all = shown(cx);
+    assert!(all.contains(&Section::Tiles) && all.contains(&Section::Commands), "{all:?}");
+
+    cx.simulate_keystrokes("cmd-3");
+    cx.run_until_parked();
+    assert_eq!(scope(cx), Some(Scope::Commands));
+    let commands = shown(cx);
+    assert!(commands.iter().all(|s| *s == Section::Commands), "{commands:?}");
+    assert!(commands.len() > crate::palette::RECENT_COMMANDS, "every command: {commands:?}");
+
+    click(cx, "palette-scope-threads");
+    assert_eq!(scope(cx), Some(Scope::Threads));
+    let threads = shown(cx);
+    assert!(!threads.is_empty(), "the shell's tile");
+    assert!(threads.iter().all(|s| Scope::Threads.holds(*s)), "{threads:?}");
+
+    click(cx, "palette-scope-all");
+    assert_eq!(shown(cx), all, "All lists everything again");
+}
+
 /// No two lines of the palette run the same action or read the same: each thing has one door
 /// there (`.research/orchestrator-first-2026-10-10.md`, item 6). Checked with nothing open and
 /// with a shell focused on one of two machines, where the most lines are offered.
@@ -905,4 +951,30 @@ fn no_palette_line_repeats_another(cx: &mut TestAppContext) {
     check(cx, "nothing open");
     opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     check(cx, "a shell");
+}
+
+/// The palette is drawn whole in the frame that shows it: as it opens, as a query narrows it
+/// and as one widens it again, the frame is the one a frame from scratch draws
+/// (`slopty_kit::retained::stale`), its plate as tall as its rows.
+#[gpui::test]
+fn the_palette_follows_its_query_in_the_frame_it_shows(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let fresh = |cx: &mut VisualTestContext, step: &str| {
+        let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
+        assert!(stale.is_none(), "{step}: {}", stale.unwrap_or_default());
+    };
+    cx.dispatch_action(OpenCommands);
+    cx.run_until_parked();
+    fresh(cx, "open");
+    cx.simulate_input("new agent");
+    cx.run_until_parked();
+    fresh(cx, "narrowed");
+    cx.simulate_keystrokes("backspace backspace backspace backspace backspace");
+    cx.run_until_parked();
+    fresh(cx, "widened");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    fresh(cx, "closed");
 }

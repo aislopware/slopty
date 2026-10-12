@@ -866,7 +866,7 @@ impl FolderView {
             if n > 0 {
                 trail = trail.child(
                     slopty_kit::icons::Drawn::disclosure(theme, Symbol::ChevronRight)
-                        .slot(px(theme.typography.icon()), slopty_kit::kit::separator_ink(theme)),
+                        .slot(px(theme.icon()), slopty_kit::kit::separator_ink(theme)),
                 );
             }
             let here = n == last;
@@ -1069,7 +1069,7 @@ impl FolderView {
             .when(entry.link && entry.kind != FileKind::Symlink, |el| {
                 el.child(
                     slopty_kit::icons::icon(theme, Symbol::Link, hsla(s.text_muted))
-                        .size(px(theme.typography.icon())),
+                        .size(px(theme.icon())),
                 )
             })
             .child(column(detail, SIZE_W))

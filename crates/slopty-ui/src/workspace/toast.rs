@@ -516,8 +516,13 @@ impl WorkspaceView {
             }
         };
         let line = SharedString::from(line);
-        // Every notice floats over the panes, so it stands raised: a thing on the work rather
-        // than one more of its words.
+        let words = theme.roles().notice;
+        // A mark, a glyph and the actions stand on the first line's middle.
+        let first = |el: gpui::AnyElement| {
+            div().flex_none().h(px(words.line)).flex().items_center().child(el).into_any_element()
+        };
+        // Every notice floats over the panes, Delta's toast: the float's plane inside its line,
+        // its words up to two lines of the row's 12 on 19, then cut short.
         let notice = div()
             .id(("toast", shown.seq))
             .debug_selector(move || part.to_owned())
@@ -533,36 +538,50 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
-            .h(px(theme.density.hit))
+            .min_h(px(theme.density.hit))
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(theme.spacing.sm))
+            .py(px(theme.spacing.xs))
             .pl(px(theme.spacing.sm))
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
             .rounded(px(theme.radii.sm))
-            .map(|el| slopty_kit::kit::raised(el, theme).text_color(hsla(s.text)))
+            .map(|el| slopty_kit::kit::typed(el, words))
+            .map(|el| slopty_kit::kit::elevate(el, theme).text_color(hsla(s.text)))
             // A failure's line is tinted by what it is, as Delta's error toast's is.
             .when(part == "failed", |el| el.border_color(hsla(s.error_border)))
             .children(icon.map(|icon| {
-                slopty_kit::icons::symbol(
-                    theme,
-                    icon,
-                    px(theme.typography.icon()),
-                    hsla(s.text_secondary),
+                first(
+                    slopty_kit::icons::symbol(
+                        theme,
+                        icon,
+                        px(theme.icon()),
+                        hsla(s.text_secondary),
+                    )
+                    .into_any_element(),
                 )
             }))
-            .children(mark)
+            .children(mark.map(|mark| first(mark.into_any_element())))
             .child(body.unwrap_or_else(|| {
                 div()
+                    .debug_selector(|| "toast-words".to_owned())
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
+                    .whitespace_normal()
+                    .line_clamp(2)
                     .text_ellipsis()
                     .child(line)
                     .into_any_element()
             }))
-            .children(actions);
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(words.line))
+                    .flex()
+                    .items_center()
+                    .gap(px(theme.spacing.sm))
+                    .children(actions),
+            );
         if !self.chrome_moves(cx) {
             return notice.into_any_element();
         }

@@ -213,6 +213,42 @@ fn a_file_says_its_facts_at_its_tab_bars_end(cx: &mut TestAppContext) {
         said.iter().any(|l| l.starts_with("Rust, ") && l.ends_with("Ln 2, Col 5")),
         "it follows the caret, heard as one status: {said:?}"
     );
+    // A line asked for lands the caret while the frame is drawn: the facts follow it there,
+    // in the frame that shows it, not one a stale draw left behind.
+    file.update_in(cx, |f, _w, cx| f.focus_line(Some(3), cx));
+    cx.run_until_parked();
+    let stale = cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 12));
+    assert!(stale.is_none(), "the facts follow a line asked for: {}", stale.unwrap_or_default());
+}
+
+/// A phone's file tile has no tab bar to end with its facts: its bar's "…" heads its menu with
+/// them, and the tile's body holds none.
+#[gpui::test]
+fn a_phones_file_says_its_facts_in_its_more_menu(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let path = "/w/main.rs";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "fn main() {}".to_owned(),
+        size: 12,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+        editorconfig: Vec::new(),
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.simulate_resize(size(px(390.0), px(844.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("file-facts").is_none(), "no tab bar holds them");
+    let more = bounds(cx, "more").center();
+    cx.simulate_click(more, Modifiers::default());
+    cx.run_until_parked();
+    let row = bounds(cx, "phone-file-facts");
+    assert!(cx.debug_bounds("file-facts").is_some_and(|f| row.contains(&f.center())), "{row:?}");
 }
 
 /// A file says it is edited in its tab, a dot after its name named "Edited" to a screen reader.

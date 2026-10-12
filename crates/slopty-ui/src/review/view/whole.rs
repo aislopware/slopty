@@ -164,7 +164,7 @@ impl ReviewView {
                         .hover(move |el| el.text_color(hsla(s.text)))
                         .child(
                             slopty_kit::icons::icon(theme, Symbol::Unfold, hsla(s.text_muted))
-                                .size(px(theme.typography.icon())),
+                                .size(px(theme.icon())),
                         )
                         .child(press)
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.ask_whole(at, cx))),

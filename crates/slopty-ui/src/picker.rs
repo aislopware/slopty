@@ -519,12 +519,7 @@ impl WindowPicker {
         row.role(gpui::accesskit::Role::Status)
             .aria_label(LOADING_WINDOWS)
             .text_color(muted)
-            .child(slopty_kit::icons::status_icon(
-                theme,
-                Status::Working,
-                px(theme.typography.icon()),
-                muted,
-            ))
+            .child(slopty_kit::icons::status_icon(theme, Status::Working, px(theme.icon()), muted))
             .child(LOADING_WINDOWS)
     }
 

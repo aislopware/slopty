@@ -1813,3 +1813,29 @@ fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppC
     let against = ReviewScope::WorkingTree(Against::Branch("release".to_owned()));
     assert_eq!(asks(&mut studio), [against], "the branch it merges into, as the forge says");
 }
+
+/// The palette offers to ask the agent a new tab would start, by its name, at the field's end;
+/// Tab there starts it in the focused shell's folder with the field's words as its first
+/// message (Delta's "Ask Delta", `.research/delta-signed-in-2026-10-12.md` §2.7).
+#[gpui::test]
+fn tab_in_the_palette_asks_the_agent_with_its_words(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    studio.drain();
+    cx.dispatch_action(OpenPalette);
+    settle(cx);
+    let field = cx.debug_bounds("palette-field").expect("the field");
+    let ask = cx.debug_bounds("palette-ask").expect("the offer at the field's end");
+    assert!(field.contains(&ask.center()), "in the field's row: {field:?} {ask:?}");
+    cx.simulate_input("why does the build fail");
+    cx.simulate_keystrokes("tab");
+    settle(cx);
+    assert!(view.read_with(cx, |v, _| v.palette.is_none()), "the palette went");
+    let sent = starts(&mut studio);
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    assert!(
+        matches!(sent.as_slice(), [(_, agent, cwd, Some(words))]
+            if *agent == claude && cwd == "/src/app" && words == "why does the build fail"),
+        "{sent:?}"
+    );
+}

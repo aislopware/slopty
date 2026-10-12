@@ -893,8 +893,8 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_worktree() {
     stack.shutdown().await;
 }
 
-/// A port a shell listens on, and a file on its way up: the port counted in the title bar,
-/// the upload on the tile it belongs to.
+/// A port a shell listens on, and a file on its way up: the port forwarded with no count in
+/// the chrome (the palette's "Forwarded ports" lists it), the upload on the tile it belongs to.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
@@ -959,7 +959,7 @@ async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
         })
         .await
         .unwrap();
-    assert!(dump.a11y_node("Button", Some("1 port")).is_some(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Button", Some("1 port")).is_none(), "no count: {:#?}", dump.a11y);
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
     signal("-CONT", &worker);
     assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();

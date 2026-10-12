@@ -489,12 +489,13 @@ impl WorkspaceView {
     /// their project first.
     pub(super) fn place_from_elsewhere(&mut self, arriving: &[TileRef]) {
         let mut tiles = self.reading_order();
-        tiles.extend(arriving.iter().filter(|t| !self.layout.contains(**t)));
+        tiles
+            .extend(arriving.iter().filter(|t| !self.layout.contains(**t) && !self.is_inline(**t)));
         let grouping = self.grouping(tiles, &groups::DEFAULT_CHAIN);
         let layout = &self.layout;
         self.projects.arrived.retain(|t| layout.contains(*t));
         for &tile in arriving {
-            if self.layout.contains(tile) || self.is_task_agent(tile) {
+            if self.layout.contains(tile) || self.is_task_agent(tile) || self.is_inline(tile) {
                 continue;
             }
             let home = grouping

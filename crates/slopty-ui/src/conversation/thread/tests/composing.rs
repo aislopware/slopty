@@ -34,8 +34,8 @@ fn state() -> ThreadState {
     state
 }
 
-/// `/` lists the agent's own commands, the project's first; ↵ writes the one the keyboard is
-/// on into the draft and sends nothing.
+/// `/` lists the agent's own commands, the project's first, on Delta's 24 pt slash rows; ↵
+/// writes the one the keyboard is on into the draft and sends nothing.
 #[gpui::test]
 fn a_slash_lists_the_agent_s_commands_and_return_picks_one(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -53,7 +53,9 @@ fn a_slash_lists_the_agent_s_commands_and_return_picks_one(cx: &mut TestAppConte
 
     cx.simulate_input("/co");
     assert!(cx.debug_bounds("thread-menu").is_some(), "the menu opens in that frame");
-    assert!(cx.debug_bounds("thread-menu-1").is_some(), "two commands match");
+    let row = cx.debug_bounds("thread-menu-1").expect("two commands match");
+    let slash = slopty_theme::Theme::default().density.slash;
+    assert!((f32::from(row.size.height) - slash).abs() < 0.5, "Delta's 24 pt rows: {row:?}");
     assert!(cx.debug_bounds("thread-menu-2").is_none(), "and only two");
     cx.simulate_keystrokes("enter");
     assert_eq!(view.read_with(cx, ThreadView::draft), "/commit ", "the project's comes first");
@@ -851,4 +853,35 @@ fn words_kept_here_give_way_to_a_later_draft_from_elsewhere(cx: &mut TestAppCont
     cx.executor().advance_clock(DRAFT_SHARE_PAUSE);
     cx.run_until_parked();
     assert!(!drafted(&sent), "the worker already holds them");
+}
+
+/// "!" opens the inline terminal only as the first key of an empty composer: it asks the
+/// workspace for a shell in the thread's folder and is not typed; Esc lets the place go, and
+/// after a word it is only a letter.
+#[gpui::test]
+fn a_bang_first_asks_for_an_inline_terminal_and_esc_lets_it_go(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let asked = asked(cx, &view);
+
+    cx.simulate_input("!");
+    assert_eq!(view.read_with(cx, ThreadView::draft), "", "not typed");
+    assert!(
+        matches!(asked.borrow().as_slice(), [ThreadViewEvent::InlineTerminal { cwd }] if cwd == ROOT),
+        "a shell in the thread's folder: {:?}",
+        asked.borrow()
+    );
+    assert!(cx.debug_bounds("inline-terminal").is_some(), "its place shows in that frame");
+
+    cx.simulate_keystrokes("escape");
+    assert!(cx.debug_bounds("inline-terminal").is_none(), "Esc lets it go");
+    asked.borrow_mut().clear();
+    cx.simulate_input("ls !");
+    assert_eq!(view.read_with(cx, ThreadView::draft), "ls !", "after a word it is a letter");
+    assert!(asked.borrow().is_empty(), "and asks nothing");
 }

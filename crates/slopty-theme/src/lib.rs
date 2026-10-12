@@ -602,6 +602,9 @@ pub struct TypeRoles {
     /// header, the composer's foot, a palette row, a toast. Delta's small label, 12/16,
     /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §3.1).
     pub row: TypeRole,
+    /// A notice's words, which may run to a second line: the row's 12 on Delta's toast's 19,
+    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.10).
+    pub notice: TypeRole,
     /// The same, for what acts or is chosen: 14/20. Chosen is said by tone, not weight.
     pub action: TypeRole,
     /// What a piece of work is called where it is the thing to act on: a task, a request
@@ -649,6 +652,7 @@ impl Typography {
             metadata: role((-2.0, 4.0), (-1.0, 5.0), regular),
             chrome: role((0.0, 6.0), (3.0, 5.0), regular),
             row: role((-2.0, 4.0), (3.0, 5.0), regular),
+            notice: role((-2.0, 7.0), (3.0, 5.0), regular),
             action: role((0.0, 6.0), (3.0, 5.0), regular),
             task_title: role((0.0, 6.0), (3.0, 5.0), regular),
             section: role((-2.0, 4.0), (-1.0, 7.0), regular),
@@ -809,6 +813,9 @@ pub mod stroke {
     pub const MARK: f32 = 1.5;
     /// A terminal block's state down its left edge (a failed command's): Warp's 3 pt bar.
     pub const BAR: f32 = 3.0;
+    /// A notice's tone down its left edge, a band under a header or a row in a list: 2 pt,
+    /// the identity bar's weight (`.research/design-polish-2026-10-12.md` §1.19).
+    pub const NOTICE: f32 = 2.0;
     /// An overlay scrollbar's thumb, across: Zed's 6 pt, whatever the grid's cell.
     pub const SCROLLBAR: f32 = 6.0;
 }
@@ -1645,6 +1652,10 @@ pub struct Density {
     pub menu: f32,
     /// A row of a list typed at (the palette, a picker): Delta's palette's 27.
     pub list: f32,
+    /// A row of the composer's slash commands or its files: Delta's 24.
+    pub slash: f32,
+    /// A row of the composer's model picker: Delta's 31.
+    pub picker: f32,
     /// An icon button's side: Zed's default button, 22 on the Mac.
     pub button: f32,
     /// A status bar chip's height: 22 on the Mac.
@@ -1664,6 +1675,10 @@ pub struct Density {
     /// How far across a sash's hit area reaches, centred on its 1 pt line: Zed's 4 pt on a
     /// pointer, a finger's half target on touch.
     pub sash: f32,
+    /// How much larger a glyph and its slot are than the chrome's ([`Theme::glyph`],
+    /// [`Theme::icon`]): none on a pointer; a finger's 4, a glyph 18 in a slot of 20
+    /// (`.research/design-polish-2026-10-12.md` §4.12).
+    pub glyph_step: f32,
 }
 
 impl Density {
@@ -1679,6 +1694,8 @@ impl Density {
         item: 28.0,
         menu: 23.0,
         list: 27.0,
+        slash: 24.0,
+        picker: 31.0,
         button: 22.0,
         chip: 22.0,
         decision: 28.0,
@@ -1686,6 +1703,7 @@ impl Density {
         hit: 22.0,
         search: 32.0,
         sash: 4.0,
+        glyph_step: 0.0,
     };
     /// A finger: the iPhone and the iPad.
     pub const TOUCH: Self = Self {
@@ -1699,6 +1717,8 @@ impl Density {
         item: 44.0,
         menu: 44.0,
         list: 44.0,
+        slash: 44.0,
+        picker: 44.0,
         button: 44.0,
         chip: 32.0,
         decision: 44.0,
@@ -1706,6 +1726,7 @@ impl Density {
         hit: 44.0,
         search: 44.0,
         sash: 24.0,
+        glyph_step: 4.0,
     };
 }
 
@@ -1804,6 +1825,27 @@ impl Theme {
     #[must_use]
     pub fn roles(&self) -> TypeRoles {
         self.typography.roles(self.density.hit > Density::COMPACT.hit)
+    }
+
+    /// Every icon's slot at this theme's density: [`Typography::icon`], 16 at the default
+    /// size, and 20 for a finger ([`Density::glyph_step`]).
+    #[must_use]
+    pub fn icon(&self) -> f32 {
+        self.typography.icon() + self.density.glyph_step
+    }
+
+    /// A glyph's drawing inside its slot at this theme's density: [`Typography::glyph`], 14 at
+    /// the default size, and 18 for a finger.
+    #[must_use]
+    pub const fn glyph(&self) -> f32 {
+        self.typography.glyph() + self.density.glyph_step
+    }
+
+    /// A small glyph's drawing (a chevron, the small cross) at this theme's density:
+    /// [`Typography::small`], 12 at the default size, and 14 for a finger.
+    #[must_use]
+    pub fn glyph_small(&self) -> f32 {
+        self.density.glyph_step.mul_add(0.5, self.typography.small())
     }
 
     /// The theme for `variant` with default typography.
@@ -2091,6 +2133,8 @@ mod tests {
         assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
         assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
         assert_eq!(at(touch.row), (17.0, 22.0, 400.0), "a finger's row keeps the body size");
+        assert_eq!(at(desk.notice), (12.0, 19.0, 400.0), "Delta's toast");
+        assert_eq!(at(touch.notice), at(touch.row));
         assert_eq!(at(touch.panel_title), (19.0, 24.0, 600.0));
         assert_eq!(at(touch.prose), (17.0, 24.0, 400.0));
         assert_eq!(at(touch.first_run), (28.0, 34.0, 400.0));
@@ -2104,6 +2148,7 @@ mod tests {
                 roles.metadata,
                 roles.chrome,
                 roles.row,
+                roles.notice,
                 roles.action,
                 roles.task_title,
                 roles.section,
@@ -2472,8 +2517,15 @@ mod tests {
             (34.0, 34.0, 32.0, 36.0),
             "one top line, Zed's bars, Delta's 36 pt foot"
         );
-        assert_eq!((compact.menu, compact.list), (23.0, 27.0), "Delta's menu and palette rows");
-        assert!(touch.menu >= 44.0 && touch.list >= 44.0, "a finger's menu rows");
+        assert_eq!(
+            (compact.menu, compact.list, compact.slash, compact.picker),
+            (23.0, 27.0, 24.0, 31.0),
+            "Delta's menu, palette, slash and model rows"
+        );
+        assert!(
+            [touch.menu, touch.list, touch.slash, touch.picker].iter().all(|h| *h >= 44.0),
+            "a finger's menu rows"
+        );
         assert_eq!(compact.header, compact.title, "the tab bars meet the navigator's header");
         assert_eq!(
             (compact.row, compact.item, compact.button, compact.chip, compact.control, compact.hit),

@@ -130,6 +130,7 @@ pub mod exited;
 mod finding;
 mod fork;
 mod going;
+mod inline_shell;
 mod keyed;
 mod later;
 mod message_menu;
@@ -215,6 +216,17 @@ pub enum ThreadViewEvent {
     OpenFile {
         /// Its path, absolute, or under `~`.
         path: String,
+    },
+    /// "!" first in an empty composer: a shell in the thread's folder, for this view to show
+    /// in the next turn's place ([`ThreadView::inline_terminal`]).
+    InlineTerminal {
+        /// The thread's folder.
+        cwd: String,
+    },
+    /// The inline terminal is done with, sent with a message or let go: its shell goes.
+    InlineTerminalDone {
+        /// Its shell.
+        session: slopty_core::SessionId,
     },
 }
 
@@ -337,6 +349,10 @@ pub struct ThreadView {
     /// The turn being gone to ([`Self::go_to_turn`]), and the first turn held when a page
     /// back to it was last asked.
     going: Option<(TurnId, Option<TurnId>)>,
+    /// The inline terminal "!" opened, in the next turn's place.
+    inline: Option<inline_shell::InlineShell>,
+    /// The inline terminal came and takes the keyboard in the next frame it shows in.
+    inline_focus: bool,
     /// The aside asked from here, in its sheet.
     aside: Option<aside::Aside>,
     /// What the aside's own view asks of the workspace, passed on.
@@ -562,6 +578,8 @@ impl ThreadView {
             message_menu: None,
             finder: None,
             going: None,
+            inline: None,
+            inline_focus: false,
             aside: None,
             asides_heard: None,
             renders: 0,
@@ -806,11 +824,12 @@ impl ThreadView {
                     groups: &self.groups,
                 });
                 // What waits on the person is answered on its call's card where the call is a
-                // row; a request about no call on show is a card of its own after the turns. A
-                // question stands over the composer ([`Self::activity_bar`]).
+                // row; a request about no call on show, and a question (a questionnaire is one
+                // form), is a card of its own after the turns.
                 let apart = self.on_show(cx, |request| {
-                    let on_call = request.item.as_ref().is_some_and(|item| built.shows_call(item));
-                    (request.questions.is_empty() && !on_call).then(|| request.id.clone())
+                    let on_call = request.questions.is_empty()
+                        && request.item.as_ref().is_some_and(|item| built.shows_call(item));
+                    (!on_call).then(|| request.id.clone())
                 });
                 if let Some(ask) = apart.flatten() {
                     built.ask(ask);
@@ -1007,7 +1026,17 @@ impl ThreadView {
             self.arm(delivery, window, cx);
             return;
         }
-        let Some((text, attachments)) = self.take_message(cx) else { return };
+        // A message goes led by what the inline terminal shows, which goes with it; with one
+        // on show, it goes alone too.
+        let (text, attachments) = match self.take_message(cx) {
+            Some((words, attachments)) => {
+                (self.with_inline(&words, cx).unwrap_or(words), attachments)
+            }
+            None => match self.with_inline("", cx) {
+                Some(block) => (block, Vec::new()),
+                None => return,
+            },
+        };
         let dialog = self.opens_dialog(&text, cx);
         let _id = self.intent(Intent::Send { text, delivery, attachments }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
@@ -1255,7 +1284,7 @@ impl ThreadView {
 
     /// A row's disclosure chevron under `id`, turning a quarter as the row opens or folds.
     fn chevron(&self, id: impl Into<SharedString>, open: bool) -> AnyElement {
-        let side = px(self.theme.typography.icon());
+        let side = px(self.theme.icon());
         let tone = hsla(self.theme.surfaces.text_muted);
         kit::Disclosure::new(id, open, &self.theme, side, tone).into_any_element()
     }
@@ -1282,7 +1311,7 @@ impl ThreadView {
 
     fn icon(&self, name: Symbol, tone: Rgb) -> AnyElement {
         slopty_kit::icons::icon(&self.theme, name, hsla(tone))
-            .size(px(self.theme.typography.icon()))
+            .size(px(self.theme.icon()))
             .into_any_element()
     }
 
@@ -1298,7 +1327,7 @@ impl ThreadView {
         slopty_kit::icons::status_icon(
             &self.theme,
             Status::NeedsYou,
-            px(self.theme.typography.icon()),
+            px(self.theme.icon()),
             hsla(Status::NeedsYou.ink(&self.theme)),
         )
     }
@@ -1308,7 +1337,7 @@ impl ThreadView {
         slopty_kit::icons::status_icon(
             &self.theme,
             status,
-            px(self.theme.typography.icon()),
+            px(self.theme.icon()),
             hsla(self.theme.surfaces.text_muted),
         )
     }
@@ -1399,7 +1428,7 @@ impl ThreadView {
                 .hover(move |el| el.text_color(hsla(s.text)))
                 .child(
                     slopty_kit::icons::icon(&self.theme, icon, hsla(s.text_muted))
-                        .size(px(self.theme.typography.icon())),
+                        .size(px(self.theme.icon())),
                 ),
             s.focus,
         )
@@ -1555,7 +1584,7 @@ impl ThreadView {
             _ => theme.surfaces.icon_muted,
         };
         let glyph = slopty_kit::icons::Drawn::new(theme, mark)
-            .slot(px(theme.typography.icon()), hsla(ink))
+            .slot(px(theme.icon()), hsla(ink))
             .debug_selector(move || id);
         div()
             .relative()
@@ -1740,7 +1769,7 @@ impl ThreadView {
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .size(px(theme.typography.icon()))
+                .size(px(theme.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2589,6 +2618,7 @@ impl Render for ThreadView {
         }
         self.heroed = hero.is_some();
         let composer = composes.then(|| self.composer_box(cx));
+        let inline = self.inline_card(window, cx).filter(|_| composes);
         self.keep_keyboard(composes, window, cx);
         let dock = self.docks.map(|n| {
             div()
@@ -2650,6 +2680,11 @@ impl Render for ThreadView {
             // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥
             // and Esc before the field does; Esc otherwise stops the turn under way.
             // While an input method composes, these keys are all its own.
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                if this.bang(ev, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
                 this.menu_key(window, cx, |this, w, cx| {
                     this.menu_step(-1, cx) || this.recall(-1, w, cx)
@@ -2679,6 +2714,7 @@ impl Render for ThreadView {
                         || this.close_find(window, cx)
                         || this.menu_close(cx)
                         || this.cancel_edit(window, cx)
+                        || this.close_inline(window, cx)
                         || this.leave_subagent(window, cx)
                         || this.stop_by_key(cx)
                 });
@@ -2704,9 +2740,9 @@ impl Render for ThreadView {
                         .flex_col()
                         .justify_center()
                         .child(self.hero_question(hero_words(&agents, &place)))
-                        .child(self.foot(bar, composer)),
+                        .child(self.foot(bar, inline, composer)),
                 ),
-                None => el.child(rows).child(self.foot(bar, composer)).children(dock),
+                None => el.child(rows).child(self.foot(bar, inline, composer)).children(dock),
             })
             .children(aside)
             .children(viewer)
@@ -2716,11 +2752,17 @@ impl Render for ThreadView {
 }
 
 impl ThreadView {
-    /// The tray over the composer, on the reading column. Below the rows, never over them,
-    /// so a click above its edge is the rows'. When what waits is taller than the thread, the
-    /// tray gives way and scrolls while the composer stands whole. The composer runs the
-    /// pane's width under it, its line the tray's foot.
-    fn foot(&self, bar: Option<AnyElement>, composer: Option<AnyElement>) -> AnyElement {
+    /// The tray over the composer, on the reading column, then the inline terminal in the next
+    /// turn's place. Below the rows, never over them, so a click above its edge is the rows'.
+    /// When what waits is taller than the thread, the tray gives way and scrolls while the
+    /// composer stands whole. The composer runs the pane's width under it, its line the tray's
+    /// foot.
+    fn foot(
+        &self,
+        bar: Option<AnyElement>,
+        inline: Option<AnyElement>,
+        composer: Option<AnyElement>,
+    ) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
         let bar = bar.map(|bar| {
@@ -2744,7 +2786,7 @@ impl ThreadView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.measure_box().min_h_0().flex().flex_col().children(bar))
+            .child(self.measure_box().min_h_0().flex().flex_col().children(bar).children(inline))
             .children(composer)
             .into_any_element()
     }
@@ -2956,7 +2998,7 @@ fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyEl
                 .id("copy")
                 .role(Role::Button)
                 .aria_label("Copy code")
-                .size(px(theme.typography.icon()))
+                .size(px(theme.icon()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2965,7 +3007,7 @@ fn code_actions(theme: &Theme, block: &gpui_kit::base::text::CodeBlock) -> AnyEl
                 .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
                     slopty_kit::icons::icon(theme, Symbol::DocOnDoc, hsla(s.text_muted))
-                        .size(px(theme.typography.icon())),
+                        .size(px(theme.icon())),
                 )
                 .on_click(move |_ev, _window, cx| {
                     cx.stop_propagation();

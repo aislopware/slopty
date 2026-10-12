@@ -296,7 +296,7 @@ impl ReviewView {
                     .child(OPEN_WHOLE)
                     .child(
                         slopty_kit::icons::icon(theme, Symbol::ArrowUpRight, hsla(s.text_muted))
-                            .size(px(theme.typography.icon())),
+                            .size(px(theme.icon())),
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         if let Some(path) = this.whole_path(at, cx) {

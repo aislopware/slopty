@@ -1473,6 +1473,8 @@ impl WorkspaceView {
                 self.send(key, ClientMsg::FindFiles { root, query });
             }
             ThreadViewEvent::OpenFile { path } => self.open_file_on(Some(key), &path, None, cx),
+            ThreadViewEvent::InlineTerminal { cwd } => self.open_inline(key, view, cwd, cx),
+            ThreadViewEvent::InlineTerminalDone { session } => self.inline_done(session, cx),
         }
     }
 
@@ -1584,6 +1586,11 @@ impl WorkspaceView {
                     self.open_file_on(Some(key), &path, None, cx);
                 }
             }
+            ThreadViewEvent::InlineTerminal { cwd } => match self.worker_of_session(session) {
+                Some(key) => self.open_inline(key, view, cwd, cx),
+                None => view.update(cx, ThreadView::inline_terminal_gone),
+            },
+            ThreadViewEvent::InlineTerminalDone { session } => self.inline_done(session, cx),
         }
     }
 

@@ -846,6 +846,7 @@ impl WorkspaceView {
                 summary.state = SessionState::Exited { status };
             }
         }
+        self.inline_ended(session, cx);
         cx.notify();
     }
 
@@ -920,6 +921,7 @@ impl WorkspaceView {
             }
             self.attach_terminal(key, session, cx);
         }
+        self.hand_inline(cx);
         // A worker away keeps its shells' views, showing their last rows, for its next link to
         // attach again; one closed meanwhile lets go of its view.
         let away: std::collections::HashSet<SessionId> = self

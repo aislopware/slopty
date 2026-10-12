@@ -86,7 +86,7 @@ fn remove_button(theme: &Theme, chip: &Attachment, side: Pixels, remove: Remove)
         .on_click(remove)
         .child(
             slopty_kit::icons::icon(theme, Symbol::Xmark, hsla(s.text_muted))
-                .size(px(theme.typography.icon())),
+                .size(px(theme.icon())),
         );
     slopty_kit::a11y::tab_stop(button, s.focus).into_any_element()
 }
@@ -107,7 +107,7 @@ fn picture_chip(
         .rounded(px(theme.radii.xs))
         .overflow_hidden()
         .hover(move |el| el.bg(hsla(s.hover)))
-        .child(remove_button(theme, chip, px(theme.typography.icon()), remove));
+        .child(remove_button(theme, chip, px(theme.icon()), remove));
     // How far it got, as the kit's capsule along the picture's foot, held in from its edges.
     let progress = (!chip.landed()).then(|| {
         div()
@@ -153,7 +153,7 @@ fn file_chip(theme: &Theme, chip: &Attachment, remove: Remove) -> AnyElement {
     // While it uploads, its mark is a ring of how far it got; landed, the file's glyph.
     let mark = if chip.landed() {
         slopty_kit::icons::icon(theme, Symbol::Doc, hsla(s.text_muted))
-            .size(px(theme.typography.icon()))
+            .size(px(theme.icon()))
             .into_any_element()
     } else {
         div()
@@ -163,7 +163,7 @@ fn file_chip(theme: &Theme, chip: &Attachment, remove: Remove) -> AnyElement {
                 SharedString::from(format!("attachment-ring-{}", chip.id)),
                 chip.fraction,
                 s.accent_fill,
-                px(theme.typography.icon()),
+                px(theme.icon()),
             ))
             .into_any_element()
     };
