@@ -68,7 +68,8 @@ async fn soon<T>(within: Duration, mut done: impl AsyncFnMut() -> Option<T>) -> 
 /// The time is checked between dumps, never during one: a dump dropped half-way through left
 /// its answer on the socket, and the driver's next request read it as its own.
 async fn seen(driver: &mut Driver, within: Duration, done: impl Fn(&Dump) -> bool) -> Option<Dump> {
-    let until = Instant::now() + within;
+    let since = Instant::now();
+    let until = since.checked_add(within).unwrap_or(since);
     loop {
         if let Ok(d) = driver.dump().await
             && done(&d)
