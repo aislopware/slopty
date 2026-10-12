@@ -13,7 +13,7 @@
 //! host with a bad port) is never written; its row says why until it is typed again.
 //!
 //! On a desktop the sections are a list with the search field at its top, grouped App,
-//! Machines and Help, each with its glyph, the file's text and the way back at its foot
+//! Machines and Help, each by its name, the file's text and the way back at its foot
 //! (`SettingsForm::sections`); the page beside it holds the chosen section's rows under their
 //! group labels. The workspace draws the list as its navigator's body while the settings fill
 //! the panes; with no navigator beside it the form draws the list as its own sidebar. A query
@@ -115,10 +115,10 @@ const NAV_WIDTH: f32 = 168.0;
 const CONTENT_MIN: f32 = 480.0;
 
 /// The way to `settings.toml` itself, in a file tile: an advanced path kept apart from the
-/// sections. Short enough for the sidebar's width beside its glyph.
+/// sections. Short enough for the sidebar's width.
 pub const OPEN_FILE: &str = "Open the file";
 
-/// The way out of the settings, back to the work, at the section list's foot.
+/// The way out of the settings, back to the work: the list's head row's first control.
 pub const BACK: &str = "Back";
 
 /// What the section list is to a screen reader, apart from the page beside it.
@@ -126,6 +126,11 @@ pub const SECTIONS: &str = "Settings sections";
 
 /// The form's name, over a search's results and over the single column.
 pub const SETTINGS: &str = "Settings";
+
+/// The widest a page's title, groups and rows run, left aligned: a wide window stretches no
+/// row's gap between its words and its control (`.research/design-polish-2026-10-12.md` §1.11,
+/// Zed's settings page).
+pub const MEASURE: f32 = 720.0;
 
 /// The least the page's title narrows to beside Done, in ems of the chrome's size.
 const TITLE_FLOOR_EMS: f32 = 6.0;
@@ -990,22 +995,27 @@ impl SettingsForm {
 
     // ----- drawing ---------------------------------------------------------------------------
 
+    /// The filter, unboxed as the navigator's is: the magnifier in the muted icon ink, then the
+    /// words.
     fn search_field(&self, cx: &Draw<'_, Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
-        well(theme)
+        div()
             .id("settings-search")
             .debug_selector(|| "settings-search".to_owned())
-            .flex_none()
-            .gap(px(theme.spacing.xs))
-            .px(px(slopty_kit::kit::FIELD_INSET))
+            .flex_1()
+            .min_w_0()
+            .h(px(theme.density.search))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs + theme.spacing.xxs))
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                 if !this.composing(cx) {
                     this.step_from(None, true, window, cx);
                     cx.stop_propagation();
                 }
             }))
-            .child(slopty_kit::icons::icon(theme, Symbol::Magnifyingglass, hsla(s.text_muted)))
+            .child(slopty_kit::icons::icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
             .child(
                 div().flex_1().min_w_0().child(
                     Input::new(&self.search)
@@ -1017,10 +1027,54 @@ impl SettingsForm {
             )
     }
 
-    /// The section list: the search at its top, the sections under their groups' names, each
-    /// its glyph and its name, then the file's own text and the way back to the work at its
-    /// foot. The page shown is the selected row, live while the keyboard is on the list and at
-    /// the hover's wash while it is in the page.
+    /// The list's head row, as Zed's sidebar header holds it: ← back to the work as its first
+    /// control, its glyph hung on the row's edge, then the filter. The workspace draws it in its
+    /// navigator's header row while the list is the navigator's body; a form with a sidebar of
+    /// its own draws it over its list.
+    pub(crate) fn list_head(&self, cx: &Draw<'_, Self>) -> Stateful<Div> {
+        let theme = &self.theme;
+        let back = slopty_kit::kit::icon_button(theme, "settings-back", Symbol::ArrowLeft, BACK)
+            .flex_none()
+            .on_click(cx.listener(|_this, _ev, _window, cx| cx.emit(SettingsFormEvent::Done)));
+        Self::leaves(div().id("settings-list-head"), cx)
+            .debug_selector(|| "settings-list-head".to_owned())
+            .w_full()
+            .min_w_0()
+            .h(px(theme.density.row))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .child(slopty_kit::kit::hang(back, theme))
+            .child(self.search_field(cx))
+    }
+
+    /// `el` answering as the page does wherever it is drawn: Esc and ⌘↩ leave the settings,
+    /// unless an input method is composing.
+    fn leaves(el: Stateful<Div>, cx: &Draw<'_, Self>) -> Stateful<Div> {
+        el.capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+            if !this.composing(cx) {
+                cx.emit(SettingsFormEvent::Done);
+                cx.stop_propagation();
+            }
+        }))
+        .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
+            if enter.secondary && !this.composing(cx) {
+                cx.emit(SettingsFormEvent::Done);
+                cx.stop_propagation();
+            }
+        }))
+        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
+            if ev.keystroke.key == "escape" && !this.composing(cx) {
+                cx.emit(SettingsFormEvent::Done);
+                cx.stop_propagation();
+            }
+        }))
+    }
+
+    /// The section list: the sections under their groups' names, each its name alone, then the
+    /// file's own text at its foot; its head row ([`Self::list_head`]) over it where the form
+    /// draws its own sidebar. The page shown is the selected row, live while the keyboard is on the
+    /// list and at the hover's wash while it is in the page.
     ///
     /// The workspace draws it as its navigator's body while the settings fill the panes
     /// ([`Self::set_aside`]); a form with no navigator beside it draws it as its own sidebar.
@@ -1033,9 +1087,8 @@ impl SettingsForm {
         let tab = |section: Section, handle: &FocusHandle| {
             let selected = !searching && section == self.section;
             let hover = hsla(theme.surfaces.hover);
-            let ink = if selected { s.text } else { s.text_secondary };
             let el = self
-                .list_row(div().id(("settings-section", section.index())), section.symbol(), ink)
+                .list_row(div().id(("settings-section", section.index())))
                 .debug_selector(move || format!("settings-section-{}", section.index()))
                 .track_focus(handle)
                 .role(gpui::accesskit::Role::Tab)
@@ -1079,31 +1132,11 @@ impl SettingsForm {
                 }),
             )
         });
-        div()
-            .id("settings-sections-panel")
+        // Drawn in the navigator it is outside the page, so it answers as the page does.
+        Self::leaves(div().id("settings-sections-panel"), cx)
             .debug_selector(|| "settings-sections".to_owned())
             .role(gpui::accesskit::Role::Group)
             .aria_label(SECTIONS)
-            // Drawn in the navigator it is outside the page, so it answers as the page does:
-            // Esc and ⌘↩ leave the settings, unless an input method is composing.
-            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
-                if !this.composing(cx) {
-                    cx.emit(SettingsFormEvent::Done);
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
-                if enter.secondary && !this.composing(cx) {
-                    cx.emit(SettingsFormEvent::Done);
-                    cx.stop_propagation();
-                }
-            }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
-                if ev.keystroke.key == "escape" && !this.composing(cx) {
-                    cx.emit(SettingsFormEvent::Done);
-                    cx.stop_propagation();
-                }
-            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -1113,7 +1146,7 @@ impl SettingsForm {
             // The navigator's rows are set in the chrome's size; drawn in its place, the
             // sections are too, rather than the window's body size.
             .text_size(px(theme.roles().chrome.size))
-            .child(self.search_field(cx))
+            .when(!self.aside, |el| el.child(self.list_head(cx).flex_none()))
             .child(
                 div()
                     .id("settings-sections")
@@ -1128,23 +1161,15 @@ impl SettingsForm {
                     .children(groups),
             )
             .children(self.file_opens.then(|| {
-                self.foot_row(
-                    "settings-open-file",
-                    Symbol::ChevronLeftForwardslashChevronRight,
-                    OPEN_FILE,
-                    cx,
-                    |cx| {
-                        cx.emit(SettingsFormEvent::OpenFile);
-                    },
-                )
-            }))
-            .child(self.foot_row("settings-back", Symbol::ArrowLeft, BACK, cx, |cx| {
-                cx.emit(SettingsFormEvent::Done);
+                self.foot_row("settings-open-file", OPEN_FILE, cx, |cx| {
+                    cx.emit(SettingsFormEvent::OpenFile);
+                })
             }))
     }
 
-    /// A row of the section list: a row tall, its glyph in `ink`'s tier, then its words.
-    fn list_row(&self, el: Stateful<Div>, symbol: Symbol, ink: Rgb) -> Stateful<Div> {
+    /// A row of the section list: a row tall, its words alone (`docs/decisions/ui.md`, "The
+    /// chrome's icons are Octicons at 14": a list of names needs no pictures).
+    fn list_row(&self, el: Stateful<Div>) -> Stateful<Div> {
         let theme = &self.theme;
         let spacing = theme.spacing;
         el.flex_none()
@@ -1155,23 +1180,20 @@ impl SettingsForm {
             .px(px(spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .child(crate::palette::icon_slot(theme, symbol, hsla(ink)))
     }
 
-    /// A way out of the form at the section list's foot (the file's text, back to the work):
-    /// quiet and apart from the sections, as Zed keeps its settings file under its sections and
-    /// `MonoCode` its way back under its settings' sections.
+    /// A way out of the form at the section list's foot, the file's text: quiet and apart from
+    /// the sections, as Zed keeps its settings file under its sections.
     fn foot_row(
         &self,
         id: &'static str,
-        symbol: Symbol,
         words: &'static str,
         cx: &Draw<'_, Self>,
         then: impl Fn(&mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
         let s = self.theme.surfaces;
         let el = self
-            .list_row(div().id(id), symbol, s.text_muted)
+            .list_row(div().id(id))
             .debug_selector(move || id.to_owned())
             .role(gpui::accesskit::Role::Button)
             .aria_label(words)
@@ -1184,10 +1206,11 @@ impl SettingsForm {
         slopty_kit::a11y::tab_stop(el, s.focus)
     }
 
-    /// A group's heading over the rows it names, as System Settings titles its groups: the
-    /// section role in the secondary tone, on a row's height at the group's leading inset (the
-    /// card's, so it starts over its rows' titles), with space above it. In a search or a single
-    /// column it names the section instead.
+    /// A group's heading over the rows it names, as Delta's settings head theirs: the section
+    /// role in the code face and the muted tone on the page's one edge, ruled under by the
+    /// lighter `stroke` line the page's width, 48 above it (16 under the page's name) and 8
+    /// between its words and the rule (`.research/delta-re-2026-10-12.md` §2.2, §2.4). In a
+    /// search or a single column it names the section instead.
     fn heading(&self, text: impl Into<SharedString>, n: usize, first: bool) -> AnyElement {
         let text: SharedString = text.into();
         let theme = &self.theme;
@@ -1198,12 +1221,12 @@ impl SettingsForm {
             .role(gpui::accesskit::Role::Heading)
             .aria_label(text.clone())
             .flex_none()
-            .h(px(theme.density.row))
-            .flex()
-            .items_center()
-            .px(px(spacing.lg))
-            .text_color(hsla(theme.surfaces.text_secondary))
-            .mt(px(if first { spacing.sm } else { spacing.lg }))
+            .font_family(slopty_kit::kit::mono_family(theme))
+            .mt(px(if first { spacing.lg } else { spacing.xxxl }))
+            .pb(px(spacing.sm))
+            .border_b(slopty_kit::kit::HAIR)
+            .border_color(hsla(theme.surfaces.stroke))
+            .text_color(hsla(theme.surfaces.text_muted))
             .child(text)
             .into_any_element()
     }
@@ -1218,7 +1241,6 @@ impl SettingsForm {
             .aria_label(words)
             .flex_none()
             .pt(px(theme.spacing.xs))
-            .px(px(theme.spacing.lg))
             .text_color(hsla(theme.surfaces.text_muted))
             .child(words)
             .into_any_element()
@@ -1235,7 +1257,7 @@ impl SettingsForm {
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let searching = !self.query.trim().is_empty();
         let words = if self.narrow || searching { SETTINGS } else { self.section.label() };
-        let title = slopty_kit::kit::typed(div(), theme.roles().panel_title)
+        let title = slopty_kit::kit::typed(div(), theme.roles().page_heading)
             .id("settings-title")
             .debug_selector(|| "settings-title".to_owned())
             .role(gpui::accesskit::Role::Heading)
@@ -1291,15 +1313,23 @@ impl SettingsForm {
         } else {
             row
         };
+        let side = self.side();
         div()
             .id("settings-head")
             .debug_selector(|| "settings-head".to_owned())
             .flex_none()
             .w_full()
-            .mt(px(spacing.sm))
-            .px(px(spacing.inset()))
+            .max_w(px(2.0_f32.mul_add(side, MEASURE)))
+            .pt(px(if self.narrow { spacing.sm } else { spacing.xl }))
+            .px(px(side))
             .child(row)
             .into_any_element()
+    }
+
+    /// How far in from the page's side its one edge stands: Zed's settings page's 32, a
+    /// phone's single column the window's inset.
+    const fn side(&self) -> f32 {
+        if self.narrow { self.theme.spacing.inset() } else { self.theme.spacing.page() }
     }
 
     /// The Keyboard page's lines for the form's text: the keymap in effect with the text's
@@ -1709,6 +1739,11 @@ impl SettingsForm {
         if children.is_empty() {
             children.push(quiet(&theme, "settings-empty", NO_MATCHES).into_any_element());
         }
+        // Each child keeps to the measure, left aligned, and stays a child of the page, so
+        // scrolling to a row still finds it.
+        let children = children
+            .into_iter()
+            .map(|child| div().w_full().max_w(px(MEASURE)).child(child).into_any_element());
         // The row a page was opened on comes into view once, on the page's first frame.
         if let Some(child) =
             self.reveal.take().and_then(|ix| placed.iter().find(|(row, _)| *row == ix)).map(|p| p.1)
@@ -1728,7 +1763,7 @@ impl SettingsForm {
             .h_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .px(px(theme.spacing.inset()))
+            .px(px(self.side()))
             .pb(px(theme.spacing.md))
             .children(children);
         // What scrolls under the head fades into the well there, as a macOS 26 pane's content
@@ -2275,8 +2310,6 @@ fn ruled(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
             div()
                 .debug_selector(move || format!("settings-ruled-{i}"))
                 .w_full()
-                // In from the page's edge to where the group's label and footer start.
-                .px(px(theme.spacing.lg))
                 .when(spaced && !first, |el| el.border_t(slopty_kit::kit::HAIR).border_color(rule))
                 .child(child)
                 .into_any_element()

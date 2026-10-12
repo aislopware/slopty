@@ -86,11 +86,26 @@ pub struct Filled {
     pub starters: Vec<Starter>,
 }
 
+/// Where a goal would start, as the sheet asks its machine about it: the machine, the folder
+/// and the target branch (blank for one of the goal's own).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoalPlace {
+    /// The machine the folder is on.
+    pub worker: WorkerKey,
+    /// The folder, trimmed.
+    pub folder: String,
+    /// The target branch, trimmed; blank for a branch of the goal's own.
+    pub target: String,
+}
+
 /// What the sheet tells the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SheetEvent {
     /// Start this goal.
     Create(NewGoal),
+    /// Ask the place's machine whether a goal can start there (`Verb::GoalCheck`); the
+    /// answer comes back through [`GoalSheet::place_checked`].
+    Check(GoalPlace),
     /// Let the sheet go, making nothing.
     Cancel,
 }
@@ -143,8 +158,10 @@ pub struct GoalSheet {
     autonomy: Autonomy,
     /// "More" is open.
     more: bool,
+    /// What the place's machine said of it: `Ok` where a goal can start, else why not.
+    checked: Option<(GoalPlace, Result<(), String>)>,
     focus: FocusHandle,
-    _enters: [Subscription; 4],
+    _enters: [Subscription; 6],
 }
 
 impl std::fmt::Debug for GoalSheet {
@@ -186,6 +203,14 @@ impl GoalSheet {
                 this.create(cx);
             }
         });
+        let mut moved = |input: &Entity<InputState>| {
+            cx.subscribe(input, |this, _input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.ask_check(cx);
+                }
+            })
+        };
+        let (folder_moved, target_moved) = (moved(&fields.folder), moved(&fields.target));
         let mut enter = |input: &Entity<InputState>| {
             cx.subscribe(input, |this, _input, event, cx| {
                 if let InputEvent::PressEnter { .. } = event {
@@ -193,8 +218,14 @@ impl GoalSheet {
                 }
             })
         };
-        let enters =
-            [goal_enter, enter(&fields.folder), enter(&fields.target), enter(&fields.verifier)];
+        let enters = [
+            goal_enter,
+            enter(&fields.folder),
+            enter(&fields.target),
+            enter(&fields.verifier),
+            folder_moved,
+            target_moved,
+        ];
         fields.goal.update(cx, |input, cx| input.focus(window, cx));
         let machine = filled.starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k);
         Self {
@@ -206,14 +237,62 @@ impl GoalSheet {
             machine,
             autonomy: Autonomy::default(),
             more: false,
+            checked: None,
             focus: cx.focus_handle(),
             _enters: enters,
         }
     }
 
+    /// Where the sheet would start the goal now: its machine, its folder and its target, each
+    /// trimmed; none while it names no machine or no folder.
+    #[must_use]
+    pub fn place(&self, cx: &gpui::App) -> Option<GoalPlace> {
+        let folder = self.fields.folder.read(cx).value().trim().to_owned();
+        let target = self.fields.target.read(cx).value().trim().to_owned();
+        let worker = self.machine?;
+        (!folder.is_empty()).then_some(GoalPlace { worker, folder, target })
+    }
+
+    /// Ask the workspace whether a goal can start where the sheet holds now.
+    fn ask_check(&self, cx: &mut Context<Self>) {
+        if let Some(place) = self.place(cx) {
+            cx.emit(SheetEvent::Check(place));
+        }
+        cx.notify();
+    }
+
+    /// What the machine said of `place`: kept while the sheet still holds that place.
+    pub fn place_checked(
+        &mut self,
+        place: &GoalPlace,
+        said: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.place(cx).as_ref() == Some(place) {
+            self.checked = Some((place.clone(), said));
+            cx.notify();
+        }
+    }
+
+    /// What is known of the place held now: `Ok` where a goal can start, else why not; none
+    /// until its machine has said.
+    #[must_use]
+    pub fn place_is(&self, cx: &gpui::App) -> Option<Result<(), String>> {
+        let place = self.place(cx)?;
+        self.checked.as_ref().filter(|(p, _)| *p == place).map(|(_, said)| said.clone())
+    }
+
     /// Put `words` in the goal, as written elsewhere before the sheet opened.
     pub fn set_goal(&self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fields.goal.update(cx, |input, cx| input.set_value(words.to_owned(), window, cx));
+    }
+
+    /// Put `folder` in the folder field, as the person types it, and ask what it is.
+    #[cfg(test)]
+    pub fn set_folder(&self, folder: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = folder.to_owned();
+        self.fields.folder.update(cx, |input, cx| input.set_value(folder, window, cx));
+        self.ask_check(cx);
     }
 
     /// The agent that starts, and its machines.
@@ -238,7 +317,11 @@ impl GoalSheet {
         })
     }
 
+    /// Create, once the goal is written and its place's machine said a goal can start there.
     fn create(&self, cx: &mut Context<Self>) {
+        if self.place_is(cx) != Some(Ok(())) {
+            return;
+        }
         if let Some(goal) = self.typed(cx) {
             cx.emit(SheetEvent::Create(goal));
         }
@@ -250,7 +333,7 @@ impl GoalSheet {
         let kept = self.machine.filter(|m| starter.machines.iter().any(|(k, _)| k == m));
         self.machine = kept.or_else(|| starter.machines.first().map(|(k, _)| *k));
         self.agent = ix;
-        cx.notify();
+        self.ask_check(cx);
     }
 
     /// Move the folder to `place`, and the machine with it: the agent stays where it can start
@@ -267,7 +350,7 @@ impl GoalSheet {
         self.machine = Some(place.worker);
         let folder = place.folder.clone();
         self.fields.folder.update(cx, |input, cx| input.set_value(folder, window, cx));
-        cx.notify();
+        self.ask_check(cx);
     }
 
     /// The recent repositories as chips under the folder, but for the one it holds: a press
@@ -331,6 +414,23 @@ impl GoalSheet {
                 .flex_wrap()
                 .gap(px(sp.xxs))
                 .children(chips),
+        )
+    }
+
+    /// Why a goal cannot start where the sheet holds, in the machine's words, under the
+    /// folder: no such folder, not one, not in a git repository, a bare one, no commit yet, or
+    /// no such branch. Create waits for a place it can.
+    fn refusal(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        let Some(Err(why)) = self.place_is(cx) else { return None };
+        let why = SharedString::from(why);
+        Some(
+            kit::meta(div(), &self.theme)
+                .id("goal-sheet-refusal")
+                .debug_selector(|| "goal-sheet-refusal".to_owned())
+                .role(Role::Status)
+                .aria_label(why.clone())
+                .text_color(hsla(self.theme.surfaces.warn))
+                .child(why),
         )
     }
 
@@ -408,7 +508,7 @@ impl GoalSheet {
             let at = starter.machines.iter().position(|(k, _)| Some(*k) == self.machine);
             let pick: fn(&mut Self, usize, &mut Context<Self>) = |this, ix, cx| {
                 this.machine = this.starter().and_then(|s| s.machines.get(ix)).map(|(k, _)| *k);
-                cx.notify();
+                this.ask_check(cx);
             };
             let el =
                 self.choice(("goal-sheet-machine", "Machine"), words, at.unwrap_or(0), pick, cx);
@@ -505,7 +605,9 @@ impl Render for GoalSheet {
             .child(more);
         let cancel = kit::button(theme, "goal-sheet-cancel", "Cancel", ButtonKind::Ghost)
             .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(SheetEvent::Cancel)));
+        let ready = self.place_is(cx) == Some(Ok(()));
         let create = kit::button(theme, "goal-sheet-create", "Create", ButtonKind::Primary)
+            .when(!ready, |el| el.opacity(slopty_theme::alpha::PRESSED).cursor_default())
             .on_click(cx.listener(|this, _ev, _w, cx| this.create(cx)));
         kit::dialog(theme, kit::Overlay::Editor)
             .id("goal-sheet")
@@ -520,7 +622,11 @@ impl Render for GoalSheet {
                     .gap(px(sp.md))
                     .pb(px(sp.md))
                     .child(field(theme, GOAL, goal))
-                    .child(field(theme, FOLDER, folder).children(self.places_row(cx)))
+                    .child(
+                        field(theme, FOLDER, folder)
+                            .children(self.refusal(cx))
+                            .children(self.places_row(cx)),
+                    )
                     .child(who)
                     .when(open, |el| el.child(self.more_fields(cx))),
             )

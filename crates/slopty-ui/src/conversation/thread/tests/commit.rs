@@ -81,6 +81,18 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
+/// `state` with a turn's answer, so the thread has rows and its foot, not the empty thread's
+/// ledge, says where it works.
+fn answered(mut state: slopty_proto::thread::ThreadState) -> slopty_proto::thread::ThreadState {
+    state.items.push(slopty_proto::thread::Item {
+        id: slopty_proto::thread::ItemId("a".to_owned()),
+        turn: slopty_proto::thread::TurnId(1),
+        at_ms: slopty_core::WallMs::ZERO,
+        body: slopty_proto::thread::ItemBody::Text(slopty_proto::thread::Clipped::whole("Done.")),
+    });
+    state
+}
+
 /// A thread at `/w`, its view open with the commit sheet opened from the "+" menu.
 fn opened(cx: &mut TestAppContext) -> (gpui::Entity<ThreadHub>, Sent, &mut VisualTestContext) {
     opened_owning(cx, Some(&["src/lib.rs", "notes.md"]))
@@ -105,7 +117,7 @@ fn opened_as<'a>(
     use slopty_proto::thread::{TurnId, TurnState};
 
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     state.turns.push(turn(1, TurnState::Complete));
     if queues {
         state.meta.caps = vec![slopty_proto::thread::Cap::named(slopty_proto::thread::Cap::QUEUE)];
@@ -115,8 +127,7 @@ fn opened_as<'a>(
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     let asked = sent.borrow().iter().any(|m| {
         matches!(
             m,
@@ -457,15 +468,14 @@ fn the_agent_is_asked_to_commit_and_the_sheet_reads_again_after_its_turn(cx: &mu
     use crate::conversation::thread::commit::ASK_TO_COMMIT;
 
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     state.meta.caps = vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)];
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
     let read = asks(&sent).iter().filter(|(_, op)| *op == GitOp::Status).count();
 
@@ -510,15 +520,14 @@ fn an_ask_to_commit_turned_down_says_why(cx: &mut TestAppContext) {
     use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
 
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     state.meta.caps = vec![Cap::named(Cap::QUEUE)];
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     click(cx, "commit-ask");
     let id = sent
         .borrow()
@@ -566,15 +575,14 @@ fn opened_with_agent(
 ) -> (gpui::Entity<ThreadHub>, Sent, &mut VisualTestContext) {
     use slopty_proto::thread::Cap;
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     state.meta.caps = vec![Cap::named(Cap::QUEUE)];
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     answer(&hub, cx, last(&sent, &GitOp::Status), GitDone::Status(Box::new(status())));
     (hub, sent, cx)
 }
@@ -679,7 +687,7 @@ fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) 
 
     const ROOT: &str = "/r/.claude/worktrees/fix";
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     ROOT.clone_into(&mut state.meta.cwd);
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
@@ -696,8 +704,7 @@ fn a_merged_pull_request_offers_to_remove_its_worktree(cx: &mut TestAppContext) 
         })
         .detach();
     });
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     let read = |sent: &Sent| {
         sent.borrow()
             .iter()
@@ -757,14 +764,13 @@ fn the_sheet_asks_again_when_the_rows_pull_request_moves(cx: &mut TestAppContext
     use slopty_proto::thread::wire::{PullSeen, PullStands, TableFrame};
 
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let mut state = answered(fixtures::empty());
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     let reads = |sent: &Sent| asks(sent).iter().filter(|(_, op)| *op == GitOp::PullStatus).count();
     let opened = reads(&sent);
     let table = |state: &slopty_proto::thread::ThreadState, seq, pull: Option<PullSeen>| {
@@ -832,8 +838,7 @@ fn a_sheet_with_words_stays_and_its_words_come_back(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("commit-sheet").is_some(), "so does Esc");
     click(cx, "commit-close");
     assert!(cx.debug_bounds("commit-sheet").is_none(), "Close closes");
-    click(cx, "thread-attach");
-    click(cx, "thread-add-menu-commit");
+    click(cx, "thread-checkout");
     cx.update(|window, _cx| {
         window.set_a11y_active(true);
         window.refresh();

@@ -361,6 +361,7 @@ impl ThreadView {
                 .flex_shrink_1()
                 .min_w_0()
                 .max_w_full()
+                .min_h(px(theme.density.decision))
                 .justify_start()
                 .px(px(theme.spacing.sm))
                 .child(div().min_w_0().whitespace_normal().child(words))

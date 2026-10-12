@@ -598,7 +598,26 @@ impl Board {
     /// The lane a task is in on the board: its state's.
     #[must_use]
     pub fn lane(&self, task: TaskId) -> Option<Lane> {
-        Some(Lane::of(self.tasks.get(&task)?.state))
+        Some(self.lane_of(self.tasks.get(&task)?))
+    }
+
+    /// The lane `card` stands in: its state's, except that a start that failed
+    /// ([`Self::start_failed`]) stands in *Failed*, not *Up next*: it waits on the person, not
+    /// on its turn.
+    #[must_use]
+    pub fn lane_of(&self, card: &TaskCard) -> Lane {
+        if self.start_failed(card).is_some() { Lane::Failed } else { Lane::of(card.state) }
+    }
+
+    /// The step `card`'s start failed at, while it waits to be started again: a planned task
+    /// with no terminal on it whose last step (a clone, what its worktree starts from, the
+    /// agent's own start) failed. Nothing starts it again but the person or the orchestrator.
+    #[must_use]
+    pub fn start_failed<'a>(&self, card: &'a TaskCard) -> Option<&'a TaskStep> {
+        card.step
+            .as_ref()
+            .filter(|s| matches!(s.state, StepState::Failed { .. }))
+            .filter(|_| self.not_started(card))
     }
 
     /// The board: each lane that holds a task, left to right. Ready to merge is the merge
@@ -624,7 +643,7 @@ impl Board {
 
     /// Where `task` stands in `lane`'s order: `None` goes after every task that has a turn.
     fn turn(&self, lane: Lane, task: TaskId) -> Option<(bool, WallMs)> {
-        let card = self.tasks.get(&task).filter(|c| Lane::of(c.state) == lane)?;
+        let card = self.tasks.get(&task).filter(|c| self.lane_of(c) == lane)?;
         match lane {
             // The queue merges the one waiting longest, so it is also the one merging.
             Lane::ReadyToMerge => Some((false, card.merge.as_ref()?.queued()?)),

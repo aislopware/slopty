@@ -63,17 +63,16 @@ fn open_settings(
     open_settings_with(view, cx, true)
 }
 
-/// The page takes the panes' place under the title bar, beside the docked navigator, and the
-/// foot bar goes with the panes. The navigator keeps its top row, and its body is the
-/// sections under their groups, each a glyph and a name, with the file and Back at its foot;
-/// the page draws no list of its own. A section picked there shows its page. Back gives the
+/// The page takes the panes' place under the window's own top line, beside the docked
+/// navigator. The navigator's header row holds ← and the settings' filter, and its body is the
+/// sections under their groups, each by its name, with the file at its foot; the page draws no
+/// list of its own. A section picked there shows its page. Back gives the
 /// panes back.
 #[gpui::test]
 fn the_settings_fill_the_panes_and_the_navigator_lists_their_sections(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    assert!(cx.debug_bounds("foot").is_some(), "the foot bar under the panes");
     let (editor, events) = open_settings(&view, cx);
 
     let page = cx.debug_bounds("settings-editor").expect("the page");
@@ -83,17 +82,18 @@ fn the_settings_fill_the_panes_and_the_navigator_lists_their_sections(cx: &mut T
     assert!(page.left() >= nav.right() - px(1.0), "beside the navigator: {page:?} {nav:?}");
     assert!(page.top() >= bar.bottom() - px(0.5), "under the title bar");
     assert_eq!((page.right(), page.bottom()), (window.width, window.height), "to the edges");
-    assert!(cx.debug_bounds("foot").is_none(), "the foot bar goes with the panes");
 
     let list = cx.debug_bounds("settings-sections").expect("the section list");
     assert!(nav.contains(&list.center()), "in the navigator: {list:?} {nav:?}");
     assert!(list.top() >= nav.top() + px(titlebar_height(&Theme::default())) - px(1.0));
-    let search = cx.debug_bounds("settings-search").expect("the search");
-    assert!(nav.contains(&search.center()), "the search at its top");
-    for selector in ["settings-open-file", "settings-back"] {
-        let at = cx.debug_bounds(selector).expect("the list's foot");
-        assert!(nav.contains(&at.center()) && at.top() > list.top(), "{selector} at its foot");
+    let header = cx.debug_bounds("nav-header").expect("the navigator's header row");
+    for selector in ["settings-back", "settings-search"] {
+        let at = cx.debug_bounds(selector).expect("the header row's controls");
+        assert!(header.contains(&at.center()), "{selector} in the header row: {at:?}");
     }
+    assert!(cx.debug_bounds("nav-new-agent").is_none(), "the starts give the row up");
+    let file = cx.debug_bounds("settings-open-file").expect("the list's foot");
+    assert!(nav.contains(&file.center()) && file.top() > list.top(), "the file at its foot");
     let said: Vec<String> = tree(cx).into_iter().filter_map(|n| n.label).collect();
     for group in Group::ALL.map(Group::label) {
         assert!(said.iter().any(|l| l == group), "{group}: {said:#?}");
@@ -108,12 +108,53 @@ fn the_settings_fill_the_panes_and_the_navigator_lists_their_sections(cx: &mut T
     assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss));
     assert!(cx.debug_bounds("settings-editor").is_none(), "gone");
     assert!(cx.debug_bounds("settings-sections").is_none(), "the navigator's rows again");
-    assert!(cx.debug_bounds("foot").is_some(), "and the foot bar");
+    assert!(cx.debug_bounds("titlebar").is_none(), "the panes' tab bars are the top line");
+}
+
+/// The settings are one left column (`.research/design-polish-2026-10-12.md` §4.5): the page's
+/// name, its group heads and its rows stand on one edge 32 in from the page's side, and on a
+/// wide window they keep to the 720 measure, left aligned, rather than stretch.
+#[gpui::test]
+fn settings_have_one_left_column(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    cx.simulate_resize(size(px(1600.0), px(900.0)));
+    cx.run_until_parked();
+    let (_editor, _events) = open_settings(&view, cx);
+    let page = cx.debug_bounds("settings-page").expect("the page");
+    let title = cx.debug_bounds("settings-title").expect("the page's name");
+    let first = |cx: &mut VisualTestContext, what: &str| {
+        (0..32).find_map(|i| cx.debug_bounds(leak(format!("settings-{what}-{i}"))))
+    };
+    let heading = first(cx, "heading").expect("a group's head");
+    let row = first(cx, "ruled").expect("a row");
+    let side = Theme::default().spacing.page();
+    assert!((title.left() - page.left() - px(side)).abs() < px(0.5), "32 in: {title:?} {page:?}");
+    for (what, at) in [("head", heading), ("row", row)] {
+        assert!((at.left() - title.left()).abs() < px(0.5), "the {what} on the edge: {at:?}");
+    }
+    assert!(row.size.width <= px(crate::settings_form::MEASURE) + px(0.5), "{row:?}");
+    assert!(
+        page.size.width > px(2.0_f32.mul_add(side, crate::settings_form::MEASURE)),
+        "a wide page"
+    );
+    // Delta's anatomy (`.research/delta-re-2026-10-12.md` §4.9): the title at 16 on its 22
+    // line, and each group's head ruled under.
+    let line = Theme::default().roles().page_heading.line;
+    assert!(title.size.height <= px(line) + px(0.5), "the title's one line: {title:?}");
+    let ruled = cx.update(|window, _| {
+        window.painted_quads().into_iter().any(|q| {
+            q.border_widths.bottom.0 > 0.0
+                && (q.bounds.bottom().0 / window.scale_factor() - f32::from(heading.bottom())).abs()
+                    < 1.0
+        })
+    });
+    assert!(ruled, "a rule under the group's head: {heading:?}");
 }
 
 /// With the navigator hidden the page carries the list as its own sidebar; Esc from the
-/// search, in the navigator's list, leaves, and so does a press on a title tab, which turns to the
-/// work.
+/// search, in the navigator's list, leaves, and so does showing a tab, which turns to the work.
 #[gpui::test]
 fn the_page_carries_its_list_and_leaves_for_the_work(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -145,9 +186,10 @@ fn the_page_carries_its_list_and_leaves_for_the_work(cx: &mut TestAppContext) {
 
     let other = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
     on_new_tab(&view, cx, other);
-    let first = leak(format!("title-tab-{}", pos_of(&view, cx, shell).tab.get()));
+    let first = pos_of(&view, cx, shell).tab;
     let (_editor, events) = open_settings(&view, cx);
-    click(cx, first);
+    view.update_in(cx, |v, _w, cx| v.show_tab(first, cx));
+    cx.run_until_parked();
     assert_eq!(events.borrow().last(), Some(&SettingsEditorEvent::Dismiss), "the work");
     assert!(cx.debug_bounds("settings-editor").is_none());
 }

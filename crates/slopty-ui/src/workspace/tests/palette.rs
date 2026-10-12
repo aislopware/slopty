@@ -199,7 +199,8 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
 
 /// The empty workspace asks what to work on over a composer, which takes the keyboard: what is
 /// written there and sent starts a goal's orchestrator at once, as "New goal…" does, in the
-/// machine's latest place. A shell and a window stay one press away under it, with no keys
+/// machine's latest repository; with none known, the sheet takes the goal and asks where. A
+/// shell and a window stay one press away under it, with no keys
 /// on them, and each does what its key does. Nothing else stands on the page.
 #[gpui::test]
 fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
@@ -237,7 +238,7 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
     }
     let page = cx.debug_bounds("empty-workspace").expect("the page");
     let goal = cx.debug_bounds("empty-goal").expect("the composer");
-    assert!((goal.center().y - page.center().y).abs() < page.size.height / 4.0, "centred");
+    assert!(page.bottom() - goal.bottom() < px(Theme::default().spacing.md), "at the foot");
 
     fake.drain();
     cx.simulate_input("Fix the login redirect");
@@ -251,14 +252,14 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
             _ => None,
         })
         .collect();
-    let [start] = started.as_slice() else { panic!("one start: {started:?}") };
-    assert_eq!(start.agent, AgentId::named(AgentId::CLAUDE_CODE), "an orchestrator");
-    assert_eq!((start.cwd.as_str(), start.prompt.as_deref()), ("~", None), "the goal waits");
-    let goal =
-        view.read_with(cx, |v, _| v.projects.orchestrating.as_ref().map(|(_, g)| g.goal.clone()));
-    assert_eq!(goal.as_deref(), Some("Fix the login redirect"), "for its project");
-    cx.simulate_keystrokes("cmd-w");
+    // No repository known to work in: nothing starts in the home folder, and the sheet,
+    // holding the goal, asks where.
+    assert!(started.is_empty(), "nothing starts: {started:?}");
+    let typed = view.read_with(cx, WorkspaceView::goal_sheet_typed).expect("the sheet");
+    assert_eq!(typed.goal, "Fix the login redirect", "holding the goal");
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
+    assert!(cx.debug_bounds("goal-sheet").is_none(), "put away");
 
     click(cx, "empty-terminal");
     assert!(
@@ -274,6 +275,40 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
         "the worker is asked for its windows"
     );
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
+}
+
+/// The empty workspace is a thread with no turns (`.research/design-polish-2026-10-12.md`
+/// §4.9): the question, the line saying where a goal goes, the heads and the doors' glyphs
+/// stand on one edge in a column of 512 whose top is 30 % down the launcher, and the goal's
+/// composer waits at the pane's foot, where a thread keeps it.
+#[gpui::test]
+fn the_empty_page_has_one_edge(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    view.update_in(cx, |v, _w, cx| v.threads_linked(fake.key, cx));
+    cx.run_until_parked();
+    let at = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is not drawn"))
+    };
+    let theme = Theme::default();
+    let question = at(cx, "empty-question");
+    let edge = question.left();
+    for s in ["empty-goal-foot", "empty-start"] {
+        let b = at(cx, s);
+        assert!((b.left() - edge).abs() < px(0.5), "{s} on the edge: {b:?} {question:?}");
+    }
+    for door in ["empty-terminal", "empty-window", "empty-new-goal"] {
+        let glyph = at(cx, door).left() + px(theme.spacing.inset());
+        assert!((glyph - edge).abs() < px(0.5), "{door}'s glyph hangs on the edge");
+    }
+    let (page, goal, column) =
+        (at(cx, "empty-workspace"), at(cx, "empty-goal"), at(cx, "empty-column"));
+    assert!(column.size.width <= px(512.0 + 0.5), "{column:?}");
+    let launcher = goal.top() - page.top();
+    let top = column.top() - page.top();
+    assert!((top - launcher * 0.3).abs() < px(1.0), "30 % down: {top:?} of {launcher:?}");
+    assert!(page.bottom() - goal.bottom() < px(theme.spacing.md), "the composer at the foot");
+    assert!(goal.top() > at(cx, "empty-new-goal").bottom(), "under the launcher");
 }
 
 /// A project on show with nothing open in it asks what to work on there, by its name; with no
@@ -302,9 +337,9 @@ fn an_empty_project_asks_what_to_work_on_in_it(cx: &mut TestAppContext) {
     assert_eq!(heading(cx).as_deref(), Some("What should we work on in Atlas?"), "named");
 }
 
-/// The composer's foot says where ↵ sends the goal (the machine, the folder, the agent), so
-/// nothing starts somewhere unseen; pressed, it opens "New goal…"'s sheet holding what was
-/// typed, and the words move there.
+/// The line under the question says where ↵ sends the goal (the machine, the folder, the
+/// agent), so nothing starts somewhere unseen; pressed, it opens "New goal…"'s sheet holding
+/// what was typed, and the words move there. The doors print no keys: keys are the palette's.
 #[gpui::test]
 fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -313,12 +348,14 @@ fn the_empty_workspaces_composer_says_where_the_goal_goes(cx: &mut TestAppContex
     cx.run_until_parked();
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
-    let place = "studio · ~ · Claude Code";
+    // No repository known yet: the machine and the agent, and the sheet asks for the folder.
+    let place = "studio · Claude Code";
     let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("Button", Some(place))), "where it goes: {tree:#?}");
     let (foot, goal) = (cx.debug_bounds("empty-goal-foot"), cx.debug_bounds("empty-goal"));
-    let (Some(foot), Some(goal)) = (foot, goal) else { panic!("the foot in the composer") };
-    assert!(goal.contains(&foot.center()), "inside the box: {foot:?} {goal:?}");
+    let (Some(foot), Some(goal)) = (foot, goal) else { panic!("the place and the composer") };
+    let question = cx.debug_bounds("empty-question").expect("the question");
+    assert!(foot.top() >= question.bottom() && foot.bottom() < goal.top(), "under the question");
     for keys in ["⇧⌘T", "⌘O"] {
         assert!(
             !tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(keys))),
@@ -428,9 +465,8 @@ fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
 /// On a desktop the palette hangs near the top ([`crate::palette::LIST_TOP`] down), at most
 /// [`crate::palette::LIST_WIDTH`] wide, and takes at most three fifths of the window's height
 /// under its ceiling, shorter still when it lists less. On a phone it is a sheet from the bottom,
-/// the window's width, from under the status bar down to the keyboard, its field at its foot above
-/// the keyboard. On both a fade covers the list's end while more runs on below
-/// it.
+/// the window's width, from under the status bar down to the keyboard, its field heading it. On
+/// both a fade covers the list's end while more runs on below it.
 #[gpui::test]
 fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -446,7 +482,7 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     let near = crate::palette::LIST_TOP;
     assert!((f32::from(brief.top()) - near).abs() < 0.5, "near the top: {brief:?}");
     let wide = crate::palette::LIST_WIDTH;
-    assert!((f32::from(brief.size.width) - wide).abs() < 0.5, "Zed's width: {brief:?}");
+    assert!((f32::from(brief.size.width) - wide).abs() < 0.5, "Delta's width: {brief:?}");
     cx.simulate_input("e");
     cx.run_until_parked();
     let full = cx.debug_bounds("palette").expect("drawn");
@@ -474,8 +510,10 @@ fn the_palette_hangs_near_the_top_and_is_a_sheet_on_a_phone(cx: &mut TestAppCont
     assert!((f32::from(palette.bottom()) - short).abs() < 0.5, "to the keyboard: {palette:?}");
     let field = cx.debug_bounds("palette-field").expect("the field");
     let list = cx.debug_bounds("palette-list").expect("the list");
-    assert!(field.top() >= list.bottom(), "the field under what it finds: {field:?} {list:?}");
-    assert!((field.bottom() - palette.bottom()).abs() < px(0.5), "at the foot: {field:?}");
+    assert!(list.top() >= field.bottom(), "the field over what it finds: {field:?} {list:?}");
+    // Under the sheet's one line along its top.
+    let under = f32::from(field.top() - palette.top());
+    assert!((0.0..1.5).contains(&under), "at the head: {field:?}");
     assert!(
         f32::from(palette.left()).abs() < 0.5 && (f32::from(palette.right()) - phone_w).abs() < 0.5,
         "the window's width: {palette:?}"
@@ -711,7 +749,8 @@ fn a_project_line_goes_to_its_workspace(cx: &mut TestAppContext) {
 }
 
 /// "Scope to atlas" narrows the navigator and its attention sections alike to atlas; it leads
-/// the filter as a token, the bell keeps it, and Esc lets go of it.
+/// the filter as a token, the open field taking the row from New agent and New goal, the bell
+/// keeps it, and Esc lets go of it.
 #[gpui::test]
 fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -732,6 +771,9 @@ fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestA
     view.update_in(cx, |v, w, cx| v.scope_to(&scope, w, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("nav-scope").is_some(), "the scope leads the filter");
+    let input = cx.debug_bounds("nav-filter").expect("its field");
+    assert!(f32::from(input.size.width) >= 24.0, "room to type in: {input:?}");
+    assert!(cx.debug_bounds("nav-new-goal").is_none(), "the open field takes the starts' room");
     let listed = view.read_with(cx, |v, _| v.navigator_tiles());
     assert_eq!(listed, [atlas], "only atlas's rows");
     cx.simulate_keystrokes("cmd-shift-u");
@@ -751,9 +793,9 @@ fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestA
 
 /// The palette splits three ways, `MonoCode`'s. ⌘K searches everything and, before anything is
 /// typed, lists the threads worked in lately that no tile shows, newest first (R17). ⌘⇧P opens
-/// the same search at `>`: every command and nothing else, and Esc on the untouched `>` closes
-/// it. ⌘P searches the files alone: the ones open in tiles at once, and what is typed asked of
-/// the machine's files.
+/// the commands alone with an empty field, no `>` to type past (Zed's command palette), and
+/// Esc on it closes it. ⌘P searches the files alone: the ones open in tiles at once, and what is
+/// typed asked of the machine's files.
 #[gpui::test]
 fn the_palette_splits_into_everything_commands_and_files(cx: &mut TestAppContext) {
     use slopty_proto::thread::wire::{TableFrame, ThreadRow};
@@ -811,13 +853,13 @@ fn the_palette_splits_into_everything_commands_and_files(cx: &mut TestAppContext
     let field = view.read_with(cx, |v, cx| {
         v.palette.clone().map(|p| p.read(cx).input_value(cx)).unwrap_or_default()
     });
-    assert_eq!(field, ">", "opened at the commands");
+    assert_eq!(field, "", "the commands alone, no prompt in the field");
     let lines = shown(cx);
     assert!(lines.iter().all(|(section, _)| *section == Section::Commands), "{lines:?}");
     assert!(lines.len() > crate::palette::RECENT_COMMANDS, "every command: {}", lines.len());
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(view.read_with(cx, |v, _| v.palette.is_none()), "Esc on the untouched `>` closes");
+    assert!(view.read_with(cx, |v, _| v.palette.is_none()), "Esc on the empty field closes");
 
     studio.drain();
     cx.dispatch_action(OpenFile);

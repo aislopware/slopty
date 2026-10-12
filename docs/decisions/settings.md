@@ -431,7 +431,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Both heads fit their room** (`kit::priority_row`). Done, Cancel and Save never leave.
     The way to the file, or back to the controls, gives way to its glyph alone where its words
     do not fit (curly braces, a gear).
-  - Tests: `settings_editor::tests::{the_columns_start_together,
+  - Tests: `settings_editor::tests::{the_page_is_headed_by_its_section,
     the_file_is_the_sidebars_advanced_path, a_narrow_sheet_keeps_its_heads_whole}` and
     `settings_form::tests::a_groups_rows_are_one_ring_under_its_label`. Goldens: `settings`,
     `settings-dark`, `settings-form`, `settings-keyboard`, `settings-about`, `settings-input`.

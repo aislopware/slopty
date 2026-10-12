@@ -1,6 +1,6 @@
 //! The state marks drawn by us, at Zed's geometry: a figure ten points across in a sixteen
 //! point slot, its line one device pixel at 1x and two at 2x (`docs/decisions/ui.md`, "State is
-//! a glyph" and "The chrome's icons are IBM Carbon's at 16").
+//! a glyph" and "The chrome's icons are Octicons at 14").
 //!
 //! One silhouette for every state, as Linear's statuses are, so the eye compares fill and hue
 //! and not shapes: an empty ring, a dashed ring, a ring with a pie of its share, a ring with a

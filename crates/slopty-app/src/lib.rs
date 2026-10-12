@@ -179,17 +179,17 @@ const ALT_CAP: &str = "⌥";
 /// Where the arrows end in [`BAR_KEYS`]: the clipboard key follows them.
 const ARROWS_END: usize = 7;
 
-/// A key cap's height: the bar's, a base unit clear of its edges.
-fn cap_side(spacing: Spacing) -> f32 {
-    2.0_f32.mul_add(-spacing.xs, KEY_BAR_H)
+/// A key's side: the bar's whole height, a finger's 44, the key a ghost button with no cap
+/// drawn round it (`.research/design-polish-2026-10-12.md` §1.19).
+const fn cap_side(_spacing: Spacing) -> f32 {
+    KEY_BAR_H
 }
 
-/// A key cap's width: square for a symbol, a word's a small step wider each side. Fixed, never
-/// grown: an iPad's spare width stays spare rather than stretching "|" to 100 pt, and a phone's
-/// row scrolls rather than crowds.
-fn cap_width(label: &str, spacing: Spacing) -> f32 {
-    let side = cap_side(spacing);
-    if label.chars().count() > 1 { 2.0_f32.mul_add(spacing.sm, side) } else { side }
+/// A key's width: a finger's square, for a symbol and a word alike, the keys abutting with no
+/// gap, since nothing is drawn round them. Fixed, never grown: an iPad's spare width stays
+/// spare rather than stretching "|" to 100 pt, and a phone's row scrolls rather than crowds.
+const fn cap_width(_label: &str, spacing: Spacing) -> f32 {
+    cap_side(spacing)
 }
 
 /// Where a key sits on a row wide enough for all of it (an iPad's): one leading run of groups,
@@ -217,19 +217,17 @@ fn key_group(label: &str) -> KeyGroup {
     }
 }
 
-/// How wide a row of `labels`' caps is, a gap between each and at its ends.
+/// How wide a row of `labels`' keys is, abutting, a gap at its ends.
 fn key_row_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing) -> f32 {
-    let (count, caps) = labels
-        .into_iter()
-        .fold((0.0_f32, 0.0_f32), |(n, w), label| (n + 1.0, w + cap_width(label, spacing)));
-    2.0_f32.mul_add(spacing.xs, (count - 1.0).max(0.0).mul_add(spacing.xs, caps))
+    let caps: f32 = labels.into_iter().map(|label| cap_width(label, spacing)).sum();
+    2.0_f32.mul_add(spacing.xs, caps)
 }
 
-/// How wide the row of `labels`' caps is laid out as one run of groups: [`key_row_width`] with
-/// a step between the groups where a gap between caps was. At most three breaks: the lead, the
-/// arrows, the symbols, then the word keys trailing.
+/// How wide the row of `labels`' keys is laid out as one run of groups: [`key_row_width`] with
+/// a step between the groups. At most three breaks: the lead, the arrows, the symbols, then the
+/// word keys trailing.
 fn spread_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing) -> f32 {
-    3.0_f32.mul_add(spacing.md - spacing.xs, key_row_width(labels, spacing))
+    3.0_f32.mul_add(spacing.md, key_row_width(labels, spacing))
 }
 
 /// How far a row of `labels`' caps scrolls in `width`: none where it spreads out, else what
@@ -3134,7 +3132,8 @@ impl Workspace {
         // edge, which the row gives up.
         let spacing = self.theme.spacing;
         let hiding = overflow > 0.0;
-        let hide_w = cap_width(HIDE_CAP, spacing) + spacing.xs.mul_add(2.0, 1.0);
+        // The Hide key's square, and the step the row's fade ends short of it.
+        let hide_w = KEY_BAR_H + spacing.sm;
         let overflow = if hiding { overflow + hide_w } else { overflow };
         // The extent comes from the caps, not the last layout, so a bar just shown, turned or
         // resized fades right on its first frame.
@@ -3146,26 +3145,27 @@ impl Workspace {
             ..gpui::Edges::default()
         });
         // A phone's soft keyboard has no key that puts it away, so its bar ends in one, held
-        // still at the trailing edge while the row scrolls; an iPad's keyboard has its own.
-        let hide = hiding.then(|| {
-            div()
-                .flex_none()
-                .h_full()
-                .flex()
-                .items_center()
-                .px(px(self.theme.spacing.xs))
-                .border_l(kit::HAIR)
-                .border_color(hsla(self.theme.surfaces.border))
-                .child(self.hide_key("key-hide"))
-        });
-        // The caps fade per pixel; the bar's surface is outside the fade.
+        // still at the trailing edge while the row scrolls, on the keys' line with no rule
+        // before it, the row's fade ending a step short of it; an iPad's keyboard has its own.
+        let hide = hiding.then(|| self.hide_key("key-hide"));
+        // The keys fade per pixel; the bar's surface is outside the fade. It is the sidebar's
+        // plane under the lighter line, as a column's foot is.
         div()
+            .debug_selector(|| "key-bar-band".to_owned())
             .w_full()
+            .h(px(KEY_BAR_H))
             .flex()
-            .bg(hsla(self.theme.content()))
+            .items_center()
+            .bg(hsla(self.theme.surfaces.sidebar))
             .border_t(kit::HAIR)
-            .border_color(hsla(self.theme.surfaces.border))
-            .child(div().flex_1().min_w_0().child(gpui::edge_fade(row, ends)))
+            .border_color(hsla(self.theme.surfaces.stroke))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when(hiding, |el| el.mr(px(spacing.sm)))
+                    .child(gpui::edge_fade(row, ends)),
+            )
             .children(hide)
             .into_any_element()
     }
@@ -3201,9 +3201,8 @@ impl Workspace {
                 KeyGroup::Words => words.push(key),
             }
         }
-        let group = |keys: Vec<gpui::AnyElement>| {
-            div().flex().flex_none().items_center().gap(px(spacing.xs)).children(keys)
-        };
+        let group =
+            |keys: Vec<gpui::AnyElement>| div().flex().flex_none().items_center().children(keys);
         let run = [lead, arrows, symbols].into_iter().filter(|g| !g.is_empty()).map(group);
         let spread = row
             .debug_selector(|| "key-bar-spread".to_owned())
@@ -3233,14 +3232,12 @@ impl Workspace {
             .overflow_x_scroll()
             .track_scroll(&self.key_bar_scroll)
             .px(px(spacing.xs))
-            .gap(px(spacing.xs))
             .font_family(self.theme.typography.ui_family.clone())
     }
 
-    /// A key cap of the bar: raised off the bar ([`kit::raised`]), `pressed` while held, the
-    /// accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste")
-    /// is set small, as a keyboard sets its word keys; a glyph at the title size, so an arrow
-    /// reads at a glance on a 36 pt cap.
+    /// A key of the bar: a ghost button, nothing drawn round it at rest, the pressed wash while
+    /// held, the accent's tint when `lit` (armed or toggled on). A word ("Esc", "Paste") at the
+    /// prose's 15, a glyph at the icon's 16 (`.research/design-polish-2026-10-12.md` §1.19).
     fn key_cap(&self, id: String, label: &str, lit: bool) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;
         let (spacing, ty) = (self.theme.spacing, &self.theme.typography);
@@ -3254,15 +3251,8 @@ impl Workspace {
             .items_center()
             .justify_center()
             .rounded(px(self.theme.radii.sm))
-            // A glyph cap at a title's size, a word cap at the metadata's.
-            .text_size(px(if word { ty.small() } else { self.theme.roles().panel_title.size }))
-            .map(|el| {
-                if lit {
-                    kit::tinted(el, &self.theme)
-                } else {
-                    kit::raised(el.text_color(hsla(s.text)), &self.theme)
-                }
-            })
+            .text_size(px(if word { ty.prose() } else { ty.icon() }))
+            .map(|el| if lit { kit::tinted(el, &self.theme) } else { el.text_color(hsla(s.text)) })
             .when(!lit, |el| el.active(|el| el.bg(hsla(s.pressed))))
     }
 
@@ -3455,14 +3445,22 @@ impl Workspace {
         (row.into_any_element(), overflow)
     }
 
-    /// The bar's last cap: it puts the soft keyboard away and leaves the focus where it is, so
-    /// the screen is the program's whole; a tap on the terminal brings the keyboard back.
+    /// The bar's last key: it puts the soft keyboard away and leaves the focus where it is, so
+    /// the screen is the program's whole; a tap on the terminal brings the keyboard back. A
+    /// chevron down in a square of its own, on the keys' line.
     fn hide_key(&self, id: &str) -> gpui::Stateful<gpui::Div> {
+        let s = &self.theme.surfaces;
+        let selector = id.to_owned();
         let key = self
             .key_cap(id.to_owned(), HIDE_CAP, false)
+            .debug_selector(move || selector)
             .role(Role::Button)
             .aria_label("Hide the keyboard")
-            .child(HIDE_CAP);
+            .child(slopty_kit::icons::icon(
+                &self.theme,
+                slopty_kit::icons::Symbol::ChevronDown,
+                hsla(s.icon),
+            ));
         tab_stop(key, self.theme.surfaces.focus)
             .on_click(|_ev, window, _cx| window.dismiss_virtual_keyboard())
     }
@@ -3588,8 +3586,8 @@ impl Render for Workspace {
         self.ready_paste_key(window, cx);
         let key_bar = self.key_target.clone().map(|target| self.key_bar(&target, window, cx));
         let surfaces = self.theme.surfaces;
-        // Under the key bar, its surface; else the ground the foot bar lies on too.
-        let band = if key_bar.is_some() { self.theme.content() } else { surfaces.ground };
+        // Under the key bar, its plane; else the window's one ground.
+        let band = if key_bar.is_some() { surfaces.sidebar } else { surfaces.ground };
         if std::mem::take(&mut self.pending_focus_editor)
             && let Some(editor) = self.settings_editor.clone()
         {
@@ -3651,8 +3649,7 @@ impl Render for Workspace {
                         el.child(div().w_full().pl(insets.left).pr(insets.right).child(bar))
                     })
                     // The home indicator's and the soft keyboard's band continues what is above
-                    // it: the key bar on the body's surface, the foot bar on the chrome, else
-                    // the window's one ground.
+                    // it: the key bar's plane, the sidebar's, else the window's one ground.
                     .child(div().w_full().h(insets.bottom).bg(hsla(band)))
             })
             .when_some(adding, gpui::ParentElement::child)
@@ -4193,7 +4190,7 @@ pub fn open_workspace(
     }
     // The chrome's glyphs read and drawn on a background thread while the window is made, so
     // the first frame does not pay for Core Graphics' first context (docs/MEASUREMENTS.md,
-    // "Carbon glyphs drawn on demand").
+    // "Octicons glyphs drawn on demand").
     slopty_kit::icons::prewarm(&Theme::default());
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
@@ -4574,7 +4571,8 @@ mod tests {
         let row = key_row_width(labels, spacing);
         assert!(row > 402.0 && row < 820.0, "{row}");
         assert!((cap_width("|", spacing) - cap_side(spacing)).abs() < f32::EPSILON, "square");
-        assert!(cap_side(spacing) < KEY_BAR_H, "a cap sits inside its bar");
+        assert!((cap_width("Paste", spacing) - KEY_BAR_H).abs() < f32::EPSILON, "a word too");
+        assert!((cap_side(spacing) - KEY_BAR_H).abs() < f32::EPSILON, "a finger's whole bar");
     }
 
     /// Every bar fits an 11-inch iPad (820 pt) as one run of groups with its word keys
@@ -4617,8 +4615,9 @@ mod tests {
     }
 
     /// On an iPad the key bar is one bar: Esc, Tab and the modifiers, then the arrows, then the
-    /// symbols, one leading run a step apart, the word keys at the trailing end; the arrows no
-    /// longer float alone in the middle. On a phone it is one line in the given order.
+    /// symbols, one leading run a step apart, the caps of a group abutting, the word keys at the
+    /// trailing end; the arrows no longer float alone in the middle. On a phone it is one line
+    /// in the given order.
     #[gpui::test]
     fn an_ipad_key_bar_is_one_leading_run_with_the_word_keys_trailing(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -4637,10 +4636,10 @@ mod tests {
             f32::from(at(cx, after).left() - at(cx, before).right())
         };
         assert!((f32::from(at(cx, "Esc").left()) - spacing.xs).abs() < 0.5, "leading");
-        assert!((gap(cx, "Tab", CONTROL_CAP) - spacing.xs).abs() < 0.5, "caps in a group");
-        assert!((gap(cx, ALT_CAP, "⌘") - spacing.xs).abs() < 0.5, "the modifiers together");
+        assert!(gap(cx, "Tab", CONTROL_CAP).abs() < 0.5, "caps in a group abut");
+        assert!(gap(cx, ALT_CAP, "⌘").abs() < 0.5, "the modifiers together");
         assert!((gap(cx, "⌘", "←") - spacing.md).abs() < 0.5, "the arrows follow the lead");
-        assert!((gap(cx, "→", "PgUp") - spacing.xs).abs() < 0.5, "paging with the arrows");
+        assert!(gap(cx, "→", "PgUp").abs() < 0.5, "paging with the arrows");
         assert!((gap(cx, "PgDn", "~") - spacing.md).abs() < 0.5, "the symbols follow them");
         assert!((f32::from(at(cx, "Find").right()) - (1032.0 - spacing.xs)).abs() < 0.5);
         assert!(gap(cx, "-", "Paste") > 200.0, "the word keys trail: {}", gap(cx, "-", "Paste"));
@@ -4648,7 +4647,7 @@ mod tests {
         cx.simulate_resize(size(px(402.0), px(200.0)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("key-bar-spread").is_none(), "a phone's row scrolls");
-        assert!((gap(cx, "→", "~") - spacing.xs).abs() < 0.5, "in the given order");
+        assert!(gap(cx, "→", "~").abs() < 0.5, "in the given order, abutting");
     }
 
     /// The shell in a headless window with the panel up: with `set_up`, a server and one of

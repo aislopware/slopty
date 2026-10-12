@@ -16,7 +16,7 @@ use slopty_kit::kit;
 use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Notice, Retry, Turn};
 use slopty_theme::{Rgb, Surfaces};
 
-use super::{TOOL_ROW, ThreadView, composer, tokens};
+use super::{MARK_SLOT, TOOL_ROW, ThreadView, composer, tokens};
 use crate::conversation::figures::{model_name, spoken_model};
 
 /// A compaction in words: "Compacted 120k → 18k tokens".
@@ -101,7 +101,7 @@ impl ThreadView {
         let (icon, words, under, more) = match &item.body {
             ItemBody::Compaction(c) => {
                 let summary = c.summary.as_ref().map(|t| t.text.clone()).filter(|t| !t.is_empty());
-                (Symbol::Scissors, compacted(c), None, summary)
+                (None, compacted(c), None, summary)
             }
             ItemBody::Notice(n) => {
                 let (shown, rest) = notice_lines(&n.text.text);
@@ -109,15 +109,15 @@ impl ThreadView {
                 let words = if cut { shown } else { n.text.text.trim().to_owned() };
                 let (icon, ink) = notice_mark(n, &s);
                 tone = ink;
-                (icon, words, n.retry.as_ref().map(retrying), None)
+                (Some(icon), words, n.retry.as_ref().map(retrying), None)
             }
             // Codex's reviewer begins here; what it found follows as its answer.
             ItemBody::Review { entered } => {
                 let words = if *entered { "Reviewed the changes" } else { "Review ended" };
-                (Symbol::Checklist, words.to_owned(), None, None)
+                (Some(Symbol::Checklist), words.to_owned(), None, None)
             }
             ItemBody::Extra { kind, .. } => {
-                (Symbol::InfoCircle, composer::sentence(kind), None, None)
+                (Some(Symbol::InfoCircle), composer::sentence(kind), None, None)
             }
             _ => return div().into_any_element(),
         };
@@ -138,7 +138,7 @@ impl ThreadView {
             .gap(px(theme.spacing.xs))
             .min_h(px(TOOL_ROW))
             .when(tone != s.text_muted, |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.icon(icon, tone)))
+            .child(Self::slot().children(icon.map(|icon| self.icon(icon, tone))))
             .child(div().min_w_0().whitespace_normal().child(SharedString::from(words)))
             .when(opens, |el| {
                 el.cursor_pointer()
@@ -148,7 +148,7 @@ impl ThreadView {
                         this.toggle_item(toggle.clone(), cx);
                     }))
             });
-        let indent = px(TOOL_ROW + theme.spacing.xs);
+        let indent = px(MARK_SLOT + theme.spacing.xs);
         div()
             .w_full()
             .flex()

@@ -1,5 +1,5 @@
-//! The title bar's breadcrumb: where the focused work is, `project ▾ / checkout ▾ / branch`,
-//! as Zed's title bar names its project and branch.
+//! The cluster's breadcrumb while the navigator is not docked: where the focused work is,
+//! `project ▾ / checkout ▾ / branch`, as Zed's title bar names its project and branch.
 //!
 //! When the focused tile's project spans more than one worker, its worker follows the
 //! project (`slopty ▾ / devbox ▾ / main`), with the menu of the project's clones on every
@@ -228,8 +228,7 @@ impl WorkspaceView {
             .debug_selector(|| "breadcrumb".to_owned())
             .role(Role::Group)
             .aria_label("Where")
-            // As wide as what it says and no wider: the title tabs and "+" follow it, and what
-            // is left of the bar is its empty span.
+            // As wide as what it says and no wider: the cluster's controls follow it.
             .flex_initial()
             .min_w_0()
             .h_full()

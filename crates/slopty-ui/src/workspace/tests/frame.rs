@@ -1,5 +1,5 @@
-//! The frame around the panes in the headless workspace: the navigator, the title bar's
-//! items and the bell.
+//! The frame around the panes in the headless workspace: the navigator, the top line's lead and
+//! cluster, and the bell.
 
 use gpui::{AppContext as _, Modifiers, MouseButton};
 use slopty_client::layout::Navigator;
@@ -56,8 +56,9 @@ fn saved_navigator(cx: &VisualTestContext, path: &std::path::Path) -> Navigator 
 }
 
 /// How the navigator sits: docked where the panes keep a desktop's width beside it, and on an
-/// iPad where they keep a regular width; over the panes on an iPad narrower than that or a
-/// window that would leave the panes a phone's; a drawer on a phone.
+/// iPad 900 pt wide or more, a 13-inch one upright too, as Delta and Zed dock their sidebars;
+/// over the panes on a narrower iPad or a window that would leave the panes a phone's; a drawer
+/// on a phone.
 #[test]
 fn the_navigator_docks_only_where_the_panes_keep_their_room() {
     use navigator::{Mode, mode};
@@ -65,45 +66,69 @@ fn the_navigator_docks_only_where_the_panes_keep_their_room() {
     assert_eq!(mode(900.0, 248.0, 700.0, false), Mode::Overlay, "the panes would be a phone's");
     assert_eq!(mode(1376.0, 248.0, 700.0, true), Mode::Docked, "a 13-inch iPad in landscape");
     assert_eq!(mode(1210.0, 248.0, 700.0, true), Mode::Docked, "an 11-inch iPad in landscape");
-    assert_eq!(mode(1032.0, 248.0, 700.0, true), Mode::Overlay, "a 13-inch iPad upright");
+    assert_eq!(mode(1032.0, 248.0, 700.0, true), Mode::Docked, "a 13-inch iPad upright");
+    assert_eq!(mode(834.0, 248.0, 700.0, true), Mode::Overlay, "an 11-inch iPad upright");
     assert_eq!(mode(1032.0, 248.0, 700.0, false), Mode::Docked, "a Mac window as wide");
     assert_eq!(mode(390.0, 248.0, 700.0, true), Mode::Home, "a phone");
 }
 
-/// A window too narrow to dock the navigator folds it to the rail rather than to nothing, as
-/// `MonoCode`'s compact rail: the panes start past it, and the panel opened over them leaves the
-/// rail and the panes where they were.
+/// A window too narrow to dock the navigator hides it, with no rail in its place: the panes
+/// take the whole width, and the panel opened over them leaves the panes where they were.
 #[gpui::test]
-fn a_narrow_window_folds_the_navigator_to_its_rail(cx: &mut TestAppContext) {
+fn a_narrow_window_lays_the_navigator_over_the_panes(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     cx.simulate_resize(size(px(800.0), px(700.0)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("navigator").is_none(), "not docked, not open");
-    let rail = cx.debug_bounds("nav-rail").expect("the rail");
+    assert!(cx.debug_bounds("nav-rail").is_none(), "no rail");
     let area = cx.debug_bounds("area").expect("the panes");
-    assert!(area.left() >= rail.right() - px(0.5), "the panes past it: {rail:?} {area:?}");
-    assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5);
-    let machine = leak(format!("nav-rail-{}", studio.key));
-    let machine = cx.debug_bounds(machine).expect("the machine its shell is on");
-    assert!(rail.contains(&machine.center()), "in the rail: {machine:?}");
+    assert!(f32::from(area.left()).abs() < 0.5, "the whole width: {area:?}");
 
     view.update_in(cx, |v, window, cx| v.toggle_navigator(&ToggleNavigator, window, cx));
     cx.run_until_parked();
     let panel = cx.debug_bounds("navigator").expect("open over the panes");
-    assert_eq!(cx.debug_bounds("nav-rail"), Some(rail), "the rail stays");
-    assert_eq!(cx.debug_bounds("area"), Some(area), "and the panes do not move");
+    assert_eq!(cx.debug_bounds("area"), Some(area), "the panes do not move");
     assert!(panel.right() > area.left(), "over them");
-
-    cx.simulate_resize(size(px(390.0), px(844.0)));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("nav-rail").is_none(), "a phone has its drawer, no rail");
 }
 
-/// ⌘B hides the docked navigator and the panes take its room but the rail's; ⌘B brings it
-/// back. Whether it shows is written with the layout, and a workspace made from that file
-/// starts the same way.
+/// The top line is one row: the docked navigator's header and every top pane's tab bar start
+/// at the window's top and are the header's height, side by side on one rule; no title bar
+/// stands over the panes. Hidden, the tab bars alone are the top line, the same height.
+#[gpui::test]
+fn the_top_line_is_one_row(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let left = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let right = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    beside(&view, cx, right, left, slopty_client::layout::Side::Right);
+    let h = Theme::default().density.header;
+    let row = |cx: &mut VisualTestContext, selector: &'static str| {
+        let b = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"));
+        assert!(f32::from(b.top()).abs() < 0.5, "{selector} at the window's top: {b:?}");
+        assert!((f32::from(b.size.height) - h).abs() < 0.5, "{selector} one row tall: {b:?}");
+        b
+    };
+    let header = row(cx, "nav-header");
+    let (first, second) =
+        (row(cx, selector("title", left.item)), row(cx, selector("title", right.item)));
+    assert!((header.right() - first.left()).abs() < px(0.5), "side by side: {header:?} {first:?}");
+    assert!(first.right() <= second.left() + px(1.0), "{first:?} {second:?}");
+    assert!(cx.debug_bounds("titlebar").is_none(), "no title bar over the panes");
+    let (lead, cluster) = (row(cx, "lead"), row(cx, "cluster"));
+    assert!(first.contains(&lead.center()), "the lead starts the first bar");
+    assert!(second.contains(&cluster.center()), "the cluster ends the last");
+
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    let first = row(cx, selector("title", left.item));
+    assert!(f32::from(first.left()).abs() < 0.5, "from the window's leading edge: {first:?}");
+}
+
+/// ⌘B hides the docked navigator and the panes take its whole room; ⌘B brings it back.
+/// Whether it shows is written with the layout, and a workspace made from that file starts the
+/// same way.
 #[gpui::test]
 fn cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it(cx: &mut TestAppContext) {
     let (dir, path) = temp_layout();
@@ -120,9 +145,9 @@ fn cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it(cx: &mut TestAppC
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     assert!(cx.debug_bounds("navigator").is_none(), "hidden");
-    assert!(cx.debug_bounds("nav-rail").is_some(), "the rail in its place");
+    assert!(cx.debug_bounds("nav-rail").is_none(), "no rail in its place");
     let alone = area_w(cx);
-    let freed = Navigator::DEFAULT_WIDTH - navigator::RAIL_W;
+    let freed = Navigator::DEFAULT_WIDTH;
     assert!((alone - beside - freed).abs() < 1.0, "{beside} → {alone}");
     assert!(!saved_navigator(cx, &path).shown, "the layout keeps it hidden");
     let saved = read_layout(&path).ok().flatten().expect("written");
@@ -131,7 +156,7 @@ fn cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it(cx: &mut TestAppC
     assert!(!restored.read_with(cx, |v, _| v.navigator().shown), "and starts hidden");
 
     click(cx, "navigator-toggle");
-    assert!(cx.debug_bounds("navigator").is_some(), "the title bar's toggle brings it back");
+    assert!(cx.debug_bounds("navigator").is_some(), "the lead's toggle brings it back");
     assert!(saved_navigator(cx, &path).shown);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -274,30 +299,12 @@ fn the_frame_says_where_the_focused_tile_is_once(cx: &mut TestAppContext) {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(!names.iter().any(|l| l.starts_with("Round trip")), "no readout: {names:#?}");
-    assert!(cx.debug_bounds("readouts").is_none(), "the title bar says none of it again");
+    assert!(cx.debug_bounds("readouts").is_none(), "the cluster says none of it again");
     assert!(!names.iter().any(|l| l.contains("1 working")), "no agent counts: {names:#?}");
-    assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
-    // The bell stands in the bar while the navigator is hidden.
-    assert!(cx.debug_bounds("bell").is_none(), "the navigator's Needs you says it");
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let count = cx.debug_bounds("bell-count").expect("the bell counts the one waiting");
-    assert_eq!(count.size, size(px(0.0), px(0.0)), "said, not drawn: no disc on the bell");
+    assert!(cx.debug_bounds("rtt").is_none(), "no round trip in the top line");
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
     let tree = tree(cx);
     assert!(tree.iter().any(|n| n.is("Status", Some("1 new"))), "the count is said: {tree:#?}");
-    let amber =
-        gpui::Background::from(slopty_kit::colors::hsla(Theme::default().surfaces.warn_fill));
-    let bell = cx.debug_bounds("bell").expect("the bell");
-    let disc = cx.update(|window, _| {
-        window.painted_quads().into_iter().any(|q| {
-            q.background == amber && {
-                let scale = window.scale_factor();
-                let at = point(px(q.bounds.origin.x.0 / scale), px(q.bounds.origin.y.0 / scale));
-                bell.contains(&at)
-            }
-        })
-    });
-    assert!(!disc, "no amber disc over the bell");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting), "⌘⇧A still goes to the one waiting");
@@ -349,9 +356,10 @@ fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppCont
     assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge, and holds no breadcrumb or bell while the
-/// navigator stands; the toggle stays in the navigator's top row, clear of the bar. With the
-/// navigator hidden the breadcrumb returns, clear of the bell however long the project's name.
+/// The top line's lead starts at the docked navigator's right edge, and the cluster holds no
+/// breadcrumb while the navigator stands; the toggle stays in the navigator's header. With the
+/// navigator hidden the breadcrumb returns to the cluster, clear of the bell however long the
+/// project's name.
 #[gpui::test]
 fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -367,13 +375,11 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext)
         cx.notify();
     });
     cx.run_until_parked();
-    let (navigator, toggle, titlebar) =
-        (bounds(cx, "navigator"), bounds(cx, "navigator-toggle"), bounds(cx, "titlebar"));
+    let (navigator, toggle, lead) =
+        (bounds(cx, "navigator"), bounds(cx, "navigator-toggle"), bounds(cx, "lead"));
     assert!(toggle.right() <= navigator.right(), "the toggle is the navigator's: {toggle:?}");
-    assert!(navigator.right() <= titlebar.left() + px(0.5), "the bar starts at its edge");
-    for absent in ["crumb-project", "bell"] {
-        assert!(cx.debug_bounds(absent).is_none(), "{absent}: the navigator says it");
-    }
+    assert!(navigator.right() <= lead.left() + px(0.5), "the lead starts at its edge");
+    assert!(cx.debug_bounds("crumb-project").is_none(), "the navigator names the project");
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     let (crumbs, bell) = (bounds(cx, "crumb-project"), bounds(cx, "bell"));
@@ -462,8 +468,8 @@ fn a_workers_tiles_come_in_order_of_attention(cx: &mut TestAppContext) {
 }
 
 /// A tile whose long command finished well while the human looked elsewhere carries the
-/// unseen check at its row's end. The check stands aside while the tile is at work, and goes
-/// once the tile is looked at. One that failed ends its row with the failure's mark instead, which
+/// unseen check in its row's lead. The check stands aside while the tile is at work, and goes
+/// once the tile is looked at. One that failed leads its row with the failure's mark instead, which
 /// comes first.
 #[gpui::test]
 fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppContext) {
@@ -488,7 +494,7 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
         cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
         cx.debug_bounds(check).expect("the check"),
     );
-    assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
+    assert!(lane.left() <= at.left() && at.right() < lane.center().x, "in the lead: {at:?}");
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l.starts_with("make, ") && l.ends_with(", unseen")), "{said:?}");
     view.update_in(cx, |v, _w, cx| {
@@ -503,7 +509,7 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
     cx.run_until_parked();
     let failed = cx.debug_bounds(selector("nav-state", tile.item)).expect("the failure's mark");
     assert!(cx.debug_bounds(check).is_none(), "the failure comes first");
-    assert!(lane.right() >= failed.right() && failed.left() > lane.center().x, "{failed:?}");
+    assert!(lane.left() <= failed.left() && failed.right() < lane.center().x, "{failed:?}");
     assert!(labels(&view, cx).iter().any(|l| l == "make, Failed, unseen"), "named by what it ran");
 
     view.update_in(cx, |v, _w, cx| {
@@ -521,24 +527,17 @@ fn an_unseen_check_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppC
 }
 
 /// How many times the workspace draws in one second of a 120 Hz display: each tick delivers
-/// whatever frame was asked for, then runs what is due. Counted by the panes' builds or the
-/// title bar strip's, which is a tab's one tile's header, whichever built more: one frame may
-/// build both.
+/// whatever frame was asked for, then runs what is due. Counted by the panes' builds, which hold
+/// every tile's tab bar.
 fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> u64 {
-    let builds = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| {
-            let strip = u64::try_from(v.chrome.tile_strip.read(cx).renders).unwrap_or(u64::MAX);
-            (v.drawn.builds.get(), strip)
-        })
-    };
-    let (area, strip) = builds(cx);
+    let builds = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.builds.get());
+    let area = builds(cx);
     for _ in 0..120 {
         cx.executor().advance_clock(Duration::from_nanos(8_333_333));
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
     }
-    let (area_after, strip_after) = builds(cx);
-    area_after.wrapping_sub(area).max(strip_after.wrapping_sub(strip))
+    builds(cx).wrapping_sub(area)
 }
 
 /// A working agent in view turns its mark twelve steps a second, and the workspace draws
@@ -782,7 +781,7 @@ fn narrowing_the_window_never_lays_the_panes_out_as_a_phone(cx: &mut TestAppCont
     assert_eq!(after.left(), area_left(cx), "no strut before it: {after:?}");
 }
 
-/// The window is solid: an opaque ground under the title bar, and the panels opaque on it.
+/// The window is solid: an opaque ground under the top line, and the panels opaque on it.
 /// Nothing shows through from behind the window, and nothing is translucent but the washes.
 #[gpui::test]
 fn the_window_is_one_opaque_ground(cx: &mut TestAppContext) {
@@ -793,13 +792,13 @@ fn the_window_is_one_opaque_ground(cx: &mut TestAppContext) {
     let theme = theme();
     let ground = slopty_kit::colors::hsla(theme.surfaces.ground);
     let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
-    let bar = cx.debug_bounds("titlebar").expect("the title bar").scale(scale);
+    let bar = cx.debug_bounds(selector("title", shell.item)).expect("the top line").scale(scale);
     let under_bar = quads.iter().any(|q| {
         q.bounds.origin.y.0 <= bar.origin.y.0 + 0.5
             && q.bounds.size.height.0 >= bar.size.height.0 - 0.5
             && q.background.as_solid() == Some(ground)
     });
-    assert!(under_bar, "the ground, opaque, under the title bar");
+    assert!(under_bar, "the ground, opaque, under the top line");
     assert!((ground.a - 1.0).abs() < f32::EPSILON, "the ground is opaque");
     let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell").scale(scale);
     let content = slopty_kit::colors::hsla(theme.content());

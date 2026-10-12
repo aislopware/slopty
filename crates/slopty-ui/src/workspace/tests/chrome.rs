@@ -148,19 +148,19 @@ fn dense_screen(rows: usize) -> Vec<String> {
         .collect()
 }
 
-/// How many times each region has drawn: the navigator, the title bar.
+/// How many times each region has drawn: the navigator, the top line.
 fn renders(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> [usize; 2] {
     view.read_with(cx, WorkspaceView::chrome_renders)
 }
 
-/// An echo draws its terminal and leaves the navigator and the title bar as they were drawn; a
+/// An echo draws its terminal and leaves the navigator and the top line as they were drawn; a
 /// change to the workspace draws them all again.
 #[gpui::test]
 fn an_echo_leaves_the_chrome_as_it_was_drawn(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [_, _, (session, _)] = three_shells(&view, cx, &studio);
-    assert!(cx.debug_bounds("navigator").is_some() && cx.debug_bounds("titlebar").is_some());
+    assert!(cx.debug_bounds("navigator").is_some() && cx.debug_bounds("cluster").is_some());
     let before = renders(&view, cx);
     for (seq, typed) in (1..).zip(["$ l", "$ ls", "$ ls -"]) {
         let rows = [(typed, SemanticMark::Prompt { exit: None, input: Some(2) })];
@@ -208,8 +208,9 @@ fn sash_at(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> (Point<Pixel
 }
 
 /// A sash dragged is the area's alone: each step draws the panes again and leaves the
-/// navigator and the title bar as they were drawn, and no step works out the titles or who
-/// needs the human again, however many steps the drag takes.
+/// navigator as it was drawn, and no step works out the titles or who needs the human again,
+/// however many steps the drag takes. The top line's two ends sit in the top panes' tab bars,
+/// so they draw with those, once a step and no more.
 #[gpui::test]
 fn a_sash_drag_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -237,7 +238,10 @@ fn a_sash_drag_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
     let built = view.read_with(cx, |v, _| v.drawn.builds.get()).saturating_sub(builds);
     assert_ne!(sizes(cx), before, "the drag moved the panes");
     assert!(built >= 12, "the area drew each step: {built}");
-    assert_eq!(after, chrome, "no step drew the chrome");
+    assert_eq!(after[0], chrome[0], "no step drew the navigator");
+    let ends = after[1].saturating_sub(chrome[1]);
+    let ends = u64::try_from(ends).unwrap_or(u64::MAX);
+    assert!(ends <= built.saturating_mul(2), "the lead and the cluster, once a step: {ends}");
     assert_eq!(took, counts, "nor worked out the titles");
     cx.simulate_mouse_up(at, left, Modifiers::default());
     cx.run_until_parked();
@@ -332,9 +336,8 @@ fn a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows(cx: &mut 
     );
 }
 
-/// A command starting in a shell is news for its navigator row, and only for the navigator,
-/// while the shell is not what names its tab. Started in the shell that does, it renames the
-/// title tab too.
+/// A command starting in a shell is news for its navigator row and its pane's tab: the top
+/// line's ends sit in the top panes' tab bars, so they draw with those, once and no more.
 #[gpui::test]
 fn a_command_that_starts_draws_the_navigator_alone(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -346,25 +349,24 @@ fn a_command_that_starts_draws_the_navigator_alone(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.term_event(session, marked_frame(1, &rows, 0), cx));
     cx.run_until_parked();
     let before = renders(&view, cx);
+    let builds = view.read_with(cx, |v, _| v.drawn.builds.get());
     let rows = [("$ make", prompt), ("building", SemanticMark::Output)];
     view.update_in(cx, |v, _w, cx| v.term_event(session, marked_frame(2, &rows, 1), cx));
     cx.run_until_parked();
     let after = renders(&view, cx);
+    let built = view.read_with(cx, |v, _| v.drawn.builds.get()).saturating_sub(builds);
     assert!(after[0] > before[0], "the navigator draws the new command: {before:?} → {after:?}");
-    assert_eq!(after[1..], before[1..], "the bars do not");
+    let ends = after[1].saturating_sub(before[1]);
+    let ends = u64::try_from(ends).unwrap_or(u64::MAX);
+    assert!(ends <= built.saturating_mul(2), "the ends draw only with the bars: {ends}, {built}");
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
     assert!(lines.iter().any(|(title, ..)| title == "make"), "its title: {lines:#?}");
 
-    let tabs = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.chrome.title_tabs.read(cx).renders)
-    };
-    let before = tabs(cx);
     let rows = [("$ cargo test", prompt), ("running", SemanticMark::Output)];
     view.update_in(cx, |v, _w, cx| v.term_event(naming, marked_frame(1, &rows, 1), cx));
     cx.run_until_parked();
-    assert!(tabs(cx) > before, "the tab it names is renamed");
-    let named = view.read_with(cx, |v, _| v.title_tabs());
-    assert!(named.iter().any(|t| t.title.contains("cargo")), "{named:?}");
+    let named = view.read_with(cx, |v, _| v.tab_lines());
+    assert!(named.iter().any(|t| t.title.contains("cargo")), "the tab's name follows: {named:?}");
 }
 
 /// A key typed into a focused shell holds the working marks' steps for its echo, for the round
@@ -483,41 +485,26 @@ fn agents_at_their_turn_draw_no_section_and_no_clock(cx: &mut TestAppContext) {
     assert_eq!(renders(&view, cx), before, "the seconds passing draw nothing");
 }
 
-/// With the navigator hidden where it docks, a worker holding tiles of its own (of no project)
-/// stands on the rail for them, marked with what wants the person once something does; it goes
-/// to that tile. A rail of a machine's loose tiles alone was an empty column before. The title
-/// bar runs over it, so its top is the bar's own row and it draws no top cell of its own
-/// (`MonoCode`'s compact rail under a title bar above it): its first square stands its padding
-/// under the bar's line, the full width across the rail.
+/// A hidden navigator is hidden: no rail stands in its place, the panes take the window's whole
+/// width from its leading edge, and what waits on the person is the bell's count.
 #[gpui::test]
-fn the_rail_shows_a_worker_with_its_own_tiles_and_what_waits(cx: &mut TestAppContext) {
+fn a_hidden_navigator_leaves_no_rail(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
     let away = SessionId::new();
-    let theirs = opens(&view, cx, &laptop, away, laptop.me, 1);
-    let _mine = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    assert!(cx.debug_bounds("nav-rail").is_none(), "the navigator shows");
+    let _theirs = opens(&view, cx, &laptop, away, laptop.me, 1);
+    let mine = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    let rail = cx.debug_bounds("nav-rail").expect("the rail in its place");
-    assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5, "{rail:?}");
-    let bar = cx.debug_bounds("titlebar").expect("the title bar");
-    assert!((rail.top() - bar.bottom()).abs() < px(0.5), "under the bar: {rail:?} {bar:?}");
-    assert!(bar.left() <= rail.left() && bar.right() > rail.right(), "the bar runs over it");
-    let search = cx.debug_bounds("nav-rail-search").expect("its first square");
-    let theme = view.read_with(cx, |v, _| v.theme.clone());
-    let pad = theme.spacing.xs + theme.spacing.xxs;
-    assert!((search.top() - rail.top() - px(pad)).abs() < px(0.5), "no top cell: {search:?}");
-    let glyph = leak(format!("nav-rail-{}", laptop.key));
-    assert!(cx.debug_bounds(glyph).is_some(), "at rest and well, it stands for its tiles");
-    let badge = leak(format!("nav-rail-{}-rollup", laptop.key));
-    assert!(cx.debug_bounds(badge).is_none(), "with nothing waiting");
+    assert!(cx.debug_bounds("navigator").is_none(), "hidden");
+    assert!(cx.debug_bounds("nav-rail").is_none(), "no rail in its place");
+    let item = cx.debug_bounds(selector("item", mine.item)).expect("the shell");
+    assert!(f32::from(item.left()).abs() < 0.5, "from the window's leading edge: {item:?}");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(away), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds(badge).is_some(), "what waits shows on the rail");
-    click_at(cx, glyph);
-    assert_eq!(focused(&view, cx), Some(theirs), "the worker's tile");
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts what waits");
+    assert!(cx.debug_bounds("nav-rail").is_none(), "and still no rail");
 }
 
 /// The handle is 12 pt centred on the navigator's edge, and a double-click puts the width back.
@@ -585,36 +572,25 @@ fn the_project_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
 }
 
-/// The panes meet the foot bar, which meets the window's bottom edge, and the title bar says
-/// nothing of itself while nothing needs saying. The server out of reach is said at
-/// its trailing end until it answers; a word about no one tile sits in its lane; a failure in
-/// a tile's own work sits beside that tile, under its header at its trailing edge, and moves to
-/// the title bar once the tile is gone.
+/// The cluster says nothing of itself while nothing needs saying. The server out of reach is
+/// said in it until it answers; a word about no one tile hangs under it; a failure in a tile's
+/// own work sits beside that tile, under its header at its trailing edge, and moves under the
+/// cluster once the tile is gone.
 #[gpui::test]
-fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppContext) {
+fn a_notice_sits_by_its_work(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let bounds = |cx: &mut VisualTestContext, selector: &'static str| cx.debug_bounds(selector);
-    let area = bounds(cx, "area").expect("the panes' area is drawn");
-    let window = cx.update(|window, _| window.viewport_size());
-    let foot = bounds(cx, "foot").expect("the foot bar");
-    assert!(f32::from(window.height - foot.bottom()).abs() < 0.5, "on the window's bottom edge");
-    let tile = cx.debug_bounds(selector("item", shell.item)).expect("the shell");
-    for (what, bottom) in [("the tile", tile.bottom()), ("the area", area.bottom())] {
-        assert!(
-            f32::from(foot.top() - bottom).abs() < 0.5,
-            "{what} on the foot bar: {bottom:?} over {foot:?}"
-        );
-    }
     assert!(bounds(cx, "readouts").is_none(), "nothing to say, nothing said");
     assert!(bounds(cx, "status-worker").is_none(), "the worker is the navigator's to name");
 
-    let titlebar = bounds(cx, "titlebar").expect("the title bar");
+    let cluster = bounds(cx, "cluster").expect("the cluster");
     view.update_in(cx, |v, _w, cx| v.set_server_status(Some("server unreachable".into()), cx));
     cx.run_until_parked();
     let server = bounds(cx, "readout-server").expect("the server's word");
-    assert!(titlebar.contains(&server.center()), "at the title bar's end: {server:?}");
+    let cluster = bounds(cx, "cluster").unwrap_or(cluster);
+    assert!(cluster.contains(&server.center()), "in the cluster: {server:?}");
     let more = bounds(cx, "more").expect("the bar's \u{2026}");
     assert!(server.right() <= more.left(), "before \u{2026}: {server:?} {more:?}");
     view.update_in(cx, |v, _w, cx| v.set_server_status(None, cx));
@@ -624,7 +600,7 @@ fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppCon
     view.update(cx, |v, cx| v.show_notice("Copied".to_owned(), cx));
     cx.run_until_parked();
     let lane = bounds(cx, "notices").expect("a word about no one tile");
-    assert!(titlebar.contains(&lane.center()), "in the title bar's lane: {lane:?}");
+    assert!(lane.top() >= cluster.bottom(), "under the cluster: {lane:?}");
 
     view.update(cx, |v, cx| v.show_failure_at(shell, "The drop did not land".to_owned(), cx));
     cx.run_until_parked();
@@ -632,9 +608,7 @@ fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppCon
     let beside = bounds(cx, leak(format!("tile-notices-{}", shell.item.as_uuid())))
         .expect("the failure beside its tile");
     assert!(tile.contains(&beside.center()), "within its tile: {beside:?} in {tile:?}");
-    // Alone in its tab it has no header of its own: the title bar is its header.
     let header = view.read_with(cx, |v, _| v.header_h());
-    assert!(header.abs() < f32::EPSILON, "the shell is its tab's one tile");
     assert!(
         f32::from(beside.top()) >= f32::from(tile.top()) + header - 0.5,
         "at its top: {beside:?} in {tile:?}"
@@ -654,14 +628,14 @@ fn the_panes_meet_the_foot_bar_and_a_notice_sits_by_its_work(cx: &mut TestAppCon
         texts.iter().any(|t| t == "The drop did not land"),
         "a failure outlives its tile: {texts:?}"
     );
-    assert!(bounds(cx, "notices").is_some(), "and moves to the title bar");
+    assert!(bounds(cx, "notices").is_some(), "and moves under the cluster");
 }
 
-/// Notices the bar has no room for are never cut off unseen: the newest stays whole, the
+/// Notices the window has no room for are never cut off unseen: the newest stays whole, the
 /// older go behind a count, and the count opens them under it. With room again they come back
 /// beside it and the count goes.
 #[gpui::test]
-fn the_notices_the_bar_has_no_room_for_go_behind_a_count_that_opens_them(cx: &mut TestAppContext) {
+fn the_notices_with_no_room_go_behind_a_count_that_opens_them(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -678,9 +652,9 @@ fn the_notices_the_bar_has_no_room_for_go_behind_a_count_that_opens_them(cx: &mu
 
     cx.simulate_resize(size(px(760.0), px(900.0)));
     cx.run_until_parked();
-    let titlebar = cx.debug_bounds("titlebar").expect("the title bar");
+    let window = cx.update(|window, _| window.viewport_size());
     let lane = cx.debug_bounds("notices").expect("the notices");
-    assert!(lane.right() <= titlebar.right(), "within the bar: {lane:?} {titlebar:?}");
+    assert!(lane.right() <= window.width, "within the window: {lane:?}");
     let more = cx.debug_bounds("notices-more").expect("the older behind a count");
     assert!(lane.contains(&more.center()), "the count is in the lane: {more:?} {lane:?}");
     assert!(cx.debug_bounds("notices-left").is_none(), "closed until asked");
@@ -1016,4 +990,33 @@ fn a_command_in_the_focused_tile_retitles_a_phones_bar(cx: &mut TestAppContext) 
         heading(cx).is_some_and(|h| h.starts_with("terminal cat -v")),
         "still the focused tile"
     );
+}
+
+/// With a task waiting, the top line stays controls: no part of the cluster is wider than the
+/// project's button (no sentence about the work stands there), and the bell's badge says how
+/// many wait. What waits is the navigator's *Needs you* to say in words.
+#[gpui::test]
+fn the_bell_counts_and_the_bar_stays_quiet(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let _asking = opens(&view, cx, &studio, session, studio.me, 1);
+    let _other = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    let cluster = cx.debug_bounds("cluster").expect("the cluster");
+    let project = cx.debug_bounds("crumb-project").expect("the project's button");
+    let nodes = tree(cx);
+    let inside = nodes.iter().filter(|n| {
+        let [x, y, w, h] = n.bounds;
+        n.role != "Group" && cluster.contains(&point(px(x + w / 2.0), px(y + h / 2.0)))
+    });
+    for node in inside {
+        let width = node.bounds[2];
+        assert!(width <= f32::from(project.size.width) + 0.5, "a control, not prose: {node:?}");
+    }
+    assert!(cx.debug_bounds("bell-count").is_some(), "the badge counts it");
+    assert!(nodes.iter().any(|n| n.is("Status", Some("1 new"))), "{nodes:#?}");
 }

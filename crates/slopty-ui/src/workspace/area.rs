@@ -3,13 +3,12 @@
 //! body), and the pointer that carries a tile by its header or its tab. With no tab on show,
 //! the start page.
 //!
-//! A pane's header or tab, a navigator's tile row, or a title tab pressed and moved past
-//! [`DRAG_SLOP`] carries what it stands for ([`Carried`]). A tile over a pane, within a fifth of
-//! the pane's shorter side from an edge, splits it there; elsewhere it joins the pane's tabs
+//! A pane's header or tab, or a navigator's tile row, pressed and moved past [`DRAG_SLOP`]
+//! carries what it stands for ([`Carried`]). A tile over a pane, within a fifth of the pane's
+//! shorter side from an edge, splits it there; elsewhere it joins the pane's tabs
 //! ([`slopty_client::layout::Tiling::drop_target`]), and the wash shows the pane the tile would
-//! become. Over the title strip, a tile becomes a tab of its own and a title tab moves, where a
-//! mark between two tabs says. Over a project's row in the navigator, either goes to that
-//! project, the row washed ([`Landing`]).
+//! become. Over a project's row in the navigator, it goes to that project, the row washed
+//! ([`Landing`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -17,11 +16,11 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, Bounds, Context, Entity, EntityId, InteractiveElement as _, IntoElement as _, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, canvas, div, px,
+    App, Bounds, Context, ElementId, Entity, EntityId, InteractiveElement as _, IntoElement as _,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, canvas, div,
+    px,
 };
-use slopty_client::layout::tiling::TabId;
 use slopty_client::layout::{Drop, GroupKey, Laid, PaneId, Rect, Sash, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_kit::colors::hsla;
@@ -48,8 +47,6 @@ pub(super) enum Drag {
 pub(super) enum Carried {
     /// A tile: from its pane's header or tab, or its navigator row.
     Tile(TileRef),
-    /// A title tab, its layout whole.
-    Tab(TabId),
     /// A thread with no tile here, from its navigator row: dropped on a pane, its tile opens
     /// there (`MonoCode`'s session card dragged onto a pane's edge).
     Thread { worker: WorkerKey, thread: ThreadId },
@@ -60,44 +57,24 @@ pub(super) enum Carried {
 pub(super) enum Landing {
     /// On a pane of the tab on show: a tile alone lands there.
     Pane(Drop),
-    /// On the title strip, before the tab at this index (past the last, after it).
-    Strip(usize),
     /// On a project's row in the navigator.
     Project(GroupKey),
 }
 
 /// Where the chrome outside the area takes a drop, as it was last drawn, in window
-/// coordinates: the title strip and its tabs, and the navigator's project rows. Each surface
-/// writes its own as it lays out ([`spot`]).
+/// coordinates: the navigator's project rows. Each writes its own as it lays out ([`spot`]).
 #[derive(Default)]
 pub(super) struct DropSpots {
-    /// The title strip.
-    pub strip: Cell<Option<Bounds<Pixels>>>,
-    /// Each title tab.
-    pub tabs: RefCell<Vec<(TabId, Bounds<Pixels>)>>,
     /// Each project row the navigator drew.
     pub projects: RefCell<Vec<(GroupKey, Bounds<Pixels>)>>,
 }
 
 impl DropSpots {
-    /// Title tab `id` lies at `bounds`: in place of where it lay, should it be laid out twice.
-    pub fn put_tab(&self, id: TabId, bounds: Bounds<Pixels>) {
-        let mut tabs = self.tabs.borrow_mut();
-        tabs.retain(|(t, _)| *t != id);
-        tabs.push((id, bounds));
-    }
-
     /// The row of project `home` lies at `bounds`.
     pub fn put_project(&self, home: &GroupKey, bounds: Bounds<Pixels>) {
         let mut projects = self.projects.borrow_mut();
         projects.retain(|(k, _)| k != home);
         projects.push((home.clone(), bounds));
-    }
-
-    /// The title strip is not drawn.
-    pub fn no_strip(&self) {
-        self.strip.set(None);
-        self.tabs.borrow_mut().clear();
     }
 }
 
@@ -125,13 +102,17 @@ pub(super) struct Placed {
     pub pane: PaneId,
     /// Its pane has the focus.
     pub focused: bool,
-    /// Its pane holds other tiles too, so its header is a row of tabs.
-    pub tabs: bool,
-    /// Its tab holds other panes too, so the focused one's shown tab wears the focus edge.
+    /// Its tab holds other panes too, so the focused one's shown tab wears the focus dot.
     pub shared: bool,
-    /// It is the one tile on show in its tab ([`WorkspaceView::lone_tile`]): its header is
-    /// the title bar's, and its pane has none.
-    pub lone: bool,
+    /// Its pane meets the window's top: its tab bar is part of the top line, whose empty run
+    /// is the window's title bar.
+    pub top: bool,
+    /// Its pane meets the window's top line at its leading end: its tab bar starts with the
+    /// window's lead ([`WorkspaceView::render_lead`]).
+    pub top_left: bool,
+    /// Its pane meets the window's top line at its trailing end: its tab bar ends with the
+    /// window's cluster ([`super::cluster`]).
+    pub top_right: bool,
 }
 
 /// What the area drew, kept by its view ([`super::AreaHost`]) and read by the workspace's
@@ -151,6 +132,9 @@ pub(super) struct Drawn {
     pub on_screen: RefCell<HashSet<ItemId>>,
     /// Bumped every time the area builds.
     pub builds: Cell<u64>,
+    /// Whether the window drew its own top line over the area in the last frame
+    /// ([`WorkspaceView::follow_top_line`]).
+    pub own_top_line: Cell<Option<bool>>,
     /// What the last build handed each body it drew, and what the one before handed
     /// ([`WorkspaceView::hand_over`]).
     pub handed: RefCell<HashMap<EntityId, Handed>>,
@@ -230,37 +214,24 @@ impl WorkspaceView {
     }
 
     /// Something pressed that a move would carry, from a surface that does not focus it on the
-    /// press: a navigator row, a title tab.
+    /// press: a navigator row.
     pub(super) fn begin_carry(&mut self, carried: Carried, ev: &MouseDownEvent) {
         self.drag = Some(Drag::Move { carried, grab: ev.position, moving: false, target: None });
     }
 
-    /// Where `carried` would land with the pointer at `p`: the title strip, then a project's
-    /// row other than its own, then for a tile a pane of the tab on show.
+    /// Where `carried` would land with the pointer at `p`: a project's row other than its own,
+    /// then a pane of the tab on show.
     fn landing_at(&self, carried: Carried, p: Point<Pixels>) -> Option<Landing> {
         let spots = &self.drop_spots;
-        let thread = matches!(carried, Carried::Thread { .. });
-        if !thread && spots.strip.get().is_some_and(|b| b.contains(&p)) {
-            let mut tabs = spots.tabs.borrow().clone();
-            tabs.sort_by(|a, b| f32::from(a.1.origin.x).total_cmp(&f32::from(b.1.origin.x)));
-            let index = tabs.iter().position(|(_, b)| p.x < b.center().x).unwrap_or(tabs.len());
-            return Some(Landing::Strip(index));
-        }
         let row =
             spots.projects.borrow().iter().find(|(_, b)| b.contains(&p)).map(|(k, _)| k.clone());
-        if let Some(home) = row.filter(|_| !thread) {
-            let own = match carried {
-                Carried::Tile(tile) => self.layout.position(tile).map(|pos| pos.project),
-                Carried::Tab(id) => self.layout.tab_place(id).map(|(p, _)| p),
-                Carried::Thread { .. } => None,
-            };
-            let own = own
-                .and_then(|p| self.layout.projects().get(p))
+        if let (Some(home), Carried::Tile(tile)) = (row, carried) {
+            let own = self
+                .layout
+                .position(tile)
+                .and_then(|pos| self.layout.projects().get(pos.project))
                 .map(slopty_client::layout::Project::home);
             return (own != Some(&home)).then_some(Landing::Project(home));
-        }
-        if let Carried::Tab(_) = carried {
-            return None;
         }
         if !self.drawn.viewport.get().contains(&p) {
             return None;
@@ -277,10 +248,9 @@ impl WorkspaceView {
         }
     }
 
-    /// The views that draw a landing: the area's wash, the strip's mark, a row's wash.
+    /// The views that draw a landing: the area's wash, a row's wash.
     fn landing_moved(&self, cx: &mut Context<Self>) {
         App::notify(cx, self.area_host.entity_id());
-        App::notify(cx, self.chrome.title_tabs.entity_id());
         App::notify(cx, self.chrome.nav_rows.entity_id());
     }
 
@@ -349,25 +319,13 @@ impl WorkspaceView {
         {
             self.open_thread_dropped(worker, thread, *drop, cx);
         } else if let (true, Some(target)) = (moving, target) {
-            let home = self.layout.shown_project().map(|p| p.home().clone());
             self.layout_action(cx, |l| match (carried, target) {
                 (Carried::Tile(tile), Landing::Pane(drop)) => {
                     l.place(tile, drop);
                     l.focus(tile);
                 }
-                (Carried::Tile(tile), Landing::Strip(index)) => {
-                    if let Some(home) = &home {
-                        l.new_tab_at(tile, home, index);
-                    }
-                }
                 (Carried::Tile(tile), Landing::Project(home)) => l.move_to_project(tile, &home),
-                (Carried::Tab(id), Landing::Strip(index)) => {
-                    l.move_tab(id, index);
-                }
-                (Carried::Tab(id), Landing::Project(home)) => {
-                    l.move_tab_to_project(id, &home);
-                }
-                (Carried::Tab(_), Landing::Pane(_)) | (Carried::Thread { .. }, _) => {}
+                (Carried::Thread { .. }, _) => {}
             });
         }
         // A press let go where it was is a click: nothing was drawn for it.
@@ -427,34 +385,25 @@ impl WorkspaceView {
         App::notify(cx, self.area_host.entity_id());
     }
 
-    /// The tile on show alone in the tab on show: one pane laid out, holding one tile, and no
-    /// other pane zoomed away. Its tab in the title bar says its title, so its pane draws no
-    /// header, and the bar holds the rest of one ([`super::tile_strip`]). A tab's terminal put
-    /// away leaves it alone; a phone's bar is its focused tile's anyway.
-    pub(super) fn lone_tile(&self) -> Option<TileRef> {
-        let tab = self.layout.shown_tab()?;
-        if self.phone || tab.zoomed().is_some_and(|_| tab.panes().nth(1).is_some()) {
-            return None;
+    /// The area gives the window's own top line its height in the frame the line comes, and
+    /// takes it back in the frame it goes (the first pane to meet the top holds the line in
+    /// its tab bar), so what is placed in that frame, a display made for this device sized to
+    /// its tile, is sized as it is drawn and not as the frame before had it.
+    pub(super) fn follow_top_line(&mut self, window: &Window) {
+        let own = self.own_top_line();
+        let was = self.drawn.own_top_line.replace(Some(own));
+        if was.is_none_or(|was| was == own) {
+            return;
         }
-        let frame = self.layout.frame();
-        let [laid] = frame.panes.as_slice() else { return None };
-        match tab.pane(laid.pane)?.tiles() {
-            [tile] => Some(*tile),
-            _ => None,
-        }
+        let line = super::titlebar_height(&self.theme) + f32::from(window.insets().effective().top);
+        let area = self.layout.area();
+        let h = if own { area.h - line } else { area.h + line };
+        self.layout.set_area(area.w, h.max(0.0));
     }
 
-    /// News for the tiles' headers and bodies alone: the panes are drawn again, and so is the
-    /// title bar's strip while it is the one tile's header, and its tab where what it says
-    /// changed ("Edited").
+    /// News for the tiles' headers and bodies alone: the panes are drawn again.
     pub(super) fn panes_news(&self, cx: &mut App) {
         App::notify(cx, self.area_host.entity_id());
-        if self.lone_tile().is_some() {
-            App::notify(cx, self.chrome.tile_strip.entity_id());
-            if *self.title_tabs_drawn.borrow() != self.title_tabs() {
-                App::notify(cx, self.chrome.title_tabs.entity_id());
-            }
-        }
     }
 
     /// The tile each pane of the tab on show shows, where.
@@ -463,8 +412,7 @@ impl WorkspaceView {
         let focus = tab.focus();
         let frame = self.layout.frame();
         let shared = frame.panes.len() > 1;
-        let lone = self.lone_tile();
-        frame
+        let mut placed: Vec<Placed> = frame
             .panes
             .iter()
             .filter_map(|laid| {
@@ -474,12 +422,42 @@ impl WorkspaceView {
                     rect: laid.rect,
                     pane: laid.pane,
                     focused: laid.pane == focus,
-                    tabs: pane.tiles().len() > 1,
                     shared,
-                    lone: lone.is_some(),
+                    top: false,
+                    top_left: false,
+                    top_right: false,
                 })
             })
-            .collect()
+            .collect();
+        // A pane meets the top line where its top is the area's, and the lead and the cluster
+        // each go to one pane: the leftmost and the rightmost of those. A phone draws its own
+        // bar, and the window its own line while no pane meets the top.
+        if !self.own_top_line() {
+            let area = self.layout.area();
+            let top = |p: &Placed| (p.rect.y - area.y).abs() < 0.5;
+            for p in &mut placed {
+                p.top = top(p);
+            }
+            let left = placed
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.top)
+                .min_by(|(_, a), (_, b)| a.rect.x.total_cmp(&b.rect.x))
+                .map(|(ix, _)| ix);
+            let right = placed
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.top)
+                .max_by(|(_, a), (_, b)| (a.rect.x + a.rect.w).total_cmp(&(b.rect.x + b.rect.w)))
+                .map(|(ix, _)| ix);
+            if let Some(p) = left.and_then(|ix| placed.get_mut(ix)) {
+                p.top_left = true;
+            }
+            if let Some(p) = right.and_then(|ix| placed.get_mut(ix)) {
+                p.top_right = true;
+            }
+        }
+        placed
     }
 
     /// The tiles on screen in this build: `visible`, remote ones first seen off screen from
@@ -643,7 +621,7 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let muted = hsla(s.text_muted);
         let title_of = |text: SharedString| {
-            kit::typed(kit::inset_x(div(), theme), theme.roles().panel_title)
+            kit::typed(div(), theme.roles().panel_title)
                 .pb(px(spacing.xs))
                 .text_color(hsla(s.text))
                 .child(text)
@@ -670,7 +648,7 @@ impl WorkspaceView {
             });
             column
                 .child(title_of(SharedString::from(super::readouts::sentence(&status))))
-                .child(kit::inset_x(div(), theme).text_color(muted).child(SERVER_DOWN_NEXT))
+                .child(div().text_color(muted).child(SERVER_DOWN_NEXT))
                 .child(
                     div()
                         .w_full()
@@ -689,7 +667,7 @@ impl WorkspaceView {
             });
             column
                 .child(title_of(NO_WORKERS.into()))
-                .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
+                .child(div().text_color(muted).child(NO_WORKERS_NEXT))
                 .children(add)
         } else {
             return kit::pane_surface(theme)
@@ -718,28 +696,27 @@ impl WorkspaceView {
         kit::pane_surface(theme).absolute().inset_0().child(page).into_any_element()
     }
 
-    /// The composer page, Zed's empty state: the question, the composer unboxed, and a short
-    /// list of a terminal and a window, in a narrow column a third of the way down.
+    /// The composer page, a thread with no turns (`.research/design-polish-2026-10-12.md`
+    /// §4.9): the goal's composer at the pane's foot, where a thread keeps it, and above it a
+    /// launcher in a 512 pt column whose top stands at 30 % of the pane, on one edge: the
+    /// question, where a goal goes, a *Start* head over the ways that need no goal, then a
+    /// *Recent* head over the tabs used last. The doors print no keys: keys are the palette's.
     fn composer_page(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let asked = self.empty_question();
-        // On the edge the goal's words start at, as the list under the composer leads its
-        // words past its marks.
         let question = kit::typed(div(), theme.roles().page_heading)
-            .pl(px(kit::FIELD_INSET))
             .id("empty-question")
             .debug_selector(|| "empty-question".to_owned())
             .role(gpui::accesskit::Role::Heading)
             .aria_label(asked.clone())
             .w_full()
-            .pb(px(spacing.md))
             .text_color(hsla(s.text))
             .child(asked.clone());
-        // Where ↵ sends the goal, said under the field: nothing starts somewhere unseen, and a
-        // press opens the sheet that changes it.
-        let foot = self.page_goal_place(cx).map(|place| {
+        // Where ↵ sends the goal, a muted line under the question: nothing starts somewhere
+        // unseen, and a press opens the sheet that changes it.
+        let place = self.page_goal_place(cx).map(|place| {
             let el = kit::typed(div(), theme.roles().metadata)
                 .id("empty-goal-foot")
                 .debug_selector(|| "empty-goal-foot".to_owned())
@@ -747,17 +724,14 @@ impl WorkspaceView {
                 .aria_label(SharedString::from(place.clone()))
                 .aria_description(CHANGE_PLACE)
                 .flex_none()
-                .flex()
-                .items_center()
-                .h(px(theme.density.chip))
-                .px(px(spacing.xs))
-                .rounded(px(theme.radii.sm))
+                .min_w_0()
+                .pt(px(spacing.sm))
                 .cursor_pointer()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_color(hsla(s.text_secondary))
-                .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .text_color(hsla(s.text_muted))
+                .hover(|st| st.text_color(hsla(s.text)))
                 .child(SharedString::from(place));
             slopty_kit::a11y::tab_stop(el, s.focus).on_click(cx.listener(
                 |this, _ev, window, cx| {
@@ -765,32 +739,22 @@ impl WorkspaceView {
                 },
             ))
         });
-        // The thread's next turn, unboxed: the lighter line over it and no field's box, as
-        // Zed's empty state sets its composer.
-        let composer = self.empty_goal.as_ref().map(|(goal, _)| {
-            kit::message::shell(div(), theme)
-                .debug_selector(|| "empty-goal".to_owned())
-                .w_full()
-                .px(px(kit::FIELD_INSET))
-                .pt(px(spacing.xs))
-                .pb(px(spacing.xxs))
-                .flex()
-                .flex_col()
-                .child(
-                    gpui_kit::component::input::Textarea::new(goal)
-                        .appearance(false)
-                        .aria_label(asked.clone()),
-                )
-                // The foot's words start where the goal's text does: the field pads its text
-                // by the inset, and the chip pads its words by its own.
-                .child(div().w_full().flex().pl(px(kit::FIELD_INSET - spacing.xs)).children(foot))
-        });
-        // Zed's empty state: the ways that need no goal as a short list under the composer.
+        let head = |id: &'static str, words: &'static str| {
+            kit::typed(div(), theme.roles().section)
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(gpui::accesskit::Role::Heading)
+                .aria_label(words)
+                .pt(px(spacing.xl))
+                .pb(px(spacing.xs))
+                .text_color(hsla(s.text_muted))
+                .child(words)
+        };
         let doors = div()
             .w_full()
-            .pt(px(spacing.md))
             .flex()
             .flex_col()
+            .child(head("empty-start", START))
             .child(
                 self.door_row("empty-terminal", Symbol::Terminal, NEW_TERMINAL.into(), false)
                     .on_click(cx.listener(|this, _ev, window, cx| {
@@ -802,31 +766,113 @@ impl WorkspaceView {
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.add_window(&super::actions::AddWindow, window, cx);
                     })),
+            )
+            .child(
+                self.door_row(
+                    "empty-new-goal",
+                    Symbol::Flag,
+                    super::titlebar::NEW_GOAL.into(),
+                    false,
+                )
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.new_goal(&super::actions::NewGoal, window, cx);
+                })),
             );
-        // Zed's empty state stands a third of the way down, in a narrow column.
-        div()
-            .id("empty-workspace")
-            .debug_selector(|| "empty-workspace".to_owned())
-            .size_full()
+        // The tabs used last, newest first, each a row that goes back to it.
+        let recent: Vec<(ItemId, String, slopty_kit::icons::Mark)> = self
+            .recency
+            .iter()
+            .rev()
+            .filter(|id| self.tile_of(**id).is_some())
+            .filter_map(|id| {
+                let (_, item) = self.items().find(|(_, item)| item.id == *id)?;
+                Some((*id, self.tile_title(item), self.kind_glyph(item)))
+            })
+            .take(RECENT_TABS)
+            .collect();
+        let recent = (!recent.is_empty()).then(|| {
+            let rows = recent.into_iter().map(|(id, title, mark)| {
+                let selector = format!("empty-recent-{}", id.as_uuid());
+                let row = kit::row(theme, kit::Row::One)
+                    .id(ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector)
+                    .role(gpui::accesskit::Role::Button)
+                    .aria_label(SharedString::from(title.clone()))
+                    .ml(px(-spacing.inset()))
+                    .mr(px(-spacing.inset_trailing()))
+                    .rounded(px(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(hsla(s.hover)))
+                    .active(|st| st.bg(hsla(s.pressed)))
+                    .child(crate::palette::lead_slot(theme, mark, hsla(s.icon_muted)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(title)),
+                    )
+                    .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to(id, cx)));
+                slopty_kit::a11y::tab_stop(row, s.focus)
+            });
+            div().w_full().flex().flex_col().child(head("empty-recent", RECENT)).children(rows)
+        });
+        // The goal's composer, unboxed, at the pane's foot in the reading column a thread
+        // keeps it in, so the habit is one place.
+        let composer = self.empty_goal.as_ref().map(|(goal, _)| {
+            let (side, lane) = (spacing.lg, crate::conversation::thread::view::LANE);
+            let column = crate::conversation::thread::view::PROSE;
+            div().flex_none().w_full().flex().justify_center().pb(px(spacing.sm)).child(
+                kit::message::shell(div(), theme)
+                    .debug_selector(|| "empty-goal".to_owned())
+                    .w_full()
+                    .max_w(px(2.0_f32.mul_add(side, lane + column)))
+                    .pl(px(side + lane))
+                    .pr(px(side))
+                    .pt(px(spacing.sm))
+                    .child(
+                        gpui_kit::component::input::Textarea::new(goal)
+                            .appearance(false)
+                            .px_0()
+                            .aria_label(asked.clone()),
+                    ),
+            )
+        });
+        let launcher = div()
+            .id("empty-launcher")
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .overflow_y_scroll()
             .flex()
             .flex_col()
             .items_center()
-            .px(px(spacing.xl))
-            .text_size(px(theme.typography.ui_size))
-            .font_family(theme.typography.ui_family.clone())
+            .px(px(spacing.page()))
             .child(div().flex_none().w_full().h(gpui::relative(EMPTY_ANCHOR)))
             .child(
                 div()
+                    .debug_selector(|| "empty-column".to_owned())
                     .w_full()
                     .max_w(px(EMPTY_W))
                     .pb(px(spacing.xl))
                     .flex()
                     .flex_col()
                     .child(question)
-                    .children(composer)
-                    .child(doors),
-            )
+                    .children(place)
+                    .child(doors)
+                    .children(recent),
+            );
+        div()
+            .id("empty-workspace")
+            .debug_selector(|| "empty-workspace".to_owned())
+            .size_full()
+            .flex()
+            .flex_col()
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .child(launcher)
+            .children(composer)
             .into_any_element()
     }
 
@@ -917,7 +963,8 @@ impl WorkspaceView {
     }
 
     /// A row of the empty page that opens a door, not a tile: its glyph and its words, the
-    /// first door raised as the one ↵ would take.
+    /// first door raised as the one ↵ would take. It hangs by its pad, so its glyph stands on
+    /// the column's edge.
     fn door_row(
         &self,
         id: &'static str,
@@ -928,29 +975,40 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let selector = id.to_owned();
-        let icon_ink = if primary { s.text } else { s.text_secondary };
+        let icon_ink = if primary { s.icon } else { s.icon_muted };
         let row = kit::row(theme, kit::Row::One)
             .id(id)
             .debug_selector(move || selector)
             .role(gpui::accesskit::Role::Button)
             .aria_label(label.clone())
-            .w_full()
+            .ml(px(-theme.spacing.inset()))
+            .mr(px(-theme.spacing.inset_trailing()))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(primary, |el| el.bg(hsla(s.selected)))
             .when(!primary, |el| el.hover(|st| st.bg(hsla(s.hover))))
             .active(|st| st.bg(hsla(s.pressed)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
-            .child(div().flex_none().text_color(hsla(s.text)).child(label));
+            .child(div().flex_1().min_w_0().truncate().text_color(hsla(s.text)).child(label));
         slopty_kit::a11y::tab_stop(row, s.focus)
     }
 }
 
-/// How wide the empty workspace's column stands: Zed's empty state's 384.
-pub(super) const EMPTY_W: f32 = 384.0;
+/// How wide the empty workspace's column stands: Zed's welcome's 512.
+pub(super) const EMPTY_W: f32 = 512.0;
 
-/// How far down the empty workspace's composer page starts: a third, as Zed's empty state.
-const EMPTY_ANCHOR: f32 = 1.0 / 3.0;
+/// How far down the empty workspace's launcher starts: 30 % of the pane, higher than the
+/// middle, as Zed's welcome stands.
+const EMPTY_ANCHOR: f32 = 0.3;
+
+/// How many tabs used last the empty workspace lists.
+const RECENT_TABS: usize = 5;
+
+/// The head over the ways to begin.
+const START: &str = "Start";
+
+/// The head over the tabs used last.
+const RECENT: &str = "Recent";
 
 /// The empty workspace's question over its composer.
 pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";

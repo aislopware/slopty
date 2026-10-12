@@ -137,8 +137,8 @@ fn a_tui_agents_start_lands_in_its_terminals_tile_on_the_thread_face(cx: &mut Te
 
     let title = view.read_with(cx, |v, _| v.tile_title(item));
     assert_eq!(tile_says(cx, &title).as_deref(), Some(Face::Thread.label()));
-    // Its header offers the other face: alone in its tab, in the title bar, at rest.
-    let header = cx.debug_bounds(selector("tile-strip", placeholder.item)).expect("its header");
+    // Its header offers the other face under the pointer.
+    let header = cx.debug_bounds(selector("title", placeholder.item)).expect("its header");
     cx.simulate_mouse_move(header.center(), None, Modifiers::none());
     settle(cx);
     let nodes = tree(cx);
@@ -448,10 +448,11 @@ fn an_exited_agents_tile_goes_on_where_its_thread_is_taken_up_again(cx: &mut Tes
     });
 }
 
-/// Identity leads, state trails: an agent's tile leads with its agent's own mark whether it
-/// works, needs the person or rests, in its header and its navigator row, and the mark names
-/// the agent to a screen reader; how it is doing takes the row's end, and goes at rest. The
-/// place no longer names the agent in words. A plain shell keeps its own glyph.
+/// An agent's tile is known by its agent's own mark, in its header and as its kind, whether it
+/// works, needs the person or rests, and the mark names the agent to a screen reader. Its
+/// navigator row is one line whose lead slot holds the state's mark while there is one and the
+/// agent's mark at rest (`.research/design-polish-2026-10-12.md` §4.5). The place no longer
+/// names the agent in words. A plain shell keeps its own glyph.
 #[gpui::test]
 fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppContext) {
     use slopty_kit::icons::{AgentMark, Mark};
@@ -476,39 +477,38 @@ fn an_agents_tile_leads_with_its_mark_and_ends_with_its_state(cx: &mut TestAppCo
     let spark = Mark::Agent(AgentMark::Claude);
     let ends = |cx: &mut VisualTestContext, what: &str| {
         settle(cx);
-        let lead = cx.debug_bounds(selector("nav-kind", tile.item)).expect("the row's lead");
         let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
         let state = cx.debug_bounds(selector("nav-state", tile.item));
-        assert!(lead.right() < row.center().x, "{what}: the mark leads: {lead:?} {row:?}");
-        assert_eq!(read(cx, tile).0, spark, "{what}: the mark never changes");
-        state.map(|state| {
-            let word = cx.debug_bounds(selector("nav-word", tile.item)).expect("its word");
-            assert!(word.left() > row.center().x, "{what}: the state ends it: {word:?}");
-            assert!(state.right() <= word.left(), "{what}: the glyph, then its word: {state:?}");
-            assert!(word.right() <= row.right(), "{what}: {word:?} {row:?}");
-            assert!(state.top() > lead.bottom() - px(0.5), "{what}: on the second line: {state:?}");
-        })
+        let kind = cx.debug_bounds(selector("nav-kind", tile.item));
+        let lead = state.or(kind).expect("the row's lead");
+        assert!(lead.right() < row.center().x, "{what}: the lead slot: {lead:?} {row:?}");
+        assert!(state.is_none() || kind.is_none(), "{what}: one mark in the slot");
+        assert_eq!(read(cx, tile).0, spark, "{what}: the tile's mark never changes");
+        let line = px(Theme::default().density.row);
+        assert!(row.size.height <= line + px(0.5), "{what}: one line: {row:?}");
+        state
     };
     let works = AgentEvent { status: AgentStatus::Working, ..blocked(session) };
     view.update_in(cx, |v, _w, cx| v.agent_event(works, cx));
-    assert!(ends(cx, "working").is_some(), "a working agent ends its row with the spinner");
+    assert!(ends(cx, "working").is_some(), "a working agent's row leads with the spinner");
     let place = read(cx, tile).1.unwrap_or_default();
     assert!(!place.contains("Claude Code"), "the mark says which agent: {place}");
-    let header = cx.debug_bounds(selector("kind", tile.item)).expect("the header's lead");
-    let status = cx.debug_bounds(selector("status", tile.item)).expect("the header's state");
-    assert!(header.right() < status.left(), "the header's state ends it: {header:?} {status:?}");
-    let nodes = tree(cx);
-    assert!(nodes.iter().any(|n| n.is("Image", Some("Claude Code"))), "named: {nodes:#?}");
+    let cell = cx.debug_bounds(selector("tab", tile.item)).expect("its tab");
+    let status = cx.debug_bounds(selector("tab-status", tile.item)).expect("the tab's state");
+    assert!(cell.contains(&status.center()), "the state leads its tab: {status:?} {cell:?}");
+    assert!(cx.debug_bounds(selector("tab-slot", tile.item)).is_none(), "in the kind's place");
 
     let asks = AgentEvent {
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
         ..blocked(session)
     };
     view.update_in(cx, |v, _w, cx| v.agent_event(asks, cx));
-    assert!(ends(cx, "needs you").is_some(), "needing the person ends the row with its mark");
+    assert!(ends(cx, "needs you").is_some(), "needing the person leads the row with its mark");
     let rests = AgentEvent { status: AgentStatus::Idle, ..blocked(session) };
     view.update_in(cx, |v, _w, cx| v.agent_event(rests, cx));
-    assert!(ends(cx, "at rest").is_none(), "at rest the row's end says no state");
+    assert!(ends(cx, "at rest").is_none(), "at rest the agent's mark leads it");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Image", Some("Claude Code"))), "named: {nodes:#?}");
 
     let (glyph, place) = read(cx, shell);
     assert_eq!(glyph, Mark::Symbol(slopty_kit::icons::Symbol::Terminal));

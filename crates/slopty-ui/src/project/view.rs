@@ -58,6 +58,9 @@ pub(crate) const ALLOW: &str = "Allow";
 /// The button that refuses it.
 pub(crate) const DENY: &str = "Deny";
 
+/// The action on a task whose start failed: its start, asked again.
+pub(crate) const START_AGAIN: &str = "Start again";
+
 /// What a board with no tasks yet says.
 pub(crate) const NO_TASKS: &str = "No tasks yet";
 /// What it adds: where tasks come from.
@@ -1330,13 +1333,15 @@ impl ProjectView {
         // Starting is a control of the card stood on, so a lane of planned tasks is not a
         // column of the same button.
         let offered = self.offered(board, task);
-        let stood_on = [TaskAction::Start];
+        // A start that failed is started again from its row, whether or not it is stood on.
+        let again = board.tasks.get(&task).and_then(|c| board.start_failed(c)).is_some();
+        let stood_on: &[TaskAction] = if again { &[] } else { &[TaskAction::Start] };
         let mut actions: Vec<(TaskAction, bool)> =
             offered.iter().copied().filter(|a| !stood_on.contains(a)).map(|a| (a, false)).collect();
         if self.picked() == Some(Some(task)) {
             // A task asked to start again is not asked twice while it does.
             let handing = self.handing.contains_key(&task);
-            let starts = stood_on.into_iter().filter(|a| offered.contains(a));
+            let starts = stood_on.iter().copied().filter(|a| offered.contains(a));
             actions.extend(
                 starts.filter(|a| !(handing && *a == TaskAction::Start)).map(|a| (a, true)),
             );
@@ -1349,13 +1354,15 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let buttons = actions.into_iter().enumerate().map(|(ix, (action, control))| {
+            let words =
+                if again && action == TaskAction::Start { START_AGAIN } else { action.label() };
             let id = action.selector(prefix, task);
             let selector = id.clone();
             let el = div()
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
                 .role(Role::Button)
-                .aria_label(SharedString::from(format!("{} #{task}", action.label())))
+                .aria_label(SharedString::from(format!("{words} #{task}")))
                 // A secondary button at the small size: on a card's fill a ghost's words
                 // read as plain text ("Merge" looked like a label), so it carries the
                 // hairline that makes it a button there, at the least height a click needs.
@@ -1367,7 +1374,7 @@ impl ProjectView {
                 .rounded(px(theme.radii.sm))
                 .text_size(px(theme.typography.small()))
                 .cursor_pointer()
-                .child(action.label());
+                .child(words);
             let el = if control {
                 el.text_color(hsla(s.text_secondary))
                     .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
@@ -1420,6 +1427,8 @@ impl ProjectView {
             .h(self.row_height())
             .gap(px(self.theme.spacing.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(Some(Phase::NeedsYou)))
+            // No number, but its slot, so its title stands on the cards' edge.
+            .item("number", Priority::ESSENTIAL, div().flex_none().w(px(self.number_w())))
             .title(self.row_title(ORCHESTRATOR.to_owned()), self.title_floor());
         let el = self
             .row_frame(key.to_owned(), said(&[ORCHESTRATOR, &asks]), false)
@@ -1586,6 +1595,8 @@ impl ProjectView {
                 .step
                 .as_ref()
                 .filter(|s| !matches!(s.state, StepState::Done { .. }))
+                // A start that failed says so under its row.
+                .filter(|_| board.start_failed(card).is_none())
                 .filter(|s| !check.is_some_and(|c| c.speaks_for(s)))
                 .filter(|s| !(piped && s.running() && s.kind == StepKind::Merge));
             if let Some(step) = shown {
@@ -1948,8 +1959,16 @@ impl ProjectView {
             .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.hover))))
     }
 
-    /// What stands under a row's line, from its number's edge: what it asks, what holds it,
-    /// a failed check's last lines, the "Run on" picker. Nothing, most of the time.
+    /// The slot a card's number stands in: "#999" in tabular figures at the metadata size, so
+    /// every card's title starts on one edge and what hangs under it can start there too.
+    fn number_w(&self) -> f32 {
+        // A tabular figure is about 0.62 of the size wide; "#" and three digits.
+        (self.theme.roles().metadata.size * 0.62 * 4.0).ceil()
+    }
+
+    /// What stands under a row's line, under its title (`.research/design-polish-2026-10-12.md`
+    /// §4.8): what it asks, what holds it, a failed check's last lines, the "Run on" picker.
+    /// Nothing, most of the time.
     fn detail(&self, parts: Vec<AnyElement>) -> Option<Div> {
         let theme = &self.theme;
         let sp = theme.spacing;
@@ -1959,7 +1978,7 @@ impl ProjectView {
                 .flex_col()
                 .gap(px(sp.xs))
                 .min_w_0()
-                .pl(px(theme.typography.icon() + sp.sm))
+                .pl(px(theme.typography.icon() + sp.sm + self.number_w() + sp.sm))
                 .pb(px(sp.sm))
                 .children(parts)
         })
@@ -2033,6 +2052,19 @@ impl ProjectView {
                 .children(buttons)
                 .into_any_element(),
         )
+    }
+
+    /// Why a task's start failed, as a row's second line in the secondary ink, the row's mark
+    /// saying it failed.
+    fn why_line(&self, key: &str, why: String) -> AnyElement {
+        let id = format!("{key}-why");
+        slopty_kit::kit::typed(div(), self.theme.roles().metadata)
+            .debug_selector(move || id)
+            .min_w_0()
+            .line_clamp(2)
+            .text_color(hsla(self.theme.surfaces.text_secondary))
+            .child(SharedString::from(why))
+            .into_any_element()
     }
 
     /// What an agent asks the person, as a row's second line in the secondary ink.
@@ -2162,14 +2194,19 @@ impl ProjectView {
         let sp = theme.spacing;
         let node = Some(card.id);
         let picked = self.picked() == Some(node);
-        let own = Lane::of(card.state);
+        let own = board.lane_of(card);
         // The row leads with its lane's phase, or, while an agent works the task, with what
         // the agent says of itself; a task waiting on its own background work wears the dashed
         // ring.
         let lane_phase = match card.state {
             TaskState::Waiting => Phase::Waiting,
-            state => Lane::of(state).phase(),
+            _ => own.phase(),
         };
+        // A start that failed says why under the row, where it is read, not among the facts
+        // a narrow board lets go.
+        let start_failed = board
+            .start_failed(card)
+            .map(|step| super::model::step_line(step, |w| self.worker_name(w)));
         let agent = self.agent(board, node);
         let live = agent.map(|a| a.status);
         let phase = Some(match live {
@@ -2189,13 +2226,13 @@ impl ProjectView {
         let handing = self.handing.get(&card.id).map(|h| h.words.clone());
         let CardFacts { check, stages, meta } = self.card_facts(board, card, asks.is_some());
         let failed = matches!(&check, Some(Check::Verdict { run, .. }) if !run.passed);
-        let held = stages.iter().any(|stage| stage.holds) || failed;
+        let held = stages.iter().any(|stage| stage.holds) || failed || start_failed.is_some();
         let place_words =
             self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
         let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
         let label = said(&[
             &card.title,
-            state_word(card.state),
+            if start_failed.is_some() { own.title() } else { state_word(card.state) },
             asks.as_deref().unwrap_or(""),
             handing.as_deref().unwrap_or(""),
             &place_words,
@@ -2209,16 +2246,19 @@ impl ProjectView {
 
         let number = slopty_kit::kit::tabular(div())
             .flex_none()
+            .w(px(self.number_w()))
             .whitespace_nowrap()
             .text_size(px(theme.roles().metadata.size))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(format!("#{}", card.id)));
+        let title_id = format!("{key}-title");
+        let title = self.row_title(card.title.clone()).debug_selector(move || title_id);
         let mut line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(sp.sm))
             .item("mark", Priority::ESSENTIAL, self.mark(phase))
             .item("number", Priority::ESSENTIAL, number)
-            .title(self.row_title(card.title.clone()), self.title_floor())
+            .title(title, self.title_floor())
             .end();
         if !meta.is_empty() {
             let meta = div()
@@ -2256,6 +2296,7 @@ impl ProjectView {
             .map(|words| self.handing_line(&key, words))
             .into_iter()
             .chain(asks.map(|asks| self.asks_line(&key, asks)))
+            .chain(start_failed.map(|why| self.why_line(&key, why)))
             .chain(self.answers(&key, board, node, cx))
             .chain(self.pipeline_row(&key, &loud).map(IntoElement::into_any_element))
             .chain(
@@ -2471,9 +2512,15 @@ impl ProjectView {
                 .line_height(relative(theme.typography.prose_line_height))
                 .aria_label(COMPOSE_LABEL),
         );
-        let send =
-            slopty_kit::kit::message::send_control(theme, "project-send", Symbol::Send, SEND)
-                .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
+        let armed = !input.read(cx).value().trim().is_empty();
+        let send = slopty_kit::kit::message::send_control(
+            theme,
+            "project-send",
+            Symbol::Send,
+            SEND,
+            armed,
+        )
+        .on_click(cx.listener(|this, _ev, window, cx| this.send_composed(window, cx)));
         let foot = div()
             .flex()
             .justify_end()
@@ -2615,7 +2662,7 @@ const fn recap_icon(kind: RecapKind) -> Mark {
         RecapKind::VerifyFailed | RecapKind::StepFailed => Mark::Symbol(Symbol::XmarkCircle),
         RecapKind::Conflicts => Mark::Git(GitGlyph::Branch),
         RecapKind::ChecksFailed => Mark::Git(GitGlyph::PullRequest),
-        RecapKind::AgentEnded => Mark::Symbol(Symbol::Power),
+        RecapKind::AgentEnded => Mark::Symbol(Symbol::Stop),
         RecapKind::Merged => Mark::Git(GitGlyph::Merge),
         RecapKind::Verified => Mark::Symbol(Symbol::CheckmarkCircle),
         RecapKind::Started => Mark::Symbol(Symbol::Terminal),

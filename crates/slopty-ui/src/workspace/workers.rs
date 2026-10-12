@@ -1600,6 +1600,7 @@ impl WorkspaceView {
         let can = self.run_target().is_some();
         view.update(cx, |v, cx| v.set_can_run(can, cx));
         self.files.insert(id, view);
+        self.file_changed(id, cx);
         if let Some(w) = self.workers.get(&worker) {
             w.send(ClientMsg::ReadFile { path });
         }

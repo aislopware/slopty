@@ -14,16 +14,14 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Context, ElementId, InteractiveElement as _, IntoElement as _, MouseButton, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_client::items::{ItemCache, ItemDoc};
 use slopty_client::layout::WorkerKey;
-use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
 
 use super::WorkspaceView;
 use super::area::Placed;
-use super::tile::title_ink;
 
 /// The cache and the writes under way.
 #[derive(Default)]
@@ -90,34 +88,11 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let state = self.away_state(tile.worker)?;
-        let theme = &self.theme;
         let id = tile.item;
         let name = SharedString::from(self.worker_name(tile.worker));
-        let ink = hsla(title_ink(theme, placed.focused));
-        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`); none
-        // for a tab's one tile, which the title bar's tab names.
-        let header = (!placed.lone).then(|| {
-            super::tab_look::row(theme, div().id("title"))
-                .debug_selector(move || format!("title-{}", id.as_uuid()))
-                .role(Role::Heading)
-                .aria_label(name.clone())
-                .h(px(theme.density.header))
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(theme.typography.ui_size))
-                .text_color(ink)
-                .font_family(theme.typography.ui_family.clone())
-                .child(super::tab_look::lone(
-                    theme,
-                    self.machine_glyph(tile.worker),
-                    name.clone(),
-                    placed.focused,
-                    placed.shared,
-                ))
+        // Its pane's tab bar of one cell, as every pane's (`tile::render_header`).
+        let header = (!self.phone).then(|| {
+            self.one_tab_bar(placed, self.machine_glyph(tile.worker), name.clone(), None, cx)
         });
         let pill = Some(self.render_state_pill(tile, &state, true, cx));
         Some(

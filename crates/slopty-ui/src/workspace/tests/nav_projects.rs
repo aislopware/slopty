@@ -81,8 +81,39 @@ fn a_projects_board_heads_its_group(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.board_shown(orchestrator)), "the board is shown");
 }
 
-/// Once the orchestrator has said where the goal stands, the board's row carries the first line
-/// of it under the tasks' words, so a phone's home shows each goal's line.
+/// The colour run beside row `row`: the bar a project's colour draws down a row under its
+/// head, found by where it stands.
+fn run_beside(cx: &mut VisualTestContext, row: &'static str) -> Option<Bounds<Pixels>> {
+    let row = cx.debug_bounds(row)?;
+    (0..40).find_map(|ix| {
+        let bar = cx.debug_bounds(leak(format!("nav-run-{ix}")))?;
+        ((bar.top() - row.top()).abs() < px(0.5)).then_some(bar)
+    })
+}
+
+/// A project's colour runs from its head down the rows under it, Delta's thread colour down
+/// its subthreads: a 2 pt bar on the board's row and its tiles', 3 pt on the selected tile's
+/// (`.research/delta-signed-in-2026-10-12.md` §2.3).
+#[gpui::test]
+fn a_projects_colour_runs_down_its_rows(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (worker, studio) = studio(&view, cx);
+    let orchestrator = SessionId::new();
+    let tile = opens_in(&view, cx, &studio, orchestrator, studio.me, 1, Some("/w/board"));
+    declare(&view, cx, worker, orchestrator);
+    let other = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/board"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let board = run_beside(cx, "nav-board-board").expect("the board's row carries the colour");
+    assert!((f32::from(board.size.width) - 2.0).abs() < 0.5, "2 pt: {board:?}");
+    let chosen = run_beside(cx, selector("nav-tile", tile.item)).expect("the selected tile's");
+    assert!((f32::from(chosen.size.width) - 3.0).abs() < 0.5, "3 pt when chosen: {chosen:?}");
+    let rest = run_beside(cx, selector("nav-tile", other.item)).expect("the other tile's");
+    assert!((f32::from(rest.size.width) - 2.0).abs() < 0.5, "2 pt: {rest:?}");
+}
+
+/// Once the orchestrator has said where the goal stands, the board's row keeps to one line and
+/// carries the first line of it in its name and its hint.
 #[gpui::test]
 fn a_boards_row_carries_where_its_goal_stands(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -91,7 +122,6 @@ fn a_boards_row_carries_where_its_goal_stands(cx: &mut TestAppContext) {
     let _tile = opens_in(&view, cx, &studio, orchestrator, studio.me, 1, Some("/w/board"));
     declare(&view, cx, worker, orchestrator);
     let one = cx.debug_bounds("nav-board-board").expect("the row");
-    assert!(cx.debug_bounds("nav-board-summary-board").is_none(), "nothing said yet");
     let term = TermRef { worker, session: orchestrator };
     let mut record = project("board", Some(term));
     record.progress = Some(slopty_proto::project::Progress {
@@ -105,10 +135,7 @@ fn a_boards_row_carries_where_its_goal_stands(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let two = cx.debug_bounds("nav-board-board").expect("the row");
-    let words = cx.debug_bounds("nav-board-words-board").expect("the tasks' words");
-    let line = cx.debug_bounds("nav-board-summary-board").expect("the goal's line");
-    assert!(two.size.height > one.size.height, "a second line: {one:?} {two:?}");
-    assert!(line.top() >= words.bottom() - px(0.5), "under the words: {words:?} {line:?}");
+    assert!((two.size.height - one.size.height).abs() < px(0.5), "one line: {one:?} {two:?}");
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));

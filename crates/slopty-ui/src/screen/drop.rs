@@ -214,9 +214,7 @@ impl ScreenView {
         let shown = taking.items.iter().take(ICONS).map(|item| {
             let name = match &item.file {
                 Some(file) if file.folder => Symbol::Folder,
-                Some(_) => Symbol::Doc,
-                None if item.promised.is_some() => Symbol::Doc,
-                None => Symbol::DocText,
+                Some(_) | None => Symbol::Doc,
             };
             kit::elevate(div(), theme)
                 .size(px(side))

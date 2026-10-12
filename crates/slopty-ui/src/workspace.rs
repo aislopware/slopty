@@ -16,18 +16,20 @@
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
 //! * `area` — the tab on show: its panes and their tiles, a header's drag, the start page.
 //! * `panes` — a tab's panes at their rectangles and the sashes between them.
-//! * `title_tabs` — the title bar's tabs of the project on show.
-//! * `tile` — one tile's chrome and body.
-//! * `titlebar` — the bar across the top: where the focused work is, the notices, the bell.
+//! * `tile` — one tile's chrome and body: its pane's tab bar over it.
+//! * `cluster` — the top line's two ends: the lead (the toggle, back and forward) and the cluster
+//!   (the terminal toggle, the project, the readouts, the bell, "…").
+//! * `titlebar` — the window's own top line while no pane meets the top, and a phone's bar.
 //! * `navigator` — the workers and their tiles, down the left, and the filter over them.
 //! * `machines` — what each machine says of itself and what can be done to it, from its row.
 //! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
-//! * `readouts` — what the app says of itself at the title bar's end, while it has something.
+//! * `readouts` — what the app says of itself in the cluster, while it has something.
 //! * `approvals` — "Allow" and "Deny" for an agent that waits, from its row or its note.
 //! * `turns` — agents' turns that ended unread, which the bell counts.
 //! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
-//! The navigator and the title bar are views of their own (`ChromeView`),
+//! The navigator, the lead, the cluster and the window's own top line are views of their own
+//! (`ChromeView`),
 //! drawn cached: a terminal's echo draws the terminal and the panes around it, never the
 //! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
@@ -44,6 +46,7 @@ mod board_tiles;
 mod breadcrumb;
 mod browsers;
 mod clone_here;
+mod cluster;
 mod commands;
 mod context_menus;
 mod desktop;
@@ -52,7 +55,6 @@ mod faces;
 mod facts;
 mod folder_typing;
 mod folders;
-mod foot;
 mod grouping;
 mod handoffs;
 mod kept_items;
@@ -82,8 +84,6 @@ mod starting;
 mod tab_look;
 mod tabs;
 mod tile;
-mod tile_strip;
-mod title_tabs;
 mod titlebar;
 mod toast;
 mod turns;
@@ -101,7 +101,7 @@ pub(crate) use area::{ADD_WORKER, EMPTY_QUESTION, NO_WORKERS, NO_WORKERS_NEXT};
 pub use drafts::ReviewDraft;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
-    StyleRefinement, Subscription, Task, WeakEntity, Window,
+    Subscription, Task, WeakEntity, Window,
 };
 pub use machines::HostActions;
 pub use navigator::NAVIGATOR_CTX;
@@ -116,6 +116,7 @@ use slopty_proto::items::{Item, ItemOp};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::terminal::SessionSummary;
+use slopty_terminal::TerminalView;
 use slopty_theme::Theme;
 #[cfg(test)]
 pub(crate) use tile::{
@@ -123,15 +124,9 @@ pub(crate) use tile::{
     TAKE_OVER,
 };
 pub use tile::{COPY_COMMAND, cwd_tail, file_title};
-pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
-
-/// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
-/// badge's description and what "+" is called.
-#[cfg(test)]
-pub(crate) const CHROME_WORDS: [&str; 1] = [agents::SHOW_PROMPT];
-use slopty_terminal::TerminalView;
 pub use titlebar::titlebar_height;
 use tokio::sync::mpsc;
+pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
 
 use crate::file::FileView;
 use crate::folder::FolderView;
@@ -177,18 +172,13 @@ enum Region {
     /// The navigator's rows, inside its panel: the list's wheel builds this view alone,
     /// not the panel with its filter field.
     NavigatorRows,
-    /// The navigator folded to a glyph per project, where it is hidden or lays over the panes:
-    /// a view of its own, so it stays while the panel opens over it.
-    Rail,
+    /// The window's own top line while no pane meets the top, and a phone's bar
+    /// ([`titlebar`]).
     Titlebar,
-    /// The title bar's tabs, inside it: a working mark's step builds this view alone, not
-    /// the bar with its breadcrumb and its readouts.
-    TitleTabs,
-    /// The bar along the window's foot ([`foot`]).
-    Foot,
-    /// The facts and controls of a tab's one tile, in the title bar ([`tile_strip`]): news for
-    /// its header builds this view and the panes, not the bar.
-    TileStrip,
+    /// The top line's lead ([`cluster`]).
+    Lead,
+    /// The top line's cluster ([`cluster`]).
+    Cluster,
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
@@ -253,12 +243,9 @@ impl gpui::Render for AreaHost {
 struct Chrome {
     navigator: Entity<ChromeView>,
     nav_rows: Entity<ChromeView>,
-    /// The navigator folded to its glyphs ([`Region::Rail`]).
-    rail: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
-    title_tabs: Entity<ChromeView>,
-    foot: Entity<ChromeView>,
-    tile_strip: Entity<ChromeView>,
+    lead: Entity<ChromeView>,
+    cluster: Entity<ChromeView>,
 }
 
 impl Chrome {
@@ -277,11 +264,9 @@ impl Chrome {
         Self {
             navigator: view(Region::Navigator),
             nav_rows: view(Region::NavigatorRows),
-            rail: view(Region::Rail),
             titlebar: view(Region::Titlebar),
-            title_tabs: view(Region::TitleTabs),
-            foot: view(Region::Foot),
-            tile_strip: view(Region::TileStrip),
+            lead: view(Region::Lead),
+            cluster: view(Region::Cluster),
         }
     }
 
@@ -293,17 +278,9 @@ impl Chrome {
     }
 
     /// The views.
-    fn ids(&self) -> [gpui::EntityId; 7] {
-        [
-            &self.navigator,
-            &self.nav_rows,
-            &self.rail,
-            &self.titlebar,
-            &self.title_tabs,
-            &self.foot,
-            &self.tile_strip,
-        ]
-        .map(Entity::entity_id)
+    fn ids(&self) -> [gpui::EntityId; 5] {
+        [&self.navigator, &self.nav_rows, &self.titlebar, &self.lead, &self.cluster]
+            .map(Entity::entity_id)
     }
 }
 
@@ -773,17 +750,8 @@ pub struct WorkspaceView {
     /// The remote windows' pane sizes when the sash was pressed, to ask them to follow once it
     /// is let go.
     sash_before: Vec<(ItemId, (f32, f32))>,
-    /// Where the title bar's tabs are scrolled.
-    title_scroll: gpui::ScrollHandle,
-    /// The title tabs that closed and still fold away.
-    title_closing: title_tabs::Closing,
     /// The file tile open as a preview, which the next file opened in passing replaces.
     preview: preview::Preview,
-    /// The foot bar's own state.
-    foot: foot::Foot,
-    /// The title tabs as last drawn: a header's news draws them again only where it changed
-    /// what they say.
-    title_tabs_drawn: std::cell::RefCell<Vec<title_tabs::TitleTab>>,
     /// The layout's clock starts here.
     epoch: Instant,
     /// A tick runs while a worker is out of reach, so its tiles' "Reconnecting for …" keeps
@@ -1155,11 +1123,7 @@ impl WorkspaceView {
             navigator,
             panes: panes::Panes::default(),
             sash_before: Vec::new(),
-            title_scroll: gpui::ScrollHandle::new(),
-            title_closing: title_tabs::Closing::default(),
             preview: preview::Preview::default(),
-            foot: foot::Foot::default(),
-            title_tabs_drawn: std::cell::RefCell::default(),
             epoch: Instant::now(),
             away_ticking: false,
             #[cfg(test)]
@@ -1733,41 +1697,9 @@ impl WorkspaceView {
         match region {
             Region::Navigator => self.render_navigator_region(window, cx),
             Region::NavigatorRows => self.render_navigator_rows(window, cx),
-            Region::Rail => self.navigator_rail(cx),
             Region::Titlebar => self.render_titlebar(window, cx),
-            Region::Foot => self.render_foot(window, cx),
-            Region::TileStrip => self.render_tile_strip(cx),
-            Region::TitleTabs => {
-                let tabs = self.title_tabs();
-                let at = match self.landing() {
-                    Some(area::Landing::Strip(at)) => Some(*at),
-                    _ => None,
-                };
-                // A closed tab folds away on the layout's clock, among the project's own tabs.
-                let closing = self.layout.shown_project().map(|project| {
-                    let mut hasher = std::hash::DefaultHasher::new();
-                    std::hash::Hash::hash(project.home(), &mut hasher);
-                    let clock = tab_look::Clock {
-                        row: std::hash::Hasher::finish(&hasher),
-                        now: self.clock_instant(),
-                        moves: self.animate && slopty_kit::kit::motion(cx),
-                    };
-                    (&self.title_closing, clock)
-                });
-                // The tab on show is its one tile's title, which its field names in place.
-                let field = self.lone_tile().and_then(|tile| {
-                    let named = self
-                        .rename
-                        .as_ref()
-                        .is_some_and(|r| r.tile == tile && r.field != Field::Address);
-                    named.then(|| self.rename_field(tile, tile.item)).flatten()
-                });
-                let drops = title_tabs::Drops { spots: &self.drop_spots, at, closing, field };
-                let drawn =
-                    title_tabs::render(&self.theme, &tabs, &self.title_scroll, drops, window, cx);
-                *self.title_tabs_drawn.borrow_mut() = tabs;
-                drawn
-            }
+            Region::Lead => self.render_lead(window, cx),
+            Region::Cluster => self.render_cluster(window, cx),
         }
     }
 
@@ -1793,14 +1725,17 @@ impl WorkspaceView {
     }
 
     /// How many times each region of the chrome has drawn: the navigator (its panel and its
-    /// rows together), the title bar.
+    /// rows together), the top line (its own bar or a phone's, the lead and the cluster
+    /// together).
     #[cfg(test)]
     fn chrome_renders(&self, cx: &App) -> [usize; 2] {
         let chrome = &self.chrome;
         let renders = |view: &Entity<ChromeView>| view.read(cx).renders;
         [
             renders(&chrome.navigator).saturating_add(renders(&chrome.nav_rows)),
-            renders(&chrome.titlebar),
+            renders(&chrome.titlebar)
+                .saturating_add(renders(&chrome.lead))
+                .saturating_add(renders(&chrome.cluster)),
         ]
     }
 
@@ -1904,20 +1839,12 @@ impl WorkspaceView {
         }
     }
 
-    /// `session`'s header changed, news for the area. A title tab is named and marked by the
-    /// tiles of its tab, so a tile of the project on show is the title tabs' news too where it
-    /// changed what they say. On a
-    /// phone the bar is the focused tile's header, so a change to that tile's title, kind or
-    /// state is the bar's news as well; any other tile's is not.
+    /// `session`'s header changed, news for the area. On a phone the bar is the focused
+    /// tile's header, so a change to that tile's title, kind or state is the bar's news as
+    /// well; any other tile's is not.
     fn header_news(&self, session: SessionId, cx: &mut App) {
         self.panes_news(cx);
         let tile = self.tile_of_session(session);
-        let shown = self.layout.shown_index();
-        if tile.and_then(|t| self.layout.position(t)).is_some_and(|p| Some(p.project) == shown)
-            && *self.title_tabs_drawn.borrow() != self.title_tabs()
-        {
-            App::notify(cx, self.chrome.title_tabs.entity_id());
-        }
         if self.phone && tile.is_some_and(|t| self.focused() == Some(t)) {
             App::notify(cx, self.chrome.titlebar.entity_id());
         }
@@ -2143,6 +2070,7 @@ impl gpui::Render for WorkspaceView {
         self.keep_zoom(cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);
+        self.follow_top_line(window);
         self.follow_sized_displays(window, cx);
         self.arm_system_keys(window, cx);
         if std::mem::take(&mut self.titles_dirty) {
@@ -2344,9 +2272,8 @@ impl WorkspaceView {
     }
 
     /// The frame: the navigator the window's full height on the left, docked beside the rest
-    /// or laid over it (or the rail in its place), and the title bar over the area to its
-    /// right, the area running to the window's bottom edge. The chrome's regions are their own
-    /// views, drawn cached at the sizes laid out here.
+    /// or laid over it, and the area to its right from the window's top edge to its bottom,
+    /// its top tab bars the window's top line. The chrome's regions are their own views.
     fn render_frame(
         &self,
         area: gpui::AnyElement,
@@ -2355,21 +2282,24 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         use gpui::{IntoElement as _, ParentElement as _, Styled as _, px};
         let safe = window.insets().effective();
-        // Not cached, as the docked navigator is not: a retained view is drawn again from last
-        // frame around a nested view notified alone (the title tabs' marks stepping), where a
-        // cached one is built again whole.
-        let titlebar = gpui::div()
-            .w_full()
-            .flex_none()
-            .h(px(titlebar_height(&self.theme)) + safe.top)
-            .flex()
-            .child(self.chrome.titlebar.clone());
+        // No title bar: the panes' tab bars are the top line, and the window draws a line of
+        // its own only where no pane meets the top (`titlebar`), or a phone's bar. Not cached,
+        // as the docked navigator is not: a retained view is drawn again from last frame around
+        // a nested view notified alone, where a cached one is built again whole.
+        let titlebar = self.own_top_line().then(|| {
+            gpui::div()
+                .w_full()
+                .flex_none()
+                .h(px(titlebar_height(&self.theme)) + safe.top)
+                .flex()
+                .child(self.chrome.titlebar.clone())
+        });
         let navigator = self.chrome.navigator.clone();
-        // The rail draws no project rows to drop on.
+        // A hidden navigator draws no project rows to drop on.
         if self.nav.drawn.is_none() {
             self.drop_spots.projects.borrow_mut().clear();
         }
-        let (docked, rail, over, handle) = match self.nav.drawn {
+        let (docked, over, handle) = match self.nav.drawn {
             Some(navigator::Mode::Docked) => {
                 let width = px(self.navigator_width());
                 let handle = Self::render_handle(width, cx);
@@ -2391,39 +2321,27 @@ impl WorkspaceView {
                     .flex()
                     .child(navigator)
                     .child(edge);
-                (Some(column.into_any_element()), None, None, Some(handle))
+                (Some(column.into_any_element()), None, Some(handle))
             }
-            // Over the panes, the rail stays under it, so the panes do not move as it opens.
-            Some(mode) => {
-                let over = self.navigator_over(mode, navigator, window, cx);
-                (None, self.render_rail(), Some(over), None)
-            }
-            None => (None, self.render_rail(), None, None),
+            Some(mode) => (None, Some(self.navigator_over(mode, navigator, window, cx)), None),
+            None => (None, None, None),
         };
-        // The settings take the panes' place, and the foot bar goes with them.
+        // The settings take the panes' place.
         let page = self.render_settings_page();
         let area = page.unwrap_or(area);
-        // Cached, as the title bar is not: nothing in it is a view notified alone.
-        let foot = self.foot_drawn().then(|| {
-            let height = px(self.foot_height());
-            self.chrome
-                .foot
-                .clone()
-                .cached(StyleRefinement::default().flex_none().w_full().h(height))
-        });
-        // The panes meet the frame's edges and each other on the one ground.
-        let middle =
-            gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
-                gpui::div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .child(area),
-            );
+        // The panes meet the frame's edges and each other on the one ground; on a Mac and an
+        // iPad their top tab bars are the window's top line, under the safe area's top.
+        let top = if self.phone || titlebar.is_some() { px(0.0) } else { safe.top };
+        let middle = gpui::div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .pt(top)
+            .overflow_hidden()
+            .child(area);
         gpui::div()
             .relative()
             .flex_1()
@@ -2439,13 +2357,23 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(titlebar)
-                    .child(middle)
-                    .children(foot),
+                    .children(titlebar)
+                    .child(middle),
             )
             .children(handle)
             .children(over)
             .into_any_element()
+    }
+
+    /// Whether the window draws a top line of its own: on a phone, its bar; elsewhere only
+    /// while no pane meets the top to hold the lead and the cluster (the settings page, the
+    /// empty workspace, no machine yet).
+    pub(super) fn own_top_line(&self) -> bool {
+        self.phone
+            || self.workers.is_empty()
+            || self.settings.is_some()
+            || self.layout.shown_tab().is_none()
+            || self.layout.frame().panes.is_empty()
     }
 
     /// The navigator laid over the frame in `mode`, on the scrim, which a click closes it by.

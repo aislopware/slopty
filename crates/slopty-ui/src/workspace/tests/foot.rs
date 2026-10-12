@@ -1,21 +1,17 @@
-//! The foot bar along the window's foot: the plan's usage, the focused agent, what runs out of
-//! sight, and the toggle of the tab's terminal.
+//! No status bar: the panes run to the window's foot, and what the bar held stands in the
+//! window's cluster (the tab's terminal toggle, a plan far used) or nowhere.
 
 use gpui::Modifiers;
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{AgentId, Cursor, Limit, ThreadId};
 
 use super::*;
-use crate::workspace::foot::{HIDE_TERMINAL, SHOW_TERMINAL};
+use crate::workspace::cluster::{HIDE_TERMINAL, SHOW_TERMINAL};
 
 fn click(cx: &mut VisualTestContext, selector: &'static str) {
     let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"));
     cx.simulate_click(at.center(), Modifiers::default());
     cx.run_until_parked();
-}
-
-fn leak(selector: String) -> &'static str {
-    Box::leak(selector.into_boxed_str())
 }
 
 fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<String> {
@@ -38,55 +34,37 @@ fn window(name: &str, used_bp: u32) -> Limit {
     Limit { name: name.to_owned(), used_bp, resets_ms: None }
 }
 
-/// The bar runs along the window's foot under the panes, the status step tall, on the panel's
-/// plane with the one line over it, as Zed's status bar, beside the navigator rather than under it.
-/// A phone has none.
+/// The window has no status bar: nothing is drawn along its foot, the panes run down to it, and
+/// the one control the bar held, the tab's terminal toggle, ends the top-right tab bar in the
+/// window's cluster. A phone has neither.
 #[gpui::test]
-fn the_foot_bar_runs_along_the_windows_foot(cx: &mut TestAppContext) {
+fn the_window_has_no_status_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    assert!(cx.debug_bounds("foot").is_none(), "no bar before a machine is known");
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let theme = Theme::default();
-    let foot = cx.debug_bounds("foot").expect("the foot bar");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert!(cx.debug_bounds("foot").is_none(), "no status bar");
     let window = cx.update(|window, _| window.viewport_size());
-    assert_eq!(foot.bottom(), window.height, "at the window's foot");
-    assert_eq!(foot.size.height, px(theme.density.status), "the status step tall");
-    assert_eq!(foot.right(), window.width, "to the window's trailing edge");
-    if let Some(nav) = cx.debug_bounds("navigator") {
-        assert!(foot.left() >= nav.right() - px(1.0), "beside the navigator: {foot:?} {nav:?}");
-    }
-    let area = cx.debug_bounds("pane-area").or_else(|| cx.debug_bounds("workspace-area"));
-    if let Some(area) = area {
-        assert!(area.bottom() <= foot.top() + px(0.5), "the panes end over it");
-    }
-    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-    let plane = slopty_kit::colors::hsla(theme.surfaces.sidebar);
-    let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
-    // A translucent line is painted as a quad of its own over the fill.
-    let over = |q: &&gpui::Quad| {
-        near(q.bounds.origin.y.0, foot.top()) && near(q.bounds.size.height.0, foot.size.height)
-    };
+    let item = cx.debug_bounds(selector("item", shell.item)).expect("the shell's tile");
     assert!(
-        quads.iter().filter(over).any(|q| q.background.as_solid() == Some(plane)),
-        "on the panel's plane"
+        (f32::from(item.bottom()) - f32::from(window.height)).abs() < 0.5,
+        "the pane runs to the window's foot: {item:?}"
     );
-    let stroke = slopty_kit::colors::hsla(theme.surfaces.stroke);
-    assert!(
-        quads.iter().filter(over).any(|q| q.border_color == stroke && q.border_widths.top.0 > 0.0),
-        "the one line along its top"
-    );
+    let cluster = cx.debug_bounds("cluster").expect("the window's cluster");
+    let toggle = cx.debug_bounds("tab-terminal").expect("the tab's terminal toggle");
+    assert!(cluster.contains(&toggle.center()), "in the cluster: {toggle:?} {cluster:?}");
+    assert!(toggle.top() < px(Theme::default().density.header), "on the top line");
 
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("foot").is_none(), "a phone has no foot bar");
+    assert!(cx.debug_bounds("foot").is_none(), "a phone has none either");
+    assert!(cx.debug_bounds("tab-terminal").is_none(), "nor the toggle");
 }
 
-/// The plan's usage on the focused tile's machine is always said at the bar's start, in `warn`
-/// once a window is 80 % used, and a click lists every machine's readings above the bar. A
-/// machine whose agents published none shows no meter. The title bar says none of it.
+/// The plan's usage says nothing while every window of it is under 80 % used; once one is past,
+/// the cluster says it in `warn`, and a click lists every machine's readings under the top line.
+/// A machine whose agents published none shows no meter.
 #[gpui::test]
-fn the_plans_usage_leads_the_foot_bar(cx: &mut TestAppContext) {
+fn the_plan_speaks_in_the_cluster_once_far_used(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -104,73 +82,41 @@ fn the_plans_usage_leads_the_foot_bar(cx: &mut TestAppContext) {
         cx.run_until_parked();
     };
     publish(cx, 1, 4_100);
-    let foot = cx.debug_bounds("foot").expect("the foot bar");
-    let plan = cx.debug_bounds("readout-plan").expect("always said");
-    assert!(foot.contains(&plan.center()), "in the foot bar");
-    assert!(plan.left() - foot.left() < px(Theme::default().spacing.md), "at its start");
-    assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 41%"));
-    assert!(cx.debug_bounds("readouts").is_none(), "the title bar says none of it");
+    assert!(cx.debug_bounds("readout-plan").is_none(), "nothing to warn of");
     publish(cx, 2, 8_200);
+    let cluster = cx.debug_bounds("cluster").expect("the cluster");
+    let plan = cx.debug_bounds("readout-plan").expect("far used, said");
+    assert!(cluster.contains(&plan.center()), "in the cluster");
     assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 82%"));
 
     click(cx, "readout-plan");
     let plans = cx.debug_bounds("plans").expect("every reading, listed");
     let row = "studio · Claude Code, 5h 23% · 7d 82% · now".to_owned();
     assert!(labels(&view, cx).contains(&row), "{:?}", labels(&view, cx));
-    assert!(plans.bottom() <= foot.top(), "above the bar: {plans:?} {foot:?}");
-    assert!(plans.left() >= foot.left(), "from its start");
+    assert!(plans.top() >= cluster.bottom(), "under the top line: {plans:?} {cluster:?}");
+    assert!(plans.right() <= cluster.right() + px(0.5), "its right edge on the cluster's");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(there, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("readout-plan").is_none(), "the laptop's agents said nothing");
 }
 
-/// A shell whose command runs out of sight has a chip, which shows it; one on show says it in
-/// its own header and has none. The toggle shows and hides the tab's terminal, and says which.
+/// The cluster's toggle shows and hides the tab's terminal, and says which.
 #[gpui::test]
-fn what_runs_out_of_sight_and_the_tabs_terminal_are_at_the_bars_end(cx: &mut TestAppContext) {
+fn the_cluster_toggles_the_tabs_terminal(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    let (first, second) = (SessionId::new(), SessionId::new());
-    let away = opens(&view, cx, &fake, first, fake.me, 1);
-    let here = opens(&view, cx, &fake, second, fake.me, 2);
-    on_new_tab(&view, cx, here);
-    view.update_in(cx, |v, _w, _cx| v.running_after = Duration::ZERO);
-    for session in [first, second] {
-        view.update_in(cx, |v, _w, cx| {
-            let runs = marked_frame(
-                2,
-                &[
-                    ("~ % make", SemanticMark::Prompt { exit: None, input: Some(4) }),
-                    ("building", SemanticMark::Output),
-                ],
-                1,
-            );
-            v.term_event(session, runs, cx);
-        });
-    }
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let chip = leak(format!("foot-shell-{first}"));
-    assert!(cx.debug_bounds(chip).is_some(), "the shell in the other tab has a chip");
-    assert!(
-        cx.debug_bounds(leak(format!("foot-shell-{second}"))).is_none(),
-        "the one on show says it in its header"
-    );
-    click(cx, chip);
-    assert_eq!(focused(&view, cx), Some(away), "the chip goes to it");
-    assert!(cx.debug_bounds(chip).is_none(), "and, on show, has no chip");
-
+    let _here = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     assert!(labels(&view, cx).iter().any(|l| l == SHOW_TERMINAL));
-    click(cx, "foot-terminal");
+    click(cx, "tab-terminal");
     let asked = view.read_with(cx, |v, _| {
         v.workers.values().any(|w| w.openings.iter().any(|(_, o)| *o == tabs::Opening::Terminal))
     });
     assert!(asked, "the tab's terminal is asked for");
-    let terminal = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
+    let terminal = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     assert!(view.read_with(cx, |v, _| v.layout.on_show(terminal)), "below the tab");
     assert!(labels(&view, cx).iter().any(|l| l == HIDE_TERMINAL), "the toggle says it shows");
-    click(cx, "foot-terminal");
+    click(cx, "tab-terminal");
     assert!(!view.read_with(cx, |v, _| v.layout.on_show(terminal)), "put away");
     assert!(labels(&view, cx).iter().any(|l| l == SHOW_TERMINAL));
 }

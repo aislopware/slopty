@@ -233,7 +233,7 @@ impl ProjectSearch {
         let pad = crate::palette::list_pad(theme);
         let icon = match hit.open {
             TileOpen::Session(_) => slopty_kit::icons::Symbol::Terminal,
-            TileOpen::File(_) => slopty_kit::icons::Symbol::DocText,
+            TileOpen::File(_) => slopty_kit::icons::Symbol::Doc,
         };
         let total = usize::try_from(hit.total).unwrap_or(usize::MAX);
         let label = format!("{}, {}", hit.title, super::count_label(total));

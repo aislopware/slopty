@@ -185,11 +185,11 @@ fn closing_the_tile_or_the_agent_leaving_lets_the_thread_go(cx: &mut TestAppCont
     assert!(thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }));
 }
 
-/// An agent's pill says the state alone ("Needs approval"), since what the agent asks is the
+/// An agent's state is its tab's lead, a glyph alone, since what the agent asks is the
 /// navigator's line and the pointer's; a screen reader still hears all of it. On a phone the
-/// tile has no header: the bar is the tile's, its heading the title and all the pill would say.
+/// tile has no header: the bar is the tile's, its heading the title and all the state.
 #[gpui::test]
-fn a_pill_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
+fn a_tab_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     cx.run_until_parked();
@@ -204,20 +204,19 @@ fn a_pill_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
     };
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(asks, cx);
-        // On its TUI, where the header's pill speaks for it.
+        // On its TUI, where only the tab speaks for it.
         v.show_face(session, false, cx);
         v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
+    let glyph = Theme::default().typography.icon();
     let width = |cx: &mut VisualTestContext| {
         let name = cx.debug_bounds(selector("name", tile.item)).expect("the title");
-        let pill = cx.debug_bounds(selector("agent", tile.item)).expect("the pill");
-        let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
-        assert!(pill.left() >= name.right(), "side by side: {name:?} {pill:?}");
-        assert!(pill.right() <= header.right(), "inside the header: {pill:?} {header:?}");
-        f32::from(pill.size.width)
+        let mark = cx.debug_bounds(selector("tab-status", tile.item)).expect("the state");
+        assert!(mark.right() <= name.left(), "it leads the title: {mark:?} {name:?}");
+        f32::from(mark.size.width)
     };
-    let word = width(cx);
+    assert!((width(cx) - glyph).abs() < 0.5, "a glyph alone");
     let full = "Needs approval: Run touch a-file-with-a-rather-long-name-for-a-phone.txt";
     assert!(tree(cx).iter().any(|n| n.label.as_deref() == Some(full)), "all of it, said");
     let brief = AgentEvent {
@@ -227,7 +226,7 @@ fn a_pill_says_the_state_and_a_phone_bar_says_it_all(cx: &mut TestAppContext) {
     };
     view.update_in(cx, |v, _w, cx| v.agent_event(brief, cx));
     cx.run_until_parked();
-    assert!((width(cx) - word).abs() < 0.5, "the word, not the ask");
+    assert!((width(cx) - glyph).abs() < 0.5, "the glyph, not the ask");
 
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
@@ -275,32 +274,6 @@ fn a_thread_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestApp
     state.status.phase = Phase::Idle;
     table(&view, cx, studio.key, vec![state.row(WallMs::ZERO)]);
     assert_eq!(mark(cx), Some(Status::Idle), "at rest: the hook's word again");
-}
-
-/// While the thread shows a request in its tray, that is the tile's statement: the header
-/// wears no pill saying the same thing above it. Over the TUI the pill is back.
-#[gpui::test]
-fn the_request_is_said_once(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (tile, session) = agent_tile(&view, cx, &mut studio);
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
-    let mut row = thread_on(session).row(WallMs::ZERO);
-    row.requests = vec![RequestCard {
-        buttons: Vec::new(),
-        id: AskId("ask-1".to_owned()),
-        item: None,
-        kind: Request::APPROVAL.to_owned(),
-        title: "Run `cargo test`".to_owned(),
-        options: Vec::new(),
-        opened_ms: WallMs::ZERO,
-    }];
-    table(&view, cx, studio.key, vec![row]);
-    assert!(view.read_with(cx, |v, _| v.face_asks(session)), "the thread asks");
-    assert!(cx.debug_bounds(selector("agent", tile.item)).is_none(), "no pill over it");
-    view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("agent", tile.item)).is_some(), "the TUI's header says it");
 }
 
 /// Two agents that have not titled themselves read alike, "Claude Code" and "Claude Code 2",

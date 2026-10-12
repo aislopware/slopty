@@ -433,8 +433,7 @@ fn beside(
 }
 
 /// A shell of this client's opened at `version` and put in a pane of its own beside `tile`,
-/// which is focused again: a tab's one tile has no header of its own, its header being the
-/// title bar's ([`WorkspaceView::lone_tile`]), so a test of a pane's header gives it company.
+/// which is focused again: a split, where each pane's tab leads with the focus dot.
 fn paired(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
@@ -454,12 +453,9 @@ fn paired(
     other
 }
 
-/// Whether `tile` says "Edited": in its pane's header, or in its tab while it is its tab's one
-/// tile.
-fn says_edited(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) -> bool {
-    let tab = format!("title-tab-edited-{}", pos_of(view, cx, tile).tab.get());
+/// Whether `tile` says "Edited", in its tab.
+fn says_edited(_view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) -> bool {
     cx.debug_bounds(selector("unsaved", tile.item)).is_some()
-        || cx.debug_bounds(Box::leak(tab.into_boxed_str())).is_some()
 }
 
 /// `tile` moved to a new tab of the project on show, and that tab shown.
@@ -952,16 +948,16 @@ fn a_vertical_swipe_over_a_terminal_scrolls_its_history(cx: &mut TestAppContext)
     assert_eq!(after.origin, before.origin, "the pane stayed");
 }
 
-/// Dragging a tile's header onto the middle of another pane makes it one of that pane's tabs.
+/// Dragging a tile's tab onto the middle of another pane makes it one of that pane's tabs.
 #[gpui::test]
-fn a_header_dragged_onto_a_pane_joins_its_tabs(cx: &mut TestAppContext) {
+fn a_tab_dragged_onto_a_pane_joins_its_tabs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     // The third is the tab the pane below shows.
     let [(_, first), _, (_, third)] = three_shells(&view, cx, &fake);
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
-    let header = cx.debug_bounds(selector("title", first.item)).unwrap().center();
+    let header = cx.debug_bounds(selector("tab", first.item)).unwrap().center();
     let onto = cx.debug_bounds(selector("item", third.item)).unwrap().center();
     cx.simulate_mouse_down(header, gpui::MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_move(
@@ -1400,8 +1396,8 @@ fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
 
 // ----- agents ------------------------------------------------------------------------------
 
-/// An agent waiting on the human rings the tile in the warn tone, counts in the titlebar and
-/// the Dock, and ⌘⇧A goes to it, across workers.
+/// An agent waiting on the human rings the tile in the warn tone, counts on the bell and the
+/// Dock, and ⌘⇧A goes to it, across workers.
 #[gpui::test]
 fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1433,9 +1429,6 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1);
     assert!(events.borrow().contains(&WorkspaceEvent::NeedsYou(1)), "{:?}", events.borrow());
-    assert!(cx.debug_bounds("bell-count").is_none(), "no bell while the navigator stands");
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell says so");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
@@ -1502,7 +1495,7 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
         view.read_with(cx, |v, _| (v.needs_you_count(), v.needs_you_on(studio.key))),
         (1, 1)
     );
-    assert!(cx.debug_bounds("bell-count").is_none(), "no bell while the navigator stands");
+    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts it, docked or not");
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts it");
@@ -1540,9 +1533,9 @@ fn an_agent_the_server_reports_without_a_tile_is_counted_and_reached(cx: &mut Te
 }
 
 /// A worker the server says is away reads so in the navigator, and the server's own word leads
-/// the title bar's readouts, in sentence case, only while it does not answer.
+/// the cluster's readouts, in sentence case, only while it does not answer.
 #[gpui::test]
-fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
+fn the_servers_word_is_said_in_the_cluster(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -1560,9 +1553,9 @@ fn the_servers_word_is_said_at_the_title_bars_end(cx: &mut TestAppContext) {
     assert!(labels.contains(&"Server offline"), "{labels:#?}");
     let (server, bar) = (
         cx.debug_bounds("readout-server").expect("drawn"),
-        cx.debug_bounds("titlebar").expect("drawn"),
+        cx.debug_bounds("cluster").expect("drawn"),
     );
-    assert!(bar.contains(&server.center()), "in the title bar: {server:?} {bar:?}");
+    assert!(bar.contains(&server.center()), "in the cluster: {server:?} {bar:?}");
     let readouts = cx.debug_bounds("readouts").expect("drawn");
     assert!(server.left() - readouts.left() < px(1.0), "first among them: {server:?}");
     // Pressed, it offers what can be done, the app's rows, ending on its own right edge.
@@ -1667,7 +1660,6 @@ mod foot;
 mod frame;
 mod handoffs;
 mod leaks;
-mod lone_tile;
 mod measure;
 mod menus;
 mod modal_focus;

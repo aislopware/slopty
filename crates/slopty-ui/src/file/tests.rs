@@ -127,16 +127,14 @@ fn cmd_s_sends_the_edit_based_on_the_version_it_started_from(cx: &mut TestAppCon
     assert_eq!(events.borrow().len(), 1);
 }
 
-/// A file says its own facts at its foot, as an editor's status line does: what it is
-/// coloured as, its indent and line endings, and where the caret is, following the caret. A
-/// notice in its body (a file too large) has no caret, and says none.
+/// A file knows its own facts, as an editor's status line does: what it is coloured as, its
+/// indent and line endings, and where the caret is, following the caret. A notice in its body
+/// (a file too large) has no caret, and says none. Its tab bar draws them.
 #[gpui::test]
-fn a_file_says_its_facts_at_its_foot(cx: &mut TestAppContext) {
+fn a_file_knows_its_facts(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/main.rs");
     arrives(&view, cx, text_read("fn main() {\n    run();\n}", true, 1));
-    let foot = cx.debug_bounds("file-foot").expect("the foot line");
-    let window = cx.update(|window, _| window.viewport_size());
-    assert!((f32::from(foot.bottom()) - f32::from(window.height)).abs() < 0.5, "at the bottom");
+    assert!(view.read_with(cx, |v, _| v.shows_facts()), "a text has its facts");
     let said = view.read_with(cx, |v, cx| {
         let (line, col) = v.caret(cx);
         (v.coloured_as(), v.layout_facts(), line, col)
@@ -150,15 +148,9 @@ fn a_file_says_its_facts_at_its_foot(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let caret = view.read_with(cx, FileView::caret);
     assert_eq!(caret, (2, 5), "it follows the caret");
-    view.update(cx, |_, cx| cx.notify());
-    let said = labels(cx, "Status");
-    assert!(
-        said.iter().any(|l| l.starts_with("Rust, ") && l.ends_with("Ln 2, Col 5")),
-        "a screen reader hears it: {said:?}"
-    );
 
     arrives(&view, cx, FileRead::TooLarge { size: FILE_BYTES.saturating_add(1) });
-    assert!(cx.debug_bounds("file-foot").is_none(), "no caret in a notice");
+    assert!(!view.read_with(cx, |v, _| v.shows_facts()), "no caret in a notice");
 }
 
 #[gpui::test]

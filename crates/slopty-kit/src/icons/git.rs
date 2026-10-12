@@ -1,8 +1,7 @@
-//! The chrome's git vocabulary: Carbon's git glyphs, drawn as every chrome glyph is
-//! ([`super::Symbol`]). Developers read the node-and-line glyphs as git, as GitHub's Octicons
-//! taught them. Carbon has one pull request, so a draft and a closed one are told apart by
-//! their ink ([`GitGlyph::state_ink`]) (`docs/decisions/ui.md`, "The chrome's icons are IBM
-//! Carbon's at 16").
+//! The chrome's git vocabulary: Octicons' git glyphs, drawn as every chrome glyph is
+//! ([`super::Symbol`]), the node-and-line glyphs developers read as git. A draft and a closed
+//! pull request each have their own glyph and their own ink ([`GitGlyph::state_ink`])
+//! (`docs/decisions/ui.md`, "The chrome's icons are Octicons at 14").
 
 use slopty_proto::thread::wire::PullStands;
 use slopty_theme::{Rgb, Theme};
@@ -12,19 +11,19 @@ use super::Symbol;
 /// One of the git glyphs.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum GitGlyph {
-    /// A branch: `branch`.
+    /// A branch: `git-branch`.
     Branch,
-    /// An open pull request: `pull-request`.
+    /// An open pull request: `git-pull-request`.
     PullRequest,
-    /// A draft pull request: `pull-request`, grey.
+    /// A draft pull request: `git-pull-request-draft`, grey.
     PullRequestDraft,
-    /// A pull request closed without a merge: `pull-request`, red.
+    /// A pull request closed without a merge: `git-pull-request-closed`, red.
     PullRequestClosed,
-    /// A merge, or a pull request merged: `merge`.
+    /// A merge, or a pull request merged: `git-merge`.
     Merge,
-    /// A commit: `commit`.
+    /// A commit: `git-commit`.
     Commit,
-    /// A repository: `git--repo`.
+    /// A repository: `repo`.
     Repo,
 }
 
@@ -45,9 +44,9 @@ impl GitGlyph {
     pub const fn symbol(self) -> Symbol {
         match self {
             Self::Branch => Symbol::ArrowTriangleBranch,
-            Self::PullRequest | Self::PullRequestDraft | Self::PullRequestClosed => {
-                Symbol::ArrowTrianglePull
-            }
+            Self::PullRequest => Symbol::ArrowTrianglePull,
+            Self::PullRequestDraft => Symbol::PullDraft,
+            Self::PullRequestClosed => Symbol::PullClosed,
             Self::Merge => Symbol::ArrowTriangleMerge,
             Self::Commit => Symbol::GitCommit,
             Self::Repo => Symbol::GitRepo,
@@ -92,21 +91,20 @@ impl GitGlyph {
 mod tests {
     use super::*;
 
-    /// Each git glyph is Carbon's; the three pull requests share its one glyph and differ by
-    /// their ink.
+    /// Each git glyph is Octicons'; the three pull requests have a glyph and an ink each.
     #[test]
-    fn each_git_glyph_is_carbons() {
+    fn each_git_glyph_is_octicons() {
         let names: Vec<&str> = GitGlyph::ALL.iter().map(|g| g.symbol().name()).collect();
         assert_eq!(
             names,
             [
-                "branch",
-                "pull-request",
-                "pull-request",
-                "pull-request",
-                "merge",
-                "commit",
-                "git--repo"
+                "octicons/git-branch-16",
+                "octicons/git-pull-request-16",
+                "octicons/git-pull-request-draft-16",
+                "octicons/git-pull-request-closed-16",
+                "octicons/git-merge-16",
+                "octicons/git-commit-16",
+                "octicons/repo-16"
             ]
         );
         let theme = Theme::default();

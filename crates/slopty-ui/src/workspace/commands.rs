@@ -1162,6 +1162,7 @@ impl WorkspaceView {
         // file once more, and weighs its edit against what the disk has now.
         if let Some(file) = closed.file {
             self.files.insert(tile.item, file);
+            self.file_changed(tile.item, cx);
         }
         self.propose(tile.worker, ItemOp::Add(closed.item), cx);
         if matches!(self.item(tile).map(|i| &i.kind), Some(ItemKind::File { .. })) {

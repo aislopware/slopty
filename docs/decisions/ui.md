@@ -2084,7 +2084,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_dialog_closes_on_esc_or_a_click_outside`.
 
 - ✅ **The key bar's caps hold their edges and keep their widths** (2026-09-27, UI wave 2 app
-  shell). The caps were `raised` on `canvas`, a contrast of about 1.03, so they had no
+  shell; the caps' look superseded 2026-10-12 by "iOS at touch density, docked and flat"). The caps were `raised` on `canvas`, a contrast of about 1.03, so they had no
   edges. They also grew to share an iPad's width, which made 100 pt "|" keys. They now sit on
   `elevated` under the `border` hairline, both bars (terminal and remote window) on `canvas`.
   The bar is a finger's 44 pt (`Density::TOUCH.hit`) whatever the chrome's density, since it
@@ -2193,7 +2193,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_held_step_waits_for_the_echo_or_the_end_of_the_hold`.
 
 - ✅ **A navigator row says its state or its age on line one, and the rest on line two**
-  (2026-09-27, UI wave 2 frame chrome). The review found a lone "~ … now", "Note" as a second
+  (superseded 2026-10-12 by **A navigator row is one line and acts through icon buttons**; 2026-09-27, UI wave 2 frame chrome). The review found a lone "~ … now", "Note" as a second
   line, a count and a round trip side by side on each worker, two strong lines stacked under
   "Workers", and a filter that read as a label.
   - Line one ends in the tile's state as a word in its tone ("Needs you", "Working", "Done",
@@ -2511,7 +2511,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (best first), and says "Nothing answered on your tailnet" when none does. Workers are not
     probed yet: that needs a worker probe with the worker's ALPN in `slopty_net::discover`.
   - **iPad** docks the navigator where the strip keeps a regular width (900 pt beside it:
-    either iPad in landscape), and lays it over the strip below that.
+    either iPad in landscape), and lays it over the strip below that (superseded 2026-10-12: a
+    touch screen 900 pt wide or more docks it, "iOS at touch density, docked and flat").
   - **Fixes.** An agent row joins its words and its place with the one meta separator, spaces
     and all, as a tile's second line does; it had a gap on each side of a bare dot. The app
     goldens wait for every link's first round trip before capture, so the status bar's readout
@@ -4891,7 +4892,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `settings_editor::tests::the_dialog_follows_the_file_and_writes_nothing_back`,
     `thread_start::an_open_palette_takes_the_agents_as_they_arrive`.
 
-- ✅ **A request is answered where it was asked** (2026-10-02, design checkpoint 2,
+- ❌ **A request is answered where it was asked** (superseded 2026-10-12 by "What waits on the
+  person flows in the thread": no copy in a tray; 2026-10-02, design checkpoint 2,
   `conversation/thread/view/tray.rs`; tests in `thread/tests/face.rs`). While the call that asks
   is on screen, its answers sit on that call's card. Once it scrolls away, a tray on the
   composer's top edge carries the request with the way back to the call (Scroll ↑/↓), so the
@@ -5435,7 +5437,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `palette::the_empty_workspace_asks_what_an_agent_should_do`,
     `palette::the_questions_chips_choose_where_the_agent_starts`.
 
-- ✅ **Plan usage in the status bar, from what the agents publish** (2026-10-04, rulings §6).
+- ✅ **Plan usage in the status bar, from what the agents publish** (where it shows superseded
+  2026-10-12 by **The frame is one top line**; 2026-10-04, rulings §6).
   MonoCode reads an undocumented endpoint with Claude Code's Keychain token; Slopty never reads
   a credential. The plan's windows already arrive on every thread row (`ThreadRow::meters`,
   `Limit`): Claude Code's status line `rate_limits` and Codex's `account/rateLimits`, mapped by
@@ -7893,7 +7896,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     way before the words do. The agent's screen chip keeps its words everywhere but in a narrow
     tile.
   - **The review reads its room.** The file list sits beside the diff in a wide tile, as it
-    did from 720 pt. The diff shows both sides when what the list leaves is itself a wide room
+    did from 720 pt (superseded 2026-10-12: no list column at any width, "The review is
+    Delta's Changes"). The diff shows both sides when what the list leaves is itself a wide room
     (960 pt of tile at the default chrome, as before; superseded 2026-10-07, the diff is
     unified at every width). Both edges now move with the chrome size,
     so no fourth room was needed.
@@ -8861,7 +8865,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::thread_start::the_place_chip_starts_a_worktree_from_a_branch_picked`
     (the place on the ledge, the branch checked out as words).
 
-- ✅ **One reading measure, MonoCode's** (2026-10-07, `.research/ui-audit-monocode-2026-10-06.md`
+- ✅ **One reading measure, MonoCode's** (superseded 2026-10-12 by **The thread has one left
+  edge**; 2026-10-07, `.research/ui-audit-monocode-2026-10-06.md`
   item 8, M12). The transcript, the tray and the composer already shared one centred column,
   and the tray's code already parted its groups by a base unit of space rather than the
   hairlines "The tray's sections each stand apart" ruled, as MonoCode's stack does; that
@@ -8914,7 +8919,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Unified at every width.** `Row::Pair`, the side-by-side row, `lines::Ink::split` and
     `diff::pairs` are deleted. A comment's lines are always a run of the hunk's lines.
   - **A file folds to its head.** The head's name, folder and counts are one button with a
-    chevron, which folds the file to its head or opens it. Keep and Revert stay beside it.
+    chevron, which folds the file to its head or opens it (the chevron went 2026-10-12; the
+    viewed tick box leads the head: "The review is Delta's Changes"). Keep and Revert stay beside it.
     What is folded is held by path (`ReviewView::folded`), so it lasts through the review's
     updates and a change of span. Picking a folded file in the list opens it.
   - **One switch for every file**, at the scope bar's end beside the refresh, as MonoCode's
@@ -9007,8 +9013,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the row shows none. The tab's spoken name carries the folder too ("lib.rs, src").
   - Test: `workspace::tests::tiles::a_tab_row_names_folders_only_where_files_read_alike`.
 
-- ✅ **A foot bar holds the plan, the agent and what runs out of sight** (2026-10-09, MonoCode
-  audit row 3, M8; reverses the bar half of "No bar along the bottom").
+- ✅ **A foot bar holds the plan, the agent and what runs out of sight** (Superseded 2026-10-12
+  by **The frame is one top line**; 2026-10-09, MonoCode audit row 3, M8; reverses the bar half
+  of "No bar along the bottom").
   - **Where.** A bar the status step tall (`Density::status`, 28 pt, 32 on touch) along the
     window's foot, under the panes and beside the navigator, on the chrome with a hairline
     over it (`workspace::foot`). It is a cached view of its own, drawn again on the
@@ -9076,7 +9083,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `settings_form::schema::tests::the_groups_list_the_sections_in_order`; the app's
     `a_settings_change_applies_with_the_page_still_up`.
 
-- ✅ **A window too narrow to dock the navigator folds it to the rail** (2026-10-09, MonoCode
+- ✅ **A window too narrow to dock the navigator folds it to the rail** (Superseded 2026-10-12
+  by **The frame is one top line**: the rail went; 2026-10-09, MonoCode
   audit row 30, M6 `CompactProjectRail`; the rail was only the hidden navigator's before;
   amended 2026-10-10 by "The MonoCode port: one pill, one line, bars on the ground": the rail is MonoCode's compact rail).
   - Where the navigator would leave the panes less than a phone's width, so it cannot dock,
@@ -10560,7 +10568,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `workspace::tests::projects::a_goal_starts_in_the_latest_repository_and_offers_the_others`.
 
 - ✅ **A board's navigator row says how far the work is in, and its mark says what waits**
-  (2026-10-11, `.research/readiness-a-2026-10-11.md` item 3). Amends "Declared projects in the
+  (its second line superseded 2026-10-12 by **A navigator row is one line and acts through icon
+  buttons**; 2026-10-11, `.research/readiness-a-2026-10-11.md` item 3). Amends "Declared projects in the
   navigator", whose row read "1 needs you · 3 of 5 merged". At the navigator's usual width that
   cut to "1 needs you · 1 of…" (the `project-lanes` golden), losing the count it was for. What
   waits on the person is already the row's mark (the most urgent lane's glyph, named "Needs
@@ -10680,7 +10689,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     own read 2.4 on a selected row.
   - **Zed's sizes.** Radii 2, 4, 6 and 8, with dialogs at 8 as every float. A pointer's density
     is a 34 pt title bar, 32 pt tab bars whose tabs fill them, 24 pt rows, 22 pt buttons, chips
-    and controls, a 30 pt status bar and a 4 pt sash. The chrome label is 14 (the setting's
+    and controls, a 30 pt status bar and a 4 pt sash (rows, controls, the foot, prose and the
+    word colours since moved to Delta's measured values: "Delta's real values replace the
+    mock's"). The chrome label is 14 (the setting's
     default moves from 13), with 12 and 10 under it and 16 pt icons; prose is 14 on Delta's
     1.625. Every role is the regular weight but a panel's and a page's title: the medium weight
     is gone, and chosen is said by tone. The row inset is 8, the trailing 6.
@@ -10704,7 +10715,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `fonts::bundled::each_family_weight_and_slant_is_the_bundled_face`, `slopty-terminal`
     `metrics`, the e2e `check_lilex_face`, and every golden, retaken.
 
-- ✅ **The chrome's icons are IBM Carbon's at 16** (2026-10-12, `.research/zed-clone-2026-10-11.md`
+- ✅ **The chrome's icons are IBM Carbon's at 16** (Superseded 2026-10-12 by **The chrome's
+  icons are Octicons at 14**; 2026-10-12, `.research/zed-clone-2026-10-11.md`
   §4, step 3 of the Zed port; supersedes the chrome's half of "The chrome's icons are Tabler's,
   and a file's are Material's"). The person read Tabler's round 24-grid strokes, the Lucide
   family, as dated. Zed's own icons are GPL and cannot ship in Slopty, so the set is IBM
@@ -10792,7 +10804,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `kit::pane::tests::a_sash_is_the_one_line`; `slopty-ui`
     `lints::a_floating_surface_is_rounded_lg` (the hint).
 
-- ✅ **Tabs are Zed's cells, the foot Zed's status bar** (2026-10-12,
+- ✅ **Tabs are Zed's cells, the foot Zed's status bar** (its foot and title bar superseded
+  2026-10-12 by **The frame is one top line**; the cell stands; 2026-10-12,
   `.research/zed-clone-2026-10-11.md` §3.4, §5.1, §5.2 and §5.4, step 5 of the Zed port;
   supersedes the pill tabs of "The one look of a tab" from MonoCode's anatomy).
   - **A tab is a square cell** its bar's full height, as wide as its title from 120 to 240 pt
@@ -10803,7 +10816,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the `tab_bar` plane with the `border` line along its foot; a lone tile's header stays on its
     pane's ground. The edited dot and the split's focus dot are Zed's 6 pt indicator in the
     accent. A tab opening grows its slot's ceiling from nothing, stopping at its own width.
-  - **The foot is Zed's status bar**: 30 pt on the panel's plane (`sidebar`) under the lighter
+  - **The foot is Zed's status bar** (a column's foot is 34 since "Delta's real values replace
+    the mock's"): 30 pt on the panel's plane (`sidebar`) under the lighter
     `stroke` line, 4 in at its ends, its parts 8 apart, its words Small (12) in
     `text_secondary`. The tab's terminal toggle is an icon button, on while the terminal shows,
     its hint naming it and its keys; the word "Terminal" went.
@@ -10819,7 +10833,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     tests in `tab_strip` and `tiles`,
     `workspace::tests::foot::the_foot_bar_runs_along_the_windows_foot`.
 
-- ✅ **The navigator is Zed's sidebar** (2026-10-12, `.research/zed-clone-2026-10-11.md` §5.3,
+- ✅ **The navigator is Zed's sidebar** (its header under a lights row superseded 2026-10-12 by
+  **The frame is one top line**; 2026-10-12, `.research/zed-clone-2026-10-11.md` §5.3,
   step 6 of the Zed port; supersedes the pill rows and the rail actions taken from MonoCode).
   - **Rows run square, edge to edge**: the density's 24 pt (42 for two lines), 8 in, their
     parts 6 apart, their words in `text`; the pointer's wash under them and the selection's
@@ -10867,7 +10882,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     caret's to say. The box with its focused ring, and the narrow pane's bleed as a separate
     case, went. The board's message to its orchestrator wears the same frame.
   - **Send** is Carbon's `send--alt` in an icon button's square in the tinted accent; stop is
-    `stop--filled` in its place. The foot's controls are Zed's subtle buttons: bare at rest,
+    `stop--filled` in its place (now Delta's accent-outlined square: "Delta's real values replace
+    the mock's"). The foot's controls are Zed's subtle buttons: bare at rest,
     the pointer's wash, the selected wash while their menu is up.
   - **The tray** (the plan, the queue, the work in the background) is Zed's activity bar: lined
     on its top and sides, top corners round, standing on the composer's line, which closes it.
@@ -10984,3 +11000,461 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   where it was ends it, so lists that disagree with the text can never spin it. Tests:
   `highlight::editor::tests::{the_rows_on_show_lead_the_parse,
   rows_on_show_far_down_colour_before_the_parse_reaches_them}`.
+
+- ✅ **The frame is one top line** (2026-10-12, `.research/design-polish-2026-10-12.md` §4.1–§4.4,
+  batch 1; supersedes the foot of "A foot bar holds the plan, the agent and what runs out of
+  sight", the title bar and foot of "Tabs are Zed's cells, the foot Zed's status bar", the rail
+  of "A window too narrow to dock the navigator folds it to the rail", and the lights row of "The
+  navigator is Zed's sidebar"). The person found the renders not yet right; the study measured
+  66 pt of chrome over every desktop screen naming each tile twice, and a status bar that on 62
+  of 66 goldens drew one glyph.
+  - **No status bar.** The panes run to the window's foot. The tab's terminal toggle moves to the
+    cluster; transfers in flight are a glyph and a count there (the glyph stands still: a turning
+    one in the corner of the eye for minutes read as an alarm); a file's language, indent and
+    caret end its own tab bar (`FileFacts`, a view of its own so the caret redraws it alone).
+    The forwarded-ports count went: the palette's "Forwarded ports" lists them, and a port taken
+    here still says so in a notice. `Density::status` became `foot`, now only the phone's key bar.
+  - **One tab layer.** The title bar's tabs went: a project's tabs are its rows in the navigator,
+    and ⌘1–⌘9, ⌃⇥, the palette's "Go to tab" and the lead's back and forward still reach them.
+    Every pane shows its tab bar, a lone tile one cell (`tile::one_tab_bar` for the board, the
+    kept and the starting tiles), so a split never shows two header styles; the lone header and
+    the title bar's strip of its tile went. `Density::header` and `tab` are 34, the title's.
+  - **The top line** is the navigator's header and every top pane's tab bar on one rule at the
+    window's top; a top tab bar's empty run drags the window and a double-click is the system's
+    title-bar action. The window draws a line of its own only where no pane meets the top (no
+    machine yet, the settings page, an empty tab, a phone).
+  - **The lead and the cluster** are views of their own, drawn in the top-left and top-right
+    panes' tab bars (`cluster.rs`). The lead holds the lights' room and the navigator's toggle
+    while it is hidden, then back and forward through the tabs visited; these walk the window's
+    one history, so they stand once, not on every pane as Zed's per-pane history has them. The
+    cluster ends the line: the terminal toggle and a divider, the project and branch while the
+    navigator is hidden, the readouts only while they warn (server, relay, release, the plan
+    once a window of it is 80 % used), transfers, the bell with a count badge, "…". It never
+    holds a sentence: the project notice that said a task's state there went (the navigator's
+    *Needs you* and the bell say it), and a notice about no one tile hangs under the cluster,
+    raised over the panes' tops, never over a composer's foot.
+  - **No `+` or split menu on a tab bar.** The study's Zed bar ends with them; here New agent and
+    New goal stand in the navigator's header, a new terminal and a split are keys and the
+    palette, and the tile's menu splits: a second door on every pane is chrome for what is
+    one key away.
+  - **A tab's lead says its state once.** While its tile works, waits on the person or has
+    finished, the state's mark takes the kind's place in the tab, its words the screen
+    reader's and the hint's; the header's separate state glyph and its words pill went.
+  - **No rail; the navigator's header is one row**: the lights' room, the toggle and a 1 pt
+    divider while docked, the filter, New agent and New goal. A window too narrow to dock lays
+    the navigator over the panes on ⌘B and leaves nothing in its place. In 248 pt the lights'
+    78 and the toggle leave an open filter no room beside the starts and a scope's token, so
+    while the field is open it takes the starts' room (both stay on their keys and in the
+    palette); a phone's home is wide enough for all of it.
+  - **The ends draw with the top bars.** The lead and the cluster stand in the top panes' tab
+    bars, so whatever draws those bars again (a sash's step, a tab's new title) draws the two
+    ends once with them. A cached view must be laid out at a definite size, and the cluster's
+    width is its contents' (the crumbs, the readouts that warn), so caching it would trade a
+    few elements' build for a frame laid out on a width a frame old. What draws nothing else
+    (an echo, a clock's tick) still leaves the top line as it was.
+  - **The area follows the top line in the same frame.** When the first pane comes to the top
+    (the window's own line goes) or the last goes, the area takes or gives back the line's
+    height before anything is placed in that frame, so a display made for this device is sized
+    to the tile as drawn, not to the frame before (`WorkspaceView::follow_top_line`).
+  - Tests: `slopty-ui` `workspace::tests::foot::the_window_has_no_status_bar`,
+    `foot::the_plan_speaks_in_the_cluster_once_far_used`,
+    `frame::the_top_line_is_one_row`, `tab_strip::no_title_tab_is_drawn`,
+    `tiles::a_lone_tile_has_a_tab_cell`, `tiles::a_tabs_lead_is_its_kind_until_a_state_takes_it`,
+    `chrome::the_bell_counts_and_the_bar_stays_quiet`, `nav_rows::the_header_is_one_row`,
+    `chrome::a_hidden_navigator_leaves_no_rail`,
+    `bodies::a_file_says_its_facts_at_its_tab_bars_end`,
+    `bars::a_top_tab_bars_empty_span_moves_and_zooms_the_window`,
+    `toasts::a_notice_hangs_under_the_top_line_at_the_right`,
+    `palette::a_scope_filters_the_navigator_and_its_attention_sections_alike`,
+    `chrome::a_sash_drag_is_no_news_for_the_chrome`,
+    `desktop::a_touch_device_opens_a_desktop_at_its_own_size_and_keeps_the_pick`.
+
+- ✅ **The chrome's icons are Octicons at 14** (2026-10-12, `.research/design-polish-2026-10-12.md`
+  §3, batch 2; supersedes "The chrome's icons are IBM Carbon's at 16", the files' Material
+  shapes, and the leads' `text_secondary` of "An icon takes its words' size, weight and
+  tier"). The person found the renders not right yet; the study measured Carbon at 16 as a
+  1.06 px line beside IBM Plex's 1.29 px stem, carrying about a third of its words' tone.
+  - **GitHub Octicons (MIT, 19.40.0), its 16-grid art drawn at 14 in the 16 slot**
+    (`Typography::glyph`): a 1.31 px line, the words' stem; a 12.9 px figure with a point of
+    air, as Zed sets its icons. Chevrons and a tab's close are the 12-grid art at 12
+    (`Symbol::small_art`). Octicons is the vocabulary of what Slopty works on: branch, commit,
+    pull request open, draft and closed (each its own glyph now), merge, diff, repo. The
+    laptop is our own on Octicons' grid; Octicons has none. Carbon's files went.
+  - **A file wears its kind, not its language**: code, Markdown, a picture or sound, an
+    archive, a binary, else the plain document (`file_types::glyph`). Material's 59 logos and
+    the SVG renderer path that masked them went; `Mark::File` went with them. A file's tab
+    wears no glyph, as Zed's tabs do, but on a Mac the shown one leads with its proxy, which
+    drags the file out as a document window's title icon does.
+  - **Ink**: leads wear `icon_muted` at rest and `icon` when chosen, a state its own fill. The
+    dark `icon_muted` rose from Zed's #7E879A to #9AA2B1, so a glyph carries at least 0.70 of
+    its words' tone mass on both planes in both appearances (0.81 dark, 0.82 light).
+  - **Identity colour is the row bar alone**: a project's or a machine's colour runs down its
+    navigator head's leading edge, 2 pt, over a light tint of the row in the same colour
+    (`alpha::IDENTITY`, Delta's colour-coded rows), and its glyph wears `icon_muted`: one
+    carrier per row, where there were up to three.
+  - **Decorative glyphs went**: the settings section list is words alone, a compaction note
+    has no scissors, an ended agent wears `stop`.
+  - Tests: `slopty-kit` `icons::tests::a_glyph_weighs_like_its_words` (the median line through
+    the paint path's own sizing at 1x, 1.15–1.50 px), `icons::tests::a_glyph_is_crisp_at_one_x`
+    (Σα²/Σα ≥ 0.72 over every glyph, none under 0.55), `a_glyph_is_fourteen_in_a_slot_of_sixteen`,
+    `glyphs::tests::every_glyph_reads`, `file_types::tests::a_file_leads_with_its_kinds_glyph`;
+    `slopty-theme` `icon_muted_carries_three_quarters_of_its_words`; `slopty-ui`
+    `lints::a_lead_wears_icon_muted_or_its_state` (replaces `a_lead_is_never_muted_at_rest`),
+    `lints::identity_colour_is_the_row_bar` (replaces `identity_colour_stays_on_its_glyph`),
+    `workspace::tests::bodies::a_files_tab_wears_no_glyph_but_its_proxy`.
+
+- ✅ **A goal starts only where its machine says it can** (2026-10-12,
+  `.research/readiness-a-2026-10-12.md` finding 1, the GUI half; the server's `Verb::GoalCheck`
+  is lane W's). The walk found the sheet offering the home, starting an orchestrator there, and
+  leaving a stray tile and a lasting notice when the server refused the project.
+  - The sheet opens on a repository: the focused tile's, else the last start's, else the
+    latest work's on the machine; with none known its folder is empty, never `~`.
+  - As the folder, the target or the machine changes the sheet asks the machine
+    (`Verb::GoalCheck`, which changes nothing) and shows its refusal under the folder in the
+    machine's words: no such folder, not a folder, not in a git repository, bare, no commit
+    yet, no such branch. Create and ↩ wait until the place passes; only then does the
+    orchestrator start. The empty page's composer starts a goal at once only in a repository
+    this client knows, else it opens the sheet holding the goal.
+  - A project the server still refuses takes its orchestrator's tile with it, and its notice
+    goes once a board opens: nothing is left of a goal that did not start but why.
+  - Tests: `slopty-ui` `workspace::tests::projects::a_goal_waits_for_a_place_it_can_start_and_says_why_not`.
+
+- ✅ **A start that failed waits on the person** (2026-10-12,
+  `.research/readiness-a-2026-10-12.md` finding 2). The walk found a task whose clone failed
+  sitting in *Up next* as if queued, its why among facts a narrow board drops, and no way to
+  start it again but a key. A planned task with no terminal whose last step failed
+  (`Board::start_failed`) stands in *Failed* with the failed mark, says why as its row's second
+  line, and offers "Start again" as a button whether or not it is stood on.
+  - Tests: `slopty-ui` `project::tests::a_start_that_failed_waits_on_the_person`; the walk's
+    `project-start-failed` golden.
+
+- ✅ **A navigator row is one line and acts through icon buttons** (2026-10-12,
+  `.research/design-polish-2026-10-12.md` §4.5, batch 3). The person found the renders not yet
+  right; the study measured two-line rows doubling the list for a cwd and a state word that
+  repeated the row's mark, and "Deny", "Allow" and "Merge" as inline words that outranked the
+  row's own title.
+  - **A tile's row** is the density's row (24, a finger's 44): how it stands in the lead's 16
+    slot while it works, waits, failed or is away, the green check for a finish not looked at,
+    else its kind, never both; its title in `text` once chosen, `text_secondary` otherwise; and
+    in a 22 pt end slot one figure where one matters (a running command's clock, a report's
+    figure, the working tree's changes, else its age), after its pull request's glyph only
+    while the request calls for the person or is ready. What its agent says, where it runs,
+    its state in words, its pull request and "Restored" are its hint; its accessible name
+    still says the state. A report's bar went with the second line.
+  - **The attention sections** are one line too: a *Needs you* row's words are the ask, its
+    title and place the hint; a ready task's end says its project and place in the queue.
+  - **Actions are icon buttons in the end slot**, shown under the pointer over what rests
+    there, in a slot as wide as the wider of the two, so nothing on the line moves: Deny (`x`
+    in `error`) then Allow (`check` in `success`), Merge (`git-merge` in `success`), a tile's
+    close. This reverses "an answer is neutral": the study's icon buttons carry their verb's
+    hue, as Zed's permission buttons do. A finger has no hover; on touch the end keeps its
+    figure and the actions are the long press's and the row's keys (⌘↵, ⌘⌫).
+  - **A board's row** is one line; where its goal stands is its hint and its name.
+  - **The open filter takes the starts' room** (see "The frame is one top line").
+  - A row's parts stand `Spacing::row_gap` (6) apart, `kit::row`'s too.
+  - Tests: `slopty-ui` `workspace::tests::nav_rows::a_tree_row_is_one_line`,
+    `nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`,
+    `nav_rows::a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer`,
+    `needs_you::the_actions_show_on_hover_as_buttons`, `nav_projects::a_boards_row_carries_where_its_goal_stands`,
+    `lints::a_row_acts_through_icon_buttons`.
+
+- ✅ **The thread has one left edge** (2026-10-12, `.research/design-polish-2026-10-12.md`
+  §4.6–§4.7, batch 3; supersedes "One reading measure, MonoCode's"). The study measured six
+  text edges in one column and two right edges, a 560 pt turn beside 655 pt cards.
+  - **The column** stands on the tile's left, 16 off its sides: a 32 pt lane (the turn's mark
+    centred in its first 24, 8 clear of the words), then the content. A narrow tile has no lane
+    and hangs no marks. The transcript, the tray, the composer and the thread's own header ride
+    it, the header's title on the content edge. (It was 760 at most and centred until Delta's
+    renders showed its thread left-aligned: "Delta's real values replace the mock's".)
+  - **Prose keeps to 720**, Delta's default content width, the person's turn and the answer
+    alike, and the activity bar and the composer with them; wells, cards and diffs run on to
+    the tile's side. An answer's code fence keeps to the answer's 720 for now, since the answer
+    is one Markdown view.
+  - **A summary line is words on the edge**: a turn's line, a stretch's and a run of quiet
+    calls end in their fold's chevron rather than start with it; a call's line leads with no
+    kind's glyph, its spinner or its waiting mark after its words while it has one; what opens
+    under a call starts on the same edge. A call put to the person is a card whose head and
+    body sit 12 in.
+  - **The composer's words start on the edge** (the field's pad went) and its foot's first
+    button hangs by half the room round its glyph (`kit::hang`, −4), so the glyph does.
+  - Tests: `slopty-ui` `conversation::thread::tests::steps::the_thread_has_one_left_edge`,
+    `steps::the_column_s_gutter_follows_the_tile_s_room`,
+    `steps::whose_turn_it_is_hangs_in_the_gutter`.
+- ✅ **The palette's query sits on the rows' edge, and ⌘⇧P lists the commands with no prompt**
+  (2026-10-12, `.research/design-polish-2026-10-12.md` §1.8, batch 3). The field held a lens at
+  158, a `>` at 186 and its words at 194 over rows whose labels start at 159; Zed's command
+  palette has neither glyph.
+  - **One edge.** The field's words start where a row's lead does (the list's pad and the row's
+    `sm`), with no magnifier; the picker shares the field.
+  - **⌘⇧P is a commands palette, not a seeded search.** It opens with an empty field that
+    says what to type, lists the commands alone, keeps a typed word to them, asks no machine
+    for files or threads, and closes on Esc. A `>` typed into ⌘K still narrows it to the
+    commands.
+  - **The commands run last lead under *Recent*, three at most**, above the rest, in ⌘⇧P
+    and in an empty ⌘K alike: Zed's picker shows its history first.
+  - **Copy.** "New agent…" beside "New agent" read as a duplicate; it is "New agent on…",
+    naming the chooser. "Run" had no object; it is "Run a script…".
+  - Tests: `slopty-ui` `palette::tests::the_query_sits_on_the_rows_edge`,
+    `the_commands_palette_has_no_prompt_to_type_past`, `the_commands_run_last_lead_the_commands`;
+    `workspace::tests::palette::the_palette_splits_into_everything_commands_and_files`.
+- ✅ **Settings are one left column** (2026-10-12, `.research/design-polish-2026-10-12.md`
+  §1.11 and §4.5, batch 3). The page held two edges (its title at 224, groups and rows at 240)
+  beside a list with a boxed search and Back at its foot, and a wide window stretched every
+  row's gap between its words and its control.
+  - **The list is the navigator's**: its body the sections (labels only, the navigator's row),
+    its header row ← (the way back, its glyph hung on the row's edge; Esc and ⌘↩ too) and the
+    filter, unboxed as the navigator's is. The file stays at the list's foot. A form drawn with
+    a sidebar of its own heads it with the same row.
+  - **The page has one edge**, Delta's settings page's 32 in from its side (a phone's single
+    column keeps the window's inset): the page's name (16 regular) 24 from the top, the group
+    heads (Lilex at 12, muted, ruled under by the lighter line, 48 above, 8 to the rule), the
+    rows and their rules, and the notes all start on it. The search heading the list is 32
+    tall.
+  - **A measure of 720**: every child of the page keeps to it, left aligned, so the controls end
+    on its right edge however wide the window.
+  - Tests: `slopty-ui` `workspace::tests::settings_page::settings_have_one_left_column`,
+    `…::the_settings_fill_the_panes_and_the_navigator_lists_their_sections`;
+    `settings_editor::tests::the_file_is_the_sidebars_advanced_path`. The test that the page's
+    title stood on the search's line went with that layout.
+- ✅ **The empty workspace is a thread with no turns** (2026-10-12,
+  `.research/design-polish-2026-10-12.md` §1.3 and §4.9, batch 3; supersedes the layout of
+  "The empty workspace is the composer page", whose goal-first behaviour stands). The study
+  measured three left edges (282, 292, 302), a stray rule that was the field's top line, a
+  semibold 18 heading, five gaps on no scale, and the composer floating mid-pane where no thread
+  keeps it.
+  - **The composer sits at the pane's foot**, in the reading column a thread keeps it in
+    (`thread::view::PROSE` and its lane), its words on the thread's content edge: one place,
+    one habit.
+  - **Above it a launcher**, a 512 pt column (Zed's welcome) whose top stands 30 % down, on one
+    edge: the question at `page_heading`, Delta's settings title 16/22 at the regular weight; 8
+    under it, where a goal goes as a 12 muted line that opens the goal's sheet; 24 under that a
+    *Start* head (12 muted) over New terminal, Add a window or display, and New goal, rows that
+    hang by their pad so their glyphs stand on the edge; then a *Recent* head over the five tabs
+    used last, which go back to them. The doors still print no keys: keybindings go in the
+    palette, not on buttons, which outranks the study's key hints.
+  - The page with no machine, or the server out of reach, keeps its words and doors on the same
+    one edge.
+  - Tests: `slopty-ui` `workspace::tests::palette::the_empty_page_has_one_edge` (the study
+    named `faces::`; the empty page's tests live with the palette's), `…::the_empty_workspace_asks_what_to_work_on`,
+    `…::the_empty_workspaces_composer_says_where_the_goal_goes`; slopty-theme
+    `the_type_roles_are_zeds_labels_and_headlines`.
+- ✅ **What waits on the person flows in the thread** (2026-10-12,
+  `.research/design-polish-2026-10-12.md` §4.7, batch 4; supersedes "A request is answered
+  where it was asked"). A tray over the composer pinned a copy of the request there, opening a
+  dead band in a short thread and saying it twice in a long one.
+  - **A request about a call is answered on the call's card**, wherever the call stands; the
+    list brings the call into view once, as the request comes, and the scroll is the person's
+    after that. A request about no call that is a row (a call folded away, none at all) is a
+    card of its own after the turns (`Row::Asked`), a large step under the last. A question
+    still stands whole over the composer, the one form it is: gpui-fast's carried text
+    measurement panics on its answers inside the list's rows ("measurement has not been
+    performed"), so it moves into the thread once the fork holds that.
+  - **The card is Zed's permission card**: radius 6 in `call_border`; a head band of
+    `Density.decision` (28) on `card_head` with the mark, what it asks at 14 and, for several
+    questions, which one this is in 12 muted at its right; the body 12 in; the answers 28 tall
+    on its foot, right-aligned with the primary last, a standing grant at its left. A press
+    on it gives it the keyboard, and then ⌘↵ and ⌘⌫ answer it, as before.
+  - **A question's answers are rows, not boxes**: no ring, nothing under them at rest, the
+    selection's wash once chosen.
+  - **The plan lives once, in the activity bar**, which stands on the composer's top line; a
+    call that keeps the task list says "Updated the plan" in its turn and opens to nothing.
+  - Deleted: the tray's copy of a request, its Scroll ↑/↓ way back, and the 12 % share the rest
+    of the bar kept under a request.
+  - Tests: `slopty-ui` `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
+    `…::a_request_is_answered_on_its_call_wherever_it_stands`, `…::the_plan_shows_once`,
+    `…::a_plan_in_the_thread_takes_its_answer`;
+    `…::questions::a_question_stands_whole_and_the_activity_bar_gives_way`;
+    `conversation::thread::questions::tests::a_question_answers_are_rows_not_boxes`;
+    slopty-theme `elevation_and_density`.
+- ✅ **The composer's foot says where the agent works** (2026-10-12,
+  `.research/design-polish-2026-10-12.md` §4.7, batch 4). Delta's foot row tells the person
+  where the agent works; ours said it only in the tile's header.
+  - **Left**: the checkout by its folder and its branch, "slopty / main", after the repository's
+    glyph in 12 secondary; a press opens the commit sheet, which left the "+" menu for it. Then
+    what the thread changed, "+12 −3" in Lilex, added in `success`, removed in `error`. Its
+    glyph hangs on the column's edge (its pad is half the room round it, and the foot hangs by
+    as much).
+  - **Right**: the context ring, only from a tenth of the window used (figures from half); the
+    runner, the machine's glyph and name, which the thread's header no longer says, the first
+    to leave a narrow foot; the model and its effort as one button; the mode, kept beside it, since the agents that
+    publish modes switch them here; the paperclip, which is the "+" menu under its true name
+    (attach files, Photos on iOS, then commands, mentions, the runs and what the foot had no
+    room for); then send.
+  - Tests: `slopty-ui` `conversation::thread::tests::face::the_foot_names_the_checkout`,
+    `…::the_context_ring_waits_for_ten_percent`, `…::a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus`;
+    `…::steps::the_thread_has_one_left_edge`; the commit tests open the sheet from the checkout.
+- ✅ **Delta's real values replace the mock's** (2026-10-12, `.research/delta-re-2026-10-12.md`
+  §2–§6; supersedes the values below in "The design system is Zed's, with Delta's values",
+  "Tabs are Zed's cells, the foot Zed's status bar", "The thread is Delta's", "The thread has
+  one left edge" and "Settings are one left column"). The
+  polish study measured delta.dev's HTML mock, which draws the app at about 0.8 scale; Delta
+  0.19.2's own theme file and renders give the app's values, and where the two differ Delta's
+  win.
+  - **Rows 28**: the navigator and the settings list (`Density.row`, `.item`); a two-line row
+    44. Our 24 read cramped beside Delta's. (Menus 23 and the palette 27 since "Measured from
+    the signed-in app".)
+  - **Prose 15** (`prose_size` 15, and the settings' `[font] prose_size` default); the 1.625
+    came from the mock's `leading-relaxed`. A turn's summary line is prose-sized in the muted
+    tone, not the chrome's 12. (Its line is 21 and the window's rows 12 since "Measured from
+    the signed-in app".)
+  - **Code** (`TypeRoles.code`): a call's well, a diff (the thread's and the review's) and an
+    answer's code fence. The 12 came from the mock's 10 px. (15/21 since "Measured from the
+    signed-in app".)
+  - **The thread is left-aligned** (Delta's Center Content is off), wide work to the tile's
+    side (Constrain Wide Content off). Replaces the centred 760 with 640 of prose. (Prose 705,
+    52 in, since "Measured from the signed-in app".)
+  - **The foot** holds the composer's controls: checkout and changes on the left; meter,
+    runner, model and effort, mode and the paperclip on the right; send last. The foot's chips
+    are 28 (`Density.control`). The machine's pill left the thread's header for the runner
+    chip. (The foot 36 and send a 22 pt bordered square since "Measured from the signed-in
+    app".)
+  - **Controls 28, radius 4** (`Density.control`): text buttons, dropdowns and fields in pages,
+    dialogs and the foot. Icon buttons stay 22 (`button`, `hit`). A search heading a list is 32
+    (`Density.search`).
+  - **Word colours**: success `#7BD979` in dark, as Delta has it; Delta's dark error `#FF928A`
+    sat 0.031 Oklab from it for a deuteranope (`vision` wants 0.06), so it moved 0.04 down in
+    Oklab lightness to `#F1857E` (0.067). In light every word is lifted to AA on every plane and
+    row, which took Delta's `#D03A42` to `#B13138`, 0.048 from the lifted green and 0.033 from
+    the amber; the light error keeps Delta's hue at Oklab L 0.40 C 0.14, `#831921` (0.066 and
+    0.089), and the green, given as `#008019`, lands at `#007016`. Light's changed words are
+    Delta's `#85D6A3` and `#EFA4B2`. Delta's greener success (hue 144) moved the identity's
+    green and teal to 165 and 186, 20 degrees clear of it.
+  - **Identity** is a 2 pt bar and a light tint of the row in its colour. (It runs down the
+    rows under the head, 3 pt on the selected one, since "Measured from the signed-in app".)
+  - **Settings**: the page's title 16 at the regular weight (`page_heading`, which the empty
+    workspace's question shares), group heads in Lilex with a rule under them, the page 32 in.
+  - **Icons stay Octicons**, a deliberate deviation from the RE's ruling: the person rejected
+    Lucide's outline register. They are drawn at 14 in a 16 slot, where Octicons' 1.5 line on
+    its 16 grid measures 1.375 px, the nearest it comes to Delta's 1.1–1.3 pt; at 16 the same
+    art draws 1.5 and more.
+  - **Settings' group heads are in Lilex**, the one use of the code face in the chrome outside
+    the kit (`lints::the_mono_face_is_for_addresses` allows it).
+  - **The turns keep four lines** of prose in view however much stands under them (a question,
+    the activity bar), which scroll first.
+  - Already as Delta has them: no status bar, the traffic lights in the sidebar's 34 pt
+    header, one tab layer, radii 4 and 8, square full-width rows, the unread dot, the unboxed
+    composer.
+  - Tests: `slopty-theme` `elevation_and_density`, `the_type_roles_are_zeds_labels_and_headlines`,
+    `vision::opposite_states_stay_apart_for_every_dichromacy`; `slopty-kit`
+    `message::tests::send_is_a_bordered_square_tinted_when_armed`, `icons::tests::a_glyph_weighs_like_its_words`
+    (the band narrowed to 1.10–1.40 px); `slopty-theme` `identity_keeps_clear_of_the_states`;
+    `slopty-ui`
+    `conversation::thread::tests::steps::the_thread_has_one_left_edge`,
+    `…::steps::the_column_s_gutter_follows_the_tile_s_room`,
+    `…::face::the_one_bordered_square_stops_a_turn_or_sends_the_draft`,
+    `workspace::tests::settings_page::settings_have_one_left_column`.
+- ✅ **The review is Delta's Changes** (2026-10-12, `.research/design-polish-2026-10-12.md`
+  §1.9 and §4.11, batch 5; code sizes from `.research/delta-re-2026-10-12.md` §4.2). The study
+  measured five left edges in the top 200 pt of the review, a stray "Line 1" band, two number
+  columns in a unified diff, a 220 pt file list that left the diff room to wrap its code, the
+  foot's primary in its middle, and the viewed box at the far end of a head from the name it
+  marks.
+  - **No list column, at any width.** The stacked file heads are the list, as in Delta's
+    Changes; the scope bar's Files button opens them as a menu everywhere, and ⌘⇧O with it.
+  - **One gutter**: a line's new number, or a removed line's old one (`lines::gutter`); the
+    two-gutter row is deleted. Lines are the code role (Lilex 14/20).
+  - **No band over a lone hunk at the file's top**: a hunk head shows only with a heading,
+    beside another hunk, or past line 1. Between hunks the "N unchanged lines" folds say it.
+  - **One edge, the pane's 8**: the comparison's words (its button hung by its pad), each
+    head's tick box and the lines' numbers.
+  - **A file head** is a row tall: the viewed tick box first, at a chevron's place, then the
+    file's glyph, name, folder and counts. Ticking it folds the file; a press on the name still
+    folds and opens it.
+  - **The bar** holds glyphs: "Review with Claude Code" is the agent's icon button with its
+    words in the hint.
+  - **The foot** is the column's 34 with 28 pt buttons, right-aligned with the one primary
+    last: Mark reviewed, the forge's post, Add to message, Merge, then Send.
+  - Left for a later batch: the findings band still stands over the diff (the study draws each
+    finding as a comment at its line and a "raised 2 findings ⌄" menu in the comparison row),
+    and long lines still wrap rather than scroll sideways.
+  - Tests: `slopty-ui` `conversation::lines::tests::one_gutter_in_a_unified_diff`,
+    `review::tests::no_hunk_label_above_line_one`, `review::tests::the_primary_ends_the_foot`,
+    `review::tests::the_review_has_one_left_edge`, `review::tests::the_files_are_a_menu_at_every_width`.
+- ✅ **The board is the wide pane; the orchestrator a column** (2026-10-12,
+  `.research/design-polish-2026-10-12.md` §1.10 and §4.8, batch 5). Beside its board, an empty
+  orchestrator's thread took 60 % of the tile and the board's rows truncated in what was left.
+  - **The orchestrator is Delta's thread column**, 420 pt (never more than half the tile nor
+    under 360), on the left; the board takes the rest behind the hairline. The board is the
+    work being directed; the thread is a voice.
+  - **A card's second line hangs under its title**: the number stands in a slot as wide as
+    "#999", so every title starts on one edge, and what it asks, what holds it and a failed
+    check start there too. The orchestrator's row keeps the slot empty, its question on the
+    same edge.
+  - Left for a later batch: the head's autonomy and review limit in a gear popover, and "Fix
+    CI" as an end-slot button.
+  - Tests: `slopty-ui` `workspace::tests::projects::the_board_stands_beside_its_orchestrator`
+    (the board wider than half the tile, the orchestrator 420),
+    `…::the_board_is_one_grouped_list` (a card's second line under its title).
+- ✅ **One dialog anatomy** (2026-10-12, `.research/design-polish-2026-10-12.md` §4.10,
+  batch 5). Two dialogs measured two insets (12 and 24) and two button heights.
+  - `kit::dialog_head`, `dialog_section` and `dialog_foot` are 16 in from the dialog's sides;
+    the head 16 under its top, its words 4 apart; sections 16 apart; the foot's buttons
+    (`Density.control`, 28) 8 apart, 12 above and below, under the lighter line, the primary
+    last.
+  - Tests: `slopty-kit` `kit::tests::a_dialog_has_one_inset`.
+- ✅ **iOS at touch density, docked and flat** (2026-10-12, `.research/design-polish-2026-10-12.md`
+  §1.19 and §4.12, batch 6).
+  - **A pad docks the navigator at 900 pt and wider** (`navigator::TOUCH_DOCK_AT`), as Delta
+    and Zed dock their sidebars: a 13-inch iPad upright (1032) docks it; an 11-inch upright
+    (834) and Split View's thirds keep the drawer over a scrim.
+  - **The accessory bar is flat**: 44 pt on the sidebar's plane under the lighter line, the
+    band under it continuing that plane; its keys are ghost buttons a finger's 44 square,
+    abutting with nothing drawn round them, the pressed wash only, glyphs at 16 and words at
+    15. Hide is a chevron down in a 44 square of its own on the keys' line, with no rule
+    before it, the scrolling run's fade ending 8 short of it. The terminal's seventeen keys
+    still spread on an 11-inch iPad (792 of 820) and scroll on a phone.
+  - **Tabs fill a touch tab bar**: `Density::TOUCH.tab` is the bar's 44.
+  - **The phone's palette** is a sheet whose field heads it, rows below, rather than a field
+    at its foot under the rows.
+  - **The light scrim is 24 %** (`alpha::SCRIM_LIGHT`); 40 % over paper read as mud. Dark
+    keeps 40.
+  - The phone's title was already the inline 17 at the strong weight. Left for a later batch:
+    glyphs 18 in a 20 slot on touch, a notice row with its 2 pt bar, the editor's facts in the
+    bar's overflow, and the e2e harness painting the keyboard's inset in `stage`.
+  - Tests: `slopty-ui` `workspace::tests::frame::the_navigator_docks_only_where_the_panes_keep_their_room`;
+    `slopty-app` `tests::the_key_caps_keep_their_width`,
+    `every_bar_spreads_on_an_ipad_and_scrolls_on_a_phone`.
+- ✅ **Measured from the signed-in app** (2026-10-12, `.research/delta-signed-in-2026-10-12.md`
+  §2 and §3, batch 7; supersedes the values named below in "Delta's real values replace the
+  mock's", "The review is Delta's Changes" and "The thread has one left edge"). The person's
+  own signed-in Delta 0.19.2 was measured at 1x from 71 window captures; where it differs from
+  the RE's renders and the polish study, it wins.
+  - **The window's rows are 12**: a navigator row and its section heads, a pane's tab and
+    header title, the composer's foot, a palette row (`TypeRoles.row`, 12/16; a finger's keeps
+    the 17 body). Menus, pickers, the palette's query, the review's head rows and the
+    settings' list stay 14 (`TypeRoles.chrome`). Our panes have one tab layer, so every tab
+    cell is the header's 12, where Delta's right pane draws its few tabs at 14.
+  - **Prose and code are 15 on 21** (`prose_line_height` 1.4, `TypeRoles.code` 15/21) in the
+    thread and the review; the review's line numbers are the code's size in the line number's
+    tone; the thread's diffs have no numbers at all (`lines::Ink::bare`).
+  - **The thread's prose starts 52 in** (the 16 side and a 36 lane, `view::LANE`), wraps at
+    705 (`view::PROSE`), and wide work ends 38 short of the tile's right (`view::END`). A call's
+    well hangs 9 left of the prose edge, its line and a base unit, so the code inside starts on
+    the prose's edge.
+  - **A call's line** is prose-sized, 28 tall (`TOOL_ROW`), its well right under it with no
+    gap; a mark sits in its own 24 slot.
+  - **Rows by kind**: menus 23 (`Density.menu`), the palette and pickers 27 (`Density.list`),
+    the navigator and the settings' list 28. The palette is 560 wide, 120 down the window, its
+    query row 36.
+  - **The foot is 36** (`Density.foot`). Send is an icon button's 22 pt square inside the
+    lighter line on the element's ground, its glyph quiet; armed (a draft, a turn to stop) it
+    takes the accent's quiet ground, the selection's line and the accent's glyph.
+  - **The header row and the tab bar are one plane** between the work and the sidebar:
+    `#F4F4F4` in light, `#1D2023` in dark (`Surfaces.header`, `.tab_bar`); the shown tab takes
+    the work's ground.
+  - **Identity runs down the rows**: a machine's or a project's colour, a 2 pt bar and a faint
+    wash on its head, runs down the board's, the threads' and the tiles' rows under it; on the
+    selected tile's row the bar is 3 pt and the wash strong (`alpha::IDENTITY_SELECTED`, 0.2).
+  - **A notice is up to 465 wide** (`toast::TOAST_MAX_W`), a failure's line in the error's
+    border tone; it keeps its copy and dismiss.
+  - Kept as deliberate deviations: Octicons, and the word colours shifted for the dichromacy
+    floor.
+  - Left for a later batch: notices as Delta's two-line cards (12 on 19);
+    comments as inline cards with the commenter's bar; the palette's scope row and "Ask" key;
+    the slash menu's 24 and the model picker's 31 rows; "!" opening an inline terminal.
+  - Tests: `slopty-theme` `the_type_roles_are_zeds_labels_and_headlines`,
+    `elevation_and_density`; `slopty-kit` `message::tests::send_is_a_bordered_square_tinted_when_armed`;
+    `slopty-ui` `conversation::thread::tests::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`,
+    `…::steps::the_column_s_gutter_follows_the_tile_s_room`,
+    `…::face::the_one_bordered_square_stops_a_turn_or_sends_the_draft`,
+    `workspace::tests::nav_projects::a_projects_colour_runs_down_its_rows`.

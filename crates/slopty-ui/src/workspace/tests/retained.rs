@@ -455,12 +455,10 @@ fn the_keyboard_moving_builds_only_the_shells_it_moves_between(cx: &mut TestAppC
     assert_eq!(after[2], before[2], "the shell it never touched was not built again");
 }
 
-/// Title tabs opened one by one until they run past the bar's room, then back and forward
-/// between them: each frame is the frame drawn from scratch. What the strip shows of the tabs
-/// past its ends is known only once it is laid out, so it is drawn in that same frame, never
-/// from what the last frame laid out.
+/// Tabs opened one by one, then back and forward between them: each frame is the frame drawn
+/// from scratch, the top line's lead and cluster moving with the pane that meets them.
 #[gpui::test]
-fn title_tabs_that_overflow_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
+fn tabs_opened_one_by_one_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let first = SessionId::new();
@@ -471,19 +469,16 @@ fn title_tabs_that_overflow_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
         on_new_tab(&view, cx, tile);
         fresh(cx, &format!("tab {n}"));
     }
-    let overflows = view.read_with(cx, |v, _| v.title_scroll.max_offset().x > px(0.0));
-    assert!(overflows, "the tabs run past the bar's room");
     for (keys, what) in [("cmd-[", "back"), ("cmd-]", "forward"), ("cmd-[", "back again")] {
         cx.simulate_keystrokes(keys);
         fresh(cx, what);
     }
 }
 
-/// Tabs enough to run past the bar arriving in one snapshot, as a relaunch onto many tabs lays
-/// them all out in its first frame: that frame is the frame drawn from scratch, the tab the
-/// strip's end cuts and every glyph in it included. A narrower window, the same.
+/// Many tabs arriving in one snapshot, as a relaunch onto many tabs lays them all out in its
+/// first frame: that frame is the frame drawn from scratch. A narrower window, the same.
 #[gpui::test]
-fn title_tabs_that_overflow_at_once_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
+fn many_tabs_at_once_are_drawn_as_from_scratch(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
@@ -504,10 +499,8 @@ fn title_tabs_that_overflow_at_once_are_drawn_as_from_scratch(cx: &mut TestAppCo
     fresh(cx, "twelve tabs at once");
     let tabs = view.read_with(cx, |v, _| v.layout().shown_project().map(|p| p.tabs().len()));
     assert_eq!(tabs, Some(13), "each a tab of the shell's project");
-    let overflows = view.read_with(cx, |v, _| v.title_scroll.max_offset().x > px(0.0));
-    assert!(overflows, "the tabs run past the bar's room");
     cx.simulate_keystrokes("cmd-[");
-    fresh(cx, "back to a tab past the end");
+    fresh(cx, "back to another tab");
     cx.simulate_resize(size(px(700.0), px(900.0)));
     fresh(cx, "a narrower window");
 }

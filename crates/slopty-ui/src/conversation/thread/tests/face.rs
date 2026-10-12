@@ -54,11 +54,11 @@ fn scroll(cx: &mut VisualTestContext, dy: f32) {
     cx.run_until_parked();
 }
 
-/// A request whose call is on screen is answered under the call's line, and the tray carries
-/// no copy; while the call is scrolled away the tray carries it with the way back to the call,
-/// which brings the answers back under it.
+/// A request about a call is answered under the call's line, wherever the call stands: no
+/// copy waits pinned over the composer, and the list brings the call into view as the request
+/// comes (`docs/decisions/ui.md`, "What waits on the person flows in the thread").
 #[gpui::test]
-fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContext) {
+fn a_request_is_answered_on_its_call_wherever_it_stands(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -91,12 +91,10 @@ fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContex
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds("request-a").is_some(), "the call is above: the tray carries it");
-    let back = cx.debug_bounds("asked-scroll").expect("with the way back to the call").center();
-    cx.simulate_click(back, Modifiers::none());
+    cx.update(gpui::Window::simulate_next_frame);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("request-a").is_none(), "the call shows: the tray has no copy");
-    let card = cx.debug_bounds("call-x").expect("the call shows");
+    assert!(cx.debug_bounds("request-a").is_none(), "no copy of it apart from its call");
+    let card = cx.debug_bounds("call-x").expect("the list brought the call into view");
     let allow = cx.debug_bounds("answer-a-allow").expect("answered under the call");
     assert!(card.contains(&allow.center()), "the answers sit under the call's line");
 
@@ -106,6 +104,78 @@ fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContex
         "{:?}",
         intents(&sent)
     );
+}
+
+/// A request about no call follows the last turn as a card of its own, a large step under
+/// it: in a short thread it stands under the turns, not pinned to the composer with a dead band
+/// over it, and the composer's activity bar holds no copy of it.
+#[gpui::test]
+fn an_approval_follows_the_last_turn(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::NeedsYou;
+    state.turns = vec![live_turn()];
+    state.items = vec![item("t", ItemBody::Text(Clipped::whole("Running the tests next.")))];
+    state.requests = vec![approval("a")];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let last = cx.debug_bounds("item-t").expect("the last turn's answer");
+    let card = cx.debug_bounds("thread-decision").expect("the request's card");
+    let composer = cx.debug_bounds("thread-composer").expect("the composer");
+    let step = px(slopty_theme::Theme::default().spacing.lg);
+    assert!(card.top() >= last.bottom() + step - px(0.5), "under the turn: {card:?} {last:?}");
+    assert!(card.top() - last.bottom() < step * 3.0, "following it: {card:?} {last:?}");
+    assert!(composer.top() - card.bottom() > step * 3.0, "not pinned to the composer");
+    assert!(cx.debug_bounds("thread-activity").is_none(), "nothing else waits over it");
+}
+
+/// The plan lives once, in the activity bar over the composer: the call that keeps the task
+/// list says "Updated the plan" in its turn and, opened, shows nothing more under its line
+/// (`.research/design-polish-2026-10-12.md` §4.7).
+#[gpui::test]
+fn the_plan_shows_once(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Plan, Step};
+
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![live_turn()];
+    state.items = vec![item(
+        "x",
+        ItemBody::Tool(Box::new(ToolCall {
+            name: "TodoWrite".to_owned(),
+            kind: kind::TASKS.to_owned(),
+            title: "Update todos".to_owned(),
+            input: Clipped::whole(r#"{"todos":[{"content":"Lex the input"}]}"#),
+            state: ToolState::Completed,
+            output: Some(Clipped::whole("Todos have been modified")),
+            images: Vec::new(),
+            detail: None,
+            child: None,
+            ended_ms: None,
+        })),
+    )];
+    let step = Step { id: None, text: "Lex the input".to_owned(), status: "pending".to_owned() };
+    state.plan = Some(Plan { text: None, steps: vec![step] });
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    click(cx, "tool-x");
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Button", Some("Updated the plan"))),
+        "the turn says it: {tree:#?}"
+    );
+    let (call, line) = (cx.debug_bounds("call-x"), cx.debug_bounds("tool-x"));
+    let (Some(call), Some(line)) = (call, line) else { panic!("the call is a row") };
+    assert!(call.size.height <= line.size.height + px(0.5), "nothing under its line: {call:?}");
+    assert!(cx.debug_bounds("thread-plan").is_some(), "the plan in the activity bar");
 }
 
 /// A call that asks as it arrives at the foot of the thread is answered under its line in the
@@ -290,12 +360,11 @@ fn the_reading_size_grows_what_is_read_and_not_the_chrome(cx: &mut TestAppContex
     assert_eq!(tall(cx, "thread-model"), chip, "the chrome does not");
 }
 
-/// The fill a disc at `at` was painted with, and its corner radius over its side: a round disc
-/// has a half.
-fn disc(
+/// A square's outline where `at` is painted: its colour and its corner as a share of its side.
+fn outline(
     cx: &mut VisualTestContext,
     at: gpui::Bounds<gpui::Pixels>,
-) -> Option<(gpui::Background, f32)> {
+) -> Option<(gpui::Hsla, f32)> {
     cx.update(|window, _| {
         let scale = window.scale_factor();
         window.painted_quads().into_iter().find_map(|q| {
@@ -304,17 +373,17 @@ fn disc(
                 && near(q.bounds.origin.y.0, at.origin.y)
                 && near(q.bounds.size.width.0, at.size.width);
             let round = q.corner_radii.top_left.0 / q.bounds.size.width.0;
-            (here && q.background != gpui::Background::from(gpui::transparent_black()))
-                .then_some((q.background, round))
+            (here && q.border_widths.left.0 > 0.0).then_some((q.border_color, round))
         })
     })
 }
 
 /// The composer's square stops the turn while it runs and nothing is typed and sends what is
-/// typed, Zed's tinted accent either way: a square at a control's radius, never a disc, never
-/// the green.
+/// typed, Delta's either way: an icon button's 22 pt square at a control's radius, armed in
+/// the selection's line, never a disc, never the green
+/// (`.research/delta-signed-in-2026-10-12.md` §2.6).
 #[gpui::test]
-fn the_one_tinted_square_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
+fn the_one_bordered_square_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
@@ -327,19 +396,20 @@ fn the_one_tinted_square_stops_a_turn_or_sends_the_draft(cx: &mut TestAppContext
     cx.run_until_parked();
 
     let theme = slopty_theme::Theme::default();
-    let fill = |c: slopty_theme::Tint| gpui::Background::from(slopty_kit::colors::hsla(c));
+    let armed = slopty_kit::colors::hsla(theme.surfaces.selected_border);
     let stop = cx.debug_bounds("thread-stop").expect("at work, nothing typed: stop");
     assert!(cx.debug_bounds("thread-send").is_none());
-    let side = slopty_kit::kit::icon_button_side(&theme);
+    let side = theme.density.button;
     let square = theme.radii.sm / side;
     assert!((f32::from(stop.size.width) - side).abs() < 0.5, "{stop:?}");
-    let (painted, round) = disc(cx, stop).expect("the stop's square");
-    assert_eq!(painted, fill(theme.surfaces.info_background), "stopping is tinted");
+    assert!((f32::from(stop.size.height) - side).abs() < 0.5, "{stop:?}");
+    let (ring, round) = outline(cx, stop).expect("the stop's square");
+    assert_eq!(ring, armed, "stopping is armed");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     cx.simulate_input("And the docs");
     let send = cx.debug_bounds("thread-send").expect("typed: send");
-    let (painted, round) = disc(cx, send).expect("the send's square");
-    assert_eq!(painted, fill(theme.surfaces.info_background), "sending too");
+    let (ring, round) = outline(cx, send).expect("the send's square");
+    assert_eq!(ring, armed, "sending too");
     assert!((round - square).abs() < 0.01, "a square at 4: {round}");
     let send = send.center();
     cx.simulate_click(send, Modifiers::none());
@@ -758,8 +828,8 @@ fn the_latest_answer_s_new_words_lift_in(cx: &mut TestAppContext) {
 }
 
 /// A plan put to the person stands in the thread as type, its title from its heading, its head
-/// shown until opened, the answers on it; scrolled away, the tray says "Plan ready" with the
-/// way back to it and no second copy of its words.
+/// shown until opened, the answers on it; scrolled away, nothing waits over the composer in
+/// its stead: no second copy of it or its answers.
 #[gpui::test]
 fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -809,6 +879,12 @@ fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("request-p").is_none(), "answered under the call");
     let allow = cx.debug_bounds("answer-p-allow").expect("the answers under the plan");
     assert!(cx.debug_bounds("plan-plan").expect("drawn").contains(&allow.center()));
+    cx.simulate_click(allow.center(), Modifiers::none());
+    assert!(
+        matches!(intents(&sent).as_slice(), [Intent::Answer { choice, .. }] if choice == "allow"),
+        "{:?}",
+        intents(&sent)
+    );
 
     // Taller than the view, so the newest row's place puts the plan above it.
     state.items.push(Item {
@@ -818,17 +894,11 @@ fn a_plan_in_the_thread_takes_its_answer(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
     cx.run_until_parked();
     scroll(cx, -100_000.0);
-    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-    assert!(cx.debug_bounds("request-p").is_some(), "the tray carries it while it is away");
-    assert!(tree.iter().any(|n| n.label.as_deref() == Some("Plan ready")), "named, not copied");
-    assert!(!tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("1. Step 1"))));
-    let allow = cx.debug_bounds("answer-p-allow").expect("answered from the tray");
-    cx.simulate_click(allow.center(), Modifiers::none());
-    assert!(
-        matches!(intents(&sent).as_slice(), [Intent::Answer { choice, .. }] if choice == "allow"),
-        "{:?}",
-        intents(&sent)
-    );
+    assert!(cx.debug_bounds("request-p").is_none(), "no copy waits over the composer");
+    let tray = cx.debug_bounds("thread-tray");
+    let copied =
+        cx.debug_bounds("answer-p-allow").zip(tray).is_some_and(|(a, t)| t.contains(&a.center()));
+    assert!(!copied, "its answers stay on its card");
 }
 
 /// A picture sent with a message opens large over the thread on a press, saying what it is;
@@ -1034,6 +1104,61 @@ fn the_meter_says_its_share_from_half_full(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-meter-figure").is_some(), "60 %: in figures too");
 }
 
+/// The foot says where the agent works, Delta's foot row: the checkout by its folder and its
+/// branch, which opens the commit sheet, then what the thread changed in figures, the added in
+/// the success tone and the removed in the error tone.
+#[gpui::test]
+fn the_foot_names_the_checkout(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.cwd = "/src/slopty".to_owned();
+    state.meta.facts.insert("branch".to_owned(), "main".to_owned());
+    let mut turn = live_turn();
+    turn.changed = Changed { added: 12, removed: 3 };
+    state.turns = vec![turn];
+    state.items = vec![item("t", ItemBody::Text(Clipped::whole("Done with the parser.")))];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Button", Some("Commit on slopty / main"))),
+        "the checkout and its branch: {tree:#?}"
+    );
+    assert!(tree.iter().any(|n| n.is("Label", Some("12 added, 3 removed"))), "the diff stat");
+    let (checkout, send) = (cx.debug_bounds("thread-checkout"), cx.debug_bounds("thread-send"));
+    let (Some(checkout), Some(send)) = (checkout, send) else { panic!("the foot's two ends") };
+    assert!(checkout.right() < send.left(), "the checkout leads, the send ends the row");
+    click(cx, "thread-checkout");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("commit-sheet").is_some(), "a press opens the commit sheet");
+}
+
+/// The context's ring stays away while a thread has used under a tenth of its window: a thread
+/// barely begun has nothing to watch.
+#[gpui::test]
+fn the_context_ring_waits_for_ten_percent(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![live_turn()];
+    state.items = vec![item("t", ItemBody::Text(Clipped::whole("Reading the parser.")))];
+    state.meters.context_window = Some(200_000);
+    state.meters.context_tokens = Some(10_000);
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter").is_none(), "5 %: no ring yet");
+    state.meters.context_tokens = Some(30_000);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter").is_some(), "15 %: the ring");
+}
+
 /// A request's card asks only its own question: what the turn edited stays the thread's,
 /// for the changes card under its answer and the review.
 #[gpui::test]
@@ -1050,9 +1175,9 @@ fn a_requests_card_leaves_the_edits_to_the_thread(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("request-changes").is_none(), "nothing of them on the card");
 }
 
-/// The composer's foot fits the room it is given: in a column beside a board (312 pt) the send
-/// stays inside the card, the "+" stays, and the model, if it left the foot, waits in the "+"
-/// menu. With room, nothing leaves and the menu holds only its own rows.
+/// The composer's foot fits the room it is given: in a column narrower than a board's (240 pt)
+/// the send stays inside the card, the "+" stays, and the model, if it left the foot, waits in the
+/// "+" menu. With room, nothing leaves and the menu holds only its own rows.
 #[gpui::test]
 fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -1079,7 +1204,7 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
     assert!(cx.debug_bounds("thread-add-menu-model").is_none(), "nothing left the foot");
     open_plus(cx);
 
-    cx.simulate_resize(gpui::size(px(312.0), px(600.0)));
+    cx.simulate_resize(gpui::size(px(240.0), px(600.0)));
     cx.run_until_parked();
     let card = cx.debug_bounds("thread-composer").expect("the composer");
     let send = cx.debug_bounds("thread-send").expect("the send stays");
@@ -1087,7 +1212,7 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
     let add = cx.debug_bounds("thread-attach").expect("the + stays");
     assert!(add.right() <= send.left(), "the + leads, the send ends");
     let gone: Vec<&str> = chips.into_iter().filter(|c| cx.debug_bounds(c).is_none()).collect();
-    assert!(!gone.is_empty(), "312 pt holds the foot only by leaving some out: {gone:?}");
+    assert!(!gone.is_empty(), "240 pt holds the foot only by leaving some out: {gone:?}");
     assert!(cx.debug_bounds("thread-ledge").is_none(), "a thread with rows has no ledge");
     open_plus(cx);
     let model_gone = gone.contains(&"thread-model");

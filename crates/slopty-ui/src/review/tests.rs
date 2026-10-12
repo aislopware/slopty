@@ -167,9 +167,10 @@ fn the_tile_asks_for_the_last_turn_and_lists_the_source_first(cx: &mut TestAppCo
         matches!(m, ClientMsg::Thread(ThreadRequest::Review { scope: ReviewScope::Turn(_), .. }))
     });
     assert!(asked, "the last turn's review was asked for");
+    click(cx, "review-fold-all");
     let y = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).unwrap().top();
     let (lib, lock, test) =
-        (y(cx, "review-file-1"), y(cx, "review-file-0"), y(cx, "review-file-2"));
+        (y(cx, "review-head-1"), y(cx, "review-head-0"), y(cx, "review-head-2"));
     assert!(lib < lock && lock < test, "the source, then the quiet ones by weight");
 }
 
@@ -200,7 +201,8 @@ fn files_fold_to_their_heads_one_or_all(cx: &mut TestAppContext) {
         assert!(!shown(cx, line), "{line}: every file folded");
     }
     assert!(view.read_with(cx, |v, _| v.all_folded()));
-    click(cx, "review-file-2");
+    click(cx, "review-files-button");
+    click(cx, "review-files-file-2");
     assert!(shown(cx, "review-line-2-0-0"), "the file picked in the list opened");
     assert!(!view.read_with(cx, |v, _| v.all_folded()));
 
@@ -993,7 +995,7 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
     assert_eq!(revert, "Revert lib.rs to before the last turn");
 
     // `src/lib.rs` is the review's second file.
-    right_click(cx, "review-file-1");
+    right_click(cx, "review-head-row-1");
     assert!(cx.debug_bounds("review-file-menu").is_some(), "the menu hangs at the press");
     assert_eq!(rows(cx), ["Keep", COPY_PATH_IN_REPOSITORY, revert.as_str()], "no root yet");
     click(cx, "review-file-menu-copy-path");
@@ -1030,11 +1032,11 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
     click(cx, "review-file-menu-open");
     let opened = ReviewEvent::OpenFile { path: "/r/src/lib.rs".to_owned() };
     assert_eq!(*heard.borrow(), [opened], "from the root, not the thread's folder");
-    right_click(cx, "review-file-1");
+    right_click(cx, "review-head-row-1");
     click(cx, "review-file-menu-copy-path");
     assert_eq!(copied(cx).as_deref(), Some("/r/src/lib.rs"));
 
-    right_click(cx, "review-file-1");
+    right_click(cx, "review-head-row-1");
     click(cx, "review-file-menu-revert");
     let reverted: Vec<Intent> =
         intents(&sent).into_iter().filter(|i| matches!(i, Intent::Revert(_))).collect();
@@ -1042,7 +1044,7 @@ fn a_files_menu_keeps_opens_copies_and_says_what_revert_does(cx: &mut TestAppCon
         matches!(&*reverted, [Intent::Revert(p)] if p.path == "src/lib.rs" && p.hunks.is_empty()),
         "the whole file goes back: {reverted:?}"
     );
-    right_click(cx, "review-file-1");
+    right_click(cx, "review-head-row-1");
     assert_eq!(rows(cx), ["Open", COPY_PATH], "no keep or revert while one is on its way");
 }
 
@@ -1183,16 +1185,57 @@ fn a_comment_s_field_keeps_its_letters(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-comment-0").is_some(), "the comment kept its words");
 }
 
-/// On a tile too narrow for the list of files, the scope bar's Files opens them as a menu,
-/// and a file picked there is where the keyboard stands.
+/// No column of files stands beside the diff at any width (the stacked heads are the list,
+/// as in Delta's Changes): the scope bar's Files opens them as a menu, and a file picked there
+/// is where the keyboard stands.
 #[gpui::test]
-fn a_narrow_tile_goes_to_a_file_from_its_menu(cx: &mut TestAppContext) {
-    let (view, _hub, _sent, cx) = tile(cx, 600.0);
-    assert!(cx.debug_bounds("review-files").is_none(), "no list beside the diff");
-    click(cx, "review-files-button");
-    assert!(cx.debug_bounds("review-files-file-2").is_some(), "the files, as a menu");
-    click(cx, "review-files-file-2");
-    assert_eq!(view.read_with(cx, |v, _| v.cursor_file()), Some(2));
+fn the_files_are_a_menu_at_every_width(cx: &mut TestAppContext) {
+    for width in [1600.0, 600.0] {
+        let (view, _hub, _sent, cx) = tile(cx, width);
+        assert!(cx.debug_bounds("review-files").is_none(), "{width}: no list beside the diff");
+        click(cx, "review-files-button");
+        assert!(cx.debug_bounds("review-files-file-2").is_some(), "{width}: the files, a menu");
+        click(cx, "review-files-file-2");
+        assert_eq!(view.read_with(cx, |v, _| v.cursor_file()), Some(2), "{width}");
+    }
+}
+
+/// No "Line 1" band over a lone hunk that starts at the file's top; a hunk further in keeps
+/// its head (`.research/design-polish-2026-10-12.md` §1.9).
+#[gpui::test]
+fn no_hunk_label_above_line_one(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = tile(cx, 1200.0);
+    let mut top = review();
+    if let Some(lock) = top.files.first_mut()
+        && let Some(hunk) = lock.patch.hunks.first_mut()
+    {
+        (hunk.old_start, hunk.new_start) = (1, 1);
+    }
+    let thread = view.read_with(cx, |v, _| v.thread()).expect("a thread's review");
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(top)), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-line-0-0-0").is_some(), "the lock's lines show");
+    assert!(cx.debug_bounds("review-hunk-head-0-0").is_none(), "no band over the file's top");
+    assert!(cx.debug_bounds("review-hunk-head-2-0").is_some(), "a hunk further in keeps it");
+}
+
+/// The foot ends in its one primary, Zed's modal foot: "Mark reviewed" and "Add to message"
+/// first, then "Send 1 comment" rightmost (`.research/design-polish-2026-10-12.md` §1.9).
+#[gpui::test]
+fn the_primary_ends_the_foot(cx: &mut TestAppContext) {
+    let (_view, _hub, _sent, cx) = tile(cx, 1200.0);
+    click(cx, "review-line-1-0-2");
+    cx.simulate_input("Why new?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let right = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} drawn")).right()
+    };
+    let send = right(cx, "review-send");
+    for part in ["review-mark", "review-add"] {
+        assert!(right(cx, part) < send, "{part} before the send");
+    }
+    assert!(right(cx, "review-mark") < right(cx, "review-add"), "mark, then add");
 }
 
 /// What a file's head and its empty row say of a rename, a change of mode, a picture and a file
@@ -1504,4 +1547,24 @@ fn a_task_s_review_sends_back_and_merges(cx: &mut TestAppContext) {
     heard.borrow_mut().clear();
     click(cx, "review-merge");
     assert_eq!(*heard.borrow(), [ReviewEvent::Merge { thread }]);
+}
+
+/// The review has one left edge, the pane's 8 (`.research/design-polish-2026-10-12.md` §1.9):
+/// the comparison's words (its button hung by its pad), each file head's tick box and the
+/// lines' numbers all start on it.
+#[gpui::test]
+fn the_review_has_one_left_edge(cx: &mut TestAppContext) {
+    let (_view, _hub, _sent, cx) = tile(cx, 1200.0);
+    let theme = Theme::default();
+    let edge = theme.spacing.sm;
+    let left = |cx: &mut VisualTestContext, s: &'static str| {
+        f32::from(cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} drawn")).left())
+    };
+    let words = left(cx, "review-scope") + theme.spacing.xs + theme.spacing.xxs;
+    assert!((words - edge).abs() < 0.5, "the comparison's words at {words}");
+    let tick = left(cx, "review-viewed-1");
+    assert!((tick - edge).abs() < 0.5, "the head's tick box at {tick}");
+    // A line's row runs from the pane's side and pads its number `sm` in.
+    let row = left(cx, "review-line-1-0-0");
+    assert!(row.abs() < 0.5, "a line's row from the side, at {row}");
 }

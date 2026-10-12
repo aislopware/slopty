@@ -662,7 +662,7 @@ impl FolderView {
                 .px(px(theme.spacing.inset()))
                 .border_b(slopty_kit::kit::HAIR)
                 .border_color(hsla(theme.surfaces.stroke))
-                .child(self.lead(Symbol::FolderBadgePlus, hsla(theme.surfaces.text_secondary)))
+                .child(self.lead(Symbol::Folder, hsla(theme.surfaces.text_secondary)))
                 .children(self.name_field(NEW_FOLDER))
                 .into_any_element(),
         )

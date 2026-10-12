@@ -31,7 +31,7 @@ fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<Strin
 
 /// A row under *Needs you* says what its agent asks, never "Needs approval" under the heading
 /// that already says it waits, and an agent the hook named only its tool for says what that tool
-/// does, not the tool. Its first line ends in how long ago it began to wait, counted from the
+/// does, not the tool. Its one line ends in how long ago it began to wait, counted from the
 /// worker's stamp so a reconnect keeps it.
 #[gpui::test]
 fn a_waiting_row_says_what_it_asks_and_since_when(cx: &mut TestAppContext) {
@@ -68,7 +68,8 @@ fn a_waiting_row_says_what_it_asks_and_since_when(cx: &mut TestAppContext) {
 
     let row = bounds(cx, leak(format!("nav-waiting-{asking}")));
     let ago = bounds(cx, leak(format!("nav-waiting-time-{asking}")));
-    assert!(ago.center().y < row.center().y, "on the first line: {ago:?} in {row:?}");
+    assert!(ago.left() > row.center().x && ago.right() <= row.right(), "it ends the row: {ago:?}");
+    assert!((ago.center().y - row.center().y).abs() < px(1.0), "on its one line: {ago:?} {row:?}");
     let names = labels(&view, cx);
     assert!(
         names.iter().any(|l| l.contains("Run touch refused.txt")),

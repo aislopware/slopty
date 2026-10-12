@@ -25,7 +25,7 @@ use crate::conversation::thread::git::Said;
 use crate::palette::{CommandPalette, PaletteEvent, PaletteItem};
 
 /// The palette's line.
-pub(crate) const RUN: &str = "Run";
+pub(crate) const RUN: &str = "Run a script\u{2026}";
 
 /// The step's field, while it lists the scripts.
 const PICK: &str = "Run a script";

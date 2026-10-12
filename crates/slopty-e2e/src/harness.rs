@@ -2758,6 +2758,67 @@ impl ProjectStack {
         self.dir.path().join(name)
     }
 
+    /// Start a second machine, `name`, registered with this run's server: its own ptyd and
+    /// worker under `<root>/<name>`, with its own `home`, the stand-in `claude` and the run's
+    /// other programs on its `PATH`, and `env` added. Returns once the server lists it online.
+    ///
+    /// # Errors
+    ///
+    /// When a daemon does not come up, or the server never lists it online.
+    pub async fn add_worker(
+        &self,
+        name: &str,
+        home: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<Worker> {
+        std::fs::create_dir_all(home)?;
+        let home = std::fs::canonicalize(home)?;
+        let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.path("programs").display());
+        let home = home.to_string_lossy().into_owned();
+        let mut all = vec![
+            ("HOME", home.as_str()),
+            ("PATH", path.as_str()),
+            ("SLOPTY_BIND", "127.0.0.1"),
+            ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
+        ];
+        all.extend_from_slice(env);
+        let worker =
+            Worker::start(&self.path(name), name, Some(self.server.address()), &log_level(), &all)
+                .await?;
+        let started = tokio::time::Instant::now();
+        loop {
+            let workers = self.slopty(&["workers"]).await?;
+            let online = workers.as_array().is_some_and(|all| {
+                all.iter().any(|w| w["name"] == name && w["liveness"] == "online")
+            });
+            if online {
+                return Ok(worker);
+            }
+            ensure!(started.elapsed() < STARTUP, "{name} online: {workers}");
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// Start another app, `name`, following this run's server as a second device would: its
+    /// own data directory and test socket. The caller quits and reaps it.
+    ///
+    /// # Errors
+    ///
+    /// When the app does not start or answer.
+    pub async fn add_app(&self, name: &str) -> Result<(Child, Driver)> {
+        let root = self.dir.path();
+        follow(&root.join(name), &self.server)?;
+        let (app, mut driver) = spawn_app(root, name, &log_level(), &[]).await?;
+        driver.ok(&crate::Command::Ping).await?;
+        Ok((app, driver))
+    }
+
+    /// Ask an app [`Self::add_app`] started to quit, then reap it.
+    pub async fn quit_app(mut app: Child, mut driver: Driver) {
+        let _quit = driver.call(&crate::Command::Quit).await;
+        reap(&mut app, "slopty-app").await;
+    }
+
     /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
     /// `settings.toml`, the server it follows kept; the app sees it within a second.
     ///

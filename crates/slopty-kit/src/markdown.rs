@@ -216,7 +216,8 @@ pub fn code_block(
         .px(px(spacing.sm))
         .py(px(spacing.xs))
         .font_family(mono)
-        .text_size(px(theme.typography.small()))
+        .text_size(px(theme.roles().code.size))
+        .line_height(px(theme.roles().code.line))
         .child(
             div()
                 .flex()

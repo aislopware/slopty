@@ -827,7 +827,7 @@ impl CommitSheet {
             .map(|(ix, check)| {
                 let (icon, tone) = match check.bucket() {
                     CheckBucket::Failed => (Symbol::XmarkCircle, s.error),
-                    CheckBucket::Running => (Symbol::CircleDashed, s.text_secondary),
+                    CheckBucket::Running => (Symbol::CircleInsetFilled, s.text_secondary),
                     CheckBucket::Passed => (Symbol::CheckmarkCircle, s.text_muted),
                     CheckBucket::Skipped => (Symbol::Minus, s.text_muted),
                 };

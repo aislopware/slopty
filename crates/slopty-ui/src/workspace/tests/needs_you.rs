@@ -168,10 +168,83 @@ fn what_a_key_opens_arrives_without_a_fade(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    // The rail's Search, with the navigator hidden, opens it by the pointer.
-    cx.simulate_keystrokes("cmd-b");
+    // A phone's "…" opens it by the pointer.
+    cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
-    click(cx, "nav-rail-search");
+    click(cx, "more");
+    click(cx, "menu-Command palette");
     let fades = view.read_with(cx, |v, cx| v.palette.as_ref().map(|p| p.read(cx).fades_in()));
     assert_eq!(fades, Some(true), "the palette, by the pointer, fades in");
+}
+
+/// A *Needs you* row is one line, its words the ask, and it acts through icon buttons in its
+/// end slot (`.research/design-polish-2026-10-12.md` §4.5): at rest the end says how long it
+/// has waited and no button stands; under the pointer Deny (`x` in `error`) and Allow (`check`
+/// in `success`) take that place, 22 pt squares, the yes last, inside the row; Allow answers.
+#[gpui::test]
+fn the_actions_show_on_hover_as_buttons(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::Intent;
+    use slopty_proto::thread::{AskId, Choice, Effect};
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut row = thread_waits::asking(None);
+    let thread = row.id;
+    if let Some(card) = row.requests.first_mut() {
+        card.options = vec![choice("accept", Effect::Allow), choice("decline", Effect::Deny)];
+    }
+    thread_waits::table(&view, cx, key, vec![row]);
+    cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    let row = cx.debug_bounds(leak(format!("nav-waiting-{thread}"))).expect("its row");
+    let theme = Theme::default();
+    assert!((f32::from(row.size.height) - theme.density.row).abs() < 0.5, "one line: {row:?}");
+    let words = cx.debug_bounds(leak(format!("nav-waiting-words-{thread}"))).expect("the ask");
+    assert!(row.contains(&words.center()), "on its line");
+    let (allow, deny) = (leak(format!("nav-allow-{thread}")), leak(format!("nav-deny-{thread}")));
+    assert!(cx.debug_bounds(allow).is_none() && cx.debug_bounds(deny).is_none(), "at rest");
+
+    cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+    cx.run_until_parked();
+    let (allow_at, deny_at) = (
+        cx.debug_bounds(allow).expect("Allow under the pointer"),
+        cx.debug_bounds(deny).expect("Deny under the pointer"),
+    );
+    let side = slopty_kit::kit::icon_button_side(&theme);
+    for button in [allow_at, deny_at] {
+        assert!((f32::from(button.size.width) - side).abs() < 0.5, "an icon button: {button:?}");
+        assert!(row.contains(&button.center()), "inside the row: {button:?} {row:?}");
+    }
+    assert!(deny_at.right() <= allow_at.left(), "the yes last: {deny_at:?} {allow_at:?}");
+    let nodes = tree(cx);
+    for name in [crate::project::ALLOW, crate::project::DENY] {
+        assert!(nodes.iter().any(|n| n.is("Button", Some(name))), "{name}: {nodes:#?}");
+    }
+    studio.drain();
+    cx.simulate_click(allow_at.center(), Modifiers::default());
+    cx.run_until_parked();
+    let sent: Vec<Intent> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(slopty_proto::thread::wire::ThreadRequest::Intent {
+                intent, ..
+            }) => Some(intent),
+            _ => None,
+        })
+        .collect();
+    let accepted = Intent::Answer {
+        ask: AskId("ask-1".to_owned()),
+        choice: "accept".to_owned(),
+        message: None,
+    };
+    assert_eq!(sent, [accepted], "Allow answers, once");
 }

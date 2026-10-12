@@ -1,4 +1,4 @@
-//! The title bar's readouts, a machine's menu, a finish's badge, and the palette's rows with
+//! The cluster's readouts, a machine's menu, a finish's badge, and the palette's rows with
 //! their context, in the headless workspace.
 
 use std::cell::Cell;
@@ -90,9 +90,9 @@ fn a_place_is_named_by_its_repository_else_its_directory() {
     assert_eq!(place_name("/", None, None), None);
 }
 
-/// The foot bar counts the ports forwarded here, which list them; the machine a shell runs on
-/// is the navigator's and the breadcrumb's to say, not a readout's, and the frame time is the
-/// stream stats overlay's.
+/// The ports forwarded here are the palette's "Forwarded ports" to list, not a readout's; the
+/// machine a shell runs on is the navigator's and the breadcrumb's to say, and the frame time is
+/// the stream stats overlay's.
 #[gpui::test]
 fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -107,13 +107,12 @@ fn the_readouts_count_what_is_shared_and_say_no_machine(cx: &mut TestAppContext)
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "2 ports"), "{names:#?}");
-    let foot = cx.debug_bounds("foot").expect("the foot bar");
-    let ports = cx.debug_bounds("readout-ports").expect("the ports");
-    assert!(foot.contains(&ports.center()), "{ports:?}");
+    assert!(!names.iter().any(|l| l == "2 ports"), "no count of them: {names:#?}");
+    assert!(cx.debug_bounds("readout-ports").is_none(), "no readout");
     assert!(cx.debug_bounds("status-worker").is_none(), "the machine is the navigator's");
 
-    click(cx, "readout-ports");
+    cx.dispatch_action(ListPorts);
+    cx.run_until_parked();
     let lines = view.read_with(cx, |v, cx| {
         let palette = v.palette.clone().expect("the ports are listed");
         palette.read(cx).matches().len()
@@ -236,7 +235,9 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("menu").is_none(), "nothing to choose, nothing opens");
 
     // The same repository on another worker makes the project span two machines: the
-    // breadcrumb names the focused tile's, and its menu lists the clones by machine.
+    // breadcrumb names the focused tile's, and its menu lists the clones by machine. The
+    // machine is the crumb that gives way first, so the window has room for every crumb.
+    cx.simulate_resize(size(px(1920.0), px(1080.0)));
     let laptop = connect(&view, cx, 2, "laptop");
     let (far, far_tile) =
         shell_in_repo(&view, cx, &laptop, "/home/me/slopty-wt", "/home/me/slopty-wt", "fix");
@@ -759,20 +760,22 @@ fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppCon
     assert!(cx.debug_bounds(leak(format!("nav-update-{key}"))).is_none(), "not while it runs");
 }
 
-/// The title bar's empty span moves the window as a native title bar does: pressed and moved,
-/// it asks the system to drag the window; a double-click asks for the system's title-bar
-/// action (zoom or minimise, as the person set it). A press on one of its buttons does neither.
+/// A top pane's tab bar is the window's title bar: its empty span, pressed and moved, asks the
+/// system to drag the window, and a double-click asks for the system's title-bar action (zoom
+/// or minimise, as the person set it). A press on one of the cluster's buttons does neither.
 #[gpui::test]
-fn the_title_bars_empty_span_moves_and_zooms_the_window(cx: &mut TestAppContext) {
+fn a_top_tab_bars_empty_span_moves_and_zooms_the_window(cx: &mut TestAppContext) {
     use crate::workspace::titlebar::WindowAsk;
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let bar = cx.debug_bounds("titlebar").expect("the bar");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let bar = cx.debug_bounds(selector("title", shell.item)).expect("the tab bar");
+    let cell = cx.debug_bounds(selector("tab", shell.item)).expect("its cell");
+    let cluster = cx.debug_bounds("cluster").expect("the cluster");
     let left = MouseButton::Left;
     let asks = |cx: &mut VisualTestContext| view.update(cx, |v, _| v.take_window_asks());
-    let empty = point(bar.center().x, bar.center().y);
+    let empty = point((cell.right() + cluster.left()) / 2.0, bar.center().y);
 
     cx.simulate_mouse_down(empty, left, Modifiers::default());
     cx.simulate_mouse_move(point(empty.x + px(4.0), empty.y), Some(left), Modifiers::default());

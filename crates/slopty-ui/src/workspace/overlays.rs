@@ -218,9 +218,13 @@ impl WorkspaceView {
         self.open_search("", window, cx);
     }
 
-    /// ⌘⇧P: the same search with `>` typed, so it lists the commands alone.
+    /// ⌘⇧P: the same search listing the commands alone, its field empty (Zed's command
+    /// palette): no `>` stands before the words.
     pub fn open_commands(&mut self, _: &OpenCommands, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_search(">", window, cx);
+        self.open_search("", window, cx);
+        if let Some(palette) = self.palette.clone() {
+            palette.update(cx, |p, cx| p.set_commands(window, cx));
+        }
     }
 
     /// The workspace's own palette, its field starting at `typed`.

@@ -1,5 +1,5 @@
-//! The one look of a tab, the title bar's and a pane's alike: Zed's tab
-//! (`.research/zed-clone-2026-10-11.md` §3.4 and §5.1).
+//! The one look of a tab: Zed's tab (`.research/zed-clone-2026-10-11.md` §3.4 and §5.1). Pane
+//! tab bars are the only tabs; a tile alone in its pane has one cell.
 //!
 //! A row of tabs is Zed's tab bar: the tab bar's plane with the `border` line along its foot.
 //! Every tab is a square cell the bar's full height, as wide as its title between
@@ -22,7 +22,7 @@ use gpui::{
 use slopty_kit::colors::hsla;
 use slopty_kit::icons::Mark;
 use slopty_kit::kit::{self, Pace};
-use slopty_theme::{Curve, Theme, alpha, stroke};
+use slopty_theme::{Curve, Theme, stroke};
 
 /// The widest a tab grows with its title: Zed's tabs end near 240.
 pub(super) const TAB_SLOT: f32 = 240.0;
@@ -59,26 +59,26 @@ pub(super) fn strip<E: gpui::Styled>(_theme: &Theme, el: E) -> E {
     el.flex().items_stretch()
 }
 
-/// Where a pane's header starts its lead with no tab to stand in: where a first tab's lead
-/// stands, past the tab's own start, so the mark keeps its place as a pane gains its second
-/// tab or loses it.
+/// How far in a tab's lead stands from the cell's start: the pane's 8 pt edge, so the first
+/// tab's glyph sits on the edge the pane's content keeps.
 #[must_use]
-pub(super) const fn lone_inset(theme: &Theme) -> f32 {
+pub(super) const fn cell_inset(theme: &Theme) -> f32 {
     theme.spacing.sm
 }
 
 /// `tab` as Zed's tab: a square cell its bar's full height, as wide as its title
-/// between [`TAB_FLOOR`] and [`TAB_SLOT`], its words at the chrome role. On show it is the
+/// between [`TAB_FLOOR`] and [`TAB_SLOT`], its words at the row role (Delta's header title,
+/// 12, measured from the signed-in app). On show it is the
 /// work's ground with the `border` line on its two sides and none under it, so it opens into
-/// the pane; at rest it is bare, in `text_secondary`. Its lead stands [`lone_inset`] in, past
-/// its side line, where a lone tile's does. `closable` leaves room at its end for the close
+/// the pane; at rest it is bare, in `text_secondary`. Its lead stands [`cell_inset`] in, past
+/// its side line. `closable` leaves room at its end for the close
 /// [`close`] lays over it. The caller gives it its identity and its children.
 #[must_use]
 pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool) -> Stateful<Div> {
     let s = theme.surfaces;
     let spacing = theme.spacing;
     let end = if closable { 2.0_f32.mul_add(spacing.xs, kit::CLOSE_BOX) } else { spacing.sm };
-    let tab = kit::typed(tab, theme.roles().chrome)
+    let tab = kit::typed(tab, theme.roles().row)
         .relative()
         .flex_initial()
         .flex_shrink(1.0)
@@ -88,7 +88,7 @@ pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool
         .flex()
         .items_center()
         .gap(px(TAB_GAP))
-        .pl(px(lone_inset(theme) - stroke::LINE))
+        .pl(px(cell_inset(theme) - stroke::LINE))
         .pr(px(end))
         .border_l(kit::HAIR)
         .border_r(kit::HAIR)
@@ -103,7 +103,7 @@ pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool
     }
 }
 
-/// A pane's tab: [`tab`], as Zed draws a pane's tabs and the title bar's alike.
+/// A pane's tab: [`tab`], as Zed draws a pane's tabs.
 #[must_use]
 pub(super) fn pane_tab(
     theme: &Theme,
@@ -114,15 +114,14 @@ pub(super) fn pane_tab(
     tab(theme, el, shown, closable)
 }
 
-/// A tab's lead: `mark` in one 16 pt slot, in the text's tone on the tab on show and at
-/// [`alpha::STRONG`] of `ink` on the rest, so a resting tab's mark recedes with its words and
-/// still reads AA.
+/// A tab's lead: `mark` in one 16 pt slot, in `icon` on the tab on show and the leads'
+/// `icon_muted` on the rest, as every lead is (`docs/decisions/ui.md`, "The chrome's icons are
+/// Octicons at 14").
 #[must_use]
 pub(super) fn lead(theme: &Theme, mark: impl Into<Mark>, shown: bool) -> Stateful<Div> {
     let s = theme.surfaces;
-    let ink = if shown { s.text } else { s.text_secondary };
+    let ink = if shown { s.icon } else { s.icon_muted };
     crate::palette::lead_mark(theme, mark, hsla(ink), theme.typography.icon())
-        .when(!shown, |el| el.opacity(alpha::STRONG))
 }
 
 /// `close`, a tab's [`kit::close_box`], laid over the tab's end, [`slopty_theme::Spacing::xs`]
@@ -161,9 +160,9 @@ pub(super) fn edited(theme: &Theme, id: impl Into<ElementId>) -> Stateful<Div> {
         .bg(hsla(theme.surfaces.accent_fill))
 }
 
-/// The dot that leads a pane's row while the tab on show holds two panes or more: Zed's 6 pt
-/// indicator in the accent on the pane with the keyboard, empty elsewhere, keeping its place
-/// so nothing after it moves as the keyboard goes between panes.
+/// The dot that leads the tab on show in each pane while the tab holds two panes or more: Zed's
+/// 6 pt indicator in the accent on the pane with the keyboard, empty elsewhere, keeping its
+/// place so nothing after it moves as the keyboard goes between panes.
 #[must_use]
 pub(super) fn focus_dot(theme: &Theme, focused: bool) -> Div {
     div()
@@ -171,33 +170,6 @@ pub(super) fn focus_dot(theme: &Theme, focused: bool) -> Div {
         .size(px(FOCUS_DOT))
         .rounded(px(theme.radii.full))
         .when(focused, |el| el.bg(hsla(theme.surfaces.accent_fill)))
-}
-
-/// A pane's one tile's title where it has no tab to stand in (a split's pane, or a pane that
-/// waits on its worker): no cell, but in a split the focus dot, then `mark` in its 16 pt slot
-/// and `title`. `focused` is whether the pane has the keyboard and
-/// `shared` whether the tab on show holds two panes or more.
-#[must_use]
-pub(super) fn lone(
-    theme: &Theme,
-    mark: impl Into<Mark>,
-    title: impl gpui::IntoElement,
-    focused: bool,
-    shared: bool,
-) -> Stateful<Div> {
-    let ink = if focused { theme.surfaces.text } else { theme.surfaces.text_secondary };
-    let slot = theme.typography.icon();
-    div()
-        .id("lone-title")
-        .min_w_0()
-        .h_full()
-        .flex()
-        .items_center()
-        .gap(px(TAB_GAP))
-        .pl(px(lone_inset(theme)))
-        .children(shared.then(|| focus_dot(theme, focused)))
-        .child(crate::palette::lead_mark(theme, mark, hsla(ink), slot))
-        .child(div().min_w_0().overflow_hidden().child(title))
 }
 
 /// The row whose tabs are on show, as a number its key hashes to (a project's, a pane's), and
@@ -262,11 +234,6 @@ impl<K: Copy + PartialEq> Moves<K> {
 }
 
 impl<K: Copy + PartialEq> Motion<K> {
-    /// The tabs as the row drew them last, while it is the row `clock` stands for.
-    pub fn last(&self, clock: Clock) -> &[K] {
-        if self.row == Some(clock.row) { &self.last } else { &[] }
-    }
-
     /// How the row moves at `clock.now` with tabs `now`, `place` saying where each lay last
     /// frame (inside its two side lines).
     pub fn step(

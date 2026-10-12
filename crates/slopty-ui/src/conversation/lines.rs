@@ -30,10 +30,11 @@ impl Ink<'_> {
         self.theme.typography.mono_families.first().cloned().unwrap_or_default().into()
     }
 
-    /// The code face at the diff's size, for lines inside a card of someone else's.
+    /// The code face at the code role (Delta's code, a point over the terminal's), for lines
+    /// inside a card of someone else's.
     #[must_use]
     pub fn code(&self) -> Div {
-        div().w_full().font_family(self.mono()).text_size(px(self.theme.typography.small()))
+        slopty_kit::kit::typed(div().w_full().font_family(self.mono()), self.theme.roles().code)
     }
 
     /// A diff as a card of its own: rounded, the hairline round it, no band.
@@ -67,20 +68,22 @@ impl Ink<'_> {
         }
     }
 
-    /// A line number in the gutter, right-aligned in the gutter's width, at the chrome's small
-    /// size whatever size the code beside it is.
+    /// A line number in the gutter, right-aligned in the gutter's width, at the code's size in
+    /// the line number's tone, as Delta's review sets them
+    /// (`.research/delta-signed-in-2026-10-12.md` §2.8).
     #[must_use]
     pub fn number(&self, n: Option<u32>) -> Div {
         let s = self.theme.surfaces;
+        let size = self.theme.roles().code.size;
         let digits = f32::from(u8::try_from(self.digits.max(2)).unwrap_or(u8::MAX));
-        // A tabular figure is about 0.62 of the size wide in the mono face.
-        let width = self.theme.typography.small() * 0.62 * digits;
+        // A tabular figure is about 0.62 of the size wide.
+        let width = size * 0.62 * digits;
         slopty_kit::kit::tabular(div())
             .flex_none()
             .w(px(width))
             .flex()
             .justify_end()
-            .text_size(px(self.theme.typography.small()))
+            .text_size(px(size))
             .text_color(hsla(s.line_number))
             .children(n.map(|n| SharedString::from(n.to_string())))
     }
@@ -113,8 +116,8 @@ impl Ink<'_> {
             .into_any_element()
     }
 
-    /// One line in a column: the new file's number (a removed line has none) and the text, on
-    /// the line's band.
+    /// One line in a column: one gutter, Zed's unified diff's, holding the new file's number,
+    /// or the old file's for a removed line, then the text, on the line's band.
     #[must_use]
     pub fn unified(&self, line: &Line) -> Div {
         let wash = self.tone(line.kind);
@@ -126,33 +129,21 @@ impl Ink<'_> {
             .gap(px(spacing.sm))
             .px(px(spacing.sm))
             .when_some(wash, gpui::Styled::bg)
-            .child(self.number(line.new))
+            .child(self.number(gutter(line)))
             .child(self.text(line))
     }
 
-    /// One row of a unified diff with both gutters, the old file's number then the new
-    /// file's, so a removed line keeps its place in the old file and an added one in the new.
+    /// One line in a thread's well: the text alone on the line's band, with no gutter, as
+    /// Delta's thread draws an edit; the band says which side it is on. Padded a base unit, so
+    /// in a hung well ([`crate::conversation::thread`]) the code starts on the prose's edge.
     #[must_use]
-    pub fn unified_numbered(&self, line: &Line) -> Div {
-        let wash = self.tone(line.kind);
-        let spacing = self.theme.spacing;
-        let old = line.old.filter(|_| line.kind != Kind::Added);
-        let new = line.new.filter(|_| line.kind != Kind::Removed);
+    pub fn bare(&self, line: &Line) -> Div {
         div()
             .w_full()
             .flex()
             .items_start()
-            .gap(px(spacing.sm))
-            .px(px(spacing.sm))
-            .when_some(wash, gpui::Styled::bg)
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .gap(px(spacing.xs))
-                    .child(self.number(old))
-                    .child(self.number(new)),
-            )
+            .px(px(self.theme.spacing.sm))
+            .when_some(self.tone(line.kind), gpui::Styled::bg)
             .child(self.text(line))
     }
 
@@ -180,6 +171,13 @@ impl Ink<'_> {
                     .child(SharedString::from(format!("Line {}", block.new_start))),
             })
     }
+}
+
+/// The one number a unified diff's gutter holds for `line`: the new file's, or the old file's
+/// for a removed line, as Zed's unified diff numbers it.
+#[must_use]
+pub const fn gutter(line: &Line) -> Option<u32> {
+    if matches!(line.kind, Kind::Removed) { line.old } else { line.new }
 }
 
 /// A path as the eye looks for it, Delta's way: the file's name, then its folder.
@@ -241,8 +239,26 @@ pub fn digits(blocks: &[Block]) -> usize {
 mod tests {
     use gpui::{Hsla, TextRun, font};
 
-    use super::{Ink, detabbed, name_first, washed};
-    use crate::conversation::diff::Kind;
+    use super::{Ink, detabbed, gutter, name_first, washed};
+    use crate::conversation::diff::{Kind, Line};
+
+    /// A unified diff has one gutter (`.research/design-polish-2026-10-12.md` §1.9): one number
+    /// per line, the new file's, or the old file's for a removed line.
+    #[test]
+    fn one_gutter_in_a_unified_diff() {
+        let line = |kind, old, new| Line {
+            kind,
+            old,
+            new,
+            text: String::new(),
+            spans: None,
+            no_newline: false,
+            emph: Vec::new(),
+        };
+        assert_eq!(gutter(&line(Kind::Context, Some(10), Some(12))), Some(12), "the new file's");
+        assert_eq!(gutter(&line(Kind::Added, None, Some(13))), Some(13));
+        assert_eq!(gutter(&line(Kind::Removed, Some(11), None)), Some(11), "the old file's");
+    }
 
     /// A file reads name first, its folder after.
     #[test]

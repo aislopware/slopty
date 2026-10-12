@@ -36,7 +36,6 @@ use super::WorkspaceView;
 use super::actions::StartThread;
 use super::area::{Handed, Placed};
 use super::projects::agent_label;
-use super::tile::title_ink;
 use crate::conversation::attach::Target;
 use crate::conversation::thread::{Draft, DraftSent, Place, ThreadView, ThreadViewEvent};
 
@@ -741,39 +740,14 @@ impl WorkspaceView {
         let id = tile.item;
         let label = agent_label(&starting.agent);
         let title = SharedString::from(format!("New {label} thread"));
-        let ink = hsla(title_ink(theme, placed.focused));
         let status = starting.sent.then_some(Status::Working);
-        // Its pane's tab row of one tab, as a tile's header is (`tile::render_header`); none
-        // for a tab's one tile, which the title bar's tab names.
-        let header = (!placed.lone).then(|| {
-            super::tab_look::row(theme, div().id("title"))
-                .debug_selector(move || format!("title-{}", id.as_uuid()))
-                .role(Role::Heading)
-                .aria_label(title.clone())
-                .h(px(theme.density.header))
-                .w_full()
-                .flex_none()
-                .flex()
-                .items_center()
-                .pr(px(theme.spacing.inset()))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(theme.typography.ui_size))
-                .text_color(ink)
-                .font_family(theme.typography.ui_family.clone())
-                .map(|el| {
-                    let lead = slopty_kit::icons::Mark::agent(&starting.agent.0);
-                    let tab = super::tab_look::lone(
-                        theme,
-                        lead,
-                        title.clone(),
-                        placed.focused,
-                        placed.shared,
-                    );
-                    el.child(tab).children(status.map(|st| {
-                        div().ml_auto().child(slopty_kit::icons::status_mark(theme, Some(st)))
-                    }))
-                })
+        // Its pane's tab bar of one cell, as every pane's (`tile::render_header`), how the
+        // start stands at its end.
+        let header = (!self.phone).then(|| {
+            let lead = slopty_kit::icons::Mark::agent(&starting.agent.0);
+            let state =
+                status.map(|st| slopty_kit::icons::status_mark(theme, Some(st)).into_any_element());
+            self.one_tab_bar(placed, lead, title.clone(), state, cx)
         });
         // The new worktree's setup, while it runs in place of the rest, and once it failed over
         // the draft given back.

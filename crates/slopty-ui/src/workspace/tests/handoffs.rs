@@ -474,6 +474,7 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
 
 /// A narrow tile keeps its title: beside a board a thread is about 312 pt wide, and there its
 /// pull request and worktree leave the header rather than squeeze the name under a third of it.
+/// The tile stands between two panes, so neither of the top line's ends shares its header.
 #[gpui::test]
 fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -493,11 +494,18 @@ fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppCon
     assert!(f32::from(wide.size.width) >= 480.0, "starts roomy: {wide:?}");
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_some(), "a roomy header says it");
 
-    // Beside the first shell, its pane dragged to a board's neighbour's width.
+    // Between the first shell and a third, its pane dragged to a board's neighbour's width.
     let pane = pos_of(&view, cx, tile).pane;
     view.update(cx, |v, cx| {
         let right = Some(slopty_client::layout::tree::Side::Right);
         assert!(v.layout.place(first, slopty_client::layout::Drop { pane, edge: right }));
+        cx.notify();
+    });
+    let board = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    let pane = pos_of(&view, cx, tile).pane;
+    view.update(cx, |v, cx| {
+        let left = Some(slopty_client::layout::tree::Side::Left);
+        assert!(v.layout.place(board, slopty_client::layout::Drop { pane, edge: left }));
         cx.notify();
     });
     pane_at(&view, cx, tile, 312.0);
@@ -509,7 +517,9 @@ fn a_narrow_agent_tile_keeps_its_title_over_its_pull_request(cx: &mut TestAppCon
     let inset = Theme::default().spacing.inset();
     let floor = inset.mul_add(-2.0, f32::from(header.size.width)) / 3.0;
     assert!(f32::from(name.size.width) >= floor - 0.5, "the title keeps its room: {name:?}");
-    if let Some(pr) = cx.debug_bounds(selector("pr", tile.item)) {
+    // A request squeezed to nothing has left the header.
+    let pr = cx.debug_bounds(selector("pr", tile.item)).filter(|pr| pr.size.width > px(0.5));
+    if let Some(pr) = pr {
         assert!(name.right() <= pr.left(), "beside the title, not over it: {name:?} {pr:?}");
     }
 }

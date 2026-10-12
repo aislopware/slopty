@@ -29,7 +29,7 @@ use super::{FileView, FileViewEvent};
 const OVERDRAW: f32 = 512.0;
 
 /// The longest line the preview sets, in points: the thread's reading column.
-const MEASURE: f32 = crate::conversation::thread::view::COLUMN;
+const MEASURE: f32 = crate::conversation::thread::view::PROSE;
 
 /// What the header's toggle says while the preview shows.
 pub const SHOW_SOURCE: &str = "Show source";

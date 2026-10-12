@@ -204,8 +204,9 @@ impl ReviewView {
 
     // ----- drawing ---------------------------------------------------------------------
 
-    /// "Viewed" on a file's head: a tick box and the word, pressed as one, as a forge's diff
-    /// has it.
+    /// "Viewed" leading a file's head: Delta's Seen, a tick box at the place a fold's chevron
+    /// would take, named for a reader of the screen; ticking it folds the file
+    /// (`.research/design-polish-2026-10-12.md` §1.9).
     pub(super) fn viewed_box(&self, at: usize, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -226,7 +227,6 @@ impl ReviewView {
                 .cursor_pointer()
                 .hover(move |el| el.text_color(hsla(s.text)))
                 .child(kit::tick_box(theme, on))
-                .child("Viewed")
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     cx.stop_propagation();
                     this.toggle_viewed(at, cx);
@@ -236,13 +236,11 @@ impl ReviewView {
         .into_any_element()
     }
 
-    /// On a tile too narrow for the list of files beside the diff: a button in the scope bar,
-    /// and while it is open, the files as a menu, each going to its file.
+    /// The way to a file, at any width: a button in the scope bar, and while it is open, the
+    /// files as a menu, each going to its file. The stacked file heads are the list, as in
+    /// Delta's Changes, so no column of files stands beside the diff.
     pub(super) fn files_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let review = self.model.review().filter(|r| !r.files.is_empty())?;
-        if self.room().is_wide() {
-            return None;
-        }
         let theme = &self.theme;
         let count = review.files.len();
         let label = kit::count(count as u64, "file", "files");

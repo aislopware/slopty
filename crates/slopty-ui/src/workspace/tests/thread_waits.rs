@@ -13,7 +13,7 @@ fn leak(selector: String) -> &'static str {
 }
 
 /// A thread on `terminal`, or on none, waiting on the person's yes or no.
-fn asking(terminal: Option<SessionId>) -> ThreadRow {
+pub(super) fn asking(terminal: Option<SessionId>) -> ThreadRow {
     let mut state = crate::conversation::thread::fixtures::thread("edit");
     state.meta.terminal = terminal;
     let mut row = state.row(WallMs::ZERO);
@@ -29,7 +29,7 @@ fn asking(terminal: Option<SessionId>) -> ThreadRow {
     row
 }
 
-fn table(
+pub(super) fn table(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
     key: WorkerKey,
@@ -66,7 +66,7 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
         assert_eq!(asks.route.item, Some(tile.item), "that leads to its tile");
         assert_eq!(asks.body, "Run cargo test", "what it asks, said plainly");
     });
-    let glyph = leak(format!("status-{}", tile.item.as_uuid()));
+    let glyph = leak(format!("tab-status-{}", tile.item.as_uuid()));
     assert!(cx.debug_bounds(glyph).is_some(), "the header's glyph");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
@@ -335,6 +335,10 @@ fn a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note(cx: &mut TestAppCo
 
     cx.run_until_parked();
     studio.drain();
+    // The row's actions show under the pointer.
+    let at = cx.debug_bounds(leak(format!("nav-waiting-{thread}"))).expect("its row");
+    cx.simulate_mouse_move(at.center(), None, Modifiers::none());
+    cx.run_until_parked();
     let allow = cx.debug_bounds(leak(format!("nav-allow-{thread}"))).expect("Allow on its row");
     cx.simulate_click(allow.center(), Modifiers::none());
     cx.run_until_parked();
@@ -463,6 +467,8 @@ fn long_words_never_push_a_row_s_answers_out_of_view(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let row = cx.debug_bounds(leak(format!("nav-waiting-{thread}"))).expect("its row");
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.run_until_parked();
     let allow = cx.debug_bounds(leak(format!("nav-allow-{thread}"))).expect("Allow on its row");
     assert!(allow.right() <= row.right(), "Allow {allow:?} inside its row {row:?}");
 }

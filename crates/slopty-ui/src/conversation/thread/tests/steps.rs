@@ -387,19 +387,79 @@ fn whose_turn_it_is_hangs_in_the_gutter(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("turn-mark-0").is_none(), "a narrow gutter hangs none");
 }
 
-/// The column stands off the tile by its room's gutter: wide, regular and narrow.
+/// The column stands on the tile's left as Delta's does, 16 off its side and past the marks'
+/// 36 pt lane at any width, prose 52 in as the signed-in app measures
+/// (`.research/delta-signed-in-2026-10-12.md` §2.4); a narrow tile has no lane.
 #[gpui::test]
 fn the_column_s_gutter_follows_the_tile_s_room(cx: &mut TestAppContext) {
-    let spacing = slopty_theme::Theme::default().spacing;
     let (view, cx) = two_turns(cx, 800.0);
-    for (width, gutter) in [(800.0, spacing.xxxl), (600.0, spacing.xl), (360.0, spacing.lg)] {
+    // 16 + 36 wherever there is a lane, Delta's 52; 360, narrow: 16.
+    for (width, edge) in [(1600.0, 52.0), (1200.0, 52.0), (800.0, 52.0), (360.0, 16.0)] {
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(600.0)));
         view.update(cx, |v, cx| v.set_layout(width, cx));
         cx.run_until_parked();
         let answer = cx.debug_bounds("item-a1").expect("the answer");
         let left = f32::from(answer.left());
-        assert!((left - gutter).abs() < 0.5, "{width}: the gutter {gutter}, at {left}");
+        assert!((left - edge).abs() < 0.5, "{width}: the content edge {edge}, at {left}");
     }
+}
+
+/// The thread has one left edge (`.research/design-polish-2026-10-12.md` §4.6): the person's
+/// turn, the agent's answer, a turn's summary line, a call's line, the composer's field and the
+/// foot's first glyph all start on it; prose keeps to Delta's 705, and a call's line runs on past
+/// it to the tile's side.
+#[gpui::test]
+fn the_thread_has_one_left_edge(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Complete)];
+    let long =
+        "Every word of this answer runs on past the measure a person reads at ease. ".repeat(8);
+    state.items = vec![
+        user("u", 1),
+        call("x", 1, kind::EXEC, None, None),
+        item("a", 1, ItemBody::Text(Clipped::whole(&long))),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(720.0)));
+    view.update(cx, |v, cx| v.set_layout(1000.0, cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let at = cx.debug_bounds("fold-1").expect("the turn's line").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let bounds = |cx: &mut gpui::VisualTestContext, id: &'static str| {
+        cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"))
+    };
+    let edge = bounds(cx, "item-a").left();
+    for id in ["item-u", "fold-1-line", "tool-x", "thread-composer-field", "thread-checkout"] {
+        let left = bounds(cx, id).left();
+        let glyph = if id == "thread-checkout" {
+            // The foot's first button pads its glyph by half the room round it, and hangs by
+            // as much.
+            let theme = slopty_theme::Theme::default();
+            (slopty_kit::kit::icon_button_side(&theme) - theme.typography.glyph()) / 2.0
+        } else {
+            0.0
+        };
+        let off = f32::from(left - edge) + glyph;
+        assert!(off.abs() < 0.5, "{id} {off} pt off the content edge");
+    }
+    let prose = bounds(cx, "prose-a");
+    let width = f32::from(prose.size.width);
+    assert!(
+        (width - crate::conversation::thread::view::PROSE).abs() < 0.5,
+        "prose at 705: {width}"
+    );
+    let call = bounds(cx, "tool-x");
+    assert!(call.size.width > prose.size.width, "wide work runs past the prose: {call:?}");
+    let field = bounds(cx, "thread-composer-field");
+    assert!(
+        field.size.width <= prose.size.width + gpui::px(0.5),
+        "the composer on the prose's measure: {field:?}"
+    );
 }
 
 /// A message the person sent into a running turn stands between two folds, each saying what

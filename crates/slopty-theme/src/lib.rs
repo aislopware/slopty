@@ -505,8 +505,8 @@ pub struct Typography {
     pub mono_line_height: f32,
     /// Line height of Markdown (a note, a code block, a plan), as a multiple of the font size.
     pub markdown_line_height: f32,
-    /// Line height of the conversation's prose, read at length: Delta's `leading-relaxed`,
-    /// 1.625 (14/23).
+    /// Line height of the conversation's prose, read at length: Delta's, 15/21 (measured from
+    /// the signed-in app, `.research/delta-signed-in-2026-10-12.md` §2.4).
     pub prose_line_height: f32,
     /// Line height of the composer's text: the prose's, since Delta's composer is the next
     /// turn's row, set as the turns are.
@@ -549,10 +549,18 @@ impl Typography {
     }
 
     /// Every icon's slot (base + 2): a row's lead, a tile's kind, a status mark, a bar button,
-    /// 16 at the default size, where Carbon's 32 grid lands on whole device pixels.
+    /// 16 at the default size.
     #[must_use]
     pub fn icon(&self) -> f32 {
         self.ui_size + 2.0
+    }
+
+    /// A glyph's drawing inside its slot (base): 14 at the default size, where Octicons' 1.5
+    /// line on its 16 grid is the 1.31 px stem of the words beside it, with a point of air
+    /// round it in the slot, as Zed sets its 12 px figure in a 16 slot.
+    #[must_use]
+    pub const fn glyph(&self) -> f32 {
+        self.ui_size
     }
 
     /// A small glyph (base − 2): a thread's fold disclosure, Zed's `IconSize::Small`, 12 at the
@@ -588,8 +596,12 @@ pub struct TypeRoles {
     pub caption: TypeRole,
     /// Facts about a thing: where it is, when, its counts. Zed's small label, 12/16.
     pub metadata: TypeRole,
-    /// A control's or a row's words: Zed's default label, 14/20.
+    /// A menu's, a picker's, a tab's, a page's and a dialog's words: Zed's default label, 14/20.
     pub chrome: TypeRole,
+    /// The window's own rows: a navigator row and its section heads, a column's title in its
+    /// header, the composer's foot, a palette row, a toast. Delta's small label, 12/16,
+    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §3.1).
+    pub row: TypeRole,
     /// The same, for what acts or is chosen: 14/20. Chosen is said by tone, not weight.
     pub action: TypeRole,
     /// What a piece of work is called where it is the thing to act on: a task, a request
@@ -600,14 +612,16 @@ pub struct TypeRoles {
     pub section: TypeRole,
     /// A panel's or a dialog's title: Zed's large label, 16/22 at the strong weight.
     pub panel_title: TypeRole,
-    /// Code in a thread's well (a diff, a command and its output), in the code face: Delta's
-    /// 12/18.
+    /// Code where it is read (a thread's well, a diff, the review), in the code face: Delta's
+    /// 15/21, measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §3.4).
     pub code: TypeRole,
-    /// What is read at length, at [`Typography::prose_size`]: 14/23, Delta's 1.625.
+    /// What is read at length, at [`Typography::prose_size`]: Delta's 15/21.
     pub prose: TypeRole,
-    /// What the person writes in the composer, at [`Typography::prose_size`]: 14/23.
+    /// What the person writes in the composer, at [`Typography::prose_size`]: 15/21.
     pub composer: TypeRole,
-    /// A page's heading inside the window: Zed's medium headline, 18/26 at the strong weight.
+    /// A page's heading inside the window (a settings page, the empty workspace's question):
+    /// Delta's settings title, 16/22 at the regular weight
+    /// (`.research/delta-re-2026-10-12.md` §2.2).
     pub page_heading: TypeRole,
     /// The heading of a page that is the whole window, the first run: Zed's extra-large
     /// headline, 23/30 at the regular weight.
@@ -634,11 +648,12 @@ impl Typography {
             caption: role((-4.0, 4.0), (-2.0, 4.0), regular),
             metadata: role((-2.0, 4.0), (-1.0, 5.0), regular),
             chrome: role((0.0, 6.0), (3.0, 5.0), regular),
+            row: role((-2.0, 4.0), (3.0, 5.0), regular),
             action: role((0.0, 6.0), (3.0, 5.0), regular),
             task_title: role((0.0, 6.0), (3.0, 5.0), regular),
             section: role((-2.0, 4.0), (-1.0, 7.0), regular),
             panel_title: role((2.0, 6.0), (5.0, 5.0), strong),
-            code: role((-2.0, 6.0), (-1.0, 7.0), regular),
+            code: role((1.0, 6.0), (-1.0, 7.0), regular),
             prose: TypeRole {
                 size: prose,
                 line: (prose * self.prose_line_height).round(),
@@ -649,7 +664,7 @@ impl Typography {
                 line: (prose * self.composer_line_height).round(),
                 weight: regular,
             },
-            page_heading: role((4.0, 8.0), (8.0, 6.0), strong),
+            page_heading: role((2.0, 6.0), (8.0, 6.0), regular),
             first_run: role((9.0, 7.0), (14.0, 6.0), regular),
         }
     }
@@ -664,13 +679,15 @@ impl Default for Typography {
             ligatures: true,
             mono_line_height: 1.0,
             markdown_line_height: 1.5,
-            // Delta's `leading-relaxed`, for the turns and the next turn's row alike.
-            prose_line_height: 1.625,
-            composer_line_height: 1.625,
+            // Delta's 15/21, measured from the signed-in app, for the turns and the next
+            // turn's row alike.
+            prose_line_height: 1.4,
+            composer_line_height: 1.4,
             // Zed's `.ZedSans`, bundled with its four weights.
             ui_family: "IBM Plex Sans".to_owned(),
             ui_size: 14.0,
-            prose_size: 14.0,
+            // Delta's prose default, a point over the chrome's labels.
+            prose_size: 15.0,
         }
     }
 }
@@ -750,6 +767,19 @@ impl Spacing {
     pub const fn inset_trailing(&self) -> f32 {
         self.md / 2.0
     }
+
+    /// How far apart a row's parts stand (6), Zed's `gap_1p5`: its lead, its words and its
+    /// end slot.
+    #[must_use]
+    pub const fn row_gap(&self) -> f32 {
+        self.md / 2.0
+    }
+
+    /// A page's side inset (32), Zed's `px_8`: the settings page and the empty state.
+    #[must_use]
+    pub const fn page(&self) -> f32 {
+        self.xxl
+    }
 }
 
 impl Default for Spacing {
@@ -800,8 +830,11 @@ pub mod alpha {
     /// The accent's underline under a path that opens its file, in a thread's call: Delta's
     /// 40 %.
     pub const LINK: f32 = 0.4;
-    /// The window under a modal, in both variants: black at 40 %.
+    /// The window under a modal in dark: black at 40 %.
     pub const SCRIM: f32 = 0.40;
+    /// The window under a modal in light: black at 24 %, since 40 % over paper reads as mud
+    /// (`.research/design-polish-2026-10-12.md` §1.19).
+    pub const SCRIM_LIGHT: f32 = 0.24;
     /// Present but set back: a read row in the inbox, a thread's fold disclosure under the
     /// pointer.
     pub const STRONG: f32 = 0.7;
@@ -811,6 +844,12 @@ pub mod alpha {
     /// How strongly a thread's call card and a thought's rail draw the border: Zed's tool card
     /// border, 80 %.
     pub const CALL_BORDER: f32 = 0.8;
+    /// How strongly a row wearing an identity colour is tinted in it, under its 2 pt bar:
+    /// Delta's colour-coded threads (`.research/delta-re-2026-10-12.md` §2.9).
+    pub const IDENTITY: f32 = 0.08;
+    /// The same on the selected row of a coloured run, under its 3 pt bar: Delta's strong tint,
+    /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.3).
+    pub const IDENTITY_SELECTED: f32 = 0.2;
 }
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`). The mark's and the icon's
@@ -858,11 +897,11 @@ pub struct Surfaces {
     /// What floats: menus, popovers, the palette, dialogs, toasts. Zed's
     /// `elevated_surface.background`, standing off what it covers by its line and its shadow.
     pub elevated: Rgb,
-    /// A pane's tab bar and its inactive tabs: Zed's `tab_bar.background` at 35 % over the work,
-    /// as Delta draws it.
+    /// A pane's tab bar and its inactive tabs: the header row's plane, between the work and the
+    /// sidebar, as the signed-in Delta draws it (`.research/delta-signed-in-2026-10-12.md`
+    /// §2.1); the active tab takes the work's ground.
     pub tab_bar: Rgb,
-    /// A column's header row in the work: the work a hair toward white in dark and toward black
-    /// in light, as Delta's thread header is.
+    /// A column's header row: the tab bar's plane, so the window's top line is one band.
     pub header: Rgb,
     /// A code, diff or command well: the work sunk, 12 % toward black in dark and 2 % in light.
     pub well: Rgb,
@@ -1042,14 +1081,14 @@ pub const IDENTITY_HUES: usize = 8;
 /// The identity hues, in degrees, with their chroma as a share of the mode's: an orange, four
 /// steps from green-teal to azure, a violet between the accent and merged, a pink, and a sand
 /// at a third of it. Each sits 20 degrees or more from every state's hue in both modes (green
-/// at 130 to 140, amber at 85 to 94, red at 17 to 30, the accent at 250 to 270, merged at 315
+/// at 130 to 145, amber at 85 to 94, red at 17 to 30, the accent at 250 to 270, merged at 315
 /// to 324), the sand excepted, since at its chroma it reads as no state.
 const IDENTITY: [(f32, f32); IDENTITY_HUES] = [
     (57.0, 1.0),
-    (162.0, 1.0),
-    (184.0, 1.0),
-    (206.0, 1.0),
-    (228.0, 1.0),
+    (165.0, 1.0),
+    (185.5, 1.0),
+    (207.0, 1.0),
+    (228.5, 1.0),
     (292.5, 1.0),
     (350.0, 1.0),
     (85.0, 0.05 / 0.13),
@@ -1089,8 +1128,10 @@ const DARK_TONES: Tones = Tones {
     ground: DARK_BG,
     sidebar: Rgb::hex(0x202327),
     elevated: Rgb::hex(0x22252a),
-    tab_bar: Rgb::hex(0x21242a),
-    header: Rgb::hex(0x1b1e21),
+    // Measured from the signed-in app: the header row and the tab bar are one plane between
+    // the work and the sidebar (`.research/delta-signed-in-2026-10-12.md` §2.1).
+    tab_bar: Rgb::hex(0x1d2023),
+    header: Rgb::hex(0x1d2023),
     well: Rgb::hex(0x16191b),
     card_head: Rgb::hex(0x25282e),
     hover: Rgb::hex(0x272a2f),
@@ -1107,16 +1148,19 @@ const DARK_TONES: Tones = Tones {
     text_secondary: Rgb::hex(0xa9afbc),
     text_muted: Rgb::hex(0x878a98),
     icon: Rgb::hex(0xd3d8de),
-    icon_muted: Rgb::hex(0x7e879a),
+    // Lifted from Zed's 0x7e879a so a glyph at rest carries most of its words' tone
+    // (`icon_muted_carries_three_quarters_of_its_words`).
+    icon_muted: Rgb::hex(0x9aa2b1),
     accent: Rgb::hex(0x74ade8),
     accent_fill: Rgb::hex(0x74ade8),
-    // Zed's green as a word, 8 % toward white: at its own `a1c181` a deuteranope saw it 0.056
-    // Oklab from the red word lifted onto its quiet ground (`vision`).
-    success: Rgb::hex(0xa9c68b),
+    // Delta's green word (`.research/delta-re-2026-10-12.md` §2.1).
+    success: Rgb::hex(0x7bd979),
     success_fill: Rgb::hex(0xa1c181),
     warn: Rgb::hex(0xdec184),
     warn_fill: Rgb::hex(0xdec184),
-    error: Rgb::hex(0xd47d81),
+    // Delta's `ff928a` 0.04 down in Oklab lightness: at its own a deuteranope saw it 0.031
+    // from the green word (`vision`); here 0.067.
+    error: Rgb::hex(0xf1857e),
     error_fill: Rgb::hex(0xd07277),
     merged: Rgb::hex(0xb477cf),
     merged_fill: Rgb::hex(0xb477cf),
@@ -1144,8 +1188,8 @@ const LIGHT_TONES: Tones = Tones {
     ground: LIGHT_BG,
     sidebar: Rgb::hex(0xebebec),
     elevated: Rgb::hex(0xebebec),
-    tab_bar: Rgb::hex(0xf5f5f5),
-    header: Rgb::hex(0xf5f5f5),
+    tab_bar: Rgb::hex(0xf4f4f4),
+    header: Rgb::hex(0xf4f4f4),
     well: Rgb::hex(0xf5f5f5),
     card_head: Rgb::hex(0xe6e6e7),
     hover: Rgb::hex(0xdfdfe0),
@@ -1165,13 +1209,15 @@ const LIGHT_TONES: Tones = Tones {
     icon_muted: Rgb::hex(0x58585a),
     accent: Rgb::hex(0x5c78e2),
     accent_fill: Rgb::hex(0x5c78e2),
-    success: Rgb::hex(0x669f59),
+    // Delta's green word; the lift to AA on every plane and row darkens it to `007016`.
+    success: Rgb::hex(0x008019),
     success_fill: Rgb::hex(0x58884c),
     warn: Rgb::hex(0xa48819),
     warn_fill: Rgb::hex(0x937a16),
-    // One Light's red darkened a quarter toward black: at the lift's `9b473c` a deuteranope saw
-    // it 0.03 Oklab from the green and from the amber word (`vision`).
-    error: Rgb::hex(0x74352d),
+    // Delta's red at its hue, taken to Oklab L 0.40 C 0.14: lifted to AA, Delta's `d03a42`
+    // landed at `b13138`, which a deuteranope saw 0.048 from the green word and 0.033 from the
+    // amber (`vision`); here 0.066 and 0.089.
+    error: Rgb::hex(0x831921),
     error_fill: Rgb::hex(0xc75b4c),
     merged: Rgb::hex(0xa349ab),
     merged_fill: Rgb::hex(0xa349ab),
@@ -1179,8 +1225,9 @@ const LIGHT_TONES: Tones = Tones {
     borders: [Rgb::hex(0xcbcdf6), Rgb::hex(0xc8dcc1), Rgb::hex(0xf4e7d1), Rgb::hex(0xf6c6bd)],
     vc_added_line: Rgb::hex(0xdaf1e2),
     vc_deleted_line: Rgb::hex(0xfdded8),
-    vc_word_added: wash(0x2ea048, 0x59),
-    vc_word_deleted: wash(0xf85149, 0xcc),
+    // Delta's light pair, opaque (`.research/delta-re-2026-10-12.md` §2.1).
+    vc_word_added: opaque(0x85d6a3),
+    vc_word_deleted: opaque(0xefa4b2),
     line_number: Rgb::hex(0xb4b4bb),
     line_number_active: Rgb::hex(0x44454b),
     identity: identity(0.60, 0.07),
@@ -1404,7 +1451,7 @@ impl Elevation {
     /// Light.
     pub const LIGHT: Self = Self {
         shade: Rgb::hex(0),
-        scrim: alpha::SCRIM,
+        scrim: alpha::SCRIM_LIGHT,
         float: [Self::layer(1.0, 0.0, 0.03), Self::layer(2.0, 3.0, 0.12)],
         dialog: [
             Self::layer(1.0, 0.0, 0.04),
@@ -1578,26 +1625,42 @@ pub struct Density {
     pub row: f32,
     /// A row of two lines: a title over its meta line.
     pub row_two_line: f32,
-    /// The window's title bar: Zed's 34 on the Mac.
+    /// The navigator's header row, and the top line it shares with the top panes' tab bars:
+    /// Zed's title bar's 34 on the Mac.
     pub title: f32,
-    /// A pane's tab bar, its header: Zed's 32 on the Mac.
+    /// A pane's tab bar, its header: 34 on the Mac, so the top panes' bars meet the
+    /// navigator's header on one line.
     pub header: f32,
     /// A pane's own toolbar, apart from its tab bar: 32 on the Mac.
     pub bar: f32,
-    /// The status bar along the window's foot: Zed's 30.
-    pub status: f32,
-    /// A tab, a cell of its bar: Zed's 32 on the Mac, the bar's whole height.
+    /// A column's foot row (a thread's, a review's): Delta's 36, measured from the signed-in
+    /// app (`.research/delta-signed-in-2026-10-12.md` §2.2). The window has no status bar.
+    pub foot: f32,
+    /// A tab, a cell of its bar: 34 on the Mac, the bar's whole height.
     pub tab: f32,
-    /// A navigator or palette row, a rail button: Zed's list row, 24 on the Mac.
+    /// A navigator or settings-list row: Delta's 28 on the Mac
+    /// (`.research/delta-signed-in-2026-10-12.md` §3.5).
     pub item: f32,
+    /// A menu's row (a thing's own menu, the bar's menus, the effort menu): Delta's 23.
+    pub menu: f32,
+    /// A row of a list typed at (the palette, a picker): Delta's palette's 27.
+    pub list: f32,
     /// An icon button's side: Zed's default button, 22 on the Mac.
     pub button: f32,
     /// A status bar chip's height: 22 on the Mac.
     pub chip: f32,
-    /// A button's or a field's height: a row's, so a button in a row fills it.
+    /// A decision's head band and the buttons of its foot, what waits on the person in the
+    /// thread: Zed's permission rows' 28 on the Mac.
+    pub decision: f32,
+    /// A text button's, a dropdown's or a field's height, in a page, a dialog or a foot:
+    /// Delta's 28 on the Mac, a row's, so a button in a row fills it. Icon buttons stay
+    /// [`Self::button`].
     pub control: f32,
     /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
     pub hit: f32,
+    /// A search field heading a list (the settings'): Delta's 32 on the Mac, a step over a
+    /// control (`.research/delta-re-2026-10-12.md` §2.5).
+    pub search: f32,
     /// How far across a sash's hit area reaches, centred on its 1 pt line: Zed's 4 pt on a
     /// pointer, a finger's half target on touch.
     pub sash: f32,
@@ -1606,18 +1669,22 @@ pub struct Density {
 impl Density {
     /// A pointer: the Mac.
     pub const COMPACT: Self = Self {
-        row: 24.0,
-        row_two_line: 42.0,
+        row: 28.0,
+        row_two_line: 44.0,
         title: 34.0,
-        header: 32.0,
+        header: 34.0,
         bar: 32.0,
-        status: 30.0,
-        tab: 32.0,
-        item: 24.0,
+        foot: 36.0,
+        tab: 34.0,
+        item: 28.0,
+        menu: 23.0,
+        list: 27.0,
         button: 22.0,
         chip: 22.0,
-        control: 22.0,
+        decision: 28.0,
+        control: 28.0,
         hit: 22.0,
+        search: 32.0,
         sash: 4.0,
     };
     /// A finger: the iPhone and the iPad.
@@ -1627,13 +1694,17 @@ impl Density {
         title: 44.0,
         header: 44.0,
         bar: 44.0,
-        status: 32.0,
-        tab: 36.0,
+        foot: 44.0,
+        tab: 44.0,
         item: 44.0,
+        menu: 44.0,
+        list: 44.0,
         button: 44.0,
         chip: 32.0,
+        decision: 44.0,
         control: 44.0,
         hit: 44.0,
+        search: 44.0,
         sash: 24.0,
     };
 }
@@ -1781,6 +1852,32 @@ mod tests {
     /// The most chroma a neutral holds: none to speak of.
     const NEUTRAL_CHROMA: f32 = 0.002;
 
+    /// A glyph at rest carries most of its words' tone mass: the glyph's ink density times its
+    /// lightness contrast with the plane, against the words' density times theirs, at least
+    /// 0.70 on the sidebar and the ground in both appearances. The densities are Octicons' at
+    /// 14 and IBM Plex Sans' at 14, measured on our own renders
+    /// (`.research/design-polish-2026-10-12.md` §3.1, §3.2). Zed's dark `icon_muted` carried
+    /// 0.65, which read as grey specks beside white words.
+    #[test]
+    fn icon_muted_carries_three_quarters_of_its_words() {
+        const GLYPH_DENSITY: f32 = 0.331;
+        const WORDS_DENSITY: f32 = 0.287;
+        // CIE L*, the lightness the eye reads a tone mass by.
+        let lightness = |c: Rgb| {
+            let y = c.luminance();
+            if y > 0.008_856 { 116.0_f32.mul_add(y.cbrt(), -16.0) } else { 903.3 * y }
+        };
+        for variant in VARIANTS {
+            let s = Theme::new(variant).surfaces;
+            for (name, plane) in [("ground", s.ground), ("sidebar", s.sidebar)] {
+                let contrast = |ink: Rgb| (lightness(ink) - lightness(plane)).abs();
+                let mass =
+                    (GLYPH_DENSITY * contrast(s.icon_muted)) / (WORDS_DENSITY * contrast(s.text));
+                assert!(mass >= 0.70, "{variant:?} on {name}: {mass:.3} of its words");
+            }
+        }
+    }
+
     #[test]
     fn palette_cube_and_greys() {
         let p = TerminalPalette::DARK;
@@ -1805,8 +1902,9 @@ mod tests {
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
     }
 
-    /// The planes, lines and states are Delta's values as its app draws them, and One Light's
-    /// where Delta keeps them: nothing is mixed or lifted but the text.
+    /// The planes, lines and states are Delta's values as its app draws them (the header's and
+    /// the tab bar's measured from the signed-in app), and One Light's where Delta keeps them:
+    /// nothing is mixed or lifted but the text.
     #[test]
     fn the_planes_lines_and_states_are_deltas() {
         let hex = |s: &Surfaces| {
@@ -1826,11 +1924,11 @@ mod tests {
             ]
         };
         let dark = [
-            0x19_1c1f, 0x20_2327, 0x22_252a, 0x21_242a, 0x1b_1e21, 0x16_191b, 0x25_282e, 0x27_2a2f,
+            0x19_1c1f, 0x20_2327, 0x22_252a, 0x1d_2023, 0x1d_2023, 0x16_191b, 0x25_282e, 0x27_2a2f,
             0x2c_2f35, 0x29_2c32, 0x32_363e, 0x22_252a,
         ];
         let light = [
-            0xfa_fafa, 0xeb_ebec, 0xeb_ebec, 0xf5_f5f5, 0xf5_f5f5, 0xf5_f5f5, 0xe6_e6e7, 0xdf_dfe0,
+            0xfa_fafa, 0xeb_ebec, 0xeb_ebec, 0xf4_f4f4, 0xf4_f4f4, 0xf5_f5f5, 0xe6_e6e7, 0xdf_dfe0,
             0xda_dbdd, 0xdf_dfe0, 0xc9_c9ca, 0xeb_ebec,
         ];
         for (variant, want) in [(Variant::Dark, dark), (Variant::Light, light)] {
@@ -1885,8 +1983,8 @@ mod tests {
                 roles.page_heading.size,
                 roles.first_run.size
             ),
-            (10.0, 12.0, 14.0, 16.0, 16.0, 18.0, 23.0),
-            "one name per size"
+            (10.0, 12.0, 14.0, 16.0, 16.0, 16.0, 23.0),
+            "one name per size; a page's heading is a panel's title at the regular weight"
         );
         const { assert!(Typography::STRONG_WEIGHT <= 600.0, "semibold at the most") };
         t.ui_size = 8.0;
@@ -1979,19 +2077,22 @@ mod tests {
         assert_eq!(at(desk.caption), (10.0, 14.0, 400.0));
         assert_eq!(at(desk.metadata), (12.0, 16.0, 400.0));
         assert_eq!(at(desk.chrome), (14.0, 20.0, 400.0));
+        assert_eq!(at(desk.row), (12.0, 16.0, 400.0), "the window's rows, Delta's 12");
         assert_eq!(at(desk.action), (14.0, 20.0, 400.0));
         assert_eq!(at(desk.task_title), (14.0, 20.0, 400.0));
         assert_eq!(at(desk.section), (12.0, 16.0, 400.0));
         assert_eq!(at(desk.panel_title), (16.0, 22.0, 600.0));
-        assert_eq!(at(desk.prose), (14.0, 23.0, 400.0), "Delta's 1.625");
-        assert_eq!(at(desk.composer), (14.0, 23.0, 400.0));
-        assert_eq!(at(desk.page_heading), (18.0, 26.0, 600.0));
+        assert_eq!(at(desk.code), (15.0, 21.0, 400.0), "Delta's code");
+        assert_eq!(at(desk.prose), (15.0, 21.0, 400.0), "Delta's prose");
+        assert_eq!(at(desk.composer), (15.0, 21.0, 400.0));
+        assert_eq!(at(desk.page_heading), (16.0, 22.0, 400.0), "Delta's settings title");
         assert_eq!(at(desk.first_run), (23.0, 30.0, 400.0));
         let touch = t.roles(true);
         assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
         assert_eq!(at(touch.chrome), (17.0, 22.0, 400.0));
+        assert_eq!(at(touch.row), (17.0, 22.0, 400.0), "a finger's row keeps the body size");
         assert_eq!(at(touch.panel_title), (19.0, 24.0, 600.0));
-        assert_eq!(at(touch.prose), (16.0, 26.0, 400.0));
+        assert_eq!(at(touch.prose), (17.0, 24.0, 400.0));
         assert_eq!(at(touch.first_run), (28.0, 34.0, 400.0));
         let larger = Typography { ui_size: 16.0, ..Typography::default() }.roles(false);
         assert_eq!(at(larger.chrome), (16.0, 22.0, 400.0), "it follows the chrome size");
@@ -2002,11 +2103,13 @@ mod tests {
                 roles.caption,
                 roles.metadata,
                 roles.chrome,
+                roles.row,
                 roles.action,
                 roles.task_title,
                 roles.section,
                 roles.prose,
                 roles.composer,
+                roles.page_heading,
                 roles.first_run,
             ];
             assert!(
@@ -2014,7 +2117,7 @@ mod tests {
                     .iter()
                     .all(|r| (r.weight - Typography::REGULAR_WEIGHT).abs() < f32::EPSILON)
             );
-            assert!(strong(roles.panel_title) && strong(roles.page_heading), "titles are strong");
+            assert!(strong(roles.panel_title), "a panel's title is strong");
         }
         let finger = Theme { density: Density::TOUCH, ..Theme::default() };
         assert_eq!(finger.roles(), touch);
@@ -2334,9 +2437,10 @@ mod tests {
 
     /// Only what floats wears a shadow, in black: menus, popovers, the palette and toasts Zed's
     /// two crisp layers, tightest first, and a dialog its modal four, none blurred past 12 pt.
-    /// The scrim under a modal is black at 0.40 in both. A finger gets Apple's 44 pt; a pointer
-    /// Zed's density: a 34 pt title bar, 32 pt tab bars whose tabs fill them, 24 pt rows, 22 pt
-    /// buttons and a 30 pt status bar.
+    /// The scrim under a modal is black at 0.40 in dark and 0.24 in light. A finger gets
+    /// Apple's 44 pt; a pointer Zed's density: one 34 pt top line (the navigator's header and
+    /// the top tab bars, whose tabs fill them), 28 pt rows, 23 pt menu rows, 22 pt buttons and
+    /// a 36 pt column foot.
     #[test]
     fn elevation_and_density() {
         let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
@@ -2344,7 +2448,11 @@ mod tests {
             let e = theme.elevation;
             let v = theme.variant();
             assert_eq!(e.shade, Rgb::hex(0), "{v:?}: black");
-            assert!((e.scrim - 0.40).abs() < f32::EPSILON, "{v:?}: the scrim");
+            let scrim = match v {
+                Variant::Dark => alpha::SCRIM,
+                Variant::Light => alpha::SCRIM_LIGHT,
+            };
+            assert!((e.scrim - scrim).abs() < f32::EPSILON, "{v:?}: the scrim");
             let [near, far] = e.float;
             assert!(near.blur < far.blur && near.y < far.y, "{v:?}: tightest first");
             let deepest = e.dialog.iter().map(|l| l.blur).fold(0.0, f32::max);
@@ -2360,16 +2468,24 @@ mod tests {
         assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
         assert!(touch.control >= 44.0 && touch.bar >= 44.0, "a finger's button and bar");
         assert_eq!(
-            (compact.title, compact.header, compact.bar, compact.status),
-            (34.0, 32.0, 32.0, 30.0),
-            "Zed's bars"
+            (compact.title, compact.header, compact.bar, compact.foot),
+            (34.0, 34.0, 32.0, 36.0),
+            "one top line, Zed's bars, Delta's 36 pt foot"
         );
+        assert_eq!((compact.menu, compact.list), (23.0, 27.0), "Delta's menu and palette rows");
+        assert!(touch.menu >= 44.0 && touch.list >= 44.0, "a finger's menu rows");
+        assert_eq!(compact.header, compact.title, "the tab bars meet the navigator's header");
         assert_eq!(
             (compact.row, compact.item, compact.button, compact.chip, compact.control, compact.hit),
-            (24.0, 24.0, 22.0, 22.0, 22.0, 22.0),
-            "Zed's rows and buttons"
+            (28.0, 28.0, 22.0, 22.0, 28.0, 22.0),
+            "Delta's rows and controls, Zed's icon buttons"
         );
+        assert_eq!(compact.row_two_line, 44.0, "Delta's two-line row");
+        assert_eq!(compact.search, 32.0, "Delta's search field");
+        assert!(touch.search >= 44.0);
         assert_eq!(compact.tab, compact.header, "a tab is a cell of its bar");
+        assert_eq!(compact.decision, 28.0, "Zed's permission rows");
+        assert!(touch.decision >= 44.0, "a finger's answer");
         assert_eq!(compact.sash, 4.0, "Zed's split hit area");
         assert!(touch.tab >= 36.0 && touch.item >= 44.0 && touch.button >= 44.0);
         assert!(touch.sash >= touch.hit / 2.0, "a finger finds the sash");

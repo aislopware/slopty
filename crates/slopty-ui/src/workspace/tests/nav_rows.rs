@@ -80,12 +80,10 @@ fn focus_a_navigator_row(view: &Entity<WorkspaceView>, cx: &mut VisualTestContex
     panic!("no row of the navigator took the keyboard");
 }
 
-/// Under the navigator's top row stand "Search", "New goal" then "New agent", rows across the
-/// panel (`MonoCode`'s rail actions), and its filter is hidden at rest. "Search" shows it in its
-/// place with the keyboard in it, Esc hides it, and so does the keyboard leaving it empty. ⌘F
-/// with a row holding the keyboard shows it, and so does typing there, the key going on after
-/// what it holds. With the navigator hidden the rail leads with the three, its "Search" opening
-/// the palette.
+/// The navigator's header row holds "Search", then "New agent" and "New goal" at its end, and
+/// its filter is hidden at rest. "Search" shows it in its place with the keyboard in it, Esc
+/// hides it, and so does the keyboard leaving it empty. ⌘F with a row holding the keyboard
+/// shows it, and so does typing there, the key going on after what it holds.
 #[gpui::test]
 fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -96,22 +94,21 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
     let bounds = |cx: &mut VisualTestContext, selector: &'static str| {
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
     };
-    let (nav, lights) = (bounds(cx, "navigator"), bounds(cx, "nav-lights-row"));
+    let (nav, header) = (bounds(cx, "navigator"), bounds(cx, "nav-header"));
     let (search, goal, new) =
         (bounds(cx, "nav-search"), bounds(cx, "nav-new-goal"), bounds(cx, "nav-new-agent"));
     for b in [search, goal, new] {
-        assert!(b.top() >= lights.bottom(), "under the lights row: {b:?}");
+        assert!(header.contains(&b.center()), "in the header row: {b:?}");
         assert!(b.left() > nav.left() && b.right() < nav.right(), "across the panel: {b:?}");
-        assert!((b.center().y - search.center().y).abs() < px(0.5), "one row: {b:?}");
     }
-    assert!(search.right() <= goal.left(), "in order: {search:?} {goal:?}");
-    assert!(goal.right() <= new.left(), "a goal first: {goal:?} {new:?}");
+    assert!(search.right() <= new.left(), "in order: {search:?} {new:?}");
+    assert!(new.right() <= goal.left(), "a goal last: {new:?} {goal:?}");
     assert!(!shown(cx, "nav-filter-field"), "hidden at rest");
 
     click(cx, "nav-search");
     assert!(shown(cx, "nav-filter-field"), "Search shows it");
     let field = bounds(cx, "nav-filter-field");
-    assert!(field.top() >= lights.bottom(), "the first row under the lights: {field:?}");
+    assert!(header.contains(&field.center()), "in the header row: {field:?}");
     cx.simulate_input("site");
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "site", "typed in it");
@@ -149,25 +146,41 @@ fn the_filter_waits_hidden_until_search_its_keys_or_typing(cx: &mut TestAppConte
     assert_eq!(held, "sites", "typing on from a row adds to what it holds");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let (search, goal, new) = (
-        bounds(cx, "nav-rail-search"),
-        bounds(cx, "nav-rail-new-goal"),
-        bounds(cx, "nav-rail-new-agent"),
-    );
-    assert!(search.bottom() <= goal.top(), "the rail leads with them: {search:?} {goal:?}");
-    assert!(goal.bottom() <= new.top(), "a goal first: {goal:?} {new:?}");
-    assert!(cx.debug_bounds("bar-search").is_none(), "and the bar holds neither");
-    click(cx, "nav-rail-search");
-    assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the rail's Search opens the palette");
 }
 
-/// A goal is the usual start, so it has a door wherever one starts: ⌘N, the navigator's
-/// "New goal", and its rail's flag each open the one sheet.
+/// The navigator's header is one row, the top line's height from the window's top: the traffic
+/// lights' room, the toggle and a short divider, the filter's way in, then New agent and New
+/// goal 6 in from its right, under the `stroke` line. No row of window controls stands over it.
 #[gpui::test]
-fn a_goal_starts_from_its_key_the_navigator_and_the_rail(cx: &mut TestAppContext) {
+fn the_header_is_one_row(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let bounds = |cx: &mut VisualTestContext, selector: &'static str| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    };
+    let theme = Theme::default();
+    let (nav, header) = (bounds(cx, "navigator"), bounds(cx, "nav-header"));
+    assert_eq!(header.top(), nav.top(), "at the navigator's top");
+    assert!((f32::from(header.size.height) - theme.density.title).abs() < 0.5, "one row tall");
+    assert!(!shown(cx, "nav-lights-row"), "no row over it");
+    let parts = ["navigator-toggle", "nav-search", "nav-new-agent", "nav-new-goal"];
+    let mut last = header.left() + px(titlebar::LEADING_INSET) - px(0.5);
+    for part in parts {
+        let b = bounds(cx, part);
+        assert!(header.contains(&b.center()), "{part} in the row: {b:?}");
+        assert!(b.left() >= last, "{part} in order after the lights: {b:?}");
+        last = b.right();
+    }
+    let goal = bounds(cx, "nav-new-goal");
+    let end = f32::from(nav.right() - goal.right());
+    assert!((end - theme.spacing.inset_trailing()).abs() < 1.5, "6 in from its right: {end}");
+}
+
+/// A goal is the usual start, so it has a door wherever one starts: ⌘N and the navigator's
+/// "New goal" each open the one sheet, and ⌘N does with the navigator hidden.
+#[gpui::test]
+fn a_goal_starts_from_its_key_and_the_navigator(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     view.update_in(cx, |v, _w, cx| v.threads_linked(fake.key, cx));
@@ -192,8 +205,9 @@ fn a_goal_starts_from_its_key_the_navigator_and_the_rail(cx: &mut TestAppContext
 
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();
-    click(cx, "nav-rail-new-goal");
-    assert!(sheet(cx), "the rail's flag opens it");
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    assert!(sheet(cx), "⌘N opens it with the navigator hidden");
 }
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every
@@ -255,9 +269,9 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), listed.last().copied(), "↑ starts from the end");
 }
 
-/// A shell no client views still shows its program's progress from its summary: the figure at
-/// the end of its second line and the hairline under it, along the share it names; a reopened
-/// shell says "Restored" there; and both go when the summary drops them.
+/// A shell no client views still shows its program's progress from its summary: its figure
+/// ends the row's one line; a reopened shell says "Restored" in the row's hint; and both go
+/// when the summary drops them.
 #[gpui::test]
 fn a_row_shows_its_sessions_progress_and_that_it_was_restored(cx: &mut TestAppContext) {
     use slopty_proto::terminal::{Progress, ProgressState, Restored};
@@ -276,30 +290,33 @@ fn a_row_shows_its_sessions_progress_and_that_it_was_restored(cx: &mut TestAppCo
     cx.run_until_parked();
     let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
     let figure = cx.debug_bounds(leak(format!("nav-progress-{id}"))).expect("the figure");
-    let bar = cx.debug_bounds(leak(format!("nav-progress-bar-{id}"))).expect("the bar");
-    let fill = cx.debug_bounds(leak(format!("nav-progress-{id}-bar-fill"))).expect("its fill");
-    let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(shown(cx, leak(format!("nav-restored-{id}"))), "the restored mark");
-    assert!(figure.top() >= meta.top() - px(0.5), "on the second line: {figure:?} {meta:?}");
-    assert!(bar.left() >= figure.right(), "after its figure: {bar:?} {figure:?}");
-    assert!(bar.top() >= meta.top() && bar.bottom() <= meta.bottom(), "on the line, not its foot");
-    assert!(bar.bottom() < row.bottom(), "never along the row's edge: {bar:?} {row:?}");
-    let share = f32::from(fill.size.width) / f32::from(bar.size.width);
-    assert!(share > 0.3 && share < 0.5, "about 40% of the bar: {share}");
+    assert!(row.contains(&figure.center()), "on the row's one line: {figure:?} {row:?}");
+    assert!(figure.left() > row.center().x, "at its end: {figure:?} {row:?}");
+    let hint = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| v.navigator_hints())
+            .into_iter()
+            .find(|(t, _)| *t == tile)
+            .and_then(|(_, hint)| hint)
+            .unwrap_or_default()
+    };
+    assert!(
+        hint(cx).contains(navigator::RESTORED),
+        "the hint says it was brought back: {}",
+        hint(cx)
+    );
 
     let quiet = summary(session, Some("/w/oss/slopty"));
     view.update_in(cx, |v, _w, cx| v.session_opened(key, quiet, cx));
     cx.run_until_parked();
     assert!(!shown(cx, leak(format!("nav-progress-{id}"))), "the report ended");
-    assert!(!shown(cx, leak(format!("nav-progress-bar-{id}"))));
-    assert!(!shown(cx, leak(format!("nav-restored-{id}"))));
+    assert!(!hint(cx).contains(navigator::RESTORED), "{}", hint(cx));
 }
 
-/// A shell's row reads two lines: its title, ended by its age from the session's start, then
-/// what its agent says, its directory below its project's root and its branch, in the order
-/// every second line keeps. Once the agent waits on the human, the state's mark takes the age's
-/// place and the second line says what it asks, not the state again; the row is not washed:
-/// the mark is the one it needs. Folded away, *Needs you* lists it.
+/// A shell's row is one line: its kind leads, its title, then its age from the session's start
+/// at its end; what its agent says, its directory below its project's root and its branch are
+/// its hint. Once the agent waits on the human, the state's mark takes the kind's place in the
+/// lead and the age stays at the end; the row is not washed: the mark is the one it needs.
+/// Folded away, *Needs you* lists it, its one line the ask.
 #[gpui::test]
 fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -330,14 +347,15 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     });
     cx.run_until_parked();
     let id = tile.item.as_uuid();
-    let (row, meta, age) = (
+    let (row, kind, title, age) = (
         cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
-        cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line"),
+        cx.debug_bounds(leak(format!("nav-kind-{id}"))).expect("the kind"),
+        cx.debug_bounds(leak(format!("nav-title-{id}"))).expect("the title"),
         cx.debug_bounds(leak(format!("nav-age-{id}"))).expect("the age"),
     );
-    assert!(meta.top() > row.top() + (row.size.height / 3.0), "under the title: {meta:?} {row:?}");
-    assert!(age.top() >= meta.top() - px(0.5), "the age ends the second line: {age:?} {meta:?}");
-    assert!(age.left() >= meta.right(), "after its words: {age:?} {meta:?}");
+    let row_h = Theme::default().density.row;
+    assert!((f32::from(row.size.height) - row_h).abs() < 0.5, "one line: {row:?}");
+    assert!(kind.right() <= title.left() && title.right() <= age.left(), "{kind:?} {age:?}");
     assert!(age.right() <= row.right() && age.left() > row.center().x, "{age:?} {row:?}");
 
     // Focus the other shell, so the waiting one's row is not the selected one.
@@ -361,21 +379,23 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         )),
         "what it asks, not its state again: {lines:#?}"
     );
-    // The state ends the second line as its glyph and its word, `MonoCode`'s, in the age's
-    // place: the title keeps the first line whole, the agent's mark still leads, and the row's
-    // name still says the state.
+    // The state's mark takes the kind's place in the lead; the row's name still says the
+    // state in words, and its hint what it asks and where.
     let state = cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the state's mark");
-    let word = cx.debug_bounds(leak(format!("nav-word-{id}"))).expect("the state's word");
-    let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(state.top() >= meta.top() - px(0.5), "on the second line: {state:?} {meta:?}");
-    assert!(meta.right() <= state.left() && state.right() <= word.left(), "{meta:?} {word:?}");
-    assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the age gives way");
-    assert!(word.size.width > px(40.0), "a word, \"Needs approval\": {word:?}");
+    let title = cx.debug_bounds(leak(format!("nav-title-{id}"))).expect("the title");
+    assert!(state.right() <= title.left(), "in the lead: {state:?} {title:?}");
+    assert!(cx.debug_bounds(leak(format!("nav-kind-{id}"))).is_none(), "said once");
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Image", Some("Needs you"))), "the glyph: {nodes:#?}");
     assert!(
         nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("Needs approval"))),
         "the row's name says it"
+    );
+    let hints = view.read_with(cx, |v, _| v.navigator_hints());
+    let hint = hints.iter().find(|(t, _)| *t == tile).and_then(|(_, h)| h.clone());
+    assert!(
+        hint.is_some_and(|h| h.contains("crates") && h.contains("Needs approval")),
+        "{hints:?}"
     );
     let wash = gpui::Background::from(slopty_kit::colors::hsla_alpha(
         Theme::default().surfaces.warn_fill,
@@ -393,18 +413,15 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     });
     assert!(!washed, "a row waiting on the human is not washed a second time");
 
-    // It is listed under *Needs you* too, in view or folded out of sight, whose row joins the
-    // agent's words and its place in one line as a tile's second line does, so the place gives
-    // way at the line's end and is never pressed to a lone ellipsis between its neighbours.
+    // It is listed under *Needs you* too, in view or folded out of sight, its one line what it
+    // asks.
     assert!(shown(cx, "nav-needs-you"), "the section lists it in view");
     let project = GroupKey::new(fact::REPO, &groups::at(key, "/Users/me/oss/slopty"));
     fold(cx, leak(format!("nav-group-{project}")));
     assert!(shown(cx, "nav-needs-you"), "and folded away");
-    assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "the words and the place");
-    for part in ["separator", "place"] {
-        let apart = leak(format!("nav-waiting-{part}-{session}"));
-        assert!(!shown(cx, apart), "the {part} is not a part of its own");
-    }
+    let waiting = cx.debug_bounds(leak(format!("nav-waiting-{session}"))).expect("its row");
+    assert!((f32::from(waiting.size.height) - row_h).abs() < 0.5, "one line: {waiting:?}");
+    assert!(shown(cx, leak(format!("nav-waiting-words-{session}"))), "the ask");
 }
 
 /// An open worker with no tile says so in one quiet line on its tiles' edge; a filter that
@@ -640,30 +657,34 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
     );
 }
 
-/// A tile's two lines sit in the middle of its row at either density: at the touch height the
-/// row grows round them, not under them.
+/// Every tile row of the tree is one line, the density's row tall (24, a finger's 44), its
+/// lead, title and end centred on it, whatever it carries: a branch, changes, an agent that
+/// waits (`.research/design-polish-2026-10-12.md` §4.5).
 #[gpui::test]
-fn a_rows_two_lines_sit_in_its_middle(cx: &mut TestAppContext) {
+fn a_tree_row_is_one_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let tile = in_repo(&view, cx, &studio, 1, ("/w/oss/app", "/w/oss/app/src", "main"));
-    let id = tile.item.as_uuid();
-    for (density, height) in
-        [(slopty_theme::Density::COMPACT, 42.0), (slopty_theme::Density::TOUCH, 56.0)]
-    {
+    let _tile = in_repo(&view, cx, &studio, 1, ("/w/oss/app", "/w/oss/app/src", "main"));
+    let session = SessionId::new();
+    let waits = opens(&view, cx, &studio, session, studio.me, 2);
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    for density in [slopty_theme::Density::COMPACT, slopty_theme::Density::TOUCH] {
         let theme = Theme { density, ..Theme::default() };
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         cx.run_until_parked();
-        let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
-        let lines = cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines");
-        assert!((f32::from(row.size.height) - height).abs() < 0.5, "{density:?}: {row:?}");
-        let (above, below) = (lines.top() - row.top(), row.bottom() - lines.bottom());
-        // Within the pixel the layout rounds to.
-        assert!(
-            f32::from(above - below).abs() <= 1.0,
-            "{density:?}: {above:?} over, {below:?} under"
-        );
+        for row in view.read_with(cx, |v, _| v.navigator_tiles()) {
+            let bounds = cx.debug_bounds(selector("nav-tile", row.item)).expect("the row");
+            let height = f32::from(bounds.size.height);
+            assert!((height - density.row).abs() < 0.5, "{density:?}: {row:?} {bounds:?}");
+            let title =
+                cx.debug_bounds(leak(format!("nav-title-{}", row.item.as_uuid()))).expect("title");
+            let off = f32::from(title.center().y - bounds.center().y).abs();
+            assert!(off <= 1.0, "{density:?}: the title {off} pt off the row's middle");
+        }
     }
+    let waiting = leak(format!("nav-state-{}", waits.item.as_uuid()));
+    assert!(cx.debug_bounds(waiting).is_some(), "it waits");
 }
 
 /// The focused tile's row sits on the navigator's plate, with no fill of its own; a click on
@@ -816,7 +837,7 @@ fn a_phone_home_is_the_whole_screen_with_what_waits_first(cx: &mut TestAppContex
     // its search.
     let goal = cx.debug_bounds("nav-new-goal").expect("New goal on the home");
     let start = cx.debug_bounds("nav-new-agent").expect("New agent on the home");
-    assert!(field.right() <= goal.left() && goal.right() <= start.left(), "{goal:?} {start:?}");
+    assert!(field.right() <= start.left() && start.right() <= goal.left(), "{start:?} {goal:?}");
     assert!(start.bottom() <= needs.top(), "{start:?}");
     assert!(!shown(cx, "nav-search"), "no Search row: the field is always there");
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the machine");
@@ -1074,10 +1095,9 @@ fn an_agents_subagents_at_work_fold_into_its_row_as_a_count(cx: &mut TestAppCont
     assert!(!none.contains("subagent"), "a finished one is not counted: {none}");
 }
 
-/// A row leads with its status glyph (an agent at work turns the working mark in the kind's
-/// place). Its second line ends in its working tree's changes, then its state as a glyph and a
-/// word ("Working"), right-aligned. Under the pointer the title's line ends in a close button,
-/// which takes the tile off.
+/// A row leads with its state's glyph while it has one (an agent at work, the working mark in
+/// the kind's place), and ends in one figure, its working tree's changes. Under the pointer the
+/// end gives way to a close button in the same place, which takes the tile off.
 #[gpui::test]
 fn a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1100,22 +1120,20 @@ fn a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer(cx: &mut Te
     cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::default());
     cx.run_until_parked();
     let id = tile.item.as_uuid();
-    let kind = cx.debug_bounds(leak(format!("nav-kind-{id}"))).expect("the lead slot");
+    let state = cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the lead slot");
     let working = tree(cx).into_iter().any(|n| n.is("Image", Some("Working")));
     assert!(working, "the working mark leads the row");
-    let (lines, changes) = (
-        cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines"),
+    assert!(cx.debug_bounds(leak(format!("nav-kind-{id}"))).is_none(), "in the kind's place");
+    let (row, title, changes) = (
+        cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row"),
+        cx.debug_bounds(leak(format!("nav-title-{id}"))).expect("the title"),
         cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the changes"),
     );
-    assert!((kind.left() - lines.left()).abs() < px(0.5), "the glyph leads: {kind:?}");
-    let (state, word) = (
-        cx.debug_bounds(leak(format!("nav-state-{id}"))).expect("the state's glyph"),
-        cx.debug_bounds(leak(format!("nav-word-{id}"))).expect("the state's word"),
-    );
-    assert!(changes.right() <= state.left(), "the changes, then the state: {changes:?}");
-    assert!(state.right() <= word.left(), "the glyph, then its word: {state:?} {word:?}");
-    assert!((lines.right() - word.right()).abs() < px(0.5), "right-aligned: {word:?}");
-    assert!(changes.top() >= state.top() - px(0.5), "on one line: {changes:?} {state:?}");
+    assert!(state.right() <= title.left() && title.right() <= changes.left(), "{changes:?}");
+    let end = f32::from(row.right() - changes.right());
+    let inset = Theme::default().spacing.sm;
+    assert!(end <= inset + 0.5, "the changes end the line: {end}");
+    assert!(row.contains(&changes.center()), "on its one line: {changes:?} {row:?}");
 
     let close = leak(format!("nav-close-{}", keep.item.as_uuid()));
     assert!(!shown(cx, close), "the close waits for the pointer");
@@ -1158,74 +1176,6 @@ fn an_away_worker_shows_on_its_projects_rows_and_in_workers(cx: &mut TestAppCont
     let names: Vec<String> = tree(cx).into_iter().filter_map(|n| n.label).collect();
     assert!(names.iter().any(|l| l.starts_with("laptop, reconnecting")), "{names:#?}");
     assert!(before.contains(&here));
-}
-
-/// Hidden where it would dock, the navigator leaves a rail of its projects, each with what its
-/// tiles add up to; a worker shows there only while it is not up. A project's glyph goes to it.
-#[gpui::test]
-fn the_rail_keeps_the_projects_in_view(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let laptop = connect(&view, cx, 2, "laptop");
-    let origin = "github.com/aislopware/slopty";
-    let session = SessionId::new();
-    let here = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w/notes"));
-    let there = clone_of(&view, cx, &laptop, 1, ("/u/slopty", "/u/slopty", "main"), Some(origin));
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let notes = view.read_with(cx, |v, _| {
-        let projects = v.project_groups();
-        projects.group_of(here).map(|g| g.key.to_string()).expect("a project")
-    });
-    assert!(shown(cx, leak(format!("nav-rail-{notes}"))), "the folder's project");
-    assert!(shown(cx, leak(format!("nav-rail-repo:{origin}"))), "the repository's");
-    assert!(!shown(cx, leak(format!("nav-rail-{}", studio.key))), "a worker that is fine is not");
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
-    cx.run_until_parked();
-    assert!(shown(cx, leak(format!("nav-rail-{notes}-rollup"))), "what it adds up to");
-    let key = laptop.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
-    });
-    cx.run_until_parked();
-    assert!(shown(cx, leak(format!("nav-rail-{}", laptop.key))), "a worker away is");
-    view.update_in(cx, |v, _w, cx| v.focus_tile(here, cx));
-    cx.run_until_parked();
-    click(cx, leak(format!("nav-rail-repo:{origin}")));
-    assert_eq!(focused(&view, cx), Some(there), "a project's glyph goes to it");
-}
-
-/// More projects than the rail is tall scroll under the wheel, so the last is in reach.
-#[gpui::test]
-fn the_rail_scrolls_its_projects(cx: &mut TestAppContext) {
-    use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase};
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let folders: Vec<String> = (0..40).map(|n| format!("/w/p{n:02}")).collect();
-    let mut last = None;
-    for (n, folder) in (1_u64..).zip(&folders) {
-        last = Some(opens_in(&view, cx, &studio, SessionId::new(), studio.me, n, Some(folder)));
-    }
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let last = last.expect("opened");
-    let key = view.read_with(cx, |v, _| {
-        v.project_groups().group_of(last).map(|g| g.key.to_string()).expect("a project")
-    });
-    let glyph = leak(format!("nav-rail-{key}"));
-    let rail = cx.debug_bounds("nav-rail").expect("the rail");
-    let before = cx.debug_bounds(glyph).expect("laid out");
-    assert!(before.bottom() > rail.bottom(), "past the foot: {before:?} {rail:?}");
-    cx.simulate_event(ScrollWheelEvent {
-        position: rail.center(),
-        delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
-        modifiers: Modifiers::default(),
-        touch_phase: TouchPhase::Moved,
-        momentum_phase: None,
-    });
-    cx.run_until_parked();
-    let after = cx.debug_bounds(glyph).expect("laid out");
-    assert!(after.bottom() <= rail.bottom() + px(0.5), "scrolled into reach: {after:?} {rail:?}");
 }
 
 /// A shell that moves to another checkout moves row to its new project at once; its tile stays

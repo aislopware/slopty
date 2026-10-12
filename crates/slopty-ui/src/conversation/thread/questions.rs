@@ -317,20 +317,16 @@ impl Questions {
     }
 }
 
-/// `el` as one answer to a question: a pill at a field's radius in the `border` ring, padded
-/// 8 by 6, on the card it sits in. Chosen, it takes the selection and Zed's selected line.
-/// The kit's own look laid a resting wash in dark and a tinted ring on the chosen one.
+/// An answer as a row, not a box (`.research/design-polish-2026-10-12.md` §4.7, Zed's list
+/// rows): no ring and on nothing at rest, at a field's radius; chosen, it takes the selection's
+/// wash.
 fn option<E: gpui::Styled>(el: E, theme: &Theme, chosen: bool) -> E {
     let s = theme.surfaces;
-    let (ring, fill) = if chosen {
-        (hsla(s.selected_border), hsla(s.selected))
-    } else {
-        (hsla(s.border), gpui::transparent_black())
-    };
+    let fill = if chosen { hsla(s.selected) } else { gpui::transparent_black() };
     el.rounded(gpui::px(theme.radii.sm))
         .px(gpui::px(theme.spacing.sm))
-        .py(gpui::px(theme.spacing.xs + theme.spacing.xxs))
-        .border_color(ring)
+        .py(gpui::px(theme.spacing.xs))
+        .border_color(gpui::transparent_black())
         .bg(fill)
 }
 
@@ -356,28 +352,24 @@ mod tests {
         Answer { question: question.to_owned(), answer: answer.to_owned() }
     }
 
-    /// An answer is a pill in the card's ring at a field's radius, on nothing at rest; chosen,
-    /// it takes the selection and the selected line, in both modes.
+    /// An answer is a row, not a box: no ring at a field's radius, on nothing at rest; chosen,
+    /// it takes the selection's wash, in both modes.
     #[test]
-    fn an_answer_is_a_pill_and_chosen_is_the_selection() {
+    fn a_question_answers_are_rows_not_boxes() {
         use slopty_theme::Variant;
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
+            let clear = Some(gpui::Fill::from(gpui::transparent_black()));
             let mut rest = option(div(), &theme, false);
             let rest = rest.style().clone();
             let r = Some(gpui::px(theme.radii.sm).into());
             assert_eq!(rest.corner_radii.top_left, r, "{variant:?}: a field's radius");
-            assert_eq!(rest.border_color, Some(hsla(s.border)), "{variant:?}: the ring");
-            let clear = Some(gpui::Fill::from(gpui::transparent_black()));
+            assert_eq!(rest.border_color, Some(gpui::transparent_black()), "{variant:?}: no ring");
             assert_eq!(rest.background, clear, "{variant:?}: no wash at rest");
             let mut chosen = option(div(), &theme, true);
             let chosen = chosen.style();
-            assert_eq!(
-                chosen.border_color,
-                Some(hsla(s.selected_border)),
-                "{variant:?}: the selected line"
-            );
+            assert_eq!(chosen.border_color, Some(gpui::transparent_black()), "{variant:?}");
             let picked = Some(gpui::Fill::from(hsla(s.selected)));
             assert_eq!(chosen.background, picked, "{variant:?}: the selection's wash");
         }

@@ -1,24 +1,23 @@
-//! The readouts: what the app has to say for itself.
+//! The readouts: what the app has to say for itself, each only while it has something to say,
+//! in the window's cluster ([`super::cluster`]).
 //!
-//! The title bar's trailing end, before the bell, holds only those that warn, each only while
-//! it has something to say: the server while it does not answer; the focused machine's link on
-//! a DERP relay that has held, with its fix; and a newer Slopty while one is out (which opens
-//! its release page when clicked).
-//!
-//! The foot bar ([`super::foot`]) holds the rest: the plan's windows the focused machine's
-//! agents last published (`5h 23% · 7d 41%`, in `warn` once one is 80 % used, which list every
-//! machine's when clicked); the ports forwarded here (which list them when clicked); the
+//! The server while it does not answer; the focused machine's link on a DERP relay that has
+//! held, with its fix; a newer Slopty while one is out (which opens its release page when
+//! clicked); the plan's windows the focused machine's agents last published once one is 80 %
+//! used (`5h 83% · 7d 41%`, in `warn`, which list every machine's when clicked); and the
 //! transfers in flight both ways while one is not the focused tile's own upload (whose header
-//! says it; they list every transfer with its rate, time left and stop when clicked). Their
-//! popovers rise from the foot bar. The frame time is the stream stats' overlay's (⌘⇧I).
+//! says it), as a glyph and a count, which list every transfer with its rate, time left and
+//! stop when clicked. Their popovers drop from the cluster. The ports forwarded here are the
+//! palette's "Forwarded ports"; the frame time is the stream stats' overlay's (⌘⇧I).
 //!
 //! Nothing here repeats what is said elsewhere: which machine a tile runs on is the navigator's
-//! and the breadcrumb's, a link's round trip its machine row's, a file's language and
-//! caret its tile's, a stream's size and rate its stats overlay's.
+//! and the cluster's project button's, a link's round trip its machine row's, a file's language
+//! and caret its tab bar's, a stream's size and rate its stats overlay's.
 //!
-//! Each readout is meta text with no icon, its figures tabular; a state is a small dot of its
-//! fill beside quiet words. A phone's bars have no room for them.
+//! Each readout is meta text, its figures tabular; a state is a small dot of its fill beside
+//! quiet words. A phone's bars have no room for them.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -68,6 +67,8 @@ pub(super) struct Readouts {
     leaving: Option<Popover>,
     /// A newer Slopty that is out, as the app last found it.
     release: Option<Release>,
+    /// Where the cluster was laid out in the window last frame, which the popovers drop from.
+    at: Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 /// One of the readouts' popovers.
@@ -88,6 +89,11 @@ impl Popover {
 }
 
 impl Readouts {
+    /// Where the cluster's measure writes its bounds each frame.
+    pub(super) fn at(&self) -> Rc<Cell<Option<gpui::Bounds<gpui::Pixels>>>> {
+        Rc::clone(&self.at)
+    }
+
     /// Whether `which` is up.
     const fn open(&self, which: Popover) -> bool {
         match which {
@@ -145,11 +151,6 @@ impl WorkspaceView {
         self.focused().map(|t| t.worker).or_else(|| self.context_worker())
     }
 
-    /// Ports forwarded here, across every shell.
-    fn forwarded_count(&self) -> usize {
-        self.ports.values().flatten().filter(|f| f.local.is_some()).count()
-    }
-
     /// Open `which`, or close it if it is up.
     fn toggle_popover(&mut self, which: Popover, cx: &mut Context<Self>) {
         if self.readouts.open(which) {
@@ -177,15 +178,14 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The readouts that have something to say, for the title bar's trailing end, with the
-    /// popover that is up; nothing on a phone's bar, nor while none has anything to say.
+    /// The readouts that warn and have something to say, for the cluster; nothing while none
+    /// has.
     pub(super) fn render_readouts(
         &self,
-        phone: bool,
         _window: &Window,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        if phone || self.workers.is_empty() {
+        if self.workers.is_empty() {
             return None;
         }
         let theme = &self.theme;
@@ -275,21 +275,10 @@ impl WorkspaceView {
         Some(meta(row, theme).into_any_element())
     }
 
-    /// The ports forwarded here, in the foot bar; a click lists them.
-    pub(super) fn ports_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
-        let n = Some(self.forwarded_count()).filter(|n| *n > 0)?;
-        let text = SharedString::from(counted(n, "port", "ports"));
-        let el = button("readout-ports", text.clone(), theme).child(tabular(div()).child(text));
-        Some(tab_stop(el, theme.surfaces.focus).on_click(cx.listener(|this, _ev, window, cx| {
-            this.list_ports(&super::actions::ListPorts, window, cx);
-        })))
-    }
-
     /// The plan's windows on the focused tile's machine, as its agent last published them (else
-    /// the freshest reading there), in the foot bar: `5h 23% · 7d 41%`, in `warn` once one is
-    /// 80 % used, with when a spent window comes back, and its age once it is past
-    /// [`PLAN_AGED_FROM`]. Clicked, every machine's readings.
+    /// the freshest reading there), in the cluster once one is 80 % used: `5h 83% · 7d 41%` in
+    /// `warn`, with when a spent window comes back, and its age once it is past
+    /// [`PLAN_AGED_FROM`]. Below that it says nothing. Clicked, every machine's readings.
     pub(super) fn plan_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -299,6 +288,9 @@ impl WorkspaceView {
         let now = slopty_kit::clock::now(cx);
         let (_, reading) = self.faces.threads.meters().shown(worker, agent, now)?;
         let (text, warn) = plan_words(reading, now);
+        if !warn && !self.readouts.plans_open {
+            return None;
+        }
         let label = SharedString::from(format!("{PLAN_USAGE} {text}"));
         let words = spaced(tabular(div().id("readout-plan-words")), &text, theme);
         let el = button("readout-plan", label, theme)
@@ -311,8 +303,8 @@ impl WorkspaceView {
     }
 
     /// Every transfer in flight at a glance, both ways, while one is not the focused tile's own
-    /// upload (its header says that one, with its stop): how many and how far, together.
-    /// Clicked, the list of them.
+    /// upload (its header says that one, with its stop): the transfers' glyph and how many, the
+    /// way and how far said to a screen reader. Clicked, the list of them.
     pub(super) fn transfers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -327,11 +319,12 @@ impl WorkspaceView {
             (d.saturating_add(r.done), t.saturating_add(r.total))
         });
         let text = transfers_label(ups, rows.len().saturating_sub(ups), done, total);
-        let el =
-            spaced(tabular(button("readout-transfers", text.clone().into(), theme)), &text, theme)
-                .when(self.readouts.transfers_open, |el| {
-                    el.bg(hsla(s.hover)).text_color(hsla(s.text))
-                });
+        let count = SharedString::from(rows.len().to_string());
+        let el = tabular(button("readout-transfers", text.into(), theme))
+            .gap(px(theme.spacing.xxs))
+            .child(icon(theme, Symbol::ArrowUpAndDown, hsla(s.icon_muted)))
+            .child(count)
+            .when(self.readouts.transfers_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         Some(tab_stop(el, s.focus).on_click(cx.listener(|this, _ev, _window, cx| {
             this.toggle_popover(Popover::Transfers, cx);
         })))
@@ -352,7 +345,7 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        let rise = self.rise(window);
+        let drop = self.drop_at(window);
         let rows: Vec<gpui::AnyElement> = self
             .transfer_rows(cx.background_executor().now())
             .into_iter()
@@ -365,8 +358,8 @@ impl WorkspaceView {
             .aria_label(TRANSFERS)
             .occlude()
             .absolute()
-            .bottom(rise.bottom)
-            .right(rise.right)
+            .top(drop.top)
+            .right(drop.right)
             .w(px(POPOVER_W))
             .flex()
             .flex_col()
@@ -450,7 +443,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .map(kit::eased)
             .hover(move |el| el.bg(hsla(s.hover)))
-            .child(crate::palette::lead_slot(theme, mark, hsla(s.text_secondary)))
+            .child(crate::palette::lead_slot(theme, mark, hsla(s.icon_muted)))
             .child(
                 div()
                     .flex_1()
@@ -482,7 +475,7 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
-        let rise = self.rise(window);
+        let drop = self.drop_at(window);
         let now = slopty_kit::clock::now(cx);
         let rows: Vec<gpui::AnyElement> = self
             .faces
@@ -537,8 +530,8 @@ impl WorkspaceView {
             .aria_label(PLAN_USAGE)
             .occlude()
             .absolute()
-            .bottom(rise.bottom)
-            .left(rise.left)
+            .top(drop.top)
+            .right(drop.right)
             .w(px(POPOVER_W))
             .flex()
             .flex_col()
@@ -552,26 +545,18 @@ impl WorkspaceView {
         self.popover(Popover::Plans, panel, window, cx)
     }
 
-    /// Where a popover of the foot bar rises from: a gap above the bar, in from its ends.
-    fn rise(&self, window: &Window) -> Rise {
+    /// Where a popover of the cluster drops from: a gap under the top line, its right edge on
+    /// the cluster's.
+    fn drop_at(&self, window: &Window) -> Hang {
         let theme = &self.theme;
         let viewport = window.viewport_size();
         let gap = px(theme.spacing.xs);
-        let bar = self.foot.at.get().unwrap_or_else(|| {
-            let h = px(self.foot_height());
-            gpui::Bounds::new(
-                gpui::point(px(0.0), viewport.height - h),
-                gpui::size(viewport.width, h),
-            )
-        });
-        Rise {
-            bottom: viewport.height - bar.top() + gap,
-            left: bar.left() + gap,
-            right: viewport.width - bar.right() + gap,
-        }
+        let line = px(super::titlebar::titlebar_height(theme)) + window.insets().effective().top;
+        let right = self.readouts.at.get().map_or(gap, |b| viewport.width - b.right() + gap);
+        Hang { top: line + gap, right }
     }
 
-    /// `panel` over the window as the bar's popover `which`: a click anywhere else closes it,
+    /// `panel` over the window as the cluster's popover `which`: a click anywhere else closes it,
     /// and it fades in. Once closed it fades out where it stands for [`kit::Pace::Exit`], the
     /// window taking the pointer back at once but where the panel still shows, and turns back
     /// if it is opened again on its way out ([`kit::Presence`]).
@@ -724,10 +709,9 @@ pub(super) const NOTES_UNPUSHABLE: &str = "The server can't send notifications t
 /// What each costs, under it.
 pub(super) const NOTES_MEANS: &str = "Nothing reaches you here while Slopty is away.";
 
-/// Where a popover rises from the foot bar, as offsets from the window's edges.
-struct Rise {
-    bottom: gpui::Pixels,
-    left: gpui::Pixels,
+/// Where a popover drops from the cluster, as offsets from the window's edges.
+struct Hang {
+    top: gpui::Pixels,
     right: gpui::Pixels,
 }
 
@@ -783,17 +767,17 @@ fn spaced(el: Stateful<Div>, text: &str, theme: &Theme) -> Stateful<Div> {
 }
 
 impl WorkspaceView {
-    /// The newer Slopty that is out, or `None` once this build is the latest: the title bar
-    /// says it quietly until then.
+    /// The newer Slopty that is out, or `None` once this build is the latest: the cluster says
+    /// it quietly until then.
     pub fn set_release(&mut self, release: Option<Release>, cx: &mut Context<Self>) {
         if self.readouts.release != release {
             self.readouts.release = release;
-            App::notify(cx, self.chrome.titlebar.entity_id());
+            App::notify(cx, self.chrome.cluster.entity_id());
         }
     }
 }
 
-/// What the title bar says of a newer release: "Slopty 0.2.0 is out".
+/// What the cluster says of a newer release: "Slopty 0.2.0 is out".
 pub(super) fn release_line(release: &Release) -> String {
     format!("Slopty {} is out", release.version)
 }

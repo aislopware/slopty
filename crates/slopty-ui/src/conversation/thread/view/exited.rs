@@ -131,7 +131,7 @@ impl ThreadView {
                 .gap(px(theme.spacing.xs))
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .child(self.icon(Symbol::Power, s.text_muted))
+                .child(self.icon(Symbol::Stop, s.text_muted))
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
                 .children(self.worktree_button(state, cx))
                 .into_any_element(),
@@ -185,7 +185,7 @@ impl ThreadView {
                 .child(if resuming {
                     self.spinner(true)
                 } else {
-                    self.icon(Symbol::Power, s.text_muted)
+                    self.icon(Symbol::Stop, s.text_muted)
                 })
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
                 .children(self.worktree_button(state, cx))

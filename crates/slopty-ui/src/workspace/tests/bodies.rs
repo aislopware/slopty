@@ -175,18 +175,18 @@ fn a_stream_the_worker_ends_reopens_once_then_offers_to_reopen(cx: &mut TestAppC
     assert!(cx.debug_bounds(selector("stopped", tile.item)).is_none(), "and waits for it");
 }
 
-/// A file with an unsaved edit says so by a dot right after its title's text, a tab's gap on,
-/// before the directory the file is in, and not at the far end of the header.
+/// A file says its own facts at its tab bar's end, as an editor's status line does: what it is
+/// coloured as, its indent and line endings, and where the caret is, following the caret. A
+/// screen reader hears them as one status.
 #[gpui::test]
-fn edited_follows_the_title(cx: &mut TestAppContext) {
+fn a_file_says_its_facts_at_its_tab_bars_end(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.txt";
+    let path = "/w/main.rs";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
-    paired(&view, cx, &studio, tile, 2);
     let text = slopty_proto::file::FileRead::Text {
-        text: "# Notes".to_owned(),
-        size: 8,
+        text: "fn main() {\n    run();\n}".to_owned(),
+        size: 25,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
         editorconfig: Vec::new(),
@@ -197,17 +197,25 @@ fn edited_follows_the_title(cx: &mut TestAppContext) {
         v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    cx.simulate_input("x");
+    let header = bounds(cx, selector("title", tile.item));
+    let cell = bounds(cx, selector("tab", tile.item));
+    let facts = bounds(cx, "file-facts");
+    assert!(header.contains(&facts.center()), "in the tab bar: {facts:?} {header:?}");
+    assert!(facts.left() > cell.right(), "after the tab: {facts:?} {cell:?}");
+    let file = view.read_with(cx, |v, _| v.files.get(&tile.item).cloned()).expect("the file");
+    file.update_in(cx, |f, _w, cx| {
+        f.editor().update(cx, |e, cx| e.set_selected_range(16..16, cx));
+    });
     cx.run_until_parked();
-    let name = bounds(cx, selector("name", tile.item));
-    let edited = bounds(cx, selector("unsaved", tile.item));
-    let place = bounds(cx, selector("place", tile.item));
-    near(f32::from(edited.left() - name.right()), tab_look::TAB_GAP);
-    assert!(place.left() > edited.right(), "the directory after them: {place:?} {edited:?}");
+    let said: Vec<String> =
+        tree(cx).into_iter().filter(|n| n.role == "Status").filter_map(|n| n.label).collect();
+    assert!(
+        said.iter().any(|l| l.starts_with("Rust, ") && l.ends_with("Ln 2, Col 5")),
+        "it follows the caret, heard as one status: {said:?}"
+    );
 }
 
-/// A file in a pane of tabs says it is edited in its tab, a dot after its name named "Edited" to
-/// a screen reader, as a lone tile's header does.
+/// A file says it is edited in its tab, a dot after its name named "Edited" to a screen reader.
 #[gpui::test]
 fn a_files_tab_says_edited(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -395,4 +403,24 @@ fn a_window_refused_for_screen_recording_offers_the_restart(cx: &mut TestAppCont
     let _gone = reply.send(Outcome::Done);
     let worker = crate::workspace::projects::worker_id(key).expect("a server id");
     assert_eq!(verb, Verb::RestartWorker { worker });
+}
+
+/// A file's tab wears no glyph, its name's extension saying its kind, as Zed's tabs do; on a
+/// Mac the shown one leads with its proxy, which drags the file out. A shell's tab keeps its
+/// kind.
+#[gpui::test]
+fn a_files_tab_wears_no_glyph_but_its_proxy(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/notes.md".to_owned() }, 2);
+    one_pane(&view, cx, &[shell, file]);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("tab-slot", shell.item)).is_some(), "a shell's kind");
+    assert!(cx.debug_bounds(selector("tab-slot", file.item)).is_none(), "no file glyph");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    cx.run_until_parked();
+    let proxy = cx.debug_bounds(selector("file-proxy", file.item));
+    assert_eq!(proxy.is_some(), cfg!(target_os = "macos"), "the shown file's proxy on a Mac");
 }

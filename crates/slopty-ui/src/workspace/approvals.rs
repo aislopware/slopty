@@ -635,46 +635,19 @@ impl WorkspaceView {
         self.answer_thread(answer.worker, answer.thread, &answer.ask, allow, cx);
     }
 
-    /// "Deny" and "Allow" as quiet text buttons the height of a row's second line: the answer
-    /// goes where the agent is, without going to it.
+    /// Deny and Allow as a row's two icon buttons, Zed's at 22: `x` in `error`, then `check`
+    /// in `success`, the yes last. The answer goes where the agent is, without going to it.
     pub(in crate::workspace) fn approval_buttons(
         &self,
         answer: &Answer,
         cx: &slopty_kit::draw::Draw<'_, Self>,
     ) -> gpui::Div {
-        use gpui::accesskit::Role;
-        use gpui::prelude::FluentBuilder as _;
-        use gpui::{
-            ElementId, InteractiveElement as _, ParentElement as _,
-            StatefulInteractiveElement as _, Styled as _, div, px,
-        };
-        use slopty_kit::colors::hsla;
+        use gpui::{ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px};
+        use slopty_kit::icons::Symbol;
+        use slopty_kit::kit;
 
-        // The navigator's row: its tones.
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (_, second_h) = super::navigator::line_heights(theme);
-        let button = |id: String, label: &'static str, ink, weight| {
-            let selector = id.clone();
-            let el = div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .h(px(second_h))
-                .px(px(theme.spacing.xs))
-                .flex()
-                .items_center()
-                .rounded(px(theme.radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(ink))
-                .font_weight(weight)
-                .map(slopty_kit::kit::eased)
-                .hover(move |el| el.bg(hsla(s.hover)))
-                .child(label);
-            slopty_kit::a11y::tab_stop(el, s.focus)
-        };
         let of = answer.thread.to_string();
         let answered = |allow: bool| {
             let answer = answer.clone();
@@ -683,40 +656,17 @@ impl WorkspaceView {
                 this.answer_row(&answer, allow, cx);
             })
         };
-        let [(deny_ink, deny_weight), (allow_ink, allow_weight)] = answer_inks(theme);
-        let deny = button(format!("nav-deny-{of}"), DENY, deny_ink, gpui::FontWeight(deny_weight))
-            .on_click(answered(false));
-        let allow =
-            button(format!("nav-allow-{of}"), ALLOW, allow_ink, gpui::FontWeight(allow_weight))
-                .on_click(answered(true));
+        let deny =
+            kit::icon_button_inked(theme, format!("nav-deny-{of}"), Symbol::Xmark, DENY, s.error)
+                .on_click(answered(false));
+        let allow = kit::icon_button_inked(
+            theme,
+            format!("nav-allow-{of}"),
+            Symbol::Checkmark,
+            ALLOW,
+            s.success,
+        )
+        .on_click(answered(true));
         div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
-    }
-}
-/// The tone and weight of a row's "Deny" and "Allow": neutral, as every answer is, since green
-/// says done and an approval is not done yet. The yes leads in the text's tone, the no a tier
-/// back; both at the regular weight, as Zed sets every label.
-fn answer_inks(theme: &slopty_theme::Theme) -> [(slopty_theme::Rgb, f32); 2] {
-    let (s, roles) = (&theme.surfaces, theme.roles());
-    [(s.text_secondary, roles.metadata.weight), (s.text, roles.action.weight)]
-}
-
-#[cfg(test)]
-mod tests {
-    use slopty_theme::{Theme, Variant};
-
-    /// A row's answers are neutral in both modes: never the accent's green, which says done.
-    /// The yes leads the no by its tone, never by weight.
-    #[test]
-    fn an_answer_is_neutral_and_the_yes_leads() {
-        for theme in [Theme::new(Variant::Light), Theme::new(Variant::Dark)] {
-            let s = theme.surfaces;
-            let [(deny, deny_weight), (allow, allow_weight)] = super::answer_inks(&theme);
-            for ink in [deny, allow] {
-                assert!(ink != s.accent && ink != s.success, "no green on an answer");
-            }
-            assert_eq!(allow, s.text, "the yes in the text's tone");
-            assert_eq!(deny, s.text_secondary, "the no a tier back");
-            assert!((allow_weight - deny_weight).abs() < f32::EPSILON, "one weight");
-        }
     }
 }

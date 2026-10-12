@@ -1,5 +1,5 @@
 //! The approval cards: what an agent out of sight waits on, stacked at the top right of the
-//! panes, under the title bar (`MonoCode`'s `ApprovalToasts`, audit row 4).
+//! panes, under the top line (`MonoCode`'s `ApprovalToasts`, audit row 4).
 //!
 //! A card stands for one request an agent waits on while its tile is not on show. An approval
 //! says which agent and which thread, "Approval" in the warn tone, up to three lines of what it
@@ -135,7 +135,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The cards, stacked at the panes' top right under the title bar; nothing while none is
+    /// The cards, stacked at the panes' top right under the top line; nothing while none is
     /// up.
     pub(super) fn render_approval_cards(
         &self,

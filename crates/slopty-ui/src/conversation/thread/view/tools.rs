@@ -28,11 +28,14 @@ use slopty_theme::{Rgb, Surfaces, alpha};
 
 use super::{
     PEEK_LINES, TOOL_ROW, ThreadView, ThreadViewEvent, call_path, patch_of, path_patch, tail,
-    tool_icon,
 };
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
+
+/// What a call that keeps the task list says in its turn: the list itself lives once, in the
+/// activity bar over the composer (`.research/design-polish-2026-10-12.md` §4.7).
+const UPDATED_PLAN: &str = "Updated the plan";
 
 /// `text` with the paths in it as a person reads them: under the agent's folder `cwd` relative
 /// to it (`/w/app/src/x.rs` reads `src/x.rs`, by either of macOS's names for a temporary
@@ -132,8 +135,10 @@ impl ThreadView {
             .filter(|end| *end > item.at_ms && !item.at_ms.is_zero())
             .map(|end| kit::duration(Duration::from_millis(end.millis_since(item.at_ms))));
         let line = self.call_line(id, call, open, child, took, cx);
-        let body =
-            open.then(|| self.sources(id, call).or_else(|| self.tool_body(id, call, cx))).flatten();
+        // A call that keeps the task list has no body: the list lives once, in the activity bar.
+        let body = (open && call.kind != slopty_proto::thread::kind::TASKS)
+            .then(|| self.sources(id, call).or_else(|| self.tool_body(id, call, cx)))
+            .flatten();
         let pictures = if open { self.pictures_row(&call.images, false, cx) } else { None };
         let answers =
             self.answered_inline(ix).then(|| self.shown_waiting(cx).cloned()).flatten().and_then(
@@ -159,29 +164,27 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .flex_col()
-                .child(kit::card_head(div(), theme).px(px(theme.spacing.xs)).child(line))
+                .child(kit::card_head(div(), theme).px(px(theme.spacing.md)).child(line))
                 .child(
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .gap(px(theme.spacing.xxs))
-                        .p(px(theme.spacing.sm))
+                        .p(px(theme.spacing.md))
                         .children(body)
                         .children(pictures.map(gpui::IntoElement::into_any_element))
                         .children(answers.map(gpui::IntoElement::into_any_element)),
                 )
                 .into_any_element();
         }
-        // Under the line, indented to its words: the body in its well, the pictures, the
-        // answers.
-        let under = |el: AnyElement| div().w_full().pl(px(TOOL_ROW + theme.spacing.xs)).child(el);
+        // Under the line, on the same edge: the body in its well, the pictures, the answers.
+        let under = |el: AnyElement| div().w_full().child(el);
         div()
             .debug_selector(selector)
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(theme.spacing.xxs))
             .child(line)
             .children(body.map(under))
             .children(pictures.map(|p| under(p.into_any_element())))
@@ -203,20 +206,12 @@ impl ThreadView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
+        // A call's line is words on the content edge, as Delta's run is: no kind's glyph leads
+        // it. Only a call at work or put to the person carries a mark, after its words.
         let mark = match call.state {
-            ToolState::Streaming | ToolState::Running => self.spinner(false),
-            ToolState::Pending { .. } => self.needs_you(),
-            _ => {
-                let kind = tool_icon(&call.kind);
-                let glyph =
-                    call_path(call).map_or_else(|| kind.into(), slopty_kit::icons::file_mark);
-                slopty_kit::icons::symbol(
-                    theme,
-                    glyph,
-                    px(theme.typography.icon()),
-                    hsla(s.text_muted),
-                )
-            }
+            ToolState::Streaming | ToolState::Running => Some(self.spinner(false)),
+            ToolState::Pending { .. } => Some(self.needs_you()),
+            _ => None,
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
         // An MCP tool by what it does, then its server muted after it: "App click ·
@@ -228,6 +223,7 @@ impl ThreadView {
         };
         let title = match &mcp {
             Some((tool, server)) => format!("{tool} \u{b7} {server}"),
+            None if call.kind == slopty_proto::thread::kind::TASKS => UPDATED_PLAN.to_owned(),
             None if call.title.is_empty() => call.name.clone(),
             None => tidy(&call.title, &cwd),
         };
@@ -343,10 +339,12 @@ impl ThreadView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .min_h(px(TOOL_ROW))
-            .text_size(px(theme.typography.small()))
+            // Delta's call line: the prose's size in the muted tones, its well right under it
+            // (`.research/delta-signed-in-2026-10-12.md` §2.4).
+            .text_size(px(theme.typography.prose()))
             .cursor_pointer()
-            .child(Self::slot().child(mark))
             .child(what)
+            .children(mark.map(|mark| Self::slot().child(mark)))
             .children(found.map(|words| {
                 div()
                     .flex_none()
@@ -493,7 +491,7 @@ impl ThreadView {
                 children.push(ink.hunk_head(block).into_any_element());
             }
             for line in block.lines.iter().take(cap.saturating_sub(shown)) {
-                children.push(ink.unified(line).into_any_element());
+                children.push(ink.bare(line).into_any_element());
                 shown = shown.saturating_add(1);
             }
         }
@@ -596,14 +594,22 @@ impl ThreadView {
     }
 
     /// An opened call's well: Delta's code well ([`kit::well`]), its code at the code role,
-    /// clipped to its corners.
+    /// clipped to its corners. It hangs [`well_hang`] left of the content edge, so the code
+    /// inside, padded a base unit, starts on the prose's edge as Delta's does, and still runs to
+    /// the column's end.
     fn well(&self, content: impl gpui::IntoElement) -> Div {
         let theme = &self.theme;
         kit::typed(kit::well(div(), theme), theme.roles().code)
-            .w_full()
+            .ml(px(-well_hang(theme)))
             .overflow_hidden()
             .child(content)
     }
+}
+
+/// How far a well hangs left of the content edge: its line and the base unit its code is
+/// padded by, Delta's 9 (`.research/delta-signed-in-2026-10-12.md` §2.4).
+pub(super) fn well_hang(theme: &slopty_theme::Theme) -> f32 {
+    theme.spacing.sm + slopty_theme::stroke::LINE
 }
 
 /// What a call was called with, as JSON laid out to read; its own text when that is not

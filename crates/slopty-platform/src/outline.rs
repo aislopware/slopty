@@ -1,19 +1,19 @@
 //! Vector outlines drawn by Core Graphics into one alpha byte per device pixel: an agent's mark
-//! beside its words, and the chrome's Carbon glyphs, crisp at 1x.
+//! beside its words, and the chrome's Octicons glyphs, crisp at 1x.
 //!
 //! An [`Outline`] is read from SVG path data (`M L H V C S A Z`, absolute and relative, the
-//! subset the marks' and Carbon's published files use), with its arcs turned into cubic
+//! subset the marks' and Octicons' published files use), with its arcs turned into cubic
 //! Béziers and its ink box worked out from the curves themselves rather than their control
 //! points. What keeps the edges at 1x is fitting the drawing to the device's pixels: a mark's
-//! ink box to whole pixels, a glyph's grid to whole pixels, where Carbon's lines, drawn for 16
-//! and 32, land on whole ones (`docs/decisions/brand.md`, "Each agent wears its owner's mark";
-//! `docs/decisions/ui.md`, "The chrome's icons are IBM Carbon's at 16").
+//! ink box to whole pixels, a glyph's grid to whole pixels (`docs/decisions/brand.md`, "Each
+//! agent wears its owner's mark"; `docs/decisions/ui.md`, "The chrome's icons are Octicons at
+//! 14").
 //!
 //! Both fill with the non-zero rule, as SVG fills a path by default, into an alpha-only bitmap:
 //! - [`rasterize_outline`] scales an outline so its ink box's longer side is a whole number of
 //!   device pixels, into a mask the ink box's size, so a caller centres the ink and not a padded
 //!   box: a mark.
-//! - [`rasterize_on_grid`] draws an outline on its own square grid (Carbon's 32 units) scaled to a
+//! - [`rasterize_on_grid`] draws an outline on its own square grid (Octicons' 16 units) scaled to a
 //!   whole number of device pixels, into a mask the grid's size: a glyph, which is set by its grid
 //!   and not its ink.
 
@@ -107,7 +107,7 @@ pub fn rasterize_outline(outline: &Outline, ink_px: u32) -> Option<Mask> {
     draw_mask(outline, whole(ink_w * scale)?, whole(ink_h * scale)?, scale, (left, top))
 }
 
-/// Draws `outline` on its square grid `grid` units a side (Carbon's 32), the grid scaled to
+/// Draws `outline` on its square grid `grid` units a side (Octicons' 16), the grid scaled to
 /// `side_px` device pixels, into a mask the grid's size.
 ///
 /// What the grid holds keeps its place on it, so glyphs drawn at one size line up as their

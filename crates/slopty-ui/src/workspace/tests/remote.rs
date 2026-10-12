@@ -886,8 +886,8 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     let label = view.read_with(cx, |v, _| v.upload_on(tile).map(|(_, u)| u.label()));
     assert_eq!(label.as_deref(), Some("\u{2191} 42%"));
     let pill = cx.debug_bounds(selector("upload", tile.item)).expect("the tile shows it");
-    // Alone in its tab, its header is the title bar's strip.
-    let header = cx.debug_bounds(selector("tile-strip", tile.item)).expect("the header");
+    // Alone in its tab, its header is its tab bar.
+    let header = cx.debug_bounds(selector("title", tile.item)).expect("the header");
     assert!(header.contains(&pill.center()), "in the header, as a pill with its ring: {pill:?}");
     assert!(pill.bottom() < header.bottom(), "no line along the header's foot");
 
@@ -1026,8 +1026,8 @@ fn a_drop_goes_where_the_tile_can_take_it(cx: &mut TestAppContext) {
     assert!(calls.try_recv().is_err(), "the note took nothing");
 }
 
-/// A shell's listening ports are counted in the title bar, not on its tile's header; one
-/// served on another port here says so in a notice; the count lists them to open.
+/// A shell's listening ports are listed by the palette's "Forwarded ports", not on its tile's
+/// header or in the window's cluster; one served on another port here says so in a notice.
 #[gpui::test]
 fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1047,8 +1047,8 @@ fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) 
     // each client serves it where it can.
     let mut studio = studio;
     studio.drain();
-    let count = cx.debug_bounds("readout-ports").expect("the title bar counts them");
-    cx.simulate_click(count.center(), Modifiers::none());
+    assert!(cx.debug_bounds("readout-ports").is_none(), "no count in the cluster");
+    cx.dispatch_action(ListPorts);
     cx.run_until_parked();
     cx.simulate_input("8080 in a tile");
     cx.simulate_keystrokes("enter");
@@ -1064,9 +1064,6 @@ fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) 
         })
         .collect();
     assert_eq!(opened, ["http://localhost:8080/"]);
-    view.update_in(cx, |v, _window, cx| v.ports_changed(shell, Vec::new(), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("readout-ports").is_none(), "gone with the server");
 }
 
 /// Two clients of one worker show one browser item, the worker's address; each loads it from

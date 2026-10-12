@@ -21,7 +21,6 @@ use super::actions::{
     CloseOtherTabs, MOVE_TO_PROJECT, MoveToProject, MoveToProjectOf, OTHER_TABS, OtherTabs,
     ShowTab, SplitDown, SplitRight, StartAgent, StartThread, TabTerminal,
 };
-use super::title_tabs::TitleTabsHost as _;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::palette::PaletteItem;
 
@@ -146,7 +145,7 @@ impl WorkspaceView {
             }
         }
         if tabs > 1 {
-            for tab in self.title_tabs() {
+            for tab in self.tab_lines() {
                 let (id, entity) = (tab.id, entity.clone());
                 entries.push(MenuEntry {
                     group: MenuGroup::Tabs,
@@ -243,7 +242,7 @@ impl WorkspaceView {
         let others: Vec<_> = project.tabs().iter().map(Tab::id).filter(|id| *id != kept).collect();
         let back = self.focused();
         for id in others {
-            self.close_title_tab(id, window, cx);
+            self.close_tab(id, window, cx);
         }
         match back {
             Some(tile) if self.layout.contains(tile) => self.focus_tile(tile, cx),
@@ -260,7 +259,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let lines = self
-            .title_tabs()
+            .tab_lines()
             .into_iter()
             .map(|tab| {
                 let mut line = PaletteItem::new(&tab.title, Box::new(ShowTab { id: tab.id }), &[]);

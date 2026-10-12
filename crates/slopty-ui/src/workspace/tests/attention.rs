@@ -797,6 +797,13 @@ fn press(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
+/// Point at the row `row` names, so its actions show in its end slot.
+fn point_at(cx: &mut VisualTestContext, row: &'static str) {
+    let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row} is drawn"));
+    cx.simulate_mouse_move(at.center(), None, gpui::Modifiers::none());
+    cx.run_until_parked();
+}
+
 /// The thread requests the workspace sent on `link`.
 fn thread_sent(link: &mut mpsc::Receiver<ClientMsg>) -> Vec<ThreadRequest> {
     std::iter::from_fn(|| link.try_recv().ok())
@@ -935,9 +942,9 @@ fn a_small_question_is_answered_from_its_notes_options(cx: &mut TestAppContext) 
 }
 
 /// A yes or no on the agent's thread rides the agent's note: "Allow" on the note answers it
-/// once and moves nothing, a second press sends nothing, and its row's "Deny" and "Allow" under
-/// *Needs you* answer the next ones without going to the agent. A question never gets the
-/// buttons.
+/// once and moves nothing, a second press sends nothing, and its row's Deny and Allow under
+/// *Needs you*, shown under the pointer, answer the next ones without going to the agent. A
+/// question never gets the buttons.
 #[gpui::test]
 fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -976,6 +983,7 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
     table(&view, cx, key, asking_row(&state, Some(("ask-9", Request::APPROVAL))));
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     cx.run_until_parked();
+    point_at(cx, leak(format!("nav-waiting-{session}")));
     press(cx, leak(format!("nav-deny-{thread}")));
     assert_eq!(intents(&thread_sent(&mut link)), [denied("ask-9")], "denied from its row");
     view.update(cx, |v, _cx| {
@@ -985,6 +993,7 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
 
     table(&view, cx, key, asking_row(&state, Some(("ask-10", Request::APPROVAL))));
     cx.run_until_parked();
+    point_at(cx, leak(format!("nav-waiting-{session}")));
     press(cx, leak(format!("nav-allow-{thread}")));
     assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-10")], "allowed from its row");
     assert!(

@@ -52,30 +52,30 @@ fn typing_under_a_resting_pointer_keeps_the_hold(cx: &mut TestAppContext) {
     assert_eq!(up, ["Copied the address"], "a key leaves the pointer where it is");
 }
 
-/// A notice about no one tile sits in the title bar, over no tile: with a shell open it lies
-/// inside the bar, above the panes; with no worker yet the bar holds it all the same.
+/// A notice about no one tile hangs under the top line at the window's right, a float over
+/// the panes: with no worker yet, under the window's own line; with a shell open, under the
+/// cluster that ends its tab bar.
 #[gpui::test]
-fn a_notice_sits_in_the_title_bar_over_no_tile(cx: &mut TestAppContext) {
+fn a_notice_hangs_under_the_top_line_at_the_right(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     view.update_in(cx, |v, _w, cx| v.show_notice("Settings did not parse".to_owned(), cx));
     cx.run_until_parked();
+    let window = cx.update(|window, _| window.viewport_size());
     let (bar, notice) = (
-        cx.debug_bounds("titlebar").expect("the title bar"),
+        cx.debug_bounds("titlebar").expect("the window's own line"),
         cx.debug_bounds("said").expect("the notice"),
     );
-    assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
+    assert!(notice.top() >= bar.bottom(), "under the line: {notice:?} {bar:?}");
+    assert!(notice.center().x > window.width / 2.0, "on the right: {notice:?}");
 
     let studio = connect(&view, cx, 1, "studio");
-    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     view.update_in(cx, |v, _w, cx| v.show_notice("Copied the address".to_owned(), cx));
     cx.run_until_parked();
-    let (bar, tile) = (
-        cx.debug_bounds("titlebar").expect("the bar"),
-        cx.debug_bounds(selector("item", shell.item)).expect("the tile"),
-    );
+    let cluster = cx.debug_bounds("cluster").expect("the cluster");
     let notice = cx.debug_bounds("said").expect("the notice");
-    assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
-    assert!(notice.bottom() <= tile.top(), "above the tile, not over it: {notice:?} {tile:?}");
+    assert!(notice.top() >= cluster.bottom(), "under the cluster: {notice:?} {cluster:?}");
+    assert!(notice.right() <= cluster.right() + px(0.5), "its right edge inside the window's");
 }
 
 /// A notice whose time comes while the app is not in front waits for it: it outlives its time

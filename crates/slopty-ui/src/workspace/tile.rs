@@ -93,27 +93,12 @@ pub(super) const ATTACH_TO_MESSAGE: &str = "Attach to the message";
 /// What the upload pill does when pressed, as it says.
 pub(super) const STOP_UPLOAD: &str = "Stop upload";
 
-/// What a single tile's header is made of, gathered by `render_header` for `header_row`.
-/// Where a tile's header is drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Seat {
-    /// Over its pane, as a row of its tabs or of its one tab.
-    Pane,
-    /// In the title bar: its tab holds it alone, and the bar's tab is its title.
-    Bar,
-}
-
-/// What a tile's header says besides its title and its lead ([`WorkspaceView::header_bits`]).
+/// What a tile's header says besides its tabs ([`WorkspaceView::header_bits`]).
 pub(super) struct HeaderBits {
-    /// Where it is, beside the title; in the bar, a page's address or its field.
+    /// A page's address, its control, or its field while it is edited.
     pub place: Option<gpui::AnyElement>,
-    /// The title is the page's address, which a click edits.
-    pub address_title: bool,
-    /// Its machine, where more than one could be meant; never in the bar, whose breadcrumb
-    /// says it.
+    /// Its machine, where more than one could be meant.
     pub worker: Option<Stateful<Div>>,
-    /// "Edited", for a file with an edit not yet on disk.
-    pub unsaved: Option<Stateful<Div>>,
     /// An agent's place, pull request and worktree, each with how much it is needed.
     pub branch: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
     pub upload: Option<gpui::AnyElement>,
@@ -125,30 +110,6 @@ pub(super) struct HeaderBits {
     pub silenced: Option<gpui::AnyElement>,
     /// The face toggle, or a Markdown file's preview toggle.
     pub face: Option<gpui::AnyElement>,
-}
-
-struct HeaderParts<'a> {
-    placed: &'a Placed,
-    item: &'a Item,
-    title: String,
-    /// Where it is, beside the title.
-    place: Option<gpui::AnyElement>,
-    /// The title is the page's address, which a click edits.
-    address_title: bool,
-    worker: Option<Stateful<Div>>,
-    unsaved: Option<Stateful<Div>>,
-    /// An agent's pull request and worktree, each with how much it is needed.
-    branch: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
-    upload: Option<gpui::AnyElement>,
-    readouts: Vec<(&'static str, kit::Priority, gpui::AnyElement)>,
-    /// What the kind says of how it stands, at rest: a size another client rules, a stream's
-    /// health, the system's keys sent on.
-    states: Option<Div>,
-    /// The kind's own actions, under the pointer only.
-    actions: Vec<gpui::AnyElement>,
-    silenced: Option<gpui::AnyElement>,
-    /// The face toggle, or a Markdown file's preview toggle.
-    face: Option<gpui::AnyElement>,
 }
 
 /// How much faster a header's place shrinks than its title.
@@ -959,10 +920,9 @@ impl WorkspaceView {
 
     /// How tall the headers of the tab on show are: none on a phone, whose bar above the strip
     /// is the focused tile's (its mark, its title, and its rows in "…"), so the screen keeps one
-    /// bar of chrome; none either for a tab's one tile, whose header is the title bar's
-    /// ([`Self::lone_tile`]).
-    pub(super) fn header_h(&self) -> f32 {
-        if self.phone || self.lone_tile().is_some() { 0.0 } else { self.theme.density.header }
+    /// bar of chrome; elsewhere every pane's tab bar, a tile alone in its pane included.
+    pub(super) const fn header_h(&self) -> f32 {
+        if self.phone { 0.0 } else { self.theme.density.header }
     }
 
     /// `worker`'s home directory, once it has said.
@@ -990,10 +950,8 @@ impl WorkspaceView {
         let title = self.tile_title(item);
         let label = SharedString::from(title.clone());
         let shows = self.tile_shows(item);
-        // A phone's bar is the focused tile's, and a tab's one tile's header is the title bar's
-        // ([`Self::header_h`]): no header of its own.
-        let header =
-            (!self.phone && !placed.lone).then(|| self.render_header(placed, item, title, cx));
+        // A phone's bar is the focused tile's ([`Self::header_h`]): no header of its own.
+        let header = (!self.phone).then(|| self.render_header(placed, item, &title, cx));
         let body = self.render_body(placed, item, window, cx);
         // Files dropped on a shell go to its directory; on a thread, to its composer; on a
         // remote window, to the worker's clipboard; on a folder, into it.
@@ -1145,7 +1103,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         item: &Item,
-        title: String,
+        title: &str,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -1154,11 +1112,10 @@ impl WorkspaceView {
         let focused = placed.focused;
         let kind = self.spoken_kind(item);
         let ink = title_ink(theme, focused);
-        let heading = SharedString::from(spoken_heading(&kind, &title));
-        // A pane's header is its tab row (`tab_look`), the one line along its foot: Zed's tab
-        // bar with its cells where the pane holds tabs, and a lone tile's title on the pane's
-        // own ground. The foot is drawn first, so what follows paints over it.
-        let fills = !self.phone;
+        let heading = SharedString::from(spoken_heading(&kind, title));
+        // A pane's header is its tab bar (`tab_look`), the one line along its foot: Zed's tab
+        // bar with a cell for each of its tiles, one for a tile alone. The foot is drawn first,
+        // so what follows paints over it.
         let header = Self::tile_menu_press(div().id("title"), tile, Pressed::Header, cx);
         let header = tab_look::row(theme, header)
             .debug_selector(move || format!("title-{}", id.as_uuid()))
@@ -1170,39 +1127,37 @@ impl WorkspaceView {
             .w_full()
             .flex_none()
             .flex()
-            .text_size(px(theme.typography.ui_size))
+            .text_size(px(theme.roles().row.size))
             .text_color(hsla(ink))
-            .font_family(theme.typography.ui_family.clone())
-            .cursor_grab()
-            .on_mouse_down(
+            .font_family(theme.typography.ui_family.clone());
+        // In the top line the bar's empty run is the window's title bar. Lower down, a press
+        // there moves the tile, and the second click of a double-click zooms the pane, as a
+        // Mac's title bar zooms its window (a tab's own double-click names its tile); the first
+        // began a move that its mouse-up ended.
+        let header = if placed.top {
+            Self::drags_window(header, cx)
+        } else {
+            header.cursor_grab().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                    // The second click of a double-click on the header's empty part zooms the
-                    // pane, as a Mac's title bar zooms its window (the name's names the tile);
-                    // the first began a move that its mouse-up ended.
                     if ev.click_count == 2 {
-                        if fills {
-                            this.focus_tile(tile, cx);
-                            this.toggle_zoom(window, cx);
-                        }
+                        this.focus_tile(tile, cx);
+                        this.toggle_zoom(window, cx);
                     } else {
                         this.begin_move(tile, ev, cx);
                     }
                     cx.stop_propagation();
                 }),
-            );
-        self.pane_header(placed, item, title, header, cx)
+            )
+        };
+        self.pane_header(placed, item, header, cx)
     }
 
-    /// What a tile's header says besides its title and its lead, built for where the header
-    /// is drawn: over its pane, or in the title bar for a tab of one tile ([`Seat::Bar`]),
-    /// which leaves out what the bar's breadcrumb and its tab say already.
+    /// What a tile's header says besides its tabs.
     pub(super) fn header_bits(
         &self,
         placed: &Placed,
         item: &Item,
-        title: &str,
-        seat: Seat,
         cx: &Draw<'_, Self>,
     ) -> HeaderBits {
         let theme = &self.theme;
@@ -1210,7 +1165,6 @@ impl WorkspaceView {
         let tile = placed.tile;
         let id = item.id;
         let focused = placed.focused;
-        let bar = seat == Seat::Bar;
         let agent = match item.kind {
             ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
@@ -1304,14 +1258,8 @@ impl WorkspaceView {
         };
         let thread_place = thread.and_then(|thread| self.header_place(thread));
         let worktree = agent.and_then(|(session, _)| self.worktree_of(session).cloned());
-        // In the bar the breadcrumb names a shell's checkout and branch, once it knows them.
-        let crumbed = bar
-            && matches!(item.kind, ItemKind::Terminal { .. })
-            && self.focused() == Some(tile)
-            && self.crumbs().checkout.is_some();
         let mut branch = thread_place
             .clone()
-            .filter(|_| !crumbed)
             .map_or_else(Vec::new, |at| self.place_chips(placed.tile, at, worktree.as_ref(), cx));
         branch.extend(self.pull_chip(item));
         branch.extend(agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session)));
@@ -1389,71 +1337,38 @@ impl WorkspaceView {
                 }))
                 .into_any_element()
         });
+        // A file's editor facts (its language, indent and caret), as a view of the file's own
+        // that the caret's moves draw again without the panes.
+        let facts = match &item.kind {
+            ItemKind::File { .. } => {
+                self.file_facts(id).editor.map(gpui::IntoElement::into_any_element)
+            }
+            _ => None,
+        };
         // Each readout with how much it is needed beside the title.
         let readouts: Vec<(&'static str, kit::Priority, gpui::AnyElement)> = [
             report.map(|r| ("report", kit::Priority::MEDIUM, r)),
             running.map(|r| ("running", kit::Priority::MEDIUM, r)),
             finished.map(|f| ("finished", kit::Priority::HIGH, f)),
+            facts.map(|f| ("facts", kit::Priority::MEDIUM, f)),
         ]
         .into_iter()
         .flatten()
         .collect();
-        // The title's context: where a shell or a file is, a page's address when the title is
-        // not it. Muted, in the UI face as every header's context
-        // is, with no separator: the colour tells it from the title.
-        let place = match &item.kind {
-            _ if thread_place.is_some() => None,
-            ItemKind::Terminal { .. } => self.tile_place(item).and_then(|p| place_beside(p, title)),
-            // The path bar right under a folder's header is where it is, every folder above it
-            // a click away; the parent beside the title said it twice, 20 pt apart.
-            ItemKind::Folder { .. } => None,
-            _ => self.tile_place(item),
-        };
-        // A directory keeps the folder it ends in.
-        let path = matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. });
-        let field = self.rename.as_ref().filter(|r| r.tile == tile).map(|r| r.field);
+        // A page's address after the tabs, which is a control, and no other place: a shell's
+        // prompt says where it is, and a file's tab its folder where two read alike
+        // ([`Self::render_tabs`]). A page with no title of its own is titled by its address,
+        // said once in its tab; while the address is edited its field stands in the tab.
         let page = matches!(item.kind, ItemKind::Browser { .. });
-        // A page with no title of its own is titled by its address, which is then what a
-        // click turns into the address field.
-        let address_title = page && field.is_none() && place.is_none();
-        // The bar's tab is the title, so its place is the page's address always: its control.
-        let address = if page && field != Some(Field::Address) {
-            (place.is_some() || bar).then(|| self.address_place(tile, focused, cx)).flatten()
-        } else if bar && field == Some(Field::Address) {
-            self.rename_field(tile, id)
-        } else {
-            None
-        };
-        let text_place = place.filter(|_| !page).map(|text| {
-            let mut place = div();
-            // Gives way long before the title does: a narrow tile keeps its name whole and
-            // loses where it is first.
-            place.style().flex_shrink = Some(PLACE_SHRINK);
-            place
-                .id("place")
-                .debug_selector(move || format!("place-{}", id.as_uuid()))
-                .role(Role::Label)
-                .aria_label(SharedString::from(text.clone()))
-                .min_w_0()
-                .max_w(px(HEADER_URL_MAX))
-                .overflow_hidden()
-                .text_color(hsla(s.text_muted))
-                .child(if path {
-                    ChromeText::new(text, px(theme.typography.small())).fill_from_start()
-                } else {
-                    ChromeText::new(text, px(theme.typography.small())).fill()
-                })
-                .into_any_element()
-        });
-        // A pane of tabs keeps a page's address after the tabs, which is a control, and no other
-        // place: a shell's prompt says where it is, and a file's tab its folder where two read
-        // alike ([`Self::render_tabs`]).
-        // In the bar, the tab says the rest ([`Self::bar_place`]).
-        let place = if placed.tabs || bar { address } else { address.or(text_place) };
+        let editing =
+            self.rename.as_ref().is_some_and(|r| r.tile == tile && r.field == Field::Address);
+        let titled = thread_place.is_none() && self.tile_place(item).is_some();
+        let place =
+            (page && titled && !editing).then(|| self.address_place(tile, focused, cx)).flatten();
         // The worker's name, where more than one could be meant (the tile's project holds
         // tiles of several): quiet text after a server glyph, a fact about the tile rather than
         // a control. A project on one machine never pays for it.
-        let several = !bar && self.project_machines(tile) > 1;
+        let several = self.project_machines(tile) > 1;
         let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
             let name = w.name.clone();
             let machine = slopty_kit::icons::machine(w.caps.as_ref().map(|c| c.form));
@@ -1475,19 +1390,9 @@ impl WorkspaceView {
                 )
                 .child(ChromeText::new(name, px(theme.typography.small())).fill())
         });
-        // A file with an edit not yet on disk says so in a dot after its name, as `MonoCode`'s
-        // dirty dot; saving keeps it until the worker has written it. In the bar, the tab says
-        // it after the title.
-        let unsaved = self.file_facts(id).unsaved && !bar;
-        let unsaved = unsaved.then(|| {
-            tab_look::edited(theme, "unsaved")
-                .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
-        });
         HeaderBits {
             place,
-            address_title,
             worker,
-            unsaved,
             branch,
             upload,
             readouts,
@@ -1498,193 +1403,178 @@ impl WorkspaceView {
         }
     }
 
-    /// A pane's header, `header`, holding its tabs or its one tab, and the rest of what it says
-    /// ([`Self::header_bits`]).
+    /// A pane's header, `header`: Zed's tab bar, a cell for each of its tiles (one for a tile
+    /// alone), then the rest of what it says ([`Self::header_bits`]). In the top line it starts
+    /// with the window's lead and ends with the window's cluster where its pane meets those
+    /// ends ([`Self::top_lead`], [`Self::top_end`]).
     fn pane_header(
         &self,
         placed: &Placed,
         item: &Item,
-        title: String,
         header: Stateful<Div>,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let tile = placed.tile;
-        let HeaderBits {
-            place,
-            address_title,
-            worker,
-            unsaved,
-            branch,
-            upload,
-            readouts,
-            states: kind_states,
-            actions: kind_actions,
-            silenced,
-            face,
-        } = self.header_bits(placed, item, &title, Seat::Pane, cx);
-        let actions = |actions: Vec<gpui::AnyElement>| {
-            div().flex().flex_none().items_center().gap(px(theme.spacing.xs)).children(actions)
-        };
-        let tabbed = placed.tabs;
-        let header = if tabbed {
-            let readouts = readouts.into_iter().map(|(_, _, el)| el).collect();
-            let buttons = f32::from(1_u8.saturating_add(u8::from(face.is_some())));
-            let controls = self.hover_controls(tile, kind_actions, face, cx);
-            let strip = self.trailing_strip(placed, readouts, controls, buttons);
-            let states = (!kind_states.is_empty()).then(|| actions(kind_states));
-            let branch = branch.into_iter().map(|(_, _, el)| el);
-            let tabs = self.render_tabs(placed, cx);
-            // What the tabs leave is the header's: the shown tile's context first (where it
-            // is, a page's address, its machine), which gives way before anything after it;
-            // the tile's controls end it.
-            let rest = div()
-                .flex_initial()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap(px(theme.spacing.sm))
-                .pl(px(theme.spacing.sm))
-                .pr(px(theme.spacing.inset()))
-                .when_some(place, gpui::ParentElement::child)
-                .when_some(worker, gpui::ParentElement::child)
-                .children(branch)
-                .when_some(upload, gpui::ParentElement::child)
-                .children(states)
-                .when_some(silenced, gpui::ParentElement::child)
-                .child(strip);
-            // In a split, a dot leads the row: the accent's on the pane with the keyboard. It
-            // stands in so far that the first tab's mark, past the tab's own inset, lands on the
-            // same edge as a lone tile's beside it (its dot, then the gap, then its mark).
-            let dot = placed.shared.then(|| {
-                div()
-                    .flex_none()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .pl(px(tab_look::TAB_GAP))
-                    .child(tab_look::focus_dot(theme, placed.focused))
-            });
-            // Zed's tab bar: its own plane, the tab on show opening out of it into the pane.
-            header
-                .border_b_0()
-                .bg(hsla(theme.surfaces.tab_bar))
-                .children(dot)
-                .child(tabs)
-                .child(rest)
-        } else {
-            self.header_row(
-                HeaderParts {
-                    placed,
-                    item,
-                    title,
-                    place,
-                    address_title,
-                    worker,
-                    unsaved,
-                    branch,
-                    upload,
-                    readouts,
-                    states: (!kind_states.is_empty()).then(|| actions(kind_states)),
-                    actions: kind_actions,
-                    silenced,
-                    face,
-                },
-                header,
-                cx,
-            )
-        };
-        header.into_any_element()
+        let HeaderBits { place, worker, branch, upload, readouts, states, actions, silenced, face } =
+            self.header_bits(placed, item, cx);
+        let readouts = readouts.into_iter().map(|(_, _, el)| el).collect();
+        // The strip keeps room for every control under the pointer: the close, the face's
+        // toggle and the kind's own (a folder's way up, a page's back and forward), so none is
+        // clipped by the header's rest as it gives way.
+        let count =
+            1_usize.saturating_add(usize::from(face.is_some())).saturating_add(actions.len());
+        let buttons = f32::from(u16::try_from(count).unwrap_or(u16::MAX));
+        let controls = self.hover_controls(tile, actions, face, cx);
+        let strip = self.trailing_strip(placed, readouts, controls, buttons);
+        let states = (!states.is_empty()).then(|| {
+            div().flex().flex_none().items_center().gap(px(theme.spacing.xs)).children(states)
+        });
+        let branch = branch.into_iter().map(|(_, _, el)| el);
+        let tabs = self.render_tabs(placed, cx);
+        let end = self.top_end(placed);
+        // What the tabs leave is the header's: the shown tile's context first (a page's
+        // address, its machine), which gives way before anything after it; the tile's
+        // controls end it. It gives way before the tabs do, so a narrow pane keeps its title.
+        let mut rest = div();
+        rest.style().flex_shrink = Some(STRIP_SHRINK);
+        let rest = rest
+            .min_w_0()
+            .overflow_hidden()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(theme.spacing.sm))
+            .pl(px(theme.spacing.sm))
+            .pr(px(theme.spacing.inset()))
+            .when_some(place, gpui::ParentElement::child)
+            .when_some(worker, gpui::ParentElement::child)
+            .children(branch)
+            .when_some(upload, gpui::ParentElement::child)
+            .children(states)
+            .when_some(silenced, gpui::ParentElement::child)
+            .child(strip);
+        // Zed's tab bar: its own plane, the tab on show opening out of it into the pane.
+        header
+            .border_b_0()
+            .bg(hsla(theme.surfaces.tab_bar))
+            .children(self.top_lead(placed))
+            .child(tabs)
+            .child(rest)
+            .children(end)
+            .into_any_element()
     }
 
-    /// The header's leading slot: what the tile is, its kind's symbol or its agent's own mark,
-    /// in one fixed square so every title starts on the same edge, as the navigator's rows and
-    /// the palette's do. It never changes while the tile lives; how the tile is doing ends the
-    /// header ([`Self::header_state`]). The mark sits a step under the title's tone. On a Mac
-    /// a file's slot is its proxy, dragged out as a document window's title icon is.
-    fn leading_slot(
-        &self,
-        tile: TileRef,
-        item: &Item,
-        focused: bool,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::AnyElement {
-        let id = item.id;
-        // The lead wears its title's tier and weight: the focused title's text at the medium
-        // weight, any other's secondary tone at the regular.
-        let ink = title_ink(&self.theme, focused);
-        let glyph = self.kind_glyph(item);
-        let side = self.theme.typography.icon();
-        let slot = crate::palette::lead_mark(&self.theme, glyph, hsla(ink), side)
-            .debug_selector(move || format!("kind-{}", id.as_uuid()))
-            .into_any_element();
-        self.file_proxy(item, tile, slot, cx)
+    /// The window's lead, where `placed`'s pane meets the top line's leading end: the room for
+    /// the traffic lights and the navigator's toggle while the navigator is not docked, then
+    /// back and forward through the tabs visited ([`super::cluster`]).
+    pub(super) fn top_lead(&self, placed: &Placed) -> Option<gpui::AnyElement> {
+        placed.top_left.then(|| self.chrome.lead.clone().into_any_element())
     }
 
-    /// How the tile is doing, at the header's end (working, waiting on the person, failed,
-    /// done, away), never on its lead, and as its glyph alone: no pill of words beside it, which
-    /// the navigator's line and the pointer's hint say. None at rest: a hollow ring read as an
-    /// unticked radio button. A remote picture on its way turns its mark in the body, which
-    /// says what opens.
-    ///
-    /// An agent's glyph carries its whole state to a screen reader and what it asks to the
-    /// pointer. While a terminal's agent waits on the person, its glyph is the one state worth a
-    /// click: it brings up the terminal, whose own prompt is answered there (Slopty never answers
-    /// for the person). A thread's face answers in its own card, so its glyph only says it.
-    pub(super) fn header_state(
+    /// The window's cluster, where `placed`'s pane meets the top line's trailing end
+    /// ([`super::cluster`]).
+    pub(super) fn top_end(&self, placed: &Placed) -> Option<gpui::AnyElement> {
+        placed.top_right.then(|| self.chrome.cluster.clone().into_any_element())
+    }
+
+    /// The tab bar of a pane whose tile has no item of its own yet (a board, a start, a machine
+    /// away): one cell on show, `mark` and `title`, then `end` (how it stands), in the top line
+    /// with the window's lead and cluster as every pane's.
+    pub(super) fn one_tab_bar(
         &self,
-        tile: TileRef,
-        item: &Item,
+        placed: &Placed,
+        mark: impl Into<Mark>,
+        title: SharedString,
+        end: Option<gpui::AnyElement>,
         cx: &Draw<'_, Self>,
-    ) -> Option<gpui::AnyElement> {
-        let id = item.id;
-        let opening = self.opening(item);
-        let status = self
-            .tile_status(tile, item)
-            .filter(|st| *st != Status::Idle)
-            .filter(|st| !(opening && *st == Status::Working))?;
+    ) -> Stateful<Div> {
         let theme = &self.theme;
-        let mark = slopty_kit::icons::status_mark(theme, Some(status))
-            .debug_selector(move || format!("status-{}", id.as_uuid()));
-        let (session, agent) = match item.kind {
-            ItemKind::Terminal { session } => (Some(session), self.agent_state(session)),
-            ItemKind::Thread { thread } => (None, self.thread_stand(thread)),
-            _ => (None, None),
+        let id = placed.tile.item;
+        let header = tab_look::row(theme, div().id("title"))
+            .debug_selector(move || format!("title-{}", id.as_uuid()))
+            .role(Role::Heading)
+            .aria_label(title.clone())
+            .h(px(theme.density.header))
+            .w_full()
+            .flex_none()
+            .flex()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .bg(hsla(theme.surfaces.tab_bar))
+            .text_size(px(theme.roles().row.size))
+            .font_family(theme.typography.ui_family.clone());
+        let header = if placed.top { Self::drags_window(header, cx) } else { header };
+        let dot = placed.shared.then(|| tab_look::focus_dot(theme, placed.focused));
+        let cell = tab_look::tab(
+            theme,
+            div().id(SharedString::from(format!("tab-{}", id.as_uuid()))),
+            true,
+            false,
+        )
+        .debug_selector(move || format!("tab-{}", id.as_uuid()))
+        .role(Role::Tab)
+        .aria_label(title.clone())
+        .aria_selected(true)
+        .children(dot)
+        .child(tab_look::lead(theme, mark, true))
+        .child(
+            div().min_w_0().overflow_hidden().child(
+                ChromeText::new(title, px(theme.roles().row.size))
+                    .fill_fading(px(tab_look::TITLE_FADE)),
+            ),
+        );
+        let rest = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .pr(px(theme.spacing.inset()))
+            .children(end);
+        header
+            .children(self.top_lead(placed))
+            .child(tab_look::strip(theme, div().flex_none().h_full()).child(cell))
+            .child(rest)
+            .children(self.top_end(placed))
+    }
+
+    /// How a tab's tile is doing, in its lead's place while it works, waits on the person or
+    /// has finished: the state's glyph alone, no pill of words beside it. An agent's glyph
+    /// carries its whole state to a screen reader and what it asks to the pointer; the
+    /// navigator's line says it in words.
+    fn tab_state(&self, item: &Item, status: Status, shown: bool) -> Stateful<Div> {
+        let theme = &self.theme;
+        let id = item.id;
+        let agent = match item.kind {
+            ItemKind::Terminal { session } => self.agent_state(session),
+            ItemKind::Thread { thread } => self.thread_stand(thread),
+            _ => None,
         };
-        let Some(agent) = agent else { return Some(mark.into_any_element()) };
-        let words = SharedString::from(super::agents::agent_status_text(agent));
-        let hint =
-            super::agents::agent_ask_text(agent).map_or_else(|| words.clone(), SharedString::from);
-        let waiting = session
-            .filter(|session| super::agents::needs_human(agent) && !self.face_shown(*session));
+        let words = SharedString::from(
+            agent.map_or_else(|| status.label().to_owned(), super::agents::agent_status_text),
+        );
+        let hint = agent
+            .and_then(super::agents::agent_ask_text)
+            .map_or_else(|| words.clone(), SharedString::from);
         let hint_theme = std::rc::Rc::new(theme.clone());
-        let s = &theme.surfaces;
-        let glyph = div()
-            .id("agent-state")
-            .role(if waiting.is_some() { Role::Button } else { Role::Status })
+        let el = div()
+            .id("tab-status")
+            .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
+            .role(Role::Status)
             .aria_label(words)
             .flex_none()
-            .rounded(px(theme.radii.xs))
-            .child(mark)
-            .map(kit::hint_timing)
-            .tooltip(move |_window, cx| {
-                let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&hint_theme));
-                cx.new(|_| kit::Hint::new(hint, "", theme)).into()
-            });
-        Some(match waiting {
-            Some(session) => tab_stop(
-                glyph
-                    .debug_selector(move || format!("agent-{}", id.as_uuid()))
-                    .aria_description(super::agents::SHOW_PROMPT)
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover))),
-                s.focus,
-            )
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal_session(session, cx)))
-            .into_any_element(),
-            None => glyph.into_any_element(),
+            .size(px(theme.typography.icon()))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(!shown, |el| el.opacity(slopty_theme::alpha::STRONG))
+            .child(slopty_kit::icons::status_mark(theme, Some(status)));
+        kit::hint_timing(el).tooltip(move |_window, cx| {
+            let (hint, theme) = (hint.clone(), std::rc::Rc::clone(&hint_theme));
+            cx.new(|_| kit::Hint::new(hint, "", theme)).into()
         })
     }
 
@@ -1721,7 +1611,7 @@ impl WorkspaceView {
                 .min_w_0()
                 .overflow_hidden()
                 .child(
-                    ChromeText::new(title, px(self.theme.typography.ui_size))
+                    ChromeText::new(title, px(self.theme.roles().row.size))
                         .fill_fading(px(tab_look::TITLE_FADE)),
                 )
                 .into_any_element(),
@@ -1832,26 +1722,36 @@ impl WorkspaceView {
                 let item = self.item(tab)?;
                 let id = item.id;
                 let shown = tab == placed.tile;
-                // How it is doing leads the tab while it works or has finished, else its kind.
+                // How it is doing leads the tab while it works or has finished, else its kind. A
+                // remote window or display on its way turns its mark in its body, so its tab
+                // keeps its kind meanwhile.
+                let screen =
+                    matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. });
                 let state = self.tile_status(tab, item).filter(|st| {
-                    matches!(st, Status::Working | Status::NeedsYou | Status::Done | Status::Failed)
+                    matches!(st, Status::NeedsYou | Status::Done | Status::Failed)
+                        || (matches!(st, Status::Working) && !screen)
                 });
+                // A file's tab wears no glyph (Zed's `tabs.file_icons: false`): its name's
+                // extension says its kind. On a Mac the shown file's tab leads with its proxy,
+                // dragged out as a document window's title icon is.
+                let file = matches!(item.kind, ItemKind::File { .. });
                 let lead = match state {
-                    Some(st) => div()
-                        .id("tab-status")
-                        .flex_none()
-                        .size(px(theme.typography.icon()))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(!shown, |el| el.opacity(slopty_theme::alpha::STRONG))
-                        .debug_selector(move || format!("tab-status-{}", id.as_uuid()))
-                        .child(slopty_kit::icons::status_mark(theme, Some(st)))
-                        .into_any_element(),
-                    None => tab_look::lead(theme, self.kind_glyph(item), shown)
-                        .debug_selector(move || format!("tab-slot-{}", id.as_uuid()))
-                        .into_any_element(),
+                    Some(st) => Some(self.tab_state(item, st, shown).into_any_element()),
+                    None if file => (shown && cfg!(target_os = "macos")).then(|| {
+                        let glyph = tab_look::lead(theme, self.kind_glyph(item), shown)
+                            .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
+                        self.file_proxy(item, tab, glyph.into_any_element(), cx)
+                    }),
+                    None => Some(
+                        tab_look::lead(theme, self.kind_glyph(item), shown)
+                            .debug_selector(move || format!("tab-slot-{}", id.as_uuid()))
+                            .into_any_element(),
+                    ),
                 };
+                // In a split, the focus dot leads the tab on show: Zed's indicator in the
+                // tab's start, the accent's on the pane with the keyboard.
+                let dot =
+                    (shown && placed.shared).then(|| tab_look::focus_dot(theme, placed.focused));
                 let alike = folder_of(tab);
                 let title =
                     alike.as_ref().map_or_else(|| self.tile_title(item), |(n, _)| n.clone());
@@ -1870,8 +1770,7 @@ impl WorkspaceView {
                         .child(ChromeText::new(dir, px(theme.typography.small())).fill_from_start())
                 });
                 let name = self.header_name(tab, id, title);
-                // A file with an edit not yet on disk says so in a dot after its name, in its
-                // tab as in a lone tile's header.
+                // A file with an edit not yet on disk says so in a dot after its name.
                 let unsaved = self.file_facts(id).unsaved.then(|| {
                     tab_look::edited(theme, "unsaved")
                         .debug_selector(move || format!("unsaved-{}", id.as_uuid()))
@@ -1910,7 +1809,8 @@ impl WorkspaceView {
                             cx.stop_propagation();
                         }),
                     )
-                    .child(lead)
+                    .children(dot)
+                    .children(lead)
                     .child(div().flex_initial().min_w_0().overflow_hidden().child(name))
                     .children(unsaved)
                     .children(folder)
@@ -1952,7 +1852,8 @@ impl WorkspaceView {
         let row = div()
             .id(SharedString::from(format!("tab-row-{}", first.as_uuid())))
             .debug_selector(move || format!("tab-row-{}", first.as_uuid()))
-            .flex_1()
+            // From the tabs' own width, so the header's rest gives way before they do.
+            .flex_auto()
             .min_w_0()
             .h_full()
             .overflow_x_scroll()
@@ -2461,9 +2362,9 @@ impl WorkspaceView {
         )
     }
 
-    /// An orchestrator's tile with its board beside it: the thread or the terminal `main_w`
-    /// wide, then the board `panel_w` wide behind a hairline, on the tile's own ground. A press
-    /// on the board gives it the keyboard.
+    /// An orchestrator's tile with its board beside it: the thread or the terminal the narrow
+    /// column `main_w` wide, then the board the wide pane, `panel_w`, behind a hairline, on the
+    /// tile's own ground. A press on the board gives it the keyboard.
     fn board_beside(
         &self,
         (session, board): (SessionId, &Entity<crate::project::ProjectView>),
@@ -2632,144 +2533,6 @@ impl WorkspaceView {
         )
     }
 
-    /// A single tile's header row: its lead, its title and where it is, then at the trailing
-    /// end its facts, its state and its readouts, laid out as a [`kit::priority_row`]. The
-    /// title keeps a third of the header; a worktree's name and the worker go before a word
-    /// of it, a pull request and the readouts while it narrows to that floor. No button stands
-    /// at rest, focused or not: the kind's actions, the face toggle and close show under the
-    /// pointer over the readouts' place, on the header's own ground, and keep no room at rest.
-    /// Touch has no hover, and its header none of them: they are its long press's menu.
-    fn header_row(
-        &self,
-        parts: HeaderParts<'_>,
-        header: Stateful<Div>,
-        cx: &Draw<'_, Self>,
-    ) -> Stateful<Div> {
-        let HeaderParts {
-            placed,
-            item,
-            title,
-            place,
-            address_title,
-            worker,
-            unsaved,
-            branch,
-            upload,
-            readouts,
-            states,
-            actions,
-            silenced,
-            face,
-        } = parts;
-        let theme = &self.theme;
-        let tile = placed.tile;
-        let id = item.id;
-        let focused = placed.focused;
-        let lead = self.leading_slot(tile, item, focused, cx);
-        let state = self.header_state(tile, item, cx);
-        let touch = theme.density == slopty_theme::Density::TOUCH;
-        let name = self.header_name(tile, id, title);
-        let renaming = self.rename.as_ref().is_some_and(|r| r.tile == tile);
-        // The edited dot follows the title it qualifies.
-        let named = div()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(tab_look::TAB_GAP))
-            .map(|el| {
-                if address_title {
-                    el.cursor_text().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _ev: &MouseDownEvent, window, cx| {
-                            this.start_address(tile, window, cx);
-                            cx.stop_propagation();
-                        }),
-                    )
-                } else {
-                    // A double-click on the name names the tile; on the rest of the header it
-                    // zooms the pane. The first click began a move, as on the header.
-                    el.on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                            if ev.click_count == 2 {
-                                this.keep_or_rename(tile, window, cx);
-                                cx.stop_propagation();
-                            }
-                        }),
-                    )
-                }
-            })
-            .child(name)
-            .when_some(unsaved, gpui::ParentElement::child);
-        // The title and where it is, as one: the place gives way long before the name.
-        let titled = div()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .child(named)
-            .children(place);
-        let inset = theme.spacing.inset();
-        let floor = (inset.mul_add(-2.0, placed.rect.w) / 3.0).max(0.0);
-        // No pill for a pane's one tile: in a split the focus dot, then its lead and its title,
-        // as `MonoCode`'s split header has them.
-        let dot = placed.shared.then(|| tab_look::focus_dot(theme, focused));
-        let tab = div()
-            .id("lone-title")
-            .debug_selector(move || format!("lone-title-{}", id.as_uuid()))
-            .min_w_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .gap(px(tab_look::TAB_GAP))
-            .pl(px(tab_look::lone_inset(theme)))
-            .children(dot)
-            .child(lead)
-            .child(titled);
-        let mut row = kit::priority_row(SharedString::from(format!("header-row-{}", id.as_uuid())))
-            .h_full()
-            .gap(px(theme.spacing.sm))
-            .tall_title(tab, px(floor))
-            .title_fills(renaming)
-            .end();
-        if let Some(worker) = worker {
-            row = row.item("worker", kit::Priority::LOW, worker);
-        }
-        for (key, priority, chip) in branch {
-            row = row.item(key, priority, chip);
-        }
-        if let Some(upload) = upload {
-            row = row.item("upload", kit::Priority::HIGH, upload);
-        }
-        if let Some(states) = states {
-            row = row.item("states", kit::Priority::HIGH, states);
-        }
-        if let Some(silenced) = silenced {
-            row = row.item("silenced", kit::Priority::MEDIUM, silenced);
-        }
-        // The state ends the header at rest. Under the pointer the controls take its place and
-        // the readouts', as the tile is a click from its prompt there anyway; the keyboard and a
-        // screen reader still reach a waiting agent's glyph.
-        if let Some(state) = state {
-            let state = div()
-                .when(!touch, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
-                .child(state);
-            row = row.item("state", kit::Priority::HIGH, state);
-        }
-        for (key, priority, readout) in readouts {
-            let readout = div()
-                .when(!touch, |el| el.group_hover(HEADER_GROUP, gpui::Styled::invisible))
-                .child(readout);
-            row = row.item(key, priority, readout);
-        }
-        let row = if touch {
-            row
-        } else {
-            row.overlay(self.hover_controls(tile, actions, face, cx).h_full())
-        };
-        header.items_center().pr(px(inset)).child(row)
-    }
-
     /// A tabbed header's right end: one fixed strip where the tile's readouts (a finished
     /// command's time, a program's progress) sit at rest and the controls (the kind's actions,
     /// the face toggle, close) take their place while the pointer is on the header, as a single
@@ -2800,7 +2563,9 @@ impl WorkspaceView {
         let mut strip = div();
         // Gives way well before the title does and well after the place, down to its buttons.
         strip.style().flex_shrink = Some(STRIP_SHRINK);
-        let least = if touch { 0.0 } else { buttons * kit::icon_button_side(theme) };
+        // Each control and the gap before it (`hover_controls`).
+        let least =
+            if touch { 0.0 } else { buttons * (kit::icon_button_side(theme) + theme.spacing.xs) };
         kit::tabular(
             strip
                 .debug_selector(move || format!("strip-{id}"))
@@ -3563,8 +3328,8 @@ impl WorkspaceView {
                 // has room for both, over them where it has not.
                 let board = self.board_view(*session).filter(|_| self.board_shown(*session));
                 let beside = board.is_some() && rest_w >= super::projects::BOARD_BESIDE_MIN;
-                let panel_w = super::projects::board_panel_w(rest_w);
-                let main_w = if beside { rest_w - panel_w } else { rest_w };
+                let main_w = if beside { super::projects::orchestrator_w(rest_w) } else { rest_w };
+                let panel_w = rest_w - main_w;
                 let main = match self.terminals.get(session) {
                     _ if !beside && let Some(board) = board => {
                         self.hand_over(cx, board, Handed::Board { beside: false }, |v, cx| {
@@ -3743,14 +3508,6 @@ impl WorkspaceView {
             },
         }
     }
-}
-
-/// Where a shell is, beside a title that may already name the directory it stands in: then
-/// nothing, since the title says it. The directory above it read as the cwd:
-/// "drop-here ~" beside a prompt in "~/drop-here".
-pub(super) fn place_beside(place: String, title: &str) -> Option<String> {
-    let last = place.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
-    (last != title && place != title).then_some(place)
 }
 
 /// A header action in words ("Take", "Mute", an upload's progress): the bare

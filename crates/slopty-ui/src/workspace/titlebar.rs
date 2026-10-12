@@ -1,30 +1,21 @@
-//! The bar across the top, Zed's title bar: the title height (34) on the panel's plane, as the
-//! navigator and the foot bar are, the `border` line along its foot, from the navigator's right
-//! edge to the window's. The tab on show is the one cell on the work's ground, open into it.
+//! The window's top line and a phone's bar.
 //!
-//! While the navigator is docked it holds the project's tabs (`title_tabs.rs`), then, only while
-//! there is something to say, the tab's one tile's header (`tile_strip`), the notices that are
-//! about no one tile's work (`toast`) and the readouts (`readouts`: the server while it does not
-//! answer, a plan far used, the ports forwarded, the transfers, a newer Slopty, the frame time
-//! with the stats), and "…" at its end. Back, forward and the navigator's toggle stand in the
-//! navigator's own top row, where the project on show is its selected group and *Needs you*
-//! its own section.
-//!
-//! With the navigator hidden it starts past the traffic lights with the toggle, back and
-//! forward, and the breadcrumb of where the focused work is (`project ▾ / checkout ▾ / branch`,
-//! `breadcrumb.rs`, whose project menu is how the bar goes between projects), then the tabs,
-//! and ends in the bell and "…". The bell counts what needs the person and the agents' turns
-//! left to review, and opens the navigator at them. Search, New goal and New agent stand in the bar
-//! only while neither the navigator nor its rail is drawn. Every other action is a key, the
-//! palette, or a tile's own header. A menu fades in as it drops 4 pt from its button, at once
-//! under Reduce Motion.
+//! On a Mac and an iPad the window has no title bar of its own. Its top line is 34 pt: the
+//! navigator's header while it is docked, then the tab bars of the panes that meet the window's
+//! top ([`super::tile`]). The top-left tab bar starts with the window's lead and the top-right
+//! one ends with the window's cluster ([`super::cluster`]), and every top tab bar's empty run is
+//! the window's title bar: pressed and moved it drags the window, and a double-click is the
+//! system's zoom ([`WorkspaceView::drags_window`]). Only while no pane meets the top (the
+//! settings page, the empty workspace, no machine yet) does the window draw a line of its own
+//! here, the lead and the cluster on the tab bar's plane with its drag run between them.
 //!
 //! On a phone the bar is a navigation bar: the focused tile's title (else the project's name),
 //! which opens the tab's other panes and the project's tabs while there are some
 //! ([`MenuKind::Switch`]), and "…", which leads with the new tiles a phone has no menu bar
 //! for. It has no room for the readouts, and its notices hang under its middle.
 //!
-//! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
+//! A menu fades in as it drops 4 pt from its button, at once under Reduce Motion. The bar is a
+//! view of its own, drawn cached: an echo in a terminal does not draw it again.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,17 +32,15 @@ use gpui::{
 use slopty_client::layout::{GroupKey, Tab, TabId, TileRef, WorkerKey};
 use slopty_kit::colors::hsla;
 use slopty_kit::draw::Draw;
-use slopty_kit::icons::{Mark, Status, Symbol};
+use slopty_kit::icons::{Status, Symbol};
 use slopty_kit::kit;
 use slopty_proto::items::ItemKind;
 
 use super::actions::{
-    AddWindow, FilterNavigator, GoBack, GoForward, NewAgent, NewGoal, NewNote, NewTerminal,
-    OpenCommands, OpenPalette, ToggleNavigator,
+    AddWindow, GoBack, GoForward, NewAgent, NewNote, NewTerminal, OpenCommands, ToggleNavigator,
 };
 use super::navigator::Mode;
 use super::rollup::Rollup;
-use super::title_tabs::TitleTab;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 
 /// The bar's height under `theme`'s density: a finger's target and a hairline's room round
@@ -67,24 +56,21 @@ pub(super) const LEADING_INSET: f32 = 78.0;
 #[cfg(not(target_os = "macos"))]
 pub(super) const LEADING_INSET: f32 = 12.0;
 
-/// The bell's hover group, which its badge's cut-out ring follows.
-const BELL: &str = "bell";
-
-/// What the magnifier beside the navigator's toggle is called.
+/// What the navigator's filter is called while it waits hidden.
 pub(super) const SEARCH: &str = "Search";
 
-/// What the flag after it is called: it opens "New goal…", the usual start.
+/// What the navigator header's goal button is called: it opens "New goal…", the usual start.
 pub(super) const NEW_GOAL: &str = "New goal";
 
-/// What the pencil after the flag is called: it starts "New agent…".
+/// What the navigator header's pencil is called: it starts "New agent…".
 pub(super) const NEW_AGENT: &str = "New agent";
 
-/// What the bar's arrows through the tabs visited are called.
+/// What the lead's arrows through the tabs visited are called.
 pub(super) const BACK: &str = "Back";
 pub(super) const FORWARD: &str = "Forward";
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
-const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
+pub(super) const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
 
 /// What a menu row runs, on the workspace itself.
 type MenuAction = fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>);
@@ -108,7 +94,7 @@ pub(super) enum MenuKind {
     Switch,
 }
 
-/// What the title bar's empty span asks of the window, as a native title bar does.
+/// What the top line's empty run asks of the window, as a native title bar does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum WindowAsk {
     /// Pressed and moved: the system drags the window after the pointer.
@@ -207,7 +193,7 @@ impl WorkspaceView {
         (rollup, count)
     }
 
-    /// What a title tab whose focused tile is `tile` is named: its title; a thread on its way
+    /// What a tab whose focused tile is `tile` is named: its title; a thread on its way
     /// as its tile's header names it; a tile whose item is not here, its machine's name, as the
     /// tile itself says while its worker is away.
     fn tab_title(&self, tile: TileRef) -> String {
@@ -229,53 +215,36 @@ impl WorkspaceView {
         }
     }
 
-    /// The tabs of the project on show, as the bar draws them: each named by its focused
-    /// work, with a mark for each agent in it that works or has finished.
-    pub(super) fn title_tabs(&self) -> Vec<TitleTab> {
+    /// The tabs of the project on show, each named by its focused work: what "Other tabs…" and
+    /// a phone's title menu list.
+    pub(super) fn tab_lines(&self) -> Vec<TabLine> {
         let Some(project) = self.layout.shown_project() else { return Vec::new() };
         let shown = project.shown().map(Tab::id);
-        let lone = self.lone_tile();
         project
             .tabs()
             .iter()
-            .map(|tab| {
-                let title = tab.focused().map(|t| self.tab_title(t)).unwrap_or_default();
-                let lead = tab
-                    .focused()
-                    .and_then(|t| self.item(t))
-                    .map_or(Mark::Symbol(Symbol::Terminal), |item| self.kind_glyph(item));
-                let marks = tab
-                    .tiles()
-                    .filter_map(|t| {
-                        let item = self.item(t)?;
-                        let (mark, _) = self.tile_marks(t, item);
-                        mark.filter(|m| {
-                            matches!(
-                                m,
-                                Status::Working | Status::NeedsYou | Status::Done | Status::Failed
-                            )
-                        })
-                    })
-                    .collect();
-                let tiles = tab.tiles().count();
-                let shown = shown == Some(tab.id());
-                let alone = lone.filter(|_| shown);
-                // A tab's one tile's state is its strip's glyph, with its words: said once.
-                let marks = if alone.is_some() { Vec::new() } else { marks };
-                let place = alone.and_then(|tile| self.bar_place(tile));
-                let edited = alone.is_some_and(|tile| self.file_facts(tile.item).unsaved);
-                TitleTab {
-                    id: tab.id(),
-                    title: title.into(),
-                    lead,
-                    place: place.map(SharedString::from),
-                    edited,
-                    tiles,
-                    marks,
-                    shown,
-                }
+            .map(|tab| TabLine {
+                id: tab.id(),
+                title: tab.focused().map(|t| self.tab_title(t)).unwrap_or_default().into(),
+                shown: shown == Some(tab.id()),
             })
             .collect()
+    }
+
+    /// Close tab `id` and everything in it, as "Close other tabs" does each other one. A shell
+    /// whose command runs asks first, in its tab.
+    pub(super) fn close_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((p, t)) = self.layout.tab_place(id) else { return };
+        let tiles: Vec<TileRef> = self
+            .layout
+            .projects()
+            .get(p)
+            .and_then(|project| project.tabs().get(t))
+            .map(|tab| tab.tiles().collect())
+            .unwrap_or_default();
+        for tile in tiles {
+            self.close_tile(tile, window, cx);
+        }
     }
 
     pub(super) fn toggle_menu(
@@ -306,13 +275,17 @@ impl WorkspaceView {
     }
 
     /// The navigator's toggle, at the far leading edge past the traffic lights wherever it
-    /// shows: in the bar while the navigator is hidden, in the navigator's top row while it is
-    /// docked, so it never moves as the navigator opens or closes.
+    /// shows: in the lead while the navigator is hidden, in the navigator's header while it is
+    /// docked, so it never moves as the navigator opens or closes. Its glyph says which way it
+    /// goes: Octicons' `sidebar-collapse` while docked, `sidebar-expand` while not.
     pub(super) fn navigator_toggle(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
-        self.leading_button("navigator-toggle", Symbol::SidebarLeft, "Navigator", &ToggleNavigator)
-            .on_click(cx.listener(|this, _ev, window, cx| {
+        let docked = self.nav.drawn == Some(Mode::Docked);
+        let glyph = if docked { Symbol::SidebarLeft } else { Symbol::SidebarExpand };
+        self.leading_button("navigator-toggle", glyph, "Navigator", &ToggleNavigator).on_click(
+            cx.listener(|this, _ev, window, cx| {
                 this.toggle_navigator(&ToggleNavigator, window, cx);
-            }))
+            }),
+        )
     }
 
     /// A button of the leading cluster's: `icon` named `label`, with the system's hint naming
@@ -359,132 +332,75 @@ impl WorkspaceView {
         div().flex_none().flex().items_center().children(buttons).into_any_element()
     }
 
-    /// "Search", beside the navigator's toggle: in the navigator's top row it shows the
-    /// navigator's filter and gives it the keyboard; in the bar, with the navigator hidden, it
-    /// opens the palette, the one search left on screen.
-    pub(super) fn search_button(
-        &self,
-        in_navigator: bool,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let (id, action): (&'static str, &'static dyn gpui::Action) = if in_navigator {
-            ("nav-search", &FilterNavigator)
-        } else {
-            ("bar-search", &OpenPalette)
-        };
-        self.leading_button(id, Symbol::Magnifyingglass, SEARCH, action).on_click(cx.listener(
-            move |this, _ev, window, cx| {
-                if in_navigator {
-                    this.reveal_navigator_filter(cx);
-                } else {
-                    this.open_palette(&OpenPalette, window, cx);
-                }
-            },
-        ))
-    }
-
-    /// "New goal", after "Search": the sheet that hands a goal to a new orchestrator.
-    pub(super) fn new_goal_button(
-        &self,
-        id: &'static str,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        self.leading_button(id, Symbol::Flag, NEW_GOAL, &NewGoal)
-            .on_click(cx.listener(|this, _ev, window, cx| this.new_goal(&NewGoal, window, cx)))
-    }
-
-    /// "New agent", after "New goal": "New agent…", the one way to start an agent.
-    pub(super) fn new_agent_button(
-        &self,
-        id: &'static str,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        self.leading_button(id, Symbol::Pencil, NEW_AGENT, &NewAgent)
-            .on_click(cx.listener(|this, _ev, window, cx| this.new_agent(&NewAgent, window, cx)))
-    }
-
-    /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
+    /// The window's own top line, drawn only while no pane meets the top: the lead, the drag
+    /// run and the cluster ([`super::cluster`]). On a phone, its navigation bar.
     pub(super) fn render_titlebar(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let spacing = self.theme.spacing;
-        let safe = window.insets().effective();
-        // Nothing to open, no column to mark and no one to point at before the first worker:
-        // the bar keeps only "…", where settings and the ways to add one live.
-        let has_workers = !self.workers.is_empty();
-        // A docked navigator holds the traffic lights and the safe area's left edge; the bar
-        // starts at its right edge.
-        let docked = self.nav.drawn == Some(Mode::Docked);
-        // Docked, the tab strip's own pad starts the bar.
-        let leading = if docked { 0.0 } else { LEADING_INSET + f32::from(safe.left) };
-        let trailing = spacing.md + f32::from(safe.right);
-        let phone = self.phone;
-        let phone_title = (has_workers && phone).then(|| self.render_phone_switch(cx));
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-
-        // Left, with the navigator hidden: its toggle, "Search", "New goal" and "New agent" while
-        // the rail is not drawn either (the rail leads with them), the arrows through the tabs
-        // visited, and where the focused work is. A docked navigator holds it all.
-        let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
-        let bare = has_workers && !phone && self.nav.drawn.is_none() && !self.nav.rail;
-        let search = bare.then(|| self.search_button(false, cx));
-        let new_goal = bare.then(|| self.new_goal_button("bar-new-goal", cx));
-        let new_agent = bare.then(|| self.new_agent_button("bar-new-agent", cx));
-        let visits = (has_workers && !phone && !docked).then(|| self.visit_arrows(cx));
-        let where_ = (has_workers && !phone && !docked).then(|| self.render_breadcrumb(cx));
-        let tabs =
-            (has_workers && !phone).then(|| self.chrome.title_tabs.clone().into_any_element());
-        // A tab's one tile's header, but for its title, which its tab says; empty while the tab
-        // holds more. Always in the bar with the tabs, as theirs is: a view that left the
-        // retained tree and is then told of news fails gpui-fast's layout splice.
-        let strip =
-            (has_workers && !phone).then(|| self.chrome.tile_strip.clone().into_any_element());
-        if tabs.is_none() {
-            self.drop_spots.no_strip();
+        if self.phone {
+            return self.render_phone_bar(window, cx);
         }
+        let theme = &self.theme;
+        let safe = window.insets().effective();
+        let bar = div()
+            .id("titlebar")
+            .debug_selector(|| "titlebar".to_owned())
+            .map(|el| super::tab_look::row(theme, el))
+            .bg(hsla(theme.surfaces.tab_bar))
+            .size_full()
+            .pt(safe.top)
+            .flex()
+            .items_center()
+            .font_family(theme.typography.ui_family.clone())
+            .child(self.chrome.lead.clone())
+            .child(div().flex_1().h_full())
+            .child(self.chrome.cluster.clone());
+        Self::drags_window(bar, cx).into_any_element()
+    }
 
-        // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
-        // left to review; it opens the navigator at them.
-        let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
-        let unread = self.bell_count();
-        let bell = (has_workers && !docked).then(|| {
-            // No count disc, the one web badge the app had: the glyph itself says it, as the
-            // Mac's own monochrome `bell.badge` does, in its words' tier, and in the warn fill
-            // only while something needs the person. The count is said, not drawn.
-            let symbol = if unread > 0 { Symbol::BellBadge } else { Symbol::Bell };
-            let label = super::navigator::NEEDS_YOU;
-            let button = if total > 0 {
-                kit::icon_button_inked(theme, "bell", symbol, label, s.warn_fill)
-            } else {
-                kit::icon_button(theme, "bell", symbol, label)
-            };
-            let count = (unread > 0).then(|| {
-                div()
-                    .id("bell-count")
-                    .debug_selector(|| "bell-count".to_owned())
-                    .role(Role::Status)
-                    .aria_label(SharedString::from(format!("{unread} new")))
-                    .absolute()
-                    .size_0()
-            });
-            button
-                .group(BELL)
-                .relative()
-                .children(count)
-                .on_click(cx.listener(|this, _ev, window, cx| this.needs_you_shown(window, cx)))
-        });
-        let more = kit::icon_button(theme, "more", Symbol::Ellipsis, "More")
-            .aria_expanded(self.menu == Some(MenuKind::More))
-            .on_click(
-                cx.listener(|this, _ev, window, cx| this.toggle_menu(MenuKind::More, window, cx)),
-            );
-        let buttons =
-            div().flex_none().flex().items_center().gap(px(spacing.xxs)).children(bell).child(more);
-        let readouts = self.render_readouts(phone, window, cx);
-        // The notices about no one tile's work: in the lane before the readouts, or hanging
-        // under a phone's bar, whose middle is its title.
-        let notices = self.render_notices(cx);
-        let (lane, hanging) = if phone { (None, notices) } else { (notices, None) };
-        let hanging = hanging.map(|notices| {
+    /// `el`, a run of the top line, as the window's title bar: pressed and moved it drags the
+    /// window, and a double-click is the system's zoom. A button's press stops before it gets
+    /// here.
+    pub(super) fn drags_window(
+        el: gpui::Stateful<gpui::Div>,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, ev: &gpui::MouseDownEvent, window, _cx| {
+                this.title_press = ev.click_count < 2;
+                if ev.click_count == 2 {
+                    this.window_ask(WindowAsk::TitleBarDoubleClick, window);
+                }
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, _cx| {
+            if this.title_press && ev.pressed_button == Some(MouseButton::Left) {
+                this.title_press = false;
+                this.window_ask(WindowAsk::Move, window);
+            }
+        }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _ev, _window, _cx| this.title_press = false),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _ev, _window, _cx| this.title_press = false),
+        )
+    }
+
+    /// A phone's navigation bar: the navigator's toggle, the focused tile's title, the bell
+    /// and "…", its notices hanging under its middle. `safe.top` is the notch's inset.
+    fn render_phone_bar(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let spacing = theme.spacing;
+        let safe = window.insets().effective();
+        let has_workers = !self.workers.is_empty();
+        let docked = self.nav.drawn == Some(Mode::Docked);
+        let toggle = (has_workers && !docked).then(|| self.navigator_toggle(cx));
+        let title = has_workers.then(|| self.render_phone_switch(cx));
+        let bell = (has_workers && !docked).then(|| self.bell_button(cx));
+        let more = self.more_button(cx);
+        let notices = self.render_notices(cx).map(|notices| {
             div()
                 .absolute()
                 .top(px(titlebar_height(theme)) + safe.top + px(spacing.xs))
@@ -495,43 +411,18 @@ impl WorkspaceView {
                 .px(px(spacing.sm))
                 .child(notices)
         });
-        // Its empty span is a native title bar: pressed and moved it drags the window, and a
-        // double-click is the system's zoom. A button's press stops before it gets here.
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, ev: &gpui::MouseDownEvent, window, _cx| {
-                    this.title_press = ev.click_count < 2;
-                    if ev.click_count == 2 {
-                        this.window_ask(WindowAsk::TitleBarDoubleClick, window);
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, _cx| {
-                if this.title_press && ev.pressed_button == Some(MouseButton::Left) {
-                    this.title_press = false;
-                    this.window_ask(WindowAsk::Move, window);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _window, _cx| this.title_press = false),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _window, _cx| this.title_press = false),
-            )
             .map(|el| super::tab_look::row(theme, el))
-            .bg(hsla(s.sidebar))
+            .bg(hsla(theme.surfaces.sidebar))
             .size_full()
             .pt(safe.top)
             .flex()
             .items_center()
             .gap(px(spacing.md))
-            .pl(px(leading))
-            .pr(px(trailing))
+            .pl(px(LEADING_INSET + f32::from(safe.left)))
+            .pr(px(spacing.md + f32::from(safe.right)))
             .font_family(theme.typography.ui_family.clone())
             .child(
                 div()
@@ -542,19 +433,18 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(spacing.xs))
                     .children(toggle)
-                    .children(search)
-                    .children(new_goal)
-                    .children(new_agent)
-                    .children(phone_title)
-                    .children(visits)
-                    .children(where_)
-                    .children(tabs),
+                    .children(title),
             )
-            .children(strip)
-            .children(lane)
-            .children(readouts)
-            .child(buttons)
-            .children(hanging)
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(spacing.xxs))
+                    .children(bell)
+                    .child(more),
+            )
+            .children(notices)
             .children(self.render_approval_cards(window, cx))
             .into_any_element()
     }
@@ -640,7 +530,7 @@ impl WorkspaceView {
             Some(said) => format!("{named}, {said}"),
             None => named,
         };
-        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.text))
+        let lead = crate::palette::lead_slot(theme, self.kind_glyph(item), hsla(s.icon))
             .debug_selector(move || format!("phone-kind-{}", id.as_uuid()));
         // Renamed, the field takes the title's place, as it does in a header.
         if let Some(field) = self.rename_field(tile, id) {
@@ -694,9 +584,14 @@ impl WorkspaceView {
             entry(MenuGroup::Tiles, "New terminal", Some(&NewTerminal), |this, w, cx| {
                 this.new_terminal(&NewTerminal, w, cx);
             }),
-            entry(MenuGroup::Tiles, "New agent\u{2026}", Some(&NewAgent), |this, w, cx| {
-                this.new_agent(&NewAgent, w, cx);
-            }),
+            entry(
+                MenuGroup::Tiles,
+                super::actions::NEW_AGENT_ON,
+                Some(&NewAgent),
+                |this, w, cx| {
+                    this.new_agent(&NewAgent, w, cx);
+                },
+            ),
             entry(MenuGroup::Tiles, "Add a window or display", Some(&AddWindow), |this, w, cx| {
                 this.add_window(&AddWindow, w, cx);
             }),
@@ -949,44 +844,13 @@ const fn menu_name(which: MenuKind) -> &'static str {
     }
 }
 
-impl super::title_tabs::TitleTabsHost for WorkspaceView {
-    fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
-        self.layout_action(cx, |l| l.show_tab(id));
-    }
-
-    fn carry_title_tab(&mut self, id: TabId, ev: &gpui::MouseDownEvent) {
-        self.begin_carry(super::area::Carried::Tab(id), ev);
-    }
-
-    fn name_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((p, t)) = self.layout.tab_place(id) else { return };
-        let tile = self.layout.projects().get(p).and_then(|project| project.tabs().get(t));
-        if let Some(tile) = tile.and_then(Tab::focused) {
-            self.keep_or_rename(tile, window, cx);
-        }
-    }
-
-    fn close_title_tab(&mut self, id: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((p, t)) = self.layout.tab_place(id) else { return };
-        let tiles: Vec<TileRef> = self
-            .layout
-            .projects()
-            .get(p)
-            .and_then(|project| project.tabs().get(t))
-            .map(|tab| tab.tiles().collect())
-            .unwrap_or_default();
-        for tile in tiles {
-            self.close_tile(tile, window, cx);
-        }
-    }
-
-    fn title_tab_menu(
-        &mut self,
-        id: TabId,
-        at: gpui::Point<gpui::Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_title_tab_menu(id, at, window, cx);
-    }
+/// One tab of the project on show, as "Other tabs…" and a phone's title menu list it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TabLine {
+    /// Which.
+    pub id: TabId,
+    /// The title of its focused work.
+    pub title: SharedString,
+    /// It is the tab on show.
+    pub shown: bool,
 }

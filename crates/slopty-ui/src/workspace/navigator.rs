@@ -1,8 +1,9 @@
 //! The navigator: the work there is, by project, and the machines it runs on, down the whole
 //! left of the window.
 //!
-//! It runs from the window's top edge to its bottom, and its top row is the title bar's
-//! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
+//! It runs from the window's top edge to its bottom, and its header is one row on the top line
+//! the top tab bars share: the traffic lights sit in it on a Mac, then its toggle, then a field
+//! that filters every row below, then New agent and New goal.
 //! Four sections are the one list of what waits on the person, each shown only while it holds
 //! something: *Needs you* (an agent or a thread waits on them), *Failed* (a turn stopped on an
 //! error or a usage limit), *Ready to merge* (a project task whose work passed, with "Merge" on
@@ -28,15 +29,15 @@
 //! would be the only one.
 //!
 //! A group's tiles come in order of attention: what needs the human, then what finished unseen,
-//! then what is working, then the rest, each class in reading order. Each tile is two lines: its
-//! kind and its title, which has the line to itself; then, muted, what its agent says or its
-//! last command, its machine where its project spans several, its directory below the
-//! project's root and its branch, or a note's progress, ended (`MonoCode`'s session card) by
-//! its pull request, its changes, and its state as its glyph and its word ("Needs approval",
-//! "Working", "Done" for a finish not looked at), else its age past a minute (an agent at rest
-//! counts from its last turn). A shell reopened after its shell was lost says "Restored" there,
-//! and one whose program reports progress (`OSC 9;4`) ends that line in its figure and bar. A
-//! row goes to what it names.
+//! then what is working, then the rest, each class in reading order. Each tile is one line, as
+//! Delta's sidebar has it: how it stands in the lead's slot while it works, waits, failed or
+//! finished unseen, else its kind; its title; and at its end one figure where one matters (a
+//! running command's clock, a report's figure, the working tree's changes, else its age past a
+//! minute, an agent at rest counting from its last turn), after its pull request's glyph while
+//! that calls for a look. Under the pointer the end gives way to the row's actions as icon
+//! buttons. What its agent says or its last command, where it runs, its state in words, its
+//! pull request and "Restored" for a shell brought back are its hint. A row goes to what it
+//! names.
 //!
 //! The filter takes words and facets: `machine:devbox`, `project:slopty`, `agent:codex`,
 //! `is:waiting` (or `working`, `failed`, `unseen`, `running`), or any fact a tile has
@@ -48,11 +49,11 @@
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
-//! at 248; ⌘B shows or hides it, and both are kept with the device's layout. Hidden there, a
-//! 40 pt rail keeps one server glyph per worker, with what its tiles add up to, so what wants
-//! the human stays on screen. On an iPad it opens over the frame and a scrim, closing once a row
+//! at 248; ⌘B shows or hides it, and both are kept with the device's layout. Hidden, it is
+//! hidden: no rail stands in its place, and the bell counts what wants the human. On an iPad it
+//! opens over the frame and a scrim, closing once a row
 //! is chosen. On a phone it is the home: the whole screen, which the app opens on, so what waits
-//! on the person, each goal's line and the notes and server lines are what a phone shows first,
+//! on the person, each goal's board and the notes and server lines are what a phone shows first,
 //! never inside a closed drawer. A row goes to its tile; the bar's navigator button comes back.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, only a
@@ -108,27 +109,15 @@ use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView, tab_look};
 use crate::palette::Plate;
 
-/// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
-/// the pair reads as one row.
-const TILE_LINE: f32 = 1.3;
-
 /// The handle's hit area, centred on the navigator's 1 pt edge: easy to find with a pointer
 /// without a visible grip.
 pub(super) const HANDLE_W: f32 = 12.0;
 
-/// The rail's width, where the navigator is hidden: `MonoCode`'s compact rail, a 32 pt button
-/// and 8 pt either side.
-pub(super) const RAIL_W: f32 = 48.0;
-
 /// The width of a project's colour bar down its row's leading edge: Delta's 2.
 const IDENTITY_BAR: f32 = 2.0;
 
-/// How a rail button that is not on show rests: `MonoCode`'s 65 % opacity, whole under the
-/// pointer.
-const RAIL_REST: f32 = 0.65;
-
-/// The rule between the rail's standing actions and its projects, in points: `MonoCode`'s 24.
-const RAIL_RULE: f32 = 24.0;
+/// The bar on the selected row of a coloured run: Delta's 3 pt, which marks the selection.
+const IDENTITY_BAR_SELECTED: f32 = 3.0;
 
 /// A navigator row's lead slot, in points: 16, a 14 pt mark centred in it, so every title
 /// starts on one edge.
@@ -175,7 +164,7 @@ pub(super) const MERGE: &str = "Merge";
 pub(super) const RTT_SHOWN_FROM: Duration = Duration::from_millis(20);
 
 /// How far past each edge of the view the list lays rows out, in points, so a scroll does not
-/// show a row arriving: two rows of two lines.
+/// show a row arriving: three rows and more.
 const OVERDRAW: f32 = 80.0;
 
 /// How the navigator sits in the window.
@@ -190,20 +179,20 @@ pub(super) enum Mode {
     Home,
 }
 
-/// The width a touch screen keeps for the panes beside a docked navigator: an iPad's regular
-/// width, room for a terminal and a pane beside it. Narrower, the navigator lays over the panes
-/// instead.
-pub(super) const TOUCH_DOCK_PANES: f32 = 900.0;
+/// The narrowest touch screen that docks the navigator, as Delta and Zed dock their sidebars: a
+/// 13-inch iPad upright is 1032 pt wide. Narrower (an 11-inch iPad upright, Split View's
+/// thirds), the navigator lays over the panes (`.research/design-polish-2026-10-12.md` §1.19).
+pub(super) const TOUCH_DOCK_AT: f32 = 900.0;
 
 /// How the navigator sits in a window `window_w` wide, `width` its own width. A window that
 /// is a phone's gets the home; a window that would leave the panes a phone's width, or a
-/// touch screen (an iPad) that would leave them less than [`TOUCH_DOCK_PANES`], gets the overlay;
-/// anything else docks it.
+/// touch screen (an iPad) narrower than [`TOUCH_DOCK_AT`], gets the overlay; anything else
+/// docks it.
 pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> Mode {
     let panes = window_w - width;
     if window_w < phone_below {
         Mode::Home
-    } else if panes < phone_below || (touch && panes < TOUCH_DOCK_PANES) {
+    } else if panes < phone_below || (touch && window_w < TOUCH_DOCK_AT) {
         Mode::Overlay
     } else {
         Mode::Docked
@@ -226,10 +215,6 @@ pub(super) struct NavState {
     pub resize: Option<(f32, f32)>,
     /// How it sat in the last frame drawn, and whether it showed.
     pub drawn: Option<Mode>,
-    /// The rail shows in its place: where it would dock but is hidden, and where the window is
-    /// too narrow to dock it, under the panel when that is open over the panes (`MonoCode`'s
-    /// compact rail).
-    pub rail: bool,
     /// The filter over its rows.
     pub filter: Filter,
     /// The fold over the threads at rest: open, and whether it lists every one.
@@ -421,7 +406,6 @@ impl std::fmt::Debug for NavState {
             .field("folded", &self.folded)
             .field("scope", &self.scope)
             .field("drawn", &self.drawn)
-            .field("rail", &self.rail)
             .field("query", &self.filter.query)
             .finish_non_exhaustive()
     }
@@ -603,7 +587,7 @@ pub(super) fn row(
 ) -> Stateful<Div> {
     let s = theme.surfaces;
     let spacing = theme.spacing;
-    let el = kit::typed(div(), theme.roles().chrome)
+    let el = kit::typed(div(), theme.roles().row)
         .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector)
         .role(Role::Button)
@@ -613,7 +597,7 @@ pub(super) fn row(
         .px(px(spacing.sm))
         .flex()
         .items_center()
-        .gap(px(spacing.xs + spacing.xxs))
+        .gap(px(spacing.row_gap()))
         .cursor_pointer()
         .text_color(hsla(s.text))
         .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
@@ -629,10 +613,11 @@ pub(super) const fn row_height(theme: &Theme, lines: kit::Row) -> f32 {
     }
 }
 
-/// A row's title at the chrome's size, faded over its last 40 pt while it is cut, as Zed's
-/// sidebar cuts a title, rather than losing its last letters to an ellipsis.
+/// A row's title at the window's row size (Delta's 12, measured from the signed-in app),
+/// faded over its last 40 pt while it is cut, as Zed's sidebar cuts a title, rather than
+/// losing its last letters to an ellipsis.
 pub(super) fn title(theme: &Theme, text: impl Into<SharedString>, color: gpui::Hsla) -> Div {
-    let size = px(theme.roles().chrome.size);
+    let size = px(theme.roles().row.size);
     div().flex_1().min_w_0().overflow_hidden().text_color(color).child(
         slopty_kit::chrome_text::ChromeText::new(text, size).fill_fading(px(tab_look::TITLE_FADE)),
     )
@@ -647,15 +632,35 @@ pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
     tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
 
-/// The ink a group's glyph wears: a project's, a repository's or a folder's own colour
-/// ([`crate::identity::identity_ink`]), the same on every client, so a project is found by its
-/// colour in every list; any other grouping's (a branch, an agent, a label) the lead's tier.
-fn group_ink(theme: &Theme, key: &GroupKey) -> Rgb {
-    if crate::identity::wears_identity(key) {
-        crate::identity::identity_ink(theme, key)
+/// Delta's colour mark on a head, in `ink`: a bar two points wide down its leading edge, the
+/// same when chosen, over a light tint of the whole row (`.research/delta-re-2026-10-12.md`
+/// §4.5). Where a project's, a repository's, a folder's or a machine's own colour shows, the same
+/// on every client, so it is found by its colour in every list. Its glyph wears the leads'
+/// `icon_muted`, so a row carries one colour (`docs/decisions/ui.md`, "The chrome's icons are
+/// Octicons at 14").
+fn identity_bar(selector: String, ink: Rgb) -> Div {
+    identity_run(selector, ink, false)
+}
+
+/// The colour a head wears, run down a row under it: Delta's bar down a thread's subthreads
+/// over a faint wash of the colour, the bar 3 pt and the wash strong on the selected row,
+/// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.3).
+fn identity_run(selector: String, ink: Rgb, selected: bool) -> Div {
+    let (bar, wash) = if selected {
+        (IDENTITY_BAR_SELECTED, slopty_theme::alpha::IDENTITY_SELECTED)
     } else {
-        theme.surfaces.text_secondary
-    }
+        (IDENTITY_BAR, slopty_theme::alpha::IDENTITY)
+    };
+    div().absolute().inset_0().bg(slopty_kit::colors::hsla_alpha(ink, wash)).child(
+        div()
+            .debug_selector(move || selector)
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(bar))
+            .bg(hsla(ink)),
+    )
 }
 
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
@@ -673,12 +678,6 @@ fn lead_slot(theme: &Theme, child: impl gpui::IntoElement) -> Div {
         .items_center()
         .justify_center()
         .child(child)
-}
-
-/// The height of a row's first and second lines, the navigator's and the inbox's alike.
-pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
-    let typo = &theme.typography;
-    (typo.ui_size * TILE_LINE, typo.small() * TILE_LINE)
 }
 
 /// A tile as its row shows it.
@@ -715,35 +714,21 @@ struct NavTile {
 }
 
 impl NavTile {
-    /// Whether its second line ends in something of its own: a state, a finish not yet looked
-    /// at, a running command's clock or an age.
-    const fn stated(&self) -> bool {
-        matches!(
-            self.mark,
-            Some(
-                Status::NeedsYou
-                    | Status::Working
-                    | Status::Running
-                    | Status::Failed
-                    | Status::Away
-            )
-        ) || self.unseen
-            || self.running.is_some()
-            || self.age.is_some()
-    }
-
-    /// Whether it has a second line.
-    const fn two_lines(&self) -> bool {
-        let figure = match self.progress {
-            Some(progress) => has_figure(progress),
-            None => false,
-        };
-        !self.meta.is_empty()
-            || self.stated()
-            || self.changes.is_some()
-            || self.restored
-            || figure
-            || self.pull.is_some()
+    /// Its row's hint: where it runs, its state in words, its pull request and a shell brought
+    /// back, each said once; none when there is nothing past its title.
+    fn hint(&self) -> Option<String> {
+        let pull = self.pull.as_ref().map(PullSeen::line);
+        let parts: Vec<&str> = [
+            Some(self.meta.as_str()),
+            self.word.as_deref(),
+            pull.as_deref(),
+            self.restored.then_some(RESTORED),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(META_SEPARATOR))
     }
 }
 
@@ -840,14 +825,11 @@ fn with_subagents(words: Option<String>, subagents: usize) -> Option<String> {
     })
 }
 
-/// A progress report's figure at the end of a row's second line: "42%" while it has one.
+/// A progress report's figure at a row's end: "42%" while it has one.
 pub(super) fn progress_figure(progress: Progress) -> Option<String> {
     let percent = progress.percent.filter(|_| has_figure(progress))?;
     Some(format!("{}%", percent.min(100)))
 }
-
-/// The width of a report's bar at a row's end, beside its figure.
-const NAV_BAR_W: f32 = 24.0;
 
 /// A worker's row under *Workers*.
 #[derive(Clone)]
@@ -903,7 +885,7 @@ struct NavBoard {
     status: Option<Status>,
     /// How many of its tasks are merged, as quiet words.
     words: String,
-    /// Where the goal stands, its orchestrator's last summary's first line: a second line.
+    /// Where the goal stands, its orchestrator's last summary's first line: the row's hint.
     summary: Option<String>,
 }
 
@@ -1010,6 +992,13 @@ struct NavReady {
     words: String,
 }
 
+/// A head whose colour runs down the rows under it: a machine's (muted while it is away), or a
+/// project's.
+enum RunHead {
+    Machine(WorkerKey, bool),
+    Group(GroupKey),
+}
+
 /// One row of the navigator's list.
 #[derive(Clone)]
 enum NavRow {
@@ -1035,15 +1024,15 @@ enum NavRow {
 }
 
 impl NavRow {
-    /// What a row's height follows: its kind, then for a tile whether it has a second line,
-    /// and for a worker's header whether it has a warning line and a step above it.
+    /// What a row's height follows: its kind, then for a worker's header whether it has a
+    /// warning line and a step above it. Every other row is one line.
     const fn shape(&self) -> (Discriminant<Self>, bool, bool) {
         let (lines, gap) = match self {
-            Self::Tile(t) => (!t.two_lines(), false),
             Self::Worker(h) => (h.warning.is_some(), h.gap),
             Self::Group(g) => (false, g.gap),
-            Self::Board(b) => (b.summary.is_some(), false),
             Self::Heading { .. }
+            | Self::Tile(_)
+            | Self::Board(_)
             | Self::Agent(_)
             | Self::Ready(_)
             | Self::Thread(_)
@@ -1284,18 +1273,13 @@ impl WorkspaceView {
             }
     }
 
-    /// Work out how the navigator sits this frame: shown in which mode, the rail in its place,
-    /// or nothing. Everything else in the frame reads it, so it comes first.
+    /// Work out how the navigator sits this frame: shown in which mode, or nothing. A hidden
+    /// navigator is hidden, with no rail in its place. Everything else in the frame reads it,
+    /// so it comes first.
     pub(super) fn place_navigator(&mut self, window: &Window) {
         let mode = self.navigator_mode(window);
         let visible = self.navigator_visible(mode);
         self.nav.drawn = visible.then_some(mode);
-        self.nav.rail = !self.workers.is_empty()
-            && match mode {
-                Mode::Docked => !visible,
-                Mode::Overlay => true,
-                Mode::Home => false,
-            };
         if !visible {
             self.nav.resize = None;
             self.nav.tick.take();
@@ -2286,8 +2270,7 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The navigator's panel as [`Self::place_navigator`] placed it, or nothing; the rail is a
-    /// view of its own ([`super::Region::Rail`]).
+    /// The navigator's panel as [`Self::place_navigator`] placed it, or nothing.
     pub(super) fn render_navigator_region(
         &self,
         window: &Window,
@@ -2299,22 +2282,11 @@ impl WorkspaceView {
         }
     }
 
-    /// The rail's column of the frame, while it shows.
-    pub(super) fn render_rail(&self) -> Option<gpui::AnyElement> {
-        self.nav.rail.then(|| {
-            let column = gpui::StyleRefinement::default().flex_none().h_full().w(px(RAIL_W));
-            self.chrome.rail.clone().cached(column).into_any_element()
-        })
-    }
-
-    /// The navigator's top, Zed's sidebar header: the lights row, then one row of the filter
-    /// (or "Search", the way to it) with New goal and New agent as icon buttons at its end.
-    ///
-    /// The lights row is the title bar's height, with no line under it, and holds the traffic
-    /// lights on a Mac and, pushed to its end, back and forward through the tabs visited and the
-    /// navigator's toggle (`MonoCode`'s `TabVisitNav`): while the navigator is docked the title
-    /// bar holds the tabs alone. A phone's home has no such row: below the status bar its filter
-    /// is its first row, as an iOS list opens on its search field.
+    /// The navigator's top, Zed's sidebar header: one row the top line's height, on the line
+    /// the top tab bars share. The traffic lights' room on a Mac, the navigator's toggle and a
+    /// short divider while it is docked, then the filter (or "Search", the way to it), then New
+    /// agent and New goal as icon buttons at its end. A phone's home has no lights: below the
+    /// status bar its filter is its first row, as an iOS list opens on its search field.
     ///
     /// "Search" is unboxed, the search glyph and the word in the placeholder's tone: a press,
     /// ⌘F with the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard
@@ -2332,18 +2304,28 @@ impl WorkspaceView {
             gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
         });
         let docked = !self.workers.is_empty() && self.nav.drawn == Some(Mode::Docked);
-        let toggle = docked.then(|| self.navigator_toggle(cx));
-        let arrows = (docked && !self.phone).then(|| self.visit_arrows(cx));
         let home = self.nav.drawn == Some(Mode::Home);
-        // Back, forward and the toggle, pushed to the lights row's end.
-        let ends = div()
-            .ml_auto()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(spacing.xxs))
-            .children(arrows)
-            .children(toggle);
+        // While the settings' list is the body, its head row (← and its filter) takes the
+        // filter's and the starts' place ([`super::settings_page`]).
+        let settings = self.render_settings_head(cx);
+        let listed = settings.is_some();
+        // The toggle, then Zed's sidebar header's divider, a hairline the type's height.
+        let toggle = docked.then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs))
+                .pr(px(spacing.xxs))
+                .child(self.navigator_toggle(cx))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(kit::HAIR)
+                        .h(px(theme.typography.ui_size))
+                        .bg(hsla(s.border)),
+                )
+        });
         let filtering = !self.nav.filter.query.is_empty();
         let input = self.nav.filter.input.as_ref().map(|input| {
             div()
@@ -2394,7 +2376,9 @@ impl WorkspaceView {
                 .debug_selector(|| "nav-scope".to_owned())
                 .role(Role::Label)
                 .aria_label(SharedString::from(format!("Scoped to {name}")))
-                .flex_none()
+                .flex_initial()
+                .min_w_0()
+                .overflow_hidden()
                 .max_w(px(self.navigator_width() / 2.0))
                 .child(SharedString::from(name))
         });
@@ -2415,7 +2399,7 @@ impl WorkspaceView {
             .children(input)
             .children(clear);
         let reveals = self.nav.filter.reveals;
-        let mut filter = self.navigator_filter_shown().then(|| {
+        let filter = self.navigator_filter_shown().then(|| {
             if home || reveals == 0 || !kit::motion(cx) {
                 return field.into_any_element();
             }
@@ -2426,98 +2410,99 @@ impl WorkspaceView {
                 .with_animation(key, kit::Pace::Settle.animation(), gpui::Styled::opacity)
                 .into_any_element()
         });
-        // Zed's sidebar header row: the filter (or the way to it, "Search"), then New goal and
-        // New agent as icon buttons at its end. A phone's home keeps its filter always, and
-        // starts a goal and an agent as every navigator does.
-        let actions = (!self.workers.is_empty()).then(|| {
-            let hint_theme = Rc::new(theme.clone());
-            let search = (!home && filter.is_none()).then(|| {
-                let el = div()
-                    .id("nav-search")
-                    .debug_selector(|| "nav-search".to_owned())
-                    .role(Role::Button)
-                    .aria_label(super::titlebar::SEARCH)
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
+        // Zed's sidebar header row: the lights, the toggle, the filter (or the way to it,
+        // "Search"), then New agent and New goal as icon buttons at its end while the field is
+        // closed. A phone's home keeps its filter always, and starts a goal and an agent as
+        // every navigator does.
+        let hint_theme = Rc::new(theme.clone());
+        let filter = filter.filter(|_| !listed);
+        let search = (!listed && !home && filter.is_none()).then(|| {
+            let el = div()
+                .id("nav-search")
+                .debug_selector(|| "nav-search".to_owned())
+                .role(Role::Button)
+                .aria_label(super::titlebar::SEARCH)
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xs + spacing.xxs))
+                .cursor_text()
+                .text_color(hsla(s.text_muted))
+                .child(icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
+                .child(super::titlebar::SEARCH)
+                .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)));
+            tab_stop(el, s.focus)
+        });
+        let start = |id: &'static str,
+                     glyph: Symbol,
+                     label: &'static str,
+                     action: &'static dyn gpui::Action| {
+            let hint_theme = Rc::clone(&hint_theme);
+            let el = kit::icon_button(theme, id, glyph, label);
+            if home {
+                return el;
+            }
+            kit::hint_timing(el).tooltip(move |_window, cx| {
+                let keys = crate::palette::keys_for(action, &super::key_bindings(cx));
+                cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
+            })
+        };
+        // An open field takes the row from New agent and New goal (each on its key and in the
+        // palette) where the lights and the toggle leave it too little; a phone's home is wide.
+        let starts =
+            (!listed && !self.workers.is_empty() && (home || filter.is_none())).then(|| {
+                let new_agent = start(
+                    "nav-new-agent",
+                    Symbol::Pencil,
+                    super::titlebar::NEW_AGENT,
+                    &super::actions::NewAgent,
+                )
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    if home {
+                        this.navigated();
+                    }
+                    this.new_agent(&super::actions::NewAgent, window, cx);
+                }));
+                let new_goal = start(
+                    "nav-new-goal",
+                    Symbol::Flag,
+                    super::titlebar::NEW_GOAL,
+                    &super::actions::NewGoal,
+                )
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    if home {
+                        this.navigated();
+                    }
+                    this.new_goal(&super::actions::NewGoal, window, cx);
+                }));
+                div()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(spacing.xs + spacing.xxs))
-                    .cursor_text()
-                    .text_color(hsla(s.text_muted))
-                    .child(icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
-                    .child(super::titlebar::SEARCH)
-                    .on_click(
-                        cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)),
-                    );
-                tab_stop(el, s.focus)
+                    .gap(px(spacing.xxs))
+                    .child(new_agent)
+                    .child(new_goal)
             });
-            let start = |id: &'static str,
-                         glyph: Symbol,
-                         label: &'static str,
-                         action: &'static dyn gpui::Action| {
-                let hint_theme = Rc::clone(&hint_theme);
-                let el = kit::icon_button(theme, id, glyph, label);
-                if home {
-                    return el;
-                }
-                kit::hint_timing(el).tooltip(move |_window, cx| {
-                    let keys = crate::palette::keys_for(action, &super::key_bindings(cx));
-                    cx.new(|_| kit::Hint::new(label, keys, Rc::clone(&hint_theme))).into()
-                })
-            };
-            // A goal is the usual start, so it leads; an agent of one's own follows.
-            let new_goal = start(
-                "nav-new-goal",
-                Symbol::Flag,
-                super::titlebar::NEW_GOAL,
-                &super::actions::NewGoal,
-            )
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                if home {
-                    this.navigated();
-                }
-                this.new_goal(&super::actions::NewGoal, window, cx);
-            }));
-            let new_agent = start(
-                "nav-new-agent",
-                Symbol::Pencil,
-                super::titlebar::NEW_AGENT,
-                &super::actions::NewAgent,
-            )
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                if home {
-                    this.navigated();
-                }
-                this.new_agent(&super::actions::NewAgent, window, cx);
-            }));
-            div()
-                .flex_none()
-                .h(px(theme.density.title))
-                .flex()
-                .items_center()
-                .gap(px(spacing.xxs))
-                .pl(px(spacing.sm))
-                .pr(px(spacing.xs))
-                .border_b(kit::HAIR)
-                .border_color(hsla(s.stroke))
-                .children(search)
-                .children(filter.take())
-                .child(new_goal)
-                .child(new_agent)
-        });
-        let lights = (!home).then(|| {
-            div()
-                .debug_selector(|| "nav-lights-row".to_owned())
-                .h(px(titlebar_height(theme)) + safe.top)
-                .pt(safe.top)
-                .pl(px(leading))
-                .pr(px(spacing.xs + spacing.xxs))
-                .flex()
-                .items_center()
-                .child(ends)
-        });
-        div().flex_none().flex().flex_col().children(lights).children(filter).children(actions)
+        let (top, lead) = if home { (px(0.0), spacing.sm) } else { (safe.top, leading) };
+        div()
+            .debug_selector(|| "nav-header".to_owned())
+            .flex_none()
+            .h(px(titlebar_height(theme)) + top)
+            .pt(top)
+            .flex()
+            .items_center()
+            .gap(px(spacing.xs))
+            .pl(px(lead))
+            .pr(px(spacing.inset_trailing()))
+            .border_b(kit::HAIR)
+            .border_color(hsla(s.stroke))
+            .children(toggle)
+            .children(search)
+            .children(filter)
+            .children(starts)
+            .children(settings.map(|head| div().flex_1().min_w_0().child(head)))
     }
 
     /// Every row the list holds this frame: *Needs you* while an agent or a thread waits,
@@ -2718,13 +2703,55 @@ impl WorkspaceView {
             Some(NavRow::Group(g)) => g.gap,
             _ => false,
         };
+        let theme = &self.theme;
+        let run = self.run_head(ix).map(|(head, selected)| {
+            let selector = format!("nav-run-{ix}");
+            match head {
+                RunHead::Machine(worker, away) => identity_run(
+                    selector,
+                    crate::identity::machine_ink(theme, worker, away),
+                    selected,
+                ),
+                RunHead::Group(key) => {
+                    identity_run(selector, crate::identity::identity_ink(theme, &key), selected)
+                }
+            }
+        });
+        let content = self.nav_row_content(ix, cx);
         div()
             .w_full()
             .flex()
             .flex_col()
-            .when(gap, |el| el.pt(px(self.theme.spacing.sm)))
-            .child(self.nav_row_content(ix, cx))
+            .when(gap, |el| el.pt(px(theme.spacing.sm)))
+            .child(match run {
+                Some(run) => div().relative().w_full().child(run).child(content).into_any_element(),
+                None => content,
+            })
             .into_any_element()
+    }
+
+    /// The head whose colour row `ix` carries down, Delta's thread colour run down its
+    /// subthreads: a tile's, the board's or a thread's row under a head that wears its own
+    /// colour, and whether it is the selected tile. Nothing above the first head or past a
+    /// section's heading.
+    fn run_head(&self, ix: usize) -> Option<(RunHead, bool)> {
+        let rows = self.nav.list.rows.borrow();
+        let selected = match rows.get(ix)? {
+            NavRow::Tile(t) => self.nav.list.selected.get() == Some(t.tile),
+            NavRow::Board(_) | NavRow::Thread(_) | NavRow::Vacant(_) => false,
+            _ => return None,
+        };
+        let head = rows.get(..ix)?.iter().rev().find_map(|row| match row {
+            NavRow::Worker(h) => {
+                Some(Some(RunHead::Machine(h.key, matches!(h.health, Some((Status::Away, _))))))
+            }
+            NavRow::Group(g) => {
+                Some(crate::identity::wears_identity(&g.key).then(|| RunHead::Group(g.key.clone())))
+            }
+            NavRow::Heading { .. } => Some(None),
+            _ => None,
+        })??;
+        Some((head, selected))
     }
 
     fn nav_row_content(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
@@ -2871,173 +2898,6 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// Where the navigator is hidden but would dock, `MonoCode`'s compact rail: Search and New
-    /// agent, a short rule, then one glyph per project, with what its tiles add up to under it,
-    /// then a server glyph for each worker that is not up or whose own tiles want the human. The
-    /// project on show wears the selected wash; the rest rest dimmed and come up under the
-    /// pointer. A click goes to the project, or to the worker.
-    pub(super) fn navigator_rail(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let spacing = theme.spacing;
-        let side = theme.density.item.max(theme.density.hit);
-        let home = self.layout.shown_project().map(|p| p.home().clone());
-        let square = |id: String, label: String, glyph: Mark, ink: Rgb, chosen: bool| {
-            let selector = id.clone();
-            let el = div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(SharedString::from(label))
-                .aria_selected(chosen)
-                .relative()
-                .flex_none()
-                .size(px(side))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .map(|el| {
-                    if chosen {
-                        el.bg(hsla(s.selected))
-                    } else {
-                        el.opacity(RAIL_REST).hover(move |el| el.bg(hsla(s.hover)).opacity(1.0))
-                    }
-                })
-                .child(
-                    slopty_kit::icons::Drawn::new(theme, glyph)
-                        .slot(px(theme.typography.icon()), hsla(ink)),
-                );
-            tab_stop(el, s.focus)
-        };
-        let button = |id: String, label: String, glyph: Mark, ink, rollup: Rollup, chosen| {
-            let badge = rollup_slot(theme, format!("{id}-rollup"), rollup, true)
-                .absolute()
-                .right_0()
-                .bottom_0();
-            square(id, label, glyph, ink, chosen).child(badge)
-        };
-        let search = square(
-            "nav-rail-search".to_owned(),
-            super::titlebar::SEARCH.to_owned(),
-            Symbol::Magnifyingglass.into(),
-            s.text_secondary,
-            false,
-        )
-        .on_click(cx.listener(|this, _ev, window, cx| {
-            this.open_palette(&super::actions::OpenPalette, window, cx);
-        }));
-        let new_goal = square(
-            "nav-rail-new-goal".to_owned(),
-            super::titlebar::NEW_GOAL.to_owned(),
-            Symbol::Flag.into(),
-            s.text_secondary,
-            false,
-        )
-        .on_click(cx.listener(|this, _ev, window, cx| {
-            this.new_goal(&super::actions::NewGoal, window, cx);
-        }));
-        let new_agent = square(
-            "nav-rail-new-agent".to_owned(),
-            super::titlebar::NEW_AGENT.to_owned(),
-            Symbol::Pencil.into(),
-            s.text_secondary,
-            false,
-        )
-        .on_click(cx.listener(|this, _ev, window, cx| {
-            this.new_agent(&super::actions::NewAgent, window, cx);
-        }));
-        let rule = div().flex_none().w(px(RAIL_RULE)).h(kit::HAIR).bg(hsla(s.stroke));
-        let words = |name: String, more: Option<String>, rollup: Rollup| {
-            [Some(name), more]
-                .into_iter()
-                .flatten()
-                .chain(rollup.words())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let projects = self.project_groups();
-        let mut groups: Vec<(String, gpui::AnyElement)> = Vec::new();
-        let mut loose: BTreeMap<WorkerKey, Rollup> = BTreeMap::new();
-        for group in &projects.grouped.groups {
-            let mut rollup = Rollup::default();
-            for tile in projects.members(group) {
-                if let Some(item) = self.item(tile) {
-                    let (mark, unseen) = self.tile_marks(tile, item);
-                    rollup.add(mark, unseen);
-                }
-            }
-            if let Some(worker) = group.key.worker() {
-                loose.insert(worker, rollup);
-                continue;
-            }
-            let name = self.group_name(group);
-            let key = group.key.clone();
-            let el = button(
-                format!("nav-rail-{}", group.key),
-                words(name.clone(), None, rollup),
-                group_glyph(&group.fact),
-                group_ink(theme, &group.key),
-                rollup,
-                home.as_ref() == Some(&group.key),
-            )
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                this.navigated();
-                this.go_to_group(&key, cx);
-            }));
-            groups.push((name.to_lowercase(), el.into_any_element()));
-        }
-        groups.sort_by(|(a, _), (b, _)| a.cmp(b));
-        let workers = self.workers.iter().filter_map(|(key, w)| {
-            let key = *key;
-            // A machine holding tiles of no project stands for them, as a project's glyph
-            // does for its own; one with none shows only while it is not well.
-            let holds = loose.get(&key).copied();
-            let rollup = holds.unwrap_or_default();
-            let health = worker_health(&w.status);
-            if health.is_none() && holds.is_none() {
-                return None;
-            }
-            let glyph = Mark::from(self.machine_glyph(key));
-            let ink =
-                crate::identity::machine_ink(theme, key, matches!(health, Some((Status::Away, _))));
-            let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
-            let chosen = home.as_ref().and_then(GroupKey::worker) == Some(key);
-            let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup, chosen).on_click(
-                cx.listener(move |this, _ev, _w, cx| {
-                    this.navigated();
-                    this.go_to_worker(key, cx);
-                }),
-            );
-            Some(el.into_any_element())
-        });
-        let buttons: Vec<gpui::AnyElement> =
-            groups.into_iter().map(|(_, el)| el).chain(workers).collect();
-        div()
-            .id("nav-rail")
-            .debug_selector(|| "nav-rail".to_owned())
-            .role(Role::Navigation)
-            .aria_label("Projects")
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .overflow_y_scroll()
-            .py(px(spacing.xs + spacing.xxs))
-            .gap(px(spacing.xs + spacing.xxs))
-            // On the sidebar's plane, as the docked navigator is, its trailing edge the line.
-            .bg(hsla(s.sidebar))
-            .border_r(kit::HAIR)
-            .border_color(hsla(s.stroke))
-            .child(search)
-            .child(new_goal)
-            .child(new_agent)
-            .child(rule)
-            .children(buttons)
-            .into_any_element()
-    }
-
     /// The handle on the navigator's edge, `x` its centre in the frame: a 12 pt strip around
     /// the 1 pt edge, drawn over the panes so its outer half takes the pointer too. Pressed, it
     /// drags the width; double-clicked, it puts the width back. The listeners that follow the
@@ -3110,13 +2970,15 @@ impl WorkspaceView {
         )
     }
 
-    /// A row of *Needs you* or *To review*: what it is and how long it has waited, then what
-    /// the agent asks or did, its worker and its directory, and for a yes or no held here
-    /// "Deny" and "Allow" at the second line's end.
+    /// A row of *Needs you*, *Failed* or *To review*, one line: how it stands in the lead's
+    /// slot, then its words, which are the ask ("Allow Bash: touch refused.txt") where it asks
+    /// and else what it did, the title standing in where it said nothing; at rest the end slot
+    /// says how long it has waited, and under the pointer a yes or no held here takes it as
+    /// Deny and Allow. Its title and where it runs are the hint: the same tile in the tree
+    /// below shows only its mark, so the words are said once.
     fn agent_row(&self, agent: &NavAgent, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (first, second) = line_heights(theme);
         // A terminal's agent by its session, a thread by its own id.
         let key: SharedString = match agent.at {
             Step::Session(at) => at.session.to_string(),
@@ -3139,62 +3001,40 @@ impl WorkspaceView {
             .and_then(age_shown)
             .map(|text| {
                 let key = key.clone();
-                readout(theme, text).debug_selector(move || format!("{prefix}-time-{key}"))
+                readout(theme, text)
+                    .debug_selector(move || format!("{prefix}-time-{key}"))
+                    .into_any_element()
             });
-        let line1 = div()
-            .h(px(first))
-            .line_height(px(first))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            // At rest a tier under the content, as every row is: its glyph keeps the urgency.
-            .child(title(theme, agent.title.clone(), hsla(s.text_secondary)))
-            .children(time);
-        // The agent's words, then where it runs, as a tile's second line reads: one line joined
-        // by the same separator, so the place is what gives way first and is never pressed to a
-        // lone ellipsis between the words and the answers. What a waiting one asks is detail,
-        // muted, under the heading that says it waits. The line shrinks before the answers do,
-        // which are the row's point.
-        let said = [&agent.words, &agent.place]
+        let said = if agent.words.is_empty() { &agent.title } else { &agent.words };
+        let words = {
+            let key = key.clone();
+            title(theme, said.clone(), hsla(s.text))
+                .debug_selector(move || format!("{prefix}-words-{key}"))
+        };
+        let row_group = SharedString::from(format!("{prefix}-group-{key}"));
+        let answers = agent
+            .answer
+            .as_ref()
+            .map(|answer| (self.approval_buttons(answer, cx).into_any_element(), 2));
+        let end = end_slot(theme, row_group.clone(), time, answers);
+        let hint = [&agent.title, &agent.place]
             .into_iter()
-            .filter(|part| !part.is_empty())
+            .filter(|part| !part.is_empty() && *part != said)
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(META_SEPARATOR);
-        let blank = said.is_empty();
-        let words = (!blank).then(|| {
-            let key = key.clone();
-            div()
-                .debug_selector(move || format!("{prefix}-words-{key}"))
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(crate::palette::dotted(theme, said))
-        });
-        let answers = agent.answer.as_ref().map(|answer| self.approval_buttons(answer, cx));
-        let line2 = meta(div(), theme)
-            .h(px(second))
-            .line_height(px(second))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .children(words)
-            .when(blank, |el| el.child(div().flex_1()))
-            .children(answers);
         let step = agent.at;
-        row(theme, kit::Row::Two, format!("{prefix}-{key}"), label.into(), false)
-            .items_start()
-            .pt(px(theme.spacing.xs))
+        let row = row(theme, kit::Row::One, format!("{prefix}-{key}"), label.into(), false)
+            .group(row_group)
             // It leads with how it stands, as every row does: what it waits on is the point of
-            // the row, and the agent is named in its words.
+            // the row, and the agent is named in its hint.
             .child(lead_slot(theme, {
                 let side = px(theme.typography.icon());
                 let tone = hsla(agent.status.ink(theme));
                 slopty_kit::icons::status_icon(theme, agent.status, side, tone).into_any_element()
             }))
-            .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
+            .child(words)
+            .child(end)
             .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
             // Focused, the row answers as its buttons do: ⌘↵ allows, ⌘⌫ denies. Only here, where
             // the person has put the keyboard on this one request.
@@ -3211,82 +3051,55 @@ impl WorkspaceView {
                             this.answer_row(&deny, false, cx);
                         },
                     ))
-            })
-            .into_any_element()
+            });
+        with_hint(row, theme, (!hint.is_empty()).then_some(hint)).into_any_element()
     }
 
-    /// A task ready to merge: its mark, its title, then its project and its place in the queue
-    /// with "Merge", which sends the merge as the person's word. The row opens its board.
+    /// A task ready to merge, one line: the done mark, its title, and at rest its project and
+    /// its place in the queue; under the pointer Merge (`git-merge` in `success`), which sends
+    /// the merge as the person's word. The row opens its board.
     fn ready_row(&self, ready: &NavReady, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (first, second) = line_heights(theme);
         let key = format!("{}-{}", ready.project, ready.task);
         let label = [ready.title.as_str(), ready.words.as_str(), READY_TO_MERGE]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
-        let line1 = div().h(px(first)).line_height(px(first)).flex().items_center().child(title(
-            theme,
-            ready.title.clone(),
-            hsla(s.text_secondary),
-        ));
         let words = {
             let key = key.clone();
-            div()
+            readout(theme, ready.words.clone())
                 .debug_selector(move || format!("nav-ready-words-{key}"))
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(crate::palette::dotted(theme, ready.words.clone()))
+                .into_any_element()
         };
         let merge = {
             let (project, task) = (ready.project.clone(), ready.task);
-            let id = format!("nav-merge-{key}");
-            let selector = id.clone();
-            let el = div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(MERGE)
-                .flex_none()
-                .h(px(second))
-                .px(px(theme.spacing.xs))
-                .flex()
-                .items_center()
-                .rounded(px(theme.radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.text))
-                .font_weight(gpui::FontWeight(theme.roles().action.weight))
-                .map(kit::eased)
-                .hover(move |el| el.bg(hsla(s.hover)))
-                .child(MERGE);
-            tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
+            kit::icon_button_inked(
+                theme,
+                format!("nav-merge-{key}"),
+                Symbol::ArrowTriangleMerge,
+                MERGE,
+                s.success,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
                 this.merge_task(&project, task, cx);
             }))
+            .into_any_element()
         };
-        let line2 = meta(div(), theme)
-            .h(px(second))
-            .line_height(px(second))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(words)
-            .child(merge);
+        let row_group = SharedString::from(format!("nav-ready-group-{key}"));
+        let end = end_slot(theme, row_group.clone(), Some(words), Some((merge, 1)));
         let project = ready.project.clone();
-        row(theme, kit::Row::Two, format!("nav-ready-{key}"), label.into(), false)
-            .items_start()
-            .pt(px(theme.spacing.xs))
+        row(theme, kit::Row::One, format!("nav-ready-{key}"), label.into(), false)
+            .group(row_group)
             .child(lead_slot(theme, {
                 let side = px(theme.typography.icon());
                 let tone = hsla(Status::Done.ink(theme));
                 slopty_kit::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
             }))
-            .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
+            .child(title(theme, ready.title.clone(), hsla(s.text_secondary)))
+            .child(end)
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
@@ -3312,14 +3125,20 @@ impl WorkspaceView {
             if folded { ", folded" } else { "" }
         ));
         // A group's head: the name at the medium weight, a name and not a title, and the machine
-        // by its form beside it, in its own colour; muted only while away.
+        // by its form beside it in the leads' ink; its own colour is the bar down its edge,
+        // muted while away.
         let named = theme.roles().action.weight;
-        let machine = |ink: Rgb| {
-            crate::palette::lead_mark(theme, self.machine_glyph(key), hsla(ink), LEAD_SLOT)
+        let away = matches!(worker.health, Some((Status::Away, _)));
+        let bar = identity_bar(
+            format!("nav-worker-bar-{key}"),
+            crate::identity::machine_ink(theme, key, away),
+        );
+        let machine = || {
+            crate::palette::lead_mark(theme, self.machine_glyph(key), hsla(s.icon_muted), LEAD_SLOT)
         };
         let lead = match worker.health {
-            None => machine(crate::identity::machine_ink(theme, key, false)).into_any_element(),
-            Some((Status::Away, _)) => machine(crate::identity::machine_ink(theme, key, true))
+            None => machine().into_any_element(),
+            Some((Status::Away, _)) => machine()
                 .child(div().id("away").role(Role::Image).aria_label(Status::Away.label()))
                 .into_any_element(),
             Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark))).into_any_element(),
@@ -3540,7 +3359,9 @@ impl WorkspaceView {
         let lines = if worker.warning.is_some() { kit::Row::Two } else { kit::Row::One };
         let row = row(theme, lines, format!("nav-worker-{key}"), label, false);
         Self::machine_menu_press(row, key, cx)
+            .relative()
             .group(group)
+            .child(bar)
             .child(lead)
             .child(name)
             .children(update_beside)
@@ -3582,7 +3403,7 @@ impl WorkspaceView {
         let glyph = crate::palette::lead_mark(
             theme,
             group.glyph,
-            hsla(group_ink(theme, &group.key)),
+            hsla(theme.surfaces.icon_muted),
             LEAD_SLOT,
         );
         let name_key = key.clone();
@@ -3748,17 +3569,9 @@ impl WorkspaceView {
                     .bg(super::panes::drop_ink(theme))
             });
         // Delta's colour bar: a project that wears a colour of its own says it down the row's
-        // leading edge too, two points wide.
+        // leading edge, two points wide, and nowhere else.
         let bar = crate::identity::wears_identity(&key).then(|| {
-            let bar_key = key.clone();
-            div()
-                .debug_selector(move || format!("nav-group-bar-{bar_key}"))
-                .absolute()
-                .left_0()
-                .top_0()
-                .bottom_0()
-                .w(px(IDENTITY_BAR))
-                .bg(hsla(group_ink(theme, &key)))
+            identity_bar(format!("nav-group-bar-{key}"), crate::identity::identity_ink(theme, &key))
         });
         let row = row(theme, kit::Row::One, format!("nav-group-{key}"), label, false);
         Self::project_menu_press(row, key, group.new_shell.clone(), cx)
@@ -3788,8 +3601,8 @@ impl WorkspaceView {
     }
 
     /// A declared project's board, first under its header and set in as its tiles are: the
-    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand,
-    /// with where the goal stands, as its orchestrator last said, on a second line. ↩ or a click
+    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand, on
+    /// one line; where the goal stands, as its orchestrator last said, is its hint. ↩ or a click
     /// shows the board in its orchestrator's tile.
     fn board_row(&self, board: &NavBoard, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -3801,11 +3614,13 @@ impl WorkspaceView {
             .collect::<Vec<_>>()
             .join(", ");
         let state = board.status.filter(|m| *m != Status::Idle);
-        // The board wears its project's own colour, as the project's head above it does.
-        let project_key = GroupKey::new(fact::PROJECT, board.project.as_str());
-        let ink = crate::identity::identity_ink(theme, &project_key);
-        let lead =
-            crate::palette::lead_mark(theme, Symbol::RectangleSplit3x1, hsla(ink), LEAD_SLOT);
+        // The board's glyph wears the leads' ink; its project's colour is the head's bar above.
+        let lead = crate::palette::lead_mark(
+            theme,
+            Symbol::RectangleSplit3x1,
+            hsla(s.icon_muted),
+            LEAD_SLOT,
+        );
         let words_id = id.clone();
         let project = board.project.clone();
         let line1 = div()
@@ -3826,33 +3641,12 @@ impl WorkspaceView {
                     .debug_selector(move || format!("nav-board-words-{words_id}")),
             )
             .children(state.map(|st| status_mark(theme, Some(st))));
-        let lines = if board.summary.is_some() { kit::Row::Two } else { kit::Row::One };
-        let el = row(theme, lines, format!("nav-board-{id}"), label.into(), false)
-            .pl(px(theme.spacing.sm + nest_step(theme)));
-        let el = match &board.summary {
-            None => el.child(lead).child(line1.flex_1()),
-            Some(summary) => {
-                let (first, second) = line_heights(theme);
-                let summary_id = id;
-                let line2 = meta(div(), theme)
-                    .debug_selector(move || format!("nav-board-summary-{summary_id}"))
-                    .h(px(second))
-                    .line_height(px(second))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(summary.clone());
-                el.items_start().pt(px(theme.spacing.xs)).child(lead).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(line1.h(px(first)).line_height(px(first)))
-                        .child(line2),
-                )
-            }
-        };
+        // Where the goal stands is the row's hint: the board itself says it in full.
+        let el = row(theme, kit::Row::One, format!("nav-board-{id}"), label.into(), false)
+            .pl(px(theme.spacing.sm + nest_step(theme)))
+            .child(lead)
+            .child(line1.flex_1());
+        let el = with_hint(el, theme, board.summary.clone());
         el.on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
     }
@@ -3869,7 +3663,7 @@ impl WorkspaceView {
             .collect::<Vec<_>>()
             .join(", ");
         let state = t.status.filter(|m| *m != Status::Idle);
-        let lead = crate::palette::lead_mark(theme, t.glyph, hsla(s.text_secondary), LEAD_SLOT)
+        let lead = crate::palette::lead_mark(theme, t.glyph, hsla(s.icon_muted), LEAD_SLOT)
             .debug_selector(move || format!("nav-thread-kind-{id}"));
         let row_group = SharedString::from(format!("nav-thread-group-{id}"));
         let ink = s.text_secondary;
@@ -3967,10 +3761,13 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A tile's row: its status glyph (else its kind), its title and at the end of that line
-    /// the unseen dot, a running command's clock or its age, then the muted second line with
-    /// the working tree's changes right-aligned under the line's end, as Zed's and `MonoCode`'s
-    /// thread rows have them. Under the pointer the line's end gives way to a close button.
+    /// A tile's row, one line as Delta's sidebar has it: how it stands in the lead's slot
+    /// while it works, waits, failed or finished unseen, else its kind; its title; and in the
+    /// end slot one figure where one matters (a running command's clock, a report's figure, the
+    /// working tree's changes, else its age), after its pull request's glyph while that calls
+    /// for a look. Under the pointer or the keyboard the end slot gives way to the row's close,
+    /// in the same place, so nothing on the line moves. Where it runs, its state's words and
+    /// its pull request are its hint.
     fn tile_row(
         &self,
         t: &NavTile,
@@ -3985,23 +3782,10 @@ impl WorkspaceView {
             .flatten()
             .collect::<Vec<_>>()
             .join(", ");
-        let ink = if selected { s.text } else { s.text_secondary };
         let id = t.tile.item.as_uuid();
-        let (first, second) = line_heights(theme);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
-        // What the row is leads it, and never changes while it lives: its kind, or its agent's
-        // own mark at 14 pt, its size in the tile's tab, so the eye finds the same agent in the
-        // same column.
-        let lead = crate::palette::lead_mark(theme, t.kind, hsla(ink), LEAD_SLOT)
-            .debug_selector(move || format!("nav-kind-{id}"));
-        // The state trails the second line as its glyph and its word, `MonoCode`'s session
-        // card: "Needs approval", "Working", "Failed", "Done" for a finish not yet looked at; a
-        // running command's clock beside its glyph; else the age. The title has the first line
-        // to itself, so a long one is never cut for the state ("Needs approval" on the title's
-        // line took half a 240 pt row).
-        let end = nav_state(theme, t);
-        // Under the pointer the line's end gives way to the row's action, in the same place, so
-        // nothing on the line moves.
+        let lead = nav_lead(theme, t, selected);
+        let figure = nav_figure(theme, t);
         let tile = t.tile;
         let close = kit::icon_button(
             theme,
@@ -4014,97 +3798,12 @@ impl WorkspaceView {
             cx.stop_propagation();
             this.close_tile(tile, window, cx);
         }));
-        // Under the pointer the title's line ends in the row's close, over nothing, so no word
-        // on either line moves.
-        let close = div()
-            .relative()
-            .flex_none()
-            .min_w(px(theme.typography.icon()))
-            .h(px(first))
-            .flex()
-            .items_center()
-            .justify_end()
-            .invisible()
-            .group_hover(row_group.clone(), gpui::Styled::visible)
-            .child(close);
-        let line1 = div()
-            .h(px(first))
-            .line_height(px(first))
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.xs))
-            .child(
-                title(theme, t.title.clone(), hsla(ink))
-                    .group_hover(row_group.clone(), move |st| st.text_color(hsla(s.text))),
-            )
-            .child(close);
-        // The working tree's changes end the line whole; the words before them give way.
-        let changes = t
-            .changes
-            .and_then(|(added, removed)| kit::changes(theme, added, removed))
-            .map(|changes| changes.debug_selector(move || format!("nav-changes-{id}")));
-        let restored = t.restored.then(|| {
-            div().debug_selector(move || format!("nav-restored-{id}")).flex_none().child(RESTORED)
-        });
-        // A report at the second line's end: its figure, then the kit's bar beside it, held
-        // still, as nothing in the navigator moves on its own. No line along the row's foot.
-        let figure = t.progress.and_then(progress_figure).map(|figure| {
-            readout(theme, figure).debug_selector(move || format!("nav-progress-{id}"))
-        });
-        let bar = t.progress.and_then(slopty_terminal::progress::shown).map(|progress| {
-            div().debug_selector(move || format!("nav-progress-bar-{id}")).w(px(NAV_BAR_W)).child(
-                kit::progress::Bar::new(theme, format!("nav-progress-{id}-bar"), progress)
-                    .label("Progress")
-                    .still()
-                    .at_once(),
-            )
-        });
-        // Its pull request before the changes: the glyph in its state's ink where the state
-        // calls for a look, its number quiet.
-        let pull = t.pull.as_ref().map(|pull| {
-            let ink = pull_ink(theme, pull.stands);
-            div()
-                .id(SharedString::from(format!("nav-pull-{id}")))
-                .debug_selector(move || format!("nav-pull-{id}"))
-                .role(Role::Label)
-                .aria_label(SharedString::from(pull.line()))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xxs))
-                .child(icon(theme, GitGlyph::of_stands(pull.stands), hsla(ink)))
-                .child(SharedString::from(pull.named()))
-        });
-        let line2 = t.two_lines().then(|| {
-            meta(div(), theme)
-                .h(px(second))
-                .line_height(px(second))
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(
-                    div()
-                        .debug_selector(move || format!("nav-meta-{id}"))
-                        .flex_initial()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(crate::palette::dotted(theme, t.meta.clone())),
-                )
-                .children(restored)
-                .child(div().flex_1())
-                .children(pull)
-                .children(changes)
-                .children(figure)
-                .children(bar)
-                .children(end)
-        });
-        let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
+        let end = end_slot(theme, row_group.clone(), figure, Some((close.into_any_element(), 1)));
+        let hint = t.hint();
+        let ink = if selected { s.text } else { s.text_secondary };
         // Under its header, and once more under the lead it helps.
         let depth = 1_u8.saturating_add(u8::from(t.nested));
-        let row = row(theme, lines, format!("nav-tile-{id}"), label.into(), selected)
+        let row = row(theme, kit::Row::One, format!("nav-tile-{id}"), label.into(), selected)
             // Pressed and moved, the row carries its tile; a finger's move scrolls the list.
             .when(theme.density != slopty_theme::Density::TOUCH, |row| {
                 row.on_mouse_down(
@@ -4114,37 +3813,21 @@ impl WorkspaceView {
                     }),
                 )
             });
-        Self::tile_menu_press(row, tile, super::context_menus::Pressed::Navigator, cx)
+        let row = Self::tile_menu_press(row, tile, super::context_menus::Pressed::Navigator, cx)
             .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
-            .group(row_group)
-            // The two lines sit in the middle of the row at either density, the kind beside the
-            // first.
-            .items_center()
+            .group(row_group.clone())
             // The kind's glyph under the worker's name, past its icon and the gap after it: the
             // slot is wider than the glyph centred in it, so it starts that margin to the left.
             .pl(px(f32::from(depth).mul_add(nest_step(theme), theme.spacing.sm)))
             .relative()
             .children((0..depth).map(|guide| indent_guide(theme, guide)))
+            .child(lead)
             .child(
-                div()
-                    .debug_selector(move || format!("nav-lines-{id}"))
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_start()
-                    .gap(px(theme.spacing.xs))
-                    .child(div().h(px(first)).flex().items_center().child(lead))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(line1)
-                            .children(line2),
-                    ),
+                title(theme, t.title.clone(), hsla(ink))
+                    .debug_selector(move || format!("nav-title-{id}"))
+                    .group_hover(row_group, move |st| st.text_color(hsla(s.text))),
             )
+            .child(end)
             .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
                 row.child(
                     canvas(
@@ -4155,8 +3838,8 @@ impl WorkspaceView {
                     .inset_0(),
                 )
             })
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)))
-            .into_any_element()
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_tile(tile, cx)));
+        with_hint(row, theme, hint).into_any_element()
     }
 }
 
@@ -4230,65 +3913,135 @@ fn summed<'a>(checkouts: impl Iterator<Item = &'a (u32, u32)>) -> Option<(u32, u
     (added > 0 || removed > 0).then_some((added, removed))
 }
 
-/// What ends `t`'s second line, by precedence: a state that wants a look (needs you, failed, at
-/// work with a running command's clock, away) as its glyph and its word; a finish not looked at
-/// as the green check and "Done"; a running command's clock; else the age.
-fn nav_state(theme: &Theme, t: &NavTile) -> Option<gpui::AnyElement> {
+/// What leads a tile's row, in the lead's 16 slot: how it stands while it works, waits on the
+/// person, failed or is away, the green check for a finish not looked at, else its kind, never
+/// both. A state's glyph wears its own hue; the kind the leads' ink.
+fn nav_lead(theme: &Theme, t: &NavTile, selected: bool) -> gpui::AnyElement {
     let s = &theme.surfaces;
-    let item = t.tile.item;
-    let state = t.mark.filter(|m| !matches!(m, Status::Idle | Status::Done));
-    let clock = t.running.clone().map(|ran| {
-        readout(theme, ran)
-            .debug_selector(move || format!("nav-running-{}", item.as_uuid()))
-            .text_color(hsla(s.text_secondary))
+    let id = t.tile.item.as_uuid();
+    match t.mark.filter(|m| !matches!(m, Status::Idle | Status::Done)) {
+        Some(state) => status_mark(theme, Some(state))
+            .debug_selector(move || format!("nav-state-{id}"))
+            .into_any_element(),
+        None if t.unseen => status_mark(theme, Some(Status::Done))
+            .debug_selector(move || format!("nav-unseen-{id}"))
+            .into_any_element(),
+        None => {
+            let ink = if selected { s.icon } else { s.icon_muted };
+            crate::palette::lead_mark(theme, t.kind, hsla(ink), LEAD_SLOT)
+                .debug_selector(move || format!("nav-kind-{id}"))
+                .into_any_element()
+        }
+    }
+}
+
+/// What ends a tile's row at rest: its pull request's glyph while the request calls for the
+/// person or is ready to merge, then one figure where one matters, in Lilex 12 muted: a running
+/// command's clock, a report's figure, the working tree's changes, else its age.
+fn nav_figure(theme: &Theme, t: &NavTile) -> Option<gpui::AnyElement> {
+    let s = &theme.surfaces;
+    let id = t.tile.item.as_uuid();
+    let pull = t.pull.as_ref().filter(|p| pull_ink(theme, p.stands) != s.text_muted).map(|p| {
+        div()
+            .id(SharedString::from(format!("nav-pull-{id}")))
+            .debug_selector(move || format!("nav-pull-{id}"))
+            .role(Role::Label)
+            .aria_label(SharedString::from(p.line()))
+            .flex_none()
+            .child(icon(theme, GitGlyph::of_stands(p.stands), hsla(pull_ink(theme, p.stands))))
     });
-    let said = |status: Status, word: String, selector: String| {
-        // A running command's clock says it in place of a word.
-        let word = (status != Status::Running).then(|| {
-            div()
-                .debug_selector(move || format!("nav-word-{}", item.as_uuid()))
-                .flex_none()
-                .text_color(hsla(status.word(theme)))
-                .child(word)
-        });
+    let running = t.running.clone().map(|ran| {
+        readout(theme, ran).debug_selector(move || format!("nav-running-{id}")).into_any_element()
+    });
+    let progress = || {
+        t.progress.and_then(progress_figure).map(|figure| {
+            readout(theme, figure)
+                .debug_selector(move || format!("nav-progress-{id}"))
+                .into_any_element()
+        })
+    };
+    let changes = || {
+        t.changes
+            .and_then(|(added, removed)| kit::changes(theme, added, removed))
+            .map(|c| c.debug_selector(move || format!("nav-changes-{id}")).into_any_element())
+    };
+    let age = || {
+        t.age.clone().map(|age| {
+            readout(theme, age).debug_selector(move || format!("nav-age-{id}")).into_any_element()
+        })
+    };
+    let figure = running.or_else(progress).or_else(changes).or_else(age);
+    (pull.is_some() || figure.is_some()).then(|| {
         div()
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xxs))
-            .child(status_mark(theme, Some(status)).debug_selector(move || selector))
-            .children(word)
+            .gap(px(theme.spacing.row_gap()))
+            .children(pull)
+            .children(figure)
             .into_any_element()
-    };
-    match state {
-        Some(state) => {
-            let word = t.word.clone().unwrap_or_else(|| state.label().to_owned());
-            let mark = said(state, word, format!("nav-state-{}", item.as_uuid()));
-            let clock = clock.filter(|_| matches!(state, Status::Working | Status::Running));
-            Some(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .children(clock)
-                    .child(mark)
-                    .into_any_element(),
-            )
-        }
-        // Something ended there while the person was elsewhere.
-        None if t.unseen => Some(said(
-            Status::Done,
-            Status::Done.label().to_owned(),
-            format!("nav-unseen-{}", item.as_uuid()),
-        )),
-        None => clock.map(gpui::IntoElement::into_any_element).or_else(|| {
-            t.age.clone().map(|age| {
-                readout(theme, age)
-                    .debug_selector(move || format!("nav-age-{}", item.as_uuid()))
-                    .into_any_element()
+    })
+}
+
+/// A row's end slot: `rest` at rest; under the pointer `actions` (that many icon buttons) in
+/// its place, laid over it in a slot as wide as the wider of the two, so nothing on the line
+/// moves. A finger has no hover: on touch the actions are the long press's and `rest` stays.
+fn end_slot(
+    theme: &Theme,
+    group: SharedString,
+    rest: Option<gpui::AnyElement>,
+    actions: Option<(gpui::AnyElement, u8)>,
+) -> Div {
+    let touch = theme.density == slopty_theme::Density::TOUCH;
+    let acts = actions.is_some() && !touch;
+    let buttons = f32::from(actions.as_ref().map_or(1, |(_, n)| *n).max(1));
+    let side = kit::icon_button_side(theme);
+    let room = buttons.mul_add(side, (buttons - 1.0) * theme.spacing.xxs);
+    let rest = rest.map(|rest| {
+        div()
+            .flex()
+            .items_center()
+            .when(acts, |el| el.group_hover(group.clone(), gpui::Styled::invisible))
+            .child(rest)
+    });
+    let actions = actions.filter(|_| !touch).map(|(actions, _)| {
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(theme.spacing.xxs))
+            .invisible()
+            .group_hover(group, gpui::Styled::visible)
+            .child(actions)
+    });
+    div()
+        .relative()
+        .flex_none()
+        .h_full()
+        .min_w(px(room))
+        .flex()
+        .items_center()
+        .justify_end()
+        .children(rest)
+        .children(actions)
+}
+
+/// `row` with `hint` (where it runs, what it says, its pull request) under the pointer, after
+/// the hint's wait, when there is one to give.
+fn with_hint(row: Stateful<Div>, theme: &Theme, hint: Option<String>) -> Stateful<Div> {
+    match hint {
+        Some(hint) => {
+            let theme = Rc::new(theme.clone());
+            kit::hint_timing(row).tooltip(move |_window, cx| {
+                let (hint, theme) = (hint.clone(), Rc::clone(&theme));
+                cx.new(|_| kit::Hint::new(hint, "", theme)).into()
             })
-        }),
+        }
+        None => row,
     }
 }
 
@@ -4363,13 +4116,22 @@ impl WorkspaceView {
         listing.tiles().map(|t| (t.title.clone(), t.meta.clone(), t.age.clone())).collect()
     }
 
-    /// The state's word at the end of each tile row's first line, by title.
+    /// The state's word each tile row names, by title.
     pub(super) fn navigator_words(&self, cx: &gpui::App) -> Vec<(String, Option<String>)> {
         let listing = self.nav_listing(&self.project_groups(), cx);
         listing.tiles().map(|t| (t.title.clone(), t.word.clone())).collect()
     }
 
-    /// Each tile row's second line, by tile, in the list's order.
+    /// Each tile row's hint, by tile, in the list's order.
+    pub(super) fn navigator_hints(&self) -> Vec<(TileRef, Option<String>)> {
+        let hint = |r: &NavRow| match r {
+            NavRow::Tile(t) => Some((t.tile, t.hint())),
+            _ => None,
+        };
+        self.nav.list.rows.borrow().iter().filter_map(hint).collect()
+    }
+
+    /// Each tile row's place and words, by tile, in the list's order.
     pub(super) fn navigator_metas(&self) -> Vec<(TileRef, String)> {
         let meta = |r: &NavRow| match r {
             NavRow::Tile(t) => Some((t.tile, t.meta.clone())),

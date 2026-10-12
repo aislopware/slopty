@@ -73,7 +73,7 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppConte
     let accent = slopty_kit::colors::hsla(theme.surfaces.accent_fill);
     // The accent's dot inside the pane's title, the dot's side square.
     let dotted = |cx: &mut VisualTestContext, tile: TileRef| {
-        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
+        let title = cx.debug_bounds(selector("tab", tile.item)).expect("its cell");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         quads.iter().any(|q| {
             let b = q.bounds;
@@ -84,7 +84,7 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppConte
     };
     let pill = slopty_kit::colors::hsla(theme.surfaces.selected);
     for tile in [first, second] {
-        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
+        let title = cx.debug_bounds(selector("tab", tile.item)).expect("its cell");
         let fills = fills_at(cx, title);
         assert!(!fills.contains(&pill), "{tile:?}: no pill: {fills:?}");
     }
@@ -108,27 +108,30 @@ fn the_focused_tile_is_said_by_its_titles_tone_and_its_dot(cx: &mut TestAppConte
 }
 
 /// In a split, a pane of tabs leads with the focus dot as a lone pane does: centred on its row,
-/// and its first tab's mark on the edge the lone pane's mark stands on, so the two headers read
-/// as one grid.
+/// and the mark of the tab on show as far into its cell as the lone pane's, so the two headers
+/// read as one grid.
 #[gpui::test]
 fn a_pane_of_tabs_leads_with_its_dot_on_the_lone_panes_edge(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
-    let [(_, lone), (_, second), (_, third)] = three_shells(&view, cx, &studio);
+    let [(_, lone), (_, _second), (_, third)] = three_shells(&view, cx, &studio);
     view.update_in(cx, |v, _w, cx| v.focus_tile(third, cx));
     cx.run_until_parked();
     let at = |cx: &mut VisualTestContext, what: &str, tile: TileRef| {
         cx.debug_bounds(selector(what, tile.item)).unwrap_or_else(|| panic!("{what} is drawn"))
     };
-    let lone_mark = at(cx, "kind", lone).left() - at(cx, "title", lone).left();
-    let header = at(cx, "title", third);
-    let first_tab = at(cx, "tab-slot", second).left().min(at(cx, "tab-slot", third).left());
-    let tabbed_mark = first_tab - header.left();
+    // The tab on show leads with the dot in either pane, so its mark stands as far into its
+    // cell in the lone pane as in the pane of tabs.
+    let mark_in = |cx: &mut VisualTestContext, tile: TileRef| {
+        at(cx, "tab-slot", tile).left() - at(cx, "tab", tile).left()
+    };
+    let (lone_mark, tabbed_mark) = (mark_in(cx, lone), mark_in(cx, third));
     assert!(
         f32::from(tabbed_mark - lone_mark).abs() < 0.5,
         "one edge: {tabbed_mark:?} against {lone_mark:?}"
     );
+    let header = at(cx, "title", third);
     let accent = slopty_kit::colors::hsla(Theme::default().surfaces.accent_fill);
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let dot = quads
@@ -142,11 +145,10 @@ fn a_pane_of_tabs_leads_with_its_dot_on_the_lone_panes_edge(cx: &mut TestAppCont
     assert!(off < 0.5, "centred on the row: {off} pt off");
 }
 
-/// A tab of several tiles is one line, as every pill is: its focused tile's title, the count
-/// said to a screen reader only, since the split shows under it. The pane's tab on show carries
-/// no fill where the title tab wears `selected`, so the same pill never shows twice.
+/// The pane's tab on show carries no pill: its one cell is the work's ground, open into it, and
+/// says the focus with its dot alone.
 #[gpui::test]
-fn a_tab_of_several_tiles_is_one_line(cx: &mut TestAppContext) {
+fn a_panes_tab_on_show_wears_no_pill(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
@@ -155,23 +157,7 @@ fn a_tab_of_several_tiles_is_one_line(cx: &mut TestAppContext) {
     one_pane(&view, cx, &[first, second]);
     view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
     cx.run_until_parked();
-    let n = view.read_with(cx, |v, _| v.layout().shown_tab().map(|t| t.id().get())).expect("a tab");
-    let tab = cx.debug_bounds(Box::leak(format!("title-tab-{n}").into_boxed_str())).expect("tab");
-    let title = cx.debug_bounds(Box::leak(format!("title-tab-text-{n}").into_boxed_str()));
-    let title = title.expect("its title");
-    let off = f32::from(title.center().y - tab.center().y).abs();
-    assert!(off < 1.0, "one line, centred in the pill: {off} pt off");
     let theme = Theme::default();
-    let line = theme.roles().chrome.line;
-    assert!(f32::from(title.size.height) <= line + 0.5, "the chrome role's line: {title:?}");
-    let bar = cx.debug_bounds("titlebar").expect("the bar").bottom();
-    let said: Vec<String> = tree(cx)
-        .into_iter()
-        .filter(|n| n.role == "Tab" && n.bounds[1] < f32::from(bar))
-        .filter_map(|n| n.label)
-        .collect();
-    assert!(said.iter().any(|l| l.ends_with(", 2 tiles")), "the count is heard: {said:?}");
-
     let pane_tab = cx.debug_bounds(selector("tab", second.item)).expect("the pane's tab on show");
     let fills = fills_at(cx, pane_tab);
     assert!(!fills.contains(&slopty_kit::colors::hsla(theme.surfaces.selected)), "{fills:?}");

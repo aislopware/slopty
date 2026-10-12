@@ -364,6 +364,32 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     assert!(board(&again).verdict(TaskId(1)).is_none(), "a pass for work since moved on");
 }
 
+/// A start that failed (its clone, what its worktree starts from, its agent's own start)
+/// stands in *Failed* and offers Start, not *Up next* as if it waited its turn; once an agent
+/// runs on it again, it is the agent's to say.
+#[test]
+fn a_start_that_failed_waits_on_the_person() {
+    use super::fixtures::step;
+    use super::model::TaskAction;
+
+    let worker = WorkerId::new();
+    let why = StepState::Failed { why: "fatal: unable to access the forge".into() };
+    let mut failed = card(1, "Its clone failed", TaskState::Planned);
+    failed.step = Some(step(StepKind::Clone, worker, why.clone(), None));
+    let mut again = on(card(2, "Started again", TaskState::Planned), worker, SessionId::new());
+    again.step = Some(step(StepKind::Clone, worker, why, None));
+    let planned = card(3, "Not started", TaskState::Planned);
+    let mirror = one(vec![failed, again, planned]);
+    let b = board(&mirror);
+    assert_eq!(b.lane(TaskId(1)), Some(Lane::Failed), "it waits on the person");
+    assert!(b.start_failed(&b.tasks[&TaskId(1)]).is_some());
+    assert_eq!(b.actions(TaskId(1)), [TaskAction::Start]);
+    assert_eq!(b.lane(TaskId(2)), Some(Lane::UpNext), "an agent runs on it: not failed");
+    assert_eq!(b.lane(TaskId(3)), Some(Lane::UpNext));
+    let lanes = b.lanes();
+    assert!(lanes.contains(&(Lane::Failed, vec![TaskId(1)])), "{lanes:?}");
+}
+
 /// What the person can do to a task from the board: merge what is done and not queued, retry
 /// a step that failed on the way to the target, and nothing to a task that reads or has merged.
 #[test]

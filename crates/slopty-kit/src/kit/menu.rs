@@ -529,7 +529,9 @@ fn row(
     let (hover_cursor, click_menu, click_close) =
         (cursor.clone(), Rc::clone(menu), Rc::clone(close));
     let disabled = item.disabled;
+    // Delta's menu row, 23 with 14 pt words (`.research/delta-signed-in-2026-10-12.md` §3.5).
     super::sheet_row(theme, super::Row::One)
+        .h(px(theme.density.menu))
         .id(ElementId::Name(selector.clone().into()))
         .debug_selector(move || selector)
         .role(role)

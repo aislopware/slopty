@@ -1,9 +1,9 @@
 //! The thread view: one agent's thread drawn from this client's mirror of it, for any agent.
 //!
-//! A header names the thread and says where it is; under it runs one reading column,
-//! [`COLUMN`] at most, each turn's work under one line over its answer, open while the turn
-//! runs and folded once it is done; at the column's foot sit the activity bar and the
-//! composer, on the same measure.
+//! A header names the thread and says where it is; under it runs one reading column on the
+//! tile's left, prose [`PROSE`] at most and wide work (a call's output, a diff) the tile's width,
+//! each turn's work under one line over its answer, open while the turn runs and folded once it
+//! is done; at the column's foot sit the activity bar and the composer, on the prose's measure.
 //!
 //! Everything the person does goes through the hub's outbox and shows in the frame they did
 //! it: a message as a bubble on its way, an answer flipping its card, a stop as "Stopping".
@@ -36,7 +36,7 @@ use slopty_proto::git::GitOp;
 use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
     AgentId, AskId, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
-    ThreadState, ToolCall, ToolDetail, TurnId, TurnState, kind,
+    ThreadState, ToolCall, ToolDetail, TurnId, TurnState,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -60,12 +60,23 @@ fn message_group(id: &ItemId) -> SharedString {
 /// How long a copy button says it copied.
 const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
-/// The widest the reading column's text runs, in points.
+/// The lane left of the content edge where whose turn it is hangs: with the column's 16 side,
+/// Delta's prose edge 52 in, measured from the signed-in app
+/// (`.research/delta-signed-in-2026-10-12.md` §2.4).
+pub const LANE: f32 = 36.0;
+
+/// How far wide work (a well, a card) ends short of the tile's right side while there is a
+/// lane: Delta's 38, the room its message rail keeps.
+pub const END: f32 = 38.0;
+
+/// The widest a line of prose runs: Delta's default content width.
 ///
-/// `MonoCode`'s 896 pt column (`max-w-4xl`) less its rows' 16 pt pads, shared by the
-/// transcript, the tray and the composer (`docs/decisions/ui.md`, "One reading measure,
-/// `MonoCode`'s").
-pub const COLUMN: f32 = 864.0;
+/// About 705 pt of Plex at 15, measured from the signed-in app
+/// (`.research/delta-signed-in-2026-10-12.md` §2.4). The person's turn,
+/// the agent's answer, the activity bar and the composer keep to it; wells, cards and diffs run
+/// on to the tile's side, as Delta's "Constrain Wide Content" off lets them
+/// (`docs/decisions/ui.md`, "The thread has one left edge").
+pub const PROSE: f32 = 705.0;
 
 /// The most of the window's height what else waits in the tray (the plan, the edits, the
 /// queue) takes before it scrolls.
@@ -75,18 +86,21 @@ const TRAY: f32 = 0.3;
 /// field in the tray keeps its ⌘↵.
 pub(crate) const COMPOSER_CTX: &str = "ThreadComposer";
 
-/// The same while a request stands whole above it: what the person must answer and the
-/// conversation it is about come first, so the rest keeps to a line or two and scrolls.
-const TRAY_ASKING: f32 = 0.12;
-
 /// How far past the viewport the list lays rows out, as Zed's thread does.
 const OVERDRAW: f32 = 2048.0;
+
+/// How many lines of prose the turns keep in view, however much stands under them.
+const ROWS_KEEP: f32 = 4.0;
 
 /// The composer grows with its text up to this many rows, then scrolls.
 const COMPOSER_ROWS: usize = 8;
 
-/// A call's line: its least height and the square its mark sits in.
-const TOOL_ROW: f32 = 24.0;
+/// A call's line, and every one-line row of a turn's work: its least height, Delta's 28 apart
+/// (`.research/delta-signed-in-2026-10-12.md` §2.4).
+const TOOL_ROW: f32 = 28.0;
+
+/// The square a row's mark sits in.
+const MARK_SLOT: f32 = 24.0;
 
 /// Lines of a call's output or a diff shown before "Show all".
 const PEEK_LINES: usize = 12;
@@ -98,7 +112,7 @@ const HEADINGS: [f32; 2] = [3.0, 1.0];
 /// The gap between an answer's paragraphs, in points at the prose size.
 const PARAGRAPH: f32 = 10.0;
 
-/// The gutter a turn's mark hangs in, left of the column's words: Delta's 24.
+/// The slot a turn's mark is centred in, at the [`LANE`]'s start: Delta's 24.
 const TURN_MARK: f32 = 24.0;
 
 /// A message longer than this many lines or characters shows its start first.
@@ -295,6 +309,12 @@ pub struct ThreadView {
     /// What the last frame drew from the list's scroll: where the request on show was
     /// answered and whether the way down showed.
     marks: Cell<tray::Marks>,
+    /// The window's height in the last frame: what a request's card lets what it asks the
+    /// person to read take before it scrolls.
+    viewport_h: Cell<gpui::Pixels>,
+    /// The request the list last brought into view, so a request is revealed once, as it
+    /// comes, and the person's scroll is theirs after that.
+    revealed_ask: Option<AskId>,
     /// How many items the thread held when the list left its newest row: those after it are
     /// new, and the way down counts them.
     unseen_from: Option<usize>,
@@ -529,6 +549,8 @@ impl ThreadView {
             placeholder: composer::PLACEHOLDER.to_owned(),
             reveal_terminal: false,
             marks: Cell::default(),
+            viewport_h: Cell::new(px(0.0)),
+            revealed_ask: None,
             unseen_from: None,
             told: 0,
             telling: None,
@@ -587,6 +609,19 @@ impl ThreadView {
     #[must_use]
     pub fn following(&self) -> bool {
         self.list.is_following_tail()
+    }
+
+    /// Where the list stands, for a test's word: its first row on screen, how far into it, the
+    /// offset its scrollbar reads and the most it can scroll.
+    #[cfg(test)]
+    pub(crate) fn scrolled(&self) -> (usize, f32, f32, f32) {
+        let top = self.list.logical_scroll_top();
+        (
+            top.item_ix,
+            f32::from(top.offset_in_item),
+            f32::from(self.list.scroll_px_offset_for_scrollbar().y),
+            f32::from(self.list.max_offset_for_scrollbar().y),
+        )
     }
 
     /// The composer's invitation names the thread's agent once the thread says which it is.
@@ -763,13 +798,23 @@ impl ThreadView {
         let (built, keys) = match mirror.and_then(|m| m.state().map(|s| (m, s))) {
             Some((mirror, state)) => {
                 let unshown: Vec<&Sent> = threads.unshown(self.thread).collect();
-                let built = rows::build_spans(Input {
+                let mut built = rows::build_spans(Input {
                     state,
                     unshown: &unshown,
                     open: &self.open,
                     shut: &self.shut,
                     groups: &self.groups,
                 });
+                // What waits on the person is answered on its call's card where the call is a
+                // row; a request about no call on show is a card of its own after the turns. A
+                // question stands over the composer ([`Self::activity_bar`]).
+                let apart = self.on_show(cx, |request| {
+                    let on_call = request.item.as_ref().is_some_and(|item| built.shows_call(item));
+                    (request.questions.is_empty() && !on_call).then(|| request.id.clone())
+                });
+                if let Some(ask) = apart.flatten() {
+                    built.ask(ask);
+                }
                 let keys = built
                     .rows
                     .iter()
@@ -784,6 +829,7 @@ impl ThreadView {
         self.rows = built.rows.into();
         self.spans = built.spans;
         self.keys = keys;
+        self.reveal_asked(cx);
         self.run_clock(cx);
         self.ask_changes(cx);
         if self.reveal_terminal && self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
@@ -828,7 +874,7 @@ impl ThreadView {
                 ended.wrapping_mul(2).wrapping_add(grown) | u64::from(*open)
             }
             Row::Group { open, .. } => (span.len() as u64).wrapping_mul(2) | u64::from(*open),
-            Row::Working { .. } => 0,
+            Row::Working { .. } | Row::Asked { .. } => 0,
             Row::Sending { intent } => unshown
                 .iter()
                 .find(|s| s.id == *intent)
@@ -1153,7 +1199,8 @@ impl ThreadView {
         if waiting > 0 {
             let at = self.asked_at.min(waiting.saturating_sub(1));
             self.asked_at = at.saturating_add_signed(by).min(waiting.saturating_sub(1));
-            cx.notify();
+            // The request on show may be answered on its call or on a card of its own.
+            self.rebuild(cx);
         }
     }
 
@@ -1241,7 +1288,7 @@ impl ThreadView {
 
     /// The square every mark sits in.
     fn slot() -> Div {
-        div().flex_none().size(px(TOOL_ROW)).flex().items_center().justify_center()
+        div().flex_none().size(px(MARK_SLOT)).flex().items_center().justify_center()
     }
 
     /// The mark of what waits on the person: [`Status::NeedsYou`] in its amber fill, the mark
@@ -1375,9 +1422,11 @@ impl ThreadView {
             };
             px(size)
         }));
+        let code = theme.roles().code;
         style.code_block = kit::inset(gpui::StyleRefinement::default(), theme)
             .font_family(mono.to_string())
-            .text_size(px(theme.typography.small()))
+            .text_size(px(code.size))
+            .line_height(px(code.line))
             .rounded(px(theme.radii.sm))
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.sm));
@@ -1460,33 +1509,46 @@ impl ThreadView {
         kit::Room::of(self.width, &self.theme)
     }
 
-    /// How far the column stands off the tile's edges for its room: 48 pt in a wide tile, 24 in
-    /// a regular one and 16 in a narrow one, so the gutter gives way before the words do.
-    fn gutter(&self) -> f32 {
-        let spacing = self.theme.spacing;
-        match self.room() {
-            kit::Room::Wide => spacing.xxxl,
-            kit::Room::Regular => spacing.xl,
-            kit::Room::Narrow => spacing.lg,
-        }
+    /// The lane the marks hang in left of the content edge: [`LANE`], none in a narrow tile,
+    /// whose words keep its whole width.
+    fn lane(&self) -> f32 {
+        if matches!(self.room(), kit::Room::Narrow) { 0.0 } else { LANE }
     }
 
-    /// The column every row sits in: centred, its text [`COLUMN`] at most, inside the room's
-    /// gutters ([`Self::gutter`]).
+    /// The least the column stands off the tile's sides: 16 pt.
+    const fn side(&self) -> f32 {
+        self.theme.spacing.lg
+    }
+
+    /// The reading column's box, on the tile's left as Delta's is: [`Self::side`] off the
+    /// tile's left, its content edge past the lane, wide work running to [`END`] short of the
+    /// tile's right side ([`Self::side`] in a narrow tile). Every row, the tray and the composer
+    /// stand in it, so the thread has one left edge.
+    fn column_box(&self) -> Div {
+        let (lane, side) = (self.lane(), self.side());
+        let end = if lane > 0.0 { END } else { side };
+        div().w_full().pl(px(side + lane)).pr(px(end))
+    }
+
+    /// The column's box held to the prose's measure ([`PROSE`]), for what is read or written as
+    /// prose is: the activity bar and the composer.
+    fn measure_box(&self) -> Div {
+        let (lane, side) = (self.lane(), self.side());
+        let end = if lane > 0.0 { END } else { side };
+        self.column_box().max_w(px(side + lane + PROSE + end))
+    }
+
+    /// `child` in the reading column ([`Self::column_box`]).
     fn column(&self, child: impl IntoElement) -> Div {
-        let gutter = self.gutter();
-        div().w_full().flex().justify_center().child(
-            div().w_full().max_w(px(2.0_f32.mul_add(gutter, COLUMN))).px(px(gutter)).child(child),
-        )
+        self.column_box().child(child)
     }
 
-    /// `el` with `mark` hung in the gutter left of it, Delta's turn mark: the 16 pt glyph
-    /// centred in a [`TURN_MARK`] slot ending at the column's edge, on the first line of
-    /// prose, in the quiet icon ink. A gutter narrower than the slot hangs nothing, so the
-    /// words keep the narrow pane's whole width.
+    /// `el` with `mark` hung in the lane left of it, Delta's turn mark: the glyph centred in a
+    /// [`TURN_MARK`] slot at the lane's start, 8 pt clear of the content edge, on the first
+    /// line of prose, in the quiet icon ink. A narrow tile has no lane and hangs nothing.
     pub(super) fn hang(&self, el: AnyElement, mark: Option<Mark>, id: String) -> AnyElement {
         let theme = &self.theme;
-        let Some(mark) = mark.filter(|_| self.gutter() >= TURN_MARK) else { return el };
+        let Some(mark) = mark.filter(|_| self.lane() > 0.0) else { return el };
         let line = theme.typography.prose() * theme.typography.prose_line_height;
         let ink = match mark {
             Mark::Agent(_) => theme.surfaces.text_muted,
@@ -1503,7 +1565,7 @@ impl ThreadView {
                 div()
                     .absolute()
                     .top_0()
-                    .left(px(-TURN_MARK))
+                    .left(px(-LANE))
                     .w(px(TURN_MARK))
                     .h(px(line))
                     .flex()
@@ -1543,6 +1605,7 @@ impl ThreadView {
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
+            Row::Asked { ask } => (self.asked_row(ask, cx), spacing.lg),
         };
         // Turns group: the person's message opens one a large step under the last, and what
         // answers it follows at the small step, so a question and its answer read as one block.
@@ -1744,6 +1807,7 @@ impl ThreadView {
         let words = div()
             .flex_1()
             .min_w_0()
+            .max_w(px(PROSE))
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(s.text))
@@ -1801,7 +1865,17 @@ impl ThreadView {
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .group(message_group(id))
-            .child(self.markdown(format!("text-{}", id.0), &text, streams))
+            // Prose keeps to its measure, under the column's width that wells and cards take.
+            .child(
+                div()
+                    .debug_selector({
+                        let id = id.0.clone();
+                        move || format!("prose-{id}")
+                    })
+                    .w_full()
+                    .max_w(px(PROSE))
+                    .child(self.markdown(format!("text-{}", id.0), &text, streams)),
+            )
             .when(clipped_more, |el| el.child(self.show_all(id, &clipped, cx)))
             .child(self.message_actions(id, at_ms, text.clone(), false, cx))
             .into_any_element()
@@ -1867,8 +1941,8 @@ impl ThreadView {
                 // thought reads as the same kind of aside.
                 el.child(
                     div()
-                        .ml(px(TOOL_ROW / 2.0))
-                        .pl(px(TOOL_ROW / 2.0 + theme.spacing.xs))
+                        .ml(px(MARK_SLOT / 2.0))
+                        .pl(px(MARK_SLOT / 2.0 + theme.spacing.xs))
                         .py(px(theme.spacing.xxs))
                         .border_l(kit::HAIR)
                         .border_color(hsla(s.call_border))
@@ -1968,23 +2042,27 @@ impl ThreadView {
             .items_center()
             .gap(px(theme.spacing.xs))
             .min_h(px(TOOL_ROW))
-            .text_size(px(theme.typography.small()))
+            // Delta's summary line: the prose's size in the muted tone, never the chrome's
+            // small one (`.research/delta-re-2026-10-12.md` §4.8).
+            .text_size(px(theme.typography.prose()))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.fold_chevron(
-                format!("fold-{}-chevron", turn.0),
-                open,
-                SharedString::from(format!("fold-{}", turn.0)),
-            )))
+            // The words on the content edge, the fold's chevron trailing them.
             .child(
                 kit::tabular(div())
+                    .debug_selector(move || format!("fold-{}-line", turn.0))
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .child(SharedString::from(line)),
             )
+            .child(self.fold_chevron(
+                format!("fold-{}-chevron", turn.0),
+                open,
+                SharedString::from(format!("fold-{}", turn.0)),
+            ))
             .children(changes)
             // While the turn runs its line ends in Delta's caret in the accent, held still: a
             // blink would draw a frame twice a second for as long as the agent works.
@@ -1994,7 +2072,7 @@ impl ThreadView {
                         .debug_selector(move || format!("fold-{}-caret", turn.0))
                         .flex_none()
                         .w(kit::HAIR)
-                        .h(px(theme.roles().metadata.line))
+                        .h(px(theme.roles().prose.line))
                         .bg(hsla(s.accent_fill)),
                 )
             })
@@ -2057,11 +2135,6 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.fold_chevron(
-                format!("fold-{}-{part}-chevron", turn.0),
-                open,
-                group,
-            )))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -2070,6 +2143,7 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .child(SharedString::from(line)),
             )
+            .child(self.fold_chevron(format!("fold-{}-{part}-chevron", turn.0), open, group))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_turn(turn, cx)))
             .into_any_element()
     }
@@ -2103,11 +2177,6 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(Self::slot().child(self.fold_chevron(
-                format!("group-{}-chevron", first.0),
-                open,
-                group,
-            )))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -2116,6 +2185,7 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .child(SharedString::from(line)),
             )
+            .child(self.fold_chevron(format!("group-{}-chevron", first.0), open, group))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_group(toggle.clone(), cx)))
             .into_any_element()
     }
@@ -2268,60 +2338,63 @@ impl ThreadView {
             .filter(|p| matches!(p.phase, Phase::NeedsYou | Phase::Waiting))
             .and_then(|p| p.wait.as_ref())
             .map(wait_words);
+        // Its words ride the reading column, Zed's header centred on the thread's width, so the
+        // title stands on the content edge the turns start on.
+        let words = div()
+            .debug_selector(|| "thread-header-title".to_owned())
+            .min_w_0()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(title.clone())),
+            )
+            .children(wait.map(|w| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(w))
+            }));
+        let status = status.map(|st| {
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs))
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(st.word(theme)))
+                .child(slopty_kit::icons::status_mark(theme, Some(st)))
+                .child(st.label())
+        });
         Some(
             div()
                 .id("thread-header")
                 .debug_selector(|| "thread-header".to_owned())
                 .role(Role::Banner)
-                .aria_label(SharedString::from(title.clone()))
+                .aria_label(SharedString::from(title))
                 .flex_none()
                 .w_full()
                 .flex()
-                .items_center()
-                .gap(px(theme.spacing.sm))
-                .px(px(theme.spacing.lg))
+                .justify_center()
                 .min_h(px(kit::Row::Two.height(theme)))
                 .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_size(px(theme.typography.small()))
-                                .text_color(hsla(s.text))
-                                .child(SharedString::from(title)),
-                        )
-                        .children(wait.map(|w| {
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .text_size(px(theme.typography.small()))
-                                .text_color(hsla(s.text_muted))
-                                .child(SharedString::from(w))
-                        })),
-                )
-                .children(status.map(|st| {
-                    div()
-                        .flex_none()
+                    self.column_box()
                         .flex()
                         .items_center()
-                        .gap(px(theme.spacing.xxs))
-                        .text_size(px(theme.typography.small()))
-                        .text_color(hsla(st.word(theme)))
-                        .child(slopty_kit::icons::status_mark(theme, Some(st)))
-                        .child(st.label())
-                }))
-                .child(
-                    kit::pill(theme, s.text_secondary)
-                        .child(SharedString::from(hub.worker().to_owned())),
+                        .gap(px(theme.spacing.sm))
+                        .child(words)
+                        .children(status),
                 )
                 .into_any_element(),
         )
@@ -2426,21 +2499,17 @@ impl ThreadView {
     /// The question over an empty thread's composer, at the reading column's width.
     fn hero_question(&self, words: String) -> AnyElement {
         let theme = &self.theme;
-        let gutter = self.gutter();
         let role = theme.roles().page_heading;
         div()
             .w_full()
             .flex()
             .justify_center()
             .child(
-                div()
+                self.column_box()
                     .id("thread-hero")
                     .debug_selector(|| "thread-hero".to_owned())
                     .role(Role::Heading)
                     .aria_label(SharedString::from(words.clone()))
-                    .w_full()
-                    .max_w(px(2.0_f32.mul_add(gutter, COLUMN)))
-                    .px(px(gutter))
                     .pb(px(theme.spacing.lg))
                     .text_center()
                     .text_size(px(role.size))
@@ -2463,19 +2532,22 @@ impl ThreadView {
             top: px(self.theme.spacing.lg),
             ..gpui::Edges::default()
         });
-        region
-            .debug_selector(|| "thread-rows".to_owned())
-            .child(
-                gpui::edge_fade(
-                    list(
-                        self.list.clone(),
-                        cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
-                    )
-                    .size_full(),
-                    fade,
-                )
-                .hidden_by_list(&self.list),
+        // The turns keep a few lines of their own however much stands under them: what waits
+        // and the activity bar scroll before the thread is squeezed out.
+        let keep = self.theme.roles().prose.line * ROWS_KEEP;
+        let faded = gpui::edge_fade(
+            list(
+                self.list.clone(),
+                cx.processor(|this, ix: usize, _window, cx| this.render_row(ix, cx)),
             )
+            .size_full(),
+            fade,
+        )
+        .hidden_by_list(&self.list);
+        region
+            .min_h(px(keep))
+            .debug_selector(|| "thread-rows".to_owned())
+            .child(faded)
             .children(self.marks.get().down.then(|| self.down_button(cx)))
             .children(self.find_bar(cx))
             .into_any_element()
@@ -2492,6 +2564,7 @@ impl Render for ThreadView {
         }
         self.settle_placeholder(window, cx);
         self.marks.set(self.read_marks(cx));
+        self.viewport_h.set(window.viewport_size().height);
         self.count_unseen(cx);
         // The list lays out after this render: what its scroll then says is read once the
         // frame is drawn, and draws again only if that moved the request or the way down.
@@ -2650,7 +2723,6 @@ impl ThreadView {
     fn foot(&self, bar: Option<AnyElement>, composer: Option<AnyElement>) -> AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        let gutter = self.gutter();
         let bar = bar.map(|bar| {
             div()
                 .id("thread-tray")
@@ -2672,17 +2744,7 @@ impl ThreadView {
             .min_h_0()
             .flex()
             .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(2.0_f32.mul_add(gutter, COLUMN)))
-                    .px(px(gutter))
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .children(bar),
-            )
+            .child(self.measure_box().min_h_0().flex().flex_col().children(bar))
             .children(composer)
             .into_any_element()
     }
@@ -2838,23 +2900,6 @@ fn context_used(meters: &slopty_proto::thread::Meters) -> Option<f64> {
     Some(share * 100.0)
 }
 
-/// The icon of a call's kind.
-fn tool_icon(kind: &str) -> Symbol {
-    match kind {
-        kind::READ => Symbol::DocText,
-        kind::EDIT => Symbol::Pencil,
-        kind::WRITE => Symbol::DocBadgePlus,
-        kind::EXEC => Symbol::Terminal,
-        kind::SEARCH => Symbol::Magnifyingglass,
-        kind::FETCH | kind::WEB_SEARCH => Symbol::Globe,
-        kind::MCP => Symbol::PuzzlepieceExtension,
-        kind::AGENT => slopty_kit::icons::AGENT,
-        kind::QUESTION => Symbol::QuestionmarkBubble,
-        kind::PLAN | kind::TASKS => Symbol::Checklist,
-        _ => Symbol::WrenchAndScrewdriver,
-    }
-}
-
 fn path_patch(call: &ToolCall) -> Option<(&str, &slopty_proto::thread::Patch)> {
     match &call.detail {
         Some(ToolDetail::Edit(d)) => Some((&d.path, &d.patch)),
@@ -2863,7 +2908,7 @@ fn path_patch(call: &ToolCall) -> Option<(&str, &slopty_proto::thread::Patch)> {
     }
 }
 
-/// The one file a call reads or writes, for its row to lead with the file's type.
+/// The one file a call reads or writes, which its line names first.
 fn call_path(call: &ToolCall) -> Option<&str> {
     match &call.detail {
         Some(ToolDetail::Read(d)) => Some(&d.path),

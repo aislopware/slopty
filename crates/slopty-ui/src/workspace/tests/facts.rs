@@ -189,8 +189,8 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let id = tile.item.as_uuid();
     let row = cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the row's changes");
-    let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(row.left() >= meta.right(), "after the words: {row:?} {meta:?}");
+    let title = cx.debug_bounds(leak(format!("nav-title-{id}"))).expect("the title");
+    assert!(row.left() >= title.right(), "after the title: {row:?} {title:?}");
     // The breadcrumb stands in the bar while the navigator is hidden.
     cx.simulate_keystrokes("cmd-b");
     cx.run_until_parked();

@@ -175,7 +175,7 @@ pub(super) struct ThreadFaces {
     /// Where each thread stands as the server's ladder last said: what speaks for the threads
     /// of a worker this client has no link to.
     server: HashMap<ThreadId, ThreadStand>,
-    /// Each machine's plan windows as its agents' rows last said them, for the title bar.
+    /// Each machine's plan windows as its agents' rows last said them, for the cluster.
     meters: slopty_client::meters::PlanMeters,
     /// Starts sent and not yet answered: the worker each went to, the start as it went, and
     /// the tile it fills. One whose link goes is sent again, as it was, when the link comes
@@ -197,7 +197,7 @@ pub(super) struct ThreadFaces {
 }
 
 impl ThreadFaces {
-    /// Each machine's plan windows, for the title bar.
+    /// Each machine's plan windows, for the cluster.
     pub(super) const fn meters(&self) -> &slopty_client::meters::PlanMeters {
         &self.meters
     }
@@ -1245,7 +1245,7 @@ impl WorkspaceView {
             self.settle_taps(cx);
         }
         if self.faces.threads.meters != meters_before {
-            App::notify(cx, self.chrome.titlebar.entity_id());
+            App::notify(cx, self.chrome.cluster.entity_id());
         }
         self.settle_thread_tiles(cx);
         self.count_runs(cx);

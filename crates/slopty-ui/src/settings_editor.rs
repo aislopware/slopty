@@ -408,9 +408,9 @@ mod tests {
         assert!(fills.contains(&gpui::Background::from(plate)), "{plate:?} in {fills:?}");
     }
 
-    /// Where the window has room the list is a sidebar beside a page of at least 480 pt, and
-    /// the file, once there is a tile to open it in, is its advanced path at its foot, over the
-    /// way back, apart from the sections; it asks for the file's tile after applying the change
+    /// Where the window has room the list is a sidebar beside a page of at least 480 pt, headed
+    /// by the way back, and the file, once there is a tile to open it in, is its advanced path
+    /// at its foot, apart from the sections; it asks for the file's tile after applying the change
     /// still waiting for a pause, and Back leaves. Stacked in one column, with no list, the head
     /// offers the file beside Done instead.
     #[gpui::test]
@@ -428,7 +428,9 @@ mod tests {
         let last = cx.debug_bounds(leak(format!("settings-section-{}", Section::About.index())));
         let last = last.expect("the last section");
         assert!(file.right() <= page.left(), "in the sidebar: {file:?} {page:?}");
-        assert!(file.top() > last.bottom() && back.top() >= file.bottom(), "at its foot");
+        assert!(file.top() > last.bottom(), "at its foot");
+        let first = cx.debug_bounds("settings-section-0").expect("the first section");
+        assert!(back.bottom() <= first.top() && back.right() <= page.left(), "heading the list");
         click(cx, "settings-section-1");
         click(cx, leak(format!("settings-increase-{}", row("font", "mono_size"))));
         click(cx, "settings-open-file");
@@ -627,14 +629,10 @@ mod tests {
         assert!(tree.iter().any(|n| n.is("Heading", Some("Agents"))), "{tree:#?}");
     }
 
-    /// The page's head stands on the search field's line, so the columns start together: the
-    /// page's name on it, as a macOS 26 pane is titled, with no title bar over both.
+    /// The page is headed by its section's name, as Zed's settings page is.
     #[gpui::test]
-    fn the_columns_start_together(cx: &mut TestAppContext) {
+    fn the_page_is_headed_by_its_section(cx: &mut TestAppContext) {
         let (_view, _events, cx) = editor(cx, "");
-        let search = cx.debug_bounds("settings-search").expect("the search");
-        let title = cx.debug_bounds("settings-title").expect("the page's name");
-        assert!((search.center().y - title.center().y).abs() < px(0.5), "{search:?} {title:?}");
         let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
         let general = Section::ALL[0].label();
         assert!(tree.iter().any(|n| n.is("Heading", Some(general))), "{tree:#?}");

@@ -38,9 +38,9 @@ pub use editing::{GO_TO_CTX, TEXT_CTX, palette_items as editor_palette_items};
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, RangeDecoration, RangeDecorationCollection,
@@ -431,6 +431,9 @@ pub struct FileView {
     authored: Option<Authored>,
     /// [`Self::stamp`] as the host was last told it.
     stamped: Option<WallMs>,
+    /// The editor's facts, a view of their own that the tile's tab bar ends with
+    /// ([`FileFacts`]).
+    facts: Entity<FileFacts>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
     /// this view from GPUI's view cache, which a change inside the editor would not otherwise
     /// invalidate.
@@ -470,7 +473,14 @@ impl FileView {
             InputEvent::Change => this.edited(cx),
             InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
         });
-        let redraw = cx.observe(&editor, |_this, _editor, cx| cx.notify());
+        // The caret's move is news for the facts in the tab bar too, which the workspace's
+        // panes draw from this view's own entity, never by reading the editor.
+        let redraw = cx.observe(&editor, |this: &mut Self, _editor, cx| {
+            cx.notify();
+            this.facts.update(cx, |_, cx| cx.notify());
+        });
+        let file = cx.weak_entity();
+        let facts = cx.new(|_| FileFacts { file });
         Self {
             id,
             worker,
@@ -511,6 +521,7 @@ impl FileView {
             goto: None,
             authored: None,
             stamped: None,
+            facts,
             _editor_events: [events, redraw],
         }
     }
@@ -560,76 +571,72 @@ impl FileView {
             .debug_selector(|| "file-author".to_owned())
             .px(px(theme.spacing.xxs))
             .child(tag);
-        // Over the foot line, which holds the bottom edge.
-        let foot = if self.shows_foot() { self.foot_height() } else { 0.0 };
         Some(
             div()
                 .absolute()
-                .bottom(px(foot + theme.spacing.md))
+                .bottom(px(theme.spacing.md))
                 .right(px(theme.spacing.lg))
                 .child(pill)
                 .into_any_element(),
         )
     }
 
-    /// Whether the foot line shows: while the editor holds the text, not a preview, a
+    /// Whether the editor's facts show: while the editor holds the text, not a preview, a
     /// comparison or a notice in its place.
-    fn shows_foot(&self) -> bool {
+    #[must_use]
+    pub(crate) fn shows_facts(&self) -> bool {
         self.shows_text() && !self.previewing() && self.comparing.is_none()
     }
 
-    /// The foot line's height: the meta text's size with a base unit over
-    /// and under it.
-    fn foot_height(&self) -> f32 {
-        let theme = &self.theme;
-        theme.spacing.xs.mul_add(2.0, theme.typography.small())
+    /// The editor's facts, for the tile's tab bar to end with: a view of their own, drawn
+    /// again as the caret moves without the panes around them.
+    #[must_use]
+    pub fn facts(&self) -> Entity<FileFacts> {
+        self.facts.clone()
     }
 
-    /// The foot line: what the file is coloured as, its indent and line endings, and where the
-    /// caret is (`Rust · Spaces: 4 · Ln 12, Col 5`), quiet at the tile's bottom edge, as an
-    /// editor's own status line says them. They are this tile's facts, so they are said in it
-    /// rather than in a bar the whole window shares.
-    fn render_foot(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        if !self.shows_foot() {
+    /// What the file is coloured as, its indent and line endings, and where the caret is
+    /// (`Rust · Spaces: 4 · Ln 12, Col 5`), quiet at its tab bar's end as an editor's own
+    /// status line says them: Small in `text_muted`, the caret's place in Lilex. They are this
+    /// tile's facts, so they are said in its own bar rather than one the window shares.
+    fn render_facts(&self, cx: &App) -> Option<AnyElement> {
+        if !self.shows_facts() {
             return None;
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (line, col) = self.caret(cx);
         let caret = format!("Ln {line}, Col {col}");
-        let parts: Vec<String> = self
-            .coloured_as()
-            .map(str::to_owned)
-            .into_iter()
-            .chain(self.layout_facts())
-            .chain(std::iter::once(caret))
-            .collect();
-        let label = SharedString::from(parts.join(", "));
+        let words: Vec<String> =
+            self.coloured_as().map(str::to_owned).into_iter().chain(self.layout_facts()).collect();
+        let label = SharedString::from(
+            words
+                .iter()
+                .cloned()
+                .chain(std::iter::once(caret.clone()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let mut row = div()
-            .id(SharedString::from(format!("file-foot-{}", self.id.as_uuid())))
-            .debug_selector(|| "file-foot".to_owned())
+            .id(SharedString::from(format!("file-facts-{}", self.id.as_uuid())))
+            .debug_selector(|| "file-facts".to_owned())
             .role(Role::Status)
             .aria_label(label)
             .flex_none()
-            .h(px(self.foot_height()))
-            .w_full()
             .flex()
             .items_center()
-            .justify_end()
             .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.inset()))
-            .overflow_hidden()
             .whitespace_nowrap()
             .font_family(theme.typography.ui_family.clone())
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted));
-        for (i, part) in parts.into_iter().enumerate() {
-            if i > 0 {
-                row = row.child(slopty_kit::kit::separator(theme));
-            }
-            row = row.child(slopty_kit::kit::tabular(div()).child(SharedString::from(part)));
+        for word in words {
+            row = row.child(SharedString::from(word)).child(slopty_kit::kit::separator(theme));
         }
-        Some(row.into_any_element())
+        let caret =
+            slopty_kit::kit::tabular(div()).font_family(mono).child(SharedString::from(caret));
+        Some(row.child(caret).into_any_element())
     }
 
     /// Item this tile belongs to.
@@ -652,13 +659,13 @@ impl FileView {
 
     /// The editor's text as it stands (the text about to arrive, while one is pending).
     #[must_use]
-    pub fn text(&self, cx: &gpui::App) -> String {
+    pub fn text(&self, cx: &App) -> String {
         self.pending_text.clone().unwrap_or_else(|| self.editor.read(cx).value().to_string())
     }
 
     /// Lines in the editor.
     #[must_use]
-    pub fn line_count(&self, cx: &gpui::App) -> usize {
+    pub fn line_count(&self, cx: &App) -> usize {
         match &self.pending_text {
             Some(text) => text.split('\n').count(),
             None => self.editor.read(cx).text().lines_len(),
@@ -716,14 +723,14 @@ impl FileView {
 
     /// The caret's line and column, 1-based: what the tile's foot line says.
     #[must_use]
-    pub fn caret(&self, cx: &gpui::App) -> (u32, u32) {
+    pub fn caret(&self, cx: &App) -> (u32, u32) {
         let at = self.editor.read(cx).cursor_position();
         (at.line.saturating_add(1), at.character.saturating_add(1))
     }
 
     /// Open the file in the person's own editor at the caret's line, or the line in view while
     /// the body shows no text ([`open_with`]).
-    fn open_in_editor(&self, cx: &gpui::App) {
+    fn open_in_editor(&self, cx: &App) {
         let line = if self.shows_text() { self.reading_line(cx) } else { self.focus_line_number() };
         if let Some(opening) = open_with::opening(self.worker, &self.path, line, cx) {
             open_with::open(&opening, cx);
@@ -732,7 +739,7 @@ impl FileView {
 
     /// The caret's line, 1-based.
     #[must_use]
-    pub fn reading_line(&self, cx: &gpui::App) -> Option<u32> {
+    pub fn reading_line(&self, cx: &App) -> Option<u32> {
         let line = self.pending_line.unwrap_or_else(|| {
             usize::try_from(self.editor.read(cx).cursor_position().line).unwrap_or(0)
         });
@@ -750,7 +757,7 @@ impl FileView {
 
     /// Whether the tile has the keyboard, in its editor, its find bar or itself.
     #[must_use]
-    pub fn focused(&self, window: &Window, cx: &gpui::App) -> bool {
+    pub fn focused(&self, window: &Window, cx: &App) -> bool {
         self.focus_handle.contains_focused(window, cx)
     }
 
@@ -1018,7 +1025,7 @@ impl FileView {
     /// One still waiting to be laid over the first read is that edit. The text is shared with
     /// the editor, not copied.
     #[must_use]
-    pub fn backup(&self, cx: &gpui::App) -> Option<Backup> {
+    pub fn backup(&self, cx: &App) -> Option<Backup> {
         if let Some(kept) = &self.restoring {
             return Some(kept.clone());
         }
@@ -1347,7 +1354,7 @@ impl FileView {
     /// One line about the file for a screen reader: "212 lines, edited", "binary, 1.2 MB",
     /// "missing: No such file".
     #[must_use]
-    pub fn summary(&self, cx: &gpui::App) -> String {
+    pub fn summary(&self, cx: &App) -> String {
         match &self.read {
             None if self.away => OPENS_WHEN_BACK.to_owned(),
             None | Some(FileRead::Streamed { .. }) => READING.to_owned(),
@@ -1417,7 +1424,7 @@ impl FileView {
                     cx.emit(FileViewEvent::Run(pager.clone()));
                 }),
             ));
-        self.notice(Symbol::DocText, TOO_LARGE, Some(too_large_detail(size)), Some(ways))
+        self.notice(Symbol::Doc, TOO_LARGE, Some(too_large_detail(size)), Some(ways))
     }
 
     /// The line the tile was opened at, 1-based, for a command that opens the file there.
@@ -1581,7 +1588,7 @@ impl FileView {
         part: &'static str,
         label: &'static str,
         kind: ButtonKind,
-        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -1680,7 +1687,6 @@ impl Render for FileView {
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
         let author = self.render_author(cx);
-        let foot = self.render_foot(cx);
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size;
@@ -1698,7 +1704,7 @@ impl Render for FileView {
                 self.notice(Symbol::Doc, NOT_TEXT, Some(size_label(*size)), None)
             }
             Some(FileRead::Missing { error }) if self.base.is_none() => {
-                self.notice(Symbol::DocText, CANNOT_READ, Some(error.clone()), None)
+                self.notice(Symbol::Doc, CANNOT_READ, Some(error.clone()), None)
             }
             Some(FileRead::Media { .. }) if self.base.is_none() => self.render_preview(cx),
             Some(_) if self.previewing() => self.render_reading(cx),
@@ -1759,10 +1765,23 @@ impl Render for FileView {
             .children(bar)
             .children(waiting)
             .child(body)
-            .children(foot)
             .children(author)
             .children(search)
             .children(goto)
+    }
+}
+
+/// A file tile's facts as a view of their own ([`FileView::facts`]): the tab bar draws this
+/// entity, so the caret's every move draws the facts again and not the panes around them.
+#[derive(Debug)]
+pub struct FileFacts {
+    file: WeakEntity<FileView>,
+}
+
+impl Render for FileFacts {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let facts = self.file.upgrade().and_then(|file| file.read(cx).render_facts(cx));
+        div().flex_none().flex().items_center().children(facts)
     }
 }
 

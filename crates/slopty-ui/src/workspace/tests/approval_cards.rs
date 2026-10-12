@@ -95,10 +95,10 @@ fn an_agent_out_of_sight_raises_a_card_that_answers_it(cx: &mut TestAppContext) 
 
     let card = cx.debug_bounds(leak(format!("card-{yes_no}"))).expect("the approval's card");
     let other = cx.debug_bounds(leak(format!("card-{asks}"))).expect("the question's card");
-    let bar = cx.debug_bounds("titlebar").expect("the title bar");
+    let bar = cx.debug_bounds("cluster").expect("the window's cluster");
     let window = cx.update(|window, _| window.viewport_size());
     assert_eq!(card.size.width, px(CARD_W), "360 wide");
-    assert!(card.top() > bar.bottom(), "under the title bar");
+    assert!(card.top() > bar.bottom(), "under the top line");
     let gap = window.width - card.right();
     assert!(gap > px(0.0) && gap <= px(Theme::default().spacing.md), "at the right: {gap:?}");
     assert!(card.bottom() <= other.top(), "the newest on top");

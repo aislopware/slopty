@@ -182,10 +182,7 @@ impl ReviewView {
             return div().into_any_element();
         };
         let id = format!("review-context-{at}-{g}-{ix}");
-        div()
-            .debug_selector(move || id)
-            .child(self.ink(at).unified_numbered(line))
-            .into_any_element()
+        div().debug_selector(move || id).child(self.ink(at).unified(line)).into_any_element()
     }
 }
 

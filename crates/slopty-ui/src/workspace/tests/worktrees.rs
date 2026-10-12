@@ -159,6 +159,11 @@ fn the_exited_thread_and_the_folder_in_a_worktree_offer_its_removal(cx: &mut Tes
     cx.run_until_parked();
     let told = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
     assert!(told.starts_with("Kept the worktree: ") && told.contains("not committed"), "{told}");
+    // A failure floats over the panes until dismissed.
+    let dismiss = cx.debug_bounds("toast-dismiss").expect("a failure offers its dismissal");
+    cx.simulate_click(dismiss.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("notices").is_none(), "the notice gone before the press");
 
     let folder = arrives(&view, cx, &studio, ItemKind::Folder { path: ROOT.to_owned() }, 2);
     let listed = slopty_proto::folder::Listing::Listed {

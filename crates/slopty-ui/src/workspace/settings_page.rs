@@ -1,14 +1,14 @@
 //! The settings as a page of the workspace (audit row 9, `MonoCode`'s settings view).
 //!
 //! The app hands the workspace its settings editor ([`WorkspaceView::show_settings`]) and the
-//! page takes the panes' place under the title bar; the foot bar goes with the panes, as
-//! `MonoCode`'s usage footer does. While the navigator is docked its body becomes the form's
-//! section list (its lights row stays), so the sections sit where the projects were; anywhere
-//! else (hidden, over the panes, a phone's home) the navigator stays the navigator and the
-//! page carries the list itself, or one column of every section on a narrow window.
+//! page takes the panes' place under the window's own top line. While the navigator is docked
+//! its body becomes the form's section list and its header row the list's head (← and the
+//! filter), so the sections sit where the projects were; anywhere else (hidden, over the panes, a
+//! phone's home) the navigator stays the navigator and the page carries the list itself, or one
+//! column of every section on a narrow window.
 //!
 //! The page leaves by its own ways (Back, Esc, ⌘↩) and when the person turns to the work: an
-//! action on the tiling (a title tab pressed, a pane focused by key) or the bell. Leaving asks
+//! action on the tiling (a tab shown, a pane focused by key) or the bell. Leaving asks
 //! the editor to close, so what was waiting for a pause is written first and the app takes the
 //! page back ([`WorkspaceView::show_settings`] with nothing).
 
@@ -92,6 +92,17 @@ impl WorkspaceView {
         let form = self.settings.as_ref()?.read(cx).form().clone();
         let draw = slopty_kit::draw::Draw::new(cx, form.downgrade());
         Some(form.read(cx).sections(window, &draw).into_any_element())
+    }
+
+    /// The section list's head row, ← and the filter, as the navigator's header row holds it
+    /// while the list is its body.
+    pub(super) fn render_settings_head(&self, cx: &gpui::App) -> Option<gpui::AnyElement> {
+        if !self.settings_listed() {
+            return None;
+        }
+        let form = self.settings.as_ref()?.read(cx).form().clone();
+        let draw = slopty_kit::draw::Draw::new(cx, form.downgrade());
+        Some(form.read(cx).list_head(&draw).into_any_element())
     }
 
     /// The page in the panes' place, while it is up.

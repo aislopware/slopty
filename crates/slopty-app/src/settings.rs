@@ -372,7 +372,8 @@ mod tests {
         let typography = theme_for(&s, true).typography;
         assert_eq!((typography.prose(), typography.ui_size), (20.0, 14.0), "the chrome stays");
         s.font.prose_size = 2.0;
-        assert_eq!(theme_for(&s, true).typography.prose(), 14.0);
+        let default = slopty_theme::Typography::default().prose_size;
+        assert_eq!(theme_for(&s, true).typography.prose(), default, "Delta's 15");
     }
 
     /// The app's own save is not a change for the watcher, so its warnings are not shown twice;

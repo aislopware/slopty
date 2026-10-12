@@ -37,7 +37,8 @@
 //!
 //! A project's held-up work comes only as the server's notice ([`Heard::stack`]): each is a
 //! note of its own, stacked with the project's others, leading to its orchestrator. With the
-//! app in front the app says it as a notice instead.
+//! app in front it is not said at all: the navigator's attention rows and the bell's count say
+//! it, and the window never carries a sentence about it.
 //!
 //! With notifications turned off in the system's settings, a note is dropped where nobody sees
 //! it. So the first time one goes unsaid in a run, coming back to the app says notifications
@@ -823,24 +824,6 @@ impl WorkspaceView {
             .map_or_else(|| self.route_title(route), str::to_owned);
         let body = notify::pushed::notice_body(notice);
         Some(Heard { route, kind: notice.kind, title, body, stack: None })
-    }
-
-    /// A project's notice said in the workspace while the app is in front: the task and how
-    /// it stands, as the server words it, named by its project only while that project's
-    /// orchestrator is not on the workspace in view, where the breadcrumb already names it.
-    pub fn say_project_notice(&mut self, heard: &Heard, cx: &mut Context<Self>) {
-        let route = heard.route;
-        let in_view = route.item.is_some_and(|item| {
-            let tile = TileRef { worker: route.worker, item };
-            let shown = self.layout.shown_index();
-            self.layout.position(tile).is_some_and(|at| Some(at.project) == shown)
-        });
-        let text = if in_view || heard.title.trim().is_empty() {
-            heard.body.clone()
-        } else {
-            format!("{}: {}", heard.title, heard.body)
-        };
-        self.show_notice(text, cx);
     }
 
     /// A project's notice, at `entry` of `project`'s timeline: a note that leads to its

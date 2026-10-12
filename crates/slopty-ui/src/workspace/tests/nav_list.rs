@@ -215,8 +215,8 @@ fn needs_you_lists_a_waiting_tile_scrolled_out_of_view(cx: &mut TestAppContext) 
 
 /// A row never repeats what its header says: a shell with no directory yet, or only its home,
 /// sits under its worker's name with nothing to add, and one at its project's root under the
-/// project's; their rows are one line. A directory below the root, a branch, a command or an
-/// agent's words give a row its second.
+/// project's. Every row is one line: a directory below the root, a branch, a command or an
+/// agent's words are its hint.
 #[gpui::test]
 fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -238,14 +238,10 @@ fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
         f32::from(cx.debug_bounds(selector("nav-tile", t.item)).expect("drawn").size.height)
     };
     let theme = Theme::default();
-    for one in [bare, home, root] {
+    for one in [bare, home, root, work] {
         let want = navigator::row_height(&theme, slopty_kit::kit::Row::One);
-        assert!((height(cx, one) - want).abs() < 0.5, "{one:?}");
+        assert!((height(cx, one) - want).abs() < 0.5, "one line, its place its hint: {one:?}");
     }
-    let two = navigator::row_height(&theme, slopty_kit::kit::Row::Two);
-    assert!((height(cx, work) - two).abs() < 0.5);
-    let meta = |id: ItemId| format!("nav-meta-{}", id.as_uuid());
-    assert!(cx.debug_bounds(Box::leak(meta(bare.item).into_boxed_str())).is_none());
 }
 
 /// A tile's kind glyph's slot starts under its worker's name, the list reading as a tree.

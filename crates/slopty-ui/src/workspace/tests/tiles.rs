@@ -67,72 +67,55 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
     assert_eq!(cwd_tail("/Users/w/src", Some("/Users/w/")), "~/src");
 }
 
-/// A header is its title, then its context, muted with no separator: a file's directory, a
-/// shell's (none when the title already names it: the breadcrumb has the path). (That the
-/// context is in the UI
-/// face is `kit`'s `the_mono_face_is_for_addresses`: the test platform
-/// shapes every family alike.)
+/// A tile alone in its pane has its pane's tab bar all the same, with one cell: the tab names
+/// it, its glyph on the pane's 8 pt edge, and no place follows it (a shell's prompt says where
+/// it is, a file's tab its folder where two read alike). A double-click on the cell names the
+/// tile in the cell itself.
 #[gpui::test]
-fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext) {
+fn a_lone_tile_has_a_tab_cell(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
+    let mut fake = connect(&view, cx, 1, "studio");
     let shell =
         opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/Users/w/src/slopty"));
     let main = "/Users/w/src/slopty/src/main.rs".to_owned();
     let file = arrives(&view, cx, &fake, ItemKind::File { path: main }, 2);
     beside(&view, cx, file, shell, slopty_client::layout::Side::Right);
+    for tile in [shell, file] {
+        let header = cx.debug_bounds(selector("title", tile.item)).expect("its tab bar");
+        let item = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+        assert_eq!(header.origin, item.origin, "{tile:?}: at its tile's top");
+        let cell = cx.debug_bounds(selector("tab", tile.item)).expect("its one cell");
+        assert!(header.contains(&cell.center()), "{tile:?}: in the bar: {cell:?} {header:?}");
+        assert_eq!(cell.size.height, header.size.height, "{tile:?}: the bar's full height");
+        assert!(cx.debug_bounds(selector("place", tile.item)).is_none(), "{tile:?}: no place");
+    }
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal slopty"))), "{nodes:#?}");
-    assert!(nodes.iter().any(|n| n.is("Label", Some("src"))), "the file's: {nodes:#?}");
-    assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
-    assert!(cx.debug_bounds(selector("place", file.item)).is_some(), "{file:?}");
-    assert!(cx.debug_bounds(selector("place", shell.item)).is_none(), "named by its title");
-}
+    assert!(nodes.iter().any(|n| n.is("Tab", Some("main.rs"))), "{nodes:#?}");
 
-/// A narrow tile keeps its name whole and lets where it is give way.
-#[gpui::test]
-fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    // Room for two panes side by side, each too narrow for the whole path.
-    cx.simulate_resize(size(px(1200.0), px(600.0)));
-    let fake = connect(&view, cx, 1, "studio");
-    let named = |session| Item {
-        id: ItemId::new(),
-        kind: ItemKind::Terminal { session },
-        name: Some("release notes".to_owned()),
-        facts: BTreeMap::new(),
-    };
-    let (here, nowhere) = (SessionId::new(), SessionId::new());
-    let (placed, bare) = (named(here), named(nowhere));
-    let (placed_id, bare_id) = (placed.id, bare.id);
-    let key = fake.key;
-    view.update_in(cx, |v, _window, cx| {
-        let deep = "/srv/deployments/production-eu-west/releases/2026-10-06/artifacts/signed";
-        v.session_opened(key, summary(here, Some(deep)), cx);
-        v.session_opened(key, summary(nowhere, None), cx);
-        for (version, item) in [(1, placed), (2, bare)] {
-            let op = ItemOp::Add(item);
-            v.apply_sync(key, ItemSync::Delta { version, by: fake.me, op }, cx);
-        }
-    });
+    fake.drain();
+    let at = cx.debug_bounds(selector("tab", shell.item)).expect("its cell").center();
+    for click_count in [1, 2] {
+        let (button, modifiers) = (MouseButton::Left, Modifiers::default());
+        cx.simulate_event(gpui::MouseDownEvent {
+            button,
+            position: at,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent { button, position: at, modifiers, click_count });
+    }
     cx.run_until_parked();
-    // Each alone in its pane, side by side in one tab, shown in its turn.
-    let tile = |id| TileRef { worker: key, item: id };
-    view.update_in(cx, |v, _w, cx| v.focus_tile(tile(placed_id), cx));
+    let field = cx.debug_bounds(selector("rename", shell.item)).expect("the field is up");
+    let cell = cx.debug_bounds(selector("tab", shell.item)).expect("its cell");
+    assert!(cell.contains(&field.center()), "in the cell: {field:?} {cell:?}");
+    cx.simulate_keystrokes("a p i enter");
     cx.run_until_parked();
-    beside(&view, cx, tile(bare_id), tile(placed_id), slopty_client::layout::Side::Right);
-    let width = |cx: &mut VisualTestContext, what: &str, item: ItemId| {
-        let b = cx.debug_bounds(selector(what, item)).unwrap_or_else(|| panic!("{what} drawn"));
-        f32::from(b.size.width)
-    };
-    let alone = width(cx, "name", bare_id);
-    view.update_in(cx, |v, _w, cx| v.focus_tile(tile(placed_id), cx));
-    cx.run_until_parked();
-    let title = width(cx, "name", placed_id);
-    assert!((title - alone).abs() < 1.0, "the title is whole beside its place: {title} vs {alone}");
-    let place = width(cx, "place", placed_id);
-    // The path is three times what the header leaves it.
-    assert!(place > 0.0 && place < 200.0, "the place gave way: {place}");
+    let api = ClientMsg::Items(ItemOp::Rename { id: shell.item, name: Some("api".to_owned()) });
+    let items: Vec<_> =
+        fake.drain().into_iter().filter(|m| matches!(m, ClientMsg::Items(_))).collect();
+    assert_eq!(items, vec![api], "the name alone");
 }
 
 /// The worker's name is worth a chip only when the workspace holds another worker's tile it
@@ -168,8 +151,9 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 
 /// Every tile fills its pane: square, with no ring and no shadow of its own, the focused one
 /// included, the sashes between panes the only lines round it. Every header is its pane's tab
-/// row at the tile's top, a remote window's too: on the pane's ground with the one line along its
-/// foot (`focus::the_focused_tile_is_said_by_its_titles_tone_and_its_dot` for the focus).
+/// bar at the tile's top, a remote window's too: Zed's tab bar plane with the one line along its
+/// foot, its one cell on the pane's ground and in no pill
+/// (`focus::the_focused_tile_is_said_by_its_titles_tone_and_its_dot` for the focus).
 #[gpui::test]
 fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -179,7 +163,7 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
     let window = arrives(&view, cx, &fake, remote, 2);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 3);
     assert_eq!(focused(&view, cx), Some(second));
-    // Each in a pane of its own in one tab: a tab's one tile has no header of its own.
+    // Each in a pane of its own in one tab.
     view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
     cx.run_until_parked();
     beside(&view, cx, window, first, slopty_client::layout::Side::Right);
@@ -202,8 +186,9 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         assert_eq!(header.origin, bounds.origin, "{tile:?}: the header is the tile's top");
         let theme = Theme::default();
         let fill = |q: &gpui::Quad| q.background.as_solid();
+        let plane = slopty_kit::colors::hsla(theme.surfaces.tab_bar);
         let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
-        assert!(row.is_empty(), "{tile:?}: the row lies on the pane's ground: {row:?}");
+        assert!(row.contains(&plane), "{tile:?}: the bar on the tab bar's plane: {row:?}");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         let line = slopty_kit::colors::hsla(theme.surfaces.border);
         let foot = quads.iter().any(|q| {
@@ -212,10 +197,13 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
                 && (q.bounds.size.width.0 / scale - f32::from(header.size.width)).abs() < 0.5
         });
         assert!(foot, "{tile:?}: the one line along its foot");
-        let title = cx.debug_bounds(selector("lone-title", tile.item)).expect("its title");
+        let cell = cx.debug_bounds(selector("tab", tile.item)).expect("its one cell");
         let pill = slopty_kit::colors::hsla(theme.surfaces.selected);
-        let boxed = quads_at(cx, title).iter().any(|q| fill(q) == Some(pill));
+        let boxed = quads_at(cx, cell).iter().any(|q| fill(q) == Some(pill));
         assert!(!boxed, "{tile:?}: the title stands in no pill");
+        let ground = slopty_kit::colors::hsla(theme.surfaces.ground);
+        let open = quads_at(cx, cell).iter().any(|q| fill(q) == Some(ground));
+        assert!(open, "{tile:?}: the cell on show is the work's ground");
     }
 }
 
@@ -307,47 +295,44 @@ fn no_body_is_veiled(cx: &mut TestAppContext) {
     }
 }
 
-/// The header leads with one fixed slot on its inset, where the tile's kind always sits, and
-/// its status mark, once there is one, ends it.
+/// A tab leads with its tile's kind, on the cell's inset past the split's focus dot, until the
+/// tile has a state worth a mark (it works, waits, failed or finished): then the mark takes the
+/// lead's place, said once, and the kind comes back when it goes.
 #[gpui::test]
-fn the_header_leads_with_its_kind_and_ends_with_its_state(cx: &mut TestAppContext) {
+fn a_tabs_lead_is_its_kind_until_a_state_takes_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = SessionId::new();
     let tile = opens(&view, cx, &fake, shell, fake.me, 1);
     paired(&view, cx, &fake, tile, 2);
-    let slot_at = |cx: &mut VisualTestContext| {
-        cx.debug_bounds(selector("kind", tile.item)).expect("the slot is always drawn")
-    };
-    let header = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
-    let rest = slot_at(cx);
+    let cell = cx.debug_bounds(selector("tab", tile.item)).expect("its cell");
+    let slot = cx.debug_bounds(selector("tab-slot", tile.item)).expect("the kind leads");
     // In a split the focus dot and its gap lead the mark.
     let look = (tab_look::FOCUS_DOT, tab_look::TAB_GAP);
-    let inset = tab_look::lone_inset(&Theme::default()) + look.0 + look.1;
-    assert!((f32::from(rest.left() - header.left()) - inset).abs() < 0.5, "on the inset");
-    assert!(marks(cx).iter().all(|m| m != "Failed"), "at rest: the kind");
+    let inset = tab_look::cell_inset(&Theme::default()) + look.0 + look.1;
+    assert!((f32::from(slot.left() - cell.left()) - inset).abs() < 0.5, "on the inset");
+    assert!(cx.debug_bounds(selector("tab-status", tile.item)).is_none(), "at rest: the kind");
     view.update_in(cx, |v, _w, cx| {
-        // The failed command's own rows are off screen: only the header can say it.
+        // The failed command's own rows are off screen: only the tab can say it.
         let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
-    assert!(marks(cx).iter().any(|m| m == "Failed"), "the failure is marked");
-    assert_eq!(slot_at(cx), rest, "the kind stays in its square");
-    let state = cx.debug_bounds(selector("status", tile.item)).expect("the state's mark");
-    let title = cx.debug_bounds(selector("title", tile.item)).expect("the header");
-    assert!(state.left() > title.center().x, "at the header's end: {state:?} {title:?}");
+    cx.run_until_parked();
+    let state = cx.debug_bounds(selector("tab-status", tile.item)).expect("the failure's mark");
+    assert!((state.left() - slot.left()).abs() < px(0.5), "in the lead's place: {state:?}");
+    assert!(cx.debug_bounds(selector("tab-slot", tile.item)).is_none(), "said once");
 }
 
-/// A tile whose agent waits on the human says so once: the waiting glyph that ends its header,
-/// a button to the prompt, its words to a screen reader. No bar along the top and no outline
-/// repeat it.
+/// A tile whose agent waits on the human says so once, in its tab's lead; no bar along the top
+/// and no outline repeat it, and a tile beside it says nothing.
 #[gpui::test]
-fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
+fn a_tile_that_needs_you_says_so_once_in_its_tab(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
     let other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
+    beside(&view, cx, other, waiting, slopty_client::layout::Side::Right);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(
             AgentEvent {
@@ -365,19 +350,11 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
         v.show_face(agent, false, cx);
     });
     cx.run_until_parked();
-    let glyph = cx.debug_bounds(selector("agent", waiting.item)).expect("the glyph");
+    let glyph = cx.debug_bounds(selector("tab-status", waiting.item)).expect("the mark");
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
     assert!(glyph.top() >= header.top() && glyph.bottom() <= header.bottom(), "in the header");
-    // A statement, not a question the click cannot answer; what the click does is said apart.
-    let nodes = tree(cx);
-    let badge = nodes
-        .iter()
-        .find(|n| n.label.as_deref() == Some("Needs approval: Wants to run a command"))
-        .expect("the glyph says what the agent waits for");
-    assert_eq!(badge.role, "Button");
-    assert_eq!(badge.description.as_deref(), Some(CHROME_WORDS[0]));
     assert!(cx.debug_bounds(selector("attention", waiting.item)).is_none(), "no bar");
-    assert!(cx.debug_bounds(selector("agent", other.item)).is_none(), "only on that one");
+    assert!(cx.debug_bounds(selector("tab-status", other.item)).is_none(), "only on that one");
     let tile = cx.debug_bounds(selector("item", waiting.item)).expect("drawn");
     let ring = slopty_kit::colors::hsla(Theme::default().surfaces.stroke);
     let edges = quads_at(cx, tile);
@@ -385,17 +362,15 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
     assert!(edges.all(|q| q.border_color == ring), "no outline but the panel's ring");
 }
 
-/// A header holds no fill at rest past its row and its tab: its state is a glyph at its end, not
-/// a chip. The leading
-/// slot keeps the agent's glyph rather than a warn mark that would say the state again, and an
-/// agent the worker guessed at offers nothing to install.
+/// A header holds no fill at rest past its bar and its cell: its state is a glyph, not a chip,
+/// and an agent the worker guessed at offers nothing to install.
 #[gpui::test]
-fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAppContext) {
+fn a_header_holds_no_fill(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let agent = SessionId::new();
     let waiting = opens(&view, cx, &fake, agent, fake.me, 1);
-    // Beside another, which has the focus: a focused pane's tab wears the focus edge.
+    // Beside another, which has the focus.
     let other = paired(&view, cx, &fake, waiting, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(other, cx));
     view.update_in(cx, |v, _w, cx| {
@@ -416,10 +391,6 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
     });
     cx.run_until_parked();
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
-    let state = cx.debug_bounds(selector("agent", waiting.item)).expect("the state's glyph");
-    let slot = cx.debug_bounds(selector("kind", waiting.item)).expect("the slot");
-    let mark = cx.debug_bounds(selector("status", waiting.item)).expect("its mark");
-    assert!(state.contains(&mark.center()), "the state is its mark: {mark:?} {state:?}");
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let inside = |q: &gpui::Quad, b: Bounds<Pixels>| {
         let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
@@ -438,32 +409,27 @@ fn a_header_holds_no_fill_and_its_slot_does_not_repeat_its_state(cx: &mut TestAp
             .any(|c| fill == Some(slopty_kit::colors::hsla(*c)))
             || [s.stroke, s.border].iter().any(|l| fill == Some(slopty_kit::colors::hsla(*l)))
     };
+    // The window's cluster ends the top-right header, its bell's count badge a fill of its own.
+    let cluster = cx.debug_bounds("cluster");
     let fills: Vec<&gpui::Quad> = quads
         .iter()
         .filter(|q| inside(q, header) && !q.background.is_transparent() && !surface(q))
+        .filter(|q| cluster.is_none_or(|c| !inside(q, c)))
         .collect();
     assert!(fills.is_empty(), "no fill in the header: {fills:#?}");
     assert!(cx.debug_bounds(selector("hooks", waiting.item)).is_none(), "no hooks offered");
-    let nodes = tree(cx);
-    let in_slot = |n: &&slopty_kit::a11y::Node| {
-        let [x, y, ..] = n.bounds;
-        slot.contains(&point(px(x + 1.0), px(y + 1.0)))
-    };
-    assert!(
-        !nodes.iter().filter(in_slot).any(|n| n.is("Image", Some("Needs you"))),
-        "the end says it; the slot keeps the agent's glyph"
-    );
 }
 
-/// One mark says how each tile is doing: its agent's state, a shell's failed last command, and
-/// a worker out of reach.
+/// One mark says how each tile is doing: its agent's state and a shell's failed last command,
+/// in its tab and its navigator row, once each.
 #[gpui::test]
-fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestAppContext) {
+fn the_status_mark_follows_the_agent_and_the_last_exit(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let (agent, shell) = (SessionId::new(), SessionId::new());
     let agent_tile = opens(&view, cx, &fake, agent, fake.me, 1);
     let shell_tile = opens(&view, cx, &fake, shell, fake.me, 2);
+    beside(&view, cx, shell_tile, agent_tile, slopty_client::layout::Side::Right);
     assert!(marks(cx).iter().all(|m| m != "Needs you" && m != "Failed"), "nothing to say yet");
 
     view.update_in(cx, |v, _w, cx| {
@@ -480,40 +446,21 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
             },
             cx,
         );
-        // On its TUI, where the header's glyph is a way to its prompt.
         v.show_face(agent, false, cx);
-        // The failed command's own rows are off screen: only the header can say it.
+        // The failed command's own rows are off screen: only the tab can say it.
         let rows = [("$ ", SemanticMark::Prompt { exit: Some(1), input: Some(2) })];
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
-    // A waiting agent's news ends its header, its title tab and its navigator row, each once;
-    // its slot keeps the agent's glyph.
-    assert!(cx.debug_bounds(selector("agent", agent_tile.item)).is_some(), "the agent waits");
+    assert!(cx.debug_bounds(selector("tab-status", agent_tile.item)).is_some(), "it waits");
     let waiting = drawn.iter().filter(|m| *m == "Needs you").count();
-    assert_eq!(waiting, 3, "the glyph in the header, its tab's and its row's: {drawn:?}");
+    assert_eq!(waiting, 2, "its tab's lead and its row's: {drawn:?}");
     assert!(drawn.iter().any(|m| m == "Failed"), "the shell's last command failed: {drawn:?}");
-
-    let key = fake.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
-    });
-    let nodes = tree(cx);
-    let headers: Vec<Bounds<Pixels>> = [agent_tile, shell_tile]
-        .iter()
-        .filter_map(|t| cx.debug_bounds(selector("title", t.item)))
-        .collect();
-    let in_a_header = |n: &slopty_kit::a11y::Node| {
-        let [x, y, ..] = n.bounds;
-        headers.iter().any(|h| h.contains(&point(px(x), px(y))))
-    };
-    let away = nodes.iter().filter(|n| n.is("Image", Some("Away")) && in_a_header(n)).count();
-    assert_eq!(away, 2, "both headers say away: {nodes:#?}");
 }
 
-/// A double-click on the header's empty part zooms its pane over the tab, as ⇧⌘↩ does and a
-/// Mac's title bar zooms its window; one on its name names it. Close, under the pointer, does
-/// what ⌘W does.
+/// A double-click on the empty run of a pane's tab bar below the top line zooms its pane over
+/// the tab, as ⇧⌘↩ does and a Mac's title bar zooms its window; one on its tab names it. Close,
+/// under the pointer, does what ⌘W does.
 #[gpui::test]
 fn the_header_zooms_names_and_closes_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -524,8 +471,8 @@ fn the_header_zooms_names_and_closes_its_tile(cx: &mut TestAppContext) {
         f32::from(cx.debug_bounds(selector("item", second.item)).expect("drawn").size.width)
     };
     let before = width(cx);
-    let name = cx.debug_bounds(selector("name", second.item)).expect("its name");
-    let empty = point(name.right() + px(24.0), name.center().y);
+    let cell = cx.debug_bounds(selector("tab", second.item)).expect("its cell");
+    let empty = point(cell.right() + px(24.0), cell.center().y);
     double_click(cx, empty);
     assert!(width(cx) > before + 100.0, "zoomed: {before} → {}", width(cx));
     let name = cx.debug_bounds(selector("name", second.item)).expect("drawn");
@@ -750,10 +697,10 @@ fn the_exited_pill_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("lines-below").is_none(), "in the count's place");
 }
 
-/// Notices stack in the title bar's lane on its right, no wider than 400 pt, two at most (a
-/// third pushes the oldest out), and each goes after six seconds.
+/// Notices hang under the top line on its right, no wider than Delta's 465 pt, two at most (a third
+/// pushes the oldest out), and each goes after six seconds.
 #[gpui::test]
-fn notices_stack_two_in_the_title_bar_and_go(cx: &mut TestAppContext) {
+fn notices_stack_two_under_the_top_line_and_go(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _fake = connect(&view, cx, 1, "studio");
     let long = "a word that goes on ".repeat(10);
@@ -772,10 +719,9 @@ fn notices_stack_two_in_the_title_bar_and_go(cx: &mut TestAppContext) {
         .find(|n| n.is("Status", Some(long.as_str())))
         .map_or_else(|| panic!("the long notice is drawn: {nodes:#?}"), |n| n.bounds);
     let workspace = cx.debug_bounds("workspace").expect("drawn");
-    let titlebar = cx.debug_bounds("titlebar").expect("drawn");
-    assert!(w <= 400.0, "capped at 400 pt: {w}");
+    assert!(w <= 465.0, "capped at 465 pt: {w}");
     assert!(x > f32::from(workspace.center().x), "on the right: {x}");
-    assert!(y < f32::from(titlebar.bottom()), "in the title bar: {y}");
+    assert!(y >= Theme::default().density.header, "under the top line: {y}");
 
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
@@ -802,9 +748,8 @@ fn the_closed_notice_takes_the_tile_back(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("closed").is_none(), "the offer is taken");
 }
 
-/// A header at rest has no buttons, focused or not: its state's glyph ends it. Under the
-/// pointer the face toggle and close stand over the glyph's place on the header's ground,
-/// keeping no room at rest; and the swap moves nothing.
+/// A header at rest has no buttons, focused or not. Under the pointer the face toggle and close
+/// stand at its end on the header's ground, keeping no room at rest, and the swap moves nothing.
 #[gpui::test]
 fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -814,34 +759,13 @@ fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
     let other = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     // The face toggle is one of the controls; its tile shows the TUI.
     agent_thread(&view, cx, fake.key, agent);
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(
-            AgentEvent {
-                session: agent,
-                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
-                agent_session: None,
-                detail: None,
-                attention: false,
-                source: AgentSource::Hook,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            },
-            cx,
-        );
-    });
     view.update_in(cx, |v, _w, cx| v.show_face(agent, false, cx));
     cx.simulate_mouse_move(point(px(1.0), px(799.0)), None, Modifiers::none());
     cx.run_until_parked();
     let bounds = |cx: &mut VisualTestContext, part: &str| {
         cx.debug_bounds(selector(part, waiting.item)).unwrap_or_else(|| panic!("{part} drawn"))
     };
-    let (header, name, glyph) = (bounds(cx, "title"), bounds(cx, "name"), bounds(cx, "agent"));
-    let inset = Theme::default().spacing.inset();
-    assert!(
-        (f32::from(header.right() - glyph.right()) - inset).abs() < 0.5,
-        "the state ends the header at rest: {glyph:?} in {header:?}"
-    );
-    assert!(name.right() <= glyph.left(), "the title ends before it: {name:?} {glyph:?}");
+    let (header, name) = (bounds(cx, "title"), bounds(cx, "name"));
     // Neither the focused tile nor the other draws a control: close and the face toggle are
     // there for the keyboard and a screen reader, and drawn only under the pointer.
     for tile in [waiting, other] {
@@ -851,11 +775,15 @@ fn a_header_at_rest_has_no_buttons(cx: &mut TestAppContext) {
         }
     }
 
-    cx.simulate_mouse_move(header.center(), None, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(name.right() + px(160.0), header.center().y),
+        None,
+        Modifiers::none(),
+    );
     cx.run_until_parked();
     assert_eq!(bounds(cx, "name"), name, "hovered: the title stays");
     let controls = bounds(cx, "controls");
-    assert!(controls.right() <= glyph.right() + px(0.5), "over the glyph's place: {controls:?}");
+    assert!(controls.right() <= header.right(), "at the header's end: {controls:?}");
     let close = cx.debug_bounds(selector("close", waiting.item)).expect("close drawn");
     assert!(controls.contains(&close.center()), "close is one of them");
     let face = cx.debug_bounds(selector("face-thread", waiting.item)).expect("the face toggle");
@@ -875,13 +803,13 @@ fn a_pane_of_tabs_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let first = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     let single = f32::from(
-        cx.debug_bounds(selector("kind", first.item)).expect("the slot").left()
-            - cx.debug_bounds(selector("title", first.item)).expect("the header").left(),
+        cx.debug_bounds(selector("tab-slot", first.item)).expect("the slot").left()
+            - cx.debug_bounds(selector("tab", first.item)).expect("its cell").left(),
     );
     // In a split the focus dot and its gap lead the mark.
     let look = (tab_look::FOCUS_DOT, tab_look::TAB_GAP);
-    let inset = tab_look::lone_inset(&Theme::default()) + look.0 + look.1;
-    assert!((single - inset).abs() < 0.5, "a single header's slot on the grid: {single}");
+    let inset = tab_look::cell_inset(&Theme::default()) + look.0 + look.1;
+    assert!((single - inset).abs() < 0.5, "a lone tile's cell's slot on the grid: {single}");
     one_pane(&view, cx, &[first, second]);
     view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
     cx.run_until_parked();
@@ -893,16 +821,12 @@ fn a_pane_of_tabs_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let (a, b) = (tab(cx, first), tab(cx, second));
     assert_eq!(a.top(), b.top(), "side by side in one row");
     let slot = cx.debug_bounds(selector("tab-slot", first.item)).expect("the tab's slot");
-    let row = cx.debug_bounds(selector("title", second.item)).expect("the pane's header");
-    let tabbed = f32::from(slot.left() - row.left());
-    // One pane now, so no focus dot leads it: the lone header's inset alone.
-    let lone = tab_look::lone_inset(&Theme::default());
-    assert!((tabbed - lone).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
+    let tabbed = f32::from(slot.left() - a.left());
+    // One pane now, so no focus dot leads it: the cell's inset alone.
+    let inset = tab_look::cell_inset(&Theme::default());
+    assert!((tabbed - inset).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
     assert!(a.right() <= b.left(), "in the pane's order");
-    // The pane's tabs, below the title bar's own.
-    let bar = cx.debug_bounds("titlebar").expect("the title bar").bottom();
-    let tabs: Vec<_> =
-        tree(cx).into_iter().filter(|n| n.role == "Tab" && n.bounds[1] >= f32::from(bar)).collect();
+    let tabs: Vec<_> = tree(cx).into_iter().filter(|n| n.role == "Tab").collect();
     assert_eq!(tabs.len(), 2, "{tabs:#?}");
     assert!(
         tree(cx).iter().all(|n| n.label.as_deref() != Some("2/2")),
@@ -1134,20 +1058,6 @@ fn tiles_that_read_alike_are_numbered(cx: &mut TestAppContext) {
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal Terminal 2"))), "{nodes:#?}");
 }
 
-/// A shell titled by the directory it stands in shows no place: the directory above it read as
-/// the cwd, and the breadcrumb has the whole path.
-#[test]
-fn a_place_does_not_repeat_the_title() {
-    use crate::workspace::tile::place_beside;
-    let beside = |place: &str, title: &str| place_beside(place.to_owned(), title);
-    assert_eq!(beside("~/src/slopty", "slopty"), None);
-    assert_eq!(beside("~/drop-here", "drop-here"), None);
-    assert_eq!(beside("/etc", "etc"), None);
-    assert_eq!(beside("slopty", "slopty"), None);
-    assert_eq!(beside("~", "Terminal").as_deref(), Some("~"));
-    assert_eq!(beside("~/src/myslopty", "slopty").as_deref(), Some("~/src/myslopty"));
-}
-
 /// A tile's leading slot at rest shows its kind: an idle agent keeps its glyph rather than a
 /// hollow ring that read as an unticked radio button.
 #[gpui::test]
@@ -1161,8 +1071,8 @@ fn an_idle_agent_keeps_its_kind_in_the_slot(cx: &mut TestAppContext) {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(agent) }, cx);
     });
     cx.run_until_parked();
-    let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
-    assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no state at rest");
+    let slot = cx.debug_bounds(selector("tab-slot", tile.item)).expect("the slot");
+    assert!(cx.debug_bounds(selector("tab-status", tile.item)).is_none(), "no state at rest");
     let idle = slopty_kit::icons::Status::Idle.label();
     let marked = tree(cx).into_iter().any(|n| {
         let [x, y, ..] = n.bounds;
@@ -1218,12 +1128,12 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    let strip = selector("tile-strip", shell.item);
-    assert!(cx.debug_bounds(strip).is_some(), "on a desktop, alone, the title bar is its header");
+    let cell = selector("tab", shell.item);
+    assert!(cx.debug_bounds(cell).is_some(), "on a desktop, alone, its tab bar is its header");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("title", shell.item)).is_none(), "no header on a phone");
-    assert!(cx.debug_bounds(strip).is_none(), "and no strip: the bar is the phone's");
+    assert!(cx.debug_bounds(cell).is_none(), "and no tab: the bar is the phone's");
     assert!(cx.debug_bounds(selector("phone-kind", shell.item)).is_some(), "the tile's kind");
     let title = view.read_with(cx, |v, _| v.item(shell).map(|i| v.tile_title(i))).unwrap();
     let heading = tree(cx).into_iter().find(|n| {
@@ -1352,8 +1262,8 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
     cx.executor().advance_clock(crate::screen::LOADING_GRACE);
     cx.run_until_parked();
     let working = slopty_kit::icons::Status::Working.label();
-    let slot = cx.debug_bounds(selector("kind", tile.item)).expect("the slot");
-    assert!(cx.debug_bounds(selector("status", tile.item)).is_none(), "no header state");
+    let slot = cx.debug_bounds(selector("tab-slot", tile.item)).expect("the slot");
+    assert!(cx.debug_bounds(selector("tab-status", tile.item)).is_none(), "no header state");
     let body = cx.debug_bounds(selector("waiting", tile.item)).expect("the body's block");
     let nodes = tree(cx);
     let in_slot = |n: &slopty_kit::a11y::Node| {

@@ -17,7 +17,7 @@ use std::time::Duration;
 use slopty_client::threads::Sent;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadState, ToolCall, ToolDetail,
+    AskId, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadState, ToolCall, ToolDetail,
     ToolState, Turn, TurnId, TurnState, kind,
 };
 
@@ -83,6 +83,13 @@ pub enum Row {
         /// Its intent.
         intent: IntentId,
     },
+    /// What waits on the person with no call of its own on show (a question, a request about
+    /// no call, a call folded away): its card, after the turns, where the thread is read
+    /// (`docs/decisions/ui.md`, "What waits on the person flows in the thread").
+    Asked {
+        /// The request.
+        ask: AskId,
+    },
 }
 
 impl Row {
@@ -101,6 +108,7 @@ impl Row {
             Self::Fold { turn, part, .. } => (turn, part).hash(&mut h),
             Self::Working { turn } => turn.hash(&mut h),
             Self::Sending { intent } => intent.hash(&mut h),
+            Self::Asked { ask } => ask.hash(&mut h),
         }
         h.finish()
     }
@@ -135,6 +143,18 @@ impl Built {
     fn push(&mut self, row: Row, span: Range<usize>) {
         self.rows.push(row);
         self.spans.push(span);
+    }
+
+    /// The card of `ask`, which waits on the person with no call of its own among the rows,
+    /// after every turn.
+    pub fn ask(&mut self, ask: AskId) {
+        self.push(Row::Asked { ask }, 0..0);
+    }
+
+    /// Whether the call `item` is a row of its own.
+    #[must_use]
+    pub fn shows_call(&self, item: &ItemId) -> bool {
+        self.rows.iter().any(|r| matches!(r, Row::Tool { item: i } if i == item))
     }
 }
 

@@ -180,7 +180,8 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
 }
 
 /// In a tile wide enough for both, the board stands beside the orchestrator's terminal on its
-/// right, behind a hairline, and the terminal stays on show; the board draws no composer, the
+/// right, behind a hairline, as the wide pane, the orchestrator a 420 pt column (Delta's thread
+/// column, `.research/design-polish-2026-10-12.md` §4.8); the board draws no composer, the
 /// orchestrator's own being beside it. Shown, the board has the keyboard;
 /// the tile focused again gives it to the terminal, and a press on the board takes it back. The
 /// header's toggle puts the board away, and the terminal has the whole tile again.
@@ -205,7 +206,8 @@ fn the_board_stands_beside_its_orchestrator(cx: &mut TestAppContext) {
     assert!((panel.right() - tile.right()).abs() < px(1.0), "on the tile's right: {panel:?}");
     let width = f32::from(panel.size.width);
     let tile_w = f32::from(tile.size.width);
-    assert!(width < tile_w * 0.5, "the terminal keeps the larger part: {width} of {tile_w}");
+    assert!(width > tile_w * 0.5, "the board is the wide pane: {width} of {tile_w}");
+    assert!((tile_w - width - 420.0).abs() < 1.0, "the orchestrator's column: {width} of {tile_w}");
     assert!(
         cx.debug_bounds("project-composer").is_none(),
         "beside its orchestrator, the board draws no composer of its own"
@@ -501,6 +503,10 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
             AgentEvent { detail: Some("Merge #1 now?".into()), ..blocked(orchestrator) },
             cx,
         );
+        v.agent_event(
+            AgentEvent { detail: Some("Which store?".into()), ..blocked(setup.blocked) },
+            cx,
+        );
         let merged = card(4, "Write the decision", TaskState::Merged);
         v.project_update(11, task_changed("board", merged, None), cx);
         v.show_board(orchestrator, true, cx);
@@ -536,6 +542,13 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     assert!((head.right() - pad - count.right()).abs() < px(0.5), "at the head's end: {count:?}");
     assert!(head.bottom() <= group.top(), "the head over its group");
     assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
+    // A card's second line hangs under its title, not its number
+    // (`.research/design-polish-2026-10-12.md` §4.8).
+    let title = at(cx, "project-card-2-title").expect("its title");
+    let under = at(cx, "project-card-2-asks").expect("what it asks, under it");
+    assert!((under.left() - title.left()).abs() < px(0.5), "{under:?} under {title:?}");
+    let lead = at(cx, "project-needs-orchestrator-asks").expect("drawn");
+    assert!((lead.left() - title.left()).abs() < px(0.5), "the orchestrator's too: {lead:?}");
     let one = at(cx, "project-card-3").expect("drawn");
     let row = px(Theme::default().density.row);
     assert!((one.size.height - row).abs() < px(0.5), "a row is the density's row: {one:?}");
@@ -660,6 +673,40 @@ fn the_palette_reaches_the_board(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(orchestrator_tile));
     assert!(shown(&view, cx, orchestrator));
+}
+
+/// A task whose start failed after its steps (its machine could not clone) is said on its row
+/// where it is read: under *Failed*, the reason as the row's second line, and "Start again"
+/// on the row, stood on or not, which asks the server to start it.
+#[gpui::test]
+fn a_start_that_failed_says_why_and_starts_again(cx: &mut TestAppContext) {
+    use slopty_proto::project::{StepKind, StepState};
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let worker = WorkerId::new();
+    let mut failed = card(4, "The Linux part", TaskState::Planned);
+    let why = "fatal: unable to access the forge: Could not resolve host".to_owned();
+    failed.step = Some(fixtures::step(StepKind::Clone, worker, StepState::Failed { why }, None));
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", failed, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+
+    let lane = view.read_with(cx, |v, _| {
+        v.projects.mirror.get(&fixtures::id("board")).and_then(|b| b.lane(TaskId(4)))
+    });
+    assert_eq!(lane, Some(crate::project::model::Lane::Failed), "it waits on the person");
+    let row = cx.debug_bounds("project-card-4").expect("drawn");
+    let why = cx.debug_bounds("project-card-4-why").expect("the reason under the row");
+    assert!(why.top() >= row.top() && why.bottom() <= row.bottom(), "inside its row");
+    click(cx, "project-card-start-4");
+    let verbs = sent(&mut queue, cx, done);
+    assert!(matches!(verbs.as_slice(), [Verb::TaskSpawn { task: TaskId(4), .. }]), "{verbs:?}");
 }
 
 /// Every verb the board sent so far, each answered with `answer`.
@@ -830,13 +877,27 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     cx.dispatch_action(DeleteProject);
     assert_eq!(sent(&mut queue, cx, done), [Verb::ProjectDelete { project }]);
 
+    // The notices said float over the board's header until their time is up, and a notice
+    // under the pointer waits for it to leave: the pointer goes, then the time.
+    cx.simulate_mouse_move(point(px(1.0), px(400.0)), None, Modifiers::none());
+    // Its time, then its fade out.
+    for _ in 0..2 {
+        cx.executor().advance_clock(toast::SAY_FOR);
+        cx.run_until_parked();
+    }
+    // A failure stays until dismissed.
+    while cx.debug_bounds("toast-dismiss").is_some() {
+        click(cx, "toast-dismiss");
+    }
+    assert!(cx.debug_bounds("notices").is_none(), "the notices gone before the press");
     click(cx, "project-terminal");
     assert!(!shown(&view, cx, orchestrator), "the header's way back to the terminal");
 }
 
 /// "New goal…" is one sheet: the goal written, the folder filled from the focused shell, and
 /// only the agents that run in a terminal offered, as an orchestrator must (pi is passed over).
-/// ↵ starts the agent at once with nothing said; once its tile is its terminal's, one
+/// Once its machine says it can start there, ↵ starts the agent at once with nothing said; once
+/// its tile is its terminal's, one
 /// `ProjectCreate` makes the project around it, named from the goal, carrying the goal for the
 /// server to hand over. A blank target stays blank, though the shell stands on a branch: the
 /// server lands the goal on a branch of its own.
@@ -870,6 +931,7 @@ fn a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it(cx: &mut T
             return;
         };
         let mut on_trunk = summary(session, Some("/src/app"));
+        on_trunk.repo = Some("/src/app".to_owned());
         on_trunk.branch = Some("trunk".to_owned());
         v.session_opened(key, on_trunk, cx);
         v.focus_tile(shell, cx);
@@ -887,6 +949,10 @@ fn a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it(cx: &mut T
         ("/src/app", AgentId::named(AgentId::CLAUDE_CODE), ""),
         "filled from the focus, the target left blank; pi has no terminal"
     );
+    let machine = super::super::projects::worker_id(key).expect("a worker");
+    let check =
+        Verb::GoalCheck { worker: machine, repo: "/src/app".to_owned(), target: String::new() };
+    assert_eq!(sent(&mut queue, cx, done), [check], "its place, asked of its machine");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(cx.debug_bounds("goal-sheet").is_none(), "gone once it is said");
@@ -950,6 +1016,79 @@ fn a_new_goal_starts_its_orchestrator_and_makes_its_project_around_it(cx: &mut T
         }]
     );
     assert_eq!(sent(&mut queue, cx, done), [], "the server hands the goal over itself");
+}
+
+/// A goal goes only where it can start. With no repository known to start in, the sheet opens
+/// with no folder and Create waits. A folder typed there, or a target named, is asked of its
+/// machine (`Verb::GoalCheck`): a refusal says why under the folder, in the machine's words,
+/// and Create and ↩ do nothing; a place it can start from lets the goal go.
+#[gpui::test]
+fn a_goal_waits_for_a_place_it_can_start_and_says_why_not(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::ErrorCode;
+    use slopty_proto::server::InstalledAgent;
+    use slopty_proto::thread::AgentId;
+    use slopty_proto::thread::wire::ThreadRequest;
+
+    use super::super::actions::NewGoal;
+    const WHY: &str = "/tmp/scratch is not in a git repository, and a goal's work lands on a \
+                       branch of one";
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let claude = InstalledAgent {
+        agent: AgentId::named(AgentId::CLAUDE_CODE),
+        version: "1.0".to_owned(),
+        offers: slopty_proto::thread::Offers::default(),
+        managed_hooks_off: false,
+    };
+    let caps = WorkerCaps { agents: vec![claude], ..healthy() };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.set_worker_caps(key, caps, cx);
+        v.threads_linked(key, cx);
+    });
+    let shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/tmp/scratch"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.dispatch_action(NewGoal);
+    cx.run_until_parked();
+    let folder = |cx: &mut VisualTestContext| {
+        view.read_with(cx, WorkspaceView::goal_sheet_typed).map(|t| t.folder).unwrap_or_default()
+    };
+    assert_eq!(folder(cx), "", "the focused shell is in no repository: no folder");
+    assert_eq!(sent(&mut queue, cx, done), [], "nothing to ask");
+    cx.simulate_input("Ship the dark mode toggle.");
+    let sheet = view.read_with(cx, |v, _| v.goal_sheet()).expect("the sheet");
+    sheet.update_in(cx, |s, window, cx| s.set_folder("/tmp/scratch", window, cx));
+    let refused = |_: &Verb| Outcome::Error { code: ErrorCode::Invalid, message: WHY.to_owned() };
+    let worker = super::super::projects::worker_id(key).expect("a worker");
+    let check =
+        |repo: &str| Verb::GoalCheck { worker, repo: repo.to_owned(), target: String::new() };
+    assert_eq!(sent(&mut queue, cx, refused), [check("/tmp/scratch")], "asked once");
+    assert!(cx.debug_bounds("goal-sheet-refusal").is_some(), "why, under the folder");
+    let said: Vec<String> = tree(cx).into_iter().filter_map(|n| n.label).collect();
+    assert!(said.iter().any(|l| l == WHY), "in the machine's words: {said:#?}");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("goal-sheet").is_some(), "↩ makes nothing of it");
+    let starts = |studio: &mut Fake| {
+        studio
+            .drain()
+            .into_iter()
+            .filter(|m| matches!(m, ClientMsg::Thread(ThreadRequest::Start { .. })))
+            .count()
+    };
+    assert_eq!(starts(&mut studio), 0, "no orchestrator starts");
+
+    sheet.update_in(cx, |s, window, cx| s.set_folder("/src/app/web", window, cx));
+    assert_eq!(sent(&mut queue, cx, done), [check("/src/app/web")]);
+    assert!(cx.debug_bounds("goal-sheet-refusal").is_none(), "a place it can start says nothing");
+    click(cx, "goal-sheet-create");
+    assert!(cx.debug_bounds("goal-sheet").is_none(), "the goal goes");
+    assert_eq!(starts(&mut studio), 1, "its orchestrator starts");
 }
 
 /// A goal starts where work stood: with nothing focused and no start before, the latest
@@ -1034,6 +1173,10 @@ fn what_waits_on_the_person_is_one_list(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(row).is_some(), "its row");
     assert!(cx.debug_bounds("nav-ready").is_some(), "the Ready to merge section");
     assert!(cx.debug_bounds("nav-to-review").is_none());
+    // Merge shows in the row's end slot under the pointer.
+    let ready = cx.debug_bounds("nav-ready-board-5").expect("the ready row");
+    cx.simulate_mouse_move(ready.center(), None, Modifiers::none());
+    cx.run_until_parked();
     click(cx, "nav-merge-board-5");
     assert_eq!(sent(&mut queue, cx, done), [Verb::TaskMerge { project, task: TaskId(5) }]);
 }
@@ -1624,47 +1767,6 @@ fn a_project_s_notice_leads_to_its_orchestrator_stacked_by_project(cx: &mut Test
 
     notice.tile = None;
     assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "nowhere to lead");
-}
-
-/// In front, a project's notice is said in the title bar's lane as its task and how it
-/// stands; its project is named only while that project's orchestrator is not on the
-/// workspace in view.
-#[gpui::test]
-fn a_project_s_notice_in_view_says_its_task_alone(cx: &mut TestAppContext) {
-    use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
-    let (view, cx) = workspace(cx);
-    let setup = setup(&view, cx);
-    let (_, orchestrator) = setup.orchestrator;
-    let board = slopty_proto::project::ProjectId::new("board").unwrap();
-    let notice = Notice {
-        kind: NoticeKind::Project,
-        about: Subject::Project { project: board, entry: 7 },
-        tile: Some(TermRef { worker: WorkerId::new(), session: orchestrator }),
-        title: "Ship the project board".into(),
-        text: "#1 Wire the board: its verifier failed".into(),
-        worked_ms: None,
-        via: None,
-    };
-    let said = |cx: &mut VisualTestContext| {
-        tree(cx)
-            .into_iter()
-            .filter(|n| n.role == "Status")
-            .filter_map(|n| n.label)
-            .collect::<Vec<_>>()
-    };
-    let mut heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a note");
-    view.update(cx, |v, cx| v.say_project_notice(&heard, cx));
-    cx.run_until_parked();
-    assert!(
-        said(cx).iter().any(|l| l == "#1 Wire the board: its verifier failed"),
-        "{:?}",
-        said(cx)
-    );
-    heard.route.item = None;
-    view.update(cx, |v, cx| v.say_project_notice(&heard, cx));
-    cx.run_until_parked();
-    let named = "Ship the project board: #1 Wire the board: its verifier failed";
-    assert!(said(cx).iter().any(|l| l == named), "out of view, named: {:?}", said(cx));
 }
 
 /// The bar under the header fills only with what merged: empty while nothing has, though every

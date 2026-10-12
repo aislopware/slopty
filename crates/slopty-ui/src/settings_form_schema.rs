@@ -81,21 +81,6 @@ impl Section {
             Self::Keyboard | Self::About => Group::Help,
         }
     }
-
-    /// Its glyph in the section list.
-    #[must_use]
-    pub const fn symbol(self) -> slopty_kit::icons::Symbol {
-        use slopty_kit::icons::Symbol;
-        match self {
-            Self::Appearance => Symbol::Palette,
-            Self::Terminal => Symbol::Terminal,
-            Self::Input => Symbol::Cursorarrow,
-            Self::Agents => slopty_kit::icons::AGENT,
-            Self::Network => Symbol::ServerRack,
-            Self::Keyboard => Symbol::Keyboard,
-            Self::About => Symbol::InfoCircle,
-        }
-    }
 }
 
 /// The section list's groups, each under its name, in [`Section::ALL`]'s order: how this app

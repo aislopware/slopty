@@ -192,6 +192,10 @@ actions!(
 /// The palette's name for [`StartAgent`].
 pub const NEW_AGENT_HERE: &str = "New agent";
 
+/// The palette's name for [`NewAgent`], the start by steps: it names the chooser it opens, so it
+/// never reads as [`NEW_AGENT_HERE`] with an ellipsis.
+pub const NEW_AGENT_ON: &str = "New agent on\u{2026}";
+
 /// The palette's name for [`OtherTabs`], and what its step's field says.
 pub const OTHER_TABS: &str = "Other tabs\u{2026}";
 
@@ -423,7 +427,7 @@ pub fn palette_items_of(keymap: &crate::keymap::Keymap) -> Vec<PaletteItem> {
     let mut items = vec![
         w("New terminal", Box::new(NewTerminal)),
         w(NEW_AGENT_HERE, Box::new(StartAgent)),
-        w("New agent\u{2026}", Box::new(NewAgent)),
+        w(NEW_AGENT_ON, Box::new(NewAgent)),
         w("Split right with a terminal", Box::new(SplitRight)),
         w("Split down with a terminal", Box::new(SplitDown)),
         w("Show or hide the tab's terminal", Box::new(TabTerminal)),

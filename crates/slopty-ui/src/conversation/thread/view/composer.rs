@@ -1,11 +1,11 @@
 //! The composer: a card at the foot of the column, full-bleed at the pane's foot when the pane
 //! is narrow.
 //!
-//! Its top row says where the agent works (the checkout, its branch); then the menu, the chips,
-//! the field; then a row with the way to attach, the model and how hard it thinks, the mode, how
-//! full the context is, and at the right the one primary: send, or stop while a turn runs and
-//! nothing is typed. While the agent's own TUI holds the session, a strip saying so stands in
-//! its place.
+//! The menu, the chips and the field; then Delta's foot row: where the agent works on its left
+//! (the checkout and its branch, which open the commit sheet, and what the thread changed), and
+//! at its right how full the context is, the model and how hard it thinks, the mode, the
+//! paperclip, and the one primary: send, or stop while a turn runs and nothing is typed. While
+//! the agent's own TUI holds the session, a strip saying so stands in its place.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -27,7 +27,7 @@ use super::{ThreadView, ThreadViewEvent, agent_name};
 pub(super) const PLACEHOLDER: &str = "Ask\u{2026}";
 
 /// What the composer says before anything is typed: an invitation naming the agent, "Ask
-/// Claude Code…". What it takes ("/" and "@") is taught by the "+" menu, not by the field.
+/// Claude Code…". What it takes ("/" and "@") is taught by the paperclip's menu, not by the field.
 pub(super) fn placeholder(agent: &slopty_proto::thread::AgentId) -> String {
     format!("Ask {}\u{2026}", super::agent_label(agent))
 }
@@ -135,7 +135,7 @@ impl ThreadView {
             .debug_selector(move || id.to_owned())
             .aria_label(SharedString::from(label))
             .flex_none()
-            .h(px(kit::icon_button_side(theme)))
+            .h(px(theme.density.control))
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
@@ -382,7 +382,7 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let meters = &self.state(cx)?.meters;
-        let used = super::context_used(meters);
+        let used = super::context_used(meters).filter(|u| *u >= RING_FROM);
         if used.is_none() && meters.limits.is_empty() {
             return None;
         }
@@ -444,11 +444,11 @@ impl ThreadView {
         };
         let hint_theme = std::rc::Rc::new(theme.clone());
         let hint = SharedString::from(label);
-        let el = kit::message::send_control(theme, id, icon, label).map(kit::hint_timing).tooltip(
-            move |_window, cx| {
+        let el = kit::message::send_control(theme, id, icon, label, stop || !empty)
+            .map(kit::hint_timing)
+            .tooltip(move |_window, cx| {
                 cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
-            },
-        );
+            });
         let el = el.on_click(cx.listener(move |this, _ev, window, cx| {
             if stop {
                 this.interrupt(cx);
@@ -504,33 +504,44 @@ impl ThreadView {
             .child(
                 // The kit's least field, its pads and line fixed in points, the words
                 // and lines at the prose's size.
-                div().py(px(theme.spacing.xs)).child(
-                    self.hang(
-                        Textarea::new(&self.composer)
-                            .with_size(Size::XSmall)
-                            .appearance(false)
-                            .bordered(false)
-                            .text_size(px(theme.typography.prose()))
-                            .line_height(gpui::relative(theme.typography.prose_line_height))
-                            .aria_label("Message")
-                            .on_paste(move |item, _window, cx| {
-                                view.update(cx, |v, cx| v.paste_attachment(item, cx))
-                                    .unwrap_or(false)
-                            })
-                            .into_any_element(),
-                        Some(Mark::Symbol(Symbol::Person)),
-                        "turn-mark-composer".to_owned(),
+                div()
+                    .debug_selector(|| "thread-composer-field".to_owned())
+                    .py(px(theme.spacing.xs))
+                    .child(
+                        self.hang(
+                            // Its words on the content edge: the field's own pad goes.
+                            Textarea::new(&self.composer)
+                                .with_size(Size::XSmall)
+                                .appearance(false)
+                                .bordered(false)
+                                .px_0()
+                                .text_size(px(theme.typography.prose()))
+                                .line_height(gpui::relative(theme.typography.prose_line_height))
+                                .aria_label("Message")
+                                .on_paste(move |item, _window, cx| {
+                                    view.update(cx, |v, cx| v.paste_attachment(item, cx))
+                                        .unwrap_or(false)
+                                })
+                                .into_any_element(),
+                            Some(Mark::Symbol(Symbol::Person)),
+                            "turn-mark-composer".to_owned(),
+                        ),
                     ),
-                ),
             );
-        let foot = div().w_full().pb(px(theme.spacing.sm)).child(self.composer_foot(editing, cx));
+        // The foot's first glyph on the content edge, its button's pad hung left of it.
+        let foot = div().w_full().flex().pb(px(theme.spacing.sm)).child(kit::hang(
+            div().flex_1().min_w_0().child(self.composer_foot(editing, cx)),
+            theme,
+        ));
         div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
             .key_context(super::COMPOSER_CTX)
             .w_full()
             .map(|el| self.shell(el))
-            .child(self.column(div().w_full().flex().flex_col().child(field).child(foot)))
+            .child(
+                self.measure_box().child(div().w_full().flex().flex_col().child(field).child(foot)),
+            )
             .into_any_element()
     }
 
@@ -542,7 +553,7 @@ impl ThreadView {
     fn composer_foot(&self, editing: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let row = kit::priority_row("thread-foot")
-            .h(px(theme.density.control))
+            .h(px(theme.density.foot))
             .gap(px(theme.spacing.xxs))
             .dropped(&self.foot_dropped);
         let item =
@@ -550,13 +561,90 @@ impl ThreadView {
                 Some(el) => row.item(key, priority, el),
                 None => row,
             };
-        let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
+        // Where the work is: only once the thread has rows, while the ledge does not say it.
+        let placed = !self.on_ledge(cx);
+        let row = item(row, FOOT_CHECKOUT, placed.then(|| self.checkout_chip(cx)).flatten());
+        let row = item(row, FOOT_DIFF, placed.then(|| self.diff_stat(cx)).flatten());
+        let meter = placed.then(|| self.meter(cx)).flatten();
+        let row = item(row.end(), FOOT_METER, meter);
+        let row = item(row, FOOT_RUNNER, Some(self.runner_chip(cx)));
         let row = item(row, FOOT_MODEL, self.model_chip(cx));
         let row = item(row, FOOT_MODE, self.mode_chip(cx));
-        let meter = (!self.on_ledge(cx)).then(|| self.meter(cx)).flatten();
-        let row = item(row.end(), FOOT_METER, meter);
+        let row = item(row, FOOT_ADD, (!editing).then(|| self.add_button(cx)));
         let row = item(row, FOOT_SEND, Some(self.send_button(cx)));
         row.into_any_element()
+    }
+
+    /// Where the agent works, Delta's foot: the repository's glyph, then the checkout by its
+    /// folder's name and its branch, "slopty / main", in the secondary tone; a press opens the
+    /// commit sheet on it. Its pad is half the room round its glyph, so the glyph hangs on the
+    /// column's edge with the foot ([`kit::hang`]).
+    fn checkout_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let state = self.state(cx)?;
+        let folder = std::path::Path::new(state.meta.cwd.trim_end_matches('/'))
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .filter(|f| !f.is_empty())?;
+        let branch = state.meta.facts.get(BRANCH_FACT).map(|b| b.trim()).filter(|b| !b.is_empty());
+        let words = match branch {
+            Some(branch) => format!("{folder} / {branch}"),
+            None => folder,
+        };
+        let chip = self
+            .chip("thread-checkout", format!("{COMMIT_ON} {words}"))
+            .flex_shrink_1()
+            .min_w_0()
+            .px(px((kit::icon_button_side(theme) - theme.typography.glyph()) / 2.0))
+            .child(self.icon(Symbol::GitRepo, s.text_muted))
+            .child(kit::fit_label("thread-checkout-words", words, theme));
+        Some(
+            slopty_kit::a11y::tab_stop(
+                squared(chip, theme, false)
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
+                s.focus,
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// Where the agent runs, Delta's runner: the machine's glyph and its name in quiet words.
+    /// The header leaves it to the foot, so it is said once.
+    fn runner_chip(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let machine = self.hub.read(cx).worker().to_owned();
+        self.chip("thread-runner", format!("{RUNS_ON} {machine}"))
+            .role(Role::Label)
+            .child(self.icon(slopty_kit::icons::machine(None), theme.surfaces.text_muted))
+            .child(kit::fit_label("thread-runner-name", machine, theme).fixed())
+            .into_any_element()
+    }
+
+    /// What the thread changed, in figures: "+12 −3", Delta's diff size (`kit::changes`, the
+    /// added in the success tone and the removed in the error tone); nothing while it changed
+    /// nothing.
+    fn diff_stat(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let state = self.state(cx)?;
+        let (added, removed) = state.turns.iter().fold((0_u32, 0_u32), |(a, r), turn| {
+            (a.saturating_add(turn.changed.added), r.saturating_add(turn.changed.removed))
+        });
+        let figures = kit::changes(theme, added, removed)?;
+        Some(
+            div()
+                .id("thread-diff-stat")
+                .debug_selector(|| "thread-diff-stat".to_owned())
+                .role(Role::Label)
+                .aria_label(SharedString::from(format!("{added} added, {removed} removed")))
+                .flex_none()
+                .px(px(theme.spacing.xs))
+                .text_size(px(theme.typography.small()))
+                .child(figures)
+                .into_any_element(),
+        )
     }
 }
 
@@ -601,8 +689,16 @@ fn squared(el: gpui::Stateful<Div>, theme: &Theme, open: bool) -> gpui::Stateful
 }
 
 /// The composer foot's items: each one's key in [`kit::Dropped`] and how much it is needed.
-/// The "+" holds what leaves, and the send is the one primary; neither ever leaves.
+/// The paperclip holds what leaves, and the send is the one primary; neither ever leaves.
 const FOOT_ADD: (&str, kit::Priority) = ("add", kit::Priority::ESSENTIAL);
+/// Where the agent works.
+const FOOT_CHECKOUT: (&str, kit::Priority) = ("checkout", kit::Priority(168));
+/// What the thread changed.
+const FOOT_DIFF: (&str, kit::Priority) = ("diff", kit::Priority::MEDIUM);
+/// Where the agent runs: only read, so it leaves first.
+const FOOT_RUNNER: (&str, kit::Priority) = ("runner", kit::Priority::LOW);
+/// What the runner chip is named, before the machine.
+const RUNS_ON: &str = "Runs on";
 /// The model.
 const FOOT_MODEL: (&str, kit::Priority) = ("model", kit::Priority(176));
 /// How full the context is, while the composer has no ledge for it.
@@ -623,7 +719,7 @@ impl ThreadView {
             .flex_none()
             .child(
                 squared(
-                    self.control_square(ADD_BUTTON, Symbol::Plus, ADD_LABEL),
+                    self.control_square(ADD_BUTTON, Symbol::Paperclip, ADD_LABEL),
                     &self.theme,
                     self.add_open,
                 )
@@ -826,9 +922,9 @@ impl ThreadView {
                 .detail(name),
             );
         }
-        // The way to commit where the thread works: the tile's header says where, and the
-        // sheet opens from here.
-        if self.repo(cx).is_some() {
+        // The way to commit where the thread works, while the foot has no room for the
+        // checkout's button.
+        if dropped.iter().any(|k| k.as_ref() == FOOT_CHECKOUT.0) && self.repo(cx).is_some() {
             rows.push(kit::MenuItem::new("commit", COMMIT, move |window, cx| {
                 let _gone = this.update(cx, |this, cx| {
                     this.add_open = false;
@@ -858,8 +954,8 @@ pub(crate) const ADD_BUTTON: &str = "thread-attach";
 /// The selector of the menu the "+" opens.
 pub(crate) const ADD_MENU: &str = "thread-add-menu";
 
-/// What the "+" is called.
-const ADD_LABEL: &str = "Add to the message";
+/// What the paperclip is called.
+const ADD_LABEL: &str = "Attach";
 
 /// The "+" menu's row that picks files to send.
 pub(crate) const ATTACH_FILES: &str = "Attach files\u{2026}";
@@ -898,6 +994,16 @@ fn with_mention(draft: &str, caret: usize) -> (String, usize) {
 
 /// The share of the context in use from which the meter says it in figures beside its ring.
 const FIGURE_FROM: f64 = 50.0;
+
+/// The share of the context in use from which the meter shows at all: a thread barely begun
+/// has nothing to watch (`.research/design-polish-2026-10-12.md` §4.7).
+const RING_FROM: f64 = 10.0;
+
+/// The thread's fact that names the branch it works on.
+const BRANCH_FACT: &str = "branch";
+
+/// What the checkout's button is, to a screen reader, before where.
+const COMMIT_ON: &str = "Commit on";
 
 /// Whether `name`, a mode or an effort as the agent says it, is the agent's default, which the
 /// composer leaves unsaid.

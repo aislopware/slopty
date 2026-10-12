@@ -171,6 +171,37 @@ fn a_call_s_long_diff_shows_its_head_until_asked(cx: &mut TestAppContext) {
     assert!(all.size.height > head.size.height * 2.0, "longer than its head: {head:?} {all:?}");
 }
 
+/// An opened call's diff is Delta's well: right under the call's line, hung its line and a
+/// base unit left of the content edge so its code starts on that edge, running to the column's
+/// end, its lines bare of numbers (`.research/delta-signed-in-2026-10-12.md` §2.4).
+#[gpui::test]
+fn a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let mut call = edit_call(&patch(3));
+    if let ItemBody::Tool(c) = &mut call.body {
+        c.state = ToolState::Completed;
+    }
+    state.items = vec![call];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let line = cx.debug_bounds("tool-e").expect("the call's line");
+    cx.simulate_click(line.center(), Modifiers::none());
+    cx.run_until_parked();
+    let line = cx.debug_bounds("tool-e").expect("the call's line");
+    let well = cx.debug_bounds("patch-e").expect("the diff's well");
+    let theme = slopty_theme::Theme::default();
+    let hang = theme.spacing.sm + slopty_theme::stroke::LINE;
+    let off = f32::from(line.left() - well.left());
+    assert!((off - hang).abs() < 0.5, "hung {hang} left of the edge: {off}");
+    assert!((f32::from(well.right() - line.right())).abs() < 0.5, "to the column's end");
+    assert!(f32::from(well.top() - line.bottom()).abs() < 0.5, "right under the line");
+    assert!((f32::from(line.size.height) - 28.0).abs() < 0.5, "Delta's 28 pt call line: {line:?}");
+}
+
 /// An MCP tool's opened call shows what it was called with, laid out to read.
 #[gpui::test]
 fn an_mcp_call_shows_what_it_was_called_with(cx: &mut TestAppContext) {

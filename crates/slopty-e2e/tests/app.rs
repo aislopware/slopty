@@ -14,6 +14,10 @@ mod clipboard;
 mod conversation;
 
 #[cfg(test)]
+#[path = "app/day.rs"]
+mod day;
+
+#[cfg(test)]
 #[path = "app/dnd.rs"]
 mod dnd;
 
@@ -230,7 +234,7 @@ mod tests {
         };
         drv.wait_for("the sleep counted on its tile", STEP, counting).await.unwrap();
 
-        // ⌘⇧T opens a second shell in a title tab of its own and takes the keyboard.
+        // ⌘⇧T opens a second shell in a tab of its own and takes the keyboard.
         drv.keys("cmd-shift-t").await.unwrap();
         let dump = drv
             .wait_for("a second shell", STEP, |d| {
@@ -268,22 +272,20 @@ mod tests {
         );
         assert!(
             second.project == first.project && !second.same_tab(&first),
-            "a title tab of its own, in the project: {dump:#?}"
+            "a tab of its own, in the project: {dump:#?}"
         );
         assert!(second.bounds[2] <= 0.0, "the tab behind is not drawn: {dump:#?}");
 
-        // A click on the second's title tab, above the panes, shows it with the keyboard; ⇧⌘]
-        // goes round to the first again.
-        let mut tabs: Vec<_> = dump
+        // No title tab stands over the panes: the window's tabs are the navigator's rows, and
+        // ⌘2 shows the second with the keyboard; ⇧⌘] goes round to the first again.
+        let above = dump
             .a11y
             .iter()
             .filter(|n| n.role == "Tab" && n.bounds[1] + n.bounds[3] <= first.bounds[1] + 0.5)
-            .collect();
-        tabs.sort_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]));
-        assert_eq!(tabs.len(), 2, "a title tab per shell: {:#?}", dump.a11y);
-        let [tx, ty, tw, th] = tabs[1].bounds;
-        drv.click(tx + tw / 2.0, ty + th / 2.0).await.unwrap();
-        drv.wait_for("the click to show the second shell", STEP, |d| {
+            .count();
+        assert_eq!(above, 0, "no title tab over the panes: {:#?}", dump.a11y);
+        drv.keys("cmd-2").await.unwrap();
+        drv.wait_for("⌘2 to show the second shell", STEP, |d| {
             d.items.iter().any(|i| i.id == second.id && i.active && i.bounds[2] > 0.0)
         })
         .await

@@ -12,22 +12,24 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{AppContext as _, Context, Entity, Window};
-use slopty_client::layout::WorkerKey;
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::server::ServerCaller;
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_kit::icons::Status;
+use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
     Autonomy, LimitsChange, Project, ProjectId, ProjectUpdate, ProjectsPart, TaskChange, TaskId,
     TaskLaunch, TaskState,
 };
+use slopty_proto::terminal::TermRequest;
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
 use super::agents::{agent_ask_text, agent_mark_of};
 use super::rollup::META_SEPARATOR;
-use crate::project::create::{Filled, GoalSheet, NewGoal, Place, SheetEvent, Starter};
+use crate::project::create::{Filled, GoalPlace, GoalSheet, NewGoal, Place, SheetEvent, Starter};
 use crate::project::model::{Board, Lane, Projects, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Asked, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
@@ -37,6 +39,9 @@ pub(crate) const NOT_SENT: &str = "Not sent: the server is away";
 /// The palette's line that opens the "New goal" sheet.
 pub(crate) const NEW_GOAL: &str = "New goal\u{2026}";
 /// What "New goal…" says when no machine can start an agent that runs in a terminal.
+/// What leads a goal's refusal, before the server's words.
+pub(crate) const GOAL_REFUSED: &str = "The goal did not start";
+
 pub(crate) const NO_ORCHESTRATOR: &str =
     "No machine has an agent that runs in a terminal, and only one can take a goal";
 /// What the sheet says when its goal is empty.
@@ -94,6 +99,8 @@ pub(super) struct ProjectsState {
     /// The tile of the agent "New goal…" started, and the goal it takes, whose project is
     /// made once that tile is its terminal's ([`WorkspaceView::orchestrator_started`]).
     pub orchestrating: Option<(ItemId, NewGoal)>,
+    /// What the last goal's refusal said, while it shows: a board opened since takes it down.
+    pub refused: Option<String>,
     /// How far this client read each project's timeline, as its board last hid.
     pub looked: HashMap<ProjectId, Looked>,
     /// The boards on show at the last hand-over: one not among them opened since.
@@ -102,10 +109,10 @@ pub(super) struct ProjectsState {
     pub recaps: HashMap<ProjectId, Recap>,
     /// Tiles that came from elsewhere this run, each alone in a background tab, not yet known
     /// as a task's agent: one that turns out to be leaves the tiling ([`super::seating`]).
-    pub arrived: HashSet<slopty_client::layout::TileRef>,
+    pub arrived: HashSet<TileRef>,
     /// The task's agent last opened as the helper preview, which the next one opened takes
     /// over while it is on show ([`WorkspaceView::open_helper`]).
-    pub helper: Option<slopty_client::layout::TileRef>,
+    pub helper: Option<TileRef>,
 }
 
 /// The palette's line that shows or puts away the focused orchestrator's board.
@@ -115,11 +122,19 @@ pub(crate) const TOGGLE_BOARD: &str = "Show or hide the board";
 /// least and the panel. Narrower, the board covers the tile while it shows.
 pub(super) const BOARD_BESIDE_MIN: f32 = 760.0;
 
-/// The board's panel beside its orchestrator, in points: two fifths of a tile `tile_w` wide,
-/// within a card's least and a reading column's most.
-pub(super) fn board_panel_w(tile_w: f32) -> f32 {
-    (tile_w * 0.4).clamp(320.0, 460.0)
+/// The orchestrator's column beside its board, in points: Delta's narrow thread column, 420,
+/// never more than half a tile `tile_w` wide nor under 360; the board is the wide pane and
+/// takes the rest (`.research/design-polish-2026-10-12.md` §4.8). The board is the work being
+/// directed; the thread is a voice.
+pub(super) fn orchestrator_w(tile_w: f32) -> f32 {
+    ORCHESTRATOR_W.min(tile_w / 2.0).max(ORCHESTRATOR_MIN)
 }
+
+/// The orchestrator's column on a tile wide enough for it: Delta's thread column.
+const ORCHESTRATOR_W: f32 = 420.0;
+
+/// The narrowest the orchestrator's column gets.
+const ORCHESTRATOR_MIN: f32 = 360.0;
 
 /// The header button's and the menu row's word for the board, `shown` or not.
 pub(super) const fn board_word(shown: bool) -> &'static str {
@@ -405,6 +420,13 @@ impl WorkspaceView {
     /// agent ended, or one on a machine away, the board opens in a tile of its own
     /// (`board_tiles`).
     pub fn open_project(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
+        if self.projects.mirror.get(project).is_none() {
+            return;
+        }
+        // A goal refused before is put right by this one: its words go.
+        if let Some(said) = self.projects.refused.take() {
+            self.drop_failure(&said);
+        }
         let Some(board) = self.projects.mirror.get(project) else { return };
         let Some(term) = board.project.orchestrator else {
             self.open_board_tile(project, cx);
@@ -1274,7 +1296,11 @@ impl WorkspaceView {
         let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
             SheetEvent::Create(goal) => this.take_goal(goal.clone(), cx),
             SheetEvent::Cancel => this.close_project_sheet(cx),
+            SheetEvent::Check(place) => this.check_goal_place(place.clone(), cx),
         });
+        if let Some(place) = view.read(cx).place(cx) {
+            self.check_goal_place(place, cx);
+        }
         let scope = cx.focus_handle();
         let home = gpui::Focusable::focus_handle(view.read(cx), cx);
         slopty_kit::a11y::hold(&scope, &home, cx);
@@ -1282,11 +1308,29 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// What a goal starts with when the person says no more than the goal: the folder from the
-    /// focus, else the last start, else the latest repository work stood in on its machine, and
-    /// the home only where there is none; the recent repositories on machines that can start
-    /// one; the agents and machines that can take it; the verifier guessed from the folder's
-    /// repository. `None` while no machine can start one.
+    /// Ask `place`'s machine whether a goal can start there (`Verb::GoalCheck`), for the open
+    /// goal sheet: it says why not in a clause a person reads, and changes nothing.
+    fn check_goal_place(&self, place: GoalPlace, cx: &Context<Self>) {
+        let Some(worker) = worker_id(place.worker) else { return };
+        let verb =
+            Verb::GoalCheck { worker, repo: place.folder.clone(), target: place.target.clone() };
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            let said = match outcome {
+                Outcome::Error { message, .. } => Err(message),
+                _ => Ok(()),
+            };
+            if let Some(sheet) = this.projects.sheet.as_ref().map(|s| s.view.clone()) {
+                sheet.update(cx, |sheet, cx| sheet.place_checked(&place, said, cx));
+            }
+        });
+    }
+
+    /// What a goal starts with when the person says no more than the goal: a repository, as
+    /// the folder of the focused tile's repository, else that of the last start, else the
+    /// latest repository work stood in on its machine, and none (the person picks one) where
+    /// none is known; the recent repositories on machines that can start one; the agents and
+    /// machines that can take it; the verifier guessed from the folder's repository. `None`
+    /// while no machine can start one.
     pub(super) fn goal_filled(&self, cx: &gpui::App) -> Option<Filled> {
         let starters = self.goal_starters();
         let worker = starters.first().and_then(|s| s.machines.first()).map(|(k, _)| *k)?;
@@ -1299,10 +1343,15 @@ impl WorkspaceView {
             .take(crate::project::create::PLACES)
             .map(|p| Place { worker: p.worker, folder: p.cwd, name: p.name })
             .collect();
+        let repo_of = |cwd: String| self.repo_at(worker, &cwd, cx);
         let here = self.focused().filter(|t| t.worker == worker).and_then(|_| self.active_cwd());
         let last = self.starts.last().filter(|l| l.worker == worker).map(|l| l.cwd.clone());
         let latest = || places.iter().find(|p| p.worker == worker).map(|p| p.folder.clone());
-        let folder = here.or(last).or_else(latest).unwrap_or_else(|| "~".to_owned());
+        let folder = here
+            .and_then(repo_of)
+            .or_else(|| last.and_then(repo_of))
+            .or_else(latest)
+            .unwrap_or_default();
         let repo = self.repo_at(worker, &folder, cx);
         let verifier = repo.as_deref().and_then(|repo| self.guessed_verifier(worker, repo, cx));
         Some(Filled { folder, places, verifier, starters })
@@ -1310,7 +1359,9 @@ impl WorkspaceView {
 
     /// The goal written on the empty workspace's composer: handed to an orchestrator as the
     /// sheet's Create hands it, with what the sheet would open holding (its first agent on its
-    /// first machine, a branch of the project's own, the default autonomy). Whether it went.
+    /// first machine, a branch of the project's own, the default autonomy). Whether it went:
+    /// not while no machine can start one, nor while the folder is no repository this client
+    /// knows, which the sheet asks the machine about.
     pub(super) fn goal_from_page(&mut self, words: &str, cx: &mut Context<Self>) -> bool {
         let words = words.trim();
         if words.is_empty() {
@@ -1325,6 +1376,9 @@ impl WorkspaceView {
         else {
             return false;
         };
+        if self.repo_at(worker, &filled.folder, cx).is_none() {
+            return false;
+        }
         let goal = NewGoal {
             goal: words.to_owned(),
             folder: filled.folder,
@@ -1344,9 +1398,9 @@ impl WorkspaceView {
         let filled = self.goal_filled(cx)?;
         let starter = filled.starters.first()?;
         let (_, machine) = starter.machines.first()?;
-        Some(
-            [machine.as_str(), filled.folder.as_str(), starter.label.as_str()].join(META_SEPARATOR),
-        )
+        let parts = [machine.as_str(), filled.folder.as_str(), starter.label.as_str()];
+        let parts: Vec<&str> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+        Some(parts.join(META_SEPARATOR))
     }
 
     /// The empty workspace's composer's foot, pressed: "New goal…"'s sheet, holding what was
@@ -1377,6 +1431,9 @@ impl WorkspaceView {
                 let words = goal.read(cx).value().to_string();
                 if this.goal_from_page(&words, cx) {
                     goal.update(cx, |input, cx| input.set_value("", window, cx));
+                } else if !words.trim().is_empty() && this.goal_filled(cx).is_some() {
+                    // No repository known to work in: the sheet, holding the goal, asks.
+                    this.goal_sheet_from_page(window, cx);
                 }
             }
         });
@@ -1488,13 +1545,20 @@ impl WorkspaceView {
         let Some(worker) = worker_id(tile.worker) else { return };
         let Some((_, goal)) = self.projects.orchestrating.take() else { return };
         self.focus_tile(tile, cx);
-        self.create_project(goal, TermRef { worker, session }, cx);
+        self.create_project(goal, TermRef { worker, session }, tile, cx);
     }
 
-    /// Make the project `goal` names around its orchestrator `term`, which the server hands the
-    /// goal to as the person's first message, and show its board once the server has it. A
-    /// refusal is said.
-    fn create_project(&mut self, goal: NewGoal, term: TermRef, cx: &mut Context<Self>) {
+    /// Make the project `goal` names around its orchestrator `term`, in `tile`, which the server
+    /// hands the goal to as the person's first message, and show its board once the server has
+    /// it. A refusal is said, and the orchestrator started for it goes with its tile: nothing
+    /// is left of a goal that did not start but the words why.
+    fn create_project(
+        &mut self,
+        goal: NewGoal,
+        term: TermRef,
+        tile: TileRef,
+        cx: &mut Context<Self>,
+    ) {
         let title = name_from_goal(&goal.goal);
         let mirror = &self.projects.mirror;
         let Some(project) = project_name(&title, |id| mirror.get(id).is_some()) else {
@@ -1523,11 +1587,24 @@ impl WorkspaceView {
             metadata: None,
         };
         // The server hands the goal to the orchestrator itself, as the person's first word.
-        self.send_to_server(
-            verb,
-            move |this, cx| this.open_when_orchestrated(project, term, cx),
-            cx,
-        );
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            if let Outcome::Error { message, .. } = outcome {
+                let req = TermRequest::Close;
+                this.send(tile.worker, ClientMsg::Term { session: term.session, req });
+                this.propose(tile.worker, ItemOp::Remove(tile.item), cx);
+                let said = format!("{GOAL_REFUSED}: {message}");
+                this.projects.refused = Some(said.clone());
+                this.show_failure(said, cx);
+            } else {
+                this.open_when_orchestrated(project, term, cx);
+            }
+        });
+    }
+
+    /// The open "New goal" sheet.
+    #[cfg(test)]
+    pub(super) fn goal_sheet(&self) -> Option<Entity<GoalSheet>> {
+        self.projects.sheet.as_ref().map(|s| s.view.clone())
     }
 
     /// What the open "New goal" sheet holds.

@@ -203,12 +203,11 @@ fn a_question_that_offers_nothing_takes_words(cx: &mut TestAppContext) {
     );
 }
 
-/// However much waits in the tray, it stands below the rows and never over them. A request
-/// stands whole, what the person must answer; the plan under it keeps to a line or two and
-/// scrolls; the composer stands whole under the tray. A click above the tray's edge is the
-/// rows', not the tray's.
+/// A question stands whole over the composer, the one form it is; the activity bar under it
+/// (the plan) keeps to its share and scrolls; both stand below the rows, never over them, and
+/// the composer stands whole under them. A click above their edge is the rows'.
 #[gpui::test]
-fn a_request_stands_whole_and_the_rest_of_the_tray_gives_way(cx: &mut TestAppContext) {
+fn a_question_stands_whole_and_the_activity_bar_gives_way(cx: &mut TestAppContext) {
     use slopty_proto::thread::{Clipped, Item, ItemBody, ItemId, Plan, Step, TurnId};
 
     let (hub, sent) = hub(cx, None);
@@ -247,16 +246,16 @@ fn a_request_stands_whole_and_the_rest_of_the_tray_gives_way(cx: &mut TestAppCon
     let (tray, composer) = (bounds(cx, "thread-tray"), bounds(cx, "thread-composer"));
     let (request, rest) = (bounds(cx, "request-q"), bounds(cx, "thread-activity-rest"));
     assert!(rows.size.height > px(0.0), "the rows keep what is left: {rows:?}");
-    assert!(rows.bottom() <= tray.top() + px(0.5), "the tray is under the rows: {tray:?}");
+    assert!(rows.bottom() <= tray.top() + px(0.5), "the bar is under the rows: {tray:?}");
     assert!(
         tray.top() <= request.top() + px(0.5) && request.bottom() <= rest.top() + px(0.5),
-        "the request stands whole: {request:?} in {tray:?}"
+        "the question stands whole: {request:?} in {tray:?}"
     );
     assert!(
-        rest.size.height <= whole.size.height * 0.12 + px(1.0),
-        "the open plan under it keeps to a line or two: {rest:?}"
+        rest.size.height <= whole.size.height * 0.3 + px(1.0),
+        "the open plan keeps to its share: {rest:?}"
     );
-    assert!(tray.bottom() <= composer.top() + px(0.5), "the tray is over the composer");
+    assert!(tray.bottom() <= composer.top() + px(0.5), "the bar is over the composer");
     assert!(composer.bottom() <= whole.bottom() + px(0.5), "which stands whole");
 
     let above = gpui::point(tray.center().x, tray.top() - px(2.0));

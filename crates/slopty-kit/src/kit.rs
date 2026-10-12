@@ -825,30 +825,35 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
 }
 
-/// A dialog's head, Zed's modal header: its title and what it says, `px 12 pt 8 pb 4`.
+/// A dialog's head: its title and, 4 under it, what it says.
+///
+/// It sits 16 in from the dialog's edges and its top (`.research/design-polish-2026-10-12.md`
+/// §4.10). Every dialog wears one anatomy, so two never measure two insets.
 #[must_use]
 pub fn dialog_head(theme: &Theme) -> Div {
     let sp = theme.spacing;
-    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.md)).pt(px(sp.sm)).pb(px(sp.xs))
+    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.lg)).pt(px(sp.lg)).pb(px(sp.xs))
 }
 
-/// A part of a dialog under its head, Zed's modal section: `p 8`, in to the head's edge.
+/// A part of a dialog under its head: 16 in to the head's edge, 8 above and below, so two
+/// sections stand 16 apart.
 #[must_use]
 pub fn dialog_section(theme: &Theme) -> Div {
     let sp = theme.spacing;
-    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.md)).py(px(sp.sm))
+    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.lg)).py(px(sp.sm))
 }
 
-/// A dialog's foot, Zed's modal footer: its buttons at the trailing end, `p 8`, under the
-/// lighter line.
+/// A dialog's foot, Zed's modal footer: its 28 pt buttons at the trailing end, 8 apart, the
+/// primary last, 12 above and below them and 16 in, under the lighter line.
 #[must_use]
 pub fn dialog_foot(theme: &Theme) -> Div {
     let sp = theme.spacing;
     div()
         .flex()
         .justify_end()
-        .gap(px(sp.xs))
-        .p(px(sp.sm))
+        .gap(px(sp.sm))
+        .px(px(sp.lg))
+        .py(px(sp.md))
         .border_t(HAIR)
         .border_color(hsla(theme.surfaces.stroke))
 }
@@ -1082,9 +1087,9 @@ impl Row {
 /// A list row, Zed's list item: its density's height, starting on the edge grid ([`inset_x`])
 /// and ending 6 in ([`slopty_theme::Spacing::inset_trailing`]), its parts centred.
 ///
-/// Its parts sit [`slopty_theme::Spacing::xs`] apart, Zed's `gap_1`. The navigator, the palette,
-/// the inbox and the menus draw their rows from it, so one density switch moves them all. The
-/// trailing end is usually an icon button or a count, which brings its own room.
+/// Its parts sit [`slopty_theme::Spacing::row_gap`] apart, Zed's `gap_1p5`. The navigator, the
+/// palette, the inbox and the menus draw their rows from it, so one density switch moves them all.
+/// The trailing end is usually an icon button or a count, which brings its own room.
 #[must_use]
 pub fn row(theme: &Theme, lines: Row) -> Div {
     div()
@@ -1093,7 +1098,7 @@ pub fn row(theme: &Theme, lines: Row) -> Div {
         .flex_none()
         .flex()
         .items_center()
-        .gap(px(theme.spacing.xs))
+        .gap(px(theme.spacing.row_gap()))
         .h(px(lines.height(theme)))
 }
 
@@ -1221,7 +1226,7 @@ pub fn close_box(
     id: impl Into<SharedString>,
     label: &'static str,
 ) -> gpui::Stateful<Div> {
-    small_box(theme, id, crate::icons::Symbol::Xmark, label)
+    small_box(theme, id, crate::icons::Symbol::XmarkSmall, label)
 }
 
 /// [`close_box`]'s square with another glyph: an action at the end of a line of text, such as
@@ -1259,6 +1264,17 @@ pub fn small_box(
         );
     eased(crate::a11y::tab_stop(el, s.focus))
         .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+}
+
+/// `el`, an icon button (or a row of them) that starts a line, hung left so its glyph stands on
+/// the text edge.
+///
+/// It moves by half the room round the glyph, −4 at 22 with a 14 glyph. The composer's foot,
+/// a comparison's menu and the settings' way back start this way (`docs/decisions/ui.md`, "The
+/// thread has one left edge").
+#[must_use]
+pub fn hang<E: Styled>(el: E, theme: &Theme) -> E {
+    el.ml(px(-(icon_button_side(theme) - theme.typography.glyph()) / 2.0))
 }
 
 /// The side of [`close_box`] at a pointer's density: `MonoCode`'s `size-5`.
@@ -1829,6 +1845,31 @@ mod tests {
 
     use super::*;
 
+    /// Every dialog wears one anatomy (`.research/design-polish-2026-10-12.md` §4.10): its head,
+    /// its sections and its foot 16 in from its sides, the head 16 under its top, the foot's
+    /// buttons 12 above and below and 8 apart.
+    #[test]
+    fn a_dialog_has_one_inset() {
+        let theme = Theme::default();
+        let sp = theme.spacing;
+        let at = |v: f32| Some(gpui::DefiniteLength::from(px(v)));
+        for (part, mut el) in [
+            ("head", dialog_head(&theme)),
+            ("section", dialog_section(&theme)),
+            ("foot", dialog_foot(&theme)),
+        ] {
+            let style = el.style();
+            assert_eq!(style.padding.left, at(sp.lg), "{part}: 16 in");
+            assert_eq!(style.padding.right, at(sp.lg), "{part}: 16 in");
+        }
+        assert_eq!(dialog_head(&theme).style().padding.top, at(sp.lg), "16 under the top");
+        let mut foot = dialog_foot(&theme);
+        let style = foot.style();
+        assert_eq!(style.padding.top, at(sp.md), "12 over the buttons");
+        assert_eq!(style.padding.bottom, at(sp.md), "12 under them");
+        assert_eq!(style.gap.width, Some(px(sp.sm).into()), "8 apart");
+    }
+
     /// A size reads the one way everywhere (a file tile, a download, a picture): whole
     /// kilobytes, a tenth of a megabyte.
     #[test]
@@ -2076,8 +2117,8 @@ mod tests {
     fn density_sizes_the_targets_not_the_icons() {
         let mut theme = Theme::default();
         assert!((icon_button_side(&theme) - 22.0).abs() < f32::EPSILON, "compact: Zed's 22");
-        assert!((Row::One.height(&theme) - 24.0).abs() < f32::EPSILON);
-        assert!((Row::Two.height(&theme) - 42.0).abs() < f32::EPSILON);
+        assert!((Row::One.height(&theme) - 28.0).abs() < f32::EPSILON, "Delta's row");
+        assert!((Row::Two.height(&theme) - 44.0).abs() < f32::EPSILON, "Delta's two-line row");
         theme.density = slopty_theme::Density::TOUCH;
         assert!(icon_button_side(&theme) >= 44.0, "touch: a finger's target");
         assert!(Row::One.height(&theme) >= 44.0 && Row::Two.height(&theme) > 44.0);
@@ -2169,8 +2210,8 @@ mod tests {
             let row = sheet.style();
             let radius = px(theme.radii.sm);
             assert_eq!(row.corner_radii.top_left, Some(radius.into()), "{variant:?}");
-            assert_eq!(row.gap.width, Some(px(theme.spacing.xs).into()), "{variant:?}");
-            assert_eq!(row.size.height, Some(px(24.0).into()), "{variant:?}");
+            assert_eq!(row.gap.width, Some(px(theme.spacing.row_gap()).into()), "{variant:?}: 6");
+            assert_eq!(row.size.height, Some(px(28.0).into()), "{variant:?}: Delta's menu row");
         }
     }
 

@@ -1,11 +1,12 @@
-//! The tray on the composer's top edge: what waits on the person, the plan, the files the
-//! last turn changed (`view::changes`), the messages waiting to go, and the work in the
-//! background, stacked and parted by space.
+//! What waits on the person, and the activity bar on the composer's top edge: the plan, the
+//! files the last turn changed (`view::changes`), the messages waiting to go, and the work in
+//! the background, stacked and parted by space.
 //!
-//! A request whose call is on screen is answered on the call's own card ([`Placement`]); the
-//! tray carries a copy of it only while that card is scrolled away, with the way back to it,
-//! and always carries a request that belongs to no call. There it is a card of its own above
-//! the rest, answered as one decision ([`super::decision`]).
+//! What waits on the person flows in the thread, as Zed's permission rows sit in their tool
+//! card: a request about a call that is a row is answered on the call's own card, and a
+//! question, or a request about no call on show, is a card of its own after the turns
+//! ([`super::rows::Row::Asked`]), answered as one decision ([`super::decision`]). The list
+//! brings it into view once, as it comes; nothing waits pinned over the composer.
 
 use std::time::Duration;
 
@@ -40,46 +41,16 @@ const READ_SHARE: f32 = 0.4;
 /// What a frame drew from the list's scroll, to know when a scroll changes it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) struct Marks {
-    /// The row of the request on show's call, and where the request is answered.
-    pub asked: Option<(usize, Placement)>,
+    /// The row of the call the request on show is answered on.
+    pub asked: Option<usize>,
     /// The list is scrolled up from its newest row.
     pub down: bool,
-}
-
-/// Where the request on show is answered.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(super) enum Placement {
-    /// On its call's card, which is on screen.
-    Inline,
-    /// In the tray, its call's card scrolled away above.
-    Above,
-    /// In the tray, its call's card scrolled away below.
-    Below,
-    /// In the tray: it belongs to no call on show.
-    #[default]
-    Tray,
 }
 
 impl ThreadView {
     /// The row of the call `item` is about, when the list shows it as a row of its own.
     pub(super) fn call_row(&self, item: &ItemId) -> Option<usize> {
         self.rows.iter().position(|r| matches!(r, Row::Tool { item: i } if i == item))
-    }
-
-    /// Where the call in row `row` stands against the viewport, as the last layout left it.
-    /// A row the list has not laid out yet, past its top while it follows the newest row, is
-    /// the row that just came in at its foot: on screen. Else a call that asks as it arrives
-    /// would be answered in the tray for one frame and jump onto its card in the next.
-    fn placement_of(&self, row: usize) -> Placement {
-        match (self.list.item_is_above_viewport(row), self.list.item_is_below_viewport(row)) {
-            (Some(true), _) => Placement::Above,
-            (_, Some(true)) => Placement::Below,
-            (Some(false), Some(false)) => Placement::Inline,
-            _ if self.list.is_following_tail() && row >= self.list.logical_scroll_top().item_ix => {
-                Placement::Inline
-            }
-            _ => Placement::Tray,
-        }
     }
 
     /// The request on show, among those waiting.
@@ -91,17 +62,60 @@ impl ThreadView {
         waiting.get(at).map(|asked| asked.request)
     }
 
-    /// What the list's scroll says now: where the request on show is answered, and whether
-    /// the way down shows. Questions are always the tray's: the questionnaire is one, kept
-    /// there.
+    /// What the rows and the list's scroll say now: the call the request on show is answered
+    /// on, and whether the way down shows. A question is answered on its own card, the
+    /// questionnaire being one.
     pub(super) fn read_marks(&self, cx: &App) -> Marks {
         let asked = self
             .shown_waiting(cx)
             .filter(|request| request.questions.is_empty())
             .and_then(|request| request.item.as_ref())
-            .and_then(|item| self.call_row(item))
-            .map(|row| (row, self.placement_of(row)));
+            .and_then(|item| self.call_row(item));
         Marks { asked, down: self.away_from_newest() }
+    }
+
+    /// Bring the request on show into view once, as it comes: its call's row, or its own card.
+    /// A row already on screen, or the list's newest while it follows them, stays where it is;
+    /// a row not laid out yet is looked at again once it is. Says whether the list moved.
+    pub(super) fn reveal_asked(&mut self, cx: &App) -> bool {
+        let shown = self.shown_waiting(cx).map(|request| {
+            let row = request
+                .item
+                .as_ref()
+                .filter(|_| request.questions.is_empty())
+                .and_then(|item| self.call_row(item))
+                .or_else(|| {
+                    self.rows
+                        .iter()
+                        .position(|r| matches!(r, Row::Asked { ask } if *ask == request.id))
+                });
+            (request.id.clone(), row)
+        });
+        let Some((ask, row)) = shown else {
+            self.revealed_ask = None;
+            return false;
+        };
+        if self.revealed_ask.as_ref() == Some(&ask) {
+            return false;
+        }
+        let Some(row) = row else { return false };
+        let following = self.list.is_following_tail();
+        match (self.list.item_is_above_viewport(row), self.list.item_is_below_viewport(row)) {
+            (Some(true), _) | (_, Some(true))
+                if !following || row.saturating_add(1) < self.rows.len() =>
+            {
+                // Revealing leaves the tail, or the next layout snaps back to it.
+                self.list.pause_following_tail();
+                self.list.scroll_to_reveal_item(row);
+                self.revealed_ask = Some(ask);
+                true
+            }
+            (Some(false), Some(false)) => {
+                self.revealed_ask = Some(ask);
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Whether the way down shows: the list does not follow its newest row, and is not known
@@ -115,12 +129,12 @@ impl ThreadView {
     /// Draw again once the list's layout moved what the frame drew from it: the request's
     /// place and the way down. Reads only the list, so a frame that changes neither
     /// costs no second one.
-    pub(super) fn recheck_marks(&self, cx: &mut Context<Self>) {
+    pub(super) fn recheck_marks(&mut self, cx: &mut Context<Self>) {
         let was = self.marks.get();
-        let now = Marks {
-            asked: was.asked.map(|(row, _)| (row, self.placement_of(row))),
-            down: self.away_from_newest(),
-        };
+        let now = Marks { asked: was.asked, down: self.away_from_newest() };
+        if self.reveal_asked(cx) {
+            cx.notify();
+        }
         if now != was {
             #[cfg(test)]
             self.marks_moved.set(self.marks_moved.get().saturating_add(1));
@@ -130,7 +144,7 @@ impl ThreadView {
 
     /// Whether the request on show is answered on the card of the call in row `row`.
     pub(super) fn answered_inline(&self, row: usize) -> bool {
-        self.marks.get().asked == Some((row, Placement::Inline))
+        self.marks.get().asked == Some(row)
     }
 
     /// Count what came since the list left its newest row, and once the count has held for
@@ -234,17 +248,13 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// The tray, when anything waits in it.
-    ///
-    /// A request put to the person is a card of its own, a full step of space above the rest:
-    /// a decision never reads as another way to send the message under it. The rest (the
-    /// plan, the queue, the work in the background) is Zed's activity bar: lined on its top
-    /// and sides with its top corners round, standing on the composer's line where there is a
-    /// composer (`tucked`), else a card of its own (a subagent's thread).
-    ///
-    /// A request on show stands whole; what else waits stands at most a share of the window's
-    /// height `window_h` ([`super::TRAY`], [`super::TRAY_ASKING`] under a request) and scrolls
-    /// past that, so the thread above keeps its share of the tile however much waits.
+    /// The activity bar, when anything stands in it: the plan, the queue, the work in the
+    /// background, Zed's activity bar, lined on its top and sides with its top corners round,
+    /// standing on the composer's line where there is a composer (`tucked`), else a card of
+    /// its own (a subagent's thread). It stands at most a share of the window's height
+    /// `window_h` ([`super::TRAY`]) and scrolls past that, so the thread above keeps its share
+    /// of the tile however much waits. What waits on the person is not here: it flows in the
+    /// thread ([`Self::asked_row`]).
     pub(super) fn activity_bar(
         &self,
         tucked: bool,
@@ -256,14 +266,6 @@ impl ThreadView {
         let bar = Activity::of(hub.threads(), self.thread, state);
         let theme = &self.theme;
         let s = theme.surfaces;
-        // What waits on the person stands whole; the rest, under it, scrolls past `max`.
-        let waiting: Vec<&Asked<'_>> = bar.waiting().collect();
-        let at = self.asked_at.min(waiting.len().saturating_sub(1));
-        let placement = self.marks.get().asked.map_or(Placement::Tray, |(_, p)| p);
-        let request = waiting.get(at).filter(|_| placement != Placement::Inline).map(|current| {
-            let asked = (current.request, at, waiting.len());
-            self.request_card(asked, placement, window_h, cx)
-        });
         // Each kind of thing stands in a group of its own, a base unit of space between groups,
         // so a row never reads as belonging to the group above it. Space, not a rule: rules
         // between rows read as a stack of boxes.
@@ -301,11 +303,17 @@ impl ThreadView {
             }
             sections.extend(group);
         }
-        if sections.is_empty() && request.is_none() {
+        // A question stands whole over the rest: the questionnaire is one form, its row of
+        // answers kept in view. gpui-fast's carried text measurement does not yet hold for it
+        // inside the list's rows.
+        let question = self
+            .shown_waiting(cx)
+            .filter(|request| !request.questions.is_empty())
+            .map(|request| self.asked_card(&request.id, cx).mb(px(theme.spacing.md)));
+        if sections.is_empty() && question.is_none() {
             return None;
         }
-        let parted = request.is_some();
-        let max = window_h * if parted { super::TRAY_ASKING } else { super::TRAY };
+        let max = window_h * super::TRAY;
         let rest = (!sections.is_empty()).then(|| {
             div()
                 .id("thread-activity-rest")
@@ -316,33 +324,6 @@ impl ThreadView {
                 .max_h(max)
                 .overflow_y_scroll()
                 .children(sections)
-        });
-        let request = request.map(|request| {
-            // The request takes the keyboard by a press anywhere on it, or by Tab to one of
-            // its answers; then, and only then, ⌘↵ and ⌘⌫ answer it. A press that a field or
-            // a control inside it took (a question's "Other" field) keeps the keyboard there:
-            // the card's press comes after theirs, and taking it back would leave the field
-            // deaf to what is typed.
-            div()
-                .id("thread-decision")
-                .debug_selector(|| "thread-decision".to_owned())
-                .key_context(crate::conversation::REQUEST_CTX)
-                .track_focus(&self.request_focus)
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _ev, window, cx| {
-                        if !this.request_focus.contains_focused(window, cx) {
-                            this.request_focus.focus(window, cx);
-                        }
-                    }),
-                )
-                .w_full()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .map(|el| kit::call_card(el, theme))
-                .mb(px(theme.spacing.md))
-                .child(request)
         });
         // Over the composer the tray stands on its line, which closes it; alone, it is a card
         // of its own.
@@ -378,10 +359,56 @@ impl ThreadView {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .children(request)
+                .children(question)
                 .children(rest)
                 .into_any_element(),
         )
+    }
+
+    /// The card of `ask`, waiting on the person after the turns (a question, a request about
+    /// no call on show), Zed's permission card: its head band on the card's head with the
+    /// mark, what it asks and, for several questions, which one this is; what it asks the
+    /// person to read, 12 in; its answers on the foot, the primary last.
+    ///
+    /// The card takes the keyboard by a press anywhere on it, or by Tab to one of its answers;
+    /// then, and only then, ⌘↵ and ⌘⌫ answer it. A press that a field or a control inside it
+    /// took (a question's "Other" field) keeps the keyboard there: the card's press comes after
+    /// theirs, and taking it back would leave the field deaf to what is typed.
+    ///
+    /// It draws the request on show, `ask` until the rows are built again: an answer given here
+    /// moves the card on to the next before the worker's word rebuilds them.
+    pub(super) fn asked_row(&self, ask: &AskId, cx: &Context<Self>) -> AnyElement {
+        self.asked_card(ask, cx).into_any_element()
+    }
+
+    /// The card of `ask`, or of the request on show once `ask` is answered ([`Self::asked_row`]).
+    fn asked_card(&self, ask: &AskId, cx: &Context<Self>) -> gpui::Stateful<Div> {
+        let theme = &self.theme;
+        let Some(state) = self.state(cx) else { return div().id("thread-decision") };
+        let bar = Activity::of(self.hub.read(cx).threads(), self.thread, state);
+        let waiting: Vec<&Asked<'_>> = bar.waiting().collect();
+        let shown = self.asked_at.min(waiting.len().saturating_sub(1));
+        let at = waiting.iter().position(|a| a.request.id == *ask).unwrap_or(shown);
+        let Some(asked) = waiting.get(at) else { return div().id("thread-decision") };
+        let card = self.request_card((asked.request, at, waiting.len()), self.viewport_h.get(), cx);
+        div()
+            .id("thread-decision")
+            .debug_selector(|| "thread-decision".to_owned())
+            .key_context(crate::conversation::REQUEST_CTX)
+            .track_focus(&self.request_focus)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    if !this.request_focus.contains_focused(window, cx) {
+                        this.request_focus.focus(window, cx);
+                    }
+                }),
+            )
+            .w_full()
+            .flex()
+            .flex_col()
+            .map(|el| kit::call_card(el, theme))
+            .child(card)
     }
 
     /// One of the tray's lines: a row's height, the chrome's edge, its parts a base unit
@@ -564,6 +591,7 @@ impl ThreadView {
         // the person reads whole before choosing.
         self.button_frame(id, label, kind)
             .max_w_full()
+            .min_h(px(theme.density.decision))
             .gap(px(theme.spacing.xs))
             .px(px(theme.spacing.sm))
             .children(glyph.map(|(glyph, tone)| self.icon(glyph, tone)))
@@ -571,16 +599,14 @@ impl ThreadView {
             .children(scope)
     }
 
-    /// The request on show, in the tray, one card: what it asks on its head row, "2 of 5" with
-    /// the way to the others, and the way back to its call when that is scrolled away; then the
-    /// command, then one row of answers. What the turn edited is the thread's, said by the
-    /// composer's chip, never on a permission. An approval
+    /// The request on show as one card after the turns: what it asks on its head band, "2 of 5"
+    /// with the way to the others; then the command, then one row of answers. What the turn edited
+    /// is the thread's, said by the composer's chip, never on a permission. An approval
     /// is answered only by a press, so a stray key cannot answer it; questions are a
     /// questionnaire, which the keyboard walks once it is in it.
     fn request_card(
         &self,
         (request, at, of): (&Request, usize, usize),
-        placement: Placement,
         window_h: gpui::Pixels,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -631,24 +657,6 @@ impl ThreadView {
             });
         // A command is code; anything else the agent says is a sentence.
         let code = request.kind == Request::APPROVAL || request.kind == Request::RETRY;
-        let scroll = match placement {
-            Placement::Above => Some(("Scroll \u{2191}", -1_isize)),
-            Placement::Below => Some(("Scroll \u{2193}", 1)),
-            Placement::Inline | Placement::Tray => None,
-        };
-        let back = scroll.zip(request.item.clone()).and_then(|((label, _), item)| {
-            let row = self.call_row(&item)?;
-            Some(
-                self.button("asked-scroll", label, ButtonKind::Ghost)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        // Revealing leaves the tail, or the next layout snaps back to it.
-                        this.list.pause_following_tail();
-                        this.list.scroll_to_reveal_item(row);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            )
-        });
         let stepper = (of > 1).then(|| {
             div()
                 .flex_none()
@@ -732,7 +740,7 @@ impl ThreadView {
                     .flex_none()
                     // A head with nothing under it is the whole card.
                     .map(|el| if under { el.mb(px(theme.spacing.md)) } else { el.border_b_0() })
-                    .min_h(px(theme.density.header))
+                    .min_h(px(theme.density.decision))
                     .px(px(theme.spacing.md))
                     .child(self.needs_you())
                     .child(
@@ -753,7 +761,6 @@ impl ThreadView {
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(c))
                     }))
-                    .children(back)
                     .children(stepper)
                     .children(inline),
             )

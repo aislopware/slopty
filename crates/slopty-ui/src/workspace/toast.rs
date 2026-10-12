@@ -1,12 +1,13 @@
 //! The notices: another client's pointing, a closed tile to take back, a word to this client.
 //! A notice about a tile's own work (a drop that did not land, a window that did not open)
 //! sits beside that work, under its tile's header at its trailing edge, and moves with the
-//! tile. Every other notice sits in the title bar, between where the focused work is and the
-//! readouts: a lane no tile draws in, so it never lies over a composer's send button or a
-//! shell's last rows, as one floating in the workspace's corner did. On a phone, whose bar has no
-//! such lane, they hang under the bar's middle. Each is one line, marked with what it is about
-//! when it is about something, with at most its actions; they stay [`SAY_FOR`] and no more
-//! than [`SHOWN`] are up at once in one place, side by side, the newest nearest the readouts.
+//! tile. Every other notice hangs under the top line at the window's right, under the cluster
+//! (`cluster.rs`): over the panes' tops, never over a composer's send button or a shell's last
+//! rows, as one floating in the workspace's bottom corner did. On a phone they hang under the
+//! bar's middle. Every notice floats, so each stands raised. Each is one line, marked with what
+//! it is about when it is about something, with at most its actions; they stay [`SAY_FOR`] and
+//! no more than [`SHOWN`] are up at once in one place, side by side, the newest nearest the
+//! window's edge.
 //! Where there is no room for them all, the newest stays whole and the older go behind a count
 //! that opens them under it, so none is cut off unseen. One whose time comes while the pointer is
 //! over them stays until the pointer leaves, then [`SAY_AFTER_HOVER`] more, so a notice being read
@@ -40,8 +41,9 @@ pub(super) const SAY_AFTER_HOVER: Duration = Duration::from_secs(2);
 /// How many notices are up at once in one place: a third pushes the oldest out.
 pub(super) const SHOWN: usize = 2;
 
-/// The widest a notice gets, in points: past it the line ends in an ellipsis.
-const TOAST_MAX_W: f32 = 400.0;
+/// The widest a notice gets, in points: Delta's toast's 465, measured from the signed-in app
+/// (`.research/delta-signed-in-2026-10-12.md` §2.10). Past it the line ends in an ellipsis.
+const TOAST_MAX_W: f32 = 465.0;
 
 /// The least the newest notice narrows to, in ems of the chrome's text, before older ones in
 /// its place have all gone behind the count.
@@ -72,7 +74,7 @@ struct Kept {
     count: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
-/// Where notices are said: the title bar, or beside a tile (`Shown::at`).
+/// Where notices are said: under the top line, or beside a tile (`Shown::at`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Place(Option<TileRef>);
 
@@ -81,7 +83,7 @@ struct Shown {
     seq: u64,
     what: ToastKind,
     /// The tile whose work it is about, beside which it shows while the tile is in the
-    /// layout; `None` for the title bar's.
+    /// layout; `None` for the window's, under the top line.
     at: Option<TileRef>,
     /// Its time is up and it is fading out: no longer counted as up.
     leaving: bool,
@@ -157,7 +159,7 @@ impl WorkspaceView {
         self.show_toast_at(what, None, during, cx);
     }
 
-    /// Show `what` for `during` beside `at`'s work, or in the title bar for `None`; the
+    /// Show `what` for `during` beside `at`'s work, or under the top line for `None`; the
     /// oldest in the same place goes when there would be more than [`SHOWN`] there.
     fn show_toast_at(
         &mut self,
@@ -297,6 +299,11 @@ impl WorkspaceView {
         // The numbering carries on when the last notice goes, so a timer left from before
         // can never take down a newer notice that happens to reuse its number.
         toast.shown.len() != before
+    }
+
+    /// Take down the failure that says `text`, where it still shows.
+    pub(super) fn drop_failure(&mut self, text: &str) -> bool {
+        self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Failed(t) if t == text))
     }
 
     /// A word for the human (a picture refused, a worker added).
@@ -467,7 +474,7 @@ impl WorkspaceView {
                             cx.notify();
                         }
                     }));
-                ("old-unsaved", Some(Symbol::DocText.into()), vec![discard, keep])
+                ("old-unsaved", Some(Symbol::Doc.into()), vec![discard, keep])
             }
             ToastKind::Trashed { worker, back, .. } => {
                 let (worker, back, seq) = (*worker, back.clone(), shown.seq);
@@ -509,9 +516,8 @@ impl WorkspaceView {
             }
         };
         let line = SharedString::from(line);
-        // In the title bar a notice is a ghost item, `MonoCode`'s bar holds nothing boxed; over
-        // a tile it stands raised, a thing on the tile rather than one more of its words.
-        let in_bar = self.beside_tile(shown).is_none();
+        // Every notice floats over the panes, so it stands raised: a thing on the work rather
+        // than one more of its words.
         let notice = div()
             .id(("toast", shown.seq))
             .debug_selector(move || part.to_owned())
@@ -527,26 +533,16 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
-            .h(px(if in_bar {
-                slopty_kit::kit::icon_button_side(theme)
-            } else {
-                theme.density.hit
-            }))
+            .h(px(theme.density.hit))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
             .pl(px(theme.spacing.sm))
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
             .rounded(px(theme.radii.sm))
-            .map(|el| {
-                if in_bar {
-                    slopty_kit::kit::typed(el, theme.roles().metadata)
-                        .text_color(hsla(s.text_secondary))
-                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                } else {
-                    slopty_kit::kit::raised(el, theme).text_color(hsla(s.text))
-                }
-            })
+            .map(|el| slopty_kit::kit::raised(el, theme).text_color(hsla(s.text)))
+            // A failure's line is tinted by what it is, as Delta's error toast's is.
+            .when(part == "failed", |el| el.border_color(hsla(s.error_border)))
             .children(icon.map(|icon| {
                 slopty_kit::icons::symbol(
                     theme,
@@ -643,13 +639,13 @@ impl WorkspaceView {
     }
 
     /// Whether `shown` is said beside its tile: one about a tile still in the layout. One
-    /// whose tile has gone is said in the title bar.
+    /// whose tile has gone is said under the top line.
     fn beside_tile(&self, shown: &Shown) -> Option<TileRef> {
         shown.at.filter(|tile| self.layout.contains(*tile))
     }
 
-    /// The title bar's notices up now: the newest whole, nearest the readouts, and older ones
-    /// beside it while the bar has room for them.
+    /// The window's notices up now: the newest whole, nearest the window's edge, and older ones
+    /// beside it while the window has room for them.
     pub(super) fn render_notices(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         self.notice_row(None, "notices", cx)
     }
@@ -713,16 +709,11 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label(aria)
                 .aria_expanded(open)
-                .h(px(if place.is_none() {
-                    slopty_kit::kit::icon_button_side(theme)
-                } else {
-                    theme.density.hit
-                }))
+                .h(px(theme.density.hit))
                 .flex()
                 .items_center()
                 .px(px(theme.spacing.sm))
-                .when(place.is_some(), |el| slopty_kit::kit::raised(el, theme))
-                .when(place.is_none(), |el| el.hover(move |el| el.bg(hsla(s.hover))))
+                .map(|el| slopty_kit::kit::raised(el, theme))
                 .rounded(px(theme.radii.sm))
                 .text_color(hsla(s.text_secondary))
                 .cursor_pointer()

@@ -63,9 +63,6 @@ use crate::review::{
     ShowFiles, ToggleViewed,
 };
 
-/// The file list's width, in points.
-const LIST_WIDTH: f32 = 240.0;
-
 mod authors;
 mod file_menu;
 mod forge;
@@ -722,11 +719,6 @@ impl ReviewView {
         }
     }
 
-    /// The tile's room, from its width at rest: a wide one sets the file list beside the diff.
-    fn room(&self) -> kit::Room {
-        kit::Room::of(self.width, &self.theme)
-    }
-
     // ----- what comes ------------------------------------------------------------------
 
     /// Ask for the scope on show, unless it was asked over the same turns already. While the
@@ -997,7 +989,11 @@ impl ReviewView {
             let path = self.model.file(at).map(|f| f.path.clone()).unwrap_or_default();
             for (hunk, block) in blocks.iter().enumerate() {
                 self.push_gap(&mut rows, at, hunk);
-                rows.push(Row::Hunk(at, hunk));
+                // A lone hunk from the file's top with no heading has nothing to say over it:
+                // no "Line 1" band, and no keep or put back of its own beside the file's.
+                if blocks.len() > 1 || block.heading.is_some() || block.new_start > 1 {
+                    rows.push(Row::Hunk(at, hunk));
+                }
                 for (ix, line) in block.lines.iter().enumerate() {
                     let row = Row::Line(at, hunk, ix);
                     rows.push(row);
@@ -1543,12 +1539,6 @@ impl ReviewView {
         Ink { theme: &self.theme, digits }
     }
 
-    /// The code's size: the terminal's, so code reads as it does where it was written; the
-    /// numbers beside it stay at the chrome's small size.
-    const fn code_size(&self) -> f32 {
-        self.theme.typography.mono_size
-    }
-
     fn icon(&self, name: Symbol, tone: slopty_theme::Rgb) -> AnyElement {
         slopty_kit::icons::icon(&self.theme, name, hsla(tone))
             .size(px(self.theme.typography.icon()))
@@ -1572,8 +1562,11 @@ impl ReviewView {
             .role(Role::Button)
             .aria_label(label.clone())
             .flex_none()
+            .h(px(theme.density.control))
+            .flex()
+            .items_center()
+            .whitespace_nowrap()
             .px(px(theme.spacing.sm))
-            .py(px(theme.spacing.xxs))
             .border(kit::HAIR)
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
@@ -1625,7 +1618,7 @@ impl ReviewView {
             .flex_none()
             .w_full()
             .h(px(theme.density.header))
-            .px(px(theme.spacing.md))
+            .px(px(theme.spacing.sm))
             .text_size(px(theme.typography.small()))
             .child(row.menu(self.scopes_more(cx)))
             .into_any_element()
@@ -1748,7 +1741,19 @@ impl ReviewView {
                 .with_priority(slopty_kit::layer::Layer::Submenu.priority())
         });
         let el = if others { slopty_kit::a11y::tab_stop(el, s.focus) } else { el };
-        div().relative().flex_none().child(el).children(menu).into_any_element()
+        // Hung by its pad, so its words stand on the pane's edge with the file heads' marks
+        // and the lines' numbers (`.research/design-polish-2026-10-12.md` §1.9). Shifted inside
+        // its own box, not margined: the bar's row places that box at its shaped width.
+        div()
+            .flex_none()
+            .child(
+                div()
+                    .relative()
+                    .left(px(-(theme.spacing.xs + theme.spacing.xxs)))
+                    .child(el)
+                    .children(menu),
+            )
+            .into_any_element()
     }
 
     /// The spans the comparison offers: a thread's turns, or a folder's working tree.
@@ -1787,25 +1792,20 @@ impl ReviewView {
     }
 
     /// The agent's own review: the way to ask it, where the agent has a door and there is a
-    /// change on show, or that it runs. Its words name the agent, so no mark stands beside
-    /// them; a tile too narrow for the words beside the scopes shows the conversation's glyph
-    /// alone, its words in a hint.
+    /// change on show, or that it runs. An icon button, the conversation's glyph, its words
+    /// ("Review with Claude Code") in its hint: a bar holds glyphs, not sentences
+    /// (`.research/design-polish-2026-10-12.md` §1.9).
     fn review_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (_, name) = self.door_of(cx)?;
-        let roomy = self.room().is_wide();
-        let mark = (!roomy).then(|| self.icon(slopty_kit::icons::AGENT, s.text_secondary));
+        let mark = self.icon(slopty_kit::icons::AGENT, s.text_secondary);
         let hint_theme = theme.clone();
         let hinted = move |el: gpui::Stateful<Div>, words: String| {
-            if roomy {
-                el.child(SharedString::from(words))
-            } else {
-                kit::hint_timing(el).tooltip(move |_window, cx| {
-                    let theme = Rc::new(hint_theme.clone());
-                    cx.new(|_| kit::Hint::new(words.clone(), "", theme)).into()
-                })
-            }
+            kit::hint_timing(el).tooltip(move |_window, cx| {
+                let theme = Rc::new(hint_theme.clone());
+                cx.new(|_| kit::Hint::new(words.clone(), "", theme)).into()
+            })
         };
         if self.reviewing.is_some() {
             let words = format!("{name} is reviewing\u{2026}");
@@ -1838,16 +1838,14 @@ impl ReviewView {
             .role(Role::Button)
             .aria_label(SharedString::from(label.clone()))
             .flex_none()
+            .size(px(kit::icon_button_side(theme)))
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.sm))
-            .py(px(theme.spacing.xxs))
+            .justify_center()
             .rounded(px(theme.radii.sm))
-            .text_color(hsla(s.text_secondary))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-            .children(mark)
+            .hover(move |el| el.bg(hsla(s.hover)))
+            .child(mark)
             .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
         Some(slopty_kit::a11y::tab_stop(hinted(el, label), s.focus).into_any_element())
     }
@@ -2167,63 +2165,6 @@ impl ReviewView {
         )
     }
 
-    fn file_list(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        div()
-            .id("review-files")
-            .debug_selector(|| "review-files".to_owned())
-            .role(Role::List)
-            .aria_label("Files")
-            .flex_none()
-            .w(px(LIST_WIDTH))
-            .h_full()
-            .overflow_y_scroll()
-            .bg(hsla(s.ground))
-            .py(px(theme.spacing.xs))
-            .text_size(px(theme.typography.small()))
-            .children(self.model.listed().iter().filter_map(|listed| {
-                let file = self.model.file(listed.at)?;
-                let at = listed.at;
-                let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_owned();
-                let viewed = self.is_viewed(at);
-                let tone = if listed.quiet || viewed { s.text_muted } else { s.text };
-                let here = self.cursor.is_some_and(|c| c.at == at);
-                let id = format!("review-file-{at}");
-                let selector = id.clone();
-                let row = div()
-                    .id(ElementId::Name(id.into()))
-                    .debug_selector(move || selector)
-                    .role(Role::ListItem)
-                    .aria_label(SharedString::from(file.path.clone()))
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .px(px(theme.spacing.md))
-                    .min_h(px(kit::Row::One.height(theme)))
-                    .cursor_pointer()
-                    .when(here, |el| el.bg(hsla(s.selected)))
-                    .when(!here, |el| el.hover(move |el| el.bg(hsla(s.hover))))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(hsla(tone))
-                            .child(SharedString::from(name)),
-                    )
-                    .when(viewed, |el| el.child(self.icon(Symbol::Checkmark, s.text_muted)))
-                    .when(!viewed, |el| {
-                        el.children(kit::changes(theme, file.patch.added, file.patch.removed))
-                    })
-                    .on_click(cx.listener(move |this, _ev, _w, cx| this.reveal(at, cx)));
-                Some(Self::file_menu_press(row, at, cx))
-            }))
-            .into_any_element()
-    }
-
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).copied() else { return div().into_any_element() };
         let inner = match row {
@@ -2238,13 +2179,16 @@ impl ReviewView {
             Row::Draft => self.draft_row(),
         };
         // One plane: a file is its head on the band and its lines on the content, with no frame
-        // round them; its last line keeps a base unit under it.
+        // round them; its last line keeps a base unit under it. The lines run from the pane's
+        // side, their numbers a base unit in on the pane's one edge; what is written about them
+        // (a comment, a forge's thread, a draft) stands in from it.
         let last =
             !matches!(self.rows.get(ix.saturating_add(1)), Some(r) if !matches!(r, Row::File(_)));
         let theme = &self.theme;
+        let aside = matches!(row, Row::Comment(_) | Row::Forge(..) | Row::Draft);
         div()
             .w_full()
-            .px(px(theme.spacing.md))
+            .when(aside, |el| el.px(px(theme.spacing.md)))
             .child(
                 div()
                     .w_full()
@@ -2339,13 +2283,6 @@ impl ReviewView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_file(at, cx))),
             s.focus,
         )
-        .child(kit::Disclosure::new(
-            format!("review-fold-chevron-{at}"),
-            open,
-            theme,
-            side,
-            hsla(s.icon_muted),
-        ))
         .child(
             slopty_kit::icons::Drawn::new(theme, slopty_kit::icons::file_mark(&file.path))
                 .slot(side, hsla(s.icon_muted)),
@@ -2381,21 +2318,21 @@ impl ReviewView {
         }))
         .children(kit::changes(theme, file.patch.added, file.patch.removed));
         let here = self.stands_on(at, None);
-        // Delta's file head: a band the tile's width on the element plane, a row and a base
-        // unit tall, square; the keyboard's file on the selected wash.
+        // Delta's file head: a band the tile's width on the element plane, a row tall, square;
+        // the keyboard's file on the selected wash.
         let head = div()
             .debug_selector(move || format!("review-head-row-{at}"))
             .w_full()
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .px(px(theme.spacing.md))
+            .px(px(theme.spacing.sm))
             .bg(hsla(s.element))
             .when(here, |el| el.bg(hsla(s.selected)))
-            .min_h(px(kit::Row::One.height(theme) + theme.spacing.xs))
+            .min_h(px(kit::Row::One.height(theme)))
             .text_size(px(theme.typography.small()))
-            .child(fold)
             .child(self.viewed_box(at, cx))
+            .child(fold)
             .child(self.picks(at, None, "file", cx));
         div()
             .debug_selector(move || format!("review-head-{at}"))
@@ -2438,6 +2375,7 @@ impl ReviewView {
         let s = self.theme.surfaces;
         let head = ink
             .hunk_head(block)
+            .debug_selector(move || format!("review-hunk-head-{at}-{hunk}"))
             .flex()
             .items_center()
             .when(here, |el| el.bg(hsla(s.selected)).text_color(hsla(s.text_secondary)));
@@ -2483,7 +2421,7 @@ impl ReviewView {
         let id = format!("review-line-{at}-{hunk}-{ix}");
         let new = line.new.filter(|_| line.kind != Kind::Removed);
         let tag = self.author_tag((at, hunk, ix), new, cx);
-        self.pickable(id, (at, hunk, ix), ink.unified_numbered(line), tag, cx)
+        self.pickable(id, (at, hunk, ix), ink.unified(line), tag, cx)
     }
 
     /// Row `ix` of hunk `hunk` of the file at `at`, drawn as `lines`, as a press and a drag
@@ -2510,8 +2448,7 @@ impl ReviewView {
             .w_full()
             .cursor_pointer()
             .font_family(self.mono())
-            .text_size(px(self.code_size()))
-            .line_height(px(self.code_size() * self.theme.typography.markdown_line_height))
+            .map(|el| kit::typed(el, self.theme.roles().code))
             .child(lines)
             .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
             .children(tag)
@@ -2645,43 +2582,15 @@ impl ReviewView {
             .gap(px(theme.spacing.sm))
             .dropped(&self.foot_dropped)
             .end();
-        if n > 0 {
-            let send = div()
-                .id(selector)
-                .debug_selector(move || selector.to_owned())
-                .role(Role::Button)
-                .aria_label(SharedString::from(send_words.clone()))
-                .flex_none()
-                .whitespace_nowrap()
-                .px(px(theme.spacing.md))
-                .py(px(theme.spacing.xs))
-                .rounded(px(theme.radii.sm))
-                .map(|el| kit::tinted_pressable(el, theme))
-                .cursor_pointer()
-                .child(SharedString::from(send_words))
-                .on_click(cx.listener(move |this, _ev, _w, cx| match (goal, folder) {
-                    (true, _) => this.send_to_orchestrator(cx),
-                    (false, true) => this.send_to_new_agent(cx),
-                    (false, false) => this.send_comments(cx),
-                }));
-            if !folder && task.is_none() {
-                let add = self
-                    .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
-                    .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
-                row = row.item(FOOT_ADD, kit::Priority(160), add);
-            }
-            row = row.item("send", kit::Priority::ESSENTIAL, send);
-        }
-        if task.is_some_and(|t| t.merge) {
-            // The way on while nothing waits to go back; beside comments, a step after them.
-            let merge = self.action("review-merge".to_owned(), MERGE, n == 0).on_click(
-                cx.listener(|this, _ev, _w, cx| {
-                    if let Some(thread) = this.own() {
-                        cx.emit(ReviewEvent::Merge { thread });
-                    }
-                }),
-            );
-            row = row.item("merge", kit::Priority::ESSENTIAL, merge);
+        // Right-aligned with the one primary last, Zed's modal foot: what marks or adds first,
+        // then the way on (`.research/design-polish-2026-10-12.md` §1.9).
+        if mark {
+            let marked = self
+                .action("review-mark".to_owned(), MARK_REVIEWED, n == 0)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx)));
+            // With nothing to send it is the foot's one action, and stays.
+            let priority = if n == 0 { kit::Priority::ESSENTIAL } else { kit::Priority::MEDIUM };
+            row = row.item(FOOT_MARK, priority, marked);
         }
         if let Some(words) = self.post_label(cx) {
             let posting = self.posting.is_some();
@@ -2697,18 +2606,40 @@ impl ReviewView {
             let post = div().relative().flex_none().child(post).children(self.post_menu(cx));
             row = row.item(forge::FOOT_POST, kit::Priority(150), post);
         }
-        if mark {
-            let marked = self
-                .action("review-mark".to_owned(), MARK_REVIEWED, n == 0)
-                .on_click(cx.listener(|this, _ev, _w, cx| this.mark_reviewed(cx)));
-            // With nothing to send it is the foot's one action, and stays.
-            let priority = if n == 0 { kit::Priority::ESSENTIAL } else { kit::Priority::MEDIUM };
-            row = row.item(FOOT_MARK, priority, marked);
+        if n > 0 && !folder && task.is_none() {
+            let add = self
+                .action("review-add".to_owned(), ADD_TO_MESSAGE, false)
+                .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx)));
+            row = row.item(FOOT_ADD, kit::Priority(160), add);
+        }
+        // The way on while nothing waits to go back is the primary, last; beside comments it
+        // stands before them.
+        let merge = task.is_some_and(|t| t.merge).then(|| {
+            self.action("review-merge".to_owned(), MERGE, n == 0).on_click(cx.listener(
+                |this, _ev, _w, cx| {
+                    if let Some(thread) = this.own() {
+                        cx.emit(ReviewEvent::Merge { thread });
+                    }
+                },
+            ))
+        });
+        if let Some(merge) = merge {
+            row = row.item("merge", kit::Priority::ESSENTIAL, merge);
+        }
+        if n > 0 {
+            let send = self.action(selector.to_owned(), send_words, true).on_click(cx.listener(
+                move |this, _ev, _w, cx| match (goal, folder) {
+                    (true, _) => this.send_to_orchestrator(cx),
+                    (false, true) => this.send_to_new_agent(cx),
+                    (false, false) => this.send_comments(cx),
+                },
+            ));
+            row = row.item("send", kit::Priority::ESSENTIAL, send);
         }
         div()
             .flex_none()
             .w_full()
-            .h(px(kit::Row::Two.height(theme)))
+            .h(px(theme.density.foot))
             .px(px(theme.spacing.md))
             .text_size(px(theme.typography.small()))
             .child(row.menu(self.foot_more(cx)))
@@ -2807,7 +2738,6 @@ impl ReviewView {
             .min_h_0()
             .w_full()
             .flex()
-            .when(self.room().is_wide(), |el| el.child(self.file_list(cx)))
             .child(
                 // No rule under the scope bar or over the foot: the diff fades where it slides
                 // under either, and only while some of it lies past that edge.
@@ -2921,12 +2851,10 @@ impl Render for ReviewView {
                         cx.listener(|this, _: &PutBackChange, _w, cx| this.pick_by_key(false, cx)),
                     )
             })
-            .when(!self.room().is_wide(), |el| {
-                el.on_action(cx.listener(|this, _: &ShowFiles, _w, cx| {
-                    this.files_open = !this.files_open;
-                    cx.notify();
-                }))
-            })
+            .on_action(cx.listener(|this, _: &ShowFiles, _w, cx| {
+                this.files_open = !this.files_open;
+                cx.notify();
+            }))
             .when(door, |el| {
                 el.on_action(
                     cx.listener(|this, _: &ReviewWithAgent, _w, cx| this.review_with_agent(cx)),

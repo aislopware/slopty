@@ -1,38 +1,35 @@
-//! The icons the chrome draws: IBM Carbon's glyphs ([`Symbol`]) and a file's type
-//! ([`FileType`], Material's shapes), each drawn on whole device pixels in one ink, the words'
-//! beside them, as Zed draws its icons.
+//! The icons the chrome draws: GitHub's Octicons ([`Symbol`]), a file's kind among them
+//! ([`file_mark`]), each drawn on whole device pixels in one ink, the words' beside them, as
+//! Zed draws its icons.
 //!
-//! A [`Symbol`] is one of a closed list. Git is Carbon's git glyphs ([`GitGlyph`]). An agent
+//! A [`Symbol`] is one of a closed list. Git is Octicons' git glyphs ([`GitGlyph`]). An agent
 //! wears its owner's mark ([`AgentMark`]), drawn by us from the owner's outline into the same
 //! kind of mask, and an agent with none the neutral [`AGENT`]. Nothing else is drawn by us but
 //! the marks of a state ([`Ring`]) (`docs/decisions/ui.md`,
-//! "The chrome's icons are IBM Carbon's at 16" and "State is a glyph";
+//! "The chrome's icons are Octicons at 14" and "State is a glyph";
 //! `docs/decisions/brand.md`, "Each agent wears its owner's mark").
 //!
-//! An icon fills its slot: Carbon's 32 grid and Material's view box span the slot's side. Every
-//! icon stands in one slot, [`slopty_theme::Typography::icon`] (16 pt), where Carbon's two-unit
-//! line is one whole device pixel at 1x and two at 2x, beside a row's words, in bars and in
-//! buttons alike, as Zed sets its icons; only a disclosure's chevron is drawn smaller
+//! Every icon stands in one slot, [`slopty_theme::Typography::icon`] (16 pt), beside a row's
+//! words, in bars and in buttons alike. A glyph drawn on Octicons' 16 grid spans
+//! [`slopty_theme::Typography::glyph`] (14) of it, where its 1.5 line is the words' stem; one
+//! drawn on the 12 grid (a chevron, a tab's close) spans 12, its art's own size
 //! ([`Drawn::disclosure`]). A slot sized again draws its icon larger or smaller with it.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::{
     AnimationExt as _, AnyElement, App, Bounds, DevicePixels, Div, Element, ElementId, EntityId,
     Global, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ParentElement as _, Pixels, RenderImage, ScaledPixels, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, SvgSize, TransformationMatrix, Window, canvas,
-    div, point, px, radians,
+    LayoutId, ParentElement as _, Pixels, ScaledPixels, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, TransformationMatrix, Window, canvas, div, point,
+    px, radians,
 };
-use parking_lot::RwLock;
 use slopty_platform::outline::Mask;
 use slopty_theme::{Rgb, Theme};
 
 use crate::colors::hsla;
-pub use crate::file_types::FileType;
 
 mod git;
 mod glyphs;
@@ -45,11 +42,10 @@ pub use marks::AgentMark;
 pub use ring::{Knock, Ring};
 
 /// The thread of an agent with no mark of its own ([`AgentMark::Neutral`]), an ACP agent's:
-/// one neutral mark in the ink beside it, Carbon's agent, its agent named in words.
+/// one neutral mark in the ink beside it, Octicons' model, its agent named in words.
 pub const AGENT: Symbol = Symbol::AiAgent;
 
-/// What leads a row: a glyph for what a thing is, the mark of the agent it runs, or a file's
-/// type.
+/// What leads a row: a glyph for what a thing is, or the mark of the agent it runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
     /// A chrome glyph.
@@ -58,8 +54,6 @@ pub enum Mark {
     Agent(AgentMark),
     /// A git glyph.
     Git(GitGlyph),
-    /// A file's type, its icon's silhouette in the ink beside it.
-    File(FileType),
 }
 
 impl From<GitGlyph> for Mark {
@@ -71,12 +65,6 @@ impl From<GitGlyph> for Mark {
 impl From<Symbol> for Mark {
     fn from(symbol: Symbol) -> Self {
         Self::Symbol(symbol)
-    }
-}
-
-impl From<FileType> for Mark {
-    fn from(file: FileType) -> Self {
-        Self::File(file)
     }
 }
 
@@ -103,20 +91,15 @@ impl Mark {
     pub const fn label(self) -> Option<&'static str> {
         match self {
             Self::Agent(mark) => mark.label(),
-            Self::Symbol(_) | Self::Git(_) | Self::File(_) => None,
+            Self::Symbol(_) | Self::Git(_) => None,
         }
     }
 }
 
-/// The mark for the file at `path`: the code glyph for code in a language with no icon (asked
-/// first, so `CMakeLists.txt` is code and not text); else its type's icon, or the plain
-/// document.
+/// The mark for the file at `path`: its kind's glyph ([`crate::file_types::glyph`]).
 #[must_use]
 pub fn file_mark(path: &str) -> Mark {
-    if crate::file_types::code(path) {
-        return Mark::Symbol(Symbol::ChevronLeftForwardslashChevronRight);
-    }
-    FileType::of(path).map_or(Mark::Symbol(Symbol::Doc), Mark::File)
+    Mark::Symbol(crate::file_types::glyph(path))
 }
 
 /// The glyph a machine wears, by its form.
@@ -162,8 +145,8 @@ pub fn kit_symbol(path: &str) -> Option<Symbol> {
 
 /// How a mark is drawn in a slot.
 ///
-/// A glyph or a file's icon spans `share` of the slot's side, a glyph turned by `turn` radians;
-/// an agent's mark has its ink box `ink` of the side.
+/// A glyph's grid spans `share` of the slot's side, turned by `turn` radians; an agent's mark
+/// has its ink box `ink` of the side.
 #[derive(Clone, Copy, Debug)]
 pub struct Drawn {
     mark: Mark,
@@ -173,16 +156,25 @@ pub struct Drawn {
 }
 
 impl Drawn {
-    /// `mark` in the icon slot: a glyph across the whole slot, an agent's mark with its ink
-    /// box [`slopty_theme::Spacing::xxs`] short of it.
+    /// `mark` in the icon slot: a glyph on Octicons' 16 grid across
+    /// [`slopty_theme::Typography::glyph`] (14 of 16), one on the 12 grid across its art's own
+    /// size; an agent's mark with its ink box [`slopty_theme::Spacing::xxs`] short of the slot.
     #[must_use]
     pub fn new(theme: &Theme, mark: impl Into<Mark>) -> Self {
+        let mark = mark.into();
         let slot = theme.typography.icon();
-        Self { mark: mark.into(), share: 1.0, ink: (slot - theme.spacing.xxs) / slot, turn: 0.0 }
+        let small = match mark {
+            Mark::Symbol(symbol) => symbol.small_art(),
+            Mark::Git(glyph) => glyph.symbol().small_art(),
+            Mark::Agent(_) => false,
+        };
+        let drawn = if small { theme.typography.small() } else { theme.typography.glyph() };
+        Self { mark, share: drawn / slot, ink: (slot - theme.spacing.xxs) / slot, turn: 0.0 }
     }
 
-    /// A disclosure chevron's drawing: on the grid of the chrome's smaller size
-    /// ([`slopty_theme::Typography::small`], 12 pt) in the icon slot, Zed's extra-small icon.
+    /// A small glyph's drawing: on the grid of the chrome's smaller size
+    /// ([`slopty_theme::Typography::small`], 12 pt) in the icon slot, Zed's extra-small icon: a
+    /// disclosure's chevron, or an action at the end of a line of text.
     #[must_use]
     pub fn disclosure(theme: &Theme, symbol: Symbol) -> Self {
         Self {
@@ -225,32 +217,32 @@ impl Drawn {
     #[must_use]
     pub fn slot(self, side: Pixels, color: Hsla) -> Div {
         div().flex_none().size(side).text_color(color).child(
-            canvas(|_, _, _| {}, move |bounds, (), window, cx| self.paint(bounds, window, cx))
+            canvas(|_, _, _| {}, move |bounds, (), window, _cx| self.paint(bounds, window))
                 .size_full(),
         )
     }
 
     /// Paints the mark centred in `bounds`.
-    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
+    fn paint(self, bounds: Bounds<Pixels>, window: &mut Window) {
         match self.mark {
             Mark::Symbol(symbol) => self.paint_glyph(symbol, bounds, window),
             Mark::Agent(AgentMark::Neutral) => self.paint_glyph(AGENT, bounds, window),
             Mark::Agent(mark) => self.paint_agent(mark, bounds, window),
             Mark::Git(glyph) => self.paint_glyph(glyph.symbol(), bounds, window),
-            Mark::File(file) => self.paint_file(file, bounds, window, cx),
         }
     }
 
-    /// How many device pixels a grid takes in `bounds` on this window's display.
-    fn pixels(self, bounds: Bounds<Pixels>, window: &Window) -> u32 {
-        let side = f32::from(bounds.size.width.min(bounds.size.height));
-        whole_pixels(self.grid(side) * window.scale_factor())
+    /// `symbol`'s mask as it is painted in a slot `side` points square on a display of
+    /// `scale` device pixels to the point: its grid a whole number of device pixels.
+    fn glyph_mask(self, symbol: Symbol, side: f32, scale: f32) -> Kept {
+        glyphs::mask(symbol, whole_pixels(self.grid(side) * scale))
     }
 
     /// Paints a glyph with its grid centred in `bounds`, on the device's pixel grid, turned
     /// about the centre while it turns.
     fn paint_glyph(self, symbol: Symbol, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some((mask, key)) = glyphs::mask(symbol, self.pixels(bounds, window)) else {
+        let side = f32::from(bounds.size.width.min(bounds.size.height));
+        let Some((mask, key)) = self.glyph_mask(symbol, side, window.scale_factor()) else {
             return;
         };
         let turn = if self.turn == 0.0 {
@@ -276,16 +268,6 @@ impl Drawn {
         };
         let unit = TransformationMatrix::unit();
         paint_centred(&mask, key, bounds, unit, window, || format!("{mark:?}"));
-    }
-
-    /// Paints a file's icon as one silhouette in the text's ink, its view box centred in
-    /// `bounds`, drawn at the device's size, its origin on a whole device pixel.
-    fn paint_file(self, file: FileType, bounds: Bounds<Pixels>, window: &mut Window, cx: &App) {
-        let Some((mask, key)) = file_mask(file, self.pixels(bounds, window), cx) else {
-            return;
-        };
-        let unit = TransformationMatrix::unit();
-        paint_centred(&mask, key, bounds, unit, window, || file.name().to_owned());
     }
 }
 
@@ -335,48 +317,6 @@ fn paint_centred(
 /// A drawn mask with the key the atlas keeps it under.
 type Kept = Option<(Arc<Mask>, SharedString)>;
 
-/// The file icons drawn so far, by type and side in device pixels; one that does not draw is
-/// kept as a miss, said once.
-static FILE_MASKS: LazyLock<RwLock<HashMap<(FileType, u32), Kept>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// `file`'s icon in its own colours, its view box `pixels` device pixels square: drawn by
-/// GPUI's SVG renderer at that size and no other, so nothing is resampled.
-fn file_render(file: FileType, pixels: u32, cx: &App) -> Option<Arc<RenderImage>> {
-    let side = DevicePixels(i32::try_from(pixels).ok()?);
-    let renderer = cx.svg_renderer();
-    renderer
-        .parse_svg(file.svg().as_bytes())
-        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::Size(gpui::size(side, side))))
-        .inspect_err(
-            |error| tracing::warn!(%error, file = file.name(), "a file's icon did not draw"),
-        )
-        .ok()
-}
-
-/// `file`'s icon as its silhouette, `pixels` device pixels square: the coverage of its drawing,
-/// its colours dropped, so it is painted in the ink beside it as a glyph is.
-fn file_mask(file: FileType, pixels: u32, cx: &App) -> Kept {
-    if pixels == 0 {
-        return None;
-    }
-    let at = (file, pixels);
-    if let Some(kept) = FILE_MASKS.read().get(&at) {
-        return kept.clone();
-    }
-    let kept = file_render(file, pixels, cx).and_then(|image| {
-        let size = image.size(0);
-        let alpha = image.as_bytes(0)?.as_chunks::<4>().0.iter().map(|&[.., a]| a).collect();
-        let mask = Mask {
-            width: u32::try_from(size.width.0).ok()?,
-            height: u32::try_from(size.height.0).ok()?,
-            alpha,
-        };
-        Some((Arc::new(mask), SharedString::from(format!("file:{}:{pixels}", file.name()))))
-    });
-    FILE_MASKS.write().entry(at).or_insert(kept).clone()
-}
-
 /// The display scales a window of this platform is likely shown at.
 const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 2.0] };
 
@@ -385,19 +325,24 @@ const SCALES: &[f32] = if cfg!(target_os = "ios") { &[2.0, 3.0] } else { &[1.0, 
 ///
 /// A glyph costs microseconds to draw, but the first frame would otherwise pay to read every
 /// glyph's file and Core Graphics' first context, about 6 ms together (`docs/MEASUREMENTS.md`,
-/// "Carbon glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
+/// "Octicons glyphs drawn on demand"). Whatever it has not drawn when a frame asks is drawn then.
 pub fn prewarm(theme: &Theme) {
     let slot = theme.typography.icon();
-    let sides: Vec<u32> = SCALES.iter().map(|scale| whole_pixels(slot * scale)).collect();
+    // Each glyph at the side it is painted at in the slot, on each display.
+    let glyphs: Vec<(Symbol, u32)> = Symbol::ALL
+        .iter()
+        .flat_map(|&symbol| {
+            let grid = Drawn::new(theme, symbol).grid(slot);
+            SCALES.iter().map(move |scale| (symbol, whole_pixels(grid * scale)))
+        })
+        .collect();
     let inks = [
         Drawn::new(theme, AGENT).ink(slot),
         Drawn::notice(theme, AGENT).ink(crate::kit::NOTICE_MARK),
     ];
     let warmed = std::thread::Builder::new().name("icons-prewarm".into()).spawn(move || {
-        for &symbol in Symbol::ALL {
-            for &side in &sides {
-                glyphs::mask(symbol, side);
-            }
+        for &(symbol, side) in &glyphs {
+            glyphs::mask(symbol, side);
         }
         for mark in AgentMark::OWNED {
             for (&ink, &scale) in inks.iter().flat_map(|ink| SCALES.iter().map(move |s| (ink, s))) {
@@ -454,7 +399,7 @@ impl Status {
     /// The mark drawn by us for it ([`status_icon`]): a ring for idle, a dashed ring for
     /// waiting, the turning arc for working, and a disc with its figure knocked out for the
     /// three that carry colour, so the colour has a body at 1x. `None` for away, which is
-    /// Carbon's glyph ([`Self::symbol`]).
+    /// Octicons' glyph ([`Self::symbol`]).
     #[must_use]
     pub const fn ring(self) -> Option<Ring> {
         match self {
@@ -1079,25 +1024,19 @@ mod tests {
         assert_eq!(kit_symbol("elsewhere/check.svg"), None);
     }
 
-    /// A file leads with its type's icon; code with no icon kept leads with the code glyph,
-    /// and a type neither knows with the plain document. Every agent's thread is the one
-    /// neutral glyph.
+    /// A file leads with its kind's glyph. Every agent's thread is the one neutral glyph.
     #[test]
-    fn a_file_leads_with_its_types_icon() {
-        assert_eq!(file_mark("/w/main.rs"), Mark::File(FileType::Rust));
-        assert_eq!(file_mark("/w/README.md"), Mark::File(FileType::Readme));
-        assert_eq!(file_mark("/w/q.graphql"), Symbol::ChevronLeftForwardslashChevronRight.into());
+    fn a_file_leads_with_its_kinds_glyph() {
+        assert_eq!(file_mark("/w/main.rs"), Mark::Symbol(Symbol::FileCode));
+        assert_eq!(file_mark("/w/README.md"), Mark::Symbol(Symbol::Markdown));
         assert_eq!(file_mark("/w/notes"), Mark::Symbol(Symbol::Doc));
-        let cmake = file_mark("/w/CMakeLists.txt");
-        assert_eq!(cmake, Symbol::ChevronLeftForwardslashChevronRight.into(), "code, not text");
-        assert_eq!(AGENT, Symbol::AiAgent, "Carbon's agent, not the cliched sparkles");
+        assert_eq!(AGENT, Symbol::AiAgent, "Octicons' model, not the cliched sparkles");
     }
 
-    /// An icon fills its slot, 16 pt, where Carbon's 32 grid lands on whole device pixels at
-    /// 1x and 2x, on a pointer and a finger alike; a disclosure chevron is on the 12 pt grid
-    /// in the same slot.
+    /// A glyph is drawn at 14 in its slot of 16, on a pointer and a finger alike, with a point
+    /// of air round it; the 12-grid art (a chevron, the small cross) at its own 12.
     #[test]
-    fn an_icon_fills_its_slot_of_sixteen() {
+    fn a_glyph_is_fourteen_in_a_slot_of_sixteen() {
         for touch in [false, true] {
             let mut theme = Theme::default();
             if touch {
@@ -1106,58 +1045,110 @@ mod tests {
             let slot = theme.typography.icon();
             assert!((slot - 16.0).abs() < 1e-3, "touch {touch}: {slot}");
             let grid = Drawn::new(&theme, Symbol::Doc).grid(slot);
-            assert!((grid - slot).abs() < 1e-3, "a glyph's grid is its slot");
-            let chevron = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(slot);
+            assert!((grid - 14.0).abs() < 1e-3, "a glyph's grid: {grid}");
+            let chevron = Drawn::new(&theme, Symbol::ChevronRight).grid(slot);
             assert!((chevron - 12.0).abs() < 1e-3, "the chevron's grid: {chevron}");
+            let disclosed = Drawn::disclosure(&theme, Symbol::ChevronRight).grid(slot);
+            assert!((disclosed - 12.0).abs() < 1e-3, "a disclosure's: {disclosed}");
         }
-        assert_eq!(whole_pixels(16.0 * 2.0), 32);
+        assert_eq!(whole_pixels(14.0 * 2.0), 28);
         assert_eq!(whole_pixels(f32::NAN), 0);
     }
 
-    /// A file's icon draws at the size it is painted at and no other, as one silhouette.
-    /// A lint as a test: no kept icon loses its figure in one ink, so none leans on a second
-    /// colour drawn over its first. A colour edge inside the silhouette is a figure the ink
-    /// would lose; Bun's face, Dart's, `CMake`'s and Protobuf's lost a third or more of theirs
-    /// against their outline and went (`docs/decisions/ui.md`, "The chrome's icons are IBM
-    /// Carbon's at 16").
-    #[gpui::test]
-    fn a_file_icon_is_one_silhouette_at_its_size(cx: &gpui::TestAppContext) {
-        cx.update(|cx| {
-            for file in FileType::ALL {
-                let (mask, _) = file_mask(*file, 28, cx).unwrap_or_else(|| panic!("{file:?}"));
-                assert_eq!((mask.width, mask.height), (28, 28), "{file:?}");
-                assert!(mask.alpha.iter().any(|a| *a > 0), "{file:?} has ink");
-                let image = file_render(*file, 32, cx).unwrap_or_else(|| panic!("{file:?}"));
-                let lost = lost_figure(image.as_bytes(0).unwrap_or_default(), 32);
-                assert!(lost < 0.2, "{file:?} loses {lost:.2} of its figure in one ink");
-            }
-        });
+    /// The glyphs drawn with their outlines: every one but the few that are a filled shape (a
+    /// state's disc, a dot, a square, the alert's triangle).
+    fn outlined() -> impl Iterator<Item = Symbol> {
+        Symbol::ALL.iter().copied().filter(|s| {
+            let name = s.name();
+            !name.contains("-fill") && !name.contains("kebab")
+        })
     }
 
-    /// The share of a drawing's figure one ink loses: its colour edges between two solid
-    /// pixels, against the edges of its silhouette (BGRA, `side` pixels to a row).
-    fn lost_figure(bgra: &[u8], side: usize) -> f32 {
-        let pixels: Vec<[u8; 4]> = bgra.as_chunks::<4>().0.to_vec();
-        let rows: Vec<&[[u8; 4]]> = pixels.chunks(side).collect();
-        let across = rows.iter().flat_map(|row| row.iter().zip(row.iter().skip(1)));
-        let down = rows.iter().zip(rows.iter().skip(1)).flat_map(|(a, b)| a.iter().zip(b.iter()));
-        let pairs: Vec<(&[u8; 4], &[u8; 4])> = across.chain(down).collect();
-        let outline = pairs.iter().filter(|(p, n)| p[3].abs_diff(n[3]) > 128).count();
-        let inner = pairs
-            .iter()
-            .filter(|(p, n)| {
-                let apart = p.iter().zip(n.iter()).take(3);
-                let apart = apart.map(|(c, d)| f32::from(c.abs_diff(*d)).powi(2)).sum::<f32>();
-                p[3] > 230 && n[3] > 230 && apart.sqrt() > 80.0
-            })
-            .count();
-        #[expect(clippy::cast_precision_loss, reason = "a few hundred edges")]
-        let share = inner as f32 / outline.max(1) as f32;
-        share
+    /// Each glyph's mask as it is painted in the default slot at `scale`: the paint path's own
+    /// sizing ([`Drawn::glyph_mask`]), so the size measured is the size drawn.
+    fn painted(symbol: Symbol, scale: f32) -> Arc<Mask> {
+        let theme = Theme::default();
+        let slot = theme.typography.icon();
+        Drawn::new(&theme, symbol)
+            .glyph_mask(symbol, slot, scale)
+            .unwrap_or_else(|| panic!("{symbol:?} is drawn"))
+            .0
+    }
+
+    /// A glyph weighs like its words: drawn as it is painted at 1x and measured eight times
+    /// finer, the median line is 1.10 to 1.40 px across, about Delta's 1.1–1.3 pt line beside
+    /// the 1.29 px stem of IBM Plex Sans at 14 (`.research/delta-re-2026-10-12.md` §3.1,
+    /// `.research/design-polish-2026-10-12.md` §3.1). Octicons' 1.5 line on its 16 grid measures
+    /// 1.375 drawn at 14, the nearest it comes; at 16 it would be 1.5 and more, heavier than the
+    /// words. Carbon's measured 1.06, a hairline beside its words. The line is the shorter of the
+    /// inked run across and down each inked pixel, over every outlined glyph.
+    #[test]
+    fn a_glyph_weighs_like_its_words() {
+        const FINER: f32 = 8.0;
+        let mut runs: Vec<f32> = Vec::new();
+        for symbol in outlined() {
+            let at_one = painted(symbol, 1.0);
+            let m = painted(symbol, FINER);
+            assert_eq!(m.width, at_one.width.saturating_mul(8), "{symbol:?}: the same grid, finer");
+            let side = usize::try_from(m.width).unwrap_or_default();
+            let ink = |x: usize, y: usize| {
+                m.alpha.get(y.saturating_mul(side).saturating_add(x)).is_some_and(|a| *a >= 128)
+            };
+            for y in 0..side {
+                for x in 0..side {
+                    if !ink(x, y) {
+                        continue;
+                    }
+                    let left = (0..x).rev().take_while(|&i| ink(i, y)).count();
+                    let right = (x.saturating_add(1)..side).take_while(|&i| ink(i, y)).count();
+                    let up = (0..y).rev().take_while(|&j| ink(x, j)).count();
+                    let down = (y.saturating_add(1)..side).take_while(|&j| ink(x, j)).count();
+                    let across = left.saturating_add(right).saturating_add(1);
+                    let run = across.min(up.saturating_add(down).saturating_add(1));
+                    #[expect(clippy::cast_precision_loss, reason = "a run of a few dozen")]
+                    runs.push(run as f32 / FINER);
+                }
+            }
+        }
+        runs.sort_by(f32::total_cmp);
+        let median = runs.get(runs.len() / 2).copied().unwrap_or_default();
+        eprintln!("the median line of {} inked pixels: {median:.3} px", runs.len());
+        assert!((1.10..=1.40).contains(&median), "the median line: {median} px");
+    }
+
+    /// A glyph is crisp at 1x, where the person looks: drawn as it is painted at 14 on a 1x
+    /// display, its ink is mostly whole pixels, Σα² / Σα at least 0.72 over every glyph (one
+    /// is every inked pixel solid). Carbon's art at 14 measured 0.63
+    /// (`.research/design-polish-2026-10-12.md` §3.2). None falls under 0.55, a smear.
+    #[test]
+    fn a_glyph_is_crisp_at_one_x() {
+        let (mut squares, mut sum) = (0.0_f64, 0.0_f64);
+        let mut each = Vec::new();
+        for &symbol in Symbol::ALL {
+            let m = painted(symbol, 1.0);
+            let (sq, su) = m.alpha.iter().fold((0.0_f64, 0.0_f64), |(sq, su), a| {
+                let a = f64::from(*a) / 255.0;
+                (a.mul_add(a, sq), su + a)
+            });
+            assert!(su > 0.0, "{symbol:?} has ink");
+            each.push((sq / su, symbol));
+            squares += sq;
+            sum += su;
+        }
+        let crisp = squares / sum;
+        each.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "crisp at 1x: {crisp:.3}; the softest {:?}",
+            each.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(crisp >= 0.72, "crisp at 1x: {crisp:.3}");
+        for (c, symbol) in each {
+            assert!(c >= 0.55, "{symbol:?} smears at 1x: {c:.3}");
+        }
     }
 
     /// Each status has its own mark, the three that carry colour a disc with their own figure
-    /// knocked out; only away is a glyph, Carbon's.
+    /// knocked out; only away is a glyph, Octicons'.
     #[test]
     fn each_status_has_its_own_mark() {
         let all = [

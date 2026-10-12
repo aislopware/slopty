@@ -75,7 +75,6 @@ fn chrome_text_is_sentence_case() {
         crate::workspace::NO_WORKERS,
         crate::workspace::NO_WORKERS_NEXT,
         crate::workspace::ADD_WORKER,
-        crate::workspace::CHROME_WORDS[0],
         crate::screen::waiting_text(slopty_proto::screen::SourceState::Idle),
         crate::screen::waiting_text(slopty_proto::screen::SourceState::Live),
     ];
@@ -483,12 +482,11 @@ fn the_green_control_check_knows_a_control_from_a_mark() {
 
 /// The accent is a mark, never a control's fill: the primary action, a ticked box and an armed
 /// key take Zed's tinted accent ([`slopty_kit::kit::tinted`]), its quiet ground inside its
-/// line. The accent's fill carries words only on a badge's count (the title bar's) and a
-/// switch that is on, which Zed fills with it (the settings form's).
+/// line. The accent's fill carries words only on a switch that is on, which Zed fills with it
+/// (the settings form's).
 #[test]
 fn the_accent_is_never_a_control() {
-    const RULED: [&str; 2] =
-        ["slopty-ui/src/workspace/titlebar.rs", "slopty-ui/src/settings_form.rs"];
+    const RULED: [&str; 1] = ["slopty-ui/src/settings_form.rs"];
     // Call sites whose owners move them onto `kit::tinted` in their next change.
     const AWAITING: [&str; 0] = [];
     let waived: Vec<&str> = RULED.iter().chain(&AWAITING).copied().collect();
@@ -667,55 +665,123 @@ fn a_status_glyph_wears_its_fill() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// A machine's or a project's own colour goes on the navigator's head and nowhere else: the
-/// identity hues are read only through [`identity_ink`] and [`machine_ink`], and those are
-/// called only there.
+/// A machine's or a project's own colour is Delta's bar down its navigator head's leading edge
+/// and the rows under it, and nowhere else, never its glyph (`docs/decisions/ui.md`, "The
+/// chrome's icons are Octicons at 14"): the identity hues are read only through `identity_ink`
+/// and `machine_ink`, and those are called only for the navigator's `identity_bar` and
+/// `identity_run`.
 #[test]
-fn identity_colour_stays_on_its_glyph() {
-    // The navigator's machine and project heads, and nowhere else (`docs/decisions/ui.md`,
-    // "Premium foundations"): a palette row, a tile's header, the breadcrumb and the empty
-    // workspace draw a machine in its words' tier.
-    const GLYPHS: [&str; 3] = [
-        "slopty-ui/src/identity.rs",
-        "slopty-ui/src/workspace/navigator.rs",
-        // Until the board's task meta goes to its words' tier (lane A, the same ruling).
-        "slopty-ui/src/project/view.rs",
-    ];
+fn identity_colour_is_the_row_bar() {
     let mut wrong = Vec::new();
-    for (file, line_no, line) in CHROME.into_iter().flat_map(chrome_lines) {
-        let code = line.split("//").next().unwrap_or_default();
-        let hues = code.contains("surfaces.identity") || code.contains("s.identity");
-        let ink = code.contains("identity_ink(") || code.contains("machine_ink(");
+    for (file, lines) in chrome_files() {
         let mine = file.ends_with("slopty-ui/src/identity.rs");
-        if (hues && !mine) || (ink && !GLYPHS.iter().any(|f| file.ends_with(f))) {
-            wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+        let navigator = file.ends_with("slopty-ui/src/workspace/navigator.rs");
+        for (ix, (line_no, line)) in lines.iter().enumerate() {
+            let code = line.split("//").next().unwrap_or_default();
+            let hues = code.contains("surfaces.identity") || code.contains("s.identity");
+            let ink = code.contains("identity_ink(") || code.contains("machine_ink(");
+            // The bar's call opens a line or two above the ink it is handed.
+            let barred = navigator
+                && lines.get(ix.saturating_sub(2)..=ix).is_some_and(|near| {
+                    near.iter()
+                        .any(|(_, l)| l.contains("identity_bar(") || l.contains("identity_run("))
+                });
+            if (hues && !mine) || (ink && !mine && !barred) {
+                wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+            }
         }
     }
-    assert!(wrong.is_empty(), "an identity colour off its glyph:\n{}", wrong.join("\n"));
+    assert!(wrong.is_empty(), "an identity colour off its row's bar:\n{}", wrong.join("\n"));
 }
 
-/// A row's lead handed the muted tone: two tiers under its title.
-fn muted_lead(call: &str) -> Option<&'static str> {
-    call.contains(".text_muted").then_some(
-        "a lead in `text_muted`; it is a tier under its title (`text_secondary`), muted \
-         only when away or disabled",
+/// What makes a row's action a text link or a second line, where the navigator's rows act
+/// through icon buttons in their end slot and keep to one line.
+fn row_action_wrong(line: &str) -> Option<&'static str> {
+    let code = line.split("//").next().unwrap_or_default();
+    if code.contains("ButtonKind::Link") || code.contains("kit::button(") {
+        Some("a row acts through an icon button in its end slot, never a text link or button")
+    } else if code.contains("line_heights(") || code.contains("Row::Two, format!(\"nav-") {
+        Some("a navigator row is one line")
+    } else {
+        None
+    }
+}
+
+#[test]
+fn the_row_action_check_knows_a_link_from_an_icon_button() {
+    assert!(
+        row_action_wrong("let deny = kit::button(theme, \"deny\", DENY, ButtonKind::Link)")
+            .is_some()
+    );
+    assert!(
+        row_action_wrong("row(theme, kit::Row::Two, format!(\"nav-ready-{key}\"), l, false)")
+            .is_some()
+    );
+    assert!(
+        row_action_wrong("kit::icon_button_inked(theme, id, Symbol::Checkmark, ALLOW, ink)")
+            .is_none()
+    );
+    assert!(row_action_wrong("// a kit::button( in a comment").is_none());
+}
+
+/// The navigator's rows, its attention sections and the rows the machines' and boards' lists
+/// draw are one line and act through icon buttons in their end slot, shown under the pointer
+/// (`.research/design-polish-2026-10-12.md` §4.5): an inline "Deny", "Allow" or "Merge" link
+/// was the weakest affordance in the app, and a second line doubled the list for facts the
+/// row's hint holds.
+#[test]
+fn a_row_acts_through_icon_buttons() {
+    let files = [
+        "navigator.rs",
+        "attention.rs",
+        "projects.rs",
+        "machines.rs",
+        "board_tiles.rs",
+        "approvals.rs",
+    ];
+    let mut wrong = Vec::new();
+    for (file, lines) in chrome_files() {
+        if !files.iter().any(|f| file.ends_with(&format!("slopty-ui/src/workspace/{f}"))) {
+            continue;
+        }
+        for (line_no, line) in &lines {
+            if let Some(why) = row_action_wrong(line) {
+                wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The ink a row's lead is handed, if it is not a lead's: `icon_muted` at rest, `icon` when
+/// chosen, a state's own ink (`Status::ink` and its kin), or `text_muted` for what is away.
+fn lead_ink_wrong(call: &str) -> Option<&'static str> {
+    let words = [".text_secondary", ".text)", "s.text,", ".text_primary"];
+    words.iter().any(|w| call.contains(w)).then_some(
+        "a lead in a word's tone; leads wear `icon_muted`, `icon` when chosen, or their state's \
+         ink",
     )
 }
 
-/// A lead sits one tier under its title, never two: `text_secondary` at rest and `text`
-/// when chosen, so the navigator stops reading as grey specks beside black words
-/// (`docs/decisions/ui.md`, "An icon takes its words' size, weight and tier"). Away and
-/// disabled are muted through their own words (`Status::Away`), not at the call.
 #[test]
-fn a_lead_is_never_muted_at_rest() {
-    const AWAITING: [&str; 0] = [];
+fn the_lead_ink_check_knows_a_leads_ink_from_a_words() {
+    assert!(lead_ink_wrong("lead_slot(theme,icon,hsla(s.text_secondary))").is_some());
+    assert!(lead_ink_wrong("lead_mark(theme,mark,hsla(s.text),LEAD_SLOT)").is_some());
+    assert!(lead_ink_wrong("lead_slot(theme,icon,hsla(s.icon_muted))").is_none());
+    assert!(lead_ink_wrong("lead_mark(theme,mark,hsla(s.icon),LEAD_SLOT)").is_none());
+    assert!(lead_ink_wrong("lead_slot(theme,icon,hsla(icon_ink))").is_none());
+}
+
+/// A lead wears the leads' ink or its state's: `icon_muted` at rest and `icon` when chosen, as
+/// Delta's and Zed's project panel set them, so a glyph carries most of its words' tone without
+/// standing as a word (`docs/decisions/ui.md`, "The chrome's icons are Octicons at 14";
+/// `slopty_theme`'s `icon_muted_carries_three_quarters_of_its_words`).
+#[test]
+fn a_lead_wears_icon_muted_or_its_state() {
     let mut wrong = Vec::new();
     for (file, lines) in chrome_files() {
-        if AWAITING.iter().any(|f| file.ends_with(f)) {
-            continue;
-        }
         for (ix, (line_no, line)) in lines.iter().enumerate() {
-            for needle in ["lead_slot(", "icon_slot("] {
+            for needle in ["lead_slot(", "icon_slot(", "lead_mark("] {
                 let whole = line.split_once(needle).is_some_and(|(before, _)| {
                     !before.ends_with(|c: char| c == '_' || c.is_alphanumeric())
                         && !before.trim_end().ends_with("fn")
@@ -728,7 +794,7 @@ fn a_lead_is_never_muted_at_rest() {
                 if call.contains("disclosure(") {
                     continue;
                 }
-                if let Some(why) = muted_lead(&call) {
+                if let Some(why) = lead_ink_wrong(&call) {
                     wrong.push(format!("{file}:{line_no}: {why}: {}", line.trim()));
                 }
             }
@@ -1102,7 +1168,9 @@ fn a_tile_stands_on_a_panel() {
 /// Chrome context (a header's directory, the breadcrumb's path, the palette's column, a
 /// row's second line) is in the UI face. The mono face is for an address read to judge it
 /// (a held-back page's hint) and a diff's size, Delta's (`kit::changes`), both drawn in the
-/// kit, and nothing else in the chrome calls for it: the settings file is a file tile's text.
+/// kit, and a settings page's group heads, as Delta's settings set theirs
+/// (`.research/delta-re-2026-10-12.md` §2.2); nothing else in the chrome calls for it: the
+/// settings file is a file tile's text.
 #[test]
 fn the_mono_face_is_for_addresses() {
     let uses: Vec<String> = CHROME
@@ -1111,15 +1179,16 @@ fn the_mono_face_is_for_addresses() {
         .filter(|(_, _, line)| line.contains("mono_family(") && !line.contains("fn mono_family"))
         .map(|(file, line_no, _)| format!("{file}:{line_no}"))
         .collect();
-    let kit = |at: &String| at.contains("slopty-kit/src/kit.rs");
+    let kit = |at: &&String| at.contains("slopty-kit/src/kit.rs");
+    let heads = |at: &String| at.contains("slopty-ui/src/settings_form.rs");
     assert!(
-        uses.len() == 2 && uses.iter().all(kit),
-        "mono outside the addresses and the diff's size: {uses:#?}"
+        uses.len() == 3 && uses.iter().filter(kit).count() == 2 && uses.iter().any(heads),
+        "mono outside the addresses, the diff's size and the settings' heads: {uses:#?}"
     );
 }
 
-/// A tab's title, the title bar's and a pane's alike (and the lone header's, which is a
-/// pane's), fades over its last 40 pt while it is cut, as `MonoCode`'s `TabLabel` does,
+/// A tab's title (a pane's tab, and the one cell of a pane whose tile is on its way) fades
+/// over its last 40 pt while it is cut, as `MonoCode`'s `TabLabel` does,
 /// rather than losing its last letters to an ellipsis, and so does a navigator row's title, as
 /// Zed's sidebar cuts one: the one fill that fades (`ChromeText::fill_fading`, whose own test
 /// holds when it fades).
@@ -1133,8 +1202,7 @@ fn a_tabs_title_fades_over_its_end() {
             })
             .count()
     };
-    assert_eq!(fades("workspace/title_tabs.rs"), 1, "the title tab's");
-    assert_eq!(fades("workspace/tile.rs"), 1, "the pane tab's and the lone header's");
+    assert_eq!(fades("workspace/tile.rs"), 2, "the pane tab's and a one-cell bar's");
     assert_eq!(fades("workspace/navigator.rs"), 1, "a navigator row's");
 }
 
@@ -1472,10 +1540,9 @@ fn the_spacing_check_knows_a_pad_from_a_measurement() {
     assert!(literal_spacing("something.expr(px(4.0))").is_none());
 }
 
-/// The chrome draws its icons one way (`docs/decisions/ui.md`, "The chrome's icons are IBM
-/// Carbon's at 16"): no SVG is drawn in the app's own code but the app's mark and the icon
-/// modules, no icon name of another set is left, and a file's icon is a mask in the words' ink,
-/// never a picture in its own colours.
+/// The chrome draws its icons one way (`docs/decisions/ui.md`, "The chrome's icons are
+/// Octicons at 14"): no SVG is drawn in the app's own code but the app's mark and the icon
+/// modules, and no icon name of another set is left.
 #[test]
 fn the_chrome_draws_its_own_icons() {
     let mut stray = Vec::new();
@@ -1483,15 +1550,13 @@ fn the_chrome_draws_its_own_icons() {
         for (file, line, text) in chrome_lines(dir) {
             let code = text.split("//").next().unwrap_or_default();
             // The app's mark is a drawing of ours (`brand`), `icons.rs` names the kit's
-            // drawings it stands glyphs in for and masks the files' icons, `icons/glyphs.rs`
-            // and `icons/marks.rs` read Carbon's and the agents' owners' outlines into masks,
-            // and `file_types.rs` keeps Material's files. A git glyph (`GitGlyph::`) is one
-            // of the glyphs.
+            // drawings it stands glyphs in for, and `icons/glyphs.rs` and `icons/marks.rs`
+            // read Octicons' and the agents' owners' outlines into masks. A git glyph
+            // (`GitGlyph::`) is one of the glyphs.
             let mark = code.contains("assets/icon.svg")
                 || file.ends_with("icons.rs")
                 || file.ends_with("icons/glyphs.rs")
-                || file.ends_with("icons/marks.rs")
-                || file.ends_with("file_types.rs");
+                || file.ends_with("icons/marks.rs");
             let code = code.replace("GitGlyph::", "");
             if !mark && ["svg()", ".svg\"", "IconName", "Glyph::"].iter().any(|b| code.contains(b))
             {
@@ -1501,7 +1566,7 @@ fn the_chrome_draws_its_own_icons() {
     }
     assert!(stray.is_empty(), "an icon drawn another way:\n{}", stray.join("\n"));
     let icons = include_str!("../../slopty-kit/src/icons.rs");
-    assert!(!icons.contains("paint_image("), "a file's icon is painted as a mask, in one ink");
+    assert!(!icons.contains("paint_image("), "every icon is painted as a mask, in one ink");
 }
 
 /// An agent's mark wears no colour of its own (`docs/decisions/brand.md`, "Each agent
@@ -1514,7 +1579,7 @@ fn an_agents_mark_wears_no_colour_of_its_own() {
     let between = |from: &str, to: &str| {
         icons.split(from).nth(1).and_then(|rest| rest.split(to).next()).unwrap_or_default()
     };
-    let paint = between("fn paint_agent(", "fn paint_file(");
+    let paint = between("fn paint_agent(", "\n    }\n");
     let centred = between("fn paint_centred(", "\n}\n");
     assert!(paint.contains("paint_centred("), "painted as a mask is");
     assert!(centred.contains("window.text_style().color"), "painted in the words' ink");

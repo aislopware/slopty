@@ -81,9 +81,6 @@ pub fn program_banner(name: Option<&str>, title: &str, body: &str) -> (String, S
     (banner_title(name, title), body.trim().to_owned())
 }
 
-/// What a click on a waiting agent's badge does, as a screen reader says it.
-pub(super) const SHOW_PROMPT: &str = "Shows the prompt";
-
 /// Whether the agent is waiting on the human.
 pub(super) fn needs_human(agent: &ThreadStand) -> bool {
     agent.rung == Rung::NeedsYou

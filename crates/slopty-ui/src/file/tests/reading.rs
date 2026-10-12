@@ -113,7 +113,7 @@ fn the_preview_keeps_to_the_reading_measure(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/PLAN.md");
     arrives(&view, cx, text_read(PLAN, true, 1));
     let id = uuid(&view, cx);
-    let measure = crate::conversation::thread::view::COLUMN;
+    let measure = crate::conversation::thread::view::PROSE;
     for width in [1400.0_f32, 400.0] {
         cx.simulate_resize(gpui::size(px(width), px(500.0)));
         let line: &'static str = Box::leak(format!("file-measure-{id}-0").into_boxed_str());

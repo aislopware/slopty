@@ -1,32 +1,27 @@
 //! A tab's panes drawn from the tiling model, headless: each pane at its rectangle, the sash
-//! dragged within each pane's least room, a double-click evening the split, the drop's wash, and
-//! the title bar's tabs.
+//! dragged within each pane's least room, a double-click evening the split, and the drop's
+//! wash.
 
 use std::str::FromStr as _;
 
 use gpui::{
     Bounds, InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement as _,
-    Pixels, Render, ScrollHandle, Styled as _, div, point,
+    Pixels, Render, Styled as _, div, point,
 };
-use slopty_client::layout::tiling::{Drop, TabId, Tiling, TilingConfig};
+use slopty_client::layout::tiling::{Drop, Tiling, TilingConfig};
 use slopty_client::layout::tree::{PANE_MIN_W, Sash, Side};
 use slopty_client::layout::{GroupKey, Rect};
 
-use super::super::area::DropSpots;
 use super::super::panes::{self, PaneHost, Panes};
-use super::super::title_tabs::{self, TitleTab, TitleTabsHost};
 use super::*;
 
-/// The panes and the title tabs over a tiling, alone in a window.
+/// The panes over a tiling, alone in a window, under an empty row as tall as the top line.
 struct Harness {
     theme: Theme,
     tiling: Tiling,
     panes: Panes,
     drop: Option<Drop>,
     released: usize,
-    tabs_scroll: ScrollHandle,
-    closed: Vec<TabId>,
-    spots: Rc<DropSpots>,
 }
 
 impl PaneHost for Harness {
@@ -55,52 +50,6 @@ impl PaneHost for Harness {
     }
 }
 
-impl TitleTabsHost for Harness {
-    fn show_title_tab(&mut self, id: TabId, cx: &mut Context<Self>) {
-        self.tiling.show_tab(id);
-        cx.notify();
-    }
-
-    fn carry_title_tab(&mut self, _id: TabId, _ev: &gpui::MouseDownEvent) {}
-
-    fn name_title_tab(&mut self, _id: TabId, _window: &mut Window, _cx: &mut Context<Self>) {}
-
-    fn close_title_tab(&mut self, id: TabId, _window: &mut Window, cx: &mut Context<Self>) {
-        self.closed.push(id);
-        self.tiling.drop_tab(id);
-        cx.notify();
-    }
-
-    fn title_tab_menu(
-        &mut self,
-        _id: TabId,
-        _at: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-}
-
-/// The title tabs of the project on show.
-fn title_tabs(tiling: &Tiling) -> Vec<TitleTab> {
-    let Some(project) = tiling.shown_project() else { return Vec::new() };
-    project
-        .tabs()
-        .iter()
-        .enumerate()
-        .map(|(i, tab)| TitleTab {
-            id: tab.id(),
-            title: format!("Tab {i}").into(),
-            lead: slopty_kit::icons::Mark::Symbol(slopty_kit::icons::Symbol::Terminal),
-            place: None,
-            edited: false,
-            tiles: tab.panes().count(),
-            marks: vec![slopty_kit::icons::Status::Working; tab.panes().count().min(2)],
-            shown: i == project.shown_index(),
-        })
-        .collect()
-}
-
 /// The window over a [`Harness`], drawn from it read and never written, as the workspace's own
 /// views are ([`slopty_kit::draw`]).
 struct Shown {
@@ -112,7 +61,6 @@ impl Render for Shown {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         slopty_kit::draw::build(&self.harness.downgrade(), window, cx, |this, window, cx| {
             let frame = this.tiling.frame();
-            let tabs = title_tabs(&this.tiling);
             let body = |laid: &slopty_client::layout::tree::Laid| {
                 let id = laid.pane.get();
                 div().size_full().debug_selector(move || format!("body-{id}")).into_any_element()
@@ -121,14 +69,7 @@ impl Render for Shown {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(div().h(px(TITLE_H)).w_full().flex().child(title_tabs::render(
-                    &this.theme,
-                    &tabs,
-                    &this.tabs_scroll,
-                    title_tabs::Drops { spots: &this.spots, at: None, closing: None, field: None },
-                    window,
-                    cx,
-                )))
+                .child(div().h(px(TITLE_H)).w_full())
                 .child(div().flex_1().w_full().child(panes::render(
                     this,
                     &this.theme,
@@ -172,9 +113,6 @@ fn harness(cx: &mut TestAppContext, tiling: Tiling) -> (Entity<Harness>, &mut Vi
             panes: Panes::default(),
             drop: None,
             released: 0,
-            tabs_scroll: ScrollHandle::new(),
-            closed: Vec::new(),
-            spots: Rc::default(),
         });
         let heard = cx.observe(&harness, |_, _, cx| cx.notify());
         Shown { harness, _heard: heard }
@@ -287,57 +225,4 @@ fn a_drop_washes_the_panel_the_tile_would_become(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     same(cx.debug_bounds("drop-wash").unwrap(), on_screen(right.rect));
-}
-
-/// The title bar shows the tabs of the project on show, a mark per agent in each; a press
-/// shows a tab and its panes, and its close takes it away.
-#[gpui::test]
-fn the_title_bar_shows_the_projects_tabs_and_their_agents(cx: &mut TestAppContext) {
-    let mut tiling = two_side_by_side();
-    tiling.new_tab(tile_n(3), &atlas());
-    tiling.new_tab(tile_n(9), &GroupKey::new("project", "web"));
-    tiling.show_project(&atlas());
-    let (view, cx) = harness(cx, tiling);
-    let ids: Vec<TabId> = view.read_with(cx, |h, _| {
-        h.tiling
-            .shown_project()
-            .unwrap()
-            .tabs()
-            .iter()
-            .map(slopty_client::layout::tree::Tab::id)
-            .collect()
-    });
-    assert_eq!(ids.len(), 2, "only the project on show");
-    let tab = |id: TabId| sel(format!("title-tab-{}", id.get()));
-    assert!(cx.debug_bounds(tab(ids[0])).is_some() && cx.debug_bounds(tab(ids[1])).is_some());
-    let mark = |id: TabId, i: usize| sel(format!("title-tab-mark-{}-{i}", id.get()));
-    assert!(cx.debug_bounds(mark(ids[0], 1)).is_some(), "two agents, two marks");
-    assert!(cx.debug_bounds(mark(ids[1], 1)).is_none(), "one agent, one mark");
-    assert_eq!(
-        view.read_with(cx, |h, _| h.tiling.shown_tab().map(slopty_client::layout::tree::Tab::id)),
-        Some(ids[1])
-    );
-
-    let first = cx.debug_bounds(tab(ids[0])).unwrap();
-    cx.simulate_click(first.center(), Modifiers::default());
-    cx.run_until_parked();
-    assert_eq!(
-        view.read_with(cx, |h, _| h.tiling.shown_tab().map(slopty_client::layout::tree::Tab::id)),
-        Some(ids[0])
-    );
-    let panes = view.read_with(cx, |h, _| h.tiling.frame().panes);
-    assert_eq!(panes.len(), 2);
-    for laid in panes {
-        assert!(
-            cx.debug_bounds(sel(format!("pane-{}", laid.pane.get()))).is_some(),
-            "its panes drawn"
-        );
-    }
-
-    let close = sel(format!("title-tab-close-{}", ids[0].get()));
-    let close = cx.debug_bounds(close).expect("the shown tab's close");
-    cx.simulate_click(close.center(), Modifiers::default());
-    cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |h, _| h.closed.clone()), [ids[0]]);
-    assert!(cx.debug_bounds(tab(ids[0])).is_none());
 }

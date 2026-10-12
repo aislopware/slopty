@@ -447,8 +447,13 @@ fn the_turns_fade_under_the_header_with_no_rule(cx: &mut TestAppContext) {
     let state = fixtures::long(6, 12);
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
+    let (view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    // The newest call opened: its well is something painted under the fade, where the turns'
+    // words alone, unboxed, paint none of the quads a fade is read from.
+    let newest = cx.debug_bounds("tool-t6.11").expect("the newest call's line");
+    cx.simulate_click(newest.center(), Modifiers::none());
     cx.run_until_parked();
     // The fade reads the list's extent as it lays out, so it lands a frame later.
     cx.update(gpui::Window::simulate_next_frame);
@@ -464,7 +469,23 @@ fn the_turns_fade_under_the_header_with_no_rule(cx: &mut TestAppContext) {
     });
     assert!(!ruled, "no hairline under the header");
     let faded = cx.update(|window, _| slopty_kit::retained::faded_edges(window, rows));
-    assert!(faded.top, "the turns above the newest fade under the header");
+    let (following, count, scrolled) =
+        view.read_with(cx, |v, _| (v.following(), v.rows().len(), v.scrolled()));
+    let (painted, fades): (usize, Vec<String>) = cx.update(|window, _| {
+        let lines = window.painted_primitives();
+        let fades = lines
+            .iter()
+            .filter(|line| line.contains("fade") || line.contains("Fade"))
+            .take(4)
+            .map(|line| line.chars().take(300).collect())
+            .collect();
+        (lines.len(), fades)
+    });
+    assert!(
+        faded.top,
+        "the turns above the newest fade under the header: {rows:?}, following {following}, \
+         {count} rows, scrolled {scrolled:?}, {painted} painted, fades {fades:#?}"
+    );
     assert!(!faded.bottom, "nothing lies below the newest");
 }
 

@@ -35,6 +35,10 @@ const RECENT: &str = "Recent";
 /// How many commands an empty field lists: the ones run last, then the first of the rest.
 pub const RECENT_COMMANDS: usize = 5;
 
+/// How many commands run last lead an empty field under *Recent*, above the rest
+/// (`.research/design-polish-2026-10-12.md` §1.8: Zed's picker shows its history first).
+const RECENT_LEAD: usize = 3;
+
 /// How far past its edges the list lays out lines, so a scroll never shows one appear.
 const OVERDRAW: f32 = 256.0;
 
@@ -89,19 +93,19 @@ pub(crate) fn quiet_line(
         .child(text)
 }
 
-/// The height of a line in a list that floats (the palette's, a picker's): the density's item,
-/// 24 on the Mac, Zed's picker rows.
+/// The height of a line in a list that floats (the palette's, a picker's): the density's list
+/// row, Delta's palette's 27 on the Mac (`.research/delta-signed-in-2026-10-12.md` §2.7).
 pub(crate) const fn line_height(theme: &Theme) -> f32 {
-    theme.density.item
+    theme.density.list
 }
 
-/// How wide a list typed at grows on a desktop (the palette, a picker): Zed's command palette,
-/// 38 rem.
-pub(crate) const LIST_WIDTH: f32 = 608.0;
+/// How wide a list typed at grows on a desktop (the palette, a picker): Delta's palette, 560,
+/// measured from the signed-in app.
+pub(crate) const LIST_WIDTH: f32 = 560.0;
 
-/// How far down the window a list typed at opens on a desktop: Zed's modal layer's `top_20`,
-/// 80 pt, so the eye drops a short way to it and the rows have room under it.
-pub(crate) const LIST_TOP: f32 = 80.0;
+/// How far down the window a list typed at opens on a desktop: Delta's palette's 120 pt, the
+/// same at every window size, so the eye drops a short way to it.
+pub(crate) const LIST_TOP: f32 = 120.0;
 
 /// The layer a list typed at is laid out on: [`slopty_kit::kit::anchor`]'s, the list
 /// [`LIST_TOP`] down the window rather than a dialog's way down.
@@ -110,16 +114,16 @@ pub(crate) fn list_anchor(theme: &Theme, window: &Window) -> gpui::Div {
     slopty_kit::kit::anchor(theme, window).pt(px(LIST_TOP) + safe_top)
 }
 
-/// The height of a floating list's query row: the title's, 34 on the Mac, Zed's picker editor.
+/// The height of a floating list's query row: Delta's palette's 36 on the Mac, a column
+/// foot's height.
 pub(crate) const fn query_height(theme: &Theme) -> f32 {
-    theme.density.title
+    theme.density.foot
 }
 
-/// How far in from the sheet's edge a field row's text starts: its pad, the magnifier and the
-/// gap after it ([`field_row`]).
+/// How far in from the sheet's edge a field row's text starts: on the rows' own edge, their
+/// pad round the list and their base unit in ([`field_row`]).
 fn field_text_start(theme: &Theme) -> f32 {
-    let spacing = theme.spacing;
-    spacing.sm + spacing.xxs + theme.typography.icon() + spacing.sm
+    list_pad(theme) + theme.spacing.sm
 }
 
 /// The pad round a floating list's rows: their fills sit this far in from the sheet's sides
@@ -147,9 +151,10 @@ pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::Styl
     gpui::StyledText::new(text).with_highlights(dots)
 }
 
-/// A floating list's field row, Zed's picker editor: the 16 pt magnifier in `icon_muted`, then the
-/// query bare at the chrome role, in a [`query_height`] row over the one line that parts it from
-/// the rows. The field wears no frame and no fill: the sheet is its frame.
+/// A floating list's field row, Zed's picker editor: the query bare at the chrome role, its
+/// words on the rows' edge with no magnifier before them, in a [`query_height`] row over the
+/// one line that parts it from the rows. The field wears no frame and no fill: the sheet is its
+/// frame.
 pub(crate) fn field_row(
     theme: &Theme,
     input: &Entity<InputState>,
@@ -159,20 +164,20 @@ pub(crate) fn field_row(
     div()
         .flex_none()
         .h(px(query_height(theme)))
-        .pl(px(theme.spacing.sm + theme.spacing.xxs))
+        .pl(px(field_text_start(theme)))
         .pr(px(theme.spacing.md))
         .border_b(slopty_kit::kit::HAIR)
         .border_color(hsla(s.stroke))
         .flex()
         .items_center()
-        .gap(px(theme.spacing.sm))
-        .child(icons::icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
         .child(
-            Input::new(input)
-                .appearance(false)
-                .px_0()
-                .text_size(px(theme.roles().chrome.size))
-                .aria_label(label),
+            div().debug_selector(|| "palette-query".to_owned()).flex_1().min_w_0().child(
+                Input::new(input)
+                    .appearance(false)
+                    .px_0()
+                    .text_size(px(theme.roles().chrome.size))
+                    .aria_label(label),
+            ),
         )
 }
 
@@ -1012,6 +1017,21 @@ pub(crate) fn brief<T: Listed>(items: Vec<T>, recent: &[String]) -> Vec<T> {
     out
 }
 
+/// `items` with the commands in `recent` (newest first) leading, the rest in their order: an
+/// empty commands palette, its history under *Recent* above every command.
+fn lately_first<T: Listed>(items: Vec<T>, recent: &[String]) -> Vec<T> {
+    let mut out: Vec<T> = recent
+        .iter()
+        .filter_map(|label| items.iter().copied().find(|item| &item.item().label == label))
+        .collect();
+    let rest: Vec<T> = items
+        .into_iter()
+        .filter(|item| !out.iter().any(|lead| std::ptr::eq(lead.item(), item.item())))
+        .collect();
+    out.extend(rest);
+    out
+}
+
 /// The heading a line is listed under, and its selector's slug: its section's, except that a
 /// command in `recent` (the history, while an empty field lists it) sits under *Recent*.
 fn group(item: &PaletteItem, recent: &[String]) -> (&'static str, &'static str) {
@@ -1401,6 +1421,9 @@ pub struct CommandPalette {
     /// Its lines are the workspace's own list ([`Self::set_live`]), so they follow it while
     /// it is open; a find or a list of workers keeps the lines it was opened with.
     live: bool,
+    /// It lists the commands alone, as ⌘⇧P opens it, its field empty and saying so: Zed's
+    /// command palette, with no `>` to type past.
+    commands: bool,
     /// A window narrower than this (a phone's) gets the palette as a sheet from the bottom.
     sheet_below: f32,
     /// The last frame drew it as a phone's sheet.
@@ -1509,6 +1532,7 @@ impl CommandPalette {
             chords: true,
             brief: false,
             live: false,
+            commands: false,
             sheet_below: 0.0,
             sheet: false,
             fades_in: false,
@@ -1632,6 +1656,20 @@ impl CommandPalette {
         self.chords = shown;
     }
 
+    /// List the commands alone, the field empty and saying "Type a command" ([`COMMAND_HINT`]).
+    pub fn set_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commands = true;
+        self.input.update(cx, |input, cx| input.set_placeholder(COMMAND_HINT, window, cx));
+        self.path_items.clear();
+        self.refresh(cx);
+    }
+
+    /// What of `field` asks for commands alone: all of it while the palette lists commands
+    /// ([`Self::set_commands`]), else what follows a `>` typed first ([`commands_only`]).
+    fn commands_query<'a>(&self, field: &'a str) -> Option<&'a str> {
+        if self.commands { Some(field) } else { commands_only(field) }
+    }
+
     /// Start the field at `text` (a path to finish), its path lines listed at once.
     pub fn seed(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.seeded = text.into();
@@ -1720,7 +1758,7 @@ impl CommandPalette {
         let (refreshed, rows) = self.counts.get();
         self.counts.set((refreshed.saturating_add(1), rows));
         let field = self.input.read(cx).value();
-        let only_commands = commands_only(&field);
+        let only_commands = self.commands_query(&field);
         let query = only_commands.unwrap_or(&field);
         let empty = query.trim().is_empty();
         let mut fuzzy = Fuzzy::new(query);
@@ -1740,6 +1778,14 @@ impl CommandPalette {
         // An empty field's commands are the ones run last, then a few more: the ones from
         // history sit under a heading of their own, so the list says why they are there.
         let recent = recent_commands(cx);
+        let lead: Vec<String> = recent
+            .iter()
+            .filter(|label| {
+                self.items.iter().any(|i| i.section == Section::Commands && i.label == **label)
+            })
+            .take(RECENT_LEAD)
+            .cloned()
+            .collect();
         let found = self.found.iter().enumerate().map(|(ix, item)| (At::Found(ix), item));
         // Last of all, so a thread found while the person moves through the list never moves
         // the line they are on.
@@ -1749,8 +1795,10 @@ impl CommandPalette {
         let out = if empty {
             let kept = kept.into_iter().map(|(at, item, _)| (at, item));
             if brief_now {
-                out.extend(brief(kept.collect(), &recent));
+                out.extend(brief(kept.collect(), &lead));
                 out.extend(self.recent.iter().enumerate().map(|(ix, item)| (At::Recent(ix), item)));
+            } else if self.commands {
+                out.extend(lately_first(kept.collect(), &lead));
             } else {
                 out.extend(kept);
             }
@@ -1775,7 +1823,7 @@ impl CommandPalette {
             out.extend(threads);
             out
         };
-        let recent = if brief_now && empty { recent } else { Vec::new() };
+        let recent = if empty && (brief_now || self.commands) { lead } else { Vec::new() };
         let group = |item: &PaletteItem| group(item, &recent);
         // A heading only where there are two groups to tell apart: a list of workers, of
         // ports or of hits is one kind already, and the dialog's title names it.
@@ -1819,9 +1867,15 @@ impl CommandPalette {
         self.selected = 0;
         self.reveal = true;
         let text = self.input.read(cx).value().to_string();
-        self.path_items = self.typed_lines(&text);
         self.found.clear();
         self.threads.clear();
+        if self.commands {
+            // Commands alone: no path to open, no file or thread to ask the machine for.
+            self.refresh(cx);
+            cx.notify();
+            return;
+        }
+        self.path_items = self.typed_lines(&text);
         self.refresh(cx);
         cx.emit(PaletteEvent::Changed(text));
         cx.notify();
@@ -1896,9 +1950,9 @@ impl CommandPalette {
         let icon_ink = if item.status == Some(Status::Away) {
             s.text_muted
         } else if chosen {
-            s.text
+            s.icon
         } else {
-            s.text_secondary
+            s.icon_muted
         };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         // How it is doing ends the line as its mark; its word, which the mark says, is read
@@ -1939,6 +1993,8 @@ impl CommandPalette {
             .aria_label(SharedString::from(item.a11y_label()))
             .aria_selected(chosen)
             .h(px(line_height(theme)))
+            // Delta's palette rows are the window's row words, 12; the query stays 14.
+            .text_size(px(theme.roles().row.size))
             // `MonoCode`'s quick-open row: a pill at the small radius the list's pad in from
             // the sheet's sides, padded a base unit.
             .mx(px(pad))
@@ -2129,8 +2185,8 @@ impl Render for CommandPalette {
         // the phone's sheet or the iPad's with no keyboard, dims what it came over.
         let backdrop = list_anchor(&theme, window);
         let backdrop = if sheet {
-            // A sheet from the bottom, as iOS search in a toolbar is: its field just above the
-            // keyboard, in a thumb's reach, and what it finds above the field.
+            // A sheet from the bottom, down to the keyboard, its field heading it as the
+            // desktop's does.
             backdrop.px_0().pt(safe_top + px(theme.spacing.sm)).justify_end()
         } else {
             backdrop
@@ -2216,11 +2272,11 @@ impl Render for CommandPalette {
             .debug_selector(|| "palette".to_owned())
             .role(gpui::accesskit::Role::Dialog)
             .aria_label("Commands")
-            .map(
-                |el| {
-                    if sheet { el.child(list).child(field) } else { el.child(field).child(list) }
-                },
-            );
+            // The field heads the list everywhere: on a phone's sheet too, at its top under the
+            // status bar and the rows below it, as a bottom sheet's search is
+            // (`.research/design-polish-2026-10-12.md` §1.19).
+            .child(field)
+            .child(list);
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
         // finger taps to close it, where a desktop's Esc would.
         let scrim = (sheet || !self.chords).then(|| {
@@ -2547,6 +2603,45 @@ mod tests {
         assert!(path_items(">/srv/a/").is_empty(), "nor spells a path");
     }
 
+    /// The query's words sit on the rows' edge, where a row's lead starts, with no magnifier
+    /// before them (`.research/design-polish-2026-10-12.md` §1.8): Zed's picker editor.
+    #[gpui::test]
+    fn the_query_sits_on_the_rows_edge(cx: &mut TestAppContext) {
+        let (_palette, cx) = palette_of(3, cx);
+        let query = cx.debug_bounds("palette-query").expect("the query");
+        let row = cx.debug_bounds("palette-item-0").expect("the first row");
+        let edge = row.left() + px(Theme::default().spacing.sm);
+        assert!((query.left() - edge).abs() < px(0.5), "{query:?} on the rows' edge {edge:?}");
+    }
+
+    /// ⌘⇧P's palette lists the commands alone with its field empty and saying so, no `>` in
+    /// it; Esc on the untouched field closes it.
+    #[gpui::test]
+    fn the_commands_palette_has_no_prompt_to_type_past(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let items = vec![
+            PaletteItem::session("Fix the page header", SessionId::new()),
+            PaletteItem::new("Page back", Box::new(MoveUp), &[]),
+        ];
+        let (palette, cx) = cx
+            .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
+        palette.update_in(cx, CommandPalette::set_commands);
+        cx.run_until_parked();
+        let field = palette.read_with(cx, |p, cx| p.input.read(cx).value().to_string());
+        assert_eq!(field, "", "no prompt typed for the person");
+        let labels = palette
+            .read_with(cx, |p, _| p.matches().iter().map(|i| i.label.clone()).collect::<Vec<_>>());
+        assert_eq!(labels, ["Page back"], "the commands alone");
+        palette.update_in(cx, |p, window, cx| {
+            p.input.update(cx, |input, cx| input.set_value("page".to_owned(), window, cx));
+            p.changed(cx);
+        });
+        let labels = palette
+            .read_with(cx, |p, _| p.matches().iter().map(|i| i.label.clone()).collect::<Vec<_>>());
+        assert_eq!(labels, ["Page back"], "a word keeps to the commands");
+        assert!(cx.debug_bounds("palette-hint").is_none(), "the placeholder says it, not a hint");
+    }
+
     /// A field holding only the commands prompt says what to type after it, past the prompt,
     /// and says no more once a word follows; an empty field keeps its placeholder alone.
     #[gpui::test]
@@ -2604,9 +2699,10 @@ mod tests {
     }
 
     /// In a window narrower than its sheet width the palette is a sheet the window's width, its
-    /// field at the foot, what it finds above the field, and a scrim over the work.
+    /// field heading it as on a desktop, what it finds under the field, and a scrim over the
+    /// work (`docs/decisions/ui.md`, "iOS at touch density, docked and flat").
     #[gpui::test]
-    fn a_phone_palette_is_a_sheet_with_its_field_at_the_foot(cx: &mut TestAppContext) {
+    fn a_phone_palette_is_a_sheet_headed_by_its_field(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
         let (palette, cx) = palette_of(3, cx);
         assert!(cx.debug_bounds("palette-scrim").is_none(), "a desktop palette has no scrim");
@@ -2623,8 +2719,9 @@ mod tests {
         let field = cx.debug_bounds("palette-field").expect("the field");
         let list = cx.debug_bounds("palette-list").expect("the list");
         assert!((f32::from(sheet.size.width) - width).abs() < 0.5, "the window's width");
-        assert!(list.bottom() <= field.top() + px(0.5), "what it finds lists above the field");
-        assert!(sheet.bottom() - field.bottom() < px(1.0), "the field sits at the sheet's foot");
+        assert!(field.bottom() <= list.top() + px(0.5), "what it finds lists under the field");
+        // Under the sheet's one line along its top.
+        assert!(field.top() - sheet.top() < px(1.5), "the field heads the sheet");
         assert!(cx.debug_bounds("palette-scrim").is_some(), "the sheet dims the work");
     }
 
@@ -2978,6 +3075,23 @@ mod tests {
         );
     }
 
+    /// An empty commands palette leads with the commands run last, newest first, and lists
+    /// every command after them once.
+    #[test]
+    fn the_commands_run_last_lead_the_commands() {
+        let action = |label: &str| PaletteItem::new(label, Box::new(MoveUp), &[]);
+        let items = ["A", "B", "C", "D"].map(action);
+        let shown = |recent: &[&str]| {
+            let recent: Vec<String> = recent.iter().map(|l| (*l).to_owned()).collect();
+            lately_first(items.iter().collect(), &recent)
+                .iter()
+                .map(|i| i.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&[]), ["A", "B", "C", "D"]);
+        assert_eq!(shown(&["C", "Gone", "A"]), ["C", "A", "B", "D"], "the recent first, once");
+    }
+
     /// The commands run lately sit under *Recent*, the rest of the commands under *Commands*,
     /// and a tile keeps its group whatever its name; ↩ says what it will do with each.
     #[test]
@@ -3007,7 +3121,7 @@ mod tests {
         assert_eq!(done.trailing(), Some(("12m".to_owned(), None)), "done: the dot, then the age");
         let fresh = PaletteItem::session("zsh", SessionId::new()).aged(minutes(0));
         assert_eq!(fresh.trailing(), None, "no age under a minute");
-        let file = PaletteItem::item("PLAN.md", Symbol::DocText, ItemId::new())
+        let file = PaletteItem::item("PLAN.md", Symbol::Doc, ItemId::new())
             .placed(Some("docs".to_owned()))
             .on_worker(Some("studio".to_owned()));
         assert_eq!(file.context(), "studio · docs");
@@ -3030,7 +3144,7 @@ mod tests {
         assert_eq!(worker.icon, Some(Mark::Symbol(Symbol::ServerRack)));
         assert_eq!(
             PaletteItem::open_file("/w/a.rs", None).icon,
-            Some(Mark::File(icons::FileType::Rust)),
+            Some(Mark::Symbol(Symbol::FileCode)),
             "a file line shows its kind"
         );
         assert_eq!(PaletteItem::open_file("/w/notes", None).icon, Some(Mark::Symbol(Symbol::Doc)));

@@ -727,7 +727,7 @@ async fn the_thread_shows_the_work_beyond_words() {
     let picture = "Picture, 600 \u{d7} 200";
     // The agent lists its background work: the tray lists it, with no chip to open first.
     drv.wait_for("the build in the background", STEP, |d| {
-        // The foot bar and the two panels leave the prompt above the fold: it is looked for
+        // The two panels leave the prompt above the fold: it is looked for
         // last, scrolled to.
         labels(d, "Button").iter().any(|l| l == building)
             && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))

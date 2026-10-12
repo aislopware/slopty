@@ -98,10 +98,12 @@ impl ScreenFacts {
     }
 }
 
-/// What the workspace shows of a file: whether its edit is not yet on disk, and which face a
-/// Markdown file shows. Its editor changes with every keystroke and caret blink; the header's
-/// dot and toggle, a few times an edit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the workspace shows of a file: whether its edit is not yet on disk, which face a
+/// Markdown file shows, and the view of its editor's facts that its tab bar ends with. Its
+/// editor changes with every keystroke and caret blink; the header's dot and toggle, a few
+/// times an edit. The tab bar takes the facts' view from here, never from the editor, so the
+/// area reads nothing a caret's blink changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct FileFacts {
     /// An edit not yet on disk, or a save not yet answered.
     pub unsaved: bool,
@@ -112,6 +114,8 @@ pub(super) struct FileFacts {
     pub has_text: bool,
     /// It changed on disk under an unsaved edit.
     pub conflict: bool,
+    /// Its editor's facts (its language, indent and caret), a view of their own.
+    pub editor: Option<gpui::Entity<crate::file::FileFacts>>,
 }
 
 impl FileFacts {
@@ -121,6 +125,7 @@ impl FileFacts {
             preview: (view.has_preview() && view.shows_text()).then(|| view.previewing()),
             has_text: view.shows_text(),
             conflict: matches!(view.trouble(), Some(crate::file::Trouble::Conflict)),
+            editor: Some(view.facts()),
         }
     }
 }
@@ -225,7 +230,7 @@ impl WorkspaceView {
 
     /// Item `id`'s file as last copied.
     pub(super) fn file_facts(&self, id: ItemId) -> FileFacts {
-        self.facts.files.get(&id).copied().unwrap_or_default()
+        self.facts.files.get(&id).cloned().unwrap_or_default()
     }
 
     /// Item `id`'s page as last copied.
@@ -242,7 +247,7 @@ impl WorkspaceView {
     pub(super) fn file_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(view) = self.files.get(&id) else { return };
         let now = FileFacts::of(view.read(cx));
-        if self.facts.files.insert(id, now) != Some(now) {
+        if self.facts.files.insert(id, now.clone()) != Some(now) {
             self.panes_news(cx);
         }
         self.keep_edited(id, cx);
@@ -318,12 +323,6 @@ impl WorkspaceView {
         if self.facts.shells.keys().any(counting) {
             App::notify(cx, self.chrome.nav_rows.entity_id());
             self.panes_news(cx);
-        }
-        // The foot bar's chips name the shells running out of sight, not how long they ran:
-        // news for it only when which they are changed.
-        let chips: Vec<SessionId> = self.running_shells().into_iter().map(|(_, s)| s).collect();
-        if *self.foot.running.borrow() != chips {
-            App::notify(cx, self.chrome.foot.entity_id());
         }
     }
 
