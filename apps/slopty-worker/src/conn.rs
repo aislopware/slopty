@@ -461,11 +461,17 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             Some(_finished) = peer.streams.join_next(), if !peer.streams.is_empty() => {}
             reason = peer.conn.closed() => {
                 tracing::info!(client = %peer.client, %reason, "connection closed");
-                peer.lost = matches!(reason, noq::ConnectionError::TimedOut);
                 break Ok("connection closed");
             }
         }
     };
+    // A link that times out ends its control stream at the same moment, and `select!` takes
+    // either branch first: the connection's own reason says whether it was lost, whichever
+    // ended the loop. When the loop took the stream's error, a lost link counted as closed and
+    // its held prompts went back to the TUI at once.
+    if let Some(reason) = peer.conn.close_reason() {
+        peer.lost = matches!(reason, noq::ConnectionError::TimedOut);
+    }
     let InputOrder { taken, late, .. } = peer.order;
     let ScreenOrder { taken: window_taken, late: window_late, .. } = peer.screen_order;
     tracing::info!(client = %peer.client, taken, late, window_taken, window_late, "input copies");

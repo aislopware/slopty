@@ -3553,7 +3553,10 @@ then was refused in git's words, "fatal: not a git repository", with the agent's
   shown to them went back to the TUI, so their answer on coming back was refused. A link that
   times out now leaves its prompts held for its client to follow again for two more minutes
   (`hold::LOST_HOLD`), new prompts of those sessions held too; a link closed on purpose hands
-  back at once, as the person went to the TUI. Tests:
+  back at once, as the person went to the TUI. Lost or closed is the connection's own close
+  reason, read once the link's loop ends: a timeout ends the control stream at the same moment,
+  and when the loop took the stream's error first the link counted as closed (the gate's red
+  run 38222960678; `select!` picks between the two at random). Tests:
   `a_lost_follower_keeps_its_prompts_until_the_grace_runs_out` and, against real daemons on
   macOS, `a_prompt_waits_for_a_person_whose_link_the_worker_gave_up` (55 s off the network).
 - **A worker that moves under its link is published where it went.** A laptop roaming to
