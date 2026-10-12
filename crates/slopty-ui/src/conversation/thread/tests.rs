@@ -759,3 +759,28 @@ fn soft_edge_cost(cx: &mut TestAppContext) {
         line.join(" · ")
     );
 }
+
+/// A thread with nothing said yet that asks the person nothing (its agent at work on a brief a
+/// project gave it) says whose it is and what it is doing in the rows' place, rather than
+/// leaving a blank pane over its composer.
+#[gpui::test]
+fn a_quiet_thread_says_whose_it_is_and_what_it_does(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    state.status.phase = slopty_proto::thread::Phase::Working;
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.rows().is_empty()));
+    let quiet = cx.debug_bounds("thread-quiet").expect("the quiet thread's notice");
+    let composer = cx.debug_bounds("thread-composer").expect("the composer");
+    assert!(quiet.bottom() <= composer.top(), "over the composer: {quiet:?} {composer:?}");
+    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Claude Code."))),
+        "whose it is: {tree:#?}"
+    );
+}

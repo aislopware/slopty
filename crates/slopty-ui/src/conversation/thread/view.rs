@@ -2473,6 +2473,31 @@ impl ThreadView {
                 ),
             )
             .into_any_element(),
+            // A thread with nothing said yet that asks nothing (one a project briefed, an
+            // agent at work on its first turn) says so in its place, not a blank pane: whose it
+            // is, and what it is doing.
+            Some(state) if self.hero(cx).is_none() => {
+                let agent = agent_label(&state.meta.agent);
+                let working = state.status.phase != Phase::Idle;
+                let (status, detail) = if working {
+                    (Status::Working, AT_WORK)
+                } else if !state.pending.is_empty() {
+                    (Status::Running, ON_ITS_WAY)
+                } else {
+                    (Status::Idle, NOTHING_YET)
+                };
+                let mark = slopty_kit::icons::notice_status(
+                    theme,
+                    status,
+                    hsla(theme.surfaces.text_secondary),
+                );
+                kit::notice(theme, mark, agent.clone(), Some(detail.into()))
+                    .id("thread-quiet")
+                    .role(Role::Status)
+                    .debug_selector(|| "thread-quiet".to_owned())
+                    .aria_label(SharedString::from(format!("{agent}. {detail}")))
+                    .into_any_element()
+            }
             Some(_) | None => return None,
         };
         Some(
@@ -2856,6 +2881,15 @@ struct Bubble {
 
 /// What a thread with no rows says while the worker reads it.
 pub(crate) const READING: &str = "Reading the thread\u{2026}";
+
+/// What a thread with nothing said yet says while its agent works on its first turn.
+const AT_WORK: &str = "At work on its first turn; what it says shows here";
+
+/// What a thread with nothing said yet says while a message to it is on its way.
+const ON_ITS_WAY: &str = "A message is on its way to it";
+
+/// What a thread with nothing said yet says at rest.
+const NOTHING_YET: &str = "Nothing said yet; write below to start";
 
 /// The question over an empty thread: "What should Claude Code do in slopty?", the place left
 /// out while it is not known. A message started on several `agents` asks what each should do,

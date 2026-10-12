@@ -172,6 +172,13 @@ fn the_header_is_one_row(cx: &mut TestAppContext) {
         assert!(b.left() >= last, "{part} in order after the lights: {b:?}");
         last = b.right();
     }
+    // "Search" is a control like its neighbours: their height, their line.
+    let (search, new) = (bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
+    assert!(
+        (search.size.height - new.size.height).abs() < px(0.5)
+            && (search.center().y - new.center().y).abs() < px(0.5),
+        "one size and one line: {search:?} {new:?}"
+    );
     let goal = bounds(cx, "nav-new-goal");
     let end = f32::from(nav.right() - goal.right());
     assert!((end - theme.spacing.inset_trailing()).abs() < 1.5, "6 in from its right: {end}");

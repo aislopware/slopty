@@ -2281,7 +2281,8 @@ impl WorkspaceView {
     /// agent and New goal as icon buttons at its end. A phone's home has no lights: below the
     /// status bar its filter is its first row, as an iOS list opens on its search field.
     ///
-    /// "Search" is unboxed, the search glyph and the word in the placeholder's tone: a press,
+    /// "Search" is a quiet button the icon buttons' size, the search glyph and the word at the
+    /// chrome's small size in the placeholder's tone: a press,
     /// ⌘F with the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard
     /// puts the filter in its place with the keyboard, settling in over
     /// [`kit::Pace::Settle`], at once under Reduce Motion. Esc, or the keyboard leaving it
@@ -2415,15 +2416,21 @@ impl WorkspaceView {
                 .debug_selector(|| "nav-search".to_owned())
                 .role(Role::Button)
                 .aria_label(super::titlebar::SEARCH)
-                .flex_1()
-                .min_w_0()
-                .h_full()
+                .flex_none()
+                .h(px(kit::icon_button_side(theme)))
+                .px(px((kit::icon_button_side(theme) - theme.glyph()) / 2.0))
                 .flex()
                 .items_center()
-                .gap(px(spacing.xs + spacing.xxs))
-                .cursor_text()
+                .gap(px(spacing.xs))
+                .rounded(px(theme.radii.sm))
+                .cursor_pointer()
+                .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
-                .child(icon(theme, Symbol::Magnifyingglass, hsla(s.icon_muted)))
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
+                .child(
+                    slopty_kit::icons::Drawn::new(theme, Symbol::Magnifyingglass)
+                        .slot(px(theme.icon()), hsla(s.icon_muted)),
+                )
                 .child(super::titlebar::SEARCH)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)));
             tab_stop(el, s.focus)
@@ -2492,7 +2499,11 @@ impl WorkspaceView {
             .border_b(kit::HAIR)
             .border_color(hsla(s.stroke))
             .children(toggle)
-            .children(search)
+            // "Search" is a control the icon buttons' height and type, the room after it the
+            // row's, so the header's controls share one size, one line and one gap.
+            .children(search.map(|search| {
+                div().flex_1().min_w_0().flex().items_center().child(search).into_any_element()
+            }))
             .children(filter)
             .children(starts)
             .children(settings.map(|head| div().flex_1().min_w_0().child(head)))
@@ -3060,9 +3071,15 @@ impl WorkspaceView {
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
+        // The task and its project each keep a slot of their own and are cut in it, the
+        // project's at most half the row, a gap between them.
         let words = {
             let key = key.clone();
             readout(theme, ready.words.clone())
+                .flex_shrink_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
                 .debug_selector(move || format!("nav-ready-words-{key}"))
                 .into_any_element()
         };
@@ -3082,8 +3099,13 @@ impl WorkspaceView {
             .into_any_element()
         };
         let row_group = SharedString::from(format!("nav-ready-group-{key}"));
-        let end = end_slot(theme, row_group.clone(), Some(words), Some((merge, 1)));
+        let end = end_slot(theme, row_group.clone(), Some(words), Some((merge, 1)))
+            .flex_shrink_1()
+            .min_w_0()
+            .max_w(gpui::relative(0.5))
+            .pl(px(theme.spacing.sm));
         let project = ready.project.clone();
+        let title_key = key.clone();
         row(theme, kit::Row::One, format!("nav-ready-{key}"), label.into(), false)
             .group(row_group)
             .child(lead_slot(theme, {
@@ -3091,7 +3113,10 @@ impl WorkspaceView {
                 let tone = hsla(Status::Done.ink(theme));
                 slopty_kit::icons::status_icon(theme, Status::Done, side, tone).into_any_element()
             }))
-            .child(title(theme, ready.title.clone(), hsla(s.text_secondary)))
+            .child(
+                title(theme, ready.title.clone(), hsla(s.text_secondary))
+                    .debug_selector(move || format!("nav-ready-title-{title_key}")),
+            )
             .child(end)
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
             .into_any_element()
@@ -3992,6 +4017,8 @@ fn end_slot(
     let room = buttons.mul_add(side, (buttons - 1.0) * theme.spacing.xxs);
     let rest = rest.map(|rest| {
         div()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
             .items_center()
             .when(acts, |el| el.group_hover(group.clone(), gpui::Styled::invisible))

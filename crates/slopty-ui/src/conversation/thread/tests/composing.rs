@@ -885,3 +885,50 @@ fn a_bang_first_asks_for_an_inline_terminal_and_esc_lets_it_go(cx: &mut TestAppC
     assert_eq!(view.read_with(cx, ThreadView::draft), "ls !", "after a word it is a letter");
     assert!(asked.borrow().is_empty(), "and asks nothing");
 }
+
+/// The composer's foot is one rhythm on the field's own column, Delta's foot: its first glyph
+/// on the field's left edge, the send's square on its right edge, and one gap between every
+/// control, each keeping an icon button's pad round its glyph or words.
+#[gpui::test]
+fn the_foot_keeps_one_gap_on_the_fields_column(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::thread("edit");
+    state.meta.cwd = ROOT.to_owned();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let theme = slopty_theme::Theme::default();
+    let pad = (slopty_kit::kit::icon_button_side(&theme) - theme.glyph()) / 2.0;
+    let field = cx.debug_bounds("thread-composer-field").expect("the field");
+    let send = cx.debug_bounds("thread-send").expect("the send");
+    assert!(
+        (f32::from(send.right()) - f32::from(field.right())).abs() < 0.5,
+        "the send on the field's right edge: {send:?} {field:?}"
+    );
+    let checkout = cx.debug_bounds("thread-checkout").expect("where the work is");
+    assert!(
+        (f32::from(checkout.left()) + pad - f32::from(field.left())).abs() < 0.5,
+        "the first glyph on the field's left edge: {checkout:?} {field:?}"
+    );
+    let mut controls: Vec<gpui::Bounds<gpui::Pixels>> = [
+        "thread-meter",
+        "thread-runner",
+        "thread-model",
+        "thread-mode",
+        "thread-attach",
+        "thread-send",
+    ]
+    .into_iter()
+    .filter_map(|s| cx.debug_bounds(s))
+    .collect();
+    controls.sort_by(|a, b| a.left().partial_cmp(&b.left()).unwrap_or(std::cmp::Ordering::Equal));
+    assert!(controls.len() >= 3, "the foot's controls: {controls:?}");
+    for pair in controls.windows(2) {
+        let [a, b] = pair else { continue };
+        let gap = f32::from(b.left()) - f32::from(a.right());
+        assert!((gap - theme.spacing.xs).abs() < 0.5, "one gap between controls: {a:?} {b:?}");
+    }
+}

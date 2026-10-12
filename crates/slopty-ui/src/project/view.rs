@@ -1820,7 +1820,8 @@ impl ProjectView {
         CardFacts { check, stages, meta }
     }
 
-    /// One lane: its head (its state's glyph, its name, and its count at the trailing edge),
+    /// One lane: its head, a section label (its state's glyph, its name, and its count at the
+    /// trailing edge),
     /// then its rows in one raised group, `lead` first (the orchestrator waiting on the
     /// person), a quiet hairline between two rows, as the references' boards and Apple's
     /// grouped lists set them. A folding lane's head is the button that opens it.
@@ -1841,48 +1842,60 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        let glyph = lane.phase().glyph(theme, px(theme.icon()));
-        let head = div()
-            .id(SharedString::from(head_id.clone()))
-            .debug_selector(move || selector)
-            .flex_none()
-            .h(px(theme.density.row))
-            .flex()
-            .items_center()
-            .gap(px(sp.sm))
-            .px(px(sp.xs))
-            .rounded(px(theme.radii.sm))
-            .child(self.slot().child(glyph))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(sp.xs))
-                    .child(
-                        slopty_kit::kit::label(theme, lane.title())
-                            .text_size(px(roles.metadata.size)),
-                    )
-                    .when(folds, |el| {
-                        el.child(slopty_kit::kit::Disclosure::new(
-                            format!("{head_id}-fold"),
-                            !folded,
-                            theme,
-                            px(theme.icon()),
-                            hsla(s.text_muted),
-                        ))
-                    }),
+        // A lane's head is a section label, Delta's, not a row: its state's glyph small in the
+        // rows' mark column, its name small and muted on the rows' number column, its count
+        // at the end, a group's gap over it. A lane that folds is a disclosure on the row
+        // grid instead: its chevron in the mark column, the row's height and its wash.
+        let mark = if folds {
+            slopty_kit::kit::Disclosure::new(
+                format!("{head_id}-fold"),
+                !folded,
+                theme,
+                px(theme.icon()),
+                hsla(s.text_muted),
             )
-            .child(
-                slopty_kit::kit::tabular(div())
-                    .debug_selector({
-                        let id = format!("{head_id}-count");
-                        move || id
-                    })
-                    .ml_auto()
-                    .text_size(px(roles.metadata.size))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(count.to_string())),
-            );
+            .into_any_element()
+        } else {
+            lane.phase().glyph(theme, px(theme.glyph_small())).into_any_element()
+        };
+        let name = slopty_kit::kit::typed(div(), roles.metadata)
+            .debug_selector({
+                let id = format!("{head_id}-name");
+                move || id
+            })
+            .text_color(hsla(if folds { s.text_secondary } else { s.text_muted }))
+            .child(SharedString::from(lane.title()));
+        let head =
+            div()
+                .id(SharedString::from(head_id.clone()))
+                .debug_selector(move || selector)
+                .flex_none()
+                .map(|el| {
+                    if folds {
+                        el.h(px(theme.density.row))
+                    } else {
+                        el.pt(px(sp.md)).pb(px(sp.xxs))
+                    }
+                })
+                .flex()
+                .items_center()
+                .gap(px(sp.sm))
+                .px(px(sp.xs))
+                .rounded(px(theme.radii.sm))
+                .child(self.slot().child(mark))
+                // The name on the rows' number column: the mark's slot, then the number's.
+                .child(name)
+                .child(
+                    slopty_kit::kit::tabular(div())
+                        .debug_selector({
+                            let id = format!("{head_id}-count");
+                            move || id
+                        })
+                        .ml_auto()
+                        .text_size(px(roles.metadata.size))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(count.to_string())),
+                );
         let head = if folds {
             let what = if folded { "Show" } else { "Hide" };
             let head = head

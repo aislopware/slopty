@@ -22,11 +22,10 @@ use slopty_kit::draw::Draw;
 use slopty_kit::icons::{GitGlyph, Mark, Status, Symbol};
 use slopty_kit::kit;
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::Worktree;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::server::Os;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
-use slopty_proto::thread::{AgentId, ThreadId};
+use slopty_proto::thread::AgentId;
 use slopty_theme::Theme;
 
 use super::actions::{AddWindow, CloseItem};
@@ -44,20 +43,6 @@ use crate::folder::FolderView;
 pub(super) const BOARD: &str = "Board";
 /// A page's way back or forward.
 type Go = fn(&mut BrowserView, &mut Context<BrowserView>);
-
-/// The open fact a thread's row names its branch by.
-const BRANCH_FACT: &str = "branch";
-
-/// Where a thread's agent works, for its tile's header ([`WorkspaceView::header_place`]).
-#[derive(Clone, Debug)]
-struct HeaderPlace {
-    /// The checkout's folder name.
-    checkout: Option<String>,
-    /// Its branch.
-    branch: Option<String>,
-    /// The checkout is a repository, so a press opens the commit sheet.
-    commits: bool,
-}
 
 /// A pull request's place in a header: it outlasts the checkout and the branch beside it.
 const PR_PRIORITY: kit::Priority = kit::Priority(kit::Priority::MEDIUM.0 + 16);
@@ -1244,11 +1229,9 @@ impl WorkspaceView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.cancel_transfer(xfer, cx)))
                 .into_any_element()
         });
-        // A tile showing a thread says where its agent works after the title, the checkout and
-        // its branch, which open the commit sheet; the shell's directory would say it again.
-        // Read from the worker's table as the workspace keeps it, never from the thread view:
-        // what a render reads it redraws with, and the view redraws on every step of its
-        // working mark.
+        // Where a thread's agent works is said once, in its composer's foot (the checkout and
+        // its branch, a press from the commit sheet); its header keeps to the title, its
+        // worktree and its pull request.
         let thread = match &item.kind {
             ItemKind::Terminal { session } if self.face_shown(*session) => {
                 self.session_thread(*session)
@@ -1256,12 +1239,8 @@ impl WorkspaceView {
             ItemKind::Thread { thread } => Some(*thread),
             _ => None,
         };
-        let thread_place = thread.and_then(|thread| self.header_place(thread));
-        let worktree = agent.and_then(|(session, _)| self.worktree_of(session).cloned());
-        let mut branch = thread_place
-            .clone()
-            .map_or_else(Vec::new, |at| self.place_chips(placed.tile, at, worktree.as_ref(), cx));
-        branch.extend(self.pull_chip(item));
+        let mut branch: Vec<(&'static str, kit::Priority, gpui::AnyElement)> =
+            self.pull_chip(item).into_iter().collect();
         branch.extend(agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session)));
         let (kind_states, kind_actions) = self.header_actions(tile, item, cx);
         let silenced = self.silenced(tile, item, cx);
@@ -1362,7 +1341,7 @@ impl WorkspaceView {
         let page = matches!(item.kind, ItemKind::Browser { .. });
         let editing =
             self.rename.as_ref().is_some_and(|r| r.tile == tile && r.field == Field::Address);
-        let titled = thread_place.is_none() && self.tile_place(item).is_some();
+        let titled = thread.is_none() && self.tile_place(item).is_some();
         let place =
             (page && titled && !editing).then(|| self.address_place(tile, focused, cx)).flatten();
         // The worker's name, where more than one could be meant (the tile's project holds
@@ -1938,96 +1917,6 @@ impl WorkspaceView {
             Some(_) => self.stream(item.id).is_some_and(|stream| stream.waiting),
             None => !self.parked.contains(&item.id),
         }
-    }
-
-    /// Where `thread`'s agent works, from its worker's table: the checkout by its folder's
-    /// name and the branch; `None` while neither is known.
-    fn header_place(&self, thread: ThreadId) -> Option<HeaderPlace> {
-        let place = self.thread_place(thread);
-        let checkout = place
-            .and_then(|p| p.cwd.as_deref())
-            .and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next())
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned);
-        let branch = self
-            .thread_facts(thread)
-            .and_then(|facts| facts.get(BRANCH_FACT))
-            .filter(|b| !b.is_empty())
-            .cloned();
-        let commits = place.is_some_and(|p| p.repo.is_some());
-        (checkout.is_some() || branch.is_some()).then_some(HeaderPlace {
-            checkout,
-            branch,
-            commits,
-        })
-    }
-
-    /// Where a thread's agent works, as header items after the title: the checkout by its
-    /// folder's name, then the branch with its glyph, each a press away from the commit sheet
-    /// when the place is a repository. What the worktree's chip says already is left out. They
-    /// stay while a long title narrows to its floor; then the branch leaves, then the checkout,
-    /// which names the work's project, and the pull request last.
-    fn place_chips(
-        &self,
-        tile: TileRef,
-        at: HeaderPlace,
-        worktree: Option<&Worktree>,
-        cx: &Draw<'_, Self>,
-    ) -> Vec<(&'static str, kit::Priority, gpui::AnyElement)> {
-        let id = tile.item;
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let checkout = at.checkout.filter(|c| worktree.is_none_or(|t| t.name != *c));
-        let branch =
-            at.branch.filter(|b| worktree.is_none_or(|t| t.branch.as_deref() != Some(b.as_str())));
-        let chip = |part: &'static str, glyph: Option<Mark>, words: String| {
-            let muted = hsla(s.text_muted);
-            let said = SharedString::from(words.clone());
-            let el = div()
-                .id(part)
-                .debug_selector(move || format!("{part}-{}", id.as_uuid()))
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xxs))
-                .px(px(theme.spacing.xxs))
-                .rounded(px(theme.radii.xs))
-                .text_color(muted)
-                .children(glyph.map(|glyph| {
-                    slopty_kit::icons::icon(theme, glyph, muted).size(px(theme.icon()))
-                }))
-                .child(ChromeText::new(words, px(theme.typography.small())).fill());
-            if !at.commits {
-                return el.role(Role::Label).aria_label(said).into_any_element();
-            }
-            tab_stop(
-                el.role(Role::Button)
-                    .aria_label(SharedString::from(format!("Commit on {said}")))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
-                    .active(move |el| el.bg(hsla(s.pressed))),
-                s.focus,
-            )
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                cx.stop_propagation();
-                let view = this.item(tile).and_then(|item| match item.kind {
-                    ItemKind::Terminal { session } => this.thread_face(session),
-                    ItemKind::Thread { .. } => this.thread_item(item.id),
-                    _ => None,
-                });
-                if let Some(view) = view.cloned() {
-                    view.update(cx, |v, cx| v.open_commit(window, cx));
-                }
-            }))
-            .into_any_element()
-        };
-        checkout
-            .map(|c| ("checkout", kit::Priority::MEDIUM, chip("thread-checkout", None, c)))
-            .into_iter()
-            .chain(branch.map(|b| {
-                let glyph = Some(GitGlyph::Branch.into());
-                ("branch", kit::Priority::MEDIUM, chip("thread-branch", glyph, b))
-            }))
-            .collect()
     }
 
     /// An agent's worktree, as the worker last said: its name, quiet, its branch in the hint.

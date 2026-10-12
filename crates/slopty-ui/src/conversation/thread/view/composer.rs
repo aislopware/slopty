@@ -139,7 +139,9 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.sm))
+            // The pad an icon button keeps round its glyph, so words and glyphs along the foot
+            // stand the one gap apart.
+            .px(px(foot_pad(theme)))
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
@@ -552,9 +554,11 @@ impl ThreadView {
     /// on the ledge over the field ([`Self::ledge`]).
     fn composer_foot(&self, editing: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
+        // One gap between every control, each keeping an icon button's pad round its glyph or
+        // words: the foot reads as one rhythm, Delta's.
         let row = kit::priority_row("thread-foot")
             .h(px(theme.density.foot))
-            .gap(px(theme.spacing.xxs))
+            .gap(px(theme.spacing.xs))
             .dropped(&self.foot_dropped);
         let item =
             |row: kit::PriorityRow, (key, priority): (&'static str, kit::Priority), el| match el {
@@ -596,7 +600,6 @@ impl ThreadView {
             .chip("thread-checkout", format!("{COMMIT_ON} {words}"))
             .flex_shrink_1()
             .min_w_0()
-            .px(px((kit::icon_button_side(theme) - theme.glyph()) / 2.0))
             .child(self.icon(Symbol::GitRepo, s.text_muted))
             .child(kit::fit_label("thread-checkout-words", words, theme));
         Some(
@@ -640,7 +643,7 @@ impl ThreadView {
                 .role(Role::Label)
                 .aria_label(SharedString::from(format!("{added} added, {removed} removed")))
                 .flex_none()
-                .px(px(theme.spacing.xs))
+                .px(px(foot_pad(theme)))
                 .text_size(px(theme.typography.small()))
                 .child(figures)
                 .into_any_element(),
@@ -675,6 +678,12 @@ impl ThreadView {
             s.focus,
         )
     }
+}
+
+/// The pad round a foot control's glyph or words: an icon button's, half the room its square
+/// keeps round its glyph.
+const fn foot_pad(theme: &Theme) -> f32 {
+    (kit::icon_button_side(theme) - theme.glyph()) / 2.0
 }
 
 /// `el` as one of the composer foot's controls, Zed's subtle button: bare at rest at the small

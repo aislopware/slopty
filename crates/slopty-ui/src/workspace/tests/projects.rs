@@ -541,6 +541,17 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     let pad = px(Theme::default().spacing.xs);
     assert!((head.right() - pad - count.right()).abs() < px(0.5), "at the head's end: {count:?}");
     assert!(head.bottom() <= group.top(), "the head over its group");
+    // The head is a section label on the rows' grid: its name where a row's number starts.
+    let theme = Theme::default();
+    let name = at(cx, "project-lane-needs-you-head-name").expect("its name");
+    let card = at(cx, "project-card-2").expect("a row");
+    let column = card.left() + px(theme.spacing.xs + theme.icon() + theme.spacing.sm);
+    assert!((name.left() - column).abs() < px(0.5), "on the number's column: {name:?} {card:?}");
+    let merged = at(cx, "project-lane-merged-head").expect("Merged's head");
+    assert!(
+        (merged.size.height - px(theme.density.row)).abs() < px(0.5),
+        "Merged's is a disclosure on the row grid: {merged:?}"
+    );
     assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
     // A card's second line hangs under its title, not its number
     // (`.research/design-polish-2026-10-12.md` §4.8).
@@ -2429,5 +2440,35 @@ fn an_ended_orchestrator_is_resumed_from_its_board(cx: &mut TestAppContext) {
         ops.iter()
             .any(|op| matches!(op, ItemOp::Add(item) if item.kind == ItemKind::Thread { thread })),
         "its thread opens on its machine: {ops:?}"
+    );
+}
+
+/// A ready row says its task and its project each in a slot of its own: a long title is cut
+/// before the project's name, a gap between them, and the project's name keeps to half the
+/// row, cut there too.
+#[gpui::test]
+fn a_ready_rows_title_and_project_keep_their_own_slots(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _setup = setup(&view, cx);
+    let long = "Mirror the merge queue's order on every client that shows the board";
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", card(5, long, TaskState::Done), None), cx);
+    });
+    cx.run_until_parked();
+    let bounds = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn"))
+    };
+    let row = bounds(cx, "nav-ready-board-5");
+    let title = bounds(cx, "nav-ready-title-board-5");
+    let words = bounds(cx, "nav-ready-words-board-5");
+    let gap = Theme::default().spacing.sm;
+    assert!(
+        title.right() + px(gap) <= words.left() + px(0.5),
+        "the title ends a gap before the project: {title:?} {words:?}"
+    );
+    assert!(words.right() <= row.right() + px(0.5), "the project keeps in the row: {words:?}");
+    assert!(
+        words.size.width <= row.size.width * 0.5 + px(0.5),
+        "and to half of it: {words:?} in {row:?}"
     );
 }

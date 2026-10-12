@@ -21,6 +21,7 @@
 use std::rc::Rc;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
@@ -151,41 +152,36 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// The bell: what waits on the person, counted once in a badge (Zed's count badge, its
-    /// figure in Lilex) in the warn fill while an agent needs them, quiet while only turns wait
-    /// to be reviewed. A click opens the navigator at them.
+    /// The bell: what waits on the person, counted once beside its glyph in tabular figures,
+    /// in the warn ink while an agent needs them, quiet while only turns wait to be reviewed.
+    /// A click opens the navigator at them.
     pub(super) fn bell_button(&self, cx: &Draw<'_, Self>) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let needs = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
         let count = self.bell_count();
+        // The count stands beside the bell on the button's own line, in the figures' face at
+        // the chrome's small size: a badge over the glyph was cut by the bar and hid both.
         let badge = (count > 0).then(|| {
-            let fill = if needs > 0 { s.warn_fill } else { s.icon_muted };
-            let figure = SharedString::from(count.to_string());
-            let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
+            let ink = if needs > 0 { s.warn_fill } else { s.text_secondary };
             kit::tabular(div())
                 .id("bell-count")
                 .debug_selector(|| "bell-count".to_owned())
                 .role(Role::Status)
                 .aria_label(SharedString::from(format!("{count} new")))
-                .absolute()
-                .top_0()
-                .right_0()
-                .h(px(theme.typography.ui_size))
-                .min_w(px(theme.typography.ui_size))
-                .px(px(theme.spacing.xxs))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(theme.radii.full))
-                .bg(hsla(fill))
-                .text_color(hsla(s.fill_fg))
-                .font_family(mono)
-                .text_size(px(theme.typography.caption()))
-                .child(figure)
+                .flex_none()
+                .text_color(hsla(ink))
+                .text_size(px(theme.typography.small()))
+                .child(SharedString::from(count.to_string()))
         });
+        let counted = badge.is_some();
         kit::icon_button(theme, "bell", Symbol::Bell, super::navigator::NEEDS_YOU)
-            .relative()
+            .when(counted, |el| {
+                el.w_auto()
+                    .min_w(px(kit::icon_button_side(theme)))
+                    .px(px(theme.spacing.xs))
+                    .gap(px(theme.spacing.xxs))
+            })
             .children(badge)
             .on_click(cx.listener(|this, _ev, window, cx| this.needs_you_shown(window, cx)))
     }

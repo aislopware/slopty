@@ -503,7 +503,21 @@ fn a_hidden_navigator_leaves_no_rail(cx: &mut TestAppContext) {
     assert!(f32::from(item.left()).abs() < 0.5, "from the window's leading edge: {item:?}");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(away), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts what waits");
+    let count = cx.debug_bounds("bell-count").expect("the bell counts what waits");
+    let bell = cx.debug_bounds("bell").expect("the bell");
+    assert!(
+        bell.left() <= count.left() && count.right() <= bell.right() + px(0.5),
+        "the count stands in the button, beside the glyph: {count:?} in {bell:?}"
+    );
+    assert!(
+        bell.top() <= count.top() && count.bottom() <= bell.bottom() + px(0.5),
+        "whole, on the button's line: {count:?} in {bell:?}"
+    );
+    let glyph = Theme::default().icon();
+    assert!(
+        count.left() >= bell.left() + px(glyph) - px(0.5),
+        "never over the glyph: {count:?} {bell:?}"
+    );
     assert!(cx.debug_bounds("nav-rail").is_none(), "and still no rail");
 }
 
