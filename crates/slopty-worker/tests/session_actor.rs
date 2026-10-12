@@ -3108,6 +3108,7 @@ exec cat > "$0/raw""#;
             .collect();
         let mut chunks = chunks.into_iter();
         let mut before_reading = 0_usize;
+        let mut reading = std::time::Instant::now();
         for chunk in chunks.by_ref() {
             let len = chunk.len();
             match tokio::time::timeout(Duration::from_millis(500), stream.send(chunk.clone())).await
@@ -3116,6 +3117,7 @@ exec cat > "$0/raw""#;
                 Err(_held) => {
                     // Held back: the program reads now, and this chunk goes once it has.
                     std::fs::write(dir.path().join("go"), b"").unwrap();
+                    reading = std::time::Instant::now();
                     assert!(stream.send(chunk).await);
                     break;
                 }
@@ -3132,6 +3134,14 @@ exec cat > "$0/raw""#;
         }
         stream.end(true);
         assert_eq!(answered(&dir.path().join("raw")).await, total);
+        let took = reading.elapsed();
+        #[expect(clippy::cast_precision_loss, reason = "a rate for people to read")]
+        let rate = total.saturating_sub(before_reading) as f64 / took.as_secs_f64() / 1e6;
+        println!(
+            "MEASURE a drop stream once the program reads: {} bytes in {:.0} ms ({rate:.1} MB/s)",
+            total.saturating_sub(before_reading),
+            took.as_secs_f64() * 1e3,
+        );
         session.close();
         let _killed = child.kill().await;
     }

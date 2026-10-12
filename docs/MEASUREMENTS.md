@@ -16783,3 +16783,35 @@ SLOPTY_LANE=W cargo xtask remote -p slopty-workerd --only apps/slopty-worker    
 SLOPTY_LANE=W cargo xtask remote --full -p slopty-workerd --only apps/slopty-worker   # full
 cargo xtask ci-health    # the day's spread of checks, from target/remote/history.jsonl
 ```
+
+## 2026-10-12 — a text dropped on a program: the tty's input sets the rate
+
+The app e2e `texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched` fetched
+12 MiB of text on drop in 4 178 ms (3.0 MB/s; run 38198377548, debug, hosted macos-26). That is
+ten times slower than a file over the same link. The text reaches the program as kitty's OSC 72
+answers: base64 (16 MiB) inside escapes, written into its tty. Each layer was then timed alone.
+
+| what | where | build | bytes | rate |
+| --- | --- | --- | --- | --- |
+| the tty's input, a program reading raw | mac-studio (M4) | release | 8 MiB | 13.7 MB/s |
+| the tty's input, `-icanon` (as the stand-ins set it) | mac-studio | release | 8 MiB | 10.0 MB/s |
+| the tty's input, raw | hosted macos-26 | release | 8 MiB | 8.2 MB/s |
+| the tty's input, `-icanon` | hosted macos-26 | release | 8 MiB | 7.5 MB/s |
+| the worker's drop stream into a program reading with `cat` | mac-studio | release | 23 MiB of text | 6.8 MB/s of text (9.1 MB/s base64) |
+| the same | mac-studio | debug | 23 MiB | 6.1 MB/s (8.2) |
+| the same | hosted macos-26 | debug | 23 MiB | 3.6 MB/s (4.8) |
+
+- **The bound is the kernel.** macOS takes a pty's input through the line discipline a byte at a
+  time, so the tty itself moves 7.5–14 MB/s.
+- **The worker sits close to it.** Its drop stream reaches 90 % of that in release on this Mac,
+  with a 1 MiB window held behind the program's reads.
+- **The e2e's 3 MB/s is a debug worker on a virtual Mac.** It matches the worker's own debug rate
+  on the runner, so the client and the link add little.
+- **Nothing to fix in Slopty.** A text dropped on a program moves at the tty's rate, which is
+  the budget for it. A file dropped on a program goes by its path, and stays the way to hand
+  over something large.
+
+```sh
+cargo nextest run -p slopty-pty --release --test input_rate --run-ignored only --no-capture
+cargo nextest run -p slopty-worker --release --test session_actor -E 'test(a_dropped_stream_goes_as_fast_as_the_program_reads)' --no-capture
+```
