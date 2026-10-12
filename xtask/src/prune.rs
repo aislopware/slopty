@@ -63,6 +63,14 @@ pub const DEFAULT_BUDGET_GB: u64 = 200;
 /// writes about 35 GB, so a build that starts above the floor finishes before the disk does.
 pub const DEFAULT_FLOOR_GB: u64 = 50;
 
+/// The free space a pass that acts leaves above the floor, in GB (`SLOPTY_DISK_HEADROOM_GB`):
+/// what the checks that start before the next pass may write. A pass runs before and after each
+/// check, but lanes build side by side, and on 2026-10-12 the volume fell under the floor while
+/// 30 GB of units sat unused for 1 to 6 hours: a lane's local check of the app's crates writes
+/// up to about 30 GB cold, and a fork's cold build more. A pass that has to act frees this much
+/// more than the floor, least recently used first, so the floor holds between passes.
+pub const DEFAULT_HEADROOM_GB: u64 = 30;
+
 /// What each fork or study checkout's build output under `.research/` may hold, in GB
 /// (`SLOPTY_FORK_BUDGET_GB`). The gpui-fast and gpui-kit forks each grew past 85 GB in a day of
 /// syncs and A/B builds and filled the volume (2026-09-30), since nothing pruned them.
@@ -87,6 +95,14 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// The floor a pass holds once it acts: the floor and the headroom above it
+    /// (`SLOPTY_DISK_HEADROOM_GB`, else [`DEFAULT_HEADROOM_GB`]).
+    pub fn with_headroom(self) -> Result<Self> {
+        let var = |name: &str| std::env::var(name).ok();
+        let headroom = gigabytes("SLOPTY_DISK_HEADROOM_GB", var, DEFAULT_HEADROOM_GB)?;
+        Ok(Self { floor: self.floor.saturating_add(headroom), ..self })
+    }
+
     /// The defaults, or `SLOPTY_TARGET_BUDGET_GB` and `SLOPTY_DISK_FLOOR_GB`.
     pub fn from_env() -> Result<Self> {
         let var = |name: &str| std::env::var(name).ok();
@@ -211,26 +227,33 @@ impl Report {
     }
 }
 
-/// `cargo xtask prune`: every profile directory, waiting for busy ones if asked, with a report;
-/// the fork checkouts' first, so the floor is met from them before Slopty's own.
+/// `cargo xtask prune`: every build directory (`target/` and the fork checkouts'), waiting for
+/// busy ones if asked, with a report each.
 pub fn run(opts: Options) -> Result<()> {
     let root = repo_root()?;
-    let fork_limits = Limits { budget: fork_budget()?, floor: opts.limits.floor };
-    for fork in fork_targets(&root) {
-        let report =
-            prune(&fork, Options { limits: fork_limits, ..opts }, SystemTime::now(), &free_space)?;
-        println!("▶ {fork}");
-        print(&fork, &report, opts.dry_run);
+    let targets = targets(&root, opts.limits.budget)?;
+    let opts = Options { limits: opts.limits.with_headroom()?, ..opts };
+    let reports = prune_all(&targets, opts, SystemTime::now(), &free_space)?;
+    for ((dir, _), report) in targets.iter().zip(&reports) {
+        println!("▶ {dir}");
+        print(dir, report, opts.dry_run);
     }
     let target = root.join("target");
-    let report = prune(&target, opts, SystemTime::now(), &free_space)?;
-    println!("▶ {target}");
-    print(&target, &report, opts.dry_run);
     let gone = prebuilt(&target.join(PREBUILT), SystemTime::now(), opts.dry_run)?;
     if gone > 0 {
         println!("  {gone} prebuilt libghostty-vt unused for {PREBUILT_IDLE_DAYS} days");
     }
     Ok(())
+}
+
+/// The build directories a pass covers, each with its budget: `target/` with `budget`, first,
+/// since the volume's free space is read on it, then each fork checkout's with
+/// [`fork_budget`].
+fn targets(root: &Utf8Path, budget: u64) -> Result<Vec<(Utf8PathBuf, u64)>> {
+    let fork = fork_budget()?;
+    let mut out = vec![(root.join("target"), budget)];
+    out.extend(fork_targets(root).into_iter().map(|dir| (dir, fork)));
+    Ok(out)
 }
 
 /// Where libghostty-vt-sys keeps a library built for each set of inputs, under `target/`
@@ -303,65 +326,44 @@ pub fn fork_targets(root: &Utf8Path) -> Vec<Utf8PathBuf> {
     out
 }
 
-/// The fork checkouts' pass, never failing its caller: idle units, then each fork's budget and
-/// the volume's floor.
-fn prune_forks(limits: Limits, quiet: bool) {
-    let pass = || -> Result<()> {
-        let root = repo_root()?;
-        let opts = Options {
-            idle: Duration::from_secs(DEFAULT_IDLE_HOURS.saturating_mul(3600)),
-            limits: Limits { budget: fork_budget()?, floor: limits.floor },
-            wait: false,
-            dry_run: false,
-        };
-        for fork in fork_targets(&root) {
-            let report = prune(&fork, opts, SystemTime::now(), &free_space)?;
-            let mut freed = report.idle;
-            freed.add(report.budget);
-            if !(quiet && freed.is_empty()) {
-                println!("  prune {fork}: {freed}; {} left", gb(report.size_after));
-            }
-        }
-        Ok(())
-    };
-    if let Err(e) = pass() {
-        eprintln!("  prune of the fork checkouts skipped: {e:#}");
-    }
-}
-
-/// The pass after `check` and `gate`: skips busy directories, never fails the command.
+/// The pass after a check (`check`, `gate`, and each local half of `remote`): every build
+/// directory, busy ones skipped, held to the floor and its headroom; never fails its caller.
 pub fn auto() {
-    if let Ok(limits) = Limits::from_env() {
-        prune_forks(limits, true);
-    }
-    let pass = || -> Result<Report> {
+    let pass = || -> Result<Vec<(Utf8PathBuf, Report)>> {
+        let root = repo_root()?;
+        let limits = Limits::from_env()?;
+        let targets = targets(&root, limits.budget)?;
         let opts = Options {
             idle: Duration::from_secs(DEFAULT_IDLE_HOURS.saturating_mul(3600)),
-            limits: Limits::from_env()?,
+            limits: limits.with_headroom()?,
             wait: false,
             dry_run: false,
         };
-        prune(&repo_root()?.join("target"), opts, SystemTime::now(), &free_space)
+        let reports = prune_all(&targets, opts, SystemTime::now(), &free_space)?;
+        Ok(targets.into_iter().map(|(dir, _)| dir).zip(reports).collect())
     };
     match pass() {
-        Ok(report) => {
-            let mut freed = report.idle;
-            freed.add(report.budget);
-            if !freed.is_empty() {
-                println!(
-                    "  prune target/: {freed}; {} left, {} free",
-                    gb(report.size_after),
-                    gb(report.free_after)
-                );
-            }
-            if report.short > 0 {
-                eprintln!(
-                    "  prune target/: still {} over the budget or under the floor",
-                    gb(report.short)
-                );
+        Ok(passes) => {
+            for (dir, report) in passes {
+                let mut freed = report.idle;
+                freed.add(report.budget);
+                if !freed.is_empty() {
+                    println!(
+                        "  prune {dir}: {freed}; {} left, {} free",
+                        gb(report.size_after),
+                        gb(report.free_after)
+                    );
+                }
+                if report.short > 0 {
+                    eprintln!(
+                        "  prune {dir}: still {} over its budget or under the floor and its \
+                         headroom",
+                        gb(report.short)
+                    );
+                }
             }
         }
-        Err(e) => eprintln!("  prune target/ skipped: {e:#}"),
+        Err(e) => eprintln!("  prune skipped: {e:#}"),
     }
     if let Ok(root) = repo_root()
         && let Err(e) = prebuilt(&root.join("target").join(PREBUILT), SystemTime::now(), false)
@@ -370,28 +372,40 @@ pub fn auto() {
     }
 }
 
-/// Before a gate: its volume must have the floor free. Below it, prune for the budget and the
-/// floor; still below, refuse with where the space went.
+/// Before a build: when the volume has less than the floor and its headroom free, the pass after
+/// a check runs first, so the build's own output cannot take the volume under the floor.
+pub fn before_build() {
+    let room = || -> Result<bool> {
+        let limits = Limits::from_env()?.with_headroom()?;
+        Ok(free_space(&repo_root()?)? >= limits.floor)
+    };
+    if !room().unwrap_or(false) {
+        auto();
+    }
+}
+
+/// Before a gate: its volume must have the floor free. Below it, prune every build directory to
+/// the floor and its headroom; still below the floor, refuse with where the space went.
 pub fn ensure_room(target: &Utf8Path) -> Result<()> {
     let limits = Limits::from_env()?;
     std::fs::create_dir_all(target).with_context(|| format!("create {target}"))?;
     if free_space(target)? >= limits.floor {
         return Ok(());
     }
-    // The forks' build output rebuilds without holding up a gate: it goes first.
-    prune_forks(limits, false);
-    if free_space(target)? >= limits.floor {
-        return Ok(());
-    }
+    let root = repo_root()?;
+    let targets = targets(&root, limits.budget)?;
     let opts = Options {
         idle: Duration::from_secs(DEFAULT_IDLE_HOURS.saturating_mul(3600)),
-        limits,
+        limits: limits.with_headroom()?,
         wait: false,
         dry_run: false,
     };
-    let report = prune(target, opts, SystemTime::now(), &free_space)?;
-    print(target, &report, false);
-    check_room(target, &report, limits)
+    let reports = prune_all(&targets, opts, SystemTime::now(), &free_space)?;
+    for ((dir, _), report) in targets.iter().zip(&reports) {
+        print(dir, report, false);
+    }
+    let report = reports.first().context("a pass reports on target/")?;
+    check_room(target, report, limits)
 }
 
 /// The refusal, when a pass could not bring the free space back to the floor.
@@ -492,14 +506,194 @@ struct Swept {
     busy: Option<Busy>,
 }
 
-/// One pass over `target`: the idle sweep in every profile directory, then the budget and the
-/// floor. `free` reads a volume's free space.
-pub fn prune(
+/// One pass over `target` alone: the idle sweep in every profile directory, then the budget and
+/// the floor. `free` reads a volume's free space.
+#[cfg(test)]
+fn prune(
     target: &Utf8Path,
     opts: Options,
     now: SystemTime,
     free: &dyn Fn(&Utf8Path) -> Result<u64>,
 ) -> Result<Report> {
+    let mut reports = prune_all(&[(target.to_owned(), opts.limits.budget)], opts, now, free)?;
+    reports.pop().context("a pass reports on the directory it was given")
+}
+
+/// One pass over several build directories on one volume, each with its byte budget: the idle
+/// sweep in each, then each one's budget from its own least recently used, then the volume's
+/// floor (`opts.limits.floor`) from the least recently used of them all, whichever directory
+/// holds it. One pool keeps the warmest builds: a fork's unit used an hour ago outlives a lane's
+/// untouched since the morning. A report per directory, in order.
+pub fn prune_all(
+    targets: &[(Utf8PathBuf, u64)],
+    opts: Options,
+    now: SystemTime,
+    free: &dyn Fn(&Utf8Path) -> Result<u64>,
+) -> Result<Vec<Report>> {
+    let mut surveys = targets
+        .iter()
+        .map(|(dir, budget)| survey(dir, *budget, opts, now))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(volume) = surveys.first().map(|s| s.target.clone()) else { return Ok(Vec::new()) };
+    // A dry run deleted nothing, so the volume still holds what the sweeps would delete.
+    let pending: u64 =
+        if opts.dry_run { surveys.iter().map(|s| s.report.idle.bytes).sum() } else { 0 };
+    let free_before = free(&volume)?.saturating_add(pending);
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for (s, survey) in surveys.iter_mut().enumerate() {
+        survey.report.free_before = free_before;
+        for (d, Surveyed { items, .. }) in survey.surveyed.iter().enumerate() {
+            for (i, item) in items.iter().enumerate() {
+                let bytes: u64 = item.paths.iter().filter_map(|p| survey.census.sizes.get(p)).sum();
+                let age = now.duration_since(item.last_use).unwrap_or_default().as_secs();
+                let bucket =
+                    [1_u64, 6, 24, 72].iter().take_while(|h| age >= h.saturating_mul(3600)).count();
+                if let Some(slot) = survey.report.ages.get_mut(bucket) {
+                    *slot = slot.saturating_add(bytes);
+                }
+                candidates.push(Candidate {
+                    s,
+                    d,
+                    i,
+                    last_use: item.last_use,
+                    bytes,
+                    fate: Fate::Kept,
+                });
+            }
+        }
+    }
+    candidates.sort_by_key(|c| c.last_use);
+
+    let mut plan = Plan { guard: now.checked_sub(GUARD).unwrap_or(UNIX_EPOCH), cutoff: UNIX_EPOCH };
+    let mut over = vec![false; surveys.len()];
+    let mut planned = 0_u64;
+    // Each directory's budget, from its own least recently used, to a tenth under it.
+    for (s, survey) in surveys.iter_mut().enumerate() {
+        if survey.report.size_before <= survey.budget {
+            continue;
+        }
+        if let Some(flag) = over.get_mut(s) {
+            *flag = true;
+        }
+        let excess = survey
+            .report
+            .size_before
+            .saturating_sub(survey.budget.saturating_sub(survey.budget / 10));
+        let mine = candidates.iter_mut().filter(|c| c.s == s);
+        planned = planned.saturating_add(plan.take(mine, excess, std::slice::from_mut(survey), s));
+    }
+    // The volume's floor, from the least recently used of every directory, to a tenth over it.
+    let floor = opts.limits.floor;
+    let under = free_before < floor;
+    if under {
+        over.fill(true);
+        let excess =
+            floor.saturating_add(floor / 10).saturating_sub(free_before).saturating_sub(planned);
+        plan.take(candidates.iter_mut(), excess, &mut surveys, 0);
+    }
+
+    for (s, survey) in surveys.iter_mut().enumerate() {
+        let picks = candidates.iter().filter(|c| c.s == s && c.fate == Fate::Chosen);
+        let mut by_dir: HashMap<usize, Vec<usize>> = HashMap::new();
+        for c in picks {
+            by_dir.entry(c.d).or_default().push(c.i);
+        }
+        survey.remove(&by_dir, plan.cutoff, opts)?;
+    }
+    let deleted: u64 = surveys.iter().map(|s| s.report.budget.bytes).sum();
+    let free_after =
+        if opts.dry_run { free_before.saturating_add(deleted) } else { free(&volume)? };
+    let mut reports = Vec::with_capacity(surveys.len());
+    for (survey, over) in surveys.into_iter().zip(over) {
+        let mut report = survey.report;
+        report.busy.sort_by(|a, b| a.dir.cmp(&b.dir));
+        report.size_after = report.size_before.saturating_sub(report.budget.bytes);
+        report.free_after = free_after;
+        if over {
+            let size_short = report.size_after.saturating_sub(survey.budget);
+            let free_short = floor.saturating_sub(free_after);
+            report.short = size_short.max(free_short);
+        }
+        reports.push(report);
+    }
+    Ok(reports)
+}
+
+/// A unit or cache any directory of a pass could give up, in the order the pass would.
+struct Candidate {
+    /// Its survey, profile directory and item.
+    s: usize,
+    d: usize,
+    i: usize,
+    last_use: SystemTime,
+    bytes: u64,
+    fate: Fate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fate {
+    Kept,
+    Chosen,
+    /// A unit of a directory a build holds, which the pass reached and had to leave.
+    Held,
+}
+
+/// What the budget and floor passes chose so far.
+struct Plan {
+    /// Nothing used after it goes.
+    guard: SystemTime,
+    /// The latest last use among what was chosen: anything used since is in use after all.
+    cutoff: SystemTime,
+}
+
+impl Plan {
+    /// Choose from `candidates`, least recently used first, until `excess` bytes; returns the
+    /// bytes chosen. `surveys` are theirs, the first being survey `first`. A busy directory's
+    /// unit is held back, not chosen, and said so.
+    fn take<'c>(
+        &mut self,
+        candidates: impl Iterator<Item = &'c mut Candidate>,
+        excess: u64,
+        surveys: &mut [Survey],
+        first: usize,
+    ) -> u64 {
+        let mut planned = 0_u64;
+        let recent = self.guard;
+        for c in candidates {
+            if planned >= excess || c.last_use > recent {
+                break;
+            }
+            if c.fate != Fate::Kept {
+                continue;
+            }
+            let Some(survey) = surveys.get_mut(c.s.saturating_sub(first)) else { continue };
+            let Some(Surveyed { dir, busy, items }) = survey.surveyed.get(c.d) else { continue };
+            if *busy && items.get(c.i).is_some_and(|item| item.kind == Kind::Unit) {
+                let name = rel(&survey.target, dir).to_owned();
+                survey.report.on_busy(&name, |b| b.held_back = b.held_back.saturating_add(c.bytes));
+                c.fate = Fate::Held;
+                continue;
+            }
+            planned = planned.saturating_add(c.bytes);
+            self.cutoff = self.cutoff.max(c.last_use);
+            c.fate = Fate::Chosen;
+        }
+        planned
+    }
+}
+
+/// A build directory after its idle sweep, sized, as the budget and the floor see it.
+struct Survey {
+    target: Utf8PathBuf,
+    budget: u64,
+    surveyed: Vec<Surveyed>,
+    census: Census,
+    report: Report,
+}
+
+/// The idle sweep of every profile directory in `target`, side by side, and its sizes.
+fn survey(target: &Utf8Path, budget: u64, opts: Options, now: SystemTime) -> Result<Survey> {
     let started = std::time::Instant::now();
     let mut report = Report::default();
     let dirs = profile_dirs(target)?;
@@ -528,7 +722,6 @@ pub fn prune(
         report.busy.extend(busy);
         surveyed.push(Surveyed { dir: dir.clone(), busy: was_busy, items });
     }
-
     report.sweep = started.elapsed();
     let walking = std::time::Instant::now();
     let census = census(target, &surveyed);
@@ -536,107 +729,60 @@ pub fn prune(
     // A dry run deleted nothing, so the census still counts what the sweep would delete.
     let pending = if opts.dry_run { report.idle.bytes } else { 0 };
     report.size_before = census.total.saturating_sub(pending);
-    report.free_before = free(target)?.saturating_add(pending);
-    report.largest = census.largest;
-    let mut candidates: Vec<(usize, usize, SystemTime, u64)> = Vec::new();
-    for (d, Surveyed { items, .. }) in surveyed.iter().enumerate() {
-        for (i, item) in items.iter().enumerate() {
-            let bytes: u64 = item.paths.iter().filter_map(|p| census.sizes.get(p)).sum();
-            let age = now.duration_since(item.last_use).unwrap_or_default().as_secs();
-            let bucket =
-                [1_u64, 6, 24, 72].iter().take_while(|h| age >= h.saturating_mul(3600)).count();
-            if let Some(slot) = report.ages.get_mut(bucket) {
-                *slot = slot.saturating_add(bytes);
-            }
-            candidates.push((d, i, item.last_use, bytes));
-        }
-    }
+    report.largest.clone_from(&census.largest);
+    Ok(Survey { target: target.to_owned(), budget, surveyed, census, report })
+}
 
-    let limits = opts.limits;
-    let over = report.size_before > limits.budget || report.free_before < limits.floor;
-    let excess = if over {
-        let size_target = limits.budget.saturating_sub(limits.budget / 10);
-        let free_target = limits.floor.saturating_add(limits.floor / 10);
-        report
-            .size_before
-            .saturating_sub(size_target)
-            .max(free_target.saturating_sub(report.free_before))
-    } else {
-        0
-    };
-    let mut chosen: HashMap<usize, Vec<usize>> = HashMap::new();
-    let mut cutoff = UNIX_EPOCH;
-    let mut planned = 0_u64;
-    if excess > 0 {
-        candidates.sort_by_key(|(_, _, last_use, _)| *last_use);
-        let guard = now.checked_sub(GUARD).unwrap_or(UNIX_EPOCH);
-        for (d, i, last_use, bytes) in candidates {
-            if planned >= excess || last_use > guard {
-                break;
-            }
-            let Some(Surveyed { dir, busy, items }) = surveyed.get(d) else { continue };
-            if *busy && items.get(i).is_some_and(|item| item.kind == Kind::Unit) {
-                report.on_busy(rel(target, dir), |b| {
-                    b.held_back = b.held_back.saturating_add(bytes);
-                });
-                continue;
-            }
-            planned = planned.saturating_add(bytes);
-            cutoff = cutoff.max(last_use);
-            chosen.entry(d).or_default().push(i);
-        }
-    }
-    for (d, picks) in &chosen {
-        let Some(Surveyed { dir, items, .. }) = surveyed.get(*d) else { continue };
-        let locks = Locks::take(dir, opts.wait)?;
-        let name = rel(target, dir);
-        for item in picks.iter().filter_map(|i| items.get(*i)) {
-            // A build since the sweep read it: it is in use after all.
-            if item.last_use_now() > cutoff {
-                continue;
-            }
-            let bytes: u64 = item.paths.iter().filter_map(|p| census.sizes.get(p)).sum();
-            match (&locks, item.kind) {
-                (Some(_), Kind::Unit) => {
-                    item.remove(opts.dry_run)?;
-                    report.budget.bytes = report.budget.bytes.saturating_add(bytes);
-                    report.budget.units = report.budget.units.saturating_add(1);
+impl Survey {
+    /// Delete what was chosen, `by_dir` per profile directory, under each one's locks; what was
+    /// used after `cutoff` stays.
+    fn remove(
+        &mut self,
+        by_dir: &HashMap<usize, Vec<usize>>,
+        cutoff: SystemTime,
+        opts: Options,
+    ) -> Result<()> {
+        let report = &mut self.report;
+        for (d, picks) in by_dir {
+            let Some(Surveyed { dir, items, .. }) = self.surveyed.get(*d) else { continue };
+            let locks = Locks::take(dir, opts.wait)?;
+            let name = rel(&self.target, dir);
+            for item in picks.iter().filter_map(|i| items.get(*i)) {
+                // A build since the sweep read it: it is in use after all.
+                if item.last_use_now() > cutoff {
+                    continue;
                 }
-                // As in the sweep, a cache that cannot go stays and the pass goes on.
-                (Some(_), Kind::Cache) => {
-                    if item.remove(opts.dry_run).is_ok() {
+                let bytes: u64 = item.paths.iter().filter_map(|p| self.census.sizes.get(p)).sum();
+                match (&locks, item.kind) {
+                    (Some(_), Kind::Unit) => {
+                        item.remove(opts.dry_run)?;
                         report.budget.bytes = report.budget.bytes.saturating_add(bytes);
-                        report.budget.caches = report.budget.caches.saturating_add(1);
+                        report.budget.units = report.budget.units.saturating_add(1);
                     }
+                    // As in the sweep, a cache that cannot go stays and the pass goes on.
+                    (Some(_), Kind::Cache) => {
+                        if item.remove(opts.dry_run).is_ok() {
+                            report.budget.bytes = report.budget.bytes.saturating_add(bytes);
+                            report.budget.caches = report.budget.caches.saturating_add(1);
+                        }
+                    }
+                    (None, Kind::Cache) => {
+                        let swept = item.paths.first().map(|c| sweep_sessions(c, opts.dry_run));
+                        let swept = swept.unwrap_or_default();
+                        report.budget.add(swept.freed());
+                        report.on_busy(name, |b| b.record(swept));
+                    }
+                    (None, Kind::Unit) => report.on_busy(name, |b| {
+                        b.held_back = b.held_back.saturating_add(bytes);
+                    }),
                 }
-                (None, Kind::Cache) => {
-                    let swept = item.paths.first().map(|c| sweep_sessions(c, opts.dry_run));
-                    let swept = swept.unwrap_or_default();
-                    report.budget.add(swept.freed());
-                    report.on_busy(name, |b| b.record(swept));
-                }
-                (None, Kind::Unit) => report.on_busy(name, |b| {
-                    b.held_back = b.held_back.saturating_add(bytes);
-                }),
+            }
+            if locks.is_some() && !opts.dry_run {
+                remove_empty_packages(dir)?;
             }
         }
-        if locks.is_some() && !opts.dry_run {
-            remove_empty_packages(dir)?;
-        }
+        Ok(())
     }
-    report.busy.sort_by(|a, b| a.dir.cmp(&b.dir));
-    report.size_after = report.size_before.saturating_sub(report.budget.bytes);
-    report.free_after = if opts.dry_run {
-        report.free_before.saturating_add(report.budget.bytes)
-    } else {
-        free(target)?
-    };
-    if over {
-        let size_short = report.size_after.saturating_sub(limits.budget);
-        let free_short = limits.floor.saturating_sub(report.free_after);
-        report.short = size_short.max(free_short);
-    }
-    Ok(report)
 }
 
 fn rel<'a>(target: &Utf8Path, dir: &'a Utf8Path) -> &'a str {
@@ -644,7 +790,7 @@ fn rel<'a>(target: &Utf8Path, dir: &'a Utf8Path) -> &'a str {
 }
 
 /// Every cargo profile directory under `target`: one holding cargo's `.cargo-lock`. They sit at
-/// most four levels down (`gate/<lane>/<triple>/debug`).
+/// most five levels down (`local/<lane>/target/<triple>/debug`).
 fn profile_dirs(target: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
     fn walk(dir: &Utf8Path, depth: u8, out: &mut Vec<Utf8PathBuf>) -> Result<()> {
         if dir.join(".cargo-lock").is_file() {
@@ -665,7 +811,7 @@ fn profile_dirs(target: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
         Ok(())
     }
     let mut out = Vec::new();
-    walk(target, 4, &mut out)?;
+    walk(target, 5, &mut out)?;
     out.sort();
     Ok(out)
 }

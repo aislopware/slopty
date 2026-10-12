@@ -42,6 +42,8 @@ pub fn dir(root: &Utf8Path, lane: &str) -> Utf8PathBuf {
 /// as `xtask check` does.
 pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Result<Outcome> {
     let started = Instant::now();
+    // The volume keeps its floor through the build, and after it for the next.
+    crate::prune::before_build();
     let dir = dir(root, lane);
     let tree = crate::gate::snapshot_commit(root, &dir, sha)?;
     let sh = Shell::new()?;
@@ -58,6 +60,7 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
         .ok()
         .map(|()| crate::check::run(&sh, crates, true, crate::check::Part::Tests));
     let (thermal, load) = watch.finish();
+    crate::prune::auto();
     if let Err(e) = &lint {
         println!("✘ local lint: {e:#}");
     }

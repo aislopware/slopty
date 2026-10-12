@@ -174,17 +174,19 @@ enum Cmd {
     /// unoptimised, for the dependencies `Cargo.lock` holds now.
     CiProfile,
     /// Delete the build units and incremental caches nothing has used for a while, in every
-    /// target dir under `target/`, then the least recently used until `target/` is within its
-    /// budget and its volume above the free-space floor (also run, skipping busy dirs, after
-    /// `check` and `gate`).
+    /// target dir under `target/` and the fork checkouts', then the least recently used until
+    /// each is within its budget and the volume holds the free-space floor and its headroom
+    /// (also run, skipping busy dirs, after `check` and `gate`, and around each local check of
+    /// `remote`).
     Prune {
         /// Hours a unit may go unused before it goes.
         #[arg(long, default_value_t = prune::DEFAULT_IDLE_HOURS)]
         idle_hours: u64,
-        /// GB `target/` may hold (default `SLOPTY_TARGET_BUDGET_GB`, else 160).
+        /// GB `target/` may hold (default `SLOPTY_TARGET_BUDGET_GB`, else 200).
         #[arg(long)]
         budget_gb: Option<u64>,
-        /// GB its volume keeps free (default `SLOPTY_DISK_FLOOR_GB`, else 50).
+        /// GB its volume keeps free (default `SLOPTY_DISK_FLOOR_GB`, else 50); a pass that acts
+        /// frees `SLOPTY_DISK_HEADROOM_GB` (else 30) more.
         #[arg(long)]
         floor_gb: Option<u64>,
         /// Show what would go without deleting it.

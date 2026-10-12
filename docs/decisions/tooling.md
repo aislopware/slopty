@@ -674,6 +674,28 @@ more full-window layer.
     budget taking a busy directory's caches while its units stay, and odd entries in
     `incremental/` that stay without stopping the pass. No test runs cargo.
   - Not done: moving the gate's lanes to the internal disk (next entry).
+  - **The floor holds between checks: one pool, a headroom, a pass around every check**
+    (2026-10-12). The volume fell to 34 GB free, under its 50 GB floor, while about 30 GB of
+    units sat unused for 1 to 6 hours. Three gaps let it:
+    - the router's local half (`target/local/<lane>`) ran no pass at all;
+    - every pass stopped a tenth over the floor, so the next lane's build took the volume
+      straight back under it;
+    - the forks were pruned to the floor before `target/` was looked at, whatever either had
+      used last.
+
+    Now every build directory on the volume (`target/` and each fork's) is one pass
+    (`prune::prune_all`). Each keeps its own budget from its own least recently used. The floor
+    is met from the least recently used of them all, wherever they sit, so the builds kept are
+    the warmest. A pass that has to act frees to the floor plus a headroom
+    (`SLOPTY_DISK_HEADROOM_GB`, 30 GB, about a lane's cold local check of the app's crates),
+    least recently used first and never what was used in the last hour. The pass also runs
+    before each local check when the volume is under that line, and after each one. The
+    profile-directory walk now reaches `local/<lane>/target/<triple>/debug` (five levels), which
+    it had missed: 4.4 GB in lane W alone. Considered and not done: deleting whole lane
+    directories least recently used first. Lanes share most dependency units and each holds
+    some warm ones, so dropping a whole lane discards warm builds that per-unit order keeps.
+    Tests: `under_the_floor_every_directory_gives_its_least_recently_used_first` and
+    `a_pass_that_acts_holds_the_floor_and_its_headroom`.
 
 - ✅ **A test binary's directory, not the volume, is what slowed `VideoToolbox`; the gate's lanes
   stay on the repo volume** (2026-09-30). This supersedes the cause in `testing.md`'s 2026-09-15

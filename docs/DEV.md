@@ -314,12 +314,15 @@ every target dir under `target/` and in both of cargo's layouts (to 1.99 and fro
 - the incremental caches no compile has touched for a day;
 - the object files a binary's earlier compiles left beside it.
 
-Then, when `target/` is over its budget (200 GB, room for several days of warm builds;
-`SLOPTY_TARGET_BUDGET_GB` or `--budget-gb`) or its volume has less than the floor free (50 GB,
-`SLOPTY_DISK_FLOOR_GB` or `--floor-gb`), it deletes the least recently used units and caches
-until both hold with a tenth to spare. Nothing
-used in the last hour goes that way. It runs after every `check` and `gate`, skipping a dir whose
-build lock is held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). It prints
+The fork checkouts' target dirs under `.research/` get the same pass. Then each dir over its
+budget (`target/` 200 GB, room for several days of warm builds, `SLOPTY_TARGET_BUDGET_GB` or
+`--budget-gb`; each fork 80 GB, `SLOPTY_FORK_BUDGET_GB`) gives up its own least recently used
+units and caches. When the volume has less free than the floor and its headroom (50 GB,
+`SLOPTY_DISK_FLOOR_GB` or `--floor-gb`, plus 30 GB, `SLOPTY_DISK_HEADROOM_GB`), the least
+recently used of all of them go, wherever they sit, until that holds with a tenth to spare.
+Nothing used in the last hour goes that way. It runs after every `check` and `gate`, and before
+(when under that line) and after each local half of `remote`, skipping a dir whose build lock is
+held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). It prints
 what went, the largest entries and how much was used how recently. The gate will not start
 under the floor: it prunes first, and if that is not enough it names what takes the space. How
 prune knows a unit is in use: `docs/decisions/tooling.md`, "target/ stays under a byte budget".

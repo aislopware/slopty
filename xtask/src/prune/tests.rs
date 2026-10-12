@@ -483,6 +483,73 @@ fn under_the_floor_the_least_recently_used_go_then_the_gate_refuses() {
     assert!(error.contains(&format!("{}/debug", fx.root)), "names the largest: {error}");
 }
 
+/// Under the floor, one pool across every build directory: the least recently used go first,
+/// whichever directory holds them, so a lane's unit idle since the morning goes before a fork's
+/// used an hour ago, and each directory's budget is met from its own. A lane's directory five
+/// levels down (`local/<lane>/target/<triple>/debug`) is among them.
+#[test]
+fn under_the_floor_every_directory_gives_its_least_recently_used_first() {
+    let fx = Fixture::new("pool");
+    let (target, fork) = (fx.root.join("target"), fx.root.join("fork"));
+    let lane = target.join("local/W/target/aarch64-apple-darwin/debug");
+    let profile = |dir: &Utf8Path| {
+        std::fs::create_dir_all(dir).unwrap();
+        for lock in [".cargo-lock", ".cargo-build-lock"] {
+            File::create(dir.join(lock)).unwrap();
+        }
+        fx.ledger(dir, HOUR);
+    };
+    let forks = fork.join("debug");
+    profile(&lane);
+    profile(&forks);
+    fx.old_unit(&lane, "morning", A, 10 * HOUR, 30 * HOUR);
+    fx.old_unit(&forks, "hour", B, 2 * HOUR, 30 * HOUR);
+    fx.old_unit(&lane, "noon", C, 5 * HOUR, 30 * HOUR);
+    fx.old_unit(&forks, "now", D, 600, 30 * HOUR);
+    let unit = unit_bytes(&lane, "morning", A);
+    // A byte short of the floor, and a tenth of it (a unit) to spare: two units go.
+    let floor = unit * 10;
+    let before = tally(&fx.root).bytes;
+    let root = fx.root.clone();
+    let free = move |_: &Utf8Path| {
+        Ok::<_, anyhow::Error>(floor - 1 + before.saturating_sub(tally(&root).bytes))
+    };
+    let opts = Options { limits: Limits { budget: u64::MAX, floor }, ..Fixture::opts() };
+    let targets = [(target.clone(), u64::MAX), (fork.clone(), u64::MAX)];
+
+    let reports = super::prune_all(&targets, opts, fx.now, &free).unwrap();
+
+    assert!(!alive(&lane, "morning", A), "idle since the morning");
+    assert!(!alive(&lane, "noon", C), "idle since noon, before the fork's");
+    assert!(alive(&forks, "hour", B) && alive(&forks, "now", D), "the fork's are warmer");
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].budget.units, 2);
+    assert_eq!(reports[1].budget.units, 0);
+    assert!(reports.iter().all(|r| r.free_after >= floor && r.short == 0));
+
+    // Over its own budget, a directory gives its own least recently used, and only its own.
+    let fork_budget = tally(&fork).bytes - 1;
+    let targets = [(target, u64::MAX), (fork, fork_budget)];
+    let opts = Options { limits: Limits { budget: u64::MAX, floor: 0 }, ..Fixture::opts() };
+    let reports = super::prune_all(&targets, opts, fx.now, &|_| Ok(u64::MAX / 2)).unwrap();
+    assert!(!alive(&forks, "hour", B), "the fork's least recently used");
+    assert!(alive(&forks, "now", D), "used ten minutes ago");
+    assert_eq!((reports[0].budget.units, reports[1].budget.units), (0, 1));
+}
+
+/// The floor a pass holds once it acts is the floor and the headroom above it, which the
+/// environment may set.
+#[test]
+fn a_pass_that_acts_holds_the_floor_and_its_headroom() {
+    let limits = Limits { budget: 1, floor: 50 * GB };
+    let held = limits.with_headroom().unwrap();
+    let headroom = std::env::var("SLOPTY_DISK_HEADROOM_GB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(super::DEFAULT_HEADROOM_GB);
+    assert_eq!(held, Limits { budget: 1, floor: (50 + headroom) * GB });
+}
+
 /// A directory a build holds keeps its units, whichever of cargo's two locks it holds, even when
 /// the budget reaches them, and says what it held back.
 #[test]
