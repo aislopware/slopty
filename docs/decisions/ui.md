@@ -11589,6 +11589,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     joins where the work goes on the line under it, and "N of M merged" stands once, in
     figures right of the bar. Merge is Delta's icon button (`git-merge` in the success ink),
     shown while the task waits, not the board's one framed button.
+  - **The settings keep the navigator's rhythm** (§2.7): every group head of the section list
+    but the first has a group's 16 over it and nothing under it; a page's section label stands
+    a section's 24 under what is over it (it stood 48) and 8 over its rule; and over a list
+    of its own, ← stands on the rows' words' edge, one edge down the column. Docked, the list
+    and its head already take the navigator's place and header in the top line; a window too
+    narrow to dock keeps the bar over the page and its list, as every page there does.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11599,6 +11605,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`,
     `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
     `workspace::tests::palette::the_empty_page_has_one_edge`,
+    `workspace::tests::settings_page::the_settings_keep_one_rhythm`,
     `workspace::tests::projects::{a_card_draws_its_pipeline_once_its_work_is_on_its_way,
     the_bar_fills_only_with_what_merged}`,
     `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;

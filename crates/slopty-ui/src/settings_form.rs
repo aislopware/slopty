@@ -1044,7 +1044,14 @@ impl SettingsForm {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
-            .child(slopty_kit::kit::hang(back, theme))
+            // Over a list of its own, the glyph stands on the rows' words' edge, one edge down
+            // the column (§2.7.1); in the navigator's header it hangs as the header's do.
+            .child(if self.aside {
+                slopty_kit::kit::hang(back, theme)
+            } else {
+                let pad = (slopty_kit::kit::icon_button_side(theme) - theme.glyph()) / 2.0;
+                back.ml(px(theme.spacing.sm - pad))
+            })
             .child(self.search_field(cx))
     }
 
@@ -1122,7 +1129,9 @@ impl SettingsForm {
                 .aria_label(group.label())
                 .flex_none()
                 .px(px(spacing.sm))
-                .pt(px(if n == 0 { spacing.xs } else { spacing.md }))
+                // A group's gap over every head but the first, nothing under it, as the
+                // navigator's sections stand (`.research/warp-composition-2026-10-12.md` §2.7.2).
+                .pt(px(if n == 0 { spacing.xs } else { spacing.lg }))
                 .pb(px(spacing.xxs))
                 .text_color(hsla(s.text_muted))
                 .child(group.label());
@@ -1222,7 +1231,8 @@ impl SettingsForm {
             .aria_label(text.clone())
             .flex_none()
             .font_family(slopty_kit::kit::mono_family(theme))
-            .mt(px(if first { spacing.lg } else { spacing.xxxl }))
+            // A section's 24 over its label, 8 under it to its rule (§2.7.3).
+            .mt(px(if first { spacing.lg } else { spacing.xl }))
             .pb(px(spacing.sm))
             .border_b(slopty_kit::kit::HAIR)
             .border_color(hsla(theme.surfaces.stroke))

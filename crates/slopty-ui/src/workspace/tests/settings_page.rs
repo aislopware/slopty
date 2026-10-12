@@ -194,6 +194,47 @@ fn the_page_carries_its_list_and_leaves_for_the_work(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("settings-editor").is_none());
 }
 
+/// The settings keep the navigator's rhythm (`.research/warp-composition-2026-10-12.md` §2.7):
+/// over a list of its own, ← stands on the rows' words' edge; every group head but the first
+/// has a group's gap over it, and a page's section label stands a section's 24 under what is
+/// over it.
+#[gpui::test]
+fn the_settings_keep_one_rhythm(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (_editor, _events) = open_settings(&view, cx);
+    view.update_in(cx, |v, window, cx| v.toggle_navigator(&ToggleNavigator, window, cx));
+    cx.run_until_parked();
+    let theme = Theme::default();
+    let at = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn"))
+    };
+    let back = at(cx, "settings-back");
+    let row = at(cx, section(Section::Appearance));
+    let pad = (slopty_kit::kit::icon_button_side(&theme) - theme.glyph()) / 2.0;
+    let glyph = back.left() + px(pad);
+    let words = row.left() + px(theme.spacing.sm);
+    assert!((glyph - words).abs() < px(0.5), "← on the rows' edge: {glyph:?} {words:?}");
+    let (first, second) = (at(cx, "settings-group-0"), at(cx, "settings-group-1"));
+    let more = second.size.height - first.size.height;
+    let gap = theme.spacing.lg - theme.spacing.xs;
+    assert!((f32::from(more) - gap).abs() < 0.5, "a group's gap over the head: {more:?}");
+
+    click(cx, section(Section::Terminal));
+    let heads: Vec<(usize, _)> = (0..80_usize)
+        .filter_map(|n| cx.debug_bounds(leak(format!("settings-heading-{n}"))).map(|b| (n, b)))
+        .collect();
+    let [_, (n, second), ..] = heads.as_slice() else { panic!("two sections: {heads:?}") };
+    let before = n.saturating_sub(1);
+    let over = [format!("settings-footer-{before}"), format!("settings-ruled-{before}")]
+        .into_iter()
+        .find_map(|s| cx.debug_bounds(leak(s)))
+        .expect("what stands over the second section");
+    let gap = f32::from(second.top() - over.bottom());
+    assert!((gap - theme.spacing.xl).abs() < 0.5, "a section's 24: {gap}");
+}
+
 /// On a phone the page is one column under the bar, Done in its head leaving, with no
 /// navigator list beside it. A phone has no worker of its own to open the file in, so the
 /// head offers no way to it.
