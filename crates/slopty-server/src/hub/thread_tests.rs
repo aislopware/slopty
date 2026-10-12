@@ -94,6 +94,40 @@ async fn any_agent_runs_a_task_as_a_thread() {
     assert_eq!(status(&hub).await.live.project, 0);
 }
 
+/// An agent that asks the person something before its start's answer is back (the question
+/// in its first breath, its row on the board while no task names its seat yet) still has its
+/// task wait on the person once the start lands: the task takes up what the board holds for
+/// the seat, which is never said again.
+#[tokio::test]
+async fn a_question_asked_before_the_start_lands_blocks_the_task() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    linux_lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let task = new_task(&hub).await;
+    let pi = AgentId::named(AgentId::PI);
+    let launch = Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) };
+    let asked = spawn(&hub, launch);
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+
+    let thread = ThreadId::new();
+    let mut seated = row(Phase::Working, 1, None);
+    seated.id = thread;
+    seated.agent = pi;
+    seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    let mut needs = asking(seated, "Which file holds the Linux part?");
+    needs.status.phase = Phase::NeedsYou;
+    linux_lease.handle(snapshot(vec![needs]));
+
+    answer(&linux_lease, id, Outcome::ThreadStarted { thread, worktree: None });
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    let term = TermRef { worker: linux, session: seat };
+    assert_eq!(started.assignment.map(|a| a.term), Some(term));
+    assert_eq!(started.state, TaskState::Blocked, "the start's answer says so");
+    assert_eq!(card(&hub, task).await.state, TaskState::Blocked, "it waits on the person");
+}
+
 /// The thread of `task` (its assignment's, seated at `term`) is read where it is: by the task,
 /// its seat or its id, each sent to its worker as the thread there, holding prompts for the
 /// person's read alone. A thread no table holds is no read, and answering a request is the

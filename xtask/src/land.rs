@@ -262,13 +262,13 @@ fn outcome(sh: &Shell, run: &Run, conclusion: &str, head: &str) -> Result<()> {
             promote(sh, &PromoteOpts { commit: Some(head.to_owned()) })
         }
         _ => {
-            let failed = cmd!(
-                sh,
-                "gh run view {id} --json jobs --jq .jobs[]|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")|.name"
-            )
-            .quiet()
-            .read()
-            .unwrap_or_default();
+            // One argument: `cmd!` splits its literal at spaces, and gh took the filter's
+            // words after the first as more runs to view.
+            let jq = r#".jobs[] | select(.conclusion | IN("failure", "timed_out")) | .name"#;
+            let failed = cmd!(sh, "gh run view {id} --json jobs --jq {jq}")
+                .quiet()
+                .read()
+                .unwrap_or_default();
             for job in failed.lines() {
                 eprintln!("✘ {job}");
             }

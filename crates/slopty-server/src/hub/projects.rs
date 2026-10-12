@@ -2038,8 +2038,15 @@ impl Hub {
         terminals.insert(term);
         let branch = made.or_else(|| branch_of(state, term));
         let who = Assignee { term, spawned: true, branch: branch.as_ref(), conversation, thread };
-        let (task, updates) =
-            state.projects.assign(project, task, who, &terminals, WallMs::now())?;
+        let now = WallMs::now();
+        let (task, mut updates) = state.projects.assign(project, task, who, &terminals, now)?;
+        // The agent may have spoken before its start's answer came back: a question asked in
+        // its first breath reached the board while no task named its terminal, and is never
+        // said again. What the board holds for the seat now is what the task follows.
+        if let Some(status) = state.board.seat_status(term) {
+            updates.extend(state.projects.agent_status(term, &status, now));
+        }
+        let task = state.projects.task(project, task.id).cloned().unwrap_or(task);
         state.starting.retain(|s| s.term != term);
         keep_starts(state);
         self.projects_moved(state, updates);
