@@ -1888,3 +1888,15 @@ more full-window layer.
     `.claude/rules/apple.md`, loaded with the crates that call Apple frameworks.
   - Kept whole: the safety lines and the person's grants, since they are boundaries the model
     cannot infer, and each line's reason where it has one.
+
+- ✅ **A check's branch goes when its run ends** (2026-10-12, the person's ask). Every
+  `cargo xtask remote` pushed its snapshot to `check/<name>` and left it, and 160 had piled up.
+  - Once the run ends, green, red or cancelled, `remote` deletes `check/<name>` with a lease on
+    the commit it checked, so a newer check of the same name, which pushed over it and whose run
+    is not done, keeps its branch. `--keep-branch` keeps it. `--run <id>` reads the name and the
+    commit from the run's title (`check <name> <sha>`), so a resumed wrapper deletes it too; the
+    run, its logs and its artifacts are the run's, not the branch's, so nothing needs the branch
+    once the jobs have checked it out.
+  - `land` then sweeps: every `check/*` branch a day old whose runs are all done goes, under the
+    same lease, its age its newest run's or else its commit's (`remote::sweep`). A wrapper killed
+    before its run ended leaves its branch to it.

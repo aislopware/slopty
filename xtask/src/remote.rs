@@ -313,6 +313,9 @@ pub struct RemoteOpts {
     /// workflow before it lands. Its compile cache is that branch's, so it starts cold.
     #[arg(long, value_name = "BRANCH")]
     pub workflow_ref: Option<String>,
+    /// Keep the branch `check/<name>` once the run ends, which is otherwise deleted then.
+    #[arg(long)]
+    pub keep_branch: bool,
 }
 
 /// A run as `gh run list` describes it.
@@ -345,8 +348,9 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let what = describe(opts);
     let (run, short) = if let Some(id) = opts.attach {
         let run_id = id.to_string();
-        let url = cmd!(sh, "gh run view {run_id} --json url --jq .url").read()?;
-        (Listed { id, title: String::new(), url }, format!("run {id}"))
+        let viewed = cmd!(sh, "gh run view {run_id} --json url,displayTitle").read()?;
+        let viewed: Viewed = serde_json::from_str(&viewed).context("gh run view's JSON")?;
+        (Listed { id, title: viewed.title, url: viewed.url }, format!("run {id}"))
     } else {
         let sha = if opts.head {
             cmd!(sh, "git rev-parse HEAD").read()?
@@ -374,6 +378,11 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     println!("▶ {short} ({what}) on a runner: {}", run.url);
     println!("  if this is stopped: cargo xtask remote --name {} --run {} …", opts.name, run.id);
     let conclusion = finish(sh, run.id)?;
+    if !opts.keep_branch
+        && let Some((name, sha)) = checked(&run.title)
+    {
+        let _deleted = delete_branch(sh, name, sha);
+    }
     let logs = dir.join("logs");
     if logs.exists() {
         std::fs::remove_dir_all(&logs)?;
@@ -670,6 +679,103 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         .context("gh workflow run (is `gh` logged in, and check.yml on main and gate?)")
 }
 
+/// A run as `gh run view` describes it.
+#[derive(serde::Deserialize)]
+struct Viewed {
+    url: String,
+    #[serde(rename = "displayTitle")]
+    title: String,
+}
+
+/// The check's name and the commit it checked, from its run's title, `check <name> <sha>`
+/// (`check.yml`'s `run-name`).
+fn checked(title: &str) -> Option<(&str, &str)> {
+    let mut words = title.strip_prefix("check ")?.split(' ');
+    let (name, sha) = (words.next()?, words.next()?);
+    let hex = sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit());
+    (words.next().is_none() && !name.is_empty() && hex).then_some((name, sha))
+}
+
+/// Delete the branch `check/<name>` while it still holds `sha`: a newer check of the same name
+/// pushed over it holds a run that is not done. Gone already, or moved on, it stays as it is.
+/// Whether it went.
+fn delete_branch(sh: &Shell, name: &str, sha: &str) -> bool {
+    let branch = format!("refs/heads/check/{name}");
+    let lease = format!("--force-with-lease={branch}:{sha}");
+    let deleted = cmd!(sh, "git push --quiet --no-verify {lease} origin :{branch}")
+        .quiet()
+        .ignore_stderr()
+        .run()
+        .is_ok();
+    if deleted {
+        println!("  deleted the branch check/{name}");
+    }
+    deleted
+}
+
+/// How old a check branch is when [`sweep`] deletes it, its runs done.
+const SWEPT_AFTER: Duration = Duration::from_hours(24);
+
+/// Delete every `check/*` branch older than [`SWEPT_AFTER`] whose runs are all done: those of
+/// checks stopped before their run ended, and those kept. Its age is its newest run's, or, with
+/// none listed, its commit's. Each goes only while it still holds the commit it was read at.
+/// `land` runs it after each push.
+pub fn sweep(sh: &Shell) -> Result<()> {
+    let heads = cmd!(sh, "git ls-remote --heads origin refs/heads/check/*").quiet().read()?;
+    let branches: Vec<(&str, &str)> = heads
+        .lines()
+        .filter_map(|line| {
+            let (sha, branch) = line.split_once('\t')?;
+            Some((branch.strip_prefix("refs/heads/check/")?, sha))
+        })
+        .collect();
+    if branches.is_empty() {
+        return Ok(());
+    }
+    // Title, status and start (seconds since the epoch) of the checks' newest runs.
+    let jq = ".[] | [.displayTitle, .status, (.createdAt | fromdateiso8601)] | @tsv";
+    let runs = cmd!(
+        sh,
+        "gh run list --workflow {WORKFLOW} --limit 500 --json displayTitle,status,createdAt --jq {jq}"
+    )
+    .quiet()
+    .read()
+    .context("gh run list")?;
+    let runs: Vec<(&str, &str, u64)> = runs
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (title, status) = (fields.next()?, fields.next()?);
+            Some((title, status, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("the clock is before 1970")?
+        .as_secs();
+    let mut swept = 0_usize;
+    for (name, sha) in branches {
+        let title = format!("check {name} {sha}");
+        let mine: Vec<&(&str, &str, u64)> = runs.iter().filter(|r| r.0 == title).collect();
+        if mine.iter().any(|r| r.1 != "completed") {
+            continue;
+        }
+        let born = mine.iter().map(|r| r.2).max().or_else(|| {
+            let jq = ".commit.committer.date | fromdateiso8601";
+            let commit = format!("repos/{{owner}}/{{repo}}/commits/{sha}");
+            cmd!(sh, "gh api {commit} --jq {jq}").quiet().read().ok()?.trim().parse().ok()
+        });
+        let old = born.is_some_and(|born| now.saturating_sub(born) >= SWEPT_AFTER.as_secs());
+        if old && delete_branch(sh, name, sha) {
+            swept = swept.saturating_add(1);
+        }
+    }
+    if swept > 0 {
+        println!("  swept {swept} check branches a day old whose runs were done");
+    }
+    Ok(())
+}
+
 /// The newest dispatched runs of [`WORKFLOW`].
 fn listed(sh: &Shell) -> Result<Vec<Listed>> {
     let listed = cmd!(
@@ -886,6 +992,16 @@ mod tests {
 
     fn gate(queued: bool) -> MacJob {
         MacJob { gate: true, queued, check: None }
+    }
+
+    /// A run's title gives back the check's name and commit; another title gives nothing.
+    #[test]
+    fn a_check_s_run_title_names_its_branch_and_commit() {
+        let sha = "fda027eb2144c1e6b6dbb5d1c27f7e6fa0b1c2d3";
+        assert_eq!(super::checked(&format!("check W-v {sha}")), Some(("W-v", sha)));
+        assert_eq!(super::checked("check W-v fda027eb21"), None, "a short sha");
+        assert_eq!(super::checked(&format!("gate {sha}")), None);
+        assert_eq!(super::checked(&format!("check W-v {sha} more")), None);
     }
 
     /// A quick check of crates Linux tests runs there; a full one takes a Mac for a crate a Mac

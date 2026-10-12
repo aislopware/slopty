@@ -165,6 +165,10 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
     let commits = cmd!(sh, "git rev-list --count origin/main..HEAD").read()?;
     println!("▶ {short} ({commits} commits on top of origin/main) pushed to {BRANCH}");
     println!("  CI runs every gate lane on it and fast-forwards main once all pass");
+    // Checks stopped before their runs ended leave their branches behind.
+    if let Err(e) = crate::remote::sweep(sh) {
+        println!("  check branches not swept: {e:#}");
+    }
     if !opts.wait {
         println!("watch: gh run list --workflow {WORKFLOW} --branch {BRANCH} --commit {head}");
         println!("       then `gh run watch <id> --exit-status`, or land with --wait");

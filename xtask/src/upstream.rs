@@ -920,6 +920,7 @@ fn check_on_runner(
         probe: Some(runner_script(&forks)),
         head: true,
         workflow_ref: None,
+        keep_branch: false,
     };
     let checkout = Shell::new()?;
     checkout.change_dir(root);
