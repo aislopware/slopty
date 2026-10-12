@@ -62,7 +62,9 @@ mod tests {
         );
         assert!(keyframes >= 1, "first frame is an IDR");
         assert!(frames.len() >= 10, "steady stream, got {} frames", frames.len());
-        assert_eq!(stats.encoded, frames.len() as u64);
+        // A still picture's refinements are sent as frames too, counted apart from the source's
+        // (`ScreenStats::refined`): a hosted runner's display went still and sent two.
+        assert_eq!(stats.encoded.saturating_add(stats.refined), frames.len() as u64);
 
         // Bitrate-only change applies in place; a scale change rebuilds capture and encoder.
         let in_place = stream.set_quality(&Quality { bitrate_bps: 4_000_000, ..quality }, None);
@@ -81,16 +83,14 @@ mod tests {
     }
 }
 
-/// A Ghostty window the tests launch and kill themselves.
+/// The testkit's stand-in window, which the tests launch and kill themselves.
 #[cfg(test)]
-mod ghostty {
+mod stand_in {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use slopty_core::WindowId;
     use slopty_worker::screen::shareable;
-
-    const GHOSTTY: &str = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
 
     pub struct Window(Child);
 
@@ -108,15 +108,21 @@ mod ghostty {
         }
     }
 
-    pub async fn launch(command: &[&str]) -> (Window, WindowId) {
-        let child = Command::new(GHOSTTY)
-            .arg("-e")
-            .args(command)
+    /// The testkit's stand-in window drawing `drawing` (`still`, `scroll` or `tick`;
+    /// `slopty-stub-window`), from the build this test is part of, once it is on screen.
+    pub async fn launch(drawing: &str) -> (Window, WindowId) {
+        let exe = std::env::current_exe().expect("the test's binary");
+        let target = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).parent().expect("target");
+        let profile = exe.ancestors().find(|dir| dir.parent() == Some(target)).expect("profile");
+        let anchor = profile.join("slopty-worker-tests");
+        let stub = slopty_testkit::bins::bin(&anchor.to_string_lossy(), "slopty-stub-window");
+        let child = Command::new(stub)
+            .args(["main", "800", "600", drawing])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("Ghostty.app installed");
+            .expect("the stand-in window starts");
         let pid = i32::try_from(child.id()).expect("pid");
         let window = Window(child);
         let started = Instant::now();
@@ -133,7 +139,10 @@ mod ghostty {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 return (window, w.id);
             }
-            assert!(started.elapsed() < Duration::from_secs(20), "no Ghostty window for pid {pid}");
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "no stand-in window for pid {pid}"
+            );
         }
     }
 }
@@ -162,7 +171,7 @@ mod crop_path {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e screen"]
     async fn closing_the_window_under_a_display_crop_ends_the_stream() {
-        let (mut window, id) = super::ghostty::launch(&["sleep", "600"]).await;
+        let (mut window, id) = super::stand_in::launch("still").await;
         assert!(slopty_capture::window_on_screen(id));
         let (sink, mut rx) = super::channel();
         let (stopped_tx, mut stopped_rx) = mpsc::channel(1);
@@ -237,10 +246,10 @@ mod crop_path {
 
 /// Encoder rate control on real content: the low-latency mode the worker runs
 /// (`EnableLowLatencyRateControl` + `AverageBitRate` + `DataRateLimits`)
-/// against macOS 26's `VariableBitRate` + VBV keys, on a Ghostty window this test launches
-/// running `yes` (scrolling) and one running `sleep` (static). Same window size, same
-/// bitrate; prints encode latency, keyframe size and frame-size spikes. Numbers go to
-/// MEASUREMENTS.md, the ruling to DECISIONS.md.
+/// against macOS 26's `VariableBitRate` + VBV keys, on the testkit's stand-in window this test
+/// launches scrolling text (a terminal running `yes`) and redrawing once a second (`top`). Same
+/// window size, same bitrate; prints encode latency, keyframe size and frame-size spikes. Numbers
+/// go to MEASUREMENTS.md, the ruling to DECISIONS.md.
 #[cfg(test)]
 #[expect(
     clippy::arithmetic_side_effects,
@@ -259,7 +268,7 @@ mod encoder_rate_control {
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_worker::screen::shareable;
 
-    use super::ghostty::launch;
+    use super::stand_in::launch;
 
     /// One encoder variant: the rate-control mode plus public properties layered on top.
     #[derive(Clone, Copy)]
@@ -480,14 +489,14 @@ mod encoder_rate_control {
             "| mode | content | frames | encode p50 / p95 / max | keyframe | p50 frame | max frame (spike) | rate | ltr |"
         );
         eprintln!("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-        let (scroller, id) = launch(&["yes"]).await;
+        let (scroller, id) = launch("scroll").await;
         for variant in VARIANTS {
             let o = run(id, variant, seconds).await;
             row(variant.name, "scrolling", &o);
         }
         drop(scroller);
         // `top` redraws every second: a mostly static terminal with real text changes.
-        let (top, id) = launch(&["top", "-s", "1"]).await;
+        let (top, id) = launch("tick").await;
         for variant in VARIANTS {
             let o = run(id, variant, seconds).await;
             row(variant.name, "top 1 Hz", &o);

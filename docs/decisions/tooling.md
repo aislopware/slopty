@@ -1099,6 +1099,13 @@ more full-window layer.
   - The quick gate is the tools lane alone (`gate::QUICK`): fmt, taplo, deny, hakari, shear,
     typos, `committed`, and both lockfiles `--locked` (`gate::locked`, the check host clippy's
     `--locked` made). It compiles nothing and takes seconds.
+  - It judges the index alone, rules included (2026-10-12). Its rules are compiled into xtask:
+    the shards, `SPAWNING`, the Linux-only tests. `cargo gate` builds xtask from the working
+    tree, so one lane's unstaged xtask edit judged another's commit. A lane's `SPAWNING` named
+    `slopty-capture` while the staged capture tests spawned nothing, and main's commit was
+    refused. When anything xtask is built from differs between the working tree and the index,
+    the gate builds xtask from its snapshot into `target/gate/xtask` and runs itself with that
+    (40 s cold), so only staged edits decide.
   - `land` pushes at once. `land --check` keeps the old checks for a change likely to go red.
   - CI already ran host clippy. It now also runs the app's e2e (`e2e.yml`, `cargo xtask e2e
     app --review`, a changed frame's render and diff in the `e2e-app` artifact). It is not a
@@ -1926,9 +1933,18 @@ more full-window layer.
       and Linux clippy and rustdoc (the lint job on arm Linux), Linux's tests when every crate
       tests there, and every e2e case and probe. A quick check of crates alone dispatches
       nothing. The Mac's tests never wait in the runner Mac queue (`test_runner: none`).
-    - The verdict is both parts'. `remote` records each check's latency, its part here, the
-      highest thermal pressure level and load seen, in `target/remote/history.jsonl`, and
+    - The verdict is both parts', and a failed check ends by naming each half's verdict, last.
+      Lane A's check printed "here: passed" after the runner's failure, and the lane missed the
+      seven failed e2e tests. `remote` records each check's latency, its part here, the highest
+      thermal pressure level and load seen, in `target/remote/history.jsonl`, and
       `cargo xtask ci-health` prints the day's spread.
+    - A check never waits on a job that cannot start. Before it dispatches, `remote` reads the
+      `check.yml` it will run on `gate` (or `--workflow-ref`). It refuses at once if that file
+      lacks an input it would send, or would not stand its test job aside for
+      `test_runner: none`. While a run is queued, a job queued for a runner label that no image
+      serves cancels the run with a message saying so. A check dispatched before the new
+      `check.yml` reached `gate` queued its test job for a runner called "none", and lane A
+      waited two hours on it (run 38234704645).
   - Why here and not the checkout: the lane's own directory stayed warm while the checkout's
     `target/` was churned by every lane's builds. The same one-line edit of `slopty-workerd`
     took 1 min 12 s through the router and 8 min in the checkout (clippy 52 s, nextest 432 s;

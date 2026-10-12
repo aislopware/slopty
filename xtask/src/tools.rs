@@ -264,8 +264,20 @@ pub fn target_dir(sh: &Shell) -> Result<Utf8PathBuf> {
 
 /// The repository root: the directory containing the workspace `Cargo.toml`.
 pub fn repo_root() -> Result<Utf8PathBuf> {
-    let manifest_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
+    root_from(std::env::var(REPO_ROOT).ok(), env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The checkout an xtask built elsewhere works on: the gate's run with xtask built from its
+/// snapshot of the index (`gate::by_the_index_s_xtask`) names the real checkout here, since its
+/// binary's manifest is the snapshot's.
+pub const REPO_ROOT: &str = "SLOPTY_REPO_ROOT";
+
+/// The repository root: `named` when given, else the directory above xtask's manifest `manifest`.
+fn root_from(named: Option<String>, manifest: &str) -> Result<Utf8PathBuf> {
+    if let Some(named) = named.filter(|n| !n.is_empty()) {
+        return Ok(Utf8PathBuf::from(named));
+    }
+    Utf8Path::new(manifest)
         .parent()
         .map(Utf8PathBuf::from)
         .context("xtask must live one level below the repository root")
@@ -327,4 +339,22 @@ pub fn quiet_step(title: &str, command: xshell::Cmd<'_>) -> Result<()> {
     print!("{text}");
     anyhow::ensure!(ok, "step failed: {title} ({})", output.status);
     Ok(())
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::root_from;
+
+    /// A run told its checkout works on it; one told nothing works on the one above its
+    /// manifest, as an xtask built in place does.
+    #[test]
+    fn the_root_is_the_named_checkout_or_the_one_above_xtask() {
+        let snapshot = "/w/slopty/target/gate/tree/xtask";
+        let named = root_from(Some("/w/slopty".to_owned()), snapshot).expect("named");
+        assert_eq!(named, "/w/slopty");
+        let above = root_from(None, "/w/slopty/xtask").expect("above");
+        assert_eq!(above, "/w/slopty");
+        let blank = root_from(Some(String::new()), snapshot).expect("blank is unnamed");
+        assert_eq!(blank, "/w/slopty/target/gate/tree");
+    }
 }

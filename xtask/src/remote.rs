@@ -418,9 +418,23 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         local.load
     );
     record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
-    let runners_ok = runners.unwrap_or(Ok(()));
-    ensure!(local.passed, "the local check of {} failed", opts.packages.join(" "));
-    runners_ok?;
+    // Each half's verdict, last, where the lane reads: the runners' failure came above the
+    // local half's lines, which said "passed", and a lane took the check for green.
+    let runners_failed = runners.as_ref().and_then(|r| r.as_ref().err());
+    if !local.passed || runners_failed.is_some() {
+        let here = if local.passed { "passed" } else { "FAILED" };
+        let said = match (&runners, runners_failed) {
+            (None, _) => "nothing ran there".to_owned(),
+            (Some(_), None) => "passed".to_owned(),
+            (Some(_), Some(e)) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
+        };
+        bail!(
+            "check {} failed\n  here ({}): {here}\n  on runners ({}): {said}",
+            opts.name,
+            opts.packages.join(" "),
+            if remote { describe(&there) } else { "none".to_owned() }
+        );
+    }
     let depth = if opts.full { "full" } else { "quick" };
     let and = if remote { " and on runners" } else { "" };
     let crates = opts.packages.join(" ");
@@ -483,7 +497,7 @@ fn on_runners(
             None if opts.head => cmd!(sh, "git rev-parse HEAD").read()?,
             None => snapshot(sh, root, dir, &opts.name, &opts.only)?,
         };
-        actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha)?;
+        actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha, opts)?;
         // The tree as it was asked about, dispatched once a Mac is free for it.
         let macs = mac_jobs(opts);
         if macs > 0 {
@@ -754,11 +768,17 @@ fn local_actions(workflow: &str) -> Vec<&str> {
 /// Refuses a check whose snapshot `sha` lacks a local action that `on`'s [`WORKFLOW`] runs. The
 /// workflow comes from `on` and the actions from the snapshot, so a commit that removes one and
 /// is not on `on` yet failed every lane's check at setup (run 38153490688, the zig action).
-fn actions_present(sh: &Shell, on: &str, sha: &str) -> Result<()> {
+fn actions_present(sh: &Shell, on: &str, sha: &str, opts: &RemoteOpts) -> Result<()> {
     cmd!(sh, "git fetch --quiet origin {on}").run().with_context(|| format!("fetching {on}"))?;
     // The remote-tracking branch, not `FETCH_HEAD`, which another lane's fetch may replace.
     let path = format!("origin/{on}:.github/workflows/{WORKFLOW}");
     let workflow = cmd!(sh, "git show {path}").quiet().read()?;
+    if let Some(unfit) = unfit(&workflow, opts) {
+        bail!(
+            "{on}'s {WORKFLOW} cannot run this check: {unfit}. Land the workflow change first, or \
+             try it with --workflow-ref <branch>"
+        );
+    }
     let missing: Vec<&str> = local_actions(&workflow)
         .into_iter()
         .filter(|action| {
@@ -775,10 +795,29 @@ fn actions_present(sh: &Shell, on: &str, sha: &str) -> Result<()> {
     Ok(())
 }
 
-/// Start the workflow for `sha`, on [`REF`] unless `--workflow-ref` names a branch whose
-/// `check.yml` to try. An input goes only when it differs from the workflow's default, so a tree
-/// whose xtask knows an input `gate`'s `check.yml` does not yet have still dispatches.
-fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
+/// Why `workflow` (the text of the [`WORKFLOW`] a check dispatches) cannot run what `opts` asks,
+/// or `None` when it can: an input it would be sent and does not declare, or tests on no runner
+/// (`test_runner: none`) where its test job does not stand aside for them. A `check.yml` older
+/// than the change that made `none` queued the test job for a runner named "none", which no
+/// runner serves, and the lane waited two hours (run 38234704645).
+fn unfit(workflow: &str, opts: &RemoteOpts) -> Option<String> {
+    let sent = dispatched(opts, "");
+    let undeclared: Vec<&str> = sent
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !workflow.lines().any(|l| l.trim_end() == format!("      {key}:")))
+        .collect();
+    if !undeclared.is_empty() {
+        return Some(format!("it declares no input {}", undeclared.join(", ")));
+    }
+    let none = sent.iter().any(|(key, value)| *key == "test_runner" && value == "none");
+    (none && !workflow.contains("inputs.test_runner != 'none'"))
+        .then(|| "its test job does not stand aside for `test_runner: none`".to_owned())
+}
+
+/// The inputs a dispatch of `opts` on the commit `sha` sends: each that differs from the
+/// workflow's default, and always the name and the commit.
+fn dispatched(opts: &RemoteOpts, sha: &str) -> Vec<(&'static str, String)> {
     let snapshots = if opts.accept_snapshots { "accept" } else { "compare" };
     let fields: [(&str, String, &str); 12] = [
         ("name", opts.name.clone(), ""),
@@ -794,10 +833,20 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         ("test_runner", tests_on(opts).to_owned(), "macos-26"),
         ("probe", opts.probe.clone().unwrap_or_default(), ""),
     ];
-    let args: Vec<String> = fields
-        .iter()
+    fields
+        .into_iter()
         .filter(|(key, value, default)| matches!(*key, "name" | "sha") || value != default)
-        .flat_map(|(key, value, _)| ["-f".to_owned(), format!("{key}={value}")])
+        .map(|(key, value, _)| (key, value))
+        .collect()
+}
+
+/// Start the workflow for `sha`, on [`REF`] unless `--workflow-ref` names a branch whose
+/// `check.yml` to try. An input goes only when it differs from the workflow's default, so a tree
+/// whose xtask knows an input `gate`'s `check.yml` does not yet have still dispatches.
+fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
+    let args: Vec<String> = dispatched(opts, sha)
+        .into_iter()
+        .flat_map(|(key, value)| ["-f".to_owned(), format!("{key}={value}")])
         .collect();
     let on = opts.workflow_ref.as_deref().unwrap_or(REF);
     cmd!(sh, "gh workflow run {WORKFLOW} --ref {on} {args...}")
@@ -949,6 +998,15 @@ fn finish(sh: &Shell, id: u64) -> Result<String> {
             if state.status == "completed" {
                 return Ok(state.conclusion);
             }
+            if let Some((job, label)) = unservable(sh, &id) {
+                let _cancelled = cmd!(sh, "gh run cancel {id}").quiet().ignore_stderr().run();
+                bail!(
+                    "run {id}'s job `{job}` is queued for runner `{label}`, which no runner \
+                     serves, so it would never start; the run is cancelled. Its workflow is \
+                     not the one this xtask dispatches for: land the workflow change first, or \
+                     try it with --workflow-ref <branch>"
+                );
+            }
             if state.status != last {
                 let secs = started.elapsed().as_secs();
                 println!("  {} ({}m{:02}s)", state.status, secs / 60, secs % 60);
@@ -958,6 +1016,29 @@ fn finish(sh: &Shell, id: u64) -> Result<String> {
         ensure!(started.elapsed() < FINISH, "run {id} still {last} after {FINISH:?}");
         std::thread::sleep(POLL);
     }
+}
+
+/// The runner images a check's jobs run on: what `--runner` takes and `check.yml` names.
+const RUNNERS: [&str; 3] = ["macos-26", "ubuntu-24.04", "ubuntu-24.04-arm"];
+
+/// A queued job of run `id` asking for a runner no image serves, with the label it asks for.
+fn unservable(sh: &Shell, id: &str) -> Option<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<Job>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Job {
+        name: String,
+        status: String,
+        labels: Vec<String>,
+    }
+    let url = format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs");
+    let jobs: Jobs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read().ok()?).ok()?;
+    jobs.jobs.into_iter().filter(|j| j.status == "queued").find_map(|job| {
+        let label = job.labels.into_iter().find(|l| !RUNNERS.contains(&l.as_str()))?;
+        Some((job.name, label))
+    })
 }
 
 /// The run's artifact `name` unpacked into `into`, emptied first; `None` when the run left
@@ -1003,7 +1084,54 @@ mod tests {
     use camino::{Utf8Path, Utf8PathBuf};
     use xshell::{Shell, cmd};
 
-    use super::{MacJob, mac_verdict, noise, snapshot, unaccepted};
+    use super::{MacJob, RUNNERS, RemoteOpts, mac_verdict, noise, snapshot, unaccepted, unfit};
+
+    /// `remote`'s options as its command line gives them.
+    fn opts(args: &[&str]) -> RemoteOpts {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            opts: RemoteOpts,
+        }
+        let line = std::iter::once("remote").chain(args.iter().copied());
+        <Cli as clap::Parser>::try_parse_from(line).expect("the options parse").opts
+    }
+
+    /// A check asks only what the dispatched `check.yml` can run: this tree's runs a full check
+    /// with no Mac tests, and one whose test job does not stand aside for `test_runner: none`, or
+    /// that lacks an input sent, is refused before anything is dispatched.
+    #[test]
+    fn a_check_is_refused_by_a_workflow_that_cannot_run_it() {
+        let ours = std::fs::read_to_string(
+            crate::tools::repo_root().expect("root").join(".github/workflows/check.yml"),
+        )
+        .expect("check.yml");
+        let mut full = opts(&["-p", "slopty-ui", "--full"]);
+        full.tests_on = Some("none");
+        assert_eq!(unfit(&ours, &full), None);
+        let older = ours.replace("inputs.test_runner != 'none'", "true");
+        let why = unfit(&older, &full).expect("refused");
+        assert!(why.contains("test_runner: none"), "{why}");
+        let probe = opts(&["--probe", "true"]);
+        let without = ours.replace("      probe:\n", "      tried:\n");
+        assert_eq!(unfit(&without, &probe).as_deref(), Some("it declares no input probe"));
+    }
+
+    /// Every runner a workflow's job names outright is one a check knows is served, so a job
+    /// queued for any other is one that would never start.
+    #[test]
+    fn every_runner_a_workflow_names_is_known() {
+        let dir = crate::tools::repo_root().expect("root").join(".github/workflows");
+        for entry in std::fs::read_dir(&dir).expect("workflows") {
+            let path = entry.expect("an entry").path();
+            let text = std::fs::read_to_string(&path).expect("a workflow");
+            for label in text.lines().filter_map(|l| l.trim().strip_prefix("runs-on: ")) {
+                if !label.starts_with("${{") {
+                    assert!(RUNNERS.contains(&label), "{}: {label}", path.display());
+                }
+            }
+        }
+    }
 
     /// A shell in `root` whose git ignores the user's configuration (signing, hooks, branch).
     fn git_shell(root: &Utf8Path) -> Shell {

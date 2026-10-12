@@ -92,12 +92,6 @@ slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
 filter = 'test(/^(proptest|fuzz|slow)_/)'
 slow-timeout = { period = "120s", terminate-after = 2 }
 
-# The 20k-line file's first full syntect highlight takes about 4 s a run (run 38176047490), so
-# the nightly's 50 GPUI iterations take about 210 s, past the 120 s bound.
-[[profile.default.overrides]]
-filter = 'package(slopty-ui) & test(=file::tests::a_twenty_thousand_line_file_stays_editable)'
-slow-timeout = { period = "60s", terminate-after = 5, grace-period = "5s" }
-
 # A person's day in the app walks about 15 steps across two workers, and a step that finds
 # something waits its full 15 s before the walk records it and goes on.
 [[profile.default.overrides]]
@@ -256,6 +250,19 @@ test-threads = 1
 # `cargo xtask deep miri`: the pure crates' tests under the interpreter, 50–100 times slower than
 # native. A test still running after 20 minutes is ended and fails, so one slow test is a finding
 # and not a night.
+# The nightly's GPUI scheduler seeds (`cargo xtask nightly run --only gpui-iterations`): each
+# `#[gpui::test]` runs `ITERATIONS` times (50) in its one process, so its time is one run's
+# times the seeds, and the bounds above are each for one run. A bound raised by hand for one slow
+# test was outgrown within a day: the 20k-line file's 4 s a run (run 38176047490) became 7 s on a
+# busier runner, and seed 42 of 50 met the 300 s set for it (Deep run 38228066972). Here every
+# test has twenty minutes, a run's ten-fold budget of the default's two minutes.
+[profile.iterations]
+inherits = "default"
+
+[[profile.iterations.overrides]]
+filter = 'all()'
+slow-timeout = { period = "120s", terminate-after = 10, grace-period = "10s" }
+
 [profile.miri]
 slow-timeout = { period = "300s", terminate-after = 4, grace-period = "10s" }
 fail-fast = false

@@ -424,9 +424,20 @@ fn coverage(sh: &Shell, html: bool) -> Result<()> {
     let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
     let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
     let report: &[&str] = if html { &["--html", "--open"] } else { &["--summary-only"] };
-    cmd!(sh, "cargo llvm-cov nextest --workspace --exclude slopty-e2e --exclude xtask {report...}")
-        .run()
-        .context("cargo llvm-cov")
+    // On a runner, the runners' profile: the tests that read hardware a hosted Mac lacks are
+    // left out there, as in the gate, and the timeouts are a three-core runner's. The default
+    // ran the counter tests, which read 0 instructions on its virtual Mac (Deep run 38228066972).
+    let profile: &[&str] = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        &["--profile", crate::gate::NEXTEST_CI_PROFILE]
+    } else {
+        &[]
+    };
+    cmd!(
+        sh,
+        "cargo llvm-cov nextest --workspace --exclude slopty-e2e --exclude xtask {profile...} {report...}"
+    )
+    .run()
+    .context("cargo llvm-cov")
 }
 
 /// The loom models, by crate and nextest filterset. A model lives beside the structure it checks,

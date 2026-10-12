@@ -89,6 +89,10 @@ pub fn digests() -> std::collections::BTreeMap<String, u64> {
         .collect()
 }
 
+/// What LLVM's profile runtime sets in every process built for coverage, the same value in each:
+/// a child under `cargo llvm-cov` has it of its own, not from the test (Deep run 38228066972).
+pub const COVERAGE_RUNTIME: [&str; 1] = ["__LLVM_PROFILE_RT_INIT_ONCE"];
+
 /// What every Slopty terminal sets for itself (`slopty_pty`), whatever its daemon had: the
 /// same value in a test run inside a Slopty terminal is no leak.
 pub const TERMINAL: [&str; 3] = ["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
@@ -103,7 +107,8 @@ pub fn leaked(child: &std::collections::BTreeMap<String, u64>) -> Vec<String> {
         .filter(|(name, value)| {
             let passed = kept(OsStr::new(name))
                 || ["PATH", "HOME"].contains(&name.as_str())
-                || TERMINAL.contains(&name.as_str());
+                || TERMINAL.contains(&name.as_str())
+                || COVERAGE_RUNTIME.contains(&name.as_str());
             !passed && child.get(name) == Some(value)
         })
         .map(|(name, _)| name)

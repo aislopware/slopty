@@ -321,6 +321,9 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
         (root.clone(), None)
     } else {
         let (tree, listing) = snapshot(&root, Source::Index)?;
+        if let Some(judged) = by_the_index_s_xtask(&root, &tree)? {
+            return judged;
+        }
         let inputs = Inputs::gather(&gate_dir, &tree, listing)?;
         (tree, Some(inputs))
     };
@@ -471,6 +474,11 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
 fn lock(gate_dir: &Utf8Path) -> Result<std::fs::File> {
     std::fs::create_dir_all(gate_dir)?;
     let lock = std::fs::File::create(gate_dir.join(".lock"))?;
+    // The gate run again by the index's xtask runs under the lock of the gate that started it,
+    // which waits for it ([`by_the_index_s_xtask`]).
+    if std::env::var_os(INDEX_XTASK).is_some() {
+        return Ok(lock);
+    }
     if lock.try_lock().is_err() {
         bail!("another `cargo gate` (or `land`'s tests) is running on this checkout; wait for it");
     }
@@ -798,6 +806,69 @@ fn tools_lane(
     if errors.is_empty() { Ok(()) } else { bail!("{}", errors.join("; ")) }
 }
 
+/// Set in a gate run by [`by_the_index_s_xtask`], which is that xtask already.
+const INDEX_XTASK: &str = "SLOPTY_GATE_INDEX_XTASK";
+
+/// What xtask is built from, as CI's cache key for it names it
+/// (`xtask_s_cache_key_names_every_input` holds both): when the working tree's differs from the
+/// index's, this binary's rules are not the ones being committed.
+const XTASK_INPUTS: [&str; 7] = [
+    "xtask",
+    "crates/slopty-crash",
+    "crates/slopty-testkit",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".cargo",
+];
+
+/// The gate's verdict from xtask as the index has it, when this one was built from unstaged
+/// edits; `None` when this binary is the index's. The gate judges the snapshot of the index, but
+/// its rules are compiled into xtask (the shards, `SPAWNING`, the Linux-only tests), and
+/// `cargo gate` builds xtask from the working tree. One lane's unstaged xtask edit then judged
+/// another's commit: `SPAWNING` named `slopty-capture` from a lane's working tree while the
+/// staged capture tests did not spawn a binary, and the commit was refused. So that run builds
+/// xtask from the snapshot, into its own target directory, and runs the same gate with it.
+fn by_the_index_s_xtask(root: &Utf8Path, tree: &Utf8Path) -> Result<Option<Result<()>>> {
+    if std::env::var_os(INDEX_XTASK).is_some() {
+        return Ok(None);
+    }
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let inputs = XTASK_INPUTS;
+    if cmd!(sh, "git diff --quiet -- {inputs...}").quiet().run().is_ok() {
+        return Ok(None);
+    }
+    println!("▶ xtask has unstaged edits: the gate runs with xtask as the index has it");
+    let target = root.join("target").join("gate").join("xtask");
+    let manifest = tree.join("Cargo.toml");
+    cmd!(
+        sh,
+        "cargo build --quiet --manifest-path {manifest} --package xtask --target-dir {target}"
+    )
+    .run()
+    .context("building xtask from the index")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let status = index_rerun(root, &target.join("debug").join("xtask"), &args)
+        .status()
+        .context("the gate, by the index's xtask")?;
+    Ok(Some(if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("the gate, by the index's xtask, failed ({status})"))
+    }))
+}
+
+/// The same gate run again by `xtask`, built from the index: on this checkout `root` and its
+/// index, which it is told outright, since its own manifest is the snapshot's
+/// (`tools::REPO_ROOT`); only its rules come from the index. Run with the snapshot's manifest as
+/// its root, it took `target/gate/tree` for the checkout and snapshotted that.
+fn index_rerun(root: &Utf8Path, xtask: &Utf8Path, args: &[String]) -> std::process::Command {
+    let mut rerun = std::process::Command::new(xtask);
+    rerun.args(args).current_dir(root).env(crate::tools::REPO_ROOT, root).env(INDEX_XTASK, "1");
+    rerun
+}
+
 /// The directory a tools-lane shell stands in: the snapshot.
 fn tree_root(sh: &Shell) -> Result<Utf8PathBuf> {
     Utf8PathBuf::from_path_buf(sh.current_dir())
@@ -1023,22 +1094,37 @@ pub fn spawned_bins(sh: &Shell) -> Result<()> {
     let env =
         std::env::var_os("NEXTEST_ENV").context("nextest runs this and names $NEXTEST_ENV")?;
     let bins = spawned_bin_args();
-    // Under `cargo llvm-cov nextest` the tests are built in the directory it names in
-    // `CARGO_LLVM_COV_TARGET_DIR` and passes cargo as `--target-dir`, not in the environment's
-    // `CARGO_TARGET_DIR`: built there, the binaries vouched for no test, and Deep's coverage
-    // built the workspace twice (1080 s) and failed every test that spawns one (run 38001943825).
-    let (dir, built): (Vec<String>, Utf8PathBuf) = match std::env::var("CARGO_LLVM_COV_TARGET_DIR")
-    {
-        Ok(dir) => {
-            let built = Utf8PathBuf::from(&dir).join("debug");
-            (vec!["--target-dir".to_owned(), dir], built)
-        }
-        Err(_) => (Vec::new(), crate::tools::target_dir(sh)?.join("debug")),
-    };
+    // Under `cargo llvm-cov nextest` the tests are built in `llvm-cov-target` under the target
+    // directory it names in `CARGO_LLVM_COV_TARGET_DIR`, passed to cargo as `--target-dir`, not
+    // in the environment's `CARGO_TARGET_DIR` (`cargo llvm-cov nextest` ran `cargo nextest run
+    // --target-dir target/deep/cov/llvm-cov-target`, Deep run 38228066972). The variable names
+    // the target directory itself, as `cargo llvm-cov show-env` prints it. Built anywhere else
+    // the binaries vouch for no test, so each test that spawns one built them again inside its
+    // own timeout (run 38001943825, and 38228066972, where the setup's 788 s went for nothing).
+    let (dir, built): (Vec<String>, Utf8PathBuf) =
+        match std::env::var("CARGO_LLVM_COV_TARGET_DIR").map(llvm_cov_build_dir) {
+            Ok(dir) => {
+                let built = dir.join("debug");
+                (vec!["--target-dir".to_owned(), dir.into_string()], built)
+            }
+            Err(_) => (Vec::new(), crate::tools::target_dir(sh)?.join("debug")),
+        };
     cmd!(sh, "cargo build --profile test --workspace --tests {dir...} {bins...}").run()?;
     std::fs::write(&env, format!("{BINS_BUILT}={built}\n"))
         .with_context(|| format!("write {}", std::path::Path::new(&env).display()))?;
     Ok(())
+}
+
+/// Where `cargo llvm-cov nextest` builds the tests, given the target directory it names in
+/// `CARGO_LLVM_COV_TARGET_DIR`: its own `llvm-cov-target` there (cargo-llvm-cov 0.9's
+/// `target_dir`, kept apart from the plain build's units), unless the variable already names it.
+fn llvm_cov_build_dir(target: String) -> Utf8PathBuf {
+    let target = Utf8PathBuf::from(target);
+    if target.file_name() == Some("llvm-cov-target") {
+        target
+    } else {
+        target.join("llvm-cov-target")
+    }
 }
 
 /// The gate's tests: build every test binary (of the workspace, or of `shard`'s packages), then
@@ -1490,8 +1576,14 @@ pub fn linux_tests(sh: &Shell, profile: &str, tested: &[&str], install: bool) ->
 
 /// The packages whose tests spawn [`SPAWNED_BINS`] (`slopty_testkit::bins::bin`), as
 /// `tests::the_packages_whose_tests_spawn_binaries_are_listed` reads them from the sources.
-const SPAWNING: [&str; 5] =
-    ["slopty-workerd", "slopty-worker", "slopty-files", "slopty-cli", "slopty-client"];
+const SPAWNING: [&str; 6] = [
+    "slopty-workerd",
+    "slopty-worker",
+    "slopty-files",
+    "slopty-cli",
+    "slopty-client",
+    "slopty-capture",
+];
 
 /// What the build of [`SPAWNED_BINS`] selects besides `--bin`: the workspace with its tests, or
 /// some packages (a shard's, or those `land` tests) and those that build the binaries, or
@@ -2011,10 +2103,39 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 mod tests {
     use super::{
         BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests,
-        host_lines, list, mac_binaries_filter, next_step, one_gpui, runnable_doctests,
-        spawned_selection, summary_of, test_binary, within,
+        host_lines, list, llvm_cov_build_dir, mac_binaries_filter, next_step, one_gpui,
+        runnable_doctests, spawned_selection, summary_of, test_binary, within,
     };
     use crate::tools::repo_root;
+
+    /// The gate run again by the index's xtask works on this checkout and its index, told so
+    /// outright, with the same arguments, and does not run itself again.
+    #[test]
+    fn the_index_s_xtask_gates_this_checkout() {
+        let root = camino::Utf8Path::new("/w/slopty");
+        let xtask = camino::Utf8Path::new("/w/slopty/target/gate/xtask/debug/xtask");
+        let args = ["gate".to_owned(), "-m".to_owned(), "fix: a thing".to_owned()];
+        let rerun = super::index_rerun(root, xtask, &args);
+        assert_eq!(rerun.get_program(), xtask.as_os_str());
+        let given: Vec<_> = rerun.get_args().collect();
+        assert_eq!(given, ["gate", "-m", "fix: a thing"]);
+        assert_eq!(rerun.get_current_dir(), Some(root.as_std_path()));
+        let envs: std::collections::HashMap<_, _> = rerun.get_envs().collect();
+        let root_named = envs.get(std::ffi::OsStr::new(crate::tools::REPO_ROOT));
+        assert_eq!(root_named, Some(&Some(root.as_os_str())));
+        assert!(envs.contains_key(std::ffi::OsStr::new(super::INDEX_XTASK)));
+    }
+
+    /// The spawned binaries go where `cargo llvm-cov nextest` builds the tests: `llvm-cov-target`
+    /// under the target directory its variable names, as it passed nextest in Deep run
+    /// 38228066972, and never one level deeper.
+    #[test]
+    fn coverage_s_binaries_go_where_its_tests_are_built() {
+        let base = "/w/slopty/target/deep/cov";
+        assert_eq!(llvm_cov_build_dir(base.to_owned()), format!("{base}/llvm-cov-target"));
+        let named = format!("{base}/llvm-cov-target");
+        assert_eq!(llvm_cov_build_dir(named.clone()), named);
+    }
 
     /// A line that builds or steers by host is found, whatever the cfg's form; a comment is not,
     /// and neither is an item only Linux builds, which a Mac merely leaves out.
@@ -2307,6 +2428,12 @@ let windows = cfg!(windows);
                     .map(str::to_owned),
             )
             .collect();
+        // The gate's look at whether this xtask is the index's names the same.
+        for name in &built {
+            let dir = dir_of(name).expect("a member's directory");
+            let dir = dir.strip_prefix(&root).expect("in the workspace").to_string();
+            assert!(super::XTASK_INPUTS.contains(&dir.as_str()), "XTASK_INPUTS names {dir}");
+        }
         let mut keys = Vec::new();
         for name in ["ci.yml", "check.yml", "e2e.yml"] {
             let text = std::fs::read_to_string(root.join(".github/workflows").join(name))

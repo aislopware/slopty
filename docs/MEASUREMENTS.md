@@ -16741,6 +16741,22 @@ by job, then every push to `gate` in the 24 hours before and the minutes until m
   drops it, so the gate's `promote` now starts `deep.yml` on main whenever none has started there
   for 26 hours. Today's was started by hand from main (run 38228066972).
 
+**That Deep run, job by job** (d9bf2f2d; the macOS jobs one at a time behind the gate):
+
+| job | took | verdict | root cause, and the fix |
+| --- | --- | --- | --- |
+| proptest | 3 min | passed | |
+| miri | 41 min | passed | |
+| fuzz | 39 min | passed | |
+| loom | 20 min | passed | |
+| leaks | 21 min | passed | |
+| features | 17 min | failed | `slopty-testkit` built alone lacked objc2-foundation's `objc2-core-foundation` feature, which only the workspace's unification had given it (3a0f0738) |
+| sanitize address | 21 min | failed | nextest's setup script ran `cargo xtask spawned-bins`, which rebuilt xtask under the sanitizer's `RUSTFLAGS`: ASan's and TSan's ABI mismatch, RTSan's proc-macro refusal. `deep sanitize` now names its own binary in `SLOPTY_XTASK` (3a0f0738). Realtime rerun here after the fix: setup 0.02 s, 64 tests passed in 48 s |
+| sanitize thread | 23 min | failed | the same |
+| sanitize realtime | 6.5 min | failed | the same |
+| gpui seeds | 26 min | failed | `a_twenty_thousand_line_file_stays_editable` timed out at seed 42 of 50: about 7 s a seed on that runner, against a 300 s bound set by hand from 4 s a seed the day before. The nightly now runs under nextest's `iterations` profile, whose every test has twenty minutes, and the hand-set bound is gone |
+| coverage | 43 min | failed, 5 tests | (1) the counter tests ran under the default profile, which keeps the tests that read hardware a hosted Mac lacks (0 instructions, no IOReport); coverage on a runner now runs the runners' profile. (2) `cargo llvm-cov nextest` builds the tests in `llvm-cov-target` under the directory its `CARGO_LLVM_COV_TARGET_DIR` names, so the setup script's 788 s build vouched for none, and a test that spawns a binary built them all again inside its own 120 s (`a_prompt_waits_for_a_person_whose_link_the_worker_gave_up`). The script now builds there. (3) LLVM's profile runtime sets `__LLVM_PROFILE_RT_INIT_ONCE` in every instrumented process, and the environment-leak test took the agent's own for the test's |
+
 ## 2026-10-12 — a lane's check here and on runners
 
 What a lane waits for from `cargo xtask remote -p <crate>` to its verdict. Before, every check

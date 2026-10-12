@@ -193,7 +193,8 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str, gpui: &[String]) -> V
             args: [
                 own(&["nextest", "run"]),
                 selected(&gpui.iter().map(String::as_str).collect::<Vec<_>>()),
-                own(&["--no-fail-fast"]),
+                // Bounds for a test run once per seed (.config/nextest.toml).
+                own(&["--profile", "iterations", "--no-fail-fast"]),
             ]
             .concat(),
             env: vec![("ITERATIONS", opts.iterations.to_string()), no_spawned_bins()],

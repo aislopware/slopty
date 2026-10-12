@@ -1,7 +1,9 @@
 //! Capture latency against the live window server, gated by `SLOPTY_SCREEN_E2E=1`.
 //!
-//! The content is a Ghostty window this test launches itself running `yes` (a scrolling
-//! terminal, the worst case for a window) and kills afterwards. Latency is the window
+//! The content is the testkit's stand-in window (`slopty-stub-window`), which this test launches
+//! itself scrolling text each turn of its event loop (a terminal running `yes`, the worst case
+//! for a window) and kills afterwards: a window of the test's own on any Mac, a runner's
+//! included. Latency is the window
 //! server's display time of a frame (`SCStreamFrameInfoDisplayTime`) → our callback.
 //! Numbers go to MEASUREMENTS.md; the guard test pins the ruled floor.
 
@@ -31,9 +33,7 @@ mod tests {
     use slopty_core::WindowId;
     use slopty_proto::screen::CaptureTarget;
 
-    const GHOSTTY: &str = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
-
-    /// A Ghostty window running `command`, killed on drop.
+    /// The stand-in window drawing as it was asked, killed on drop.
     struct Scroller(Child);
 
     impl Drop for Scroller {
@@ -63,16 +63,26 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(10)).expect("enumerate").expect("content")
     }
 
-    /// Launch Ghostty running `command` and wait for its window.
-    fn launch(command: &[&str]) -> (Scroller, WindowId, Shareable) {
-        let child = Command::new(GHOSTTY)
-            .arg("-e")
-            .args(command)
+    /// The testkit's stand-in window drawing `drawing` (`still`, `scroll`, `tick` or `white`;
+    /// `slopty-stub-window`), from the build this test is part of.
+    fn stub_window(drawing: &str) -> Child {
+        let exe = std::env::current_exe().expect("the test's binary");
+        let target = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).parent().expect("target");
+        let profile = exe.ancestors().find(|dir| dir.parent() == Some(target)).expect("profile");
+        let anchor = profile.join("slopty-capture-tests");
+        let stub = slopty_testkit::bins::bin(&anchor.to_string_lossy(), "slopty-stub-window");
+        Command::new(stub)
+            .args(["main", "800", "600", drawing])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("Ghostty.app installed");
+            .expect("the stand-in window starts")
+    }
+
+    /// Launch the stand-in window drawing `drawing` and wait for it on screen.
+    fn launch(drawing: &str) -> (Scroller, WindowId, Shareable) {
+        let child = stub_window(drawing);
         let pid = i32::try_from(child.id()).expect("pid");
         let scroller = Scroller(child);
         let started = Instant::now();
@@ -91,7 +101,10 @@ mod tests {
                 pause(Duration::from_millis(1500));
                 return (scroller, w.id, shareable());
             }
-            assert!(started.elapsed() < Duration::from_secs(15), "no Ghostty window for pid {pid}");
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "no stand-in window for pid {pid}"
+            );
             pause(Duration::from_millis(250));
         }
     }
@@ -277,11 +290,11 @@ mod tests {
         if !gated() {
             return;
         }
-        let (_sleeper, id, content) = launch(&["sleep", "600"]);
+        let (_sleeper, id, content) = launch("still");
         assert!(slopty_capture::window_on_screen(id), "a fresh window is on screen");
         let crop =
             Target::resolve_crop(&content, id).expect("crop resolve").expect("on one display");
-        assert_eq!(crop.included_applications(), vec!["com.mitchellh.ghostty".to_owned()]);
+        assert_eq!(crop.included_applications().len(), 1, "the window's application alone");
         let display = content.displays().first().expect("a display").id;
         let display = Target::resolve(&content, CaptureTarget::Display(display)).expect("display");
         assert!(display.included_applications().is_empty(), "a display carries every app");
@@ -297,7 +310,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let (_sleeper, id, content) = launch(&["sleep", "600"]);
+        let (_sleeper, id, content) = launch("still");
         let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
         let crop =
             Target::resolve_crop(&content, id).expect("crop resolve").expect("on one display");
@@ -329,21 +342,23 @@ mod tests {
     /// Retina panel where a point is two pixels. `destinationRect` is documented in pixels; were
     /// it read in points the picture would cover the padding, and were it placed or scaled
     /// differently the picture would not match the unpadded capture's. The picture is sized even
-    /// but off 16 on both sides, so each side gets padding. The window is its own Ghostty with a
-    /// white background, so the padding's black has something to stand against.
+    /// but off 16 on both sides, so each side gets padding. The window is the stand-in drawn bare
+    /// white, so the padding's black has something to stand against.
     #[test]
     fn a_live_padded_capture_is_the_bare_picture_over_black() {
         if !gated() {
             return;
         }
-        let (_white, id, content) =
-            launch(&["sh", "-c", "printf '\\033[107m\\033[2J\\033[?25l'; exec sleep 600"]);
+        let (_white, id, content) = launch("white");
         let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
-        assert!(
-            (window.point_scale() - 2.0).abs() < f32::EPSILON,
-            "a Retina panel, where points and pixels differ: scale {}",
-            window.point_scale()
-        );
+        // A hosted runner's display may be at one pixel a point, where the two cannot be told.
+        if (window.point_scale() - 2.0).abs() >= f32::EPSILON {
+            slopty_testkit::live::skip(&format!(
+                "a Retina panel, where points and pixels differ: this one is at scale {}",
+                window.point_scale()
+            ));
+            return;
+        }
         let off_16 = |side: u32| if side.is_multiple_of(16) { side - 2 } else { side };
         let (pw, ph) = window.pixel_size();
         let picture = (off_16(pw), off_16(ph));
@@ -394,7 +409,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let (_scroller, id, content) = launch(&["yes"]);
+        let (_scroller, id, content) = launch("scroll");
         let crop =
             Target::resolve_crop(&content, id).expect("crop resolve").expect("on one display");
         let (tx, rx) = mpsc::channel::<u64>();
@@ -461,7 +476,7 @@ mod tests {
         if !gated() {
             return;
         }
-        let (_scroller, id, content) = launch(&["yes"]);
+        let (_scroller, id, content) = launch("scroll");
         let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
         let w = run(&window, &config(window.pixel_size(), 2, None), 3);
         row("window", 2, &w);
@@ -493,7 +508,7 @@ mod tests {
         }
         let defaults = sck_defaults();
         eprintln!("SCStreamConfiguration defaults: {defaults:?}");
-        let (_scroller, id, content) = launch(&["yes"]);
+        let (_scroller, id, content) = launch("scroll");
         let seconds = seconds();
         let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
         let crop = Target::resolve_crop(&content, id)
