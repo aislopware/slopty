@@ -152,6 +152,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     property proves. With no budget, each batch goes alone. A follower that lags the feed,
     or meets a batch that does not follow on, catches up from its cursor, by the tail or by a
     snapshot.
+    - **What it gathers lives in the follower, not in the call** (2026-10-12). The stream
+      waits on the follower beside its commands, and a review's or a page's answer coming
+      cuts that wait short. The batches taken for the frame were the call's own, so a cut
+      dropped them; the cursor stayed, but nothing caught up until the thread changed again.
+      A prompt answered just as a client came back and asked for a review stayed open on that
+      client for good (the cut-link test, 3 of 9 first runs on a Mac). The follower now keeps
+      the batches and the frame's deadline until the frame goes. Test:
+      `a_follower_cut_short_while_it_gathers_loses_nothing`.
   - **A log opens on first use** (2026-10-11, readiness-w 10-11 rank 7). A start used to open
     and replay every log the worker ever kept: 431 ms for 2,000 threads of 20 turns, every state
     held in memory after (`docs/MEASUREMENTS.md`). Each thread now also keeps `head`: its row

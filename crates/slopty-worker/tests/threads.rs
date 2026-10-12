@@ -402,6 +402,35 @@ mod threads {
         assert_eq!((slow.state.as_ref(), fast.state.as_ref()), (Some(&now), Some(&now)));
     }
 
+    /// A follower cut short while it gathers within its budget, as a stream's `select!` cuts
+    /// it when a review or a page comes, keeps the batch it took: the next call sends it, though
+    /// the thread says nothing more. It used to be lost until the thread's next change, so a
+    /// prompt answered just then stayed open on the client.
+    #[tokio::test(start_paused = true)]
+    async fn a_follower_cut_short_while_it_gathers_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let meta = meta();
+        let thread = meta.id;
+        host.create(meta).unwrap();
+        host.apply(thread, vec![turn(1)]);
+        let mut follower = Follower::new(host.clone(), thread, None, 10, 16);
+        let mut client = Mirror::default();
+        client.take(follower.next().await.unwrap());
+        host.apply(thread, vec![text("a", 1), append("a", "the last word")]);
+        let cut = std::time::Duration::from_millis(5);
+        assert!(
+            tokio::time::timeout(cut, follower.next()).await.is_err(),
+            "cut short inside its 16 ms budget"
+        );
+        let quiet = std::time::Duration::from_secs(1);
+        let frame = tokio::time::timeout(quiet, follower.next())
+            .await
+            .expect("the batch it took goes, with nothing more said");
+        client.take(frame.unwrap());
+        assert_eq!(client.state, Some(state(&host, thread).0));
+    }
+
     /// A log that starts over (a resync from the agent's own session) sends every follower a
     /// snapshot of the new epoch.
     #[tokio::test]

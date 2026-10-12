@@ -7,6 +7,11 @@
 //! one part that come one after another merged into one ([`coalesce`]): the client's state
 //! comes out as the batches one by one would leave it. A follower that falls behind the
 //! thread's feed, or sees the log start over, catches up from its cursor again.
+//!
+//! [`Follower::next`] is cancel safe, as a stream's `select!` needs: what it took from the feed
+//! for a frame is kept in the follower, with the frame's deadline, until the frame goes. A call
+//! cut short while it gathered used to drop the batch it held, and a thread that went quiet
+//! after it never sent it: the client kept a prompt open that was answered.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +39,10 @@ pub struct Follower {
     budget: Duration,
     cursor: Option<Cursor>,
     feed: Option<broadcast::Receiver<Arc<Batch>>>,
+    /// The batches taken for the frame under way, which follow on from the cursor, and when it
+    /// goes at the latest: kept here so a call cut short loses none.
+    gathered: Vec<Arc<Batch>>,
+    deadline: Option<Instant>,
 }
 
 impl Follower {
@@ -54,6 +63,8 @@ impl Follower {
             budget: Duration::from_millis(u64::from(max_latency_ms)),
             cursor: have,
             feed: None,
+            gathered: Vec::new(),
+            deadline: None,
         }
     }
 
@@ -69,38 +80,49 @@ impl Follower {
         self.cursor
     }
 
-    /// The next frame, or `None` once the thread is gone. Cancel safe: a call cut short
-    /// leaves the cursor where it was, and the next one catches up from it.
+    /// The next frame, or `None` once the thread is gone. Cancel safe: a call cut short keeps
+    /// what it took from the feed, and the next call goes on gathering it.
     pub async fn next(&mut self) -> Option<ThreadFrame> {
         loop {
             let Some(feed) = self.feed.as_mut() else {
+                self.gathered.clear();
                 let follow = self.host.follow(self.thread, self.cursor, self.turns)?;
                 self.feed = Some(follow.feed);
                 let (frame, cursor) = follow.catchup.frame();
                 self.cursor = Some(cursor);
                 return Some(frame);
             };
-            let batch = match feed.recv().await {
-                Ok(batch) => batch,
-                Err(RecvError::Lagged(_)) => {
-                    self.feed = None;
-                    continue;
-                }
-                Err(RecvError::Closed) => return None,
-            };
-            let Some(mut at) = self.cursor.filter(|c| c.epoch == batch.epoch && c.seq == batch.seq)
-            else {
+            let Some(at) = self.cursor else {
                 self.feed = None;
                 continue;
             };
-            let mut actions = batch.actions.clone();
-            let mut text = appended(&actions);
-            let deadline = Instant::now().checked_add(self.budget);
+            if self.gathered.is_empty() {
+                let batch = match feed.recv().await {
+                    Ok(batch) => batch,
+                    Err(RecvError::Lagged(_)) => {
+                        self.feed = None;
+                        continue;
+                    }
+                    Err(RecvError::Closed) => return None,
+                };
+                if batch.epoch != at.epoch || batch.seq != at.seq {
+                    self.feed = None;
+                    continue;
+                }
+                self.gathered.push(batch);
+                self.deadline = Instant::now().checked_add(self.budget);
+            }
             let mut torn = false;
-            while text < FRAME_TEXT && actions.len() < FRAME_ACTIONS {
+            loop {
+                let (text, count) = self.gathered.iter().fold((0_usize, 0_usize), |(t, n), b| {
+                    (t.saturating_add(appended(&b.actions)), n.saturating_add(b.actions.len()))
+                });
+                if text >= FRAME_TEXT || count >= FRAME_ACTIONS {
+                    break;
+                }
                 // A feed that lagged or closed, or a batch that does not follow on (the log
                 // started over), is caught up from the cursor on the next call instead.
-                let next = match deadline {
+                let next = match self.deadline {
                     Some(deadline) if !self.budget.is_zero() => {
                         match tokio::time::timeout_at(deadline, feed.recv()).await {
                             Ok(next) => next.ok(),
@@ -112,7 +134,7 @@ impl Follower {
                         next => next.ok(),
                     },
                 };
-                let gathered = u64::try_from(actions.len()).unwrap_or(u64::MAX);
+                let gathered = u64::try_from(count).unwrap_or(u64::MAX);
                 let follows = next.as_ref().is_some_and(|next| {
                     next.epoch == at.epoch && next.seq == at.seq.saturating_add(gathered)
                 });
@@ -120,9 +142,13 @@ impl Follower {
                     torn = true;
                     break;
                 };
-                text = text.saturating_add(appended(&next.actions));
-                actions.extend(next.actions.iter().cloned());
+                self.gathered.push(next);
             }
+            let mut actions = Vec::new();
+            for batch in self.gathered.drain(..) {
+                actions.extend(batch.actions.iter().cloned());
+            }
+            self.deadline = None;
             let applied = u64::try_from(actions.len()).unwrap_or(u64::MAX);
             let frame = ThreadFrame::Actions {
                 epoch: at.epoch,
@@ -130,8 +156,7 @@ impl Follower {
                 next: at.seq.saturating_add(applied),
                 actions: coalesce(actions),
             };
-            at.seq = at.seq.saturating_add(applied);
-            self.cursor = Some(at);
+            self.cursor = Some(Cursor { epoch: at.epoch, seq: at.seq.saturating_add(applied) });
             if torn {
                 self.feed = None;
             }

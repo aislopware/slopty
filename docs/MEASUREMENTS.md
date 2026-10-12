@@ -16655,8 +16655,11 @@ asked into the cut; the app gives up the silent link after 5 s, as it does):
 
 Three of nine runs (each the first on its runner) failed after the answer was acted on: the
 worker said it was answered and answered the intent `Done`, but the app's copy of the thread
-still showed the request open 20 s later, so the answer never settled there. The test now
-prints the worker's own view of the request when that happens; it is open.
+still showed the request open 20 s later. The worker's follower dropped the batch it was
+gathering when the review's answer cut its wait short (`docs/decisions/agents.md`,
+"Coalescing"). Fixed; then 20 runs, five on each of four fresh Mac runners (probe runs
+38210370040, 38211178091, 38211758359 and 38212325191), all passed: linked again 2–14 ms after
+the network came back, the answer acted on 4–30 ms after, the review there 4–34 ms after.
 
 **A worker that moves under its link** (`a_worker_that_moves_under_its_link_is_published_where_it_went`,
 Linux, the dialer moved from 127.0.0.1 to 127.0.0.2): published at its new address 2.0 s after
