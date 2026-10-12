@@ -1,4 +1,4 @@
-Window │ studio
+Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
 Button │ Back
@@ -22,8 +22,6 @@ Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 TabList
-Tab │ Terminal
-Button │ Close tab
 Tab │ Orchestrator
 Image │ Claude Code
 Button │ Close tab

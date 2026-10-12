@@ -11,13 +11,6 @@ Heading │ Ready to merge
 Button │ Mirror the merge queue, Ship the project board, Ready to merge
 Button │ Merge
 Heading │ Projects
-Button │ repo
-Button │ Fold
-Button │ New shell in repo
-Button │ NOTES.md
-Button │ Close tile
-Button │ repo
-Button │ Close tile
 Button │ Ship the project board
 Button │ Fold
 Button │ Board, 1 of 6 merged
@@ -27,6 +20,10 @@ Image │ Claude Code
 Button │ Close tile
 Button │ #1 Mirror the server's projects
 Image │ Claude Code
+Button │ Close tile
+Button │ NOTES.md
+Button │ Close tile
+Button │ repo
 Button │ Close tile
 Heading │ Machines
 Button │ studio
@@ -44,7 +41,7 @@ Button │ More
 Group │ #1 Mirror the server's projects
 Heading │ Claude Code #1 Mirror the server's projects
 Image │ Claude Code
-Label │ home
+Button │ Commit on repo
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread

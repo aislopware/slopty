@@ -1,4 +1,4 @@
-Window │ studio
+Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
 Button │ Back
@@ -25,8 +25,6 @@ Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 TabList
-Tab │ Terminal
-Button │ Close tab
 Tab │ Orchestrator
 Image │ Claude Code
 Button │ Close tab
@@ -61,7 +59,7 @@ List │ Working
 Heading │ Working
 ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts
 Image │ Waiting
-Label │ Runs on studio, macOS. Branch slopty/board/1
+Label │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch slopty/board/1
 List │ Up next
 Heading │ Up next
 ListItem │ Hold it to goldens, Up next, after #1 · reads only
@@ -79,4 +77,4 @@ List │ Merged
 Button │ Show Merged 1
 Group │ Status
 Button │ Show the tab's terminal
-Status │ #5 Check the wire goldens: its verifier failed
+Status │ Ship the project board: #5 Check the wire goldens: its verifier failed
