@@ -1029,12 +1029,16 @@ impl Hub {
     /// Follow the orchestrators on `worker` as its table says: each one's thread is kept once
     /// it shows in the orchestrator's terminal, and an orchestrator whose session was taken up
     /// in another terminal there (`claude --resume`, the same thread) is the project's again in
-    /// that terminal, where what waits for it goes.
+    /// that terminal, where what waits for it goes. A thread kept that the table no longer
+    /// holds gives way to the one the terminal shows now: a Claude Code seen in its terminal
+    /// before its first hook has a provisional thread there, which goes once its session's own
+    /// begins, and a resume of the provisional one finds nothing.
     pub(super) fn follow_orchestrators(&self, state: &mut State, worker: WorkerId) {
         let now = WallMs::now();
         let mut moved = Vec::new();
         let mut followed = false;
         for (project, term, known) in state.projects.orchestrated_on(worker) {
+            let known = known.filter(|thread| state.board.holds(worker, *thread) != Some(false));
             let Some(thread) = known.or_else(|| state.board.thread_at(term)) else { continue };
             let at = state
                 .board

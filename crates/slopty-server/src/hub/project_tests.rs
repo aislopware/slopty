@@ -2703,6 +2703,52 @@ async fn a_branch_on_its_way_home_waits_for_both_ends_after_a_restart() {
     drop(linux_lease);
 }
 
+/// A task reported done while its worker has no link to the server (its agent's own link came
+/// back first, as off the network) does not lose its trip home: its card says it waits for the
+/// worker, nothing is asked of anyone, and the branch travels once the worker registers again.
+#[tokio::test]
+async fn a_done_heard_before_its_worker_is_back_goes_home_once_it_is() {
+    use slopty_proto::project::{Report, StepKind, StepState};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio = vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let agent = SessionId::new();
+    let linux_terms = || vec![in_repo(agent, "/home/c/demo", None)];
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux_terms());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: on(linux) });
+    forge_has_the_target(&studio_lease, &mut studio_rx).await;
+    let start = request(&mut linux_rx).await;
+    let term = opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    assigned(&hub, task).await;
+
+    // The box's link is gone; its agent's report arrives anyway.
+    drop((linux_lease, linux_rx));
+    let report = Report {
+        note: "Built it.".to_owned(),
+        artifacts: Vec::new(),
+        branch: Some(format!("worktree-slopty-slopty-{task}")),
+        pr: None,
+    };
+    let verb = Verb::TaskReport { project: project(), task, report };
+    let done = hub.dispatch_as(Speaker::Proven(term.session), None, verb).await;
+    assert!(matches!(done, Outcome::Task(_)), "{done:?}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let step = task_now(&hub, task).await.step.map(|s| (s.kind, s.state));
+    let Some((StepKind::Home, StepState::Running { phase, .. })) = step else {
+        panic!("waiting, not failed: {step:?}")
+    };
+    assert_eq!(phase, "Waiting for box");
+
+    let (_, linux_lease, mut linux_rx) = worker_again(&hub, linux, "box", Os::Linux, linux_terms());
+    let (_, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "on its way once the box is back: {verb:?}");
+    drop((linux_lease, studio_lease, studio_rx));
+}
+
 /// Only the person lets a project go. Every client is sent the projects afresh without it, its
 /// store forgets it, and its name is free again.
 #[tokio::test]
@@ -3338,6 +3384,40 @@ async fn an_orchestrator_resumed_in_another_terminal_is_followed() {
     answer(&lease, id, Outcome::ThreadStarted { thread: thread.id, worktree: None });
     let started = resuming.await.unwrap();
     assert!(matches!(started, Outcome::ThreadStarted { thread: t, .. } if t == thread.id));
+}
+
+/// An orchestrator's Claude Code seen in its terminal before its first hook has a provisional
+/// thread there, which its worker drops once the session's own thread begins. The project
+/// takes the session's thread then, so the person's resume after its agent ended asks for the
+/// thread the worker holds.
+#[tokio::test]
+async fn an_orchestrator_s_provisional_thread_gives_way_to_its_session_s() {
+    use ladder::tests::{row, snapshot};
+    use slopty_proto::thread::wire::ThreadRow;
+    use slopty_proto::thread::{Liveness, Phase, Status};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let session = SessionId::new();
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, session, true);
+    create(&hub, Some(TermRef { worker, session })).await;
+    let provisional = row(Phase::Idle, 10, Some(session));
+    lease.handle(snapshot(vec![provisional.clone()]));
+    let seen = status(&hub).await.project.orchestrator_thread;
+    assert_eq!(seen, Some(provisional.id), "learned from its terminal");
+
+    let own = row(Phase::Working, 20, Some(session));
+    lease.handle(snapshot(vec![own.clone()]));
+    let now = status(&hub).await.project;
+    assert_eq!(now.orchestrator_thread, Some(own.id), "the session's own thread");
+    assert_eq!(now.orchestrator, Some(TermRef { worker, session }), "in the same terminal");
+
+    let exited = Status { liveness: Liveness::Exited { resumable: true }, ..own.status.clone() };
+    lease.handle(snapshot(vec![ThreadRow { status: exited, ..own.clone() }]));
+    let resuming = spawn(&hub, Verb::ProjectResume { project: project() });
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::ResumeThread { of: ThreadOf::On { worker, thread: own.id } });
+    answer(&lease, id, Outcome::ThreadStarted { thread: own.id, worktree: None });
+    assert!(matches!(resuming.await.unwrap(), Outcome::ThreadStarted { .. }));
 }
 
 /// A project whose orchestrator has not said which repository it works in refuses a start that

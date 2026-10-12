@@ -641,6 +641,12 @@ impl Board {
         if there(row) { seat_of(row) } else { None }
     }
 
+    /// Whether `worker`'s table holds `thread`, its agent there or exited; `None` when the
+    /// worker has published no table.
+    pub(super) fn holds(&self, worker: WorkerId, thread: ThreadId) -> Option<bool> {
+        Some(self.tables.get(&worker)?.contains_key(&thread))
+    }
+
     /// The worker whose table holds `thread`.
     pub(super) fn worker_of(&self, thread: ThreadId) -> Option<WorkerId> {
         self.tables.iter().find(|(_, table)| table.contains_key(&thread)).map(|(w, _)| *w)

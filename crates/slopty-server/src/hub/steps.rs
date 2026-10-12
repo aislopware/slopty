@@ -260,6 +260,9 @@ impl Hub {
             *again = true;
             return;
         }
+        if self.home_when_back(state, &key) {
+            return;
+        }
         state.steps.homing.insert(key.clone(), false);
         let hub = self.clone();
         tokio::spawn(async move {
@@ -272,6 +275,12 @@ impl Hub {
                     hub.read_tests((project, *task)).await;
                 }
                 let mut state = hub.inner.state.lock();
+                // Its worker's link went while the branch was on its way: it goes again once the
+                // worker is back, not never.
+                if !home && hub.home_when_back(&mut state, &key) {
+                    state.steps.homing.remove(&key);
+                    break;
+                }
                 if state.steps.homing.remove(&key) != Some(true) {
                     let merge = state.steps.merge_after.remove(&key);
                     if merge {
@@ -288,6 +297,33 @@ impl Hub {
                 state.steps.homing.insert(key.clone(), false);
             }
         });
+    }
+
+    /// When the worker `task`'s branch is on has no link now, the trip waits for it: taken up
+    /// once that worker registers again ([`Self::resume_steps`]), its card saying so meanwhile.
+    /// An agent's own link to the server can come back before its worker's does, so a task
+    /// reported done off the network is heard while its branch cannot travel yet. Whether it
+    /// waits.
+    fn home_when_back(&self, state: &mut State, (project, task): &(ProjectId, TaskId)) -> bool {
+        let Some(from) = away_from(state, project, *task) else { return false };
+        let name = state.workers.get(&from).map_or_else(String::new, |e| e.info.name.clone());
+        let phase = if name.is_empty() {
+            "Waiting for its machine".to_owned()
+        } else {
+            format!("Waiting for {name}")
+        };
+        let step = TaskStep {
+            kind: StepKind::Home,
+            worker: from,
+            state: StepState::Running { phase, percent: None },
+            since_ms: WallMs::now(),
+            term: None,
+            commits: None,
+        };
+        tracing::info!(%project, %task, worker = %from, "a branch waits for its worker to go home");
+        self.step(state, (project, *task), step.clone());
+        state.projects.resume_on(from, (project.clone(), *task), step);
+        true
     }
 
     /// The person asked for `task`'s merge: when its branch is on another machine, or in
