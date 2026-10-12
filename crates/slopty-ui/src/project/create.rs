@@ -513,16 +513,17 @@ impl Render for GoalSheet {
             .track_focus(&self.focus)
             .role(Role::Dialog)
             .aria_label(TITLE)
-            .p(px(sp.lg))
-            .gap(px(sp.md))
             .on_action(cx.listener(|_this, _: &Escape, _w, cx| cx.emit(SheetEvent::Cancel)))
-            .child(kit::title(theme, TITLE))
-            .child(field(theme, GOAL, goal))
-            .child(field(theme, FOLDER, folder).children(self.places_row(cx)))
-            .child(who)
-            .when(open, |el| el.child(self.more_fields(cx)))
+            .child(kit::dialog_head(theme).child(kit::title(theme, TITLE)))
             .child(
-                div().flex().justify_end().gap(px(sp.xs)).pt(px(sp.xs)).child(cancel).child(create),
+                kit::dialog_section(theme)
+                    .gap(px(sp.md))
+                    .pb(px(sp.md))
+                    .child(field(theme, GOAL, goal))
+                    .child(field(theme, FOLDER, folder).children(self.places_row(cx)))
+                    .child(who)
+                    .when(open, |el| el.child(self.more_fields(cx))),
             )
+            .child(kit::dialog_foot(theme).child(cancel).child(create))
     }
 }

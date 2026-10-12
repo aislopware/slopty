@@ -10876,8 +10876,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     thread's own marks: a step to come the dashed ring, the one under way turning, a done one
     the success check.
   - **One thing is set apart.** A call put to the person (a permission, a question, a plan to
-    approve) is Zed's tool card (`kit::call_card`): the page's ground in the `border` line at
-    `radii.md`, its head on the `card_head` plane over the lighter line. A waiting call's line
+    approve) is Zed's tool card (`kit::call_card`): the page's ground in Zed's tool card line
+    (`call_border`, `border` at 80 %) at `radii.md`, its head on the `card_head` plane over the
+    lighter line. An opened thought hangs from the same 80 % line, as Zed's does; the lighter
+    `stroke` it hung from was four to twelve levels fainter (#292C32 against #2D3138 in dark,
+    #DFDFE0 against #D3D3D4 in light), enough in light to lose the rail on the page. A waiting call's line
     is that head, and what it would do and the answers lie under it. Everything else is type
     on the page. This replaces the card language's ring-only card and "no call is a card".
   - **What the turn changed is listed in the activity bar**, as Zed's agent panel lists a
@@ -10948,11 +10951,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     reading column, the vertical centring and the 20 pt headline role (`empty_heading`) went.
   - **Dialogs are Zed's modals** (`kit::dialog_head`, `dialog_section`, `dialog_foot`): the
     head `px 12 pt 8 pb 4`, the sections in to its edge, the buttons at the foot's trailing end
-    under the lighter line, where the 24 pt padding all round was.
+    under the lighter line, where the 24 pt padding all round was. The goal sheet and the
+    commit sheet (its pull request, files, message and the open-a-pull-request page) wear
+    them too. The palette and the window picker do not: they are Zed's picker, not its modal,
+    a bare query row over the rows with no head and no foot (`palette::field_row`,
+    `list_pad`), as Zed's command palette and file finder are.
   - **gpui-kit's primary button is the tinted accent** (a question's Next and Submit), set on
     its tokens as well as its colours: the components paint from the tokens, which a write to
     the colours alone left at gpui-kit's own black solid.
-  - Tests: `slopty-kit` `kit::tests::the_kit_theme_follows_the_tokens`; `slopty-ui`
+  - Tests: `slopty-kit` `kit::tests::the_kit_theme_follows_the_tokens`,
+    `kit::tests::a_call_card_is_ringed_a_step_quieter_than_a_control`; `slopty-ui`
     `workspace::tests::palette` (the empty page),
     `settings_form::tests::a_groups_rows_are_ruled_under_its_label`.
 

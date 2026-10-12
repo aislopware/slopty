@@ -808,6 +808,9 @@ pub mod alpha {
     /// Barely drawn until wanted: a thread's fold disclosure at rest, Zed's 30 %; and how far
     /// the activity bar's ground moves toward the selection.
     pub const QUIET: f32 = 0.3;
+    /// How strongly a thread's call card and a thought's rail draw the border: Zed's tool card
+    /// border, 80 %.
+    pub const CALL_BORDER: f32 = 0.8;
 }
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`). The mark's and the icon's
@@ -880,6 +883,9 @@ pub struct Surfaces {
     pub stroke: Tint,
     /// The line round a control or a card, a tab's sides, a split: Zed's `border`.
     pub border: Tint,
+    /// The line round a thread's call card and down a thought's side: Zed's tool card border,
+    /// [`Self::border`] at 80 %, so what an agent did sits a step quieter than a control.
+    pub call_border: Tint,
     /// The keyboard's border: Zed's `border.focused`, drawn at [`stroke::FOCUS`], moved toward
     /// the accent as far as it takes to stand 3:1 off every plane and row it rings (WCAG
     /// 2.4.13), where Zed's own reads 2.4 on a selected row.
@@ -1278,6 +1284,7 @@ impl Surfaces {
             pressed: Tint { ink: t.selected, alpha: u8::MAX },
             stroke: Tint { ink: t.stroke, alpha: u8::MAX },
             border: Tint { ink: t.border, alpha: u8::MAX },
+            call_border: Tint::of(t.border, alpha::CALL_BORDER),
             focus: lift_to(t.focus, &under, accent, Floor { ratio: NON_TEXT, lc: 0.0 }),
             selected_border: t.selected_border,
             indent_guide: t.indent_guide,

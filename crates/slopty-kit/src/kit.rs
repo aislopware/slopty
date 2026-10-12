@@ -577,11 +577,14 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
 /// `el` as the one card a thread's column keeps, Zed's agent panel's tool card.
 ///
 /// It holds a call put to the person (a permission, a question, a plan to approve): the
-/// work's ground inside the `border` line at `radii.md`, clipped to its corners, its head on
-/// [`card_head`].
+/// work's ground inside the `call_border` line (Zed's `border` at 80 %) at `radii.md`, clipped
+/// to its corners, its head on [`card_head`].
 #[must_use]
 pub fn call_card<E: Styled>(el: E, theme: &Theme) -> E {
-    raised(el, theme).rounded(px(theme.radii.md)).overflow_hidden()
+    raised(el, theme)
+        .border_color(hsla(theme.surfaces.call_border))
+        .rounded(px(theme.radii.md))
+        .overflow_hidden()
 }
 
 /// `el` as a [`call_card`]'s head.
@@ -1860,6 +1863,21 @@ mod tests {
             let shade = shade.expect("a shade");
             assert!(shade.inset, "{variant:?}: held inside");
             assert!(shade.blur_radius > px(0.0), "{variant:?}: soft");
+        }
+    }
+
+    /// A call card is Zed's tool card: `border` at 80 %, a step quieter than a control's line
+    /// and a step louder than the lighter one between regions, at `radii.md`.
+    #[test]
+    fn a_call_card_is_ringed_a_step_quieter_than_a_control() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let style = call_card(div(), &theme).style().clone();
+            assert_eq!(style.border_color, Some(hsla(s.call_border)), "{variant:?}");
+            assert_eq!(style.corner_radii.top_left, Some(px(theme.radii.md).into()));
+            assert_eq!(s.call_border.ink, s.border.ink, "{variant:?}: the border's own ink");
+            assert!(s.call_border.alpha < s.border.alpha, "{variant:?}: quieter");
         }
     }
 

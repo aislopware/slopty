@@ -1871,7 +1871,7 @@ impl ThreadView {
                         .pl(px(TOOL_ROW / 2.0 + theme.spacing.xs))
                         .py(px(theme.spacing.xxs))
                         .border_l(kit::HAIR)
-                        .border_color(hsla(s.stroke))
+                        .border_color(hsla(s.call_border))
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()

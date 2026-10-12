@@ -684,10 +684,10 @@ impl CommitSheet {
             Page::Commit => "Commit".to_owned(),
             Page::Open => format!("Open {}", forge.noun()),
         };
-        kit::inset_x(div(), theme)
+        kit::dialog_head(theme)
             .w_full()
             .flex_none()
-            .flex()
+            .flex_row()
             .items_center()
             .gap(px(theme.spacing.sm))
             .min_h(px(kit::Row::Two.height(theme)))
@@ -729,14 +729,10 @@ impl CommitSheet {
         let s = theme.surfaces;
         let repo = self.state(cx)?;
         let reading = self.hub.read(cx).git().reading(&self.repo, true);
-        let part = kit::inset_x(div(), theme)
+        let part = kit::dialog_section(theme)
             .debug_selector(|| "commit-pull".to_owned())
             .w_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(theme.spacing.xs))
-            .py(px(theme.spacing.sm));
+            .flex_none();
         let part = match (&repo.pull, &repo.pull_unread) {
             (Pull::Known(pull), _) => part.child(self.pull_line(pull)).children(self.checks(pull)),
             (_, Some(why)) => {
@@ -1141,14 +1137,11 @@ impl CommitSheet {
         let theme = &self.theme;
         let s = theme.surfaces;
         let repo = self.state(cx);
-        let part = kit::inset_x(div(), theme)
+        let part = kit::dialog_section(theme)
             .debug_selector(|| "commit-files".to_owned())
             .w_full()
             .flex_none()
-            .flex()
-            .flex_col()
-            .gap(px(theme.spacing.xxs))
-            .py(px(theme.spacing.sm));
+            .gap(px(theme.spacing.xxs));
         if let Some(why) = repo.and_then(|r| r.unread.as_deref()) {
             return part
                 .child(self.said_block("commit-unread", why, s.text_secondary))
@@ -1277,14 +1270,9 @@ impl CommitSheet {
             self.button("commit-and-push", "Commit and push", ButtonKind::Secondary, off)
                 .on_click(cx.listener(|this, _ev, _w, cx| this.commit(true, cx)))
         };
-        kit::inset_x(div(), theme)
+        let message = kit::dialog_section(theme)
             .w_full()
-            .flex_none()
-            .flex()
-            .flex_col()
             .gap(px(theme.spacing.sm))
-            .pt(px(theme.spacing.sm))
-            .pb(px(theme.spacing.md))
             .child(
                 self.field(
                     Textarea::new(&self.message)
@@ -1294,43 +1282,41 @@ impl CommitSheet {
                         .aria_label("Commit message"),
                 ),
             )
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .when(no_pull, |el| {
-                        el.child(
-                            self.button(
-                                "commit-open-pull",
-                                open_words,
-                                ButtonKind::Ghost,
-                                no_gh || busy,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _ev, window, cx| {
-                                    if !no_gh {
-                                        this.show_page(Page::Open, window, cx);
-                                    }
-                                },
-                            )),
-                        )
-                    })
-                    .children(asker.as_deref().map(|agent| {
-                        let label = format!("Ask {agent} to commit");
-                        self.button("commit-ask", label, ButtonKind::Ghost, asked || busy)
-                            .on_click(cx.listener(|this, _ev, _w, cx| this.ask_agent(cx)))
-                    }))
-                    .child(div().flex_1())
-                    .child(second)
-                    .child(
-                        self.button("commit-commit", "Commit", ButtonKind::Primary, off)
-                            .on_click(cx.listener(|this, _ev, _w, cx| this.commit(false, cx))),
-                    ),
-            )
             .children(self.asking_line(asker.as_deref()))
-            .children(self.outcome(cx))
+            .children(self.outcome(cx));
+        div().w_full().flex_none().flex().flex_col().child(message).child(
+            kit::dialog_foot(theme)
+                .w_full()
+                .items_center()
+                .when(no_pull, |el| {
+                    el.child(
+                        self.button(
+                            "commit-open-pull",
+                            open_words,
+                            ButtonKind::Ghost,
+                            no_gh || busy,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _ev, window, cx| {
+                                if !no_gh {
+                                    this.show_page(Page::Open, window, cx);
+                                }
+                            },
+                        )),
+                    )
+                })
+                .children(asker.as_deref().map(|agent| {
+                    let label = format!("Ask {agent} to commit");
+                    self.button("commit-ask", label, ButtonKind::Ghost, asked || busy)
+                        .on_click(cx.listener(|this, _ev, _w, cx| this.ask_agent(cx)))
+                }))
+                .child(div().flex_1())
+                .child(second)
+                .child(
+                    self.button("commit-commit", "Commit", ButtonKind::Primary, off)
+                        .on_click(cx.listener(|this, _ev, _w, cx| this.commit(false, cx))),
+                ),
+        )
     }
 
     /// What the agent's ask came to: waited on, or turned down in the worker's words.
@@ -1365,13 +1351,9 @@ impl CommitSheet {
                 this.draft = !this.draft;
                 cx.notify();
             }));
-        kit::inset_x(div(), theme)
+        let fields = kit::dialog_section(theme)
             .w_full()
-            .flex_none()
-            .flex()
-            .flex_col()
             .gap(px(theme.spacing.sm))
-            .py(px(theme.spacing.sm))
             .child(self.field(
                 Input::new(&self.title).appearance(false).bordered(false).aria_label("Title"),
             ))
@@ -1393,29 +1375,26 @@ impl CommitSheet {
             ))
             .child(draft)
             .children(no_gh.map(|why| self.said_block("commit-no-gh", &why, s.text_secondary)))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs))
-                    .child(div().flex_1())
-                    .child(self.button("commit-back", "Back", ButtonKind::Ghost, false).on_click(
-                        cx.listener(|this, _ev, window, cx| {
-                            this.show_page(Page::Commit, window, cx);
-                        }),
-                    ))
-                    .child(
-                        self.button(
-                            "commit-open",
-                            format!("Open {}", repo.map_or(Forge::GitHub, Repo::forge).noun()),
-                            ButtonKind::Primary,
-                            busy || repo.is_some_and(|r| r.no_gh.is_some()),
-                        )
-                        .on_click(cx.listener(|this, _ev, _w, cx| this.open_pull_request(cx))),
-                    ),
-            )
-            .children(self.outcome(cx))
+            .children(self.outcome(cx));
+        div().w_full().flex_none().flex().flex_col().child(fields).child(
+            kit::dialog_foot(theme)
+                .w_full()
+                .items_center()
+                .child(self.button("commit-back", "Back", ButtonKind::Ghost, false).on_click(
+                    cx.listener(|this, _ev, window, cx| {
+                        this.show_page(Page::Commit, window, cx);
+                    }),
+                ))
+                .child(
+                    self.button(
+                        "commit-open",
+                        format!("Open {}", repo.map_or(Forge::GitHub, Repo::forge).noun()),
+                        ButtonKind::Primary,
+                        busy || repo.is_some_and(|r| r.no_gh.is_some()),
+                    )
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.open_pull_request(cx))),
+                ),
+        )
     }
 
     /// A refusal in git's or gh's words, and, under the commit this sheet asked for, "Ask
@@ -1557,7 +1536,6 @@ impl Render for CommitSheet {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .gap(px(theme.spacing.md))
                 .children(self.pull_part(cx))
                 .child(self.files_part(cx))
                 .child(self.commit_foot(cx)),
@@ -1591,7 +1569,7 @@ impl Render for CommitSheet {
                     }))
                     .overflow_y_scroll()
                     .child(self.head(cx))
-                    .child(div().pt(px(theme.spacing.md)).child(body)),
+                    .child(body),
             )
     }
 }
