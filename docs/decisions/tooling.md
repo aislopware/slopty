@@ -1846,3 +1846,22 @@ more full-window layer.
     Mac's crates) and the loom model (the audio ring is Apple's alone) stay on the Mac.
   - A night took 238–311 macOS minutes (median 286 over six nights), of which the moved checks
     were 74–94 (median 89): about 200 a night now, on a third fewer Mac hours.
+
+- ✅ **The standing instructions state outcomes and hard lines; procedures live where they are
+  used** (2026-10-12). The person found `CLAUDE.md` too long and asked that it define outcomes
+  rather than teach, since teaching a frontier model can narrow what it tries.
+  - Evidence: Claude Code's guidance keeps a `CLAUDE.md` under 200 lines and only what the model
+    would get wrong without it ("Would removing this cause Claude to make mistakes?"), and moves
+    procedures to skills and part-of-the-code rules to path-scoped `.claude/rules/`
+    (code.claude.com/docs/en/best-practices, /memory). The Opus 5 and 5.5 prompting guides say
+    the model does best given the whole task and left to run, already verifies and corrects
+    itself, and that instructions to re-check or verify add cost with no gain
+    (platform.claude.com, "Prompting Claude Opus 5", "Prompting Claude Opus 5.5").
+  - `CLAUDE.md` went from 141 lines to 85: the outcome, the lines that hold, how the work goes
+    and session safety. Rules the lints already enforce (`unwrap`, `expect`, `std::sync::Mutex`,
+    `thread::sleep`, an `#[allow]` without a reason) left it, since clippy names them. The gate's
+    and the session start's commands stay in `docs/DEV.md`, which it cites. The design detail is
+    `.claude/rules/design.md`, loaded only with the UI crates; how parallel lanes work is the
+    `lanes` skill, loaded when a lane is briefed.
+  - Kept whole: the safety lines and the person's grants, since they are boundaries the model
+    cannot infer, and each line's reason where it has one.

@@ -10,131 +10,76 @@ working on many remote machines feels like working on one local one. Pure Rust o
 Maps: `docs/ARCHITECTURE.md` (how it is built), `docs/decisions/` (rulings with their evidence;
 `docs/DECISIONS.md` is the index), `docs/MEASUREMENTS.md` (numbers and the commands behind them),
 `docs/DEV.md` (commands and the loop), `docs/TESTING.md` (the test layers).
-`docs/knowledge-from-slop-desk.md` is unverified prior art from an earlier attempt; trust nothing
-in it until checked here.
+`docs/knowledge-from-slop-desk.md` is unverified prior art; trust nothing in it until checked.
 
-## What must hold
+## The outcome
 
-- Pure Rust, everywhere: the app, the daemons, and every script (`cargo xtask …`).
-- Floor macOS 26.5 / iOS 26.5, Apple silicon; no availability checks, no fallbacks.
-- Latest stable toolchain, dependencies and forks. The strictest lints, all of them on. An
-  `#[allow]` carries a `reason`. `[workspace.lints]` is never loosened to make something build.
-- Latency and smoothness come before features. A change on the input, terminal or frame path
-  comes with a number, and an optimisation follows a measurement recorded in
-  `docs/MEASUREMENTS.md`.
-- A commit is made only on a green `cargo gate`, and lands on main only once CI's full gate on
-  the `gate` branch is green, with a Conventional Commits message. `committed` lints it, and
-  releases derive from the messages, so `CHANGELOG.md` and the version are never edited by hand.
-- Every `unsafe` block states the framework or ABI rule it relies on. Apple constants come from
-  the objc2 statics. A `CFSTR` macro constant is spelled once, next to its use, naming its header.
-- Wire types live in `slopty-proto` with insta goldens. A changed golden is a wire change. Nothing
-  is versioned: every binary is rebuilt together (pre-release).
-- Libraries hold no `std::sync::Mutex`, no `thread::sleep`, no `unwrap`/`expect`.
+- The person mostly directs, watches and reviews agents. The GUI shows what needs them at a
+  glance, makes review fast and keeps everything else quiet, across every worker as if it were
+  one machine.
+- Every surface runs where the work is and feels local: intents show at once, streams arrive
+  incrementally, clients cache. Latency and smoothness come before features, so a change on the
+  input, terminal or frame path carries its number in `docs/MEASUREMENTS.md`.
+- The terminal is the best there is and always one action away. The remote desktop, input,
+  audio, clipboard and files are polished to a fine grain. The editor stays light, with no LSP.
+- It looks and feels like Zed and Delta, Zed's agent app (`.claude/rules/design.md`).
+- Readiness comes before new performance projects.
+
+## Lines that hold
+
+- Pure Rust everywhere, scripts included (`cargo xtask …`). Floor macOS 26.5 / iOS 26.5 on
+  Apple silicon: no availability checks, no fallbacks. Latest stable toolchain, dependencies
+  and forks; the strictest lints, never loosened to make something build.
+- Pre-release, so no backward compatibility: a format, protocol, setting or API is replaced
+  cleanly and the old path deleted. Wire types live in `slopty-proto` with insta goldens, and
+  nothing is versioned, since every binary is rebuilt together.
+- Agents speak one agent-neutral thread model, fed on the worker by one adapter per agent:
+  Claude Code observed through its TUI, Codex over its app-server, pi over its RPC mode, any
+  other over ACP. The agent's own session is the truth, and its TUI can always take it over.
+  Slopty acts only through the agent's published doors, never reads the screen to control it,
+  never answers for the person, and launches the user's own unmodified binary without touching
+  a credential.
+- Every `unsafe` block names the framework or ABI rule it relies on. Apple constants come from
+  the objc2 statics; a `CFSTR` constant is spelled once, beside its use, naming its header.
 - Every behaviour has a test at the lowest layer that can see it (`docs/TESTING.md`). A decision
   worth a paragraph gets its entry under `docs/decisions/` in the same change. Docs paraphrase
-  the user in English and never quote their prompts.
+  the person in English and never quote them.
+- Nothing compiles on this Mac: its cores and disk are the person's. Builds, lints and tests run
+  on GitHub runners through `cargo xtask remote`; only the quick gate and xtask build here.
+- What lands passes the quick `cargo gate` here, then CI's full gate on the `gate` branch
+  (`docs/DEV.md`, "Landing a change"), with a Conventional Commits message. `CHANGELOG.md` and
+  the version derive from the messages and are never edited by hand.
+- Parallel agents share this one checkout, each owning a disjoint set of files, and only the
+  session that started them commits (the `lanes` skill).
 
 ## How the work goes
 
-- **Pre-release, so no backward compatibility.** Replace a format, protocol, setting or API
-  cleanly. Delete the old path, shims, serde defaults kept for old files, and aliases. Never
-  layer compatibility on top.
-- **Priorities.** GUI-first and agent-native. The person mostly directs, watches and reviews
-  agents, so the GUI leads: what needs them at a glance, fast review, everything else quiet,
-  across every worker as if it were one machine. Every surface runs where the work is and
-  streams to the client with local-feel latency (intents shown at once, incremental streams,
-  client caches). The terminal stays the best there is and always one action away. The remote
-  desktop, input, audio, clipboard and files stay polished to a fine grain. The editor stays
-  light, with no LSP. Readiness comes before new performance projects.
-- **Agents.** Every agent speaks one agent-neutral thread model, fed on the worker by one
-  adapter per agent: Claude Code observed through its TUI by default, Codex over its app-server
-  beside its own TUI, pi over its RPC mode, any other over ACP. The agent's own session is the
-  source of truth: the worker's log is a cache rebuilt from it, one writer holds a session at a
-  time, and its TUI can always take it over. Slopty acts only through the agent's published
-  doors (its protocol, its hooks, or keys into its TUI on the person's word). It never reads
-  the screen to control an agent, never types menu digits or cycles mode keys, and never
-  answers for the person. It launches the user's own unmodified binary and never offers a login
-  or touches a credential.
-- **Design.** A clone of Zed and of Delta, Zed's agent app: Zed's design system and components,
-  Delta's thread, sidebar and review (`.research/zed-clone-2026-10-11.md`). Square where it is
-  structure (bars, tabs, panes, rows), 4 for controls, 6 for cards, 8 for floats. Three cool
-  planes (the work darkest, the sidebar a step up, floats a step more) parted by 1 px lines;
-  dense 24 px rows; IBM Plex Sans at 14, 12 and 10, Lilex for code and figures, two weights;
-  IBM Carbon icons at 16 with our own state marks in a hue per state. Every colour, size and
-  spacing comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/lints.rs`
-  enforce it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the
-  palette, not on buttons.
-- **Autonomy.** The user hands over whole goals and reviews only the results. Work
-  continuously without asking. Research, measure and improve everything from the foundation to
-  the UI, and keep looking for new ideas. A session resumes from the memory's progress notes.
-- **Start of a session: bring the ground up to date.** Run `cargo xtask upstream check` and
-  `sync` what is behind (the gpui-fast and gpui-kit forks, libghostty-rs and `vendor/ghostty`),
-  then `rustup update`, `cargo update`, and any gate tool that is behind (`docs/DEV.md` "Dev
-  loop").
-- **Upstream, continuously and never blindly.** gpui-fast lands commits every few minutes, so
-  keep a watch on the forked and vendored upstreams (gpui-fast, gpui-kit, libghostty-rs, noq)
-  and sync as they move. Check their open pull requests before building anything in them, so no
-  work is duplicated. Judge every change taken, and every library on a hot path, on whether it
-  and our use of it are optimal: measure, and improve at the root when they are not. Never wait
-  on upstream. Finish a good unfinished idea (an open pull request) in our fork now, and
-  reconcile when upstream lands it.
-- **The quick gate checks the index here; CI's full gate decides what lands.** Stage exactly
-  what you mean to land (`git add <paths>`). Then run
-  `cargo gate -m '<message>' > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`:
-  fmt, the tools, the locks and `committed`, which compile nothing and take seconds. Unstaged
-  edits are invisible to it. Read `GATE_EXIT=0` or "gate passed" in the log, then
-  `git commit -F target/gate/COMMIT_MSG` without restaging, and `cargo xtask land`. That
-  pushes at once to the `gate` branch, where CI runs every lane (clippy, tests, rustdoc) and
-  fast-forwards main once all pass; the app's e2e runs there on a schedule. Keep working meanwhile. A red run
-  names its lane and tests in the run's summary, and the fix lands on top. The wrapper's own
-  exit code is the `echo`'s. Batch several changes per land.
-- **Parallel work happens in this one checkout, with no worktrees.** Split the work by
-  ownership. Each subagent owns a disjoint set of crates or files, named in its brief, and
-  touches nothing else.
-  - A change to a shared crate (`slopty-proto`, `slopty-core`, the workspace `Cargo.toml`) is
-    owned by one agent and lands first. Work that depends on it is sequenced after it, not run
-    alongside it.
-  - **Nothing compiles on this Mac**: its cores and disk are the person's. Every build, lint
-    and test runs on a GitHub runner through `cargo xtask remote -p <crate>` (`--e2e <case>`
-    for live tests and goldens; `docs/DEV.md`), which checks the working tree without touching
-    the index. Only the quick gate and xtask build here.
-  - **No one waits.** An agent sets `SLOPTY_LANE=<its name>`, checks only its own edits on
-    `HEAD` (`--only <its paths>`; quick unless `--full`), runs the check in the background and
-    goes straight on to the next item. It reports a checkpoint on green and fixes on red. The
-    orchestrator commits each green checkpoint and lands at once; the gate's red is fixed
-    forward by the lane that owns it (`docs/decisions/tooling.md`, "Lanes never wait").
-  - An agent keeps its crates compiling between edits, because a half-edited crate breaks the
-    other agents' remote checks. An agent blocked by another agent's half-edited crate reports
-    rather than waiting for it.
-  - Subagents do not commit. The session that started them stages the batch, runs one gate
-    over it, and commits by owner.
+- The person hands over whole goals and reviews results. Work continuously, rule on what comes
+  up, and keep looking for better ideas, from the foundation to the UI. A session resumes from
+  the memory's progress notes and starts by bringing the toolchain, dependencies and upstreams
+  current (`docs/DEV.md`, "Dev loop").
+- The forked and vendored upstreams (gpui-fast, gpui-kit, libghostty-rs, ghostty, noq) move
+  daily. Stay synced, check their open pull requests before building in them, and never wait on
+  them: finish a good open pull request in our fork. Judge what is taken, and every library on a
+  hot path, by measurement.
 
 ## Session safety
 
-- Checks run as tests, never by hand. That means no synthetic keys into a pid, no screenshots of
-  other windows, and no reading images back: that pattern reads as surveillance tooling and has
-  been flagged. A *pass or fail* is decided on the diff numbers, never by eye.
-- To test an agent, play it with a stand-in the test starts: hook JSON to the worker's control
-  socket (`CtlRequest::Hook`), `slopty hook` as the test's own child, or a stub that replays
-  recorded stream-json, app-server or RPC fixtures. Never type a command into a shell under
-  test, and never run a signed-in agent in a test.
+- Checks run as tests and pass or fail on numbers. No synthetic input into a process, no
+  screenshots of other windows, and no reading images back: that pattern reads as surveillance
+  tooling and has been flagged.
+- An agent under test is a stand-in the test starts: hook JSON on the worker's control socket
+  (`CtlRequest::Hook`), `slopty hook` as the test's own child, or a stub replaying recorded
+  fixtures. Never a signed-in agent, and never a command typed into a shell under test.
 - Never read old Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`).
-- One exception, granted 2026-09-15: Slopty's own renders (`crates/slopty-e2e/golden/*.png` and
-  `target/e2e/artifacts/*.png`) may be opened **for design review**. They are this app's own
-  output, not anybody's screen, and a numeric diff cannot see a defect the golden itself encodes.
-  Everything above still holds: no other window, no image from outside those two directories, and
-  a golden still passes or fails on its numbers.
-- A second, granted 2026-10-06: design mockups an image model generates for reference (Codex's
-  image generation) may be opened for design review, kept under `.research/mockups-*/`. They are
-  generated pictures of a design, not anybody's screen; nothing else above changes.
-- A third, granted 2026-10-12: Delta (delta.dev, Zed Industries), the design Slopty clones, may
-  be downloaded and taken apart for reference: its public builds' bundled assets and strings,
-  and renders of it made headless or on a GitHub runner, kept under `.research/mockups-delta/`
-  and opened for design review. Values only: none of its code, icons or assets enter Slopty.
-  The same day the person asked for it to be signed in and tried: it may run on this Mac, signed
-  in with the person's GitHub, and only its own windows are captured. It is tried on scratch
-  folders and never granted organisation or private-repository access. Its only key is the
-  person's own LLM proxy (CPA, `cpa2.jmango360.dev`), which they asked to add as a custom provider:
-  pasted from `$CPA_API_KEY` through the clipboard, never typed or printed.
-- Daemons started for a measurement are killed when it ends. Worktrees and ports are shared
-  with other sessions.
+- Images that may be opened, for design review only: Slopty's own renders
+  (`crates/slopty-e2e/golden/`, `target/e2e/artifacts/`; granted 2026-09-15), generated mockups
+  under `.research/mockups-*/` (2026-10-06), and Delta's under `.research/mockups-delta/`
+  (2026-10-12). A golden still passes or fails on its numbers.
+- Delta, at the person's request (2026-10-12), may be downloaded and taken apart, and run here
+  signed in with their GitHub on scratch folders, never with organisation or private-repository
+  access; only its own windows are captured. Values only: none of its code, icons or assets
+  enter Slopty. Its only key is the person's CPA proxy (`cpa2.jmango360.dev`), pasted from
+  `$CPA_API_KEY` through the clipboard, never typed or printed.
+- Daemons started for a measurement die when it ends. Worktrees and ports are shared with other
+  sessions.
