@@ -1624,7 +1624,8 @@ impl ThreadView {
             Row::User { item } => (self.user_row(ix, item, cx), spacing.lg),
             Row::Text { item } => (self.text_row(ix, item, cx), spacing.sm),
             Row::Reasoning { item } => (self.reasoning_row(ix, item, cx), spacing.xs),
-            Row::Tool { item } => (self.tool_row(ix, item, cx), spacing.xxs),
+            // A run of calls stands on Delta's 28 pitch: their 28 lines touch.
+            Row::Tool { item } => (self.tool_row(ix, item, cx), 0.0),
             Row::Note { item } => (self.note_row(ix, item, cx), spacing.xs),
             Row::Fold { turn, part, open } => {
                 let last = !self
@@ -1640,7 +1641,7 @@ impl ThreadView {
                 };
                 (fold, spacing.sm)
             }
-            Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
+            Row::Group { first, open } => (self.group_row(ix, first, *open, cx), 0.0),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
             Row::Asked { ask } => (self.asked_row(ask, cx), spacing.lg),
@@ -1842,7 +1843,9 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
+        let words_id = format!("{id}-words");
         let words = div()
+            .debug_selector(move || words_id)
             .flex_1()
             .min_w_0()
             .max_w(px(PROSE))

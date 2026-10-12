@@ -662,3 +662,52 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
     assert_eq!(kept, [Intent::Keep(pick)], "each file as the review showed it");
     assert!(cx.debug_bounds("changes-1").is_none(), "the list goes");
 }
+
+/// One prose measure and one row pitch (`.research/warp-composition-2026-10-12.md` §2.5.4,
+/// §2.5.5): the person's turn and the agent's answer wrap at the same 705, and a turn's calls
+/// stand Delta's 28 apart.
+#[gpui::test]
+fn both_turns_share_one_measure_and_calls_stand_on_28(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Complete)];
+    let long =
+        "Every word of this answer runs on past the measure a person reads at ease. ".repeat(8);
+    state.items = vec![
+        item(
+            "u",
+            1,
+            ItemBody::User(UserMessage {
+                text: Clipped::whole(&long),
+                images: Vec::new(),
+                command: None,
+                intent: None,
+            }),
+        ),
+        call("x", 1, kind::EXEC, None, None),
+        call("y", 1, kind::EXEC, None, None),
+        item("a", 1, ItemBody::Text(Clipped::whole(&long))),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(gpui::px(1200.0), gpui::px(900.0)));
+    view.update(cx, |v, cx| v.set_layout(1200.0, cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let at = cx.debug_bounds("fold-1").expect("the turn's line").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let bounds = |cx: &mut gpui::VisualTestContext, id: &'static str| {
+        cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"))
+    };
+    let (person, agent) = (bounds(cx, "item-u-words"), bounds(cx, "prose-a"));
+    assert!(
+        (person.size.width - agent.size.width).abs() < gpui::px(0.5),
+        "one measure: {person:?} {agent:?}"
+    );
+    let (x, y) = (bounds(cx, "tool-x"), bounds(cx, "tool-y"));
+    let pitch = f32::from(y.top() - x.top());
+    let item = slopty_theme::Theme::default().density.item;
+    assert!((pitch - item).abs() < 0.5, "calls {item} apart: {pitch}");
+}
