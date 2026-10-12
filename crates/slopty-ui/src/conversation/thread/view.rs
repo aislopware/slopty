@@ -33,7 +33,7 @@ use slopty_kit::colors::hsla;
 use slopty_kit::icons::{AgentMark, Mark, Status, Symbol};
 use slopty_kit::kit::{self, ButtonKind};
 use slopty_proto::git::GitOp;
-use slopty_proto::thread::wire::{Expanded, Intent, ReviewScope};
+use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
     AgentId, AskId, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
     ThreadState, ToolCall, ToolDetail, TurnId, TurnState, kind,
@@ -768,28 +768,13 @@ impl ThreadView {
                     unshown: &unshown,
                     open: &self.open,
                     shut: &self.shut,
-                    kept: &self.kept,
                     groups: &self.groups,
                 });
                 let keys = built
                     .rows
                     .iter()
                     .zip(&built.spans)
-                    .map(|(row, span)| {
-                        let rev = match row {
-                            // The card draws the turn's review once it comes, and all its
-                            // files once opened.
-                            Row::Changes { turn } => {
-                                let scope = ReviewScope::Turn(*turn);
-                                let files =
-                                    threads.review(self.thread, &scope).map(|r| r.files.len());
-                                let files = files.map_or(0, |n| (n as u64).saturating_add(1));
-                                files.wrapping_mul(2) | u64::from(self.changes_open)
-                            }
-                            _ => self.rev(row, span, mirror, state, &unshown),
-                        };
-                        (row.key(), rev)
-                    })
+                    .map(|(row, span)| (row.key(), self.rev(row, span, mirror, state, &unshown)))
                     .collect();
                 (built, keys)
             }
@@ -844,8 +829,6 @@ impl ThreadView {
             }
             Row::Group { open, .. } => (span.len() as u64).wrapping_mul(2) | u64::from(*open),
             Row::Working { .. } => 0,
-            // Measured again by `rebuild`, which reads the turn's review.
-            Row::Changes { .. } => u64::from(self.changes_open),
             Row::Sending { intent } => unshown
                 .iter()
                 .find(|s| s.id == *intent)
@@ -1559,7 +1542,6 @@ impl ThreadView {
             }
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
-            Row::Changes { turn } => (self.changes_card(*turn, cx), spacing.xxs),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
         };
         // Turns group: the person's message opens one a large step under the last, and what
@@ -1569,9 +1551,6 @@ impl ThreadView {
         // the answer after a run a paragraph away, so the stream's rhythm broke at every change
         // of kind. A plan is prose, not a call.
         let gap = match ix.checked_sub(1) {
-            // The changes card follows the answer's own line of actions, which already parts it
-            // from the words: a paragraph's step on top of that left it adrift.
-            Some(_) if matches!(row, Row::Changes { .. }) => spacing.xxs,
             Some(before)
                 if !matches!(row, Row::User { .. })
                     && matches!(self.rows.get(before), Some(Row::User { .. })) =>
@@ -2007,6 +1986,18 @@ impl ThreadView {
                     .child(SharedString::from(line)),
             )
             .children(changes)
+            // While the turn runs its line ends in Delta's caret in the accent, held still: a
+            // blink would draw a frame twice a second for as long as the agent works.
+            .when(fold.running, |el| {
+                el.child(
+                    div()
+                        .debug_selector(move || format!("fold-{}-caret", turn.0))
+                        .flex_none()
+                        .w(kit::HAIR)
+                        .h(px(theme.roles().metadata.line))
+                        .bg(hsla(s.accent_fill)),
+                )
+            })
             .child(div().flex_1())
             .children(model.map(|m| {
                 div()

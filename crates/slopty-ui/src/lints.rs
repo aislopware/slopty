@@ -822,7 +822,7 @@ fn a_resting_fill_is_raised_or_sunk() {
 
 /// The thread is Delta's document (`docs/decisions/ui.md`, "The thread is Delta's"): type on
 /// one plane, with only two things set apart. A call put to the person (a permission, a
-/// question, a plan to approve) and what the turn changed are Zed's tool card
+/// question, a plan to approve) is Zed's tool card
 /// ([`slopty_kit::kit::call_card`] with its [`slopty_kit::kit::card_head`]); code is a well
 /// ([`slopty_kit::kit::well`], or the plain [`slopty_kit::kit::inset`] ground). No part raises a
 /// card of its own, names the `elevated` plane, which is the floats'

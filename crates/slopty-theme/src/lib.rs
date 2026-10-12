@@ -609,8 +609,6 @@ pub struct TypeRoles {
     pub composer: TypeRole,
     /// A page's heading inside the window: Zed's medium headline, 18/26 at the strong weight.
     pub page_heading: TypeRole,
-    /// The question an empty tab asks: Zed's large headline, 20/28 at the regular weight.
-    pub empty_heading: TypeRole,
     /// The heading of a page that is the whole window, the first run: Zed's extra-large
     /// headline, 23/30 at the regular weight.
     pub first_run: TypeRole,
@@ -652,7 +650,6 @@ impl Typography {
                 weight: regular,
             },
             page_heading: role((4.0, 8.0), (8.0, 6.0), strong),
-            empty_heading: role((6.0, 8.0), (6.0, 8.0), regular),
             first_run: role((9.0, 7.0), (14.0, 6.0), regular),
         }
     }
@@ -1879,10 +1876,9 @@ mod tests {
                 t.icon(),
                 roles.panel_title.size,
                 roles.page_heading.size,
-                roles.empty_heading.size,
                 roles.first_run.size
             ),
-            (10.0, 12.0, 14.0, 16.0, 16.0, 18.0, 20.0, 23.0),
+            (10.0, 12.0, 14.0, 16.0, 16.0, 18.0, 23.0),
             "one name per size"
         );
         const { assert!(Typography::STRONG_WEIGHT <= 600.0, "semibold at the most") };
@@ -1983,7 +1979,6 @@ mod tests {
         assert_eq!(at(desk.prose), (14.0, 23.0, 400.0), "Delta's 1.625");
         assert_eq!(at(desk.composer), (14.0, 23.0, 400.0));
         assert_eq!(at(desk.page_heading), (18.0, 26.0, 600.0));
-        assert_eq!(at(desk.empty_heading), (20.0, 28.0, 400.0));
         assert_eq!(at(desk.first_run), (23.0, 30.0, 400.0));
         let touch = t.roles(true);
         assert_eq!(at(touch.metadata), (13.0, 18.0, 400.0));
@@ -2005,7 +2000,6 @@ mod tests {
                 roles.section,
                 roles.prose,
                 roles.composer,
-                roles.empty_heading,
                 roles.first_run,
             ];
             assert!(

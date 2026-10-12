@@ -1,7 +1,6 @@
-//! The tray on the composer's top edge: what waits on the person, the plan, the messages
-//! waiting to go, and the work in the background, stacked and parted by space. The edits of
-//! the last turn are the card under its answer (`view::changes`) and the composer's changes
-//! chip.
+//! The tray on the composer's top edge: what waits on the person, the plan, the files the
+//! last turn changed (`view::changes`), the messages waiting to go, and the work in the
+//! background, stacked and parted by space.
 //!
 //! A request whose call is on screen is answered on the call's own card ([`Placement`]); the
 //! tray carries a copy of it only while that card is scrolled away, with the way back to it,
@@ -268,16 +267,16 @@ impl ThreadView {
         // Each kind of thing stands in a group of its own, a base unit of space between groups,
         // so a row never reads as belonging to the group above it. Space, not a rule: rules
         // between rows read as a stack of boxes.
-        let mut groups: Vec<Vec<AnyElement>> = Vec::new();
-        groups.push(hub.refusals(self.thread).map(|r| self.refusal_line(r, cx)).collect());
-        groups.push(
+        let mut groups: Vec<Vec<AnyElement>> = vec![
+            hub.refusals(self.thread).map(|r| self.refusal_line(r, cx)).collect(),
             bar.asked
                 .iter()
                 .filter(|a| a.answered.is_some())
                 .map(|a| self.answered_line(a, cx))
                 .collect(),
-        );
-        groups.push(bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect());
+            bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect(),
+            self.changes_turn(cx).map(|turn| self.changes_section(turn, cx)).into_iter().collect(),
+        ];
         let paused = bar.queue.iter().any(|q| q.stopped).then(|| self.paused_line());
         groups.push(
             paused

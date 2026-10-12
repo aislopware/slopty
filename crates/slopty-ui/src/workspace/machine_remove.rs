@@ -147,23 +147,24 @@ impl Render for RemoveSheet {
             .track_focus(&self.focus)
             .role(Role::AlertDialog)
             .aria_label(SharedString::from(self.words.title.clone()))
-            .p(px(sp.lg))
-            .gap(px(sp.md))
             .on_key_down(cx.listener(Self::key_down))
-            .child(kit::title(theme, self.words.title.clone()))
             .child(
-                div()
-                    .id("remove-machine-body")
-                    .debug_selector(|| "remove-machine-body".to_owned())
-                    .role(Role::Label)
-                    .aria_label(body.clone())
-                    .text_color(hsla(s.text_secondary))
-                    .child(body),
+                kit::dialog_head(theme).child(kit::title(theme, self.words.title.clone())).child(
+                    div()
+                        .id("remove-machine-body")
+                        .debug_selector(|| "remove-machine-body".to_owned())
+                        .role(Role::Label)
+                        .aria_label(body.clone())
+                        .text_color(hsla(s.text_secondary))
+                        .child(body),
+                ),
             )
-            .children(self.words.also.iter().enumerate().map(|(ix, text)| line(ix, text)))
             .child(
-                div().flex().justify_end().gap(px(sp.xs)).pt(px(sp.xs)).child(cancel).child(remove),
+                kit::dialog_section(theme)
+                    .pb(px(sp.md))
+                    .children(self.words.also.iter().enumerate().map(|(ix, text)| line(ix, text))),
             )
+            .child(kit::dialog_foot(theme).child(cancel).child(remove))
     }
 }
 

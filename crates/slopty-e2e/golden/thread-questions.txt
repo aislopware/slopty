@@ -34,9 +34,6 @@ Button │ Copy message
 Button │ Worked 9.8 s: Edited notes.txt · Read 2 files
 Article │ done
 Button │ Copy message
-Group │ Changed 1 file, 2 added, 1 removed
-Button │ Review
-Button │ Review notes.txt
 Dialog │ Which layout should the review use?
 Form
 Group │ Which layout should the review use?
@@ -48,6 +45,10 @@ Button │ Deny
 Button │ Answer in the terminal
 Button │ Skip
 Button │ Next
+Group │ Activity
+Group │ Changed 1 file, 2 added, 1 removed
+Button │ Review
+Button │ Review notes.txt
 MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Opus 5.5

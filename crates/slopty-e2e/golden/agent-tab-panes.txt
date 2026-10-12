@@ -1,4 +1,4 @@
-Window │ studio
+Window │ Ship the project board
 Group │ Workspace
 Navigation │ Navigator
 Button │ Back
@@ -16,6 +16,8 @@ Button │ Fold
 Button │ New shell in repo
 Button │ NOTES.md
 Button │ Close tile
+Button │ repo
+Button │ Close tile
 Button │ Ship the project board
 Button │ Fold
 Button │ Board, 1 of 6 merged
@@ -32,20 +34,17 @@ Button │ New shell on studio
 Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
-Button │ Terminal 2
-Button │ Close tile
 TabList
-Tab │ Terminal
-Button │ Close tab
 Tab │ Orchestrator
 Image │ Claude Code
 Button │ Close tab
-Tab │ Terminal 2, 3 tiles
+Tab │ repo, 3 tiles
 Button │ Close tab
 Button │ More
 Group │ #1 Mirror the server's projects
 Heading │ Claude Code #1 Mirror the server's projects
 Image │ Claude Code
+Label │ home
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
@@ -53,15 +52,15 @@ MultilineTextInput │ Message
 Button │ Add to the message
 Button │ Model, Claude
 Button │ Send
-Group │ Terminal 2
-Heading │ terminal Terminal 2
+Group │ repo
+Heading │ terminal repo
 Tab │ NOTES.md
 Button │ Close tile
-Tab │ Terminal 2
+Tab │ repo
 Button │ Close tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell
 Group │ Status
 Button │ Show the tab's terminal
-Status │ #5 Check the wire goldens: its verifier failed
+Status │ Ship the project board: #5 Check the wire goldens: its verifier failed

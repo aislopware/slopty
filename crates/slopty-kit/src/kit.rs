@@ -576,9 +576,9 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
 
 /// `el` as the one card a thread's column keeps, Zed's agent panel's tool card.
 ///
-/// It holds a call put to the person (a permission, a question, a plan to approve) and what
-/// the turn changed: the work's ground inside the `border` line at `radii.md`, clipped to its
-/// corners, its head on [`card_head`].
+/// It holds a call put to the person (a permission, a question, a plan to approve): the
+/// work's ground inside the `border` line at `radii.md`, clipped to its corners, its head on
+/// [`card_head`].
 #[must_use]
 pub fn call_card<E: Styled>(el: E, theme: &Theme) -> E {
     raised(el, theme).rounded(px(theme.radii.md)).overflow_hidden()
@@ -820,6 +820,34 @@ pub fn dialog(theme: &Theme, size: Overlay) -> Div {
         .font_family(theme.typography.ui_family.clone())
         .text_color(hsla(theme.surfaces.text))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+}
+
+/// A dialog's head, Zed's modal header: its title and what it says, `px 12 pt 8 pb 4`.
+#[must_use]
+pub fn dialog_head(theme: &Theme) -> Div {
+    let sp = theme.spacing;
+    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.md)).pt(px(sp.sm)).pb(px(sp.xs))
+}
+
+/// A part of a dialog under its head, Zed's modal section: `p 8`, in to the head's edge.
+#[must_use]
+pub fn dialog_section(theme: &Theme) -> Div {
+    let sp = theme.spacing;
+    div().flex().flex_col().gap(px(sp.xs)).px(px(sp.md)).py(px(sp.sm))
+}
+
+/// A dialog's foot, Zed's modal footer: its buttons at the trailing end, `p 8`, under the
+/// lighter line.
+#[must_use]
+pub fn dialog_foot(theme: &Theme) -> Div {
+    let sp = theme.spacing;
+    div()
+        .flex()
+        .justify_end()
+        .gap(px(sp.xs))
+        .p(px(sp.sm))
+        .border_t(HAIR)
+        .border_color(hsla(theme.surfaces.stroke))
 }
 
 /// A dialog's or a panel's title: the panel title role (16/22 at the strong weight), in `text`.

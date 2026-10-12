@@ -17,6 +17,10 @@ Button │ Claude Code, Needs approval
 Image │ Claude Code
 Button │ Close tile
 Image │ Needs you
+Button │ Claude Code 2, Working
+Image │ Claude Code
+Button │ Close tile
+Image │ Working
 Button │ opencode
 Button │ Close tile
 Button │ pi
@@ -29,10 +33,6 @@ Heading │ Machines
 Button │ studio
 Button │ New shell on studio
 Button │ Machine actions, studio
-Button │ Claude Code 2, Working
-Image │ Claude Code
-Button │ Close tile
-Image │ Working
 TabList
 Tab │ Claude Code
 Image │ Needs you
@@ -62,6 +62,7 @@ Button │ Send
 Group │ Claude Code 2
 Heading │ Claude Code 2
 Image │ Claude Code
+Button │ Commit on atlas
 Status │ Working
 Image │ Working
 Button │ Show terminal

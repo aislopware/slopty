@@ -1,14 +1,14 @@
-//! The files the latest turn changed, as a card under its answer once it settled, as
-//! `MonoCode`'s session review stands (`docs/decisions/ui.md`, "The latest turn ends in the
-//! files it changed").
+//! The files the latest turn changed, in the activity bar over the composer once it settled,
+//! as Zed's agent panel lists a thread's edited files (`docs/decisions/ui.md`, "The thread is
+//! Delta's").
 //!
 //! Its head says how many files and lines, with Undo, Keep and Review. Under it are the files,
-//! the first [`SHOWN`] and a way to the rest, each opening the review. Keep takes every file
-//! into what the person has kept (`Intent::Keep`), and Undo puts each back as it was before the
-//! turn (`Intent::Revert`), both by the turn's own review (`ReviewScope::Turn`), asked once as
-//! the card shows. Either done, the card goes; a file the worker would not keep or put back is
-//! said in the tray, as the review tile's are. Without the worker's snapshots there is no turn
-//! review, so the card offers only Review.
+//! the first [`SHOWN`] and a way to the rest, each a row opening the review. Keep takes every
+//! file into what the person has kept (`Intent::Keep`), and Undo puts each back as it was before
+//! the turn (`Intent::Revert`), both by the turn's own review (`ReviewScope::Turn`), asked once
+//! as the list shows. Either done, the list goes; a file the worker would not keep or put back
+//! is said in the tray, as the review tile's are. Without the worker's snapshots there is no
+//! turn review, so the list offers only Review.
 
 use std::sync::Arc;
 
@@ -25,8 +25,7 @@ use slopty_proto::thread::wire::{Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{Cap, TurnId};
 
 use super::{TOOL_ROW, ThreadView, ThreadViewEvent};
-use crate::conversation::thread::activity;
-use crate::conversation::thread::rows::Row;
+use crate::conversation::thread::{activity, rows};
 
 /// How many files the card lists before the way to the rest.
 pub(super) const SHOWN: usize = 3;
@@ -40,12 +39,9 @@ struct Listed {
 }
 
 impl ThreadView {
-    /// The turn whose changed files the rows end in, if they do.
-    fn changes_turn(&self) -> Option<TurnId> {
-        self.rows.iter().find_map(|r| match r {
-            Row::Changes { turn } => Some(*turn),
-            _ => None,
-        })
+    /// The turn whose changed files the activity bar lists, if one does.
+    pub(super) fn changes_turn(&self, cx: &App) -> Option<TurnId> {
+        rows::changes_turn(self.state(cx)?, &self.kept)
     }
 
     /// The card's turn review, once it came: what Keep and Undo act on.
@@ -56,7 +52,7 @@ impl ThreadView {
 
     /// Ask for the turn review of the card on show, once, where the worker snapshots the tree.
     pub(super) fn ask_changes(&mut self, cx: &mut Context<Self>) {
-        let Some(turn) = self.changes_turn() else { return };
+        let Some(turn) = self.changes_turn(cx) else { return };
         if self.changes_asked == Some(turn) {
             return;
         }
@@ -114,9 +110,9 @@ impl ThreadView {
         }
     }
 
-    /// The card of the files `turn` changed: its head with Undo, Keep and Review, then the
-    /// files, each opening the review.
-    pub(super) fn changes_card(&self, turn: TurnId, cx: &Context<Self>) -> AnyElement {
+    /// The activity bar's list of the files `turn` changed: its head with Undo, Keep and
+    /// Review, then the files, each opening the review.
+    pub(super) fn changes_section(&self, turn: TurnId, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let files = self.listed(turn, cx);
@@ -129,15 +125,14 @@ impl ThreadView {
         };
         let thread = self.thread;
         let acts = self.turn_review(turn, cx).is_some_and(|r| !r.files.is_empty());
-        let head = kit::card_head(div(), theme)
+        let head = div()
             .w_full()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.sm))
-            .pl(px(theme.spacing.md))
-            .pr(px(theme.spacing.xs))
-            .min_h(px(theme.density.item))
-            .child(self.icon(Symbol::Pencil, s.text_muted))
+            .gap(px(theme.spacing.xs))
+            .px(px(theme.spacing.sm))
+            .min_h(px(kit::Row::One.height(theme)))
+            .child(Self::slot().child(self.icon(Symbol::Pencil, s.text_muted)))
             .child(
                 div()
                     .min_w_0()
@@ -152,7 +147,6 @@ impl ThreadView {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .map(|el| kit::typed(el, theme.roles().chrome))
                             .text_color(hsla(s.text))
                             .child(SharedString::from(words.clone())),
                     )
@@ -168,7 +162,7 @@ impl ThreadView {
                     ),
                 )
             })
-            .child(self.button("changes-review", REVIEW, ButtonKind::Secondary).on_click(
+            .child(self.button("changes-review", REVIEW, ButtonKind::Ghost).on_click(
                 cx.listener(move |_this, _ev, _w, cx| cx.emit(ThreadViewEvent::Review { thread })),
             ));
         let more = files.len().saturating_sub(SHOWN);
@@ -186,7 +180,7 @@ impl ThreadView {
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs))
-                    .px(px(theme.spacing.md))
+                    .px(px(theme.spacing.sm))
                     .min_h(px(TOOL_ROW))
                     .cursor_pointer()
                     .text_size(px(theme.typography.small()))
@@ -232,10 +226,8 @@ impl ThreadView {
                 .w_full()
                 .flex()
                 .items_center()
-                .border_t(kit::HAIR)
-                .border_color(hsla(s.stroke))
                 .gap(px(theme.spacing.xs))
-                .px(px(theme.spacing.md))
+                .px(px(theme.spacing.sm))
                 .min_h(px(TOOL_ROW))
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
@@ -245,15 +237,15 @@ impl ThreadView {
                 .child(SharedString::from(said))
                 .on_click(cx.listener(|this, _ev, _w, cx| {
                     this.changes_open = !this.changes_open;
-                    this.rebuild(cx);
+                    cx.notify();
                 }))
         });
         let said = match kit::changes(theme, added, removed) {
             Some(_) => format!("{words}, {added} added, {removed} removed"),
             None => words,
         };
-        // One of the thread's two cards, Zed's tool card: its head on the card's own ground.
-        kit::call_card(div(), theme)
+        // A group of the activity bar: on its ground, parted from the others by space.
+        div()
             .id(ElementId::Name(format!("changes-{}", turn.0).into()))
             .debug_selector(move || format!("changes-{}", turn.0))
             .role(Role::Group)
@@ -262,7 +254,7 @@ impl ThreadView {
             .flex()
             .flex_col()
             .child(head)
-            .child(div().w_full().flex().flex_col().py(px(theme.spacing.xxs)).children(rows))
+            .child(div().w_full().flex().flex_col().children(rows))
             .children(toggle)
             .into_any_element()
     }

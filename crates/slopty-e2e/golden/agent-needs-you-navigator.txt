@@ -43,11 +43,12 @@ Button │ Send
 Group │ Fix the login redirect
 Heading │ Claude Code Fix the login redirect
 Image │ Claude Code
+Label │ home
 Button │ Show terminal
 Button │ Close tile
 Group │ Thread
-Heading │ What should Claude Code do?
-Label │ Place, on e2e-worker
+Heading │ What should Claude Code do in home?
+Label │ Place, in home on e2e-worker
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Claude

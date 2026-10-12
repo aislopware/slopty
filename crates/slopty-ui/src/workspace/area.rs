@@ -632,9 +632,9 @@ impl WorkspaceView {
     }
 
     /// An empty workspace. With a machine to begin on it is the composer page: one question,
-    /// "What should we work on?", over the unboxed composer in the reading column, vertically
-    /// centred, whose ↵ hands the goal to an orchestrator as "New goal…" would
-    /// ([`Self::goal_from_page`]), its foot saying where the goal goes; under it one quiet line
+    /// "What should we work on?", over the unboxed composer in a narrow column a third of the
+    /// way down, whose ↵ hands the goal to an orchestrator as "New goal…" would
+    /// ([`Self::goal_from_page`]), its foot saying where the goal goes; under it a short list
     /// keeps a terminal and a window one press away. With no worker, or the server out of reach,
     /// the page says where machines come from, a fifth of the way down, with its doors.
     fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
@@ -718,14 +718,17 @@ impl WorkspaceView {
         kit::pane_surface(theme).absolute().inset_0().child(page).into_any_element()
     }
 
-    /// The composer page: the question, the composer, and the quiet line of a terminal and a
-    /// window, centred in the reading column.
+    /// The composer page, Zed's empty state: the question, the composer unboxed, and a short
+    /// list of a terminal and a window, in a narrow column a third of the way down.
     fn composer_page(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let asked = self.empty_question();
-        let question = kit::typed(div(), theme.roles().empty_heading)
+        // On the edge the goal's words start at, as the list under the composer leads its
+        // words past its marks.
+        let question = kit::typed(div(), theme.roles().page_heading)
+            .pl(px(kit::FIELD_INSET))
             .id("empty-question")
             .debug_selector(|| "empty-question".to_owned())
             .role(gpui::accesskit::Role::Heading)
@@ -782,41 +785,25 @@ impl WorkspaceView {
                 // by the inset, and the chip pads its words by its own.
                 .child(div().w_full().flex().pl(px(kit::FIELD_INSET - spacing.xs)).children(foot))
         });
-        let ghost = |id: &'static str, label: &'static str| {
-            let el = kit::typed(div(), theme.roles().metadata)
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .role(gpui::accesskit::Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .h(px(theme.density.chip))
-                .px(px(spacing.xs))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .text_color(hsla(s.text_secondary))
-                .hover(|st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .child(label);
-            slopty_kit::a11y::tab_stop(el, s.focus)
-        };
-        let line = div()
+        // Zed's empty state: the ways that need no goal as a short list under the composer.
+        let doors = div()
             .w_full()
-            .pt(px(spacing.sm))
+            .pt(px(spacing.md))
             .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .child(ghost("empty-terminal", NEW_TERMINAL).on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.new_terminal(&super::actions::NewTerminal, window, cx);
-                },
-            )))
-            .child(ghost("empty-window", ADD_WINDOW).on_click(cx.listener(
-                |this, _ev, window, cx| {
-                    this.add_window(&super::actions::AddWindow, window, cx);
-                },
-            )));
+            .flex_col()
+            .child(
+                self.door_row("empty-terminal", Symbol::Terminal, NEW_TERMINAL.into(), false)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.new_terminal(&super::actions::NewTerminal, window, cx);
+                    })),
+            )
+            .child(
+                self.door_row("empty-window", Symbol::Macwindow, ADD_WINDOW.into(), false)
+                    .on_click(cx.listener(|this, _ev, window, cx| {
+                        this.add_window(&super::actions::AddWindow, window, cx);
+                    })),
+            );
+        // Zed's empty state stands a third of the way down, in a narrow column.
         div()
             .id("empty-workspace")
             .debug_selector(|| "empty-workspace".to_owned())
@@ -825,20 +812,20 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
             .px(px(spacing.xl))
-            .py(px(spacing.xl))
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
+            .child(div().flex_none().w_full().h(gpui::relative(EMPTY_ANCHOR)))
             .child(
                 div()
                     .w_full()
-                    .max_w(px(crate::conversation::thread::view::COLUMN))
+                    .max_w(px(EMPTY_W))
+                    .pb(px(spacing.xl))
                     .flex()
                     .flex_col()
                     .child(question)
                     .children(composer)
-                    .child(line),
+                    .child(doors),
             )
             .into_any_element()
     }
@@ -959,15 +946,17 @@ impl WorkspaceView {
     }
 }
 
-/// How wide the empty workspace's column stands while it says where machines come from.
-pub(super) const EMPTY_W: f32 = 400.0;
+/// How wide the empty workspace's column stands: Zed's empty state's 384.
+pub(super) const EMPTY_W: f32 = 384.0;
+
+/// How far down the empty workspace's composer page starts: a third, as Zed's empty state.
+const EMPTY_ANCHOR: f32 = 1.0 / 3.0;
 
 /// The empty workspace's question over its composer.
 pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";
 
 /// What the empty workspace's composer takes, before anything is written in it.
-pub(crate) const EMPTY_GOAL_HINT: &str =
-    "Describe the goal. An orchestrator plans it and starts the agents";
+pub(crate) const EMPTY_GOAL_HINT: &str = "Describe the goal. An orchestrator plans it";
 
 /// What the composer's foot says it does, to a screen reader, after where the goal goes.
 pub(crate) const CHANGE_PLACE: &str = "Change where it goes";

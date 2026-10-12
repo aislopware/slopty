@@ -36,15 +36,16 @@ Button │ Copy message
 Button │ Worked 9.8 s: Edited notes.txt · Read 2 files
 Article │ done
 Button │ Copy message
-Group │ Changed 1 file, 2 added, 1 removed
-Button │ Review
-Button │ Review notes.txt
 Dialog │ Allow Bash?
 Group │ Grants that last
 Button │ Always allow edits in /work this session
 Button │ Deny
 Button │ Other ways to deny
 Button │ Allow
+Group │ Activity
+Group │ Changed 1 file, 2 added, 1 removed
+Button │ Review
+Button │ Review notes.txt
 MultilineTextInput │ Message (focused)
 Button │ Add to the message
 Button │ Model, Opus 5.5

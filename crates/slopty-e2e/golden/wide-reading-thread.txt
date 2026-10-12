@@ -26,6 +26,7 @@ Button │ Copy message
 Button │ Worked 9.8 s: Edited notes.txt · Read 2 files
 Article │ done
 Button │ Copy message
+Group │ Activity
 Group │ Changed 1 file, 2 added, 1 removed
 Button │ Review
 Button │ Review notes.txt

@@ -29,10 +29,10 @@ Button │ Show more
 Button │ Worked 19 s: Edited notes.md · Ran 3 commands · 9 more
 Article │ done
 Button │ Copy message
+Group │ Activity
 Group │ Changed 1 file, 2 added, 0 removed
 Button │ Review
 Button │ Review notes.md
-Group │ Activity
 List │ In the background, 1 finished
 Status │ Run a short background echo after a one-second sleep: Completed
 Status │ Attaching screen-recording.mov, 0%

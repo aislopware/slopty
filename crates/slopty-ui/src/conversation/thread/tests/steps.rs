@@ -532,9 +532,9 @@ fn a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end(cx: &mut
     assert_eq!(before, after, "the name opened the file, not the call");
 }
 
-/// The latest turn ends in the files it changed: a card under its answer, its count and
+/// The latest turn ends in the files it changed, listed in the activity bar: its count and
 /// lines, and a way to the review. With the turn's review come, Keep takes each file into what
-/// the person has kept, as the review showed it, and the card goes.
+/// the person has kept, as the review showed it, and the list goes.
 #[gpui::test]
 fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut TestAppContext) {
     use slopty_proto::thread::detail::EditDetail;
@@ -559,7 +559,7 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
         item("a", 1, ItemBody::Text(Clipped::whole("Done."))),
     ];
     hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
+    let (_view, cx) = view(cx, &hub, thread);
     cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
@@ -608,6 +608,5 @@ fn the_latest_turn_ends_in_its_changed_files_which_keep_from_there(cx: &mut Test
         old_path: None,
     };
     assert_eq!(kept, [Intent::Keep(pick)], "each file as the review showed it");
-    let rows = view.read_with(cx, |v, _| v.rows().to_vec());
-    assert!(!rows.iter().any(|r| matches!(r, Row::Changes { .. })), "the card goes: {rows:?}");
+    assert!(cx.debug_bounds("changes-1").is_none(), "the list goes");
 }

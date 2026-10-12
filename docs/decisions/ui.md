@@ -10319,8 +10319,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the sheet would open holding: its first agent on its first machine, the folder from the
     focus or the last start, a branch of the project's own, the guessed verifier and the
     default autonomy (`WorkspaceView::goal_from_page`). ⇧↵ is a new line. The box's hint says
-    what it takes ("Describe the goal. An orchestrator plans it and starts the agents"), not
-    the heading's question again.
+    what it takes ("Describe the goal. An orchestrator plans it", since 2026-10-12 cut to
+    fit Zed's 384 pt column), not the heading's question again.
   - **Nothing starts somewhere unseen.** A quiet foot inside the box, at the metadata role in
     the secondary tone, says where ↵ sends it: "machine · folder · agent". Pressed, it opens
     "New goal…"'s sheet holding what was typed, to change any of them; the words move there.
@@ -10875,12 +10875,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     30 % toward the selection (`kit::activity`), as Zed's is; the plan's steps lead with the
     thread's own marks: a step to come the dashed ring, the one under way turning, a done one
     the success check.
-  - **Two things are set apart, and only two.** A call put to the person (a permission, a
-    question, a plan to approve) and what the turn changed are Zed's tool card
-    (`kit::call_card`): the page's ground in the `border` line at `radii.md`, its head on the
-    `card_head` plane over the lighter line. A waiting call's line is that head, and what it
-    would do and the answers lie under it. Everything else is type on the page. This replaces
-    the card language's ring-only card and "no call is a card".
+  - **One thing is set apart.** A call put to the person (a permission, a question, a plan to
+    approve) is Zed's tool card (`kit::call_card`): the page's ground in the `border` line at
+    `radii.md`, its head on the `card_head` plane over the lighter line. A waiting call's line
+    is that head, and what it would do and the answers lie under it. Everything else is type
+    on the page. This replaces the card language's ring-only card and "no call is a card".
+  - **What the turn changed is listed in the activity bar**, as Zed's agent panel lists a
+    thread's edited files: "Changed N files" with the diff stat, Undo, Keep and Review as
+    subtle buttons, then the files as 24 pt rows, each opening the review. The card under the
+    answer (and `Row::Changes`) went; the list goes once the files are kept or put back.
+  - **A running turn's line ends in Delta's caret**, 1 pt in the accent, held still: a blink
+    would draw a frame twice a second for as long as the agent works, which the frame budget
+    does not buy for a mark the turning arc already gives.
   - **Answers lead with their meaning**, Zed's permission buttons: an allow with Carbon's
     checkmark in the success tone, a deny with the cross in the error tone, an answer to a
     question with its words alone. The arrangement (the deny's split, standing grants, the
@@ -10936,8 +10942,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     before by the lighter `stroke` line, with no ring, radius or wash round a group (Zed's
     settings). The cards with their `radii.lg` ring went; a row keeps the inset its group's
     label and footer start at.
-  - **The empty page's composer is unboxed**, as the thread's next turn is: the lighter line
-    over the field and no field's box.
+  - **The empty page is Zed's empty state**: the question as the page heading (18) in a
+    384 pt column a third of the way down, the composer unboxed under it (the lighter line over
+    the field and no field's box), then a terminal and a window as list rows. The 864 pt
+    reading column, the vertical centring and the 20 pt headline role (`empty_heading`) went.
+  - **Dialogs are Zed's modals** (`kit::dialog_head`, `dialog_section`, `dialog_foot`): the
+    head `px 12 pt 8 pb 4`, the sections in to its edge, the buttons at the foot's trailing end
+    under the lighter line, where the 24 pt padding all round was.
   - **gpui-kit's primary button is the tinted accent** (a question's Next and Submit), set on
     its tokens as well as its colours: the components paint from the tokens, which a write to
     the colours alone left at gpui-kit's own black solid.

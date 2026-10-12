@@ -26,6 +26,7 @@ Group (focused)
 Terminal │ shell │ ~ %
 Group │ Terminal 2
 Heading │ terminal Terminal 2
+Label │ ~
 Button │ Close tile
 Group
 Terminal │ shell

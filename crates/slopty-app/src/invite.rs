@@ -428,10 +428,9 @@ impl crate::Workspace {
         };
         let heading =
             kit::title(theme, TITLE).id("invite-title").role(Role::Heading).aria_label(TITLE);
-        let intro =
-            div().flex().flex_col().gap(px(sp.xs)).child(heading).when_some(blurb, |el, blurb| {
-                el.child(div().text_color(hsla(s.text_secondary)).child(blurb))
-            });
+        let intro = kit::dialog_head(theme).child(heading).when_some(blurb, |el, blurb| {
+            el.child(div().text_color(hsla(s.text_secondary)).child(blurb))
+        });
         let copy = copy.then(|| {
             kit::button(theme, "invite-copy", "Copy link", ButtonKind::Secondary)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.copy_invite_link(cx)))
@@ -445,8 +444,6 @@ impl crate::Workspace {
             .role(Role::Dialog)
             .aria_label(TITLE)
             .max_w(px(crate::ADD_PANEL_W))
-            .p(px(sp.xl))
-            .gap(px(sp.lg))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
                     this.close_invite(window, cx);
@@ -454,8 +451,8 @@ impl crate::Workspace {
                 }
             }))
             .child(intro)
-            .child(body)
-            .child(div().flex().justify_end().gap(px(sp.xs)).children(copy).child(done));
+            .child(kit::dialog_section(theme).pb(px(sp.md)).child(body))
+            .child(kit::dialog_foot(theme).children(copy).child(done));
         // As the add-worker dialog: it fades in where it stands, the scrim dimming with it.
         let dialog = kit::fade_in(dialog, "invite-in", cx);
         let backdrop = kit::backdrop(theme, window)
