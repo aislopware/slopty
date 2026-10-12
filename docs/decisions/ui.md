@@ -11568,8 +11568,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     activity card, a header's divider); `border` rings controls only (a field, a dropdown, a
     secondary button, a checkbox, a segmented track). `call_border` and `alpha::CALL_BORDER`
     are deleted: three greys inside one thread read as three kinds of thing.
+  - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
+    the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
+    A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
+    well hung off the words' edge (`kit::hung`, Delta's 9: the line 9 left of the edge, the
+    lines on it), where four edges stood in 63 pt.
   - Tests: `slopty-ui` `conversation::thread::tests::composing::{the_foot_spans_the_pane_with_equal_ends,
     the_field_follows_the_last_turn}`,
+    `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`;
+    `slopty-kit` `kit::tests::a_hung_box_holds_its_content_on_the_edge`,
     `conversation::thread::tests::an_empty_thread_asks_in_its_field_under_the_header`,
     `…::face::the_composer_runs_the_panes_width_at_its_foot`, `lints::a_region_line_is_stroke`;
     `slopty-kit` `kit::tests::{a_call_card_wears_the_one_structural_line, a_card_rests_on_its_edge}`;

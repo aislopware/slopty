@@ -1715,13 +1715,25 @@ impl ProjectView {
             Check::Running { line, .. } => (line.clone(), Vec::new()),
         };
         let output = check.term().map(|term| self.output_link(key, term, cx));
+        // Its glyph hangs in the numbers' column, so "Verifier failed" starts on the words'
+        // edge with the title and the ask over it: the board keeps two left edges.
         let head = div()
             .flex()
             .items_center()
             .gap(px(sp.xs))
+            .ml(px(-(theme.icon() + sp.xs)))
             .min_w_0()
             .child(icon(theme, Symbol::XmarkCircle, hsla(s.error_fill)).size(px(theme.icon())))
-            .child(div().flex_none().text_color(hsla(s.error)).child("Verifier failed"))
+            .child(
+                div()
+                    .debug_selector({
+                        let id = format!("{key}-check-word");
+                        move || id
+                    })
+                    .flex_none()
+                    .text_color(hsla(s.error))
+                    .child("Verifier failed"),
+            )
             .child(
                 slopty_kit::kit::tabular(div())
                     .flex_1()
@@ -1742,10 +1754,9 @@ impl ProjectView {
                 .role(Role::Log)
                 .flex()
                 .flex_col()
-                .px(px(sp.sm))
                 .py(px(sp.xs))
-                .rounded(px(theme.radii.sm))
-                .map(|el| slopty_kit::kit::inset(el, theme))
+                // Delta's well, hung: its line left of the words' edge, its lines on it.
+                .map(|el| slopty_kit::kit::hung(slopty_kit::kit::well(el, theme)))
                 // What the program printed, in the face a terminal and a tool's output use, at
                 // the facts' size and a reading line, so why it failed is read, not squinted at.
                 .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
@@ -1881,7 +1892,14 @@ impl ProjectView {
             .rounded(px(theme.radii.sm))
             // The board's two edges: the glyph where the rows' numbers stand, the name where
             // their titles do, and its count beside it, Delta's.
-            .child(self.lead_column().child(mark))
+            .child(
+                self.lead_column()
+                    .debug_selector({
+                        let id = format!("{head_id}-mark");
+                        move || id
+                    })
+                    .child(mark),
+            )
             .child(
                 div().flex().items_center().gap(px(sp.row_gap())).child(name).child(
                     slopty_kit::kit::tabular(div())
@@ -2276,7 +2294,9 @@ impl ProjectView {
             .filter(|stage| stage.kind != StageKind::Branch)
             .partition(|stage| stage.holds || stage.failed);
 
+        let number_id = format!("{key}-number");
         let number = slopty_kit::kit::tabular(div())
+            .debug_selector(move || number_id)
             .flex_none()
             .w(px(self.number_w()))
             .whitespace_nowrap()

@@ -617,6 +617,26 @@ pub fn well<E: Styled>(el: E, theme: &Theme) -> E {
         .shadow(vec![BoxShadow { inset: true, ..drop_shadow(theme, layer) }])
 }
 
+/// How far a box in a column hangs left of the column's content edge, Delta's 9, measured from
+/// the signed-in app (`.research/warp-composition-2026-10-12.md` §1.5).
+pub const HANG: f32 = 9.0;
+
+/// How far inside a hung box's line its content starts: [`HANG`] less the line.
+///
+/// So the content stands on the edge the box hangs from. A card whose head is a band pads
+/// the band and its body by this, the card itself hanging by [`HANG`].
+pub const HUNG_PAD: f32 = HANG - stroke::LINE;
+
+/// `el`, a box with a [`HAIR`] line round it (a card, a well), hung Delta's way.
+///
+/// Its line stands [`HANG`] left of the content edge and its content as far again inside the
+/// line, so what it holds starts on the edge the words round it start on, and its sides
+/// mirror. One left edge per column, the boxes hanging off it.
+#[must_use]
+pub fn hung<E: Styled>(el: E) -> E {
+    el.ml(px(-HANG)).pl(px(HUNG_PAD)).pr(px(HUNG_PAD))
+}
+
 /// `el` drawn as a field's ground: the work's ground inside the `border` line, sunk ([`sunk`])
 /// so it reads as somewhere to type rather than something to press.
 #[must_use]
@@ -1902,6 +1922,29 @@ mod tests {
             assert!(shade.inset, "{variant:?}: held inside");
             assert!(shade.blur_radius > px(0.0), "{variant:?}: soft");
         }
+    }
+
+    /// A hung box's content starts on the content edge it hangs from: its line [`HANG`] left
+    /// of it and its pad as far again, less the line, on both sides.
+    #[test]
+    fn a_hung_box_holds_its_content_on_the_edge() {
+        let theme = Theme::default();
+        let style = hung(well(div(), &theme)).style().clone();
+        let length = |l: Option<gpui::Length>| match l {
+            Some(gpui::Length::Definite(gpui::DefiniteLength::Absolute(
+                gpui::AbsoluteLength::Pixels(p),
+            ))) => f32::from(p),
+            other => panic!("a length in points: {other:?}"),
+        };
+        let pad = |l: Option<gpui::DefiniteLength>| match l {
+            Some(gpui::DefiniteLength::Absolute(gpui::AbsoluteLength::Pixels(p))) => f32::from(p),
+            other => panic!("a pad in points: {other:?}"),
+        };
+        let margin = length(style.margin.left);
+        let line = f32::from(HAIR);
+        assert!((margin + line + pad(style.padding.left)).abs() < 0.01, "content on the edge");
+        assert_eq!(pad(style.padding.left), pad(style.padding.right), "its sides mirror");
+        assert!((margin + HANG).abs() < 0.01, "Delta's hang");
     }
 
     /// A call card wears the one structural line every card and well wears, Delta's, at

@@ -657,6 +657,44 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
         y(cx, "project-card-7") < y(cx, "project-card-6"),
         "the one waiting longest is next to merge"
     );
+
+    // The board keeps two left edges (`.research/warp-composition-2026-10-12.md` §2.3.1): the
+    // numbers and the lanes' glyphs on one; every title, lane name, failed check's word and its
+    // well's lines on the next, the well's line hung left of it.
+    let left = |cx: &mut VisualTestContext, s: &str| {
+        let s: &'static str = Box::leak(s.to_owned().into_boxed_str());
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn")).left()
+    };
+    let words = left(cx, "project-card-4-title");
+    let marks = left(cx, "project-card-4-number");
+    let lanes: Vec<&str> =
+        ["needs-you", "failed", "working", "up-next", "verifying", "ready-to-merge"]
+            .into_iter()
+            .filter(|lane| drawn(cx, &format!("project-lane-{lane}-head")))
+            .collect();
+    assert!(lanes.len() >= 2, "lanes to line up: {lanes:?}");
+    let mut on_words: Vec<String> =
+        ["project-card-5-title", "project-card-6-title", "project-card-4-check-word"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    let mut on_marks: Vec<String> =
+        ["project-card-5-number", "project-card-6-number"].into_iter().map(str::to_owned).collect();
+    for lane in &lanes {
+        on_words.push(format!("project-lane-{lane}-head-name"));
+        on_marks.push(format!("project-lane-{lane}-head-mark"));
+    }
+    for s in &on_words {
+        let x = left(cx, s);
+        assert!((x - words).abs() < px(0.5), "{s} on the words' edge: {x:?} {words:?}");
+    }
+    for s in &on_marks {
+        let x = left(cx, s);
+        assert!((x - marks).abs() < px(0.5), "{s} on the marks' edge: {x:?} {marks:?}");
+    }
+    let well = left(cx, "project-card-4-tail");
+    let hang = px(slopty_kit::kit::HANG);
+    assert!((well + hang - words).abs() < px(0.5), "the well hangs off the words' edge: {well:?}");
 }
 
 /// Letting the server go takes its projects, their boards and everything kept for them.
