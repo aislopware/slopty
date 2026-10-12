@@ -279,8 +279,9 @@ fn the_empty_workspace_asks_what_to_work_on(cx: &mut TestAppContext) {
 
 /// The empty workspace is a thread with no turns (`.research/design-polish-2026-10-12.md`
 /// §4.9): the question, the line saying where a goal goes, the heads and the doors' glyphs
-/// stand on one edge in a column of 512 whose top is 30 % down the launcher, and the goal's
-/// composer waits at the pane's foot, where a thread keeps it.
+/// stand on one edge in a column as wide as they are (up to 512), centred, whose top is 30 %
+/// down the launcher; and the goal's composer is the thread's at the pane's foot: its field
+/// with no line over it, its foot the pane's frame with the send at its end.
 #[gpui::test]
 fn the_empty_page_has_one_edge(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -309,6 +310,23 @@ fn the_empty_page_has_one_edge(cx: &mut TestAppContext) {
     assert!((top - launcher * 0.3).abs() < px(1.0), "30 % down: {top:?} of {launcher:?}");
     assert!(page.bottom() - goal.bottom() < px(theme.spacing.md), "the composer at the foot");
     assert!(goal.top() > at(cx, "empty-new-goal").bottom(), "under the launcher");
+    let centre = |b: Bounds<Pixels>| b.left() + b.size.width / 2.0;
+    assert!(
+        (centre(column) - centre(page)).abs() < px(8.0),
+        "the content centred: {column:?} in {page:?}"
+    );
+    assert!(column.size.width < px(400.0), "as wide as it holds, not an empty 512: {column:?}");
+    let send = at(cx, "empty-goal-send");
+    let inset = px(theme.spacing.inset_trailing());
+    assert!((page.right() - inset - send.right()).abs() < px(0.5), "the send ends the foot");
+    let field = at(cx, "empty-goal-field");
+    let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+    let lined = quads.iter().any(|q| {
+        (q.bounds.origin.y.0 / scale - f32::from(field.top())).abs() < 0.5
+            && q.border_widths.top.0 > 0.0
+            && q.border_widths.left.0 == 0.0
+    });
+    assert!(!lined, "no line over the field");
 }
 
 /// A project on show with nothing open in it asks what to work on there, by its name; with no

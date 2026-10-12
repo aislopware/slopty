@@ -1414,6 +1414,19 @@ impl WorkspaceView {
         page.update(cx, |input, cx| input.set_value("", window, cx));
     }
 
+    /// The empty workspace's goal, by ↵ or its send: handed to an orchestrator, or, with no
+    /// repository known to work in, to the sheet, which holds it and asks where.
+    pub(super) fn send_page_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((goal, _)) = &self.empty_goal else { return };
+        let goal = goal.clone();
+        let words = goal.read(cx).value().to_string();
+        if self.goal_from_page(&words, cx) {
+            goal.update(cx, |input, cx| input.set_value("", window, cx));
+        } else if !words.trim().is_empty() && self.goal_filled(cx).is_some() {
+            self.goal_sheet_from_page(window, cx);
+        }
+    }
+
     /// Once a frame: the empty workspace's composer is made the first time the page shows with
     /// a machine to begin on, and takes the keyboard where nothing else holds it.
     pub(super) fn sync_empty_goal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1426,15 +1439,14 @@ impl WorkspaceView {
                 .auto_grow(2, crate::project::create::GOAL_ROWS)
                 .submit_on_enter(true)
         });
-        let entered = cx.subscribe_in(&goal, window, |this, goal, event, window, cx| {
-            if let gpui_kit::component::input::InputEvent::PressEnter { shift: false, .. } = event {
-                let words = goal.read(cx).value().to_string();
-                if this.goal_from_page(&words, cx) {
-                    goal.update(cx, |input, cx| input.set_value("", window, cx));
-                } else if !words.trim().is_empty() && this.goal_filled(cx).is_some() {
-                    // No repository known to work in: the sheet, holding the goal, asks.
-                    this.goal_sheet_from_page(window, cx);
+        let entered = cx.subscribe_in(&goal, window, |this, _goal, event, window, cx| {
+            match event {
+                gpui_kit::component::input::InputEvent::PressEnter { shift: false, .. } => {
+                    this.send_page_goal(window, cx);
                 }
+                // The send arms with the first word, as the thread's does.
+                gpui_kit::component::input::InputEvent::Change => cx.notify(),
+                _ => {}
             }
         });
         if self.focus.is_focused(window) {

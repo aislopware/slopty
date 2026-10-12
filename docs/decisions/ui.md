@@ -11574,6 +11574,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and its body text start on the edge the turns start on, as the code wells already did.
     The tray stands out by a hang so its scroll does not clip a hung card's line. A picture
     keeps its box on the edge: the picture is its content.
+  - **The empty workspace centres its content and borrows the thread's composer** (§2.8): the
+    launcher's column is as wide as what it holds, up to Zed's 512, and centred, so the
+    content's centre is the pane's rather than a left-heavy 512 box's. Its composer is the
+    thread's: the field at the prose's 15 in the reading column, no line over it, and a foot
+    that is the pane's frame with Delta's send at its end, armed by the first word; ↵ and the
+    send hand the goal on alike. The line where the goal goes stays under the question.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11583,6 +11589,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the_field_follows_the_last_turn}`,
     `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`,
     `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
+    `workspace::tests::palette::the_empty_page_has_one_edge`,
     `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;
     `slopty-kit` `kit::tests::a_hung_box_holds_its_content_on_the_edge`,
     `conversation::thread::tests::an_empty_thread_asks_in_its_field_under_the_header`,

@@ -21,6 +21,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, canvas, div,
     px,
 };
+use gpui_kit::component::Sizable as _;
 use slopty_client::layout::{Drop, GroupKey, Laid, PaneId, Rect, Sash, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_kit::colors::hsla;
@@ -697,8 +698,9 @@ impl WorkspaceView {
     }
 
     /// The composer page, a thread with no turns (`.research/design-polish-2026-10-12.md`
-    /// §4.9): the goal's composer at the pane's foot, where a thread keeps it, and above it a
-    /// launcher in a 512 pt column whose top stands at 30 % of the pane, on one edge: the
+    /// §4.9): the goal's composer at the pane's foot, the thread's, and above it a launcher in
+    /// a centred column as wide as it holds (up to 512) whose top stands at 30 % of the pane,
+    /// on one edge: the
     /// question, where a goal goes, a *Start* head over the ways that need no goal, then a
     /// *Recent* head over the tabs used last. The doors print no keys: keys are the palette's.
     fn composer_page(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
@@ -711,7 +713,6 @@ impl WorkspaceView {
             .debug_selector(|| "empty-question".to_owned())
             .role(gpui::accesskit::Role::Heading)
             .aria_label(asked.clone())
-            .w_full()
             .text_color(hsla(s.text))
             .child(asked.clone());
         // Where ↵ sends the goal, a muted line under the question: nothing starts somewhere
@@ -751,7 +752,6 @@ impl WorkspaceView {
                 .child(words)
         };
         let doors = div()
-            .w_full()
             .flex()
             .flex_col()
             .child(head("empty-start", START))
@@ -816,28 +816,58 @@ impl WorkspaceView {
                     .on_click(cx.listener(move |this, _ev, _window, cx| this.go_to(id, cx)));
                 slopty_kit::a11y::tab_stop(row, s.focus)
             });
-            div().w_full().flex().flex_col().child(head("empty-recent", RECENT)).children(rows)
+            div().flex().flex_col().child(head("empty-recent", RECENT)).children(rows)
         });
-        // The goal's composer, unboxed, at the pane's foot in the reading column a thread
-        // keeps it in, so the habit is one place.
+        // The goal's composer is the thread's, so the habit is one place: its field at the
+        // prose's size in the reading column with no line over it, and its foot the pane's
+        // frame at the bottom, the send at its end (`.research/warp-composition-2026-10-12.md`
+        // §2.8.2).
         let composer = self.empty_goal.as_ref().map(|(goal, _)| {
             let (side, lane) = (spacing.lg, crate::conversation::thread::view::LANE);
             let column = crate::conversation::thread::view::PROSE;
-            div().flex_none().w_full().flex().justify_center().pb(px(spacing.sm)).child(
-                kit::message::shell(div(), theme)
-                    .debug_selector(|| "empty-goal".to_owned())
+            let armed = !goal.read(cx).value().trim().is_empty();
+            let field = div().w_full().flex().justify_center().child(
+                div()
+                    .debug_selector(|| "empty-goal-field".to_owned())
                     .w_full()
                     .max_w(px(2.0_f32.mul_add(side, lane + column)))
                     .pl(px(side + lane))
                     .pr(px(side))
                     .pt(px(spacing.sm))
+                    .pb(px(spacing.xs))
                     .child(
                         gpui_kit::component::input::Textarea::new(goal)
+                            .with_size(gpui_kit::component::Size::XSmall)
                             .appearance(false)
+                            .bordered(false)
                             .px_0()
+                            .text_size(px(theme.typography.prose()))
+                            .line_height(gpui::relative(theme.typography.prose_line_height))
                             .aria_label(asked.clone()),
                     ),
-            )
+            );
+            let send =
+                kit::message::send_control(theme, "empty-goal-send", Symbol::Send, SEND, armed)
+                    .on_click(cx.listener(|this, _ev, window, cx| this.send_page_goal(window, cx)));
+            let inset = px(spacing.inset_trailing());
+            let foot = div()
+                .debug_selector(|| "empty-goal-foot-bar".to_owned())
+                .w_full()
+                .h(px(theme.density.foot))
+                .flex()
+                .items_center()
+                .justify_end()
+                .pl(inset)
+                .pr(inset)
+                .child(slopty_kit::a11y::tab_stop(send, s.focus));
+            div()
+                .debug_selector(|| "empty-goal".to_owned())
+                .flex_none()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(field)
+                .child(foot)
         });
         let launcher = div()
             .id("empty-launcher")
@@ -850,10 +880,11 @@ impl WorkspaceView {
             .items_center()
             .px(px(spacing.page()))
             .child(div().flex_none().w_full().h(gpui::relative(EMPTY_ANCHOR)))
+            // As wide as what it holds, up to Zed's 512, and centred: the content's centre is
+            // the pane's, not an empty box's (`.research/warp-composition-2026-10-12.md` §2.8.1).
             .child(
                 div()
                     .debug_selector(|| "empty-column".to_owned())
-                    .w_full()
                     .max_w(px(EMPTY_W))
                     .pb(px(spacing.xl))
                     .flex()
@@ -1009,6 +1040,9 @@ const START: &str = "Start";
 
 /// The head over the tabs used last.
 const RECENT: &str = "Recent";
+
+/// What the empty workspace's send says it does.
+const SEND: &str = "Send";
 
 /// The empty workspace's question over its composer.
 pub(crate) const EMPTY_QUESTION: &str = "What should we work on?";
