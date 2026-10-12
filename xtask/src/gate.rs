@@ -811,6 +811,7 @@ fn tree_root(sh: &Shell) -> Result<Utf8PathBuf> {
 /// - `ci.yml`'s matrix runs every shard.
 /// - Every package whose tests spawn a binary through `slopty_testkit::bins::bin` is in
 ///   [`SPAWNING`], so its shard builds them.
+/// - Every test that only a Mac builds or steers runs on a Mac shard ([`linux_only_invariants`]).
 fn repo_invariants(root: &Utf8Path) -> Result<()> {
     use clap::ValueEnum as _;
     let members = crate::tools::packages_in(root)?;
@@ -878,6 +879,7 @@ fn repo_invariants(root: &Utf8Path) -> Result<()> {
             }
         }
     }
+    linux_only_invariants(root, &members, &mut errors);
     let listed: std::collections::BTreeSet<&str> = SPAWNING.into_iter().collect();
     if spawning != listed {
         errors.push(format!(
@@ -886,6 +888,54 @@ fn repo_invariants(root: &Utf8Path) -> Result<()> {
         ));
     }
     if errors.is_empty() { Ok(()) } else { bail!("repository invariants: {}", errors.join("; ")) }
+}
+
+/// Every test a Mac alone builds or steers runs on a Mac shard: each [`LINUX_ONLY_TESTS`] crate
+/// is a member the linux lane tests, its code names no host ([`host_lines`]), and every test
+/// binary of its that does is one named beside it, as each named one does. Every other member
+/// runs all its tests on its shard's Mac.
+fn linux_only_invariants(
+    root: &Utf8Path,
+    members: &[crate::tools::Package],
+    errors: &mut Vec<String>,
+) {
+    let tested = linux_tested();
+    for (package, mac) in LINUX_ONLY_TESTS {
+        let Some(member) = members.iter().find(|m| m.name == package) else {
+            errors.push(format!("LINUX_ONLY_TESTS names {package}, which is no member"));
+            continue;
+        };
+        if !tested.contains(&package) {
+            errors.push(format!(
+                "{package} is in LINUX_ONLY_TESTS, but the linux lane does not test it \
+                 (`linux_tested`), so no runner would"
+            ));
+        }
+        let (code, tests) = host_paths(root, &member.dir);
+        if let Some(first) = code.first() {
+            errors.push(format!(
+                "{first} names the host in {package}'s code, so a Mac reaches paths Linux does \
+                 not in any of its tests: take it out of LINUX_ONLY_TESTS"
+            ));
+        }
+        for (binary, lines) in &tests {
+            if !mac.contains(&binary.as_str()) {
+                errors.push(format!(
+                    "{} names the host in {package}'s test binary `{binary}`, which no Mac shard \
+                     runs: name it beside {package} in LINUX_ONLY_TESTS",
+                    lines.first().map_or("?", String::as_str)
+                ));
+            }
+        }
+        for binary in mac {
+            if !tests.contains_key(*binary) {
+                errors.push(format!(
+                    "LINUX_ONLY_TESTS runs {package}'s test binary `{binary}` on a Mac, but no \
+                     such binary names the host"
+                ));
+            }
+        }
+    }
 }
 
 /// The lines (from 1) of `source` that open a code fence in a `///` or `//!` comment rustdoc
@@ -1008,10 +1058,12 @@ fn test_lane(
         || vec!["--workspace".to_owned()],
         |s| {
             let own = s.packages().iter().copied();
-            let own = own.filter(|p| !(mac_ci && LINUX_ONLY_TESTS.contains(p)));
+            let own = own.filter(|p| !(mac_ci && linux_alone(p)));
             selected(own.chain([WORKSPACE_HACK]))
         },
     );
+    // Of a crate the linux lane tests, only the binaries that need a Mac run on one.
+    let mac_binaries = shard.filter(|_| mac_ci).and_then(|s| mac_binaries_filter(s.packages()));
     let p = &packages;
     // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
     // each unit of the build cost. Here it would pile up a report per gate.
@@ -1041,15 +1093,17 @@ fn test_lane(
     let only = only.map(|packages| {
         packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>().join(" | ")
     });
-    let apart = profile == NEXTEST_CI_PROFILE && cfg!(target_os = "macos");
-    let rest = match (&only, apart) {
-        (Some(only), true) => Some(format!("({only}) & !{VIDEOTOOLBOX}")),
-        (Some(only), false) => Some(only.clone()),
-        (None, true) => Some(format!("!{VIDEOTOOLBOX}")),
-        (None, false) => None,
+    let apart = mac_ci;
+    let mut terms: Vec<String> = only.iter().map(|only| format!("({only})")).collect();
+    if apart {
+        terms.push(format!("!{VIDEOTOOLBOX}"));
+    }
+    terms.extend(mac_binaries);
+    let filter: Vec<String> = if terms.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--no-tests=warn".to_owned(), "-E".to_owned(), terms.join(" & ")]
     };
-    let filter: Vec<String> = rest
-        .map_or_else(Vec::new, |rest| vec!["--no-tests=warn".to_owned(), "-E".to_owned(), rest]);
     let tree = Utf8PathBuf::from_path_buf(sh.current_dir())
         .map_err(|p| anyhow::anyhow!("the tree's path is not UTF-8: {}", p.display()))?;
     // Beside the JUnit report, which CI keeps.
@@ -1108,25 +1162,134 @@ fn test_lane(
     both(both(tests, videotoolbox), ptys.verdict())
 }
 
-/// The crates whose tests CI runs on Linux alone, in the linux lane, and no test shard runs on a
-/// hosted Mac: neither their code nor their tests name a target OS or vendor (`unix` is both
-/// hosts), so a Mac's run of their tests reaches no code path Linux's does not, and the same tests
-/// took three to six times as long on the virtual Mac (`.research/ci-speed-2026-10-11.md`
-/// item 6). A full gate here still runs them in their shard.
-const LINUX_ONLY_TESTS: [&str; 12] = [
-    "slopty-proto",
-    "slopty-server",
-    "slopty-engine",
-    "slopty-media",
-    "slopty-core",
-    "slopty-settings",
-    "slopty-tools",
-    "slopty-grid",
-    "slopty-predict",
-    "slopty-shape",
-    "slopty-push",
-    "slopty-theme",
+/// The crates whose tests CI runs on Linux, in the linux lane, and of which no test shard runs
+/// on a hosted Mac more than the test binaries named beside each. Their code names no target OS,
+/// vendor or family (`unix` is both hosts), and their tests do only in those binaries or in an
+/// item `#[cfg(target_os = "linux")]` leaves out on a Mac, so a Mac's run of the rest reaches no
+/// code path Linux's does not; the same tests took three to six times as long on the virtual Mac
+/// (`.research/ci-speed-2026-10-11.md` item 6). The quick gate holds every entry to that
+/// ([`repo_invariants`]), so no test a Mac alone builds or steers goes unrun. A full gate here
+/// still runs all their tests in their shard.
+const LINUX_ONLY_TESTS: [(&str, &[&str]); 13] = [
+    ("slopty-proto", &[]),
+    ("slopty-server", &[]),
+    ("slopty-engine", &[]),
+    ("slopty-media", &[]),
+    ("slopty-core", &[]),
+    ("slopty-settings", &[]),
+    ("slopty-tools", &[]),
+    ("slopty-grid", &[]),
+    ("slopty-predict", &[]),
+    ("slopty-shape", &[]),
+    ("slopty-push", &[]),
+    ("slopty-theme", &[]),
+    // The daemon's code is the server's, which names no host; its crash report is the Mac's.
+    ("slopty-serverd", &["crash"]),
 ];
+
+/// Whether CI's test shards leave every test of `package` to the linux lane.
+pub fn linux_alone(package: &str) -> bool {
+    LINUX_ONLY_TESTS.iter().any(|(name, mac)| *name == package && mac.is_empty())
+}
+
+/// On a hosted Mac, the filter that keeps of `packages` only the tests a Mac runs: of the
+/// [`LINUX_ONLY_TESTS`] among them, the test binaries named beside each. None when no such
+/// crate is among them.
+fn mac_binaries_filter(packages: &[&str]) -> Option<String> {
+    let terms: Vec<String> = LINUX_ONLY_TESTS
+        .iter()
+        .filter(|(name, mac)| !mac.is_empty() && packages.contains(name))
+        .map(|(name, mac)| {
+            let binaries: Vec<String> = mac.iter().map(|b| format!("binary(={b})")).collect();
+            format!("(package(={name}) & !({}))", binaries.join(" | "))
+        })
+        .collect();
+    (!terms.is_empty()).then(|| format!("!({})", terms.join(" | ")))
+}
+
+/// The lines (from 1) of `source` that steer a build or a run by host: those naming a target
+/// OS, vendor or family, or a cfg naming Windows, outside comments. `#[cfg(target_os = "linux")]`
+/// alone is none of them: it only leaves an item out on a Mac, which so runs less, never otherwise.
+fn host_lines(source: &str) -> Vec<usize> {
+    const LINUX_ITEM: [&str; 2] =
+        ["#[cfg(target_os = \"linux\")]", "#![cfg(target_os = \"linux\")]"];
+    const HOST: [&str; 3] = ["target_os", "target_vendor", "target_family"];
+    // `windows` is a cfg predicate only in a cfg, and a word the code uses elsewhere.
+    const WINDOWS: [&str; 2] = ["(windows", ", windows"];
+    let mut found = Vec::new();
+    for (at, line) in source.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with("//") || LINUX_ITEM.contains(&line) {
+            continue;
+        }
+        let windows = line.contains("cfg") && WINDOWS.iter().any(|w| line.contains(w));
+        if windows || HOST.iter().any(|name| line.contains(name)) {
+            found.push(at.saturating_add(1));
+        }
+    }
+    found
+}
+
+/// The test binary a file under a package's `tests/` belongs to, given as its path there: `a`
+/// for `a.rs`, `a/main.rs` and a module `a.rs` or `a/main.rs` declares under `a/`. A directory
+/// with no binary of its name holds modules several binaries share, and is named as such, which
+/// no binary is.
+fn test_binary(relative: &Utf8Path, binaries: &[String]) -> String {
+    let first = relative.components().next().map_or("", |c| c.as_str());
+    let name = first.strip_suffix(".rs").unwrap_or(first);
+    if binaries.iter().any(|b| b == name) { name.to_owned() } else { format!("{name}/ (shared)") }
+}
+
+/// What in `dir`, a package's directory, names the host ([`host_lines`]): the `file:line`s of
+/// its code (`src/`, `build.rs`), and those of its tests by the test binary they belong to.
+fn host_paths(
+    root: &Utf8Path,
+    dir: &Utf8Path,
+) -> (Vec<String>, std::collections::BTreeMap<String, Vec<String>>) {
+    let shown = |file: &std::path::Path, line: usize| {
+        let file = file.strip_prefix(root.as_std_path()).unwrap_or(file);
+        format!("{}:{line}", file.display())
+    };
+    let mut code_files = Vec::new();
+    rust_sources(dir.join("src").as_std_path(), &mut code_files);
+    code_files.push(dir.join("build.rs").into_std_path_buf());
+    let mut code = Vec::new();
+    for file in code_files {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        code.extend(host_lines(&text).into_iter().map(|line| shown(&file, line)));
+    }
+    let tests_dir = dir.join("tests");
+    let mut test_files = Vec::new();
+    rust_sources(tests_dir.as_std_path(), &mut test_files);
+    let binaries: Vec<String> = test_files
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(tests_dir.as_std_path()).ok()?;
+            let mut parts = relative.components();
+            let first = parts.next()?.as_os_str().to_str()?;
+            match parts.next().and_then(|p| p.as_os_str().to_str()) {
+                None => first.strip_suffix(".rs").map(str::to_owned),
+                Some("main.rs") if parts.next().is_none() => Some(first.to_owned()),
+                Some(_) => None,
+            }
+        })
+        .collect();
+    let mut tests = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for file in test_files {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let lines = host_lines(&text);
+        let Some(relative) =
+            file.strip_prefix(tests_dir.as_std_path()).ok().and_then(Utf8Path::from_path)
+        else {
+            continue;
+        };
+        if !lines.is_empty() {
+            let binary = test_binary(relative, &binaries);
+            tests.entry(binary).or_default().extend(lines.into_iter().map(|l| shown(&file, l)));
+        }
+    }
+    (code, tests)
+}
 
 /// The nextest test group of the tests that code through VideoToolbox (`.config/nextest.toml`).
 const VIDEOTOOLBOX: &str = "group(videotoolbox)";
@@ -1828,10 +1991,54 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests, list,
-        next_step, one_gpui, runnable_doctests, spawned_selection, summary_of, within,
+        BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests,
+        host_lines, list, mac_binaries_filter, next_step, one_gpui, runnable_doctests,
+        spawned_selection, summary_of, test_binary, within,
     };
     use crate::tools::repo_root;
+
+    /// A line that builds or steers by host is found, whatever the cfg's form; a comment is not,
+    /// and neither is an item only Linux builds, which a Mac merely leaves out.
+    #[test]
+    fn a_line_that_steers_by_host_is_found() {
+        let source = "\
+#![cfg(target_vendor = \"apple\")]
+// target_os in a comment
+#[cfg(target_os = \"linux\")]
+fn linux_only() {}
+    #[cfg(target_os = \"linux\")]
+if cfg!(target_os = \"linux\") { a() } else { b() }
+#[cfg(not(target_os = \"linux\"))]
+#[cfg(any(target_family = \"wasm\", windows))]
+#[cfg(windows)]
+fn windows(windows: &[u8]) {}
+let windows = cfg!(windows);
+";
+        assert_eq!(host_lines(source), [1, 6, 7, 8, 9, 11]);
+    }
+
+    /// A test file belongs to the binary its first path part names; a directory no binary is
+    /// named after holds shared modules, which match no binary's name.
+    #[test]
+    fn a_test_file_belongs_to_its_binary() {
+        let binaries = ["threads".to_owned(), "app".to_owned()];
+        let of = |path: &str| test_binary(camino::Utf8Path::new(path), &binaries);
+        assert_eq!(of("threads.rs"), "threads");
+        assert_eq!(of("app/main.rs"), "app");
+        assert_eq!(of("app/conversation.rs"), "app");
+        assert_eq!(of("common/mod.rs"), "common/ (shared)");
+    }
+
+    /// On a Mac shard, a crate the linux lane tests runs only its binaries named to run on a Mac;
+    /// a shard with none of those crates is not filtered.
+    #[test]
+    fn a_mac_shard_runs_only_the_mac_binaries_of_a_linux_tested_crate() {
+        assert_eq!(
+            mac_binaries_filter(Shard::Rest.packages()).as_deref(),
+            Some("!((package(=slopty-serverd) & !(binary(=crash))))")
+        );
+        assert_eq!(mac_binaries_filter(Shard::Ui.packages()), None);
+    }
 
     /// A doc fence rustdoc would compile is found, including `no_run` and `compile_fail`, and its
     /// closing fence is not taken for an opening one; fences in another language, `ignore`d
@@ -1996,24 +2203,6 @@ mod tests {
         assert!(deep.contains("max-parallel: 1"), "the deep checks leave the gate macOS runners");
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
-        for only in super::LINUX_ONLY_TESTS {
-            assert!(tested.contains(&only), "{only} runs on no Mac, so the linux lane tests it");
-            let dir = repo_root().expect("repo root").join("crates").join(only);
-            let mut sources = Vec::new();
-            super::rust_sources(dir.join("src").as_std_path(), &mut sources);
-            super::rust_sources(dir.join("tests").as_std_path(), &mut sources);
-            assert!(!sources.is_empty(), "{only} is at {dir}");
-            for file in sources {
-                let text = std::fs::read_to_string(&file).expect("a source");
-                for cfg in ["target_os", "target_vendor", "cfg(windows"] {
-                    assert!(
-                        !text.contains(cfg),
-                        "{}: {cfg}, so a Mac tests it too",
-                        file.display()
-                    );
-                }
-            }
-        }
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
         for worker in ["slopty-worker", "slopty-workerd"] {
             assert!(tested.contains(&worker), "{worker}'s tests run on Linux, where it ships too");

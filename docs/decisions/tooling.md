@@ -1847,6 +1847,26 @@ more full-window layer.
   - A night took 238–311 macOS minutes (median 286 over six nights), of which the moved checks
     were 74–94 (median 89): about 200 a night now, on a third fewer Mac hours.
 
+- ✅ **A test only a Mac builds or steers runs on a Mac shard, and the quick gate holds it so**
+  (2026-10-12). `slopty-client`'s cut-link test, whose binary is the Mac's alone, failed one Mac
+  run in three while every remote check of the client passed: the gate's rest shard ran it on
+  its Mac, but `remote` sent a check of crates the linux lane tests to Linux, which never builds
+  it.
+  - The gate's test shards on a hosted Mac leave the crates in `gate::LINUX_ONLY_TESTS` to the
+    linux lane, all but the test binaries named beside each: `slopty-serverd` runs its `crash`
+    test, whose report is the Mac's, there and nothing else, through a nextest filter
+    (`mac_binaries_filter`). Every other member runs all its tests on its shard's Mac. The
+    worker, client and CLI stay there whole, since their code takes other paths on a Mac
+    (PTYs, processes, the clipboard, audio), which their tests without a cfg reach too.
+  - The tools lane (`repo_invariants`, in seconds) fails when a `LINUX_ONLY_TESTS` crate's code
+    names a target OS, vendor or family, or a cfg names Windows, or when one of its test
+    binaries does and is not named beside it, or a named one does not. Only
+    `#[cfg(target_os = "linux")]` on an item is let through: a Mac merely leaves it out. It
+    replaces a test of xtask's that read for the bare words after a seven-minute build, and so
+    failed on `slopty-server`'s Linux-only roaming test.
+  - A full remote check (`remote --full`) of a crate a Mac shard tests takes a Mac for its
+    tests; a quick one stays on Linux and says which crates' Mac tests it leaves to the gate.
+
 - ✅ **The standing instructions state outcomes and hard lines; procedures live where they are
   used** (2026-10-12). The person found `CLAUDE.md` too long and asked that it define outcomes
   rather than teach, since teaching a frontier model can narrow what it tries.

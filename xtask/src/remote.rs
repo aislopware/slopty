@@ -42,14 +42,21 @@ const SHOWN: usize = 400;
 const LOG_ARTIFACTS: [&str; 3] = ["logs-lint", "logs-test", "logs-run"];
 
 /// The runner a check's tests take: Linux when every crate named tests there, as CI's linux lane
-/// tests it, so the check takes none of the five macOS runners; a Mac otherwise.
-fn test_runner(packages: &[String]) -> &'static str {
+/// tests it, so the check takes none of the five macOS runners; a Mac otherwise. A full check
+/// takes a Mac too for a crate a Mac shard also tests ([`mac_tested`]): its tests that a Mac
+/// alone builds or steers never run on Linux, and so `slopty-client`'s cut-link flake, one Mac
+/// run in three, hid from every Linux check of it.
+fn test_runner(packages: &[String], full: bool) -> &'static str {
     let linux = crate::gate::linux_tested();
-    if !packages.is_empty() && packages.iter().all(|p| linux.contains(&p.as_str())) {
-        "ubuntu-24.04"
-    } else {
-        "macos-26"
-    }
+    let on_linux = packages.iter().all(|p| linux.contains(&p.as_str()));
+    let mac_too = full && !mac_tested(packages).is_empty();
+    if !packages.is_empty() && on_linux && !mac_too { "ubuntu-24.04" } else { "macos-26" }
+}
+
+/// Those of `packages` whose tests a gate's Mac shard runs, all or some: those a Linux check of
+/// them leaves out.
+fn mac_tested(packages: &[String]) -> Vec<&str> {
+    packages.iter().map(String::as_str).filter(|p| !crate::gate::linux_alone(p)).collect()
 }
 
 /// The macOS jobs a check holds at most while the gate runs: the gate's three test shards need
@@ -64,7 +71,8 @@ const MAC_POLL: Duration = Duration::from_secs(60);
 /// How many macOS jobs the check asked for takes: the tests when they need a Mac, and a probe
 /// or an e2e case on a Mac. Linux's never wait.
 fn mac_jobs(opts: &RemoteOpts) -> usize {
-    let tests = !opts.packages.is_empty() && test_runner(&opts.packages).starts_with("macos");
+    let tests =
+        !opts.packages.is_empty() && test_runner(&opts.packages, opts.full).starts_with("macos");
     let run = (opts.probe.is_some() || opts.e2e.is_some()) && opts.runner.starts_with("macos");
     usize::from(tests).saturating_add(usize::from(run))
 }
@@ -456,8 +464,14 @@ fn describe(opts: &RemoteOpts) -> String {
     let mut parts = Vec::new();
     if !opts.packages.is_empty() {
         let depth = if opts.full { "full" } else { "quick" };
-        let tests = test_runner(&opts.packages);
-        parts.push(format!("{depth} check {} (tests on {tests})", opts.packages.join(" ")));
+        let tests = test_runner(&opts.packages, opts.full);
+        let mac = mac_tested(&opts.packages);
+        let left = if tests.starts_with("ubuntu") && !mac.is_empty() {
+            format!("; the Mac's own tests of {} wait for --full or the gate", mac.join(", "))
+        } else {
+            String::new()
+        };
+        parts.push(format!("{depth} check {} (tests on {tests}{left})", opts.packages.join(" ")));
     }
     if let Some(case) = &opts.e2e {
         let filter = opts.filter.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
@@ -640,7 +654,7 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         ("snapshots", snapshots.to_owned(), "compare"),
         ("full", (if opts.full { "yes" } else { "no" }).to_owned(), "no"),
         ("runner", opts.runner.clone(), "macos-26"),
-        ("test_runner", test_runner(&opts.packages).to_owned(), "macos-26"),
+        ("test_runner", test_runner(&opts.packages, opts.full).to_owned(), "macos-26"),
         ("probe", opts.probe.clone().unwrap_or_default(), ""),
     ];
     let args: Vec<String> = fields
@@ -872,6 +886,21 @@ mod tests {
 
     fn gate(queued: bool) -> MacJob {
         MacJob { gate: true, queued, check: None }
+    }
+
+    /// A quick check of crates Linux tests runs there; a full one takes a Mac for a crate a Mac
+    /// shard tests too, all of it or some binaries, and stays on Linux for one Linux alone tests.
+    #[test]
+    fn a_full_check_runs_the_mac_s_own_tests_on_a_mac() {
+        let of = |names: &[&str], full| {
+            let packages: Vec<String> = names.iter().map(|&n| n.to_owned()).collect();
+            super::test_runner(&packages, full)
+        };
+        assert_eq!(of(&["slopty-client"], false), "ubuntu-24.04");
+        assert_eq!(of(&["slopty-client"], true), "macos-26");
+        assert_eq!(of(&["slopty-serverd"], true), "macos-26");
+        assert_eq!(of(&["slopty-proto", "slopty-server"], true), "ubuntu-24.04");
+        assert_eq!(of(&["slopty-ui"], false), "macos-26");
     }
 
     #[test]
