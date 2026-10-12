@@ -2546,6 +2546,8 @@ mod ctl {
             queue_full: 1,
             heartbeats: 40,
             refreshes: 2,
+            inputs: 15,
+            inputs_refused: 1,
             keyframes_deferred: 1,
             latency_max_us: 9_000,
             latency_sum_us: 4_000_000,

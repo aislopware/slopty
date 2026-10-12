@@ -13,7 +13,7 @@
 //! The timings come from the app's own pacer (arrival → present on its surface) and from the
 //! worker's counters; `frame_time` times the whole path from the drawn frame's capture stamp.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::snapshot::{
@@ -182,7 +182,13 @@ async fn golden_stream(
     let words: Vec<PixelRect> = [page, status].into_iter().chain(live_readouts(&dump)).collect();
     let pixels: Vec<PixelRect> = words.iter().copied().chain(overlay_band(&dump, body)).collect();
     assert_matches_apart(name, &frame, TOLERANCE, &artifacts_dir(), (&pixels, &words)).unwrap();
-    let golden = before.unwrap_or_else(|| frame.image.clone());
+    // An accepting run writes this frame as the golden: the page is held to what it writes,
+    // not to the design it replaces.
+    let accepting = matches!(
+        slopty_e2e::snapshot::Accept::from_env(),
+        slopty_e2e::snapshot::Accept::Changed | slopty_e2e::snapshot::Accept::All
+    );
+    let golden = before.filter(|_| !accepting).unwrap_or_else(|| frame.image.clone());
     let distance = luma_distance(&luma_histogram(&frame, page), &luma_histogram(&golden, page));
     println!("MEASURE {name}: page luma distance {distance:.4}");
     distance
@@ -538,6 +544,173 @@ async fn the_drawn_display_streams_into_its_tile() {
     let heading = format!("display Display {DISPLAY}");
     let distance = golden_stream(drv, &dir, "stream-display", &label, &heading).await;
     assert!(distance <= PAGE_DISTANCE);
+    stack.shutdown().await;
+}
+
+/// The worker's input counters for the one live stream of `client`: what it posted to the
+/// target, and what the target's injector refused.
+async fn worker_inputs(stack: &Stack, client: &str) -> (u64, u64) {
+    let live = stack.worker_screens().await.unwrap();
+    let mine: Vec<_> = live.iter().filter(|s| s["client"] == client).collect();
+    assert_eq!(mine.len(), 1, "{live:#?}");
+    let stats = &mine[0]["stats"];
+    let n = |key: &str| stats[key].as_u64().unwrap_or_else(|| panic!("{key}: {stats}"));
+    (n("inputs"), n("inputs_refused"))
+}
+
+/// Wait until the worker has posted at least `want` inputs on `client`'s stream; how long that
+/// took from `since`.
+async fn inputs_reach(stack: &Stack, client: &str, want: u64, since: Instant) -> Duration {
+    let deadline = since.checked_add(STEP).unwrap_or(since);
+    loop {
+        let (posted, refused) = worker_inputs(stack, client).await;
+        assert_eq!(refused, 0, "the drawn window refused input");
+        if posted >= want {
+            return since.elapsed();
+        }
+        assert!(Instant::now() < deadline, "{posted} of {want} inputs posted after {STEP:?}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The worker's count of posted inputs once it has stood still for 200 ms.
+async fn settled_inputs(stack: &Stack, client: &str) -> u64 {
+    let mut last = worker_inputs(stack, client).await.0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let now = worker_inputs(stack, client).await.0;
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+}
+
+/// Keys typed and a scroll made over a streamed window reach the window on the worker, as a
+/// person works in it through its tile: the tile takes the keyboard, every character is posted
+/// there, and so is the scroll over the picture. Times each from the app being handed it to the
+/// worker having posted it, through the app's input path and loopback QUIC.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn keys_and_a_scroll_over_a_streamed_window_reach_it() {
+    let mut stack = Stack::launch_with("e2e-worker", &[SYNTHETIC]).await.unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    let dump = open_editor(drv).await;
+    let client = dump.client.clone();
+    let label = format!("Remote window {}", EDITOR.0);
+    let [x, y, w, h] = dump
+        .a11y_node("Image", Some(&label))
+        .unwrap_or_else(|| panic!("no picture {label}: {:#?}", dump.a11y))
+        .bounds;
+    // A remote window takes the keyboard when it is clicked, as a person does, never by a walk
+    // through the panes; the click is the window's too.
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (before_click, _) = worker_inputs(&stack, &client).await;
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Click { x: cx, y: cy, button: slopty_e2e::Button::default(), count: 1 })
+        .await
+        .unwrap();
+    drv.wait_for("the picture has the keyboard", STEP, |d| d.focused.starts_with("screen:"))
+        .await
+        .unwrap();
+    let clicked = settled_inputs(&stack, &client).await;
+    assert!(clicked > before_click, "the click reached the window: {before_click} → {clicked}");
+
+    let typed = "slopty walks";
+    let before = clicked;
+    let started = Instant::now();
+    stack.driver.type_text(typed).await.unwrap();
+    let chars = u64::try_from(typed.chars().count()).unwrap_or(u64::MAX);
+    let keys = inputs_reach(&stack, &client, before.saturating_add(chars), started).await;
+    // The keys' releases (and the keyboard's source, said once) follow their presses: the
+    // count settles before the scroll is counted.
+    let typed_in = settled_inputs(&stack, &client).await;
+    let moved = typed_in;
+    let started = Instant::now();
+    stack.driver.ok(&Command::Scroll { x: cx, y: cy, dx: 0.0, dy: 3.0 }).await.unwrap();
+    let scrolled = inputs_reach(&stack, &client, moved.saturating_add(1), started).await;
+    let (after, refused) = worker_inputs(&stack, &client).await;
+    println!(
+        "MEASURE keys and a scroll over a streamed window: {chars} characters posted as {} \
+         inputs, as many posted {:.1} ms after the app took the text; a scroll posted {:.1} \
+         ms after the app took it; {} inputs in all, {refused} refused",
+        typed_in.saturating_sub(before),
+        keys.as_secs_f64() * 1e3,
+        scrolled.as_secs_f64() * 1e3,
+        after.saturating_sub(before),
+    );
+    assert_eq!(refused, 0);
+    stack.shutdown().await;
+}
+
+/// Stop or resume a process of the stack.
+async fn signal(pid: u32, which: &str) {
+    let status = tokio::process::Command::new("/bin/kill")
+        .args([which, &pid.to_string()])
+        .status()
+        .await
+        .unwrap();
+    assert!(status.success(), "kill {which} {pid}: {status}");
+}
+
+/// A streamed window whose link drops comes back by itself once the link does: the worker
+/// falls silent (stopped, as a link that drops without a word looks), the app gives the link
+/// up and keeps the window's last picture, and once the worker answers again the stream opens
+/// again on the new link and takes the tile's place, clean, with nothing for the person to
+/// reopen. Times the link and the first fresh picture from the worker's return.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_streamed_window_comes_back_by_itself_with_its_link() {
+    let mut stack = Stack::launch_with("e2e-worker", &[SYNTHETIC]).await.unwrap();
+    // `Stack` starts ptyd, then the worker, then the app.
+    let worker = stack.children[1].id().unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    let dump = open_editor(drv).await;
+    let first = dump.screens[0].stream;
+    let [fw, fh] = dump.screens[0].size;
+
+    signal(worker, "-STOP").await;
+    let gone = drv
+        .wait_for("the app to give the silent link up", Duration::from_secs(40), |d| {
+            d.status.ends_with("reconnecting…")
+        })
+        .await;
+    let kept = drv.dump().await.unwrap();
+    signal(worker, "-CONT").await;
+    let back = Instant::now();
+    gone.unwrap();
+    let held = kept.screens.first().map_or(0, |s| s.frames);
+    assert!(held >= FRAMES, "the last picture kept through the drop: {:#?}", kept.screens);
+
+    drv.wait_for("the link back", STEP, |d| d.status == "connected").await.unwrap();
+    let linked = back.elapsed();
+    // A fresh stream's view counts its own frames from none, and may have the old one's id:
+    // ids are per link.
+    let fresh = |d: &Dump| d.screens.first().is_some_and(|s| s.stream != first || s.frames < held);
+    let seen = drv.wait_for("a fresh picture in the tile", FIRST_FRAMES, fresh).await.unwrap();
+    let pictured = back.elapsed();
+    // Fresh once seen: from here its own count grows past the old one's, which no longer tells
+    // them apart.
+    let from = seen.screens.first().map_or(0, |s| s.frames);
+    let dump = drv
+        .wait_for("the fresh stream's frames", FIRST_FRAMES, |d| {
+            d.screens.first().is_some_and(|s| s.frames >= from.saturating_add(FRAMES))
+        })
+        .await
+        .unwrap();
+    let screen = dump.screens[0].clone();
+    println!(
+        "MEASURE a streamed window across a dropped link: linked again {:.0} ms and a fresh \
+         picture in the tile {:.0} ms after the worker answered again; first {fw}×{fh}, then {}",
+        linked.as_secs_f64() * 1e3,
+        pictured.as_secs_f64() * 1e3,
+        row(&screen)
+    );
+    assert_clean(&screen);
     stack.shutdown().await;
 }
 

@@ -1191,6 +1191,9 @@ struct Counters {
     heartbeats: AtomicU64,
     /// Refresh requests received from the client.
     refreshes: AtomicU64,
+    /// Client input posted to the target, and refused by its injector.
+    inputs: AtomicU64,
+    inputs_refused: AtomicU64,
     /// Deferral episodes, one per run of put-off keyframes.
     keyframes_deferred: AtomicU64,
     latency_max_us: AtomicU64,
@@ -1238,6 +1241,8 @@ impl Counters {
             queue_full: AtomicU64::new(0),
             heartbeats: AtomicU64::new(0),
             refreshes: AtomicU64::new(0),
+            inputs: AtomicU64::new(0),
+            inputs_refused: AtomicU64::new(0),
             keyframes_deferred: AtomicU64::new(0),
             latency_max_us: AtomicU64::new(0),
             latency_sum_us: AtomicU64::new(0),
@@ -1290,6 +1295,8 @@ impl Counters {
             queue_full: self.queue_full.load(Ordering::Relaxed),
             heartbeats: self.heartbeats.load(Ordering::Relaxed),
             refreshes: self.refreshes.load(Ordering::Relaxed),
+            inputs: self.inputs.load(Ordering::Relaxed),
+            inputs_refused: self.inputs_refused.load(Ordering::Relaxed),
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
             audio_packets: 0,
@@ -5167,7 +5174,14 @@ impl<P: Platform> Pipeline<P> {
         if let ScreenInput::Gestures { remote } = input {
             self.gestures = *remote;
         }
-        Ok(self.injector.inject(input)?)
+        let injected = self.injector.inject(input);
+        let counter = if injected.is_ok() {
+            &self.shared.counters.inputs
+        } else {
+            &self.shared.counters.inputs_refused
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        Ok(injected?)
     }
 
     /// Take a step of a drag from the client through the injector's drag mode, in order with
@@ -6172,30 +6186,41 @@ mod tests {
     /// else the stream does can make it late. Geometry work that takes 300 ms — six times a
     /// stall gap, and three times the worst window-server round trip measured — runs beside it
     /// here, and the beats keep their cadence because they are no longer on that task.
+    ///
+    /// A beat held by the call waits the whole call: no beat goes out while it runs, and the
+    /// silence it ends spans it. Those are what is asserted, so a busy machine's scheduling (a
+    /// 142 ms gap on a hosted runner's worker shard, run 38277929108, against the 25 ms tick
+    /// and the 300 ms call) is not read as the call holding the beat.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_slow_geometry_call_does_not_make_the_beat_late() {
+        const CALL: Duration = Duration::from_millis(300);
         let (shared, wire) = shared_for_frames();
         let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
         // Whatever the cursor loop does, it does it like this: off the runtime's workers. It
         // spins rather than sleeps because a sleeping thread is not what a window-server round
         // trip does to one — and because sleeping in this project is what the lint forbids.
-        let slow = tokio::task::spawn_blocking(|| {
-            let until = Instant::now()
-                .checked_add(Duration::from_millis(300))
-                .expect("a deadline inside the clock");
+        let during = Arc::clone(&shared);
+        let slow = tokio::task::spawn_blocking(move || {
+            let beats = || during.counters.heartbeats.load(Ordering::Relaxed);
+            let before = beats();
+            let until = Instant::now().checked_add(CALL).expect("a deadline inside the clock");
             while Instant::now() < until {
                 std::hint::spin_loop();
             }
+            beats().saturating_sub(before)
         });
 
         tokio::time::sleep(Duration::from_millis(500)).await;
-        slow.await.expect("the slow call");
+        let beaten = slow.await.expect("the slow call");
         beat.abort();
 
         let seen = shared.stats();
         assert!(seen.heartbeats >= 10, "a beat every 25 ms over half a second: {seen:?}");
+        // Twelve are due in the call; a quarter of them is a beat that kept going through it.
+        assert!(beaten >= 3, "only {beaten} beats while the geometry call ran: {seen:?}");
+        let call_us = u64::try_from(CALL.as_micros()).unwrap_or(u64::MAX);
         assert!(
-            seen.beat_gap_worst_us <= 100_000,
+            seen.beat_gap_worst_us < call_us,
             "the beat fell behind the geometry call: {} µs",
             seen.beat_gap_worst_us
         );

@@ -566,11 +566,12 @@ mod tests {
             stack.driver.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 
             // The worker says the target is idle; the item says which end everyone is waiting on,
-            // and a screen reader is told the same thing.
+            // and a screen reader is told the same thing once the loading grace has passed.
             let dump = stack
                 .driver
                 .wait_for("the item to say the window is not drawing", STEP, |d| {
                     d.screens.iter().any(|s| s.source == "idle")
+                        && d.a11y_node("Status", Some("Waiting for the window to draw…")).is_some()
                 })
                 .await
                 .unwrap();

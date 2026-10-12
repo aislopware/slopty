@@ -525,6 +525,13 @@ pub struct ScreenStats {
     pub heartbeats: u64,
     /// Refresh requests the client sent for this stream (what the receiver's cap bounds).
     pub refreshes: u64,
+    /// Client input delivered to the stream's target: each key, button, pointer move, scroll
+    /// and gesture the worker posted for it (a drag's steps aside). What says a person's typing
+    /// and scrolling reached the worker's machine at all.
+    pub inputs: u64,
+    /// Client input the target's injector refused: the Accessibility grant missing, the target
+    /// gone, an event it could not make.
+    pub inputs_refused: u64,
     /// Times a wanted keyframe was put off because the link could not drain one, counted once
     /// per episode rather than per frame (see `slopty_worker::screen::keyframe_fits`). Each one
     /// sent an LTR refresh in its place and ended either when the link could carry the keyframe
