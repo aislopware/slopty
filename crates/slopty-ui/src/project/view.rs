@@ -881,31 +881,14 @@ impl ProjectView {
             .map(|el| slopty_kit::kit::typed(el, theme.roles().panel_title))
             .text_color(hsla(s.text))
             .child(SharedString::from(project.title.clone()));
-        // The name, then how far along it is and what runs, then its controls. Where the board
-        // is narrow the running count leaves first, then the name narrows to its floor, and
-        // only then does the progress leave: the bar under the name says it too. The dot
-        // between the two readouts goes with the count, so it never parts nothing.
-        let parted = progress.is_some();
-        let live = readout("project-live", live);
-        let live = if parted {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(sp.xs))
-                .child(slopty_kit::kit::separator(theme).text_size(px(theme.typography.small())))
-                .child(live)
-                .into_any_element()
-        } else {
-            live.into_any_element()
-        };
+        // The name and the controls alone on the title's line (`.research/warp-composition-
+        // 2026-10-12.md` §2.3.6): what runs joins where the work goes on the line under it, and
+        // how far along it is stands once, beside the bar that draws it.
         let mut title = slopty_kit::kit::priority_row("project-header")
             .h(px(slopty_kit::kit::icon_button_side(theme)))
             .gap(px(sp.xs))
             .title(name, px(theme.typography.ui_size * TITLE_FLOOR_EM))
             .end();
-        if let Some(progress) = progress {
-            title = title.item("progress", Priority::MEDIUM, readout("project-progress", progress));
-        }
         if let Some(unpushed) = self.unpushed(board, cx) {
             title = title.item("unpushed", Priority::HIGH, unpushed);
         }
@@ -925,22 +908,30 @@ impl ProjectView {
             title = title.item("merge-ready", Priority::HIGH, merge);
         }
         let title = title
-            .item("live", Priority::LOW, live)
             .item("checks", Priority::ESSENTIAL, checks_toggle)
             .item("push", Priority::ESSENTIAL, push_toggle)
             .item("terminal", Priority::ESSENTIAL, terminal)
             .item("settings", Priority::ESSENTIAL, self.settings(project, cx));
         let meta = div()
-            .id("project-place")
-            .debug_selector(|| "project-place".to_owned())
             .flex_1()
             .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
+            .flex()
+            .items_center()
+            .gap(px(sp.xs))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(SharedString::from(place));
+            .child(
+                div()
+                    .id("project-place")
+                    .debug_selector(|| "project-place".to_owned())
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(SharedString::from(place)),
+            )
+            .child(slopty_kit::kit::separator(theme).flex_none())
+            .child(readout("project-live", live).text_color(hsla(s.text_muted)));
         div()
             .flex_none()
             .flex()
@@ -953,7 +944,7 @@ impl ProjectView {
             .child(div().flex().items_center().child(meta))
             .children(self.ended_orchestrator(board, cx))
             .children(self.standing(board, cx))
-            .child(self.bar(board))
+            .child(self.bar(board, progress.map(|p| readout("project-progress", p))))
     }
 
     /// The head's gear, Delta's board settings: the person's two settings, how far it runs on
@@ -1403,6 +1394,32 @@ impl ProjectView {
                 if again && action == TaskAction::Start { START_AGAIN } else { action.label() };
             let id = action.selector(prefix, task);
             let selector = id.clone();
+            // Merge waits on the person and is the row's one way on: Delta's icon button in the
+            // success ink, never hidden, rather than the board's only framed button.
+            if action == TaskAction::Merge && !control {
+                let side = px(slopty_kit::kit::icon_button_side(theme));
+                let glyph = slopty_kit::icons::Drawn::new(theme, Mark::Git(GitGlyph::Merge))
+                    .slot(px(theme.icon()), hsla(s.success));
+                let el = div()
+                    .id(SharedString::from(id))
+                    .debug_selector(move || selector)
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!("{words} #{task}")))
+                    .flex_none()
+                    .size(side)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .active(move |el| el.bg(hsla(s.pressed)))
+                    .child(glyph);
+                return tab_stop(el, s.focus).on_click(cx.listener(move |this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.act(task, action, cx);
+                }));
+            }
             let el = div()
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
@@ -1443,7 +1460,7 @@ impl ProjectView {
     /// How much of the work has merged: the merged tasks' share of them all, in the success
     /// tone on the quiet track, an empty track before any has. Only what is done fills it, so a
     /// full bar means the work is in; how the rest stands is the lanes' counts.
-    fn bar(&self, board: &Board) -> Stateful<Div> {
+    fn bar(&self, board: &Board, said: Option<Stateful<Div>>) -> Stateful<Div> {
         let theme = &self.theme;
         let (merged, total) = board.progress();
         #[expect(clippy::cast_precision_loss, reason = "task counts are small")]
@@ -1454,11 +1471,22 @@ impl ProjectView {
                 .tone(theme.surfaces.success_fill)
                 .height(px(theme.spacing.xs))
                 .at_once();
-        div()
-            .id("project-bar")
-            .debug_selector(|| "project-bar".to_owned())
+        // How far along, said once, in figures right of the bar that draws it.
+        let row = div()
             .mt(px(theme.spacing.xs))
-            .child(bar)
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .child(
+                div()
+                    .id("project-bar")
+                    .debug_selector(|| "project-bar".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .child(bar),
+            )
+            .children(said);
+        row.id("project-progress-row")
     }
 
     /// The orchestrator while it waits on the person: the first row of *Needs you*, what it
@@ -2128,6 +2156,37 @@ impl ProjectView {
             .into_any_element()
     }
 
+    /// A row's facts past the one at its end, as a second line under its title: the metadata
+    /// size in the muted ink, a dot between two, on one line.
+    fn facts_line(&self, key: &str, facts: Vec<AnyElement>) -> Option<AnyElement> {
+        if facts.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let sp = theme.spacing;
+        let mut parts: Vec<AnyElement> = Vec::new();
+        for fact in facts {
+            if !parts.is_empty() {
+                let dot =
+                    slopty_kit::kit::separator(theme).text_size(px(theme.roles().metadata.size));
+                parts.push(dot.into_any_element());
+            }
+            parts.push(fact);
+        }
+        let id = format!("{key}-facts");
+        Some(
+            div()
+                .debug_selector(move || id)
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(sp.xs))
+                .overflow_hidden()
+                .children(parts)
+                .into_any_element(),
+        )
+    }
+
     /// What an agent asks the person, as a row's second line in the secondary ink.
     fn asks_line(&self, key: &str, asks: String) -> AnyElement {
         let id = format!("{key}-asks");
@@ -2305,47 +2364,55 @@ impl ProjectView {
             .child(SharedString::from(format!("#{}", card.id)));
         let title_id = format!("{key}-title");
         let title = self.row_title(card.title.clone()).debug_selector(move || title_id);
+        // One fact at the line's end (`.research/warp-composition-2026-10-12.md` §2.3.4): the
+        // check at work, else what the task is doing, else where it runs. The rest hang on a
+        // second line under the title, joined, never crowding it. A check that passed says
+        // nothing here: its lane's head says it.
         let mut line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(sp.sm))
             .item("number", Priority::ESSENTIAL, number)
             .title(title, self.title_floor())
             .end();
-        if !meta.is_empty() {
+        let running = check.as_ref().filter(|c| matches!(c, Check::Running { .. }));
+        let mut chip = self.where_chip(board, node, "project-card");
+        if let Some(check) = running {
+            line = line.item("check", Priority::HIGH, self.check_fact(&key, check, cx));
+        } else if !meta.is_empty() {
             let meta = div()
                 .whitespace_nowrap()
                 .text_size(px(theme.roles().metadata.size))
                 .text_color(hsla(s.text_muted))
                 .child(dotted(theme, meta));
             line = line.item("meta", Priority::LOW, meta);
-        }
-        if let Some(check) = check.as_ref().filter(|_| !failed) {
-            line = line.item("check", Priority::HIGH, self.check_fact(&key, check, cx));
-        }
-        for stage in quiet {
-            let rank = match stage.kind {
-                StageKind::Queue => Priority(160),
-                StageKind::ToDos => Priority::LOW,
-                _ => Priority::MEDIUM,
-            };
-            let id = format!("{key}-{}", stage.kind.word());
-            line = line.item(stage.kind.word(), rank, self.fact(id, None, stage.words));
-        }
-        if let Some(branch) = &card.branch {
-            let fact =
-                self.fact(format!("{key}-branch"), Some(GitGlyph::Branch.into()), branch.clone());
-            line = line.item("branch", Priority(96), fact);
-        }
-        if let Some(chip) = self.where_chip(board, node, "project-card") {
+        } else if let Some(chip) = chip.take() {
             line = line.item("where", Priority(144), chip);
         }
         if let Some(actions) = self.actions(board, card.id, "project-card", held, cx) {
             line = line.item("actions", Priority::ESSENTIAL, actions);
         }
-
-        let detail: Vec<AnyElement> = handing
-            .map(|words| self.handing_line(&key, words))
+        let mut facts: Vec<AnyElement> = quiet
             .into_iter()
+            .map(|stage| {
+                let id = format!("{key}-{}", stage.kind.word());
+                self.fact(id, None, stage.words).into_any_element()
+            })
+            .collect();
+        // Where the work is, for a task at work only: elsewhere it is history.
+        if own == Lane::Working {
+            if let Some(branch) = &card.branch {
+                let id = format!("{key}-branch");
+                facts.push(
+                    self.fact(id, Some(GitGlyph::Branch.into()), branch.clone()).into_any_element(),
+                );
+            }
+            facts.extend(chip.map(IntoElement::into_any_element));
+        }
+        let facts = self.facts_line(&key, facts);
+
+        let detail: Vec<AnyElement> = facts
+            .into_iter()
+            .chain(handing.map(|words| self.handing_line(&key, words)))
             .chain(asks.map(|asks| self.asks_line(&key, asks)))
             .chain(start_failed.map(|why| self.why_line(&key, why)))
             .chain(self.answers(&key, board, node, cx))

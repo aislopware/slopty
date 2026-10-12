@@ -632,10 +632,11 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
         "project-card-4-tail",
         "project-card-4-output",
         "project-card-5-check",
-        "project-card-6-check",
-        "project-card-7-check",
     ] {
         assert!(drawn(cx, part), "{part} is drawn");
+    }
+    for part in ["project-card-6-check", "project-card-7-check"] {
+        assert!(!drawn(cx, part), "{part}: a pass is its lane's to say");
     }
     assert!(!drawn(cx, "project-card-5-tail"), "a run under way has no last lines");
 
@@ -1593,14 +1594,16 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-shift-enter");
     cx.run_until_parked();
-    for part in [
-        "project-card-1-branch",
-        "project-card-1-pull",
-        "project-card-1-checks",
-        "project-card-1-todos",
-    ] {
-        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    // One fact at the line's end; the rest hang on a second line on the title's edge
+    // (`.research/warp-composition-2026-10-12.md` §2.3.4).
+    let title = cx.debug_bounds("project-card-1-title").expect("its title");
+    let facts = cx.debug_bounds("project-card-1-facts").expect("its second line");
+    assert!((facts.left() - title.left()).abs() < px(0.5), "on the title's edge: {facts:?}");
+    for part in ["project-card-1-pull", "project-card-1-checks", "project-card-1-todos"] {
+        let at = cx.debug_bounds(part).unwrap_or_else(|| panic!("{part} is drawn"));
+        assert!(at.top() >= title.bottom(), "{part} under the title, not crowding it: {at:?}");
     }
+    assert!(cx.debug_bounds("project-card-1-branch").is_none(), "its branch is history now");
     assert!(cx.debug_bounds("project-card-2-branch").is_none(), "nothing on its way yet");
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l == "2 checks running"), "{said:?}");
@@ -1862,6 +1865,16 @@ fn the_bar_fills_only_with_what_merged(cx: &mut TestAppContext) {
     assert!((fill(cx) - third).abs() < px(1.0), "one of three merged: {:?} of {track:?}", fill(cx));
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l == "1 of 3 merged"), "{said:?}");
+    // Said once, in figures beside the bar, not on the title's line too.
+    let progress = cx.debug_bounds("project-progress").expect("the count");
+    let track = cx.debug_bounds("project-bar").expect("the bar");
+    assert!(progress.left() >= track.right(), "right of the bar: {progress:?} {track:?}");
+    assert!(
+        progress.top() < track.bottom() && progress.bottom() > track.top(),
+        "on the bar's row: {progress:?} {track:?}"
+    );
+    let title = cx.debug_bounds("project-title").expect("the title");
+    assert!(progress.top() >= title.bottom(), "not on the title's line: {title:?}");
 }
 
 /// The message to the orchestrator has its own send control: a click sends what is written, as

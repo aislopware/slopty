@@ -11580,6 +11580,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     thread's: the field at the prose's 15 in the reading column, no line over it, and a foot
     that is the pane's frame with Delta's send at its end, armed by the first word; ↵ and the
     send hand the goal on alike. The line where the goal goes stays under the question.
+  - **A board row says one fact at its end** (§2.3.4, §2.3.6, §2.3.7): the check at work,
+    else what the task is doing, else where it runs. Its other facts (its pull request and
+    checks, its to-dos, its place in the queue, and for a task at work its branch and machine)
+    hang on a second line on the title's edge, a dot between two, where three facts at the
+    line's end crowded a title half their width. A check that passed says nothing on its row:
+    its lane says it. The board's title line holds the title and its controls only; what runs
+    joins where the work goes on the line under it, and "N of M merged" stands once, in
+    figures right of the bar. Merge is Delta's icon button (`git-merge` in the success ink),
+    shown while the task waits, not the board's one framed button.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11590,6 +11599,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`,
     `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
     `workspace::tests::palette::the_empty_page_has_one_edge`,
+    `workspace::tests::projects::{a_card_draws_its_pipeline_once_its_work_is_on_its_way,
+    the_bar_fills_only_with_what_merged}`,
     `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;
     `slopty-kit` `kit::tests::a_hung_box_holds_its_content_on_the_edge`,
     `conversation::thread::tests::an_empty_thread_asks_in_its_field_under_the_header`,
