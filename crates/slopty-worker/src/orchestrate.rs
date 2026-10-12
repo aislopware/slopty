@@ -58,9 +58,11 @@ use slopty_proto::terminal::{
 };
 use slopty_proto::thread::wire::{self, Intent, ThreadRow};
 use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
+use slopty_pty::protocol::Part;
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
+use crate::restore::{Brief, Orchestrated};
 use crate::session::{Read, SessionHandle, Text};
 use crate::{ItemStore, Worker, WorkerError, listing};
 
@@ -109,7 +111,14 @@ pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
 
 /// Between a pasted prompt and the Enter that submits it. Ink-based TUIs (Claude Code) read
 /// a paste and an Enter that arrive in one read as one paste, and the Enter is swallowed.
+///
+/// ptyd keeps the pause, not this worker: the paste and its Enter are one delivery
+/// ([`Worker::deliver`]), so a worker that goes in between loses neither.
 const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
+
+/// How long a worker that started again waits for a session an older worker still lets go of
+/// before it takes up the agent in it ([`Orchestrator::take_up`]).
+const TAKE_UP_WITHIN: Duration = Duration::from_secs(30);
 
 /// How long after answering [`Verb::RestartWorker`] the daemon exits: time for the answer to
 /// leave on the server's link, which goes with the process.
@@ -418,6 +427,34 @@ impl Orchestrator {
             restart: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
+    }
+
+    /// Take up the agents orchestration started before this worker did, which live on in ptyd
+    /// ([`Worker::orchestrated`]): each is followed again, so its prompts wait on the board as
+    /// they did, is guarded as an agent's terminal, and gets a brief still owed once it is at
+    /// its prompt, under the delivery's own name, so ptyd types it no second time. Must be
+    /// called on a tokio runtime.
+    pub fn take_up(&self) {
+        let inner = &self.inner;
+        for (session, kept) in inner.worker.orchestrated() {
+            tracing::info!(%session, owed = kept.brief.is_some(), "taking up an agent started before");
+            inner.agent_terms.lock().insert(session);
+            inner.conversations.follow(session);
+            let Some(brief) = kept.brief else { continue };
+            let heard = inner.heard.subscribe();
+            let worker = inner.worker.clone();
+            tokio::spawn(async move {
+                match worker.get_adopted(session, TAKE_UP_WITHIN).await {
+                    Ok(handle) => {
+                        let agents = worker.shared_agents();
+                        type_when_ready(handle, brief, AgentFeed { heard, agents }, worker).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%session, error = %e, "brief owed to a session not taken up");
+                    }
+                }
+            });
+        }
     }
 
     /// Start the server's tasks' threads in `threads` from now on. The first one given
@@ -1033,9 +1070,14 @@ impl Orchestrator {
         let session = handle.id();
         self.inner.agent_terms.lock().insert(session);
         tracing::info!(%session, conversation = ?conversation, "agent started");
-        if let Some(prompt) = prompt {
-            let agents = self.inner.worker.shared_agents();
-            tokio::spawn(type_when_ready(handle, prompt, AgentFeed { heard, agents }));
+        // Kept before any of the brief is typed: a worker that starts again in between takes
+        // the agent up, and types the brief once, whichever side of the restart ptyd took it.
+        let brief = prompt.map(|text| Brief { delivery: delivery_name(), text });
+        let worker = self.inner.worker.clone();
+        worker.keep_orchestrated(session, Orchestrated { brief: brief.clone() }).await;
+        if let Some(brief) = brief {
+            let agents = worker.shared_agents();
+            tokio::spawn(type_when_ready(handle, brief, AgentFeed { heard, agents }, worker));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
     }
@@ -1541,21 +1583,24 @@ fn at_its_prompt(agent: &SessionAgent) -> bool {
 /// Type a spawned agent's first prompt once its hooks say it is at its prompt and nothing
 /// stands in the way ([`may_type`]), trying again at each report of the agent until
 /// [`PROMPT_READY_WITHIN`] has passed. Never typed blind: when the agent never gets there, or
-/// has ended, the prompt is left unsent and the log says why.
-async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentFeed) {
+/// has ended, the prompt is left unsent, owed no more, and the log says why.
+///
+/// The paste and the Enter that submits it go to ptyd as one delivery ([`submit`]), judged
+/// once, as it starts: an agent asks the person something only inside a turn, and its turn
+/// starts with this Enter.
+async fn type_when_ready(handle: SessionHandle, brief: Brief, mut feed: AgentFeed, worker: Worker) {
     let session = handle.id();
     let Some(deadline) = tokio::time::Instant::now().checked_add(PROMPT_READY_WITHIN) else {
         return;
     };
     let mut activity = handle.activity();
     let mut held = not_ready();
-    loop {
+    let left = loop {
         if feed.agents.status(session).is_some_and(|a| at_its_prompt(&a)) {
             match may_type(&handle, &*feed.agents, true) {
-                Ok(()) => break,
+                Ok(()) => break None,
                 Err(refused) if refused.code == ErrorCode::AgentExited => {
-                    tracing::warn!(%session, why = %refused.message, "first prompt left unsent");
-                    return;
+                    break Some(refused.message);
                 }
                 Err(refused) => held = refused,
             }
@@ -1563,52 +1608,75 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
         let reported = async {
             loop {
                 match feed.heard.recv().await {
-                    Ok(ev) if ev.session == session => return true,
+                    Ok(ev) if ev.session == session => return Some(true),
                     Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => return true,
-                    Err(broadcast::error::RecvError::Closed) => return false,
+                    Err(broadcast::error::RecvError::Lagged(_)) => return Some(true),
+                    Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
         };
+        // `Some(false)` once the agent's terminal ended; `None` when its actor is gone, the
+        // worker going down.
         let exited = async {
             while !activity.borrow_and_update().exited {
                 if activity.changed().await.is_err() {
-                    return;
+                    return None;
                 }
             }
+            Some(false)
         };
         let woke = tokio::select! {
             reported = tokio::time::timeout_at(deadline, reported) => reported,
-            () = exited => Ok(false),
+            ended = exited => Ok(ended),
         };
         match woke {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(%session, "first prompt left unsent: the agent's terminal ended");
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => break Some("the agent's terminal ended".to_owned()),
+            Ok(None) => {
+                // The next worker takes the agent up, and the brief with it.
+                tracing::info!(%session, "the worker goes down; the first prompt stays owed");
                 return;
             }
             Err(_elapsed) => {
-                tracing::warn!(
-                    %session, within = ?PROMPT_READY_WITHIN, why = %held.message,
-                    "first prompt left unsent: the agent never became ready for it"
-                );
-                return;
+                break Some(format!(
+                    "the agent never became ready for it within {PROMPT_READY_WITHIN:?}: {}",
+                    held.message
+                ));
             }
         }
-    }
-    tracing::info!(%session, "typing the agent's first prompt");
-    if let Err(e) =
-        handle.request(ORCHESTRATOR, TermRequest::Paste { text: prompt, confirmed: true })
-    {
-        tracing::warn!(%session, error = %e, "first prompt not typed");
+    };
+    if let Some(why) = left {
+        tracing::warn!(%session, %why, "first prompt left unsent");
+        worker.brief_settled(session, brief.delivery);
         return;
     }
-    tokio::time::sleep(SUBMIT_PAUSE).await;
-    let enter = Input::Keys(vec!["enter".to_owned()]);
-    let guard = || may_type(&handle, &*feed.agents, true);
-    if let Err(e) = write_input(&handle, &enter, guard).await {
-        tracing::warn!(%session, error = %e.message, "first prompt typed but not submitted");
+    tracing::info!(%session, "typing the agent's first prompt");
+    if let Err(e) = submit(&handle, &brief, &worker).await {
+        tracing::warn!(%session, error = %e.message, "first prompt not typed; owed until the worker starts again");
     }
+}
+
+/// Hand ptyd `brief` pasted and an Enter [`SUBMIT_PAUSE`] after it, as one delivery under the
+/// brief's name: once ptyd has it, it is typed whole whatever becomes of this worker, and sent
+/// again by the next it is typed no second time. The session's mark is set first, as
+/// [`write_input`] sets it.
+async fn submit(handle: &SessionHandle, brief: &Brief, worker: &Worker) -> Result<(), Failure> {
+    let enter = keys::parse("enter", 0).map_err(|why| Failure::new(ErrorCode::Invalid, why))?;
+    if handle.mark().is_none() {
+        handle.mark_if_unset(position(handle).await?);
+    }
+    let entry = handle.entry(brief.text.clone(), enter).await?;
+    let pause = u32::try_from(SUBMIT_PAUSE.as_millis()).unwrap_or(u32::MAX);
+    let parts =
+        vec![Part { after_ms: 0, bytes: entry.paste }, Part { after_ms: pause, bytes: entry.key }];
+    worker.deliver(handle.id(), brief.delivery, parts).await?;
+    Ok(())
+}
+
+/// A name for a delivery no other of its session's has had, before or after a restart: the
+/// random half of a fresh time-ordered id.
+fn delivery_name() -> u64 {
+    SessionId::new().as_uuid().as_u64_pair().1
 }
 
 /// Type into a session the way a client's input path does.

@@ -24,6 +24,11 @@
 //! person's daemon, as every Codex Slopty lets an agent open is, its thread is found as a typed
 //! one's is.
 //!
+//! A session whose agent orchestration started says so in its recipe ([`Orchestrated`]), with
+//! the brief still owed to the agent's first prompt: a worker that starts again while ptyd holds
+//! the session follows the agent again and types the brief once
+//! (`crate::orchestrate::Orchestrator::take_up`).
+//!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
 //! [`KEEP_SOON`] of the last, and a full scrollback, megabytes, no more often than
@@ -91,6 +96,27 @@ pub struct Recipe {
     pub agent: Option<Resume>,
     /// The Codex or pi session running in it, typed there by the person, to take up again.
     pub typed: Option<Typed>,
+    /// Orchestration started the agent in it: followed again, and its brief typed if still
+    /// owed, by the worker that holds it next.
+    pub orchestrated: Option<Orchestrated>,
+}
+
+/// What orchestration keeps of an agent it started ([`Recipe::orchestrated`]), so a worker that
+/// starts again while the agent lives on in ptyd takes it up where the last one was.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Orchestrated {
+    /// The brief owed to the agent's first prompt, until ptyd took it whole.
+    pub brief: Option<Brief>,
+}
+
+/// A brief owed to an agent's first prompt ([`Orchestrated::brief`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Brief {
+    /// The delivery that types it (`slopty_pty::protocol::PtydRequest::Deliver`): sent again
+    /// under the same name, ptyd types it no second time.
+    pub delivery: u64,
+    /// The brief.
+    pub text: String,
 }
 
 /// What an agent the worker resumes is given besides its own flags.
@@ -137,6 +163,7 @@ impl Recipe {
             restored: None,
             agent: None,
             typed: None,
+            orchestrated: None,
         }
     }
 
@@ -329,10 +356,13 @@ pub fn system_shells() -> String {
 }
 
 enum Job {
-    Opened(SessionId, Recipe),
+    // Boxed: a recipe is far larger than any other job.
+    Opened(SessionId, Box<Recipe>),
     Checkpoint(SessionId, Vec<u8>, Place),
     Agent(SessionId, Option<Resume>),
     Typed(SessionId, Option<Typed>),
+    Orchestrated(SessionId, Orchestrated, oneshot::Sender<()>),
+    Delivered(SessionId, u64),
     Forget(SessionId),
     Flush(oneshot::Sender<()>),
 }
@@ -387,7 +417,7 @@ impl Keeper {
 
     /// Session `id` was opened, or reopened, from `recipe`: written at once.
     pub fn opened(&self, id: SessionId, recipe: Recipe) {
-        let _sent = self.jobs.send(Job::Opened(id, recipe));
+        let _sent = self.jobs.send(Job::Opened(id, Box::new(recipe)));
     }
 
     /// Session `id`'s newest checkpoint, and where it stands.
@@ -405,6 +435,21 @@ impl Keeper {
     /// at once when it differs from the one kept.
     pub fn typed(&self, id: SessionId, typed: Option<Typed>) {
         let _sent = self.jobs.send(Job::Typed(id, typed));
+    }
+
+    /// Orchestration started the agent in session `id`, as `orchestrated` says: returns once
+    /// that is on disk, so a brief is owed there before any of it is typed.
+    pub async fn orchestrated(&self, id: SessionId, orchestrated: Orchestrated) {
+        let (reply, done) = oneshot::channel();
+        if self.jobs.send(Job::Orchestrated(id, orchestrated, reply)).is_ok() {
+            let _written = done.await;
+        }
+    }
+
+    /// The brief owed in session `id` under `delivery` is owed no more: ptyd took it, or it
+    /// was given up.
+    pub fn delivered(&self, id: SessionId, delivery: u64) {
+        let _sent = self.jobs.send(Job::Delivered(id, delivery));
     }
 
     /// Session `id` was closed: nothing of it is kept.
@@ -482,7 +527,7 @@ async fn write_loop(
             }
             Some(Job::Opened(id, recipe)) => {
                 write_recipe(&dir, id, &recipe).await;
-                recipes.insert(id, recipe);
+                recipes.insert(id, *recipe);
             }
             Some(Job::Checkpoint(id, state, place)) => {
                 let recipe = recipes.entry(id).or_insert_with(|| Recipe::adopted(place.size));
@@ -510,6 +555,24 @@ async fn write_loop(
                     && recipe.typed != typed
                 {
                     recipe.typed = typed;
+                    let recipe = recipe.clone();
+                    write_recipe(&dir, id, &recipe).await;
+                }
+            }
+            Some(Job::Orchestrated(id, orchestrated, written)) => {
+                if let Some(recipe) = recipes.get_mut(&id) {
+                    recipe.orchestrated = Some(orchestrated);
+                    let recipe = recipe.clone();
+                    write_recipe(&dir, id, &recipe).await;
+                }
+                let _told = written.send(());
+            }
+            Some(Job::Delivered(id, delivery)) => {
+                if let Some(recipe) = recipes.get_mut(&id)
+                    && let Some(kept) = &mut recipe.orchestrated
+                    && kept.brief.as_ref().is_some_and(|brief| brief.delivery == delivery)
+                {
+                    kept.brief = None;
                     let recipe = recipe.clone();
                     write_recipe(&dir, id, &recipe).await;
                 }
@@ -970,6 +1033,30 @@ mod tests {
         let (_again, found) = Keeper::open(dir.path()).unwrap();
         assert!(found[&b].agent.is_none());
         assert!(found[&a].agent.is_some());
+    }
+
+    /// A brief owed is on disk by the time the keeper says it is kept, and is owed no more once
+    /// its own delivery is settled; another delivery's word leaves it owed.
+    #[tokio::test]
+    async fn a_brief_is_owed_until_its_own_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (keeper, _found) = Keeper::open(dir.path()).unwrap();
+        let a = SessionId::new();
+        keeper.opened(a, recipe(&["claude"]));
+        let brief = Brief { delivery: 7, text: "Write a.txt.".to_owned() };
+        keeper.orchestrated(a, Orchestrated { brief: Some(brief.clone()) }).await;
+        let (_again, found) = Keeper::open(dir.path()).unwrap();
+        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: Some(brief.clone()) }));
+
+        keeper.delivered(a, 8);
+        keeper.flush().await;
+        let (_again, found) = Keeper::open(dir.path()).unwrap();
+        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: Some(brief) }), "not its");
+
+        keeper.delivered(a, 7);
+        keeper.flush().await;
+        let (_again, found) = Keeper::open(dir.path()).unwrap();
+        assert_eq!(found[&a].orchestrated, Some(Orchestrated { brief: None }), "still followed");
     }
 
     /// A burst of checkpoints is one write now and one of the newest once the first one's pace

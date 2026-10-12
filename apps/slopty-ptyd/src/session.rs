@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use rustix::process::{Pid, Signal};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::terminal::TermSize;
-use slopty_pty::protocol::{Exit, Heir, SessionInfo};
+use slopty_pty::protocol::{Exit, Heir, Part, SessionInfo};
 use slopty_pty::shell_integration::ShellIntegration;
 use slopty_pty::{Pty, PtyMaster, Ring, SpawnSpec};
 use tokio::sync::{broadcast, watch};
@@ -112,7 +112,14 @@ struct State {
     checkpoint: Vec<u8>,
     /// Connection id holding the master, if any.
     attached_by: Option<u64>,
+    /// The deliveries taken ([`Session::deliver`]), the newest last, at most
+    /// [`DELIVERIES_KEPT`].
+    delivered: Vec<u64>,
 }
+
+/// How many deliveries a session remembers taking: a worker sends one again only right after
+/// it restarted, so a few cover every one it could.
+const DELIVERIES_KEPT: usize = 32;
 
 /// What a worker taking the master is handed besides it.
 #[derive(Debug)]
@@ -164,6 +171,7 @@ impl Session {
                 ring: Ring::new(backlog_bytes),
                 checkpoint: Vec::new(),
                 attached_by: None,
+                delivered: Vec::new(),
             },
             reader: Reader::Drain,
             exited: None,
@@ -198,6 +206,7 @@ impl Session {
                 ring: Ring::new(backlog_bytes),
                 checkpoint: Vec::new(),
                 attached_by: Some(conn),
+                delivered: Vec::new(),
             },
             reader: Reader::Pause,
             exited: None,
@@ -258,6 +267,7 @@ impl Session {
                 ring: Ring::holding(backlog_bytes, &backlog, dropped),
                 checkpoint,
                 attached_by: None,
+                delivered: Vec::new(),
             },
             reader: if attached { Reader::Pause } else { Reader::Drain },
             exited,
@@ -441,6 +451,33 @@ impl Session {
         }
     }
 
+    /// Type `parts` into the program in order, each after its pause, unless delivery
+    /// `delivery` was taken already (`PtydRequest::Deliver`). It runs on a task of its own, so
+    /// it finishes whatever becomes of the worker that sent it.
+    pub fn deliver(self: &Arc<Self>, delivery: u64, parts: Vec<Part>) {
+        {
+            let mut state = self.state.lock();
+            if state.delivered.contains(&delivery) {
+                tracing::info!(session = %self.id, delivery, "delivery taken already");
+                return;
+            }
+            if state.delivered.len() >= DELIVERIES_KEPT {
+                state.delivered.remove(0);
+            }
+            state.delivered.push(delivery);
+        }
+        let session = Arc::clone(self);
+        tokio::spawn(async move {
+            for part in parts {
+                tokio::time::sleep(Duration::from_millis(u64::from(part.after_ms))).await;
+                if let Err(e) = session.master.write_all(&part.bytes).await {
+                    tracing::warn!(session = %session.id, delivery, error = %e, "delivery not typed");
+                    return;
+                }
+            }
+        });
+    }
+
     /// Replace the checkpoint with one from connection `conn`, if it holds the master; the
     /// ring's bytes are inside it now, so they go.
     pub fn set_checkpoint(&self, conn: u64, checkpoint: Vec<u8>) {
@@ -543,6 +580,7 @@ impl Session {
             exited: *self.exited.borrow(),
             backlog: state.ring.len(),
             checkpoint: state.checkpoint.len(),
+            delivered: state.delivered.clone(),
         }
     }
 

@@ -1767,11 +1767,9 @@ mod tests {
             found.check(going.is_some(), "answered, the task still waits on the person");
         }
 
-        // The Linux worker restarts mid-task, its agent at work on its brief; it lives on in
-        // ptyd. The brief's Enter follows its paste by `SUBMIT_PAUSE` (200 ms): a restart
-        // inside that span loses the Enter, which nothing types again (an open item of
-        // `.research/readiness-w-2026-10-12b.md`), so the restart comes a second on.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // The Linux worker restarts mid-task, right after the answer: its brief is being
+        // typed, or waits to be. The agent lives on in ptyd, and the brief reaches it once,
+        // whole, whichever side of the restart it was typed on.
         let worker_pid = linux[1].id().unwrap();
         slopty_testkit::group::kill(worker_pid);
         let _ended = linux[1].wait().await;
@@ -1841,18 +1839,21 @@ mod tests {
             found.check(card.is_some(), &format!("task {task} is never ready to merge"));
         }
         eprintln!("MEASURE both reported to both ready: {:?}", reported.elapsed());
-        // Its brief went in once the question was answered and its turn ended.
+        // Its brief went in once the question was answered and its turn ended, once, though
+        // its worker restarted as it was typed.
         let briefed = soon(soonish, async || {
             let seen: Value =
                 serde_json::from_slice(&std::fs::read(root.join("linux-task.json")).ok()?).ok()?;
             let typed = seen["typed"].as_array()?;
-            typed.iter().any(|t| t == "Write linux.txt.").then_some(())
+            let times = typed.iter().filter(|t| *t == "Write linux.txt.").count();
+            (times > 0).then_some(times)
         })
         .await;
         found.check(
             briefed.is_some(),
             "its brief never reaches the agent that asked a question first",
         );
+        found.check(briefed.is_none_or(|times| times == 1), "its brief is typed twice");
 
         // The person reviews each task's change in the orchestrator's clone: the Linux one
         // brought home as `slopty/demo/1`, the studio's on its own branch there.

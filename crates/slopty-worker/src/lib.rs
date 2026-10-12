@@ -44,7 +44,7 @@ pub mod xfer;
 pub use items::ItemStore;
 pub use manager::Worker;
 pub use screen::{DatagramSink, ScreenError, ScreenStream};
-pub use session::{ClientSink, DragData, DragFetch, DragStream, SessionHandle, Taken};
+pub use session::{ClientSink, DragData, DragFetch, DragStream, Entry, SessionHandle, Taken};
 
 /// Worker errors.
 #[derive(Debug, thiserror::Error)]

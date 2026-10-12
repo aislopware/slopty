@@ -21,7 +21,7 @@ mod golden {
     use slopty_proto::terminal::TermSize;
     use slopty_pty::SpawnSpec;
     use slopty_pty::protocol::{
-        Bequest, Exit, Heir, OutputFrame, PtydEvent, PtydRequest, SessionInfo, inherit_args,
+        Bequest, Exit, Heir, OutputFrame, Part, PtydEvent, PtydRequest, SessionInfo, inherit_args,
     };
     use uuid::Uuid;
 
@@ -57,6 +57,7 @@ mod golden {
             PtydRequest::Adopt { .. } => "request_adopt",
             // An older ptyd reads it from a newer build: it is the handover's.
             PtydRequest::Succeed { .. } => "succession_request",
+            PtydRequest::Deliver { .. } => "request_deliver",
         }
     }
 
@@ -107,6 +108,14 @@ mod golden {
                 term: "xterm-ghostty".to_owned(),
             },
             PtydRequest::Succeed { program: PathBuf::from("/Users/me/.slopty/bin/slopty-ptyd") },
+            PtydRequest::Deliver {
+                id: id(),
+                delivery: 7,
+                parts: vec![
+                    Part { after_ms: 0, bytes: b"go".to_vec() },
+                    Part { after_ms: 200, bytes: b"\r".to_vec() },
+                ],
+            },
         ]
     }
 
@@ -129,6 +138,7 @@ mod golden {
             exited: Some(Exit::with(-9)),
             backlog: 1024,
             checkpoint: 2048,
+            delivered: vec![7],
         };
         vec![
             PtydEvent::Spawned { id: id(), pid: 4242 },

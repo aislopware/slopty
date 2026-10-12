@@ -3406,3 +3406,42 @@ reordering and edited allows are gone" in `agents.md`.*
 - Tests: `a_person_s_day_across_two_workers` (`slopty-cli`, `projects`) walks all four, and
   `a_program_that_reports_no_directory_is_where_it_was_started` (`slopty-worker`,
   `session_actor`) covers the first at its own layer.
+
+**A task starts only where its project's repository is known, and its brief survives a worker
+restart.** ✅ 2026-10-12 (open items 1, 2 and 4 of `.research/readiness-w-2026-10-12b.md`)
+- **No repository, no start.** A task with no directory of its own, in a project whose
+  orchestrator's terminal has not said its repository yet, used to start in the project's path
+  as written, the person's own checkout, and failing that in the worker's home: an agent working
+  on nothing. Such a start is now refused with words (`ErrorCode::Unplaced`: start it again once
+  the repository is known, or name a directory). A project with no orchestrator still starts a
+  task in its path when that is a path on a worker, and is refused when it is not
+  (`ErrorCode::Invalid`). The home fallback is deleted. A project's status (CLI and Slopty's
+  tools) now carries `repo_id`, so the orchestrator told to start again can see when it may.
+  The branch cleanups a project leaves are ordered by worker and repository, so they are asked
+  and kept the same way every time.
+- **A brief's paste and its Enter are one delivery.** The first prompt is pasted, and the Enter
+  that submits it follows 200 ms later (Ink reads a paste and an Enter in one read as one
+  paste). A worker killed inside those 200 ms left the brief in the agent's input with nothing
+  to submit it; under load, a question the agent raised inside them made the Enter's own guard
+  refuse it, and the brief sat there just the same. The worker now encodes both and hands them
+  to ptyd as one `PtydRequest::Deliver`: ptyd types the parts in order, each after its pause, on
+  a task of its own, so they finish whatever becomes of the worker. The pair is judged once, as
+  it starts: an agent asks the person something only inside a turn, and its turn starts with
+  this Enter.
+- **Typed once.** A delivery has a name, random per brief. ptyd takes a name once per session
+  (it remembers the last 32) and lists the names it took (`SessionInfo::delivered`). The brief
+  is kept owed in the session's recipe (`Recipe::orchestrated`), on disk before any of it is
+  typed. The worker that starts next drops it if ptyd lists its name, and otherwise types it,
+  under the same name, once the agent is at its prompt, so a brief ptyd took just as the old
+  worker died is not typed again. Known gap: the names do not cross a ptyd succession (adding
+  them to the handover would change its fingerprint and end every session on the next update),
+  so a worker killed in the same instant as a ptyd update could type a brief twice.
+- **Followed again after a restart.** The sessions whose agent orchestration started carry that
+  in their recipe. A worker that starts again takes them up (`Orchestrator::take_up`): it follows
+  each again, so a question waits on the board as before, and guards each as an agent's
+  terminal. A session reopened after its shell was lost is a new program, and is not taken up.
+- Tests: `a_start_before_the_project_knows_its_repository_is_refused` and
+  `a_start_with_nowhere_to_run_is_refused` (`slopty-server`);
+  `a_delivery_finishes_without_its_worker_and_is_typed_once` (`slopty-ptyd`, `roundtrip`);
+  `a_brief_is_owed_until_its_own_delivery` (`slopty-worker`, `restore`); and the day walk, which
+  again restarts the Linux worker right after the answer and checks the brief arrives once.

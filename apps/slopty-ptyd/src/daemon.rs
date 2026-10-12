@@ -808,6 +808,15 @@ impl Connection {
                     Err(e) => self.error(Some(id), PtydError::Os(e.to_string())).await,
                 }
             }
+            PtydRequest::Deliver { id, delivery, parts } => {
+                // No reply by contract: it rides the attached worker's taps.
+                if let Some(session) = self.session(id) {
+                    session.deliver(delivery, parts);
+                } else {
+                    tracing::debug!(session = %id, "delivery to no session");
+                }
+                Ok(())
+            }
             PtydRequest::Succeed { program } => {
                 let (failed, why) = oneshot::channel();
                 let asked = Succession { program, failed };

@@ -143,6 +143,19 @@ impl PtydClient {
         self.send(&codec::encode(&PtydRequest::Resize { id, size })?).await
     }
 
+    /// Hand ptyd input to type whole, `parts` in order under the name `delivery`
+    /// ([`PtydRequest::Deliver`]). Fire-and-forget, like [`Self::output`]: once the socket took
+    /// it, ptyd types it whether or not this worker stays.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "one sender at a time; see the type")]
+    pub async fn deliver(
+        &mut self,
+        id: SessionId,
+        delivery: u64,
+        parts: Vec<crate::protocol::Part>,
+    ) -> Result<(), PtyError> {
+        self.send(&codec::encode(&PtydRequest::Deliver { id, delivery, parts })?).await
+    }
+
     /// Kill and forget.
     pub async fn close(&mut self, id: SessionId) -> Result<(), PtyError> {
         self.expect_ok(&PtydRequest::Close { id }).await

@@ -96,6 +96,35 @@ async fn claude_installed(stack: &ProjectStack) {
     }
 }
 
+/// `git -C dir args…`, with nobody's git config, once it succeeded.
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ran = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=Mira", "-c", "user.email=mira@localhost"])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+}
+
+/// Wait until the project knows its repository, as its orchestrator's terminal names it: a
+/// task with no directory of its own starts only then, in a worktree of it, and one started
+/// before is refused.
+async fn repository_known(stack: &ProjectStack) {
+    let started = tokio::time::Instant::now();
+    loop {
+        let status = stack.slopty(&["project", "status", PROJECT]).await.unwrap();
+        if status["project"]["repo_id"]["root"].is_string() {
+            return;
+        }
+        assert!(started.elapsed() < STEP, "the project's repository: {status}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Render the window as `name` and hold it to its golden.
 async fn golden(stack: &mut ProjectStack, name: &str) {
     let frame = stack.driver.render(&stack.path(&format!("{name}.png"))).await.unwrap();
@@ -111,7 +140,12 @@ async fn golden(stack: &mut ProjectStack, name: &str) {
 async fn a_project_board_follows_its_orchestration() {
     let mut stack = ProjectStack::launch("studio").await.unwrap();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let repo = stack.path("repo").to_string_lossy().into_owned();
+    // The orchestrator works in a repository, as a goal's does: its tasks go in worktrees of
+    // it.
+    let checkout = stack.path("repo");
+    git(&checkout, &["init", "-q", "-b", "main"]);
+    git(&checkout, &["commit", "-q", "--allow-empty", "-m", "start"]);
+    let repo = checkout.to_string_lossy().into_owned();
 
     let orchestrator = term(&stack.slopty(&["agent", "spawn", "--cwd", &repo]).await.unwrap());
     let orchestrator_session = session_of(&orchestrator);
@@ -135,6 +169,7 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
     claude_installed(&stack).await;
+    repository_known(&stack).await;
     let started = stack
         .slopty(&["task", "start", "--project", PROJECT, "--title", "Mirror the server's projects"])
         .await
@@ -423,20 +458,11 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let repo = stack.path("repo").to_string_lossy().into_owned();
     let tree = stack.path("repo/.claude/worktrees/slopty-board-1");
-    let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["-c", "user.name=Mira", "-c", "user.email=mira@localhost"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-    };
-    git(&["init", "-q", "-b", "main"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let checkout = stack.path("repo");
+    git(&checkout, &["init", "-q", "-b", "main"]);
+    git(&checkout, &["commit", "-q", "--allow-empty", "-m", "start"]);
     let at = tree.to_string_lossy().into_owned();
-    git(&["worktree", "add", "-q", "-b", "worktree-slopty-board-1", &at]);
+    git(&checkout, &["worktree", "add", "-q", "-b", "worktree-slopty-board-1", &at]);
 
     // Its own start alone: the worker's script is the task's.
     let alone = r#"STUB_HOOKS=[{"hook_event_name":"SessionStart","source":"startup"}]"#;
@@ -463,6 +489,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         .await
         .unwrap();
     claude_installed(&stack).await;
+    repository_known(&stack).await;
     stack
         .slopty(&["task", "start", "--project", PROJECT, "--title", "Read a pull request's checks"])
         .await

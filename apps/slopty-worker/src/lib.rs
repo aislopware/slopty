@@ -404,6 +404,9 @@ fn join_server(
     }
     let kept = slopty_worker::facts::Kept::default();
     orchestrator.set_facts(kept.clone());
+    // The agents it started before a restart live on in ptyd: followed again, a brief owed
+    // typed once.
+    orchestrator.take_up();
     let facts = kept.subscribe();
     let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
     let facts_task = tokio::spawn(slopty_worker::facts::watch(kept, own));

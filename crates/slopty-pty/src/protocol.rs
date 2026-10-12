@@ -153,11 +153,35 @@ pub enum PtydRequest {
     /// cannot, `program` above all handing sessions on another way (its succession, which
     /// `slopty-ptyd --custody` prints, differs).
     ///
-    /// The last request, so a request added later moves nothing an older ptyd reads of it.
+    /// Requests are added only after it, so one added later moves nothing an older ptyd reads
+    /// of it.
     Succeed {
         /// The new build's `slopty-ptyd`.
         program: PathBuf,
     },
+    /// Type `parts` into the session's program, in order, each after its pause: input the
+    /// worker hands over whole, such as a pasted prompt and the Enter that submits it, so a
+    /// worker that goes in between loses none of it. `delivery` names it: one this ptyd took for
+    /// the session already is not typed again, so a worker that cannot tell whether its
+    /// delivery went sends it again. No reply: it rides the attached worker's taps.
+    Deliver {
+        /// The session it is about.
+        id: SessionId,
+        /// The delivery's name, chosen by the worker.
+        delivery: u64,
+        /// What is typed.
+        parts: Vec<Part>,
+    },
+}
+
+/// One part of a [`PtydRequest::Deliver`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Part {
+    /// How long after the part before it (or the delivery's arrival) it is typed.
+    pub after_ms: u32,
+    /// The bytes, as the program's terminal encodes them.
+    #[serde(with = "byte_string")]
+    pub bytes: Vec<u8>,
 }
 
 /// The flag a ptyd running a new build in place ([`PtydRequest::Succeed`]) runs it with,
@@ -361,6 +385,9 @@ pub struct SessionInfo {
     pub backlog: usize,
     /// Checkpoint bytes held.
     pub checkpoint: usize,
+    /// The deliveries ([`PtydRequest::Deliver`]) this ptyd took for it, the newest last: a
+    /// worker that started again learns from them whether the one it owes went.
+    pub delivered: Vec<u64>,
 }
 
 /// [`PtydRequest::Output`] as its codec frame, ready for [`crate::PtydClient::output`].

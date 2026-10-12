@@ -91,6 +91,9 @@ pub struct ProjectView<'a> {
     project: &'a str,
     title: &'a str,
     repo: &'a str,
+    /// Which repository that is on every machine, once its orchestrator's terminal named it:
+    /// a task with no directory of its own is started only then, in a worktree of it.
+    repo_id: Option<&'a slopty_proto::terminal::RepoId>,
     target: &'a str,
     /// The goal the person handed over.
     goal: Option<&'a str>,
@@ -139,6 +142,7 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         project: p.id.as_str(),
         title: &p.title,
         repo: &p.repo,
+        repo_id: p.repo_id.as_ref(),
         target: &p.target,
         goal: p.goal.as_deref(),
         autonomy: autonomy_word(p.autonomy),

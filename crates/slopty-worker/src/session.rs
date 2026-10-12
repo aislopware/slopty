@@ -14,6 +14,7 @@ use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, Text
 use slopty_engine::{Compression, EngineConfig, EngineEvent, GhosttyEngine, ImageUpload, Memory};
 use slopty_proto::codec;
 use slopty_proto::drag::{DragId, DragItem};
+use slopty_proto::input::KeyEvent;
 use slopty_proto::terminal::{
     ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
     ProgramState, ProgramStatus, Progress, ProgressState, Restored, TermColors, TermError,
@@ -175,6 +176,7 @@ enum Cmd {
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     ShareClipboard { clip: Arc<dyn ForSessions> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
+    Entry { text: String, then: KeyEvent, reply: oneshot::Sender<Result<Entry, WorkerError>> },
     Exited { exit: Exit },
     Launch { line: String },
     Master { reply: oneshot::Sender<std::io::Result<OwnedFd>> },
@@ -381,6 +383,7 @@ impl std::fmt::Debug for Cmd {
             Self::Memory { .. } => "Memory",
             Self::ShareClipboard { .. } => "ShareClipboard",
             Self::Read { .. } => "Read",
+            Self::Entry { .. } => "Entry",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
             Self::Master { .. } => "Master",
@@ -523,6 +526,20 @@ impl SessionHandle {
         rx.await.map_err(|_gone| WorkerError::SessionClosed)?
     }
 
+    /// `text` pasted and `then` pressed after it, as the program's terminal encodes them now,
+    /// for ptyd to type whole ([`crate::Worker::deliver`]). The program hears it as a viewer's
+    /// typing: a resuming line still owed to its first prompt is not typed.
+    ///
+    /// # Errors
+    ///
+    /// The engine failing to encode either; [`WorkerError::SessionClosed`] once the actor is
+    /// gone.
+    pub async fn entry(&self, text: String, then: KeyEvent) -> Result<Entry, WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Cmd::Entry { text, then, reply })?;
+        rx.await.map_err(|_gone| WorkerError::SessionClosed)?
+    }
+
     /// The session's [`Activity`], marked seen as of now: `changed()` wakes on what happens
     /// next, and errors once the actor has stopped.
     #[must_use]
@@ -608,6 +625,15 @@ impl SessionHandle {
     fn send(&self, cmd: Cmd) -> Result<(), WorkerError> {
         self.tx.send(cmd).map_err(|_gone| WorkerError::SessionClosed)
     }
+}
+
+/// A paste and the key that submits it, encoded for the program ([`SessionHandle::entry`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entry {
+    /// The paste, bracketed when the program asked for that.
+    pub paste: Vec<u8>,
+    /// The key.
+    pub key: Vec<u8>,
 }
 
 /// What the actor hands ptyd so the session outlives this worker: a copy of every byte read from
@@ -2359,6 +2385,9 @@ impl Actor {
             Cmd::Read { read, reply } => {
                 let _ignored = reply.send(self.read(read));
             }
+            Cmd::Entry { text, then, reply } => {
+                let _ignored = reply.send(self.entry(&text, &then));
+            }
             Cmd::Launch { line } => {
                 let until = tokio::time::Instant::now().checked_add(FIRST_PROMPT_WAIT);
                 self.launch = until.map(|until| (line, until));
@@ -2410,6 +2439,18 @@ impl Actor {
             Read::Since(from) => Text::Since(engine.text_since(from)?),
             Read::EndedAfter(from) => Text::Ended(engine.ended_after(from)),
         })
+    }
+
+    /// [`SessionHandle::entry`].
+    fn entry(&mut self, text: &str, then: &KeyEvent) -> Result<Entry, WorkerError> {
+        if self.launch.take().is_some() {
+            tracing::info!(session = %self.id, "an entry came before the first prompt; the agent is not resumed");
+        }
+        let mut paste = Vec::new();
+        self.engine.encode_paste(text, &mut paste)?;
+        let mut key = Vec::new();
+        self.engine.encode_key(then, &mut key)?;
+        Ok(Entry { paste, key })
     }
 
     fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
