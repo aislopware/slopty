@@ -405,9 +405,9 @@ fn the_column_s_gutter_follows_the_tile_s_room(cx: &mut TestAppContext) {
 }
 
 /// The thread has one left edge (`.research/design-polish-2026-10-12.md` §4.6): the person's
-/// turn, the agent's answer, a turn's summary line, a call's line, the composer's field and the
-/// foot's first glyph all start on it; prose keeps to Delta's 705, and a call's line runs on past
-/// it to the tile's side.
+/// turn, the agent's answer, a turn's summary line, a call's line and the composer's field all
+/// start on it (the foot is the pane's frame); prose keeps to Delta's 705, and a call's line
+/// runs on past it to the tile's side.
 #[gpui::test]
 fn the_thread_has_one_left_edge(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -434,17 +434,9 @@ fn the_thread_has_one_left_edge(cx: &mut TestAppContext) {
         cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} drawn"))
     };
     let edge = bounds(cx, "item-a").left();
-    for id in ["item-u", "fold-1-line", "tool-x", "thread-composer-field", "thread-checkout"] {
-        let left = bounds(cx, id).left();
-        let glyph = if id == "thread-checkout" {
-            // The foot's first button pads its glyph by half the room round it, and hangs by
-            // as much.
-            let theme = slopty_theme::Theme::default();
-            (slopty_kit::kit::icon_button_side(&theme) - theme.glyph()) / 2.0
-        } else {
-            0.0
-        };
-        let off = f32::from(left - edge) + glyph;
+    // The foot is the pane's frame, not the column's: it is not on this edge.
+    for id in ["item-u", "fold-1-line", "tool-x", "thread-composer-field"] {
+        let off = f32::from(bounds(cx, id).left() - edge);
         assert!(off.abs() < 0.5, "{id} {off} pt off the content edge");
     }
     let prose = bounds(cx, "prose-a");

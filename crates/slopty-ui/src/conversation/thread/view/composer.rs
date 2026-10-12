@@ -478,8 +478,8 @@ impl ThreadView {
     }
 
     /// The composer, Delta's next turn: the pane's width at its foot under the lighter line,
-    /// its field and foot in the reading column, the person's mark hung beside the field as it
-    /// hangs beside their turns.
+    /// its field in the reading column, the person's mark hung beside the field as it hangs
+    /// beside their turns, and its foot the pane's frame with equal ends.
     pub(super) fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
         if let Some(strip) = self.exited_strip(cx) {
             return strip;
@@ -530,20 +530,24 @@ impl ThreadView {
                         ),
                     ),
             );
-        // The foot's first glyph on the content edge, its button's pad hung left of it.
-        let foot = div().w_full().flex().pb(px(theme.spacing.sm)).child(kit::hang(
-            div().flex_1().min_w_0().child(self.composer_foot(editing, cx)),
-            theme,
-        ));
+        // The foot is the pane's frame, as its header is, not the reading column's: it spans
+        // the pane with the same inset at both ends, what the work is on the left and the means
+        // of sending on the right (`.research/warp-composition-2026-10-12.md` §1.12).
+        let inset = px(theme.spacing.inset_trailing());
+        let foot = div()
+            .w_full()
+            .flex()
+            .pl(inset)
+            .pr(inset)
+            .child(div().flex_1().min_w_0().child(self.composer_foot(editing, cx)));
         div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
             .key_context(super::COMPOSER_CTX)
             .w_full()
             .map(|el| self.shell(el))
-            .child(
-                self.measure_box().child(div().w_full().flex().flex_col().child(field).child(foot)),
-            )
+            .child(self.measure_box().child(div().w_full().flex().flex_col().child(field)))
+            .child(foot)
             .into_any_element()
     }
 
@@ -558,7 +562,7 @@ impl ThreadView {
         // words: the foot reads as one rhythm, Delta's.
         let row = kit::priority_row("thread-foot")
             .h(px(theme.density.foot))
-            .gap(px(theme.spacing.xs))
+            .gap(px(theme.spacing.xxs))
             .dropped(&self.foot_dropped);
         let item =
             |row: kit::PriorityRow, (key, priority): (&'static str, kit::Priority), el| match el {
@@ -581,8 +585,7 @@ impl ThreadView {
 
     /// Where the agent works, Delta's foot: the repository's glyph, then the checkout by its
     /// folder's name and its branch, "slopty / main", in the secondary tone; a press opens the
-    /// commit sheet on it. Its pad is half the room round its glyph, so the glyph hangs on the
-    /// column's edge with the foot ([`kit::hang`]).
+    /// commit sheet on it. Its pad is an icon button's, as every control of the foot keeps.
     fn checkout_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -643,8 +646,19 @@ impl ThreadView {
                 .role(Role::Label)
                 .aria_label(SharedString::from(format!("{added} added, {removed} removed")))
                 .flex_none()
-                .px(px(foot_pad(theme)))
+                .flex()
+                .items_center()
+                .gap(px(foot_pad(theme)))
+                .pr(px(foot_pad(theme)))
                 .text_size(px(theme.typography.small()))
+                // A divider parts it from the checkout before it, Delta's.
+                .child(
+                    div()
+                        .flex_none()
+                        .w(kit::HAIR)
+                        .h(px(theme.glyph()))
+                        .bg(hsla(theme.surfaces.stroke)),
+                )
                 .child(figures)
                 .into_any_element(),
         )

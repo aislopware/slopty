@@ -886,11 +886,11 @@ fn a_bang_first_asks_for_an_inline_terminal_and_esc_lets_it_go(cx: &mut TestAppC
     assert!(asked.borrow().is_empty(), "and asks nothing");
 }
 
-/// The composer's foot is one rhythm on the field's own column, Delta's foot: its first glyph
-/// on the field's left edge, the send's square on its right edge, and one gap between every
-/// control, each keeping an icon button's pad round its glyph or words.
+/// The composer's foot is the pane's frame, Delta's: it spans the pane with the same inset at
+/// both ends (its first control's box and the send's square each that far in), and one gap
+/// between every control, each keeping an icon button's pad round its glyph or words.
 #[gpui::test]
-fn the_foot_keeps_one_gap_on_the_fields_column(cx: &mut TestAppContext) {
+fn the_foot_spans_the_pane_with_equal_ends(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::thread("edit");
     state.meta.cwd = ROOT.to_owned();
@@ -901,17 +901,17 @@ fn the_foot_keeps_one_gap_on_the_fields_column(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let theme = slopty_theme::Theme::default();
-    let pad = (slopty_kit::kit::icon_button_side(&theme) - theme.glyph()) / 2.0;
-    let field = cx.debug_bounds("thread-composer-field").expect("the field");
+    let inset = theme.spacing.inset_trailing();
+    let pane = cx.debug_bounds("thread-composer").expect("the composer");
     let send = cx.debug_bounds("thread-send").expect("the send");
     assert!(
-        (f32::from(send.right()) - f32::from(field.right())).abs() < 0.5,
-        "the send on the field's right edge: {send:?} {field:?}"
+        (f32::from(pane.right()) - inset - f32::from(send.right())).abs() < 0.5,
+        "the send its inset from the pane's right: {send:?} {pane:?}"
     );
     let checkout = cx.debug_bounds("thread-checkout").expect("where the work is");
     assert!(
-        (f32::from(checkout.left()) + pad - f32::from(field.left())).abs() < 0.5,
-        "the first glyph on the field's left edge: {checkout:?} {field:?}"
+        (f32::from(checkout.left()) - inset - f32::from(pane.left())).abs() < 0.5,
+        "where the work is the same inset from its left: {checkout:?} {pane:?}"
     );
     let mut controls: Vec<gpui::Bounds<gpui::Pixels>> = [
         "thread-meter",
@@ -929,6 +929,6 @@ fn the_foot_keeps_one_gap_on_the_fields_column(cx: &mut TestAppContext) {
     for pair in controls.windows(2) {
         let [a, b] = pair else { continue };
         let gap = f32::from(b.left()) - f32::from(a.right());
-        assert!((gap - theme.spacing.xs).abs() < 0.5, "one gap between controls: {a:?} {b:?}");
+        assert!((gap - theme.spacing.xxs).abs() < 0.5, "one gap between controls: {a:?} {b:?}");
     }
 }

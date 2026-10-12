@@ -64,8 +64,22 @@ async fn soon<T>(within: Duration, mut done: impl AsyncFnMut() -> Option<T>) -> 
 }
 
 /// The app's dump once `done` holds of it, within `within`; none (no panic) when it never does.
+///
+/// The time is checked between dumps, never during one: a dump dropped half-way through left
+/// its answer on the socket, and the driver's next request read it as its own.
 async fn seen(driver: &mut Driver, within: Duration, done: impl Fn(&Dump) -> bool) -> Option<Dump> {
-    soon(within, async || driver.dump().await.ok().filter(|d| done(d))).await
+    let until = Instant::now() + within;
+    loop {
+        if let Ok(d) = driver.dump().await
+            && done(&d)
+        {
+            return Some(d);
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Say how long `what` took.

@@ -1471,9 +1471,13 @@ impl ProjectView {
         let line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(self.theme.spacing.sm))
-            .item("mark", Priority::ESSENTIAL, self.mark(Some(Phase::NeedsYou)))
-            // No number, but its slot, so its title stands on the cards' edge.
-            .item("number", Priority::ESSENTIAL, div().flex_none().w(px(self.number_w())))
+            // No number: its mark in the number's column, so its title stands on the cards'
+            // edge and its mark on theirs.
+            .item(
+                "number",
+                Priority::ESSENTIAL,
+                self.lead_column().child(self.mark(Some(Phase::NeedsYou))),
+            )
             .title(self.row_title(ORCHESTRATOR.to_owned()), self.title_floor());
         let el = self
             .row_frame(key.to_owned(), said(&[ORCHESTRATOR, &asks]), false)
@@ -1842,10 +1846,10 @@ impl ProjectView {
         let folded = self.folded(board, lane, &tasks);
         let head_id = format!("project-lane-{}-head", lane.selector());
         let selector = head_id.clone();
-        // A lane's head is a section label, Delta's, not a row: its state's glyph small in the
-        // rows' mark column, its name small and muted on the rows' number column, its count
-        // at the end, a group's gap over it. A lane that folds is a disclosure on the row
-        // grid instead: its chevron in the mark column, the row's height and its wash.
+        // A lane's head is a section label, Delta's, not a row: its state's glyph small on the
+        // numbers' edge, its name small and muted on the titles', its count beside it, a
+        // group's gap over it. A lane that folds is a disclosure: its chevron leads, under
+        // the pointer's wash.
         let mark = if folds {
             slopty_kit::kit::Disclosure::new(
                 format!("{head_id}-fold"),
@@ -1865,37 +1869,31 @@ impl ProjectView {
             })
             .text_color(hsla(if folds { s.text_secondary } else { s.text_muted }))
             .child(SharedString::from(lane.title()));
-        let head =
-            div()
-                .id(SharedString::from(head_id.clone()))
-                .debug_selector(move || selector)
-                .flex_none()
-                .map(|el| {
-                    if folds {
-                        el.h(px(theme.density.row))
-                    } else {
-                        el.pt(px(sp.md)).pb(px(sp.xxs))
-                    }
-                })
-                .flex()
-                .items_center()
-                .gap(px(sp.sm))
-                .px(px(sp.xs))
-                .rounded(px(theme.radii.sm))
-                .child(self.slot().child(mark))
-                // The name on the rows' number column: the mark's slot, then the number's.
-                .child(name)
-                .child(
+        let head = div()
+            .id(SharedString::from(head_id.clone()))
+            .debug_selector(move || selector)
+            .flex_none()
+            .h(px(theme.density.item))
+            .flex()
+            .items_center()
+            .gap(px(sp.sm))
+            .px(px(sp.xs))
+            .rounded(px(theme.radii.sm))
+            // The board's two edges: the glyph where the rows' numbers stand, the name where
+            // their titles do, and its count beside it, Delta's.
+            .child(self.lead_column().child(mark))
+            .child(
+                div().flex().items_center().gap(px(sp.row_gap())).child(name).child(
                     slopty_kit::kit::tabular(div())
                         .debug_selector({
                             let id = format!("{head_id}-count");
                             move || id
                         })
-                        .ml_auto()
                         .text_size(px(roles.metadata.size))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(count.to_string())),
-                );
+                ),
+            );
         let head = if folds {
             let what = if folded { "Show" } else { "Hide" };
             let head = head
@@ -1966,9 +1964,10 @@ impl ProjectView {
         px(self.theme.typography.ui_size * TITLE_FLOOR_EM)
     }
 
-    /// The column a row's mark and a lane's glyph stand in.
-    fn slot(&self) -> Div {
-        div().flex_none().size(px(self.theme.icon())).flex().items_center().justify_center()
+    /// The board's first column: a card's number, the orchestrator's mark and a lane's glyph
+    /// stand in it, on one edge, so every title and lane name stands on the next.
+    fn lead_column(&self) -> Div {
+        div().flex_none().w(px(self.number_w())).flex().items_center()
     }
 
     /// A row's title: the action role (13, medium) in the text ink, on one line, ending in an
@@ -2023,8 +2022,7 @@ impl ProjectView {
                 .flex_col()
                 .gap(px(sp.xs))
                 .min_w_0()
-                .pl(px(theme.icon() + sp.sm + self.number_w() + sp.sm))
-                .pb(px(sp.sm))
+                .pl(px(self.number_w() + sp.sm))
                 .children(parts)
         })
     }
@@ -2237,13 +2235,7 @@ impl ProjectView {
         let node = Some(card.id);
         let picked = self.picked() == Some(node);
         let own = board.lane_of(card);
-        // The row leads with its lane's phase, or, while an agent works the task, with what
-        // the agent says of itself; a task waiting on its own background work wears the dashed
-        // ring.
-        let lane_phase = match card.state {
-            TaskState::Waiting => Phase::Waiting,
-            _ => own.phase(),
-        };
+        // The row leads with its number: its lane's head says its state once.
         // A start that failed says why under the row, where it is read, not among the facts
         // a narrow board lets go.
         let start_failed = board
@@ -2251,10 +2243,6 @@ impl ProjectView {
             .map(|step| super::model::step_line(step, |w| self.worker_name(w)));
         let agent = self.agent(board, node);
         let live = agent.map(|a| a.status);
-        let phase = Some(match live {
-            Some(status) if card.state.follows_the_agent() => lane_phase.with_agent(status),
-            _ => lane_phase,
-        });
         let key = format!("project-card-{}", card.id);
         // What its agent asks, while the task waits on the person: its own word, else the
         // status the task was left with.
@@ -2300,7 +2288,6 @@ impl ProjectView {
         let mut line = slopty_kit::kit::priority_row(SharedString::from(format!("{key}-line")))
             .h(self.row_height())
             .gap(px(sp.sm))
-            .item("mark", Priority::ESSENTIAL, self.mark(phase))
             .item("number", Priority::ESSENTIAL, number)
             .title(title, self.title_floor())
             .end();

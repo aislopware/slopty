@@ -538,20 +538,32 @@ fn the_board_is_one_grouped_list(cx: &mut TestAppContext) {
     assert!(group.contains(&asks.center()) && group.contains(&task.center()), "one group");
     let head = at(cx, "project-lane-needs-you-head").expect("drawn");
     let count = at(cx, "project-lane-needs-you-head-count").expect("its count");
-    let pad = px(Theme::default().spacing.xs);
-    assert!((head.right() - pad - count.right()).abs() < px(0.5), "at the head's end: {count:?}");
-    assert!(head.bottom() <= group.top(), "the head over its group");
-    // The head is a section label on the rows' grid: its name where a row's number starts.
     let theme = Theme::default();
+    assert!(head.bottom() <= group.top(), "the head over its group");
+    // The head is a section label on the board's two edges: its name where the cards' titles
+    // stand, its count beside it, and as tall as a list item.
     let name = at(cx, "project-lane-needs-you-head-name").expect("its name");
-    let card = at(cx, "project-card-2").expect("a row");
-    let column = card.left() + px(theme.spacing.xs + theme.icon() + theme.spacing.sm);
-    assert!((name.left() - column).abs() < px(0.5), "on the number's column: {name:?} {card:?}");
-    let merged = at(cx, "project-lane-merged-head").expect("Merged's head");
+    let gap = px(theme.spacing.row_gap());
+    assert!((count.left() - name.right() - gap).abs() < px(0.5), "beside it: {name:?} {count:?}");
+    let card_title = at(cx, "project-card-2-title").expect("a card's title");
     assert!(
-        (merged.size.height - px(theme.density.row)).abs() < px(0.5),
-        "Merged's is a disclosure on the row grid: {merged:?}"
+        (name.left() - card_title.left()).abs() < px(0.5),
+        "on the titles' edge: {name:?} {card_title:?}"
     );
+    for lane in ["needs-you", "merged"] {
+        let head = at(cx, &format!("project-lane-{lane}-head")).expect("a head");
+        assert!(
+            (head.size.height - px(theme.density.item)).abs() < px(0.5),
+            "a head is a list item tall: {head:?}"
+        );
+    }
+    // The lanes stand one group gap apart.
+    for (above, below) in lanes.iter().zip(lanes.iter().skip(1)) {
+        assert!(
+            (below.top() - above.bottom() - px(theme.spacing.lg)).abs() < px(0.5),
+            "one gap between lanes: {above:?} {below:?}"
+        );
+    }
     assert!(at(cx, "project-needs-orchestrator-asks").is_some(), "its question under it");
     // A card's second line hangs under its title, not its number
     // (`.research/design-polish-2026-10-12.md` §4.8).

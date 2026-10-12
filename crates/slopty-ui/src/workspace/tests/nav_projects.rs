@@ -112,6 +112,35 @@ fn a_projects_colour_runs_down_its_rows(cx: &mut TestAppContext) {
     assert!((f32::from(rest.size.width) - 2.0).abs() < 0.5, "2 pt: {rest:?}");
 }
 
+/// Colour marks what is chosen, never a whole group at rest: the chosen row is washed (the rest
+/// of its run faintly), and a run with nothing chosen in it wears its 2 pt bar alone
+/// (`.research/warp-composition-2026-10-12.md` §1.9).
+#[gpui::test]
+fn an_unchosen_run_wears_its_bar_alone(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (worker, studio) = studio(&view, cx);
+    let orchestrator = SessionId::new();
+    let tile = opens_in(&view, cx, &studio, orchestrator, studio.me, 1, Some("/w/board"));
+    declare(&view, cx, worker, orchestrator);
+    let away = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/site"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let washed = |cx: &mut VisualTestContext, row: &'static str| -> Option<bool> {
+        let row = cx.debug_bounds(row)?;
+        (0..40).find_map(|ix| {
+            let bar = cx.debug_bounds(leak(format!("nav-run-{ix}")))?;
+            ((bar.top() - row.top()).abs() < px(0.5))
+                .then(|| cx.debug_bounds(leak(format!("nav-run-{ix}-wash"))).is_some())
+        })
+    };
+    assert_eq!(washed(cx, selector("nav-tile", tile.item)), Some(true), "the chosen row");
+    assert_ne!(
+        washed(cx, selector("nav-tile", away.item)),
+        Some(true),
+        "a run with nothing chosen is not washed"
+    );
+}
+
 /// Once the orchestrator has said where the goal stands, the board's row keeps to one line and
 /// carries the first line of it in its name and its hint.
 #[gpui::test]

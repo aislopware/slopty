@@ -172,12 +172,14 @@ fn the_header_is_one_row(cx: &mut TestAppContext) {
         assert!(b.left() >= last, "{part} in order after the lights: {b:?}");
         last = b.right();
     }
-    // "Search" is a control like its neighbours: their height, their line.
+    // The header holds glyphs only: the lens is an icon button as New agent is, its box and
+    // its line.
     let (search, new) = (bounds(cx, "nav-search"), bounds(cx, "nav-new-agent"));
     assert!(
-        (search.size.height - new.size.height).abs() < px(0.5)
+        (search.size.width - new.size.width).abs() < px(0.5)
+            && (search.size.height - new.size.height).abs() < px(0.5)
             && (search.center().y - new.center().y).abs() < px(0.5),
-        "one size and one line: {search:?} {new:?}"
+        "one box and one line: {search:?} {new:?}"
     );
     let goal = bounds(cx, "nav-new-goal");
     let end = f32::from(nav.right() - goal.right());

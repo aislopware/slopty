@@ -632,35 +632,53 @@ pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
     tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
 
-/// Delta's colour mark on a head, in `ink`: a bar two points wide down its leading edge, the
-/// same when chosen, over a light tint of the whole row (`.research/delta-re-2026-10-12.md`
-/// §4.5). Where a project's, a repository's, a folder's or a machine's own colour shows, the same
-/// on every client, so it is found by its colour in every list. Its glyph wears the leads'
-/// `icon_muted`, so a row carries one colour (`docs/decisions/ui.md`, "The chrome's icons are
-/// Octicons at 14").
+/// Delta's colour mark on a head, in `ink`: a bar two points wide down its leading edge, no
+/// wash at rest (`.research/delta-re-2026-10-12.md` §4.5). Where a project's, a repository's, a
+/// folder's or a machine's own colour shows, the same on every client, so it is found by its colour
+/// in every list. Its glyph wears the leads' `icon_muted`, so a row carries one colour
+/// (`docs/decisions/ui.md`, "The chrome's icons are Octicons at 14").
 fn identity_bar(selector: String, ink: Rgb) -> Div {
-    identity_run(selector, ink, false)
+    identity_run(selector, ink, Wash::None)
+}
+
+/// How far a row's identity colour washes it: only what is chosen is coloured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Wash {
+    /// The chosen row.
+    Strong,
+    /// A row of the chosen row's run.
+    Faint,
+    /// Any other: its bar alone.
+    None,
 }
 
 /// The colour a head wears, run down a row under it: Delta's bar down a thread's subthreads
 /// over a faint wash of the colour, the bar 3 pt and the wash strong on the selected row,
 /// measured from the signed-in app (`.research/delta-signed-in-2026-10-12.md` §2.3).
-fn identity_run(selector: String, ink: Rgb, selected: bool) -> Div {
-    let (bar, wash) = if selected {
-        (IDENTITY_BAR_SELECTED, slopty_theme::alpha::IDENTITY_SELECTED)
-    } else {
-        (IDENTITY_BAR, slopty_theme::alpha::IDENTITY)
+fn identity_run(selector: String, ink: Rgb, wash: Wash) -> Div {
+    let bar = if wash == Wash::Strong { IDENTITY_BAR_SELECTED } else { IDENTITY_BAR };
+    let ground = match wash {
+        Wash::Strong => Some(slopty_theme::alpha::IDENTITY_SELECTED),
+        Wash::Faint => Some(slopty_theme::alpha::IDENTITY),
+        Wash::None => None,
     };
-    div().absolute().inset_0().bg(slopty_kit::colors::hsla_alpha(ink, wash)).child(
-        div()
-            .debug_selector(move || selector)
-            .absolute()
-            .left_0()
-            .top_0()
-            .bottom_0()
-            .w(px(bar))
-            .bg(hsla(ink)),
-    )
+    let washed = format!("{selector}-wash");
+    div()
+        .absolute()
+        .inset_0()
+        .when_some(ground, move |el, alpha| {
+            el.debug_selector(move || washed).bg(slopty_kit::colors::hsla_alpha(ink, alpha))
+        })
+        .child(
+            div()
+                .debug_selector(move || selector)
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(bar))
+                .bg(hsla(ink)),
+        )
 }
 
 /// A group's fold chevron, Apple's disclosure drawing in the inline slot.
@@ -2281,8 +2299,7 @@ impl WorkspaceView {
     /// agent and New goal as icon buttons at its end. A phone's home has no lights: below the
     /// status bar its filter is its first row, as an iOS list opens on its search field.
     ///
-    /// "Search" is a quiet button the icon buttons' size, the search glyph and the word at the
-    /// chrome's small size in the placeholder's tone: a press,
+    /// The way to the filter is the lens alone, an icon button named "Search": a press,
     /// ⌘F with the keyboard in the navigator, ⌘⇧E, or typing while a row holds the keyboard
     /// puts the filter in its place with the keyboard, settling in over
     /// [`kit::Pace::Settle`], at once under Reduce Motion. Esc, or the keyboard leaving it
@@ -2410,30 +2427,25 @@ impl WorkspaceView {
         // every navigator does.
         let hint_theme = Rc::new(theme.clone());
         let filter = filter.filter(|_| !listed);
+        // The way to the filter is the quietest thing in the header: the lens alone, an icon
+        // button as New agent and New goal are, "Search" its name and its hint (Delta's).
         let search = (!listed && !home && filter.is_none()).then(|| {
-            let el = div()
-                .id("nav-search")
-                .debug_selector(|| "nav-search".to_owned())
-                .role(Role::Button)
-                .aria_label(super::titlebar::SEARCH)
-                .flex_none()
-                .h(px(kit::icon_button_side(theme)))
-                .px(px((kit::icon_button_side(theme) - theme.glyph()) / 2.0))
-                .flex()
-                .items_center()
-                .gap(px(spacing.xs))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
-                .child(
-                    slopty_kit::icons::Drawn::new(theme, Symbol::Magnifyingglass)
-                        .slot(px(theme.icon()), hsla(s.icon_muted)),
-                )
-                .child(super::titlebar::SEARCH)
-                .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)));
-            tab_stop(el, s.focus)
+            let hint_theme = Rc::clone(&hint_theme);
+            let el = kit::icon_button(
+                theme,
+                "nav-search",
+                Symbol::Magnifyingglass,
+                super::titlebar::SEARCH,
+            )
+            .on_click(cx.listener(|this, _ev, _window, cx| this.reveal_navigator_filter(cx)));
+            kit::hint_timing(el).tooltip(move |_window, cx| {
+                let keys = crate::palette::keys_for(
+                    &super::actions::FilterNavigator,
+                    &super::key_bindings(cx),
+                );
+                cx.new(|_| kit::Hint::new(super::titlebar::SEARCH, keys, Rc::clone(&hint_theme)))
+                    .into()
+            })
         });
         let start = |id: &'static str,
                      glyph: Symbol,
@@ -2499,8 +2511,7 @@ impl WorkspaceView {
             .border_b(kit::HAIR)
             .border_color(hsla(s.stroke))
             .children(toggle)
-            // "Search" is a control the icon buttons' height and type, the room after it the
-            // row's, so the header's controls share one size, one line and one gap.
+            // The lens, then the row's room: the header holds glyphs only, on one line.
             .children(search.map(|search| {
                 div().flex_1().min_w_0().flex().items_center().child(search).into_any_element()
             }))
@@ -2708,16 +2719,14 @@ impl WorkspaceView {
             _ => false,
         };
         let theme = &self.theme;
-        let run = self.run_head(ix).map(|(head, selected)| {
+        let run = self.run_head(ix).map(|(head, wash)| {
             let selector = format!("nav-run-{ix}");
             match head {
-                RunHead::Machine(worker, away) => identity_run(
-                    selector,
-                    crate::identity::machine_ink(theme, worker, away),
-                    selected,
-                ),
+                RunHead::Machine(worker, away) => {
+                    identity_run(selector, crate::identity::machine_ink(theme, worker, away), wash)
+                }
                 RunHead::Group(key) => {
-                    identity_run(selector, crate::identity::identity_ink(theme, &key), selected)
+                    identity_run(selector, crate::identity::identity_ink(theme, &key), wash)
                 }
             }
         });
@@ -2738,24 +2747,41 @@ impl WorkspaceView {
     /// subthreads: a tile's, the board's or a thread's row under a head that wears its own
     /// colour, and whether it is the selected tile. Nothing above the first head or past a
     /// section's heading.
-    fn run_head(&self, ix: usize) -> Option<(RunHead, bool)> {
+    fn run_head(&self, ix: usize) -> Option<(RunHead, Wash)> {
         let rows = self.nav.list.rows.borrow();
+        let chosen = self.nav.list.selected.get();
         let selected = match rows.get(ix)? {
-            NavRow::Tile(t) => self.nav.list.selected.get() == Some(t.tile),
+            NavRow::Tile(t) => chosen == Some(t.tile),
             NavRow::Board(_) | NavRow::Thread(_) | NavRow::Vacant(_) => false,
             _ => return None,
         };
-        let head = rows.get(..ix)?.iter().rev().find_map(|row| match row {
+        let ends = |row: &NavRow| {
+            matches!(row, NavRow::Worker(_) | NavRow::Group(_) | NavRow::Heading { .. })
+        };
+        let start = rows.get(..ix)?.iter().rposition(ends)?;
+        let head = match rows.get(start)? {
             NavRow::Worker(h) => {
-                Some(Some(RunHead::Machine(h.key, matches!(h.health, Some((Status::Away, _))))))
+                RunHead::Machine(h.key, matches!(h.health, Some((Status::Away, _))))
             }
-            NavRow::Group(g) => {
-                Some(crate::identity::wears_identity(&g.key).then(|| RunHead::Group(g.key.clone())))
+            NavRow::Group(g) if crate::identity::wears_identity(&g.key) => {
+                RunHead::Group(g.key.clone())
             }
-            NavRow::Heading { .. } => Some(None),
-            _ => None,
-        })??;
-        Some((head, selected))
+            _ => return None,
+        };
+        // Colour marks what is chosen: the chosen row's wash strong, its run's faint, any other
+        // run its bar alone (`.research/warp-composition-2026-10-12.md` §1.9).
+        let wash = if selected {
+            Wash::Strong
+        } else {
+            let run = rows.get(start.saturating_add(1)..)?;
+            let run = run.iter().take_while(|row| !ends(row));
+            if run.into_iter().any(|row| matches!(row, NavRow::Tile(t) if chosen == Some(t.tile))) {
+                Wash::Faint
+            } else {
+                Wash::None
+            }
+        };
+        Some((head, wash))
     }
 
     fn nav_row_content(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {

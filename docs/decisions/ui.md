@@ -11528,3 +11528,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::tests::composing::a_bang_first_asks_for_an_inline_terminal_and_esc_lets_it_go`,
     `conversation::thread::view::inline_shell::tests::the_block_keeps_what_the_shell_shows`,
     `workspace::tests::thread_face::a_bang_opens_a_shell_in_the_thread_and_the_next_message_carries_it`.
+- ✅ **Balance, after the person's five spots and Warp's composition** (2026-10-12,
+  `.research/warp-composition-2026-10-12.md` §3, measured from the signed-in app; the person
+  called the day's render ugly and unbalanced, circling the search, the titlebar's place chip,
+  the section heads, the merged row and the composer's foot).
+  - **One fact, one place**: a thread tile's header says no place; its checkout is said once,
+    in the composer's foot. A ready row keeps its title and its project in slots of their own,
+    the project's end yielding first. The bell's count sits in its line, never as a badge that
+    the bar clips. An empty thread says whose it is and what it does in one quiet line.
+  - **The composer's foot is the pane's frame, not the field's**: it spans the pane, both ends
+    `inset_trailing` (6) from its sides, its controls `xxs` apart, so the send button's edge and
+    the checkout's mirror each other as Delta's do. The field keeps the column's left edge; the
+    foot no longer pretends to.
+  - **The sidebar's head shows the magnifier alone**, an icon button the size of the new-agent
+    button beside it, on the same centre line; the filter field waits behind it, as in Delta.
+  - **A lane head reads as a section label**: the chevron (or the lane's glyph when it cannot
+    fold) leads in the number column, the name starts where the cards' titles start, and the
+    count sits `row_gap` after the name rather than at the far end. Heads are an item (28)
+    tall and lanes stand `lg` (16) apart. Cards lead with their #N alone; the lane already says
+    their phase, so a glyph repeated on every card said it twice and was deleted.
+  - **A project's colour washes only the selected row** (and faintly the run that holds the
+    chosen tile); every other run wears the 2 px bar alone. A wash on each of a run's rows read as a block of colour in the sidebar,
+    the heaviest thing on the screen, saying the least.
+  - Tests: `slopty-ui` `conversation::thread::tests::composing::the_foot_spans_the_pane_with_equal_ends`,
+    `…::steps::the_thread_has_one_left_edge`,
+    `conversation::thread::tests::a_quiet_thread_says_whose_it_is_and_what_it_does`,
+    `workspace::tests::thread_face::a_thread_tile_says_its_checkout_once_in_the_composers_foot`,
+    `workspace::tests::nav_rows::{the_header_is_one_row,
+    the_filter_waits_hidden_until_search_its_keys_or_typing}`,
+    `workspace::tests::nav_projects::an_unchosen_run_wears_its_bar_alone`,
+    `workspace::tests::projects::{the_board_is_one_grouped_list,
+    a_ready_rows_title_and_project_keep_their_own_slots}`.

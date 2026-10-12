@@ -1,6 +1,7 @@
 //! Each agent wears its owner's mark where it is listed: Claude Code the Claude spark, Codex
 //! the Blossom, pi its cells and an ACP agent the neutral glyph, each in the ink of its row's
-//! words, leading the row whatever the agent is doing, while how it is doing ends the row.
+//! words, leading its row at rest; while it works or waits on the person, that state leads
+//! the row instead.
 //!
 //! The one golden where a mark's size or centring shows, light and dark: a Claude Code agent
 //! waiting on the person, another at work, and a Codex, a pi and an `opencode` thread at rest,
@@ -13,9 +14,13 @@ use slopty_e2e::{Command, Dump};
 use crate::gallery::{PARK, PINNED_AT, STEP, golden};
 use crate::showcase::{Threads, start_thread};
 
-/// Whether the navigator's rows lead with each agent's mark, named for a screen reader.
+/// Whether the navigator's rows lead as they should, named for a screen reader: an agent at
+/// rest with its owner's mark, one that works or waits on the person with that state, which a
+/// row's lead says once (`docs/decisions/ui.md`, "A tab's lead says its state once").
 fn marked(d: &Dump) -> bool {
-    ["Claude Code", "Codex", "pi"].iter().all(|name| d.a11y_node("Image", Some(name)).is_some())
+    ["Codex", "pi", "Needs you", "Working"]
+        .iter()
+        .all(|name| d.a11y_node("Image", Some(name)).is_some())
 }
 
 #[tokio::test]
