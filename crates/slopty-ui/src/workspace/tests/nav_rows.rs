@@ -184,6 +184,9 @@ fn the_header_is_one_row(cx: &mut TestAppContext) {
     let goal = bounds(cx, "nav-new-goal");
     let end = f32::from(nav.right() - goal.right());
     assert!((end - theme.spacing.inset_trailing()).abs() < 1.5, "6 in from its right: {end}");
+    // The first row starts on the header's line, Delta's first head flush under it.
+    let first = bounds(cx, "nav-row-0");
+    assert!((first.top() - header.bottom()).abs() < px(0.5), "flush: {first:?} {header:?}");
 }
 
 /// A goal is the usual start, so it has a door wherever one starts: ⌘N and the navigator's

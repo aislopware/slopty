@@ -11605,6 +11605,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     answer both wrap at the 705 measure (held now by a test; the render's 580 came before the
     actions moved off the words' line), and a run of calls stands on Delta's 28 pitch, the
     28 pt call lines touching, where a 2 pt gap set them 30 apart.
+  - **The navigator's first row meets its header; sections stand 6 apart** (§2.1.3): the list
+    lost its 4 pt top pad, so the first head sits flush under the header's line as Delta's
+    does, and a section's gap is `row_gap` (6, Delta's), not 8.
+  - **The navigator indents 22 a step, on purpose** (§2.1.6): a step is the 16 pt lead slot
+    and `row_gap`, 16 + 6. Delta's 20 is its 13 pt glyph and a 7 gap; our leads are 16, so
+    our step is 22 and stays so. Nobody "fixes" it to 20.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11618,6 +11624,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::settings_page::the_settings_keep_one_rhythm`,
     `workspace::tests::bodies::a_files_tab_wears_its_kind_and_its_proxy`,
     `conversation::thread::tests::steps::both_turns_share_one_measure_and_calls_stand_on_28`,
+    `workspace::tests::nav_rows::the_header_is_one_row`,
     `workspace::tests::projects::{a_card_draws_its_pipeline_once_its_work_is_on_its_way,
     the_bar_fills_only_with_what_merged}`,
     `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;

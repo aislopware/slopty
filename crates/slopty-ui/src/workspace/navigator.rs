@@ -2732,10 +2732,12 @@ impl WorkspaceView {
         });
         let content = self.nav_row_content(ix, cx);
         div()
+            .debug_selector(move || format!("nav-row-{ix}"))
             .w_full()
             .flex()
             .flex_col()
-            .when(gap, |el| el.pt(px(theme.spacing.sm)))
+            // Delta's 6 between sections (`.research/warp-composition-2026-10-12.md` §2.1.3).
+            .when(gap, |el| el.pt(px(theme.spacing.row_gap())))
             .child(match run {
                 Some(run) => div().relative().w_full().child(run).child(content).into_any_element(),
                 None => content,
@@ -2916,7 +2918,7 @@ impl WorkspaceView {
         )
         .flex_1()
         .min_h_0()
-        .pt(px(theme.spacing.xs))
+        // The first row starts on the header's line, as Delta's first head does.
         .pb(px(theme.spacing.md));
         div()
             .relative()
