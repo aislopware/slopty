@@ -16725,3 +16725,45 @@ SLOPTY_DATA_DIR=$T/w SLOPTY_WORKER_SOCKET=$T/w.sock \
   $B/slopty-worker --port 0 --server 127.0.0.1:9 > $T/w.log 2>&1 & P=$!
 sleep 30; wc -c $T/w.log; sleep 270; wc -c $T/w.log; kill $P $D; wait
 ```
+
+## 2026-10-12 — CI's health: the Deep nightly and the gate's latency
+
+`cargo xtask ci-health` (09:25 UTC; it replaces `gate-latency`): the last Deep run on main job
+by job, then every push to `gate` in the 24 hours before and the minutes until main held it.
+
+- **Gate:** 62 pushes landed, median 16 min, p90 64 min, max 107 min. The 33 whose own run
+  passed: median 9 min, p90 23 min, max 41 min. Every green push over 15 min was on 2026-10-11
+  between 09:30 and 12:30 (16–41 min), while the old Deep nightly held the macOS runners from
+  10:58; since Deep's macOS jobs wait for the gate to go idle, green pushes took 7–14 min. The
+  slow ones are red runs, which land with the fix that follows (6f4b6591, 107 min).
+- **Deep:** no nightly had started for 2026-10-12's 04:37 schedule by 09:09; the last on main,
+  2026-10-11's, started 6 h late and was cancelled. GitHub starts a schedule late under load or
+  drops it, so the gate's `promote` now starts `deep.yml` on main whenever none has started there
+  for 26 hours. Today's was started by hand from main (run 38228066972).
+
+## 2026-10-12 — a lane's check here and on runners
+
+What a lane waits for from `cargo xtask remote -p <crate>` to its verdict. Before, every check
+ran on runners: since 2026-10-11, 404 checks took p50 6 min and p90 22 min once dispatched, after
+a wait for a runner Mac slot of p90 23 min, up to 90 min (the lane logs). Of 2,974 macOS runner
+minutes in the 21.5 hours to 09:30 UTC, lane checks took 58 % (probes and e2e cases 36 %, tests
+22 %) and the gate's three test shards 38 %: 2.3 of the five Macs busy on average, so the wait
+came from bursts and the cap of two Macs for checks, not from the gate.
+
+Through the router (`--place auto`), on this M1 Max (8 performance cores), at full power, with
+other lanes' builds running (load up to 50); thermal pressure stayed nominal (level 0) in every
+run:
+
+| check | before | after |
+| --- | --- | --- |
+| quick, `slopty-workerd`, a one-line edit, warm | remote p50 6 min, p90 22 min + Mac wait | 1 min 12 s (clippy 5 s, tests 51 s) |
+| the same edit in the checkout under the interim rule | — | 8 min (clippy 52 s, nextest 432 s) |
+| quick, nothing changed, warm (`slopty-crash`) | — | 4.6 s |
+| full, `slopty-workerd`: here and on a Linux runner | remote p50 6 min, p90 22 min + Mac wait | 6 min 25 s, bounded by the runner's iOS and Linux clippy and rustdoc; here 1 min 37 s |
+| a lane directory's first check (cold) | — | `slopty-crash` 5 min 6 s, `slopty-workerd` 8 min 40 s |
+
+```sh
+SLOPTY_LANE=W cargo xtask remote -p slopty-workerd --only apps/slopty-worker          # quick
+SLOPTY_LANE=W cargo xtask remote --full -p slopty-workerd --only apps/slopty-worker   # full
+cargo xtask ci-health    # the day's spread of checks, from target/remote/history.jsonl
+```

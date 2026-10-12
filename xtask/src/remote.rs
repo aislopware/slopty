@@ -71,8 +71,7 @@ const MAC_POLL: Duration = Duration::from_secs(60);
 /// How many macOS jobs the check asked for takes: the tests when they need a Mac, and a probe
 /// or an e2e case on a Mac. Linux's never wait.
 fn mac_jobs(opts: &RemoteOpts) -> usize {
-    let tests =
-        !opts.packages.is_empty() && test_runner(&opts.packages, opts.full).starts_with("macos");
+    let tests = !opts.packages.is_empty() && tests_on(opts).starts_with("macos");
     let run = (opts.probe.is_some() || opts.e2e.is_some()) && opts.runner.starts_with("macos");
     usize::from(tests).saturating_add(usize::from(run))
 }
@@ -262,7 +261,7 @@ impl Goldens {
 }
 
 /// `cargo xtask remote` options.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args, Clone, Debug)]
 pub struct RemoteOpts {
     /// Who asks: a lane's name. A newer check of the same name cancels the older one, and the
     /// commit goes to the branch `check/<name>`.
@@ -316,6 +315,31 @@ pub struct RemoteOpts {
     /// Keep the branch `check/<name>` once the run ends, which is otherwise deleted then.
     #[arg(long)]
     pub keep_branch: bool,
+    /// Where the crates' checks run: here and on runners, whichever returns soonest (`auto`), or
+    /// on runners alone (`runner`).
+    #[arg(long, value_enum, default_value_t)]
+    pub place: Place,
+    /// The runner the dispatched tests take, when a local check has taken the Mac's share:
+    /// `none`, or Linux for Linux's own paths.
+    #[arg(skip)]
+    pub tests_on: Option<&'static str>,
+}
+
+/// Where a check's crates are checked.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Place {
+    /// fmt, host clippy, shear, typos and the Mac's tests on this Mac, at full power, in the
+    /// lane's own directory (`crate::local`); iOS and Linux clippy, rustdoc and Linux's tests of
+    /// a full check, and every e2e case and probe, on runners, side by side.
+    #[default]
+    Auto,
+    /// Everything on runners, as before the router.
+    Runner,
+}
+
+/// The runner the dispatched tests of `opts` take.
+fn tests_on(opts: &RemoteOpts) -> &'static str {
+    opts.tests_on.unwrap_or_else(|| test_runner(&opts.packages, opts.full))
 }
 
 /// A run as `gh run list` describes it.
@@ -344,6 +368,108 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let root = crate::tools::repo_root()?;
     let dir = root.join("target").join("remote").join(&opts.name);
     std::fs::create_dir_all(&dir)?;
+    let here = opts.attach.is_none()
+        && !opts.packages.is_empty()
+        && opts.place == Place::Auto
+        && !opts.accept_snapshots
+        && cfg!(target_os = "macos");
+    if !here {
+        return on_runners(sh, opts, &root, &dir, None);
+    }
+    let started = Instant::now();
+    let sha = if opts.head {
+        cmd!(sh, "git rev-parse HEAD").read()?
+    } else {
+        snapshot(sh, &root, &dir, &opts.name, &opts.only)?
+    };
+    // What only a runner checks: a full check's iOS and Linux clippy and rustdoc, with Linux's
+    // tests when every crate tests there too; and the e2e case or probe.
+    let mut there = opts.clone();
+    if opts.full {
+        let linux = crate::gate::linux_tested();
+        let all = opts.packages.iter().all(|p| linux.contains(&p.as_str()));
+        there.tests_on = Some(if all { "ubuntu-24.04" } else { "none" });
+    } else {
+        there.packages.clear();
+    }
+    let remote = !there.packages.is_empty() || there.e2e.is_some() || there.probe.is_some();
+    println!(
+        "▶ {} checked here (fmt, host clippy, shear, typos, the Mac's tests){}",
+        opts.packages.join(" "),
+        if remote { format!("; on runners: {}", describe(&there)) } else { String::new() }
+    );
+    let (local, runners) = std::thread::scope(|scope| {
+        let local =
+            scope.spawn(|| crate::local::check(&root, lane(&opts.name), &sha, &opts.packages));
+        let runners = remote.then(|| on_runners(sh, &there, &root, &dir, Some(&sha)));
+        (local.join(), runners)
+    });
+    let local = match local {
+        Ok(outcome) => outcome?,
+        Err(_) => bail!("the local check panicked"),
+    };
+    let took = started.elapsed().as_secs();
+    let thermal = local.thermal.map_or_else(|| "unread".to_owned(), |t| t.to_string());
+    println!(
+        "  here: {} in {}m{:02}s; thermal pressure at most {thermal}, load at most {:.1}",
+        if local.passed { "passed" } else { "failed" },
+        local.took.as_secs() / 60,
+        local.took.as_secs() % 60,
+        local.load
+    );
+    record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
+    let runners_ok = runners.unwrap_or(Ok(()));
+    ensure!(local.passed, "the local check of {} failed", opts.packages.join(" "));
+    runners_ok?;
+    let depth = if opts.full { "full" } else { "quick" };
+    let and = if remote { " and on runners" } else { "" };
+    let crates = opts.packages.join(" ");
+    println!("✔ {depth} check {crates} passed here{and} ({}m{:02}s)", took / 60, took % 60);
+    Ok(())
+}
+
+/// One check's latency, appended to `target/remote/history.jsonl` for `ci-health`.
+fn record(
+    root: &Path,
+    opts: &RemoteOpts,
+    local: &crate::local::Outcome,
+    runners: Option<bool>,
+    took: u64,
+) {
+    let line = serde_json::json!({
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        "name": opts.name,
+        "full": opts.full,
+        "packages": opts.packages,
+        "local_s": local.took.as_secs(),
+        "local_passed": local.passed,
+        "runners_passed": runners,
+        "total_s": took,
+        "thermal": local.thermal,
+        "load": local.load,
+    });
+    let path = root.join("target").join("remote").join("history.jsonl");
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+    if let Err(e) = written {
+        println!("  latency not recorded in {path}: {e}");
+    }
+}
+
+/// The runners' part of a check: dispatched on the commit `sha` (made here when `None`), or the
+/// run `--run` names, waited for, its logs fetched and what it accepted applied.
+fn on_runners(
+    sh: &Shell,
+    opts: &RemoteOpts,
+    root: &Path,
+    dir: &Path,
+    sha: Option<&str>,
+) -> Result<()> {
     let started = Instant::now();
     let what = describe(opts);
     let (run, short) = if let Some(id) = opts.attach {
@@ -352,10 +478,10 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         let viewed: Viewed = serde_json::from_str(&viewed).context("gh run view's JSON")?;
         (Listed { id, title: viewed.title, url: viewed.url }, format!("run {id}"))
     } else {
-        let sha = if opts.head {
-            cmd!(sh, "git rev-parse HEAD").read()?
-        } else {
-            snapshot(sh, &root, &dir, &opts.name, &opts.only)?
+        let sha = match sha {
+            Some(sha) => sha.to_owned(),
+            None if opts.head => cmd!(sh, "git rev-parse HEAD").read()?,
+            None => snapshot(sh, root, dir, &opts.name, &opts.only)?,
         };
         actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha)?;
         // The tree as it was asked about, dispatched once a Mac is free for it.
@@ -473,14 +599,16 @@ fn describe(opts: &RemoteOpts) -> String {
     let mut parts = Vec::new();
     if !opts.packages.is_empty() {
         let depth = if opts.full { "full" } else { "quick" };
-        let tests = test_runner(&opts.packages, opts.full);
+        let tests = tests_on(opts);
         let mac = mac_tested(&opts.packages);
-        let left = if tests.starts_with("ubuntu") && !mac.is_empty() {
+        let left = if tests.starts_with("ubuntu") && !mac.is_empty() && opts.tests_on.is_none() {
             format!("; the Mac's own tests of {} wait for --full or the gate", mac.join(", "))
         } else {
             String::new()
         };
-        parts.push(format!("{depth} check {} (tests on {tests}{left})", opts.packages.join(" ")));
+        let on =
+            if tests == "none" { "tests here".to_owned() } else { format!("tests on {tests}") };
+        parts.push(format!("{depth} check {} ({on}{left})", opts.packages.join(" ")));
     }
     if let Some(case) = &opts.e2e {
         let filter = opts.filter.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
@@ -663,7 +791,7 @@ fn dispatch(sh: &Shell, opts: &RemoteOpts, sha: &str) -> Result<()> {
         ("snapshots", snapshots.to_owned(), "compare"),
         ("full", (if opts.full { "yes" } else { "no" }).to_owned(), "no"),
         ("runner", opts.runner.clone(), "macos-26"),
-        ("test_runner", test_runner(&opts.packages, opts.full).to_owned(), "macos-26"),
+        ("test_runner", tests_on(opts).to_owned(), "macos-26"),
         ("probe", opts.probe.clone().unwrap_or_default(), ""),
     ];
     let args: Vec<String> = fields

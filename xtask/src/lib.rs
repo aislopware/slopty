@@ -20,6 +20,7 @@ mod e2e;
 mod fixtures;
 mod fuzz;
 mod gate;
+mod health;
 mod icon;
 // HIToolbox's input sources: macOS only. Elsewhere `xtask ime` says so, so the deep checks
 // that run on Linux runners build the rest.
@@ -29,6 +30,7 @@ mod ios;
 mod land;
 mod latency;
 mod linux;
+mod local;
 mod memstat;
 mod nightly;
 mod pi;
@@ -145,8 +147,10 @@ enum Cmd {
     /// The checks of the working tree on a GitHub runner, not this Mac: `xtask check` for the
     /// crates named and an e2e case, whose accepted goldens come back into the tree.
     Remote(remote::RemoteOpts),
-    /// How long each push to `gate` took to reach main, and the spread: the wait a lane feels.
-    GateLatency {
+    /// How CI is doing: the last Deep nightly job by job (verdict, wall time, what failed),
+    /// then how long each push to `gate` took to reach main, and the spread: the wait a lane
+    /// feels.
+    CiHealth {
         /// Pushes since this time (`2026-10-11T00:00:00Z`); the last day by default.
         #[arg(long)]
         since: Option<String>,
@@ -403,7 +407,7 @@ pub fn main() -> Result<()> {
         Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
-        Cmd::GateLatency { since } => latency::run(&sh, since.as_deref()),
+        Cmd::CiHealth { since } => health::run(&sh, since.as_deref()),
         Cmd::GateWait { hours } => remote::gate_wait(&sh, hours),
         Cmd::Toolchain { version } => toolchain::run(&sh, version.as_deref()),
         Cmd::SpawnedBins => gate::spawned_bins(&sh),

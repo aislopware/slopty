@@ -24,4 +24,10 @@ tokio.workspace = true
 objc2-core-foundation.workspace = true
 # The stand-in app window (`slopty-stub-window`), an AppKit window asked for by message.
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = [ "NSGeometry", "NSString" ] }
+# `NSGeometry`'s types need `objc2-core-foundation` too: the workspace's features hid it until
+# Deep's per-feature check built the crate alone (run 38228066972).
+objc2-foundation = { workspace = true, features = [
+    "NSGeometry",
+    "NSString",
+    "objc2-core-foundation",
+] }

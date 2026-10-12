@@ -399,7 +399,7 @@ jobs:
     needs: [gate, linux]
     if: github.ref == 'refs/heads/gate'
     runs-on: ubuntu-24.04
-    # `actions: write` starts the app's e2e on the new main (the last step).
+    # `actions: write` starts the app's e2e on the new main, and the Deep checks when overdue.
     permissions:
       contents: write
       actions: write
@@ -442,6 +442,19 @@ jobs:
           elif [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 14400 ]; then
             gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$GITHUB_SHA"
             echo "the app's e2e started on the main just promoted" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      # The Deep checks, once 26 hours have passed since a Deep run on main last started. GitHub
+      # starts a schedule late under load, by six hours (run 38133881188), or not at all: none
+      # had started for 2026-10-12's 04:37 by 09:20. Its macOS jobs still wait for the gate to
+      # go idle (deep.yml's `wait`), so a run started in the working day holds no gate Mac.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deep.yml --branch main \
+            --limit 1 --json createdAt --jq '.[0].createdAt // empty')
+          if [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 93600 ]; then
+            gh workflow run deep.yml --repo "$GITHUB_REPOSITORY" --ref main
+            echo "the Deep checks started: none on main for 26 hours" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   # A tag, gated, is built into a release by `cargo xtask dist`: the app, the Mac CLI and

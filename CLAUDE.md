@@ -13,10 +13,11 @@ Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs
 
 ## Hard lines
 
-- Checks run where they return soonest: this Mac for a lane's own crates and Mac-only tests,
-  GitHub runners (`cargo xtask remote`) for wide, Linux and iOS work, both at full power. Landing
-  is `cargo gate`, commit, `cargo xtask land`; CI's gate decides (`docs/DEV.md`). Parallel
-  agents share this checkout: the `lanes` skill.
+- Checks run where they return soonest: `cargo xtask remote -p <crate>` checks a lane's crates
+  on this Mac at full power in the lane's own warm directory, while runners take iOS, Linux,
+  rustdoc, e2e and probes at once; no cargo in the checkout itself. Landing is `cargo gate`,
+  commit, `cargo xtask land`; CI's gate decides (`docs/DEV.md`). Parallel agents share this
+  checkout: the `lanes` skill.
 - Pre-release: no backward compatibility, no versioning. Replace cleanly and delete the old.
 - Rust everywhere, scripts too. Latest toolchain, dependencies and forks; lints never loosened.
 - Slopty drives an agent only through its published doors, never by reading its screen, never

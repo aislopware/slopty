@@ -460,7 +460,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#96f418d53e88b5fae6ad516777fce8a49b3d8a47"
+source = "git+https://github.com/aislopware/libghostty-rs.git#add81270971eee2da08dbfad4ba094024a9e8779"
 dependencies = [
  "bitflags",
  "int-enum",
@@ -471,7 +471,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#96f418d53e88b5fae6ad516777fce8a49b3d8a47"
+source = "git+https://github.com/aislopware/libghostty-rs.git#add81270971eee2da08dbfad4ba094024a9e8779"
 
 [[package]]
 name = "linux-raw-sys"
@@ -667,6 +667,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags",
  "objc2",
+ "objc2-core-foundation",
 ]
 
 [[package]]

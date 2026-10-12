@@ -1567,14 +1567,34 @@ fn list(sh: &Shell, source: Source) -> Result<std::process::Output> {
 /// a checkout at the commit the source pins ([`submodule_at`]). Returns the tree and the
 /// source's entries it holds.
 fn snapshot(root: &Utf8Path, source: Source) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let what = if source == Source::Index { "the index" } else { "HEAD" };
+    sync(root, &root.join("target").join("gate"), &list(&sh, source)?, what)
+}
+
+/// Commit `sha`'s tree synced into `<dir>/tree` as [`snapshot`] syncs the index: a local check
+/// builds exactly what a runner would check out, beside the other lanes' unfinished edits.
+pub fn snapshot_commit(root: &Utf8Path, dir: &Utf8Path, sha: &str) -> Result<Utf8PathBuf> {
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let format = "--format=%(objectmode) %(objectname) 0%x09%(path)";
+    let listed = cmd!(sh, "git ls-tree -r -z --full-tree {format} {sha}").quiet().output()?;
+    Ok(sync(root, dir, &listed, "the check's commit")?.0)
+}
+
+/// Sync the entries `listed` names (`git ls-files --stage -z` lines) into `<dir>/tree`, saying
+/// they are `what`.
+fn sync(
+    root: &Utf8Path,
+    gate: &Utf8Path,
+    listed: &std::process::Output,
+    what: &str,
+) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
     let started = Instant::now();
-    let gate = root.join("target").join("gate");
     let tree = gate.join("tree");
     let manifest_path = gate.join("tree.index");
     std::fs::create_dir_all(&tree).with_context(|| format!("create {tree}"))?;
-    let sh = Shell::new()?;
-    sh.change_dir(root);
-    let listed = list(&sh, source)?;
     let before: HashMap<String, String> = std::fs::read_to_string(&manifest_path)
         .unwrap_or_default()
         .lines()
@@ -1602,7 +1622,7 @@ fn snapshot(root: &Utf8Path, source: Source) -> Result<(Utf8PathBuf, Vec<pass::E
             std::fs::create_dir_all(parent)?;
         }
         if mode == "160000" {
-            let module = submodule_at(root, &gate, rel, sha)?;
+            let module = submodule_at(root, gate, rel, sha)?;
             if std::fs::read_link(&dst).ok().as_deref() != Some(module.as_std_path()) {
                 let _removed = std::fs::remove_file(&dst);
                 std::os::unix::fs::symlink(&module, &dst).with_context(|| format!("link {dst}"))?;
@@ -1626,7 +1646,6 @@ fn snapshot(root: &Utf8Path, source: Source) -> Result<(Utf8PathBuf, Vec<pass::E
         s
     });
     std::fs::write(&manifest_path, manifest).with_context(|| format!("write {manifest_path}"))?;
-    let what = if source == Source::Index { "the index" } else { "HEAD" };
     println!(
         "  snapshot of {what}, {} files: {written} written, {removed} removed ({:.1?})",
         wanted.len(),

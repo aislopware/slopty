@@ -921,6 +921,8 @@ fn check_on_runner(
         head: true,
         workflow_ref: None,
         keep_branch: false,
+        place: crate::remote::Place::Runner,
+        tests_on: None,
     };
     let checkout = Shell::new()?;
     checkout.change_dir(root);

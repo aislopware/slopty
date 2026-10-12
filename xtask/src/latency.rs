@@ -1,5 +1,5 @@
-//! `xtask gate-latency`: how long a push to `gate` takes to reach main, the wait every lane
-//! feels, rather than any one job's time.
+//! The gate's latency (`xtask ci-health`): how long a push to `gate` takes to reach main, the wait
+//! every lane feels, rather than any one job's time.
 //!
 //! Each push to `gate` starts a run of `ci.yml`. Main moves when a run's `promote` job
 //! fast-forwards it, or when a person or `gate-watch` runs `cargo xtask promote` (a change to a
@@ -30,7 +30,7 @@ struct Move {
 
 /// Seconds since the Unix epoch of an RFC 3339 time in UTC as GitHub writes it
 /// (`2026-10-11T12:03:55Z`); `None` for anything else.
-fn epoch(text: &str) -> Option<i64> {
+pub fn epoch(text: &str) -> Option<i64> {
     let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
     let mut ymd = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
     let (year, month, day) = (ymd.next()??, ymd.next()??, ymd.next()??);
@@ -126,6 +126,8 @@ pub fn run(sh: &Shell, since: Option<&str>) -> Result<()> {
         cmd!(sh, "git merge-base --is-ancestor {sha} {head}").quiet().ignore_stderr().run().is_ok()
     };
     let mut waits = Vec::new();
+    // The pushes whose own run passed: what a lane waits for when nothing goes red.
+    let mut green = Vec::new();
     let mut open = 0_usize;
     for push in &pushed {
         let at = epoch(&push.at).context("a run's time")?;
@@ -135,6 +137,9 @@ pub fn run(sh: &Shell, since: Option<&str>) -> Result<()> {
         if let Some(m) = landed {
             let seconds = u64::try_from(m.at.wrapping_sub(at)).unwrap_or_default();
             waits.push(seconds);
+            if push.conclusion == "success" {
+                green.push(seconds);
+            }
             println!("{} {short} {run:<9} {} min", push.at, seconds.div_euclid(60));
         } else {
             open = open.saturating_add(1);
@@ -151,6 +156,15 @@ pub fn run(sh: &Shell, since: Option<&str>) -> Result<()> {
             minutes(s.max)
         ),
         None => println!("no push landed since then; {open} not yet"),
+    }
+    if let Some(s) = slopty_testkit::stats::Spread::of(&mut green) {
+        println!(
+            "  of them {} whose own run passed: median {} min, p90 {} min, max {} min",
+            s.n,
+            minutes(s.p50),
+            minutes(s.p90),
+            minutes(s.max)
+        );
     }
     Ok(())
 }

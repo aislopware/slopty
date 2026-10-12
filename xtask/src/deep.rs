@@ -313,6 +313,11 @@ fn miri_filter() -> String {
 /// render callback and adds the test that proves an allocation there aborts.
 fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
     let flag = which.flag();
+    // nextest's setup script runs `$SLOPTY_XTASK spawned-bins`, else `cargo xtask`, which under
+    // these `RUSTFLAGS` rebuilt xtask with the sanitizer on its proc macros, which rustc refuses:
+    // the setup failed and no sanitized test ran (Deep run 38228066972). This binary is built.
+    let xtask = std::env::current_exe().context("the xtask binary")?;
+    let _xtask = sh.push_env("SLOPTY_XTASK", xtask);
     if matches!(which, Sanitizer::Realtime) {
         let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("realtime")?);
         let flags = "-Zsanitizer=realtime --cfg slopty_rtsan -C target-cpu=apple-m1";

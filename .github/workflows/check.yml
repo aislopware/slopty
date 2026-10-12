@@ -40,7 +40,7 @@ on:
         description: The runner image of the probe and the e2e case (macos-26, ubuntu-24.04, ubuntu-24.04-arm)
         default: macos-26
       test_runner:
-        description: The runner image of the tests (`remote` picks Linux when every crate tests there)
+        description: The runner image of the tests (`remote` picks Linux when every crate tests there), or none
         default: macos-26
       probe:
         description: A shell command to run after setup, for trying a step on a runner
@@ -190,7 +190,8 @@ jobs:
           retention-days: 3
 
   test:
-    if: inputs.packages != ''
+    # `none` when the crates' tests ran on the Mac that asked (`xtask remote`, `local`).
+    if: inputs.packages != '' && inputs.test_runner != 'none'
     name: test (${{ inputs.name }})
     runs-on: ${{ inputs.test_runner }}
     # One of the five macOS slots the gate's test shards need: a hung check gives it back.

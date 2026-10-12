@@ -1909,9 +1909,28 @@ more full-window layer.
     runs, and the wait for a runner Mac slot was p90 23 min, up to 90 min. An incremental local
     check took 40–55 s on 2026-09-12. The gate itself got faster (push to main, median 24 min on
     10-06, 8 min on 10-12), so the loss was in each check and the Mac queue.
-  - A lane runs `cargo clippy` and `cargo nextest` on its own crates here, and wide checks,
-    Linux, iOS and goldens on runners. The same day the person ruled out any throttle (no
-    `nice`, no job cap): local cargo runs at full power, for speed, and `target/` may hold 200 GB
-    (forks 80) so warm units save compiles, while the volume keeps its 50 GB floor.
-  - Next: `cargo xtask remote` picks local, remote or both per check by what returns soonest,
-    and records the latency in MEASUREMENTS.
+  - The same day the person ruled out any throttle (no `nice`, no job cap): local cargo runs at
+    full power, for speed, and `target/` may hold 200 GB (forks 80) so warm units save
+    compiles, while the volume keeps its 50 GB floor.
+  - `cargo xtask remote -p <crate>…` is the one entry point, called as before, and splits each
+    check (`--place auto`, the default; `--place runner` sends all of it to runners):
+    - **Here:** fmt, host clippy, shear, typos and the crates' tests as a Mac runner runs them
+      (the spawned binaries built first; nextest's `land` profile, which leaves out the tests
+      that time themselves against a busy machine and which CI runs anyway). They run on the
+      commit `remote` made of `HEAD` and the lane's `--only` paths, synced into
+      `target/local/<lane>/tree` as the gate syncs its snapshot (`gate::snapshot_commit`), so
+      unchanged files keep their times and cargo rebuilds only what changed, into
+      `target/local/<lane>/target`. The other lanes' unfinished edits never reach a check, each
+      lane stays warm in its own directory, and lanes check side by side.
+    - **On runners, side by side:** what this Mac cannot answer as CI would: a full check's iOS
+      and Linux clippy and rustdoc (the lint job on arm Linux), Linux's tests when every crate
+      tests there, and every e2e case and probe. A quick check of crates alone dispatches
+      nothing. The Mac's tests never wait in the runner Mac queue (`test_runner: none`).
+    - The verdict is both parts'. `remote` records each check's latency, its part here, the
+      highest thermal pressure level and load seen, in `target/remote/history.jsonl`, and
+      `cargo xtask ci-health` prints the day's spread.
+  - Why here and not the checkout: the lane's own directory stayed warm while the checkout's
+    `target/` was churned by every lane's builds. The same one-line edit of `slopty-workerd`
+    took 1 min 12 s through the router and 8 min in the checkout (clippy 52 s, nextest 432 s;
+    `docs/MEASUREMENTS.md`, "a lane's check here and on runners"). A lane directory's first check
+    is cold: 5 min for `slopty-crash`, 8 min 40 s for `slopty-workerd`.

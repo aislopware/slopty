@@ -27,7 +27,7 @@ use anyhow::{Result, bail};
 use xshell::{Shell, cmd};
 
 use crate::tools::{
-    HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, quiet_step, workspace_packages,
+    HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, packages_in, quiet_step,
 };
 
 /// Which part of the checks to run. A remote check runs the two on runners of their own, side by
@@ -49,7 +49,10 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
         bail!("name the crates to check: `cargo xtask check -p <crate> [-p <crate>…]`");
     }
     let started = std::time::Instant::now();
-    let workspace = workspace_packages()?;
+    // The tree the shell stands in: the checkout, a runner's, or a local check's commit.
+    let here = camino::Utf8PathBuf::from_path_buf(sh.current_dir())
+        .map_err(|p| anyhow::anyhow!("the tree's path is not UTF-8: {}", p.display()))?;
+    let workspace = packages_in(&here)?;
     let mut owned = Vec::new();
     for name in crates {
         match workspace.iter().find(|p| &p.name == name) {
@@ -64,9 +67,8 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     let host = TRIPLES[0];
     if part == Part::Tests {
         if cfg!(target_os = "macos") {
-            // On a runner, as the gate's macOS lanes test there: the binaries the tests spawn
-            // built first, and the runner's profile, whose filter leaves out what the virtual
-            // Mac lacks the hardware for.
+            // As the gate's macOS lanes test on a runner: the binaries the tests spawn built
+            // first.
             let names: Vec<&str> = names().collect();
             if let Some(spawned) = crate::gate::spawned_selection(Some(&names)) {
                 let bins = crate::gate::spawned_bin_args();
@@ -76,7 +78,11 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
                 )?;
             }
             let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
-            nextest(sh, b, &["--profile", crate::gate::NEXTEST_CI_PROFILE])?;
+            // Here, beside the person's work and other lanes' builds, the profile `land` takes:
+            // the gate's, less the tests that time themselves against the machine's load.
+            let local = sh.var_os(crate::local::LOCAL).is_some();
+            let profile = if local { "land" } else { crate::gate::NEXTEST_CI_PROFILE };
+            nextest(sh, b, &["--profile", profile])?;
         } else {
             // As CI's linux lane tests them: without the workspace hack, whose features pull in
             // the client's GPUI, and with the binaries the tests spawn built first.
