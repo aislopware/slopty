@@ -71,6 +71,7 @@ regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
 rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io"] }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios"] }
 schemars = { version = "1", features = ["chrono04", "indexmap2", "uuid1"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
@@ -87,6 +88,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
+tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v7"] }
 winnow = { version = "1" }
@@ -154,7 +156,7 @@ objc2-security = { version = "0.3", default-features = false, features = ["CSCom
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", default-features = false, features = ["time"] }
 semver = { version = "1", features = ["serde"] }
 sha2 = { version = "0.11" }
 
@@ -167,7 +169,7 @@ errno = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 semver = { version = "1", features = ["serde"] }
 sha2 = { version = "0.11" }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
@@ -194,7 +196,7 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", default-features = false, features = ["time"] }
 sha2 = { version = "0.11" }
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
@@ -207,7 +209,7 @@ errno = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 sha2 = { version = "0.11" }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
@@ -233,7 +235,7 @@ objc2-core-video = { version = "0.3", default-features = false, features = ["CVB
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", default-features = false, features = ["time"] }
 sha2 = { version = "0.11" }
 uuid = { version = "1", default-features = false, features = ["v5"] }
 
@@ -246,7 +248,7 @@ errno = { version = "0.3" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 libc = { version = "0.2" }
-rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "system", "termios", "time"] }
+rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
 sha2 = { version = "0.11" }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }

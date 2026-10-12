@@ -190,13 +190,8 @@ fn bounds(settings: slopty_settings::ProjectBounds) -> Bounds {
 #[tokio::main]
 async fn main() -> Result<()> {
     slopty_crash::install(slopty_crash::Process::Server, &slopty_platform::dirs::data_dir());
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Capped at its file's size bound under launchd (`slopty_crash::log`).
+    slopty_crash::log::init("info");
     let args = Args::parse();
     let data_dir = args.data_dir.unwrap_or_else(slopty_server::store::default_data_dir);
     std::fs::create_dir_all(&data_dir)

@@ -1556,3 +1556,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_worker_s_reported_facts_are_shown_under_the_server_s` (`slopty-server`, asked once a
     registration); `a_worker_s_own_facts_are_listed_and_a_task_runs_where_it_says`
     (`slopty-cli`) reads them through `slopty workers`.
+
+- ✅ **A daemon's log is bounded, and a failure that repeats is written once an hour**
+  (2026-10-12, `docs/MEASUREMENTS.md` "a daemon's log with its server gone, and idle"). launchd
+  points a daemon's stdout and stderr at `~/Library/Logs/Slopty/<program>.log` and never rotates
+  it, and a worker whose server was gone wrote a line every redial, about 4.4 MB a day.
+  - Every daemon sets up its log through `slopty_crash::log::init`: the `RUST_LOG` filter, else
+    `info`, colour only on a terminal. When stderr is a regular file, the writer counts what it
+    writes, and past 8 MiB it renames the file to `<file>.1`, replacing the one before, opens a
+    new one under the name and puts it in place of stderr, and of stdout when that was the same
+    file. A file whose rename fails is written on and tried again on the next line. The
+    journal on Linux and a terminal bound themselves, so they are left alone.
+  - The worker's server link keeps its failure in a `Repeats`: written when it starts or its
+    reason changes, then once an hour with the redials and minutes so far, and summed up on
+    the line that says it registered again. A refused build, a duplicate id and an ungranted
+    role go through it too: the refused build was a warning a minute.
+  - A log file rather than unified logging (`os_log`): the person and the tests read the file
+    with `grep`, `slopty` points at it, and the same file works under systemd's journal.
+  - Tests: `log::tests::a_repeated_failure_is_told_once_an_hour` and
+    `log_cap::a_log_past_its_cap_moves_aside_and_starts_again` (`slopty-crash`).

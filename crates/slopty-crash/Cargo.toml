@@ -18,8 +18,14 @@ backtrace.workspace = true
 libc.workspace = true
 # Rust names in macOS's `.ips` reports, which ReportCrash leaves mangled.
 rustc-demangle.workspace = true
+# The daemons' log (`log`): its file's size and path, and a new file put in place of stderr.
+rustix = { workspace = true, features = [ "stdio" ] }
 serde.workspace = true
 serde_json.workspace = true
+# The daemons' log (`log`), set up the same way in each.
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `tests/log_cap.rs` logs through the daemons' log.
+tracing.workspace = true

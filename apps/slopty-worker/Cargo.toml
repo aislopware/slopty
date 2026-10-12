@@ -48,7 +48,6 @@ slopty-settings.workspace = true
 slopty-tailnet.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 # The drag helper the daemon runs as `slopty-worker dnd`: a drop from a client carried as a real
 # drag session at its point (`dnd`).
@@ -68,6 +67,8 @@ slopty-client.workspace = true
 # A stand-in LocalAPI for the path reader's tests (`tailnet`).
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
+# `tests/e2e.rs` shows a failing test's logs.
+tracing-subscriber.workspace = true
 # The daemons and doubles the tests spawn, found built (`slopty_testkit::bins`).
 slopty-testkit.workspace = true
 

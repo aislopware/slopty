@@ -27,7 +27,6 @@ slopty-proto.workspace = true
 slopty-pty.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # The protocol's goldens, which the custody fingerprint hashes (`tests/custody.rs`).

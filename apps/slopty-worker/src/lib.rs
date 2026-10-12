@@ -641,13 +641,8 @@ fn holder_main() -> Option<std::process::ExitCode> {
         return Some(std::process::ExitCode::FAILURE);
     };
     let (socket, store) = (PathBuf::from(socket), PathBuf::from(store));
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Capped at its file's size bound under launchd (`slopty_crash::log`).
+    slopty_crash::log::init("info");
     let Some(queue) = sized::MainQueue::new(Holder::new(sized::Cg, store.clone())) else {
         return Some(std::process::ExitCode::FAILURE);
     };
@@ -831,13 +826,8 @@ async fn run(
     curtain: Curtain,
     sources: slopty_input::sources::Sources,
 ) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Capped at its file's size bound under launchd (`slopty_crash::log`).
+    slopty_crash::log::init("info");
     let args = Args::parse();
     // Following files holds a descriptor per watched path on macOS, past launchd's 256.
     match slopty_worker::fswatch::raise_descriptor_limit() {

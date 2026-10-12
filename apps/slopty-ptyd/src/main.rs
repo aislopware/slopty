@@ -89,13 +89,8 @@ async fn main() -> Result<()> {
     if let Some(data_dir) = std::env::var_os("SLOPTY_DATA_DIR") {
         slopty_crash::install(slopty_crash::Process::Ptyd, Path::new(&data_dir));
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    // Capped at its file's size bound under launchd (`slopty_crash::log`).
+    slopty_crash::log::init("info");
     let socket = args.socket.unwrap_or_else(slopty_pty::protocol::socket_path);
     if args.sessions {
         use std::io::Write as _;

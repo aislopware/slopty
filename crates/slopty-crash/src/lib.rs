@@ -36,6 +36,7 @@
 )]
 
 pub mod ips;
+pub mod log;
 pub mod probe;
 
 mod panic;

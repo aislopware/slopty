@@ -18,6 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use slopty_agent::status::SessionAgent;
 use slopty_core::SessionId;
+use slopty_crash::log::{Repeats, Tell};
 use slopty_net::framed::FramedSend;
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink};
@@ -99,10 +100,15 @@ pub async fn run(
     addr: HostAddr,
     watched: Watched,
 ) -> ! {
-    let mut redial = Redial::default();
+    // A server gone for weeks is redialled every couple of seconds: its failure is logged when
+    // it starts or changes, then once an hour, not on every redial (`slopty_crash::log`).
+    let mut dialing = Dialing {
+        redial: Redial::default(),
+        repeats: Repeats::new(slopty_crash::log::STILL_EVERY),
+    };
     loop {
         let ended =
-            session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut redial).await;
+            session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut dialing).await;
         // No phone's answer comes through a server this worker is not linked to.
         crate::threads::hold::pushed(&daemon, false);
         let redialling = |why: String| stands(&daemon, &addr, LinkState::Redialling { why });
@@ -115,15 +121,14 @@ pub async fn run(
             // same worker; another machine with this id and another key is refused. The redials
             // find out whether it went.
             Err(Ended::Duplicate) => {
-                tracing::warn!(server = %addr, "another worker holds this worker's id; retrying");
-                redialling("another worker holds this worker's id on the server".to_owned());
+                let why = "another worker holds this worker's id on the server";
+                told(&mut dialing.repeats, &addr, why, tracing::Level::WARN);
+                redialling(why.to_owned());
             }
             // The tailnet policy may grant it later; the redials find out.
             Err(Ended::NotGranted) => {
-                tracing::warn!(
-                    server = %addr,
-                    "the tailnet policy does not grant this machine the worker role"
-                );
+                let why = "the tailnet policy does not grant this machine the worker role";
+                told(&mut dialing.repeats, &addr, why, tracing::Level::WARN);
                 stands(&daemon, &addr, LinkState::NotGranted);
             }
             // It changes only when someone updates it or this worker: asked again after a while.
@@ -135,21 +140,51 @@ pub async fn run(
                     Some(slopty_net::Newer::There) => "update this worker",
                     None => "update whichever is behind",
                 };
-                tracing::warn!(server = %addr, server_build, this, "the server runs a different build; {update}");
                 let why = format!(
                     "the server runs build {server_build} and this worker {this}; {update}"
                 );
+                told(&mut dialing.repeats, &addr, &why, tracing::Level::WARN);
                 stands(&daemon, &addr, LinkState::Refused { why });
                 tokio::time::sleep(slopty_net::redial::WRONG_BUILD).await;
                 continue;
             }
             Err(Ended::Failed(e)) => {
-                tracing::info!(server = %addr, error = %e, "server link failed");
-                redialling(format!("{e:#}"));
+                let why = format!("{e:#}");
+                told(&mut dialing.repeats, &addr, &why, tracing::Level::INFO);
+                redialling(why);
             }
         }
-        tokio::time::sleep(redial.next(std::time::Instant::now())).await;
+        tokio::time::sleep(dialing.redial.next(std::time::Instant::now())).await;
     }
+}
+
+/// How the server link's redials go: when the next is due, and what the log has told of their
+/// failures.
+struct Dialing {
+    /// When the next redial is due.
+    redial: Redial,
+    /// What the log has told of the failures.
+    repeats: Repeats,
+}
+
+/// A redial's failure `why`, logged at `level` when it is new and once an hour while it goes on,
+/// with how many redials have failed and for how many minutes.
+fn told(repeats: &mut Repeats, addr: &HostAddr, why: &str, level: tracing::Level) {
+    let (times, minutes) = match repeats.failed(why, std::time::Instant::now()) {
+        Tell::Quiet => return,
+        Tell::New => (None, None),
+        Tell::Still { times, lasted } => (Some(times), Some(minutes(lasted))),
+    };
+    if level == tracing::Level::WARN {
+        tracing::warn!(server = %addr, why, times, minutes, "server link failing");
+    } else {
+        tracing::info!(server = %addr, why, times, minutes, "server link failing");
+    }
+}
+
+/// `d` in whole minutes.
+fn minutes(d: std::time::Duration) -> u64 {
+    d.as_secs().checked_div(60).unwrap_or_default()
 }
 
 /// Why a registration did not get going.
@@ -178,7 +213,7 @@ async fn session(
     endpoint: &slopty_net::Endpoint,
     addr: &HostAddr,
     watched: Watched,
-    redial: &mut Redial,
+    dialing: &mut Dialing,
 ) -> Result<&'static str, Ended> {
     let Watched { mut caps, mut facts } = watched;
     // Subscribed before the registration is taken: whatever happens after it is sent after it.
@@ -207,9 +242,15 @@ async fn session(
             Err(DialError::Net(e)) => return Err(e.into()),
         };
     let ServerLink { conn, remote, name, tx, mut rx, .. } = link;
-    redial.linked(std::time::Instant::now());
+    let now = std::time::Instant::now();
+    dialing.redial.linked(now);
     stands(daemon, addr, LinkState::Linked);
-    tracing::info!(server = %name, %remote, "registered with the server");
+    if let Some((failures, lasted)) = dialing.repeats.ended(now) {
+        let minutes = minutes(lasted);
+        tracing::info!(server = %name, %remote, failures, minutes, "registered with the server");
+    } else {
+        tracing::info!(server = %name, %remote, "registered with the server");
+    }
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
     let mut writer = tokio::spawn(write(tx, out_rx));
     // A registration carries no load: the server hears it first here, then each move of it.

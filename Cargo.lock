@@ -7926,9 +7926,12 @@ dependencies = [
  "backtrace",
  "libc",
  "rustc-demangle",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8294,7 +8297,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -8359,7 +8361,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -11003,6 +11004,7 @@ dependencies = [
  "tokio-util",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "tracing",
  "tracing-core",
  "uuid",
  "winnow 1.0.4",

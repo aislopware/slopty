@@ -16695,3 +16695,33 @@ goes back to its head and opens again, the same, on its next use.
 ```sh
 cargo nextest run -p slopty-worker --test rest --no-capture
 ```
+
+## 2026-10-12 — a daemon's log with its server gone, and idle
+
+A worker pointed at a server that does not answer (`--server 127.0.0.1:9`), and a worker linked
+to a server with nothing to do, each with stderr to a file as launchd gives it, at `info`
+(Linux probes; the build before, run 38216349947, and after, run 38218321012).
+
+| bytes the worker's log grows | before | after |
+| --- | --- | --- |
+| a server that does not answer, past the start | 5.9 KB in 116 s: 31 lines, one a redial | none in 270 s; one line an hour |
+| the same, a day | about 4.4 MB | about 3.6 KB (24 lines) |
+| linked and idle, past the start | — | none in 270 s, worker and server |
+| the most one daemon's log holds | no bound | 16 MiB (8 MiB and one old file) |
+
+Before, every redial (about every 3.7 s: the 2 s wait and the dial's own) wrote a "server link
+failed" line of about 190 bytes, a third of it colour codes, so a laptop whose server was gone
+for a month left some 130 MB in `~/Library/Logs/Slopty/slopty-worker.log`. Now the failure is
+written when it starts or changes, once an hour while it lasts, and once more, with its count
+and minutes, when the link comes back (`slopty_crash::log::Repeats`); colour only on a terminal;
+and each daemon's file moves to `<file>.1` past 8 MiB (`slopty_crash::log`,
+`crates/slopty-crash/tests/log_cap.rs`).
+
+```sh
+cargo build --profile test -p slopty-ptyd -p slopty-workerd -p slopty-serverd --bins
+B=target/debug T=$(mktemp -d); export SLOPTY_PTYD_SOCKET=$T/ptyd.sock RUST_LOG=info
+$B/slopty-ptyd > $T/ptyd.log 2>&1 & D=$!
+SLOPTY_DATA_DIR=$T/w SLOPTY_WORKER_SOCKET=$T/w.sock \
+  $B/slopty-worker --port 0 --server 127.0.0.1:9 > $T/w.log 2>&1 & P=$!
+sleep 30; wc -c $T/w.log; sleep 270; wc -c $T/w.log; kill $P $D; wait
+```
