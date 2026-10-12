@@ -53,11 +53,11 @@ use crate::tools::repo_root;
 /// How long a unit or an incremental cache may go unused before it goes.
 pub const DEFAULT_IDLE_HOURS: u64 = 24;
 
-/// What `target/` may hold, in GB (`SLOPTY_TARGET_BUDGET_GB`). Every compile runs on a runner
-/// (`cargo xtask remote`; `docs/decisions/tooling.md`, "Every compile runs on a runner"), so
-/// what stays here is xtask, the quick gate's tree and the odd `land --check`: a full gate's
-/// lanes took 32 GB and a day of agents' builds about 60 GB when they ran here.
-pub const DEFAULT_BUDGET_GB: u64 = 30;
+/// What `target/` may hold, in GB (`SLOPTY_TARGET_BUDGET_GB`). Lanes check their own crates here
+/// at full power (`docs/decisions/tooling.md`, "Checks run where they return soonest"), and a
+/// warm unit is a compile saved: a full gate's lanes took 32 GB and a day of agents' builds
+/// about 60 GB, so this holds several days of them. The volume's floor still guards the disk.
+pub const DEFAULT_BUDGET_GB: u64 = 200;
 
 /// The free space `target/`'s volume keeps, in GB (`SLOPTY_DISK_FLOOR_GB`): a cold full gate
 /// writes about 35 GB, so a build that starts above the floor finishes before the disk does.
@@ -66,7 +66,7 @@ pub const DEFAULT_FLOOR_GB: u64 = 50;
 /// What each fork or study checkout's build output under `.research/` may hold, in GB
 /// (`SLOPTY_FORK_BUDGET_GB`). The gpui-fast and gpui-kit forks each grew past 85 GB in a day of
 /// syncs and A/B builds and filled the volume (2026-09-30), since nothing pruned them.
-pub const DEFAULT_FORK_BUDGET_GB: u64 = 40;
+pub const DEFAULT_FORK_BUDGET_GB: u64 = 80;
 
 /// Nothing used this recently is deleted for the budget: the build that just ran, and the tests
 /// it is about to run from those binaries.

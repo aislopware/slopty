@@ -312,7 +312,7 @@ every target dir under `target/` and in both of cargo's layouts (to 1.99 and fro
 - the incremental caches no compile has touched for a day;
 - the object files a binary's earlier compiles left beside it.
 
-Then, when `target/` is over its budget (30 GB, since nothing heavy compiles here;
+Then, when `target/` is over its budget (200 GB, room for several days of warm builds;
 `SLOPTY_TARGET_BUDGET_GB` or `--budget-gb`) or its volume has less than the floor free (50 GB,
 `SLOPTY_DISK_FLOOR_GB` or `--floor-gb`), it deletes the least recently used units and caches
 until both hold with a tenth to spare. Nothing

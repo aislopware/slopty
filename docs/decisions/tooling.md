@@ -1911,6 +1911,7 @@ more full-window layer.
     10-06, 8 min on 10-12), so the loss was in each check and the Mac queue.
   - A lane runs `cargo clippy` and `cargo nextest` on its own crates here, and wide checks,
     Linux, iOS and goldens on runners. The same day the person ruled out any throttle (no
-    `nice`, no job cap, no disk budget): local cargo runs at full power, for speed.
+    `nice`, no job cap): local cargo runs at full power, for speed, and `target/` may hold 200 GB
+    (forks 80) so warm units save compiles, while the volume keeps its 50 GB floor.
   - Next: `cargo xtask remote` picks local, remote or both per check by what returns soonest,
     and records the latency in MEASUREMENTS.
