@@ -1857,11 +1857,14 @@ more full-window layer.
     the model does best given the whole task and left to run, already verifies and corrects
     itself, and that instructions to re-check or verify add cost with no gain
     (platform.claude.com, "Prompting Claude Opus 5", "Prompting Claude Opus 5.5").
-  - `CLAUDE.md` went from 141 lines to 85: the outcome, the lines that hold, how the work goes
-    and session safety. Rules the lints already enforce (`unwrap`, `expect`, `std::sync::Mutex`,
-    `thread::sleep`, an `#[allow]` without a reason) left it, since clippy names them. The gate's
+  - `CLAUDE.md` went from 141 lines to 37: a paragraph of outcome, five hard lines and the
+    session safety. The person then asked for it shorter still, so nothing a model infers, finds
+    in the docs or the memory, or is told by a lint stays in it. Rules the lints enforce
+    (`unwrap`, `expect`, `std::sync::Mutex`, `thread::sleep`, an `#[allow]` without a reason)
+    left it, since clippy names them. The gate's
     and the session start's commands stay in `docs/DEV.md`, which it cites. The design detail is
     `.claude/rules/design.md`, loaded only with the UI crates; how parallel lanes work is the
-    `lanes` skill, loaded when a lane is briefed.
+    `lanes` skill, loaded when a lane is briefed; the Apple FFI conventions are
+    `.claude/rules/apple.md`, loaded with the crates that call Apple frameworks.
   - Kept whole: the safety lines and the person's grants, since they are boundaries the model
     cannot infer, and each line's reason where it has one.
