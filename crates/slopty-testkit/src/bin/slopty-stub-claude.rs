@@ -87,6 +87,9 @@ struct Record {
     argv: Vec<String>,
     /// The directory it was started in.
     cwd: Option<String>,
+    /// The directory the session is in now: where it was started, until a payload names
+    /// another, as Claude Code moves into a worktree it enters.
+    here: Option<String>,
     env: serde_json::Map<String, Value>,
     /// Every variable it was started with, by name, as a digest of its value
     /// (`slopty_testkit::env::digests`): no value is written.
@@ -131,6 +134,7 @@ fn run(args: &[String]) -> Fallible<()> {
         at: knob("STUB_RECORD").map(PathBuf::from),
         argv: args.to_vec(),
         cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
+        here: None,
         env: std::env::vars()
             .filter(|(k, _)| k.starts_with("SLOPTY_") || k.starts_with("CLAUDE_"))
             .map(|(k, v)| (k, Value::String(v)))
@@ -347,7 +351,8 @@ fn settings(args: &[String]) -> Value {
 /// Fire every payload of `script` in order, recording each: whether every hook registered for
 /// its event ran cleanly (none registered is not fired), and what they printed. A payload that
 /// names no session carries the one the stub was started on (`--session-id`), and one that names
-/// no directory the stub's own, as each of Claude Code's does.
+/// no directory the session's (the last one named, else the stub's own), as each of Claude
+/// Code's does.
 fn fire_all(settings: &Value, script: &Value, record: &mut Record) -> Fallible<()> {
     let at = record.argv.iter().position(|a| a == "--session-id" || a == "--resume");
     let session = at.and_then(|at| record.argv.get(at.saturating_add(1))).cloned();
@@ -360,9 +365,7 @@ fn fire_all(settings: &Value, script: &Value, record: &mut Record) -> Fallible<(
         if let (Some(transcript), Some(fields)) = (&transcript, payload.as_object_mut()) {
             fields.entry("transcript_path").or_insert_with(|| json!(transcript));
         }
-        if let (Some(cwd), Some(fields)) = (&record.cwd, payload.as_object_mut()) {
-            fields.entry("cwd").or_insert_with(|| json!(cwd));
-        }
+        in_session_dir(&mut payload, record.cwd.as_ref(), &mut record.here);
         let payload = &payload;
         let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or_default();
         // An event no hook is registered for (a `Statusline` a test posts) goes through the
@@ -386,6 +389,19 @@ fn fire_all(settings: &Value, script: &Value, record: &mut Record) -> Fallible<(
         record.save()?;
     }
     Ok(())
+}
+
+/// Give `payload` the session's directory unless it names one: each of Claude Code's names
+/// where the session is now, the last directory a payload named (`here`, kept), else where it
+/// was `started`.
+fn in_session_dir(payload: &mut Value, started: Option<&String>, here: &mut Option<String>) {
+    if let Some(named) = payload.get("cwd").and_then(Value::as_str) {
+        *here = Some(named.to_owned());
+    }
+    let now = here.as_ref().or(started);
+    if let (Some(cwd), Some(fields)) = (now, payload.as_object_mut()) {
+        fields.entry("cwd").or_insert_with(|| json!(cwd));
+    }
 }
 
 /// The commands and their arguments the settings register for `event`, in order.
@@ -486,4 +502,28 @@ fn replace(at: &Path, record: &Value) -> Fallible<()> {
     std::fs::write(&part, serde_json::to_vec_pretty(record)?)?;
     std::fs::rename(&part, at)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::in_session_dir;
+
+    /// A payload that names no directory carries the last one a payload named, as Claude Code's
+    /// do once the session entered a worktree, and where the stub started before any did.
+    #[test]
+    fn a_payload_carries_the_directory_the_session_is_in() {
+        let started = "/repo".to_owned();
+        let mut here = None;
+        let mut first = json!({ "hook_event_name": "SessionStart" });
+        in_session_dir(&mut first, Some(&started), &mut here);
+        assert_eq!(first["cwd"], "/repo");
+        let mut entered = json!({ "hook_event_name": "UserPromptSubmit", "cwd": "/repo/tree" });
+        in_session_dir(&mut entered, Some(&started), &mut here);
+        assert_eq!(entered["cwd"], "/repo/tree");
+        let mut status = json!({ "hook_event_name": "Statusline" });
+        in_session_dir(&mut status, Some(&started), &mut here);
+        assert_eq!(status["cwd"], "/repo/tree", "the worktree, not where it started");
+    }
 }
