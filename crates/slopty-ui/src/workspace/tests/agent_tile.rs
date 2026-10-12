@@ -211,7 +211,7 @@ fn a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_termi
     settle(cx);
     assert_eq!(focused(&view, cx), Some(placeholder));
     assert!(view.read_with(cx, |v, _| v.face_shown(session)), "on the thread face");
-    assert!(cx.debug_bounds("thread-hero").is_none(), "the message went: nothing is asked");
+    assert!(cx.debug_bounds("thread-question").is_none(), "the message went: nothing is asked");
 
     // Its hooks stay silent, and the worker says it asks in its terminal.
     let ask = AskId("terminal-start".to_owned());
@@ -237,7 +237,7 @@ fn a_start_held_at_claude_codes_own_dialog_keeps_its_message_and_shows_the_termi
     });
     view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame(&state, 2), cx));
     settle(cx);
-    assert!(cx.debug_bounds("thread-hero").is_none());
+    assert!(cx.debug_bounds("thread-question").is_none());
     assert!(cx.debug_bounds("request-terminal-start").is_some(), "it says so");
     let release = cx.debug_bounds("release-terminal-start").expect("the way to the terminal");
     studio.drain();

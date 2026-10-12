@@ -548,8 +548,8 @@ const SUNK_DEPTH: f32 = 1.0;
 /// `el` raised off its plane at rest: what stands up from where it lies (a card, a tray's head,
 /// a notice's disc, a chip over a body).
 ///
-/// The work's ground inside the `border` line, with no shadow: a resting thing is told by its
-/// edge, as Zed's cards rest on the editor's background. A hover or
+/// The work's ground inside the one structural `stroke` line, with no shadow: a resting thing is
+/// told by its edge, as Delta's cards rest on its page (`border` rings controls only). A hover or
 /// selection wash is never a resting surface, so the kit lint `a_resting_fill_is_raised_or_sunk`
 /// keeps the washes to the pointer and the selection. The caller keeps its own radius.
 #[must_use]
@@ -564,7 +564,7 @@ pub fn raised_part<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> 
     let el = el.bg(hsla(theme.surfaces.ground)).border_l(HAIR).border_r(HAIR);
     let el = if first { el.border_t(HAIR) } else { el };
     let el = if last { el.border_b(HAIR) } else { el };
-    el.border_color(hsla(theme.surfaces.border))
+    el.border_color(hsla(theme.surfaces.stroke))
 }
 
 /// `el` set into its plane as a quiet well: code, a command's output, an attachment's chip, the
@@ -576,15 +576,12 @@ pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
 
 /// `el` as the one card a thread's column keeps, Zed's agent panel's tool card.
 ///
-/// It holds a call put to the person (a permission, a question, a plan to approve): the
-/// work's ground inside the `call_border` line (Zed's `border` at 80 %) at `radii.md`, clipped
-/// to its corners, its head on [`card_head`].
+/// It holds a call put to the person (a permission, a question, a plan to approve): a
+/// [`raised`] card, the work's ground inside the one structural line, at `radii.md`, clipped to
+/// its corners, its head on [`card_head`].
 #[must_use]
 pub fn call_card<E: Styled>(el: E, theme: &Theme) -> E {
-    raised(el, theme)
-        .border_color(hsla(theme.surfaces.call_border))
-        .rounded(px(theme.radii.md))
-        .overflow_hidden()
+    raised(el, theme).rounded(px(theme.radii.md)).overflow_hidden()
 }
 
 /// `el` as a [`call_card`]'s head.
@@ -1907,18 +1904,18 @@ mod tests {
         }
     }
 
-    /// A call card is Zed's tool card: `border` at 80 %, a step quieter than a control's line
-    /// and a step louder than the lighter one between regions, at `radii.md`.
+    /// A call card wears the one structural line every card and well wears, Delta's, at
+    /// `radii.md`: one line tone inside a thread, `border` kept for controls.
     #[test]
-    fn a_call_card_is_ringed_a_step_quieter_than_a_control() {
+    fn a_call_card_wears_the_one_structural_line() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let s = theme.surfaces;
             let style = call_card(div(), &theme).style().clone();
-            assert_eq!(style.border_color, Some(hsla(s.call_border)), "{variant:?}");
+            assert_eq!(style.border_color, Some(hsla(s.stroke)), "{variant:?}");
             assert_eq!(style.corner_radii.top_left, Some(px(theme.radii.md).into()));
-            assert_eq!(s.call_border.ink, s.border.ink, "{variant:?}: the border's own ink");
-            assert!(s.call_border.alpha < s.border.alpha, "{variant:?}: quieter");
+            let well = well(div(), &theme).style().clone();
+            assert_eq!(well.border_color, style.border_color, "{variant:?}: the well's line");
         }
     }
 
@@ -2149,7 +2146,7 @@ mod tests {
         }
     }
 
-    /// A card rests on its edge: the work's ground inside the `border` line, with no shadow, in
+    /// A card rests on its edge: the work's ground inside the `stroke` line, with no shadow, in
     /// both variants. A card cut into parts takes its top line on the first part and its bottom
     /// one on the last.
     #[test]
@@ -2160,7 +2157,7 @@ mod tests {
             let mut whole = card(&theme);
             let style = whole.style();
             assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.ground))), "{variant:?}");
-            assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: the border line");
+            assert_eq!(style.border_color, Some(hsla(s.stroke)), "{variant:?}: the one line");
             assert!(style.box_shadow.is_none(), "{variant:?}: no shadow at rest");
             let edges = |first, last| {
                 let mut part = card_part(&theme, first, last);

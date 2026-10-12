@@ -848,9 +848,6 @@ pub mod alpha {
     /// Barely drawn until wanted: a thread's fold disclosure at rest, Zed's 30 %; and how far
     /// the activity bar's ground moves toward the selection.
     pub const QUIET: f32 = 0.3;
-    /// How strongly a thread's call card and a thought's rail draw the border: Zed's tool card
-    /// border, 80 %.
-    pub const CALL_BORDER: f32 = 0.8;
     /// How strongly a row wearing an identity colour is tinted in it, under its 2 pt bar:
     /// Delta's colour-coded threads (`.research/delta-re-2026-10-12.md` §2.9).
     pub const IDENTITY: f32 = 0.08;
@@ -924,14 +921,14 @@ pub struct Surfaces {
     pub keyed: Tint,
     /// What is held down: Zed's `ghost_element.active`, the selection's tone.
     pub pressed: Tint,
-    /// The line between regions, at 1 pt: the sash between panes, the navigator's edge, a bar's
-    /// foot, a divider inside a pane. Zed's `border.variant`.
+    /// The one structural line, at 1 pt: every line that parts regions or rings a box. The top
+    /// rule, a bar's foot, a tab's sides, the sash between panes, the navigator's edge, a
+    /// divider inside a pane, a card, a well. Zed's `border.variant`, Delta's one `#dfdfe0`
+    /// (`.research/warp-composition-2026-10-12.md` §1.10).
     pub stroke: Tint,
-    /// The line round a control or a card, a tab's sides, a split: Zed's `border`.
+    /// The line round a control only: a field, a dropdown, a secondary button, a checkbox, a
+    /// segmented control's track. Zed's `border`.
     pub border: Tint,
-    /// The line round a thread's call card and down a thought's side: Zed's tool card border,
-    /// [`Self::border`] at 80 %, so what an agent did sits a step quieter than a control.
-    pub call_border: Tint,
     /// The keyboard's border: Zed's `border.focused`, drawn at [`stroke::FOCUS`], moved toward
     /// the accent as far as it takes to stand 3:1 off every plane and row it rings (WCAG
     /// 2.4.13), where Zed's own reads 2.4 on a selected row.
@@ -1338,7 +1335,6 @@ impl Surfaces {
             pressed: Tint { ink: t.selected, alpha: u8::MAX },
             stroke: Tint { ink: t.stroke, alpha: u8::MAX },
             border: Tint { ink: t.border, alpha: u8::MAX },
-            call_border: Tint::of(t.border, alpha::CALL_BORDER),
             focus: lift_to(t.focus, &under, accent, Floor { ratio: NON_TEXT, lc: 0.0 }),
             selected_border: t.selected_border,
             indent_guide: t.indent_guide,

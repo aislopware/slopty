@@ -107,8 +107,8 @@ fn a_request_is_answered_on_its_call_wherever_it_stands(cx: &mut TestAppContext)
 }
 
 /// A request about no call follows the last turn as a card of its own, a large step under
-/// it: in a short thread it stands under the turns, not pinned to the composer with a dead band
-/// over it, and the composer's activity bar holds no copy of it.
+/// it: in a short thread it stands under the turns with the composer's field after it, no dead
+/// band between, and the composer's activity bar holds no copy of it.
 #[gpui::test]
 fn an_approval_follows_the_last_turn(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -128,7 +128,7 @@ fn an_approval_follows_the_last_turn(cx: &mut TestAppContext) {
     let step = px(slopty_theme::Theme::default().spacing.lg);
     assert!(card.top() >= last.bottom() + step - px(0.5), "under the turn: {card:?} {last:?}");
     assert!(card.top() - last.bottom() < step * 3.0, "following it: {card:?} {last:?}");
-    assert!(composer.top() - card.bottom() > step * 3.0, "not pinned to the composer");
+    assert!(composer.top() - card.bottom() < step * 3.0, "the field follows it: {composer:?}");
     assert!(cx.debug_bounds("thread-activity").is_none(), "nothing else waits over it");
 }
 
@@ -1209,7 +1209,7 @@ fn a_narrow_foot_keeps_send_and_hands_the_rest_to_the_plus(cx: &mut TestAppConte
 
     cx.simulate_resize(gpui::size(px(240.0), px(600.0)));
     cx.run_until_parked();
-    let card = cx.debug_bounds("thread-composer").expect("the composer");
+    let card = cx.debug_bounds("thread-composer-foot").expect("the composer's foot");
     let send = cx.debug_bounds("thread-send").expect("the send stays");
     assert!(send.right() <= card.right() && send.left() >= card.left(), "{send:?} in {card:?}");
     let add = cx.debug_bounds("thread-attach").expect("the + stays");
@@ -1264,9 +1264,10 @@ fn the_add_menu_offers_photos_where_they_live(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-add-menu").is_none(), "and the menu closes");
 }
 
-/// The composer is Delta's next turn, unboxed at any width: it runs the pane's whole width to
-/// its foot under the lighter line, and its field keeps to the reading column, the person's
-/// mark hung in the gutter beside it while the gutter has room for it.
+/// The composer is Delta's next turn, unboxed at any width: its field and its foot run the
+/// pane's whole width with no line over either, the foot at the pane's bottom, and its field
+/// keeps to the reading column, the person's mark hung in the gutter beside it while the gutter
+/// has room for it.
 #[gpui::test]
 fn the_composer_runs_the_panes_width_at_its_foot(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
@@ -1282,17 +1283,18 @@ fn the_composer_runs_the_panes_width_at_its_foot(cx: &mut TestAppContext) {
         cx.run_until_parked();
         let pane = cx.debug_bounds("thread").expect("the thread");
         let composer = cx.debug_bounds("thread-composer").expect("the composer");
+        let foot = cx.debug_bounds("thread-composer-foot").expect("the foot");
         assert!((composer.size.width - pane.size.width).abs() < px(0.5), "{width}: {composer:?}");
-        assert!((composer.bottom() - pane.bottom()).abs() < px(0.5), "{width}: at the foot");
+        assert!((foot.size.width - pane.size.width).abs() < px(0.5), "{width}: {foot:?}");
+        assert!((foot.bottom() - pane.bottom()).abs() < px(0.5), "{width}: the foot at the foot");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let line = slopty_kit::colors::hsla(theme.surfaces.stroke);
         let lined = quads.iter().any(|q| {
-            (q.bounds.origin.y.0 / scale - f32::from(composer.top())).abs() < 0.5
-                && q.border_color == line
+            let y = q.bounds.origin.y.0 / scale;
+            [composer.top(), foot.top()].iter().any(|top| (y - f32::from(*top)).abs() < 0.5)
                 && q.border_widths.top.0 > 0.0
                 && q.border_widths.left.0 == 0.0
         });
-        assert!(lined, "{width}: the lighter line along its top, no ring");
+        assert!(!lined, "{width}: no line over the field or the foot");
     }
 }
 

@@ -57,8 +57,8 @@ fn view_in<'a>(
 ) -> (Entity<ThreadView>, &'a mut VisualTestContext) {
     let hub = hub.clone();
     // Motion runs on wall time, which a test does not hold: a move under way when a test reads
-    // a place or clicks one (the composer docking at the foot as a turn starts) lands it where
-    // a busy machine has got to. A test of a move turns motion back on itself.
+    // a place or clicks one (a row sliding in as it arrives) lands it where a busy machine has
+    // got to. A test of a move turns motion back on itself.
     cx.update(|cx| cx.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|window, cx| {
         let view = ThreadView::new(hub, thread, theme, window, cx);
@@ -157,125 +157,69 @@ fn an_answer_flips_its_card_in_the_frame_it_is_pressed(cx: &mut TestAppContext) 
     );
 }
 
-/// An empty thread is its composer: centred under one question, what its agent should do in
-/// its folder, with where it works in the composer's foot and no notice in the rows' place. A
-/// thread whose only row is a request asks nothing, since the request's card says it all; and
-/// once the thread has rows the composer docks at the foot with the keyboard still in it (at
-/// once, under Reduce Motion).
+/// An empty thread is its next turn's slot, Delta's: its field at the top under the header asks
+/// what its agent should do in its folder, with where it works on the field's ledge and no
+/// notice in the rows' place. A thread at work, one with a request on show and one a project
+/// briefed ask nothing; once the thread has rows the field follows them, the keyboard still in
+/// it.
 #[gpui::test]
-fn an_empty_thread_is_its_composer_under_a_question(cx: &mut TestAppContext) {
+fn an_empty_thread_asks_in_its_field_under_the_header(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let state = fixtures::empty();
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.rows().is_empty()));
-    let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-    assert!(
-        tree.iter().any(|n| n.is("Heading", Some("What should Claude Code do in w?"))),
-        "the question, by the folder's name"
-    );
+    let question = "What should Claude Code do in w?";
+    let says = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.placeholder().to_owned());
+    assert_eq!(says(cx), question, "the question, by the folder's name, in the field");
     assert!(cx.debug_bounds("thread-empty").is_none(), "no notice in the rows' place");
     assert!(cx.debug_bounds("thread-place").is_some(), "where, on the composer's ledge");
-    let middle = |cx: &mut VisualTestContext| {
-        let composer = cx.debug_bounds("thread-composer").expect("the composer");
-        composer.bottom() < px(450.0)
-    };
-    assert!(middle(cx), "the composer stands in the middle, not at the foot");
+    let header = cx.debug_bounds("thread-header").expect("the header");
+    let field = cx.debug_bounds("thread-composer").expect("the field");
+    let step = Theme::default().spacing.xl;
+    assert!(
+        field.top() >= header.bottom() - px(0.5) && field.top() - header.bottom() <= px(step),
+        "the field at the top, under the header: {field:?} {header:?}"
+    );
+    let foot = cx.debug_bounds("thread-composer-foot").expect("the foot");
+    let pane = cx.debug_bounds("thread").expect("the pane");
+    assert!((foot.bottom() - pane.bottom()).abs() < px(0.5), "the foot pinned: {foot:?}");
 
     let mut working = state.clone();
     working.status.phase = slopty_proto::thread::Phase::Working;
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working, 1), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-hero").is_none(), "an agent at work asks nothing");
+    assert_ne!(says(cx), question, "an agent at work asks nothing");
 
     let mut asking = state.clone();
     asking.requests = vec![approval("a")];
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(asking, 2), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("request-a").is_some(), "the request is on show");
-    assert!(cx.debug_bounds("thread-hero").is_none(), "and nothing asks over it");
+    assert_ne!(says(cx), question, "and nothing asks beside it");
 
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-hero").is_some(), "asked again");
+    assert_eq!(says(cx), question, "asked again");
     view.update(cx, |v, cx| v.set_briefed(true, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-hero").is_none(), "a thread a project briefed asks nothing");
+    assert_ne!(says(cx), question, "a thread a project briefed asks nothing");
     view.update(cx, |v, cx| v.set_briefed(false, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-hero").is_some(), "unbriefed, it asks once more");
-    let field = view.read_with(cx, gpui::Focusable::focus_handle);
-    let typing = |cx: &mut VisualTestContext| cx.update(|window, _| field.is_focused(window));
+    assert_eq!(says(cx), question, "unbriefed, it asks once more");
+    let focus = view.read_with(cx, gpui::Focusable::focus_handle);
+    let typing = |cx: &mut VisualTestContext| cx.update(|window, _| focus.is_focused(window));
     assert!(typing(cx), "the field has the keyboard");
-    let full = fixtures::thread("edit");
-    let mut moved = full;
+    let mut moved = fixtures::thread("edit");
     moved.meta.id = thread;
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 4), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-hero").is_none(), "a thread with rows asks nothing");
+    assert_ne!(says(cx), question, "a thread with rows asks nothing");
     assert!(cx.debug_bounds("thread-place").is_none(), "its header says where");
-    assert!(!middle(cx), "the composer docks at the foot");
-    assert!(typing(cx), "with the keyboard still in it");
-}
-
-/// With motion on, the composer does not jump to the foot after the first message: it sets
-/// off from the middle and the dock's move starts, which ends with the composer at the foot.
-/// The move runs on wall time, which a busy machine may have spent before any frame is read, so
-/// the test reads where the composer stands before, that the move started, and, with motion
-/// then reduced, where it ends.
-#[gpui::test]
-fn the_composer_moves_to_the_foot_after_the_first_message(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let state = fixtures::empty();
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    cx.update(|_w, cx| cx.set_reduce_motion(false));
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
-    cx.run_until_parked();
-    let bottom = |cx: &mut VisualTestContext| {
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        cx.debug_bounds("thread-composer").expect("the composer").bottom()
-    };
-    let before = bottom(cx);
-    assert!(before < px(450.0), "it stands in the middle: {before:?}");
-    assert!(cx.debug_bounds("thread-dock").is_none(), "nothing moves before the message");
-    let mut moved = fixtures::thread("edit");
-    moved.meta.id = thread;
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 1), cx));
-    let _setting_off = bottom(cx);
-    assert!(cx.debug_bounds("thread-dock").is_some(), "the move to the foot sets off");
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    let landed = bottom(cx);
-    assert!(landed > px(560.0), "and ends at the foot: {landed:?}");
-}
-
-/// Under Reduce Motion the first message puts the composer at the foot at once: no move sets
-/// off.
-#[gpui::test]
-fn under_reduce_motion_the_composer_docks_at_once(cx: &mut TestAppContext) {
-    let (hub, _sent) = hub(cx, None);
-    let state = fixtures::empty();
-    let thread = state.meta.id;
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
-    cx.run_until_parked();
-    let mut moved = fixtures::thread("edit");
-    moved.meta.id = thread;
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(moved, 1), cx));
-    cx.update(|window, _| window.refresh());
-    cx.run_until_parked();
-    let at_once = cx.debug_bounds("thread-composer").expect("the composer").bottom();
-    assert!(at_once > px(560.0), "at the foot at once: {at_once:?}");
-    assert!(cx.debug_bounds("thread-dock").is_none(), "no move under Reduce Motion");
+    assert!(typing(cx), "the keyboard still in the field");
 }
 
 /// On touch a request's answers are a finger's target, 44 points tall, as the theme's touch

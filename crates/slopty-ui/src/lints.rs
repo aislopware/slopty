@@ -390,6 +390,42 @@ fn the_destructive_red_is_the_kits() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// A `border` line in `line`'s code: the ring a control wears.
+fn border_line(line: &str) -> bool {
+    let code = !line.trim_start().starts_with("//");
+    code && (line.contains("s.border)") || line.contains("surfaces.border)"))
+}
+
+#[test]
+fn the_line_check_knows_a_border_from_a_stroke() {
+    assert!(border_line(".border_color(hsla(s.border))"));
+    assert!(border_line(".bg(hsla(theme.surfaces.border))"));
+    assert!(!border_line(".border_color(hsla(s.stroke))"));
+    assert!(!border_line(".border_color(hsla(s.selected_border))"));
+    assert!(!border_line("// the `border` line, s.border)"));
+}
+
+/// One structural line tone, Delta's (`.research/warp-composition-2026-10-12.md` §1.10): what
+/// parts regions or rings a box (a tab bar's foot, a tab's sides, a thread's cards, wells and
+/// rails) is drawn in `stroke`, and `border` rings controls only. The tab bar's files and the
+/// thread's own hold no `border` line.
+#[test]
+fn a_region_line_is_stroke() {
+    const RULED: [&str; 3] =
+        ["/workspace/tabs.rs", "/workspace/tab_look.rs", "/conversation/thread/view.rs"];
+    let wrong: Vec<String> = chrome_lines("slopty-ui/src")
+        .into_iter()
+        .filter(|(file, ..)| {
+            RULED.iter().any(|f| file.ends_with(f)) || file.contains("/conversation/thread/view/")
+        })
+        .filter(|(.., line)| border_line(line))
+        .map(|(file, line_no, line)| {
+            format!("{file}:{line_no}: a region in `border`: {}", line.trim())
+        })
+        .collect();
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// Chrome draws no gradient, `kit` included: a gradient is a wash, the first tell of
 /// generated UI. Where something scrolls past an edge, the content itself fades per pixel
 /// (`gpui::edge_fade`), over whatever lies behind it.

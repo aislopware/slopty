@@ -1306,7 +1306,7 @@ impl BrowserView {
                     .aria_label(name.clone())
                     .aria_value(status.clone())
                     .border_t(kit::HAIR)
-                    .border_color(hsla(s.border))
+                    .border_color(hsla(s.stroke))
                     .text_size(px(theme.typography.small()))
                     .font_family(theme.typography.ui_family.clone())
                     .text_color(hsla(s.text))

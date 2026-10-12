@@ -902,7 +902,13 @@ fn the_foot_spans_the_pane_with_equal_ends(cx: &mut TestAppContext) {
 
     let theme = slopty_theme::Theme::default();
     let inset = theme.spacing.inset_trailing();
-    let pane = cx.debug_bounds("thread-composer").expect("the composer");
+    let pane = cx.debug_bounds("thread").expect("the pane");
+    let foot = cx.debug_bounds("thread-composer-foot").expect("the foot");
+    assert!(
+        (foot.bottom() - pane.bottom()).abs() < gpui::px(0.5)
+            && (foot.size.width - pane.size.width).abs() < gpui::px(0.5),
+        "the foot spans the pane at its bottom: {foot:?} {pane:?}"
+    );
     let send = cx.debug_bounds("thread-send").expect("the send");
     assert!(
         (f32::from(pane.right()) - inset - f32::from(send.right())).abs() < 0.5,
@@ -931,4 +937,59 @@ fn the_foot_spans_the_pane_with_equal_ends(cx: &mut TestAppContext) {
         let gap = f32::from(b.left()) - f32::from(a.right());
         assert!((gap - theme.spacing.xxs).abs() < 0.5, "one gap between controls: {a:?} {b:?}");
     }
+}
+
+/// The next turn's slot follows the last turn, Delta's: while the rows are shorter than the
+/// pane, what waits and the composer's field stand right under the last row and only the foot
+/// is pinned to the pane's bottom, the room left between them; once the rows fill the pane,
+/// the field stands right over the foot.
+#[gpui::test]
+fn the_field_follows_the_last_turn(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    // One turn: the message and its answer, short of a pane 900 tall.
+    let short = fixtures::long(1, 0);
+    let thread = short.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(900.0)));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(short, 0), cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    let pane = cx.debug_bounds("thread").expect("the pane");
+    let foot = cx.debug_bounds("thread-composer-foot").expect("the foot");
+    assert!((foot.bottom() - pane.bottom()).abs() < gpui::px(0.5), "the foot pinned: {foot:?}");
+    let last = view.read_with(cx, |v, _| v.last_row_bottom()).expect("the last row is drawn");
+    let slot = cx
+        .debug_bounds("thread-tray")
+        .or_else(|| cx.debug_bounds("thread-composer"))
+        .expect("the next turn's slot");
+    assert!(
+        (slot.top() - last).abs() < gpui::px(0.5),
+        "right under the last row: {slot:?} {last:?}"
+    );
+    let field = cx.debug_bounds("thread-composer").expect("the field");
+    assert!(foot.top() - field.bottom() > gpui::px(200.0), "the room left under the field");
+    cx.simulate_click(field.center(), Modifiers::none());
+    cx.simulate_input("go");
+    assert_eq!(
+        view.read_with(cx, ThreadView::draft),
+        "go",
+        "the field drawn there takes the keyboard"
+    );
+
+    let mut long = fixtures::long(6, 3);
+    long.meta.id = thread;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(long, 1), cx));
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let field = cx.debug_bounds("thread-composer").expect("the field");
+    let foot = cx.debug_bounds("thread-composer-foot").expect("the foot");
+    assert!(
+        (foot.top() - field.bottom()).abs() < gpui::px(0.5),
+        "over the foot: {field:?} {foot:?}"
+    );
+    assert!((foot.bottom() - pane.bottom()).abs() < gpui::px(0.5), "the foot still pinned");
 }

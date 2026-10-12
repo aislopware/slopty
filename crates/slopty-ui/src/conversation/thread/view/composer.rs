@@ -470,23 +470,31 @@ impl ThreadView {
         slopty_kit::a11y::tab_stop(el, s.focus).into_any_element()
     }
 
-    /// The composer's shell, which what stands in its place shares: a message's frame
+    /// The frame of what stands in the composer's place once its agent has gone: a message's
     /// ([`kit::message::shell`]), the one the board's message to its orchestrator wears, the
     /// pane's width under the lighter line.
     pub(super) fn shell<E: Styled>(&self, el: E) -> E {
         kit::message::shell(el, &self.theme)
     }
 
-    /// The composer, Delta's next turn: the pane's width at its foot under the lighter line,
-    /// its field in the reading column, the person's mark hung beside the field as it hangs
-    /// beside their turns, and its foot the pane's frame with equal ends.
-    pub(super) fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
+    /// The composer, Delta's next turn, in two parts: its field, the next turn's slot in the
+    /// reading column with the person's mark hung beside it as it hangs beside their turns,
+    /// which follows the last turn (`ThreadView::foot`); and its foot, the pane's frame with
+    /// equal ends, pinned to the pane's bottom. No line runs over either: the field is a turn,
+    /// and the foot a frame (`.research/warp-composition-2026-10-12.md` §1.12). An agent that
+    /// has gone stands its strip in the field's place, with no foot.
+    pub(super) fn composer_box(&self, cx: &Context<Self>) -> (AnyElement, Option<AnyElement>) {
         if let Some(strip) = self.exited_strip(cx) {
-            return strip;
+            return (strip, None);
         }
         let theme = &self.theme;
         let editing = self.composing.editing();
         let view = cx.weak_entity();
+        // A field that asks what the agent should do is named by its question, so it is heard
+        // as it is seen.
+        let asks = self.hero(cx).is_some();
+        let name =
+            if asks { SharedString::from(self.placeholder.clone()) } else { "Message".into() };
         let field = div()
             .w_full()
             .flex()
@@ -519,7 +527,7 @@ impl ThreadView {
                                 .px_0()
                                 .text_size(px(theme.typography.prose()))
                                 .line_height(gpui::relative(theme.typography.prose_line_height))
-                                .aria_label("Message")
+                                .aria_label(name)
                                 .on_paste(move |item, _window, cx| {
                                     view.update(cx, |v, cx| v.paste_attachment(item, cx))
                                         .unwrap_or(false)
@@ -535,20 +543,26 @@ impl ThreadView {
         // of sending on the right (`.research/warp-composition-2026-10-12.md` §1.12).
         let inset = px(theme.spacing.inset_trailing());
         let foot = div()
+            .id("thread-composer-foot")
+            .debug_selector(|| "thread-composer-foot".to_owned())
             .w_full()
+            .flex_none()
             .flex()
             .pl(inset)
             .pr(inset)
             .child(div().flex_1().min_w_0().child(self.composer_foot(editing, cx)));
-        div()
+        let field = div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
             .key_context(super::COMPOSER_CTX)
             .w_full()
-            .map(|el| self.shell(el))
-            .child(self.measure_box().child(div().w_full().flex().flex_col().child(field)))
-            .child(foot)
-            .into_any_element()
+            .child(
+                self.measure_box()
+                    // While its field asks what the agent should do ([`Self::hero`]).
+                    .when(asks, |el| el.debug_selector(|| "thread-question".to_owned()))
+                    .child(div().w_full().flex().flex_col().child(field)),
+            );
+        (field.into_any_element(), Some(foot.into_any_element()))
     }
 
     /// The composer's foot, one row that fits the room it is given (`kit::priority_row`): the

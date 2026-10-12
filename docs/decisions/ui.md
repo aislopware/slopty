@@ -11550,7 +11550,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A project's colour washes only the selected row** (and faintly the run that holds the
     chosen tile); every other run wears the 2 px bar alone. A wash on each of a run's rows read as a block of colour in the sidebar,
     the heaviest thing on the screen, saying the least.
-  - Tests: `slopty-ui` `conversation::thread::tests::composing::the_foot_spans_the_pane_with_equal_ends`,
+  - **The next turn's slot follows the last turn; only the foot pins** (§2.5.1). What waits,
+    the inline terminal and the composer's field stand right under the last row while the rows
+    are shorter than the pane, and over the foot once they fill it; the room left over lies
+    between the field and the foot, never between the work and the field. The slot is laid
+    out under the rows' region and drawn up by the room the rows leave (`view/follows.rs`),
+    read as it prepaints, after the list has laid out in the same frame, so it never trails
+    the rows by a frame. It reads the list's offset only while the rows fit and nothing can
+    scroll, so a thread that scrolls keeps its scroll the list's alone. No line runs over the
+    field or the foot.
+  - **An empty thread is its field at the top**, under the header, as Delta's: the centred
+    question over the composer and its move to the foot are deleted. The question ("What
+    should Codex do in a new worktree of atlas?") is the field's placeholder and its
+    accessible name, and a quiet thread's notice stands at the top where its rows will come.
+  - **One structural line tone** (§1.10): `stroke` for every line that parts regions or rings
+    a box (a tab bar's foot, a tab's sides, the sash, cards, wells, a thought's rail, the
+    activity card, a header's divider); `border` rings controls only (a field, a dropdown, a
+    secondary button, a checkbox, a segmented track). `call_border` and `alpha::CALL_BORDER`
+    are deleted: three greys inside one thread read as three kinds of thing.
+  - Tests: `slopty-ui` `conversation::thread::tests::composing::{the_foot_spans_the_pane_with_equal_ends,
+    the_field_follows_the_last_turn}`,
+    `conversation::thread::tests::an_empty_thread_asks_in_its_field_under_the_header`,
+    `…::face::the_composer_runs_the_panes_width_at_its_foot`, `lints::a_region_line_is_stroke`;
+    `slopty-kit` `kit::tests::{a_call_card_wears_the_one_structural_line, a_card_rests_on_its_edge}`;
     `…::steps::the_thread_has_one_left_edge`,
     `conversation::thread::tests::a_quiet_thread_says_whose_it_is_and_what_it_does`,
     `workspace::tests::thread_face::a_thread_tile_says_its_checkout_once_in_the_composers_foot`,

@@ -86,7 +86,7 @@ impl WorkspaceView {
         let tabbed = has_workers && self.layout.shown_tab().is_some() && self.settings.is_none();
         let toggle = tabbed.then(|| self.terminal_toggle(cx));
         let divider = tabbed.then(|| {
-            div().flex_none().w(kit::HAIR).h(px(theme.typography.ui_size)).bg(hsla(s.border))
+            div().flex_none().w(kit::HAIR).h(px(theme.typography.ui_size)).bg(hsla(s.stroke))
         });
         let crumbs = (has_workers && !docked).then(|| {
             div().flex_initial().min_w_0().max_w(px(CRUMBS_MAX)).child(self.render_breadcrumb(cx))

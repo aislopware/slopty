@@ -19,11 +19,10 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, FollowMode, FontWeight, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, list, px,
-    relative,
+    AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListState,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, div, list, px, relative,
 };
 use gpui_kit::component::input::{self, InputEvent, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
@@ -38,7 +37,7 @@ use slopty_proto::thread::{
     AgentId, AskId, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadId,
     ThreadState, ToolCall, ToolDetail, TurnId, TurnState,
 };
-use slopty_theme::{Rgb, Theme, Typography, alpha};
+use slopty_theme::{Rgb, Theme, alpha};
 
 use self::composing::Composing;
 use super::commit::{CommitEvent, CommitSheet};
@@ -128,6 +127,7 @@ mod decision;
 pub mod denying;
 pub mod exited;
 mod finding;
+mod follows;
 mod fork;
 mod going;
 mod inline_shell;
@@ -251,11 +251,6 @@ pub struct ThreadView {
     /// How many runs the thread's first message has, itself among them: one, or as many as it
     /// was started on side by side ([`ThreadViewEvent::ReviewRuns`]).
     runs: usize,
-    /// The last frame drew the empty thread's question with the composer under it.
-    heroed: bool,
-    /// How many times the composer has docked at the foot after the question, for the move's
-    /// animation; none while it never has.
-    docks: Option<u32>,
     theme: Theme,
     /// The theme, shared with what outlives a frame (a code block's corner).
     shared: Arc<Theme>,
@@ -531,8 +526,6 @@ impl ThreadView {
             orchestrates: false,
             photos: cfg!(target_os = "ios"),
             runs: 1,
-            heroed: false,
-            docks: None,
             width: 0.0,
             header: true,
             rows: Rc::from([]),
@@ -604,6 +597,19 @@ impl ThreadView {
         self.thread
     }
 
+    /// What the empty field says.
+    #[cfg(test)]
+    pub(crate) fn placeholder(&self) -> &str {
+        &self.placeholder
+    }
+
+    /// Where the last row ends, as the last frame drew it.
+    #[cfg(test)]
+    pub(crate) fn last_row_bottom(&self) -> Option<gpui::Pixels> {
+        let last = self.list.item_count().checked_sub(1)?;
+        self.list.bounds_for_item(last).map(|b| b.bottom())
+    }
+
     /// The rows, as last built.
     #[must_use]
     pub fn rows(&self) -> &[Row] {
@@ -644,10 +650,13 @@ impl ThreadView {
 
     /// The composer's invitation names the thread's agent once the thread says which it is.
     fn settle_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let words = self.state(cx).map_or_else(
-            || composer::PLACEHOLDER.to_owned(),
-            |st| composer::placeholder(&st.meta.agent),
-        );
+        // An empty thread asks what its agent should do there in the field itself, where the
+        // answer is written ([`Self::hero`]).
+        let words = match (self.hero(cx), self.state(cx)) {
+            (Some((agents, place)), _) => hero_words(&agents, &place),
+            (None, Some(st)) => composer::placeholder(&st.meta.agent),
+            (None, None) => composer::PLACEHOLDER.to_owned(),
+        };
         if self.placeholder != words {
             self.composer.update(cx, |c, cx| c.set_placeholder(words.clone(), window, cx));
             self.placeholder = words;
@@ -1974,7 +1983,7 @@ impl ThreadView {
                         .pl(px(MARK_SLOT / 2.0 + theme.spacing.xs))
                         .py(px(theme.spacing.xxs))
                         .border_l(kit::HAIR)
-                        .border_color(hsla(s.call_border))
+                        .border_color(hsla(s.stroke))
                         .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()
@@ -2429,10 +2438,10 @@ impl ThreadView {
         )
     }
 
-    /// What a thread with no rows says, centred where its rows would be: a start that went
+    /// What a thread with no rows says, at the top where its rows will come: a start that went
     /// says it is starting, and one being read says so once the read has taken
-    /// [`crate::screen::LOADING_GRACE`]. A new thread says nothing here: its question stands
-    /// over the composer ([`Self::hero`]). A thread whose only row is a request says nothing
+    /// [`crate::screen::LOADING_GRACE`]. A new thread says nothing here: its field asks its
+    /// question ([`Self::hero`]). A thread whose only row is a request says nothing
     /// either (the tray is the statement, and the navigator says it too), and nor does one out
     /// of reach: its tile says so, with what to do about it.
     fn empty_notice(&self, cx: &Context<Self>) -> Option<AnyElement> {
@@ -2505,10 +2514,10 @@ impl ThreadView {
                 .id("thread-empty")
                 .debug_selector(|| "thread-empty".to_owned())
                 .role(Role::Status)
-                .size_full()
+                .w_full()
                 .flex()
-                .items_center()
                 .justify_center()
+                .py(px(theme.spacing.xl))
                 .child(notice)
                 .into_any_element(),
         )
@@ -2516,8 +2525,8 @@ impl ThreadView {
 
     /// The empty thread's agent and where it works, while it asks its first message: a draft
     /// whose start has not gone, or a thread at rest with no rows and nothing waiting on the
-    /// person.
-    /// The composer is then the page, under one question ([`hero_words`]).
+    /// person. Its field, at the top under the header, then asks the one question
+    /// ([`hero_words`]), as Delta's empty thread is its next turn's slot and nothing more.
     fn hero(&self, cx: &App) -> Option<(Vec<String>, Place)> {
         let state = self.state(cx)?;
         let agent = agent_label(&state.meta.agent);
@@ -2550,36 +2559,14 @@ impl ThreadView {
         Some((vec![agent], Place { folder, machine, worktree: false, pull: None, base: None }))
     }
 
-    /// The question over an empty thread's composer, at the reading column's width.
-    fn hero_question(&self, words: String) -> AnyElement {
-        let theme = &self.theme;
-        let role = theme.roles().page_heading;
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(
-                self.column_box()
-                    .id("thread-hero")
-                    .debug_selector(|| "thread-hero".to_owned())
-                    .role(Role::Heading)
-                    .aria_label(SharedString::from(words.clone()))
-                    .pb(px(theme.spacing.lg))
-                    .text_center()
-                    .text_size(px(role.size))
-                    .line_height(px(role.line))
-                    .font_weight(FontWeight(Typography::REGULAR_WEIGHT))
-                    .text_color(hsla(theme.surfaces.text_secondary))
-                    .child(SharedString::from(words)),
-            )
-            .into_any_element()
-    }
-
+    /// The rows' region: the room left over, or, with no rows yet, only what says why, at the
+    /// top where the rows will come.
     fn list_region(&self, cx: &Context<Self>) -> AnyElement {
-        let region = div().relative().flex_1().min_h_0().w_full().overflow_hidden();
+        let region = div().relative().min_h_0().w_full().overflow_hidden();
         if self.rows.is_empty() {
-            return region.children(self.empty_notice(cx)).into_any_element();
+            return region.flex_none().children(self.empty_notice(cx)).into_any_element();
         }
+        let region = region.flex_1();
         // No rule under the header or the trail over it: the turns fade where they slide under
         // the top edge, and only while some lie above it, as macOS 26's soft scroll edge does.
         let fade = gpui::EdgeFade::new(gpui::Edges {
@@ -2635,26 +2622,17 @@ impl Render for ThreadView {
         let sent = self.draft.as_ref().is_some_and(|d| d.read(cx).sent());
         let composes = !self.in_subagent() && !sent;
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
-        // An empty thread is its composer, centred under its question; the first message docks
-        // it at the foot, moving there unless motion is reduced.
-        let hero = self.hero(cx).filter(|_| composes);
-        if self.heroed && hero.is_none() && composes && kit::motion(cx) {
-            self.docks = Some(self.docks.map_or(0, |n| n.wrapping_add(1)));
-        }
-        self.heroed = hero.is_some();
-        let composer = composes.then(|| self.composer_box(cx));
+        let (field, composer_foot) = composes
+            .then(|| self.composer_box(cx))
+            .map_or((None, None), |(f, foot)| (Some(f), foot));
         let inline = self.inline_card(window, cx).filter(|_| composes);
         self.keep_keyboard(composes, window, cx);
-        let dock = self.docks.map(|n| {
-            div()
-                .debug_selector(|| "thread-dock".to_owned())
-                .w_full()
-                .with_animation(("thread-dock", n), kit::Pace::Sheet.animation(), |mut el, t| {
-                    el.style().flex_grow = Some(1.0 - t);
-                    el
-                })
-                .into_any_element()
-        });
+        // The next turn's slot (what waits, the inline terminal, the field) follows the last
+        // turn, and only the composer's foot pins to the pane's bottom: no band of nothing
+        // between the work and the field (`.research/warp-composition-2026-10-12.md` §2.5.1).
+        // With no rows yet the slot stands at the top, under the header.
+        let empty = self.rows.is_empty();
+        let next = self.foot(bar, inline, field);
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())
@@ -2755,20 +2733,15 @@ impl Render for ThreadView {
             .text_color(hsla(s.text))
             .children(header)
             .children(trail)
-            .map(|el| match hero {
-                Some((agents, place)) => el.child(
-                    div()
-                        .w_full()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .child(self.hero_question(hero_words(&agents, &place)))
-                        .child(self.foot(bar, inline, composer)),
-                ),
-                None => el.child(rows).child(self.foot(bar, inline, composer)).children(dock),
+            .child(rows)
+            .map(|el| {
+                if empty {
+                    el.child(next).child(div().flex_1())
+                } else {
+                    el.child(follows::follows(&self.list, next))
+                }
             })
+            .children(composer_foot)
             .children(aside)
             .children(viewer)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
@@ -2777,11 +2750,10 @@ impl Render for ThreadView {
 }
 
 impl ThreadView {
-    /// The tray over the composer, on the reading column, then the inline terminal in the next
-    /// turn's place. Below the rows, never over them, so a click above its edge is the rows'.
-    /// When what waits is taller than the thread, the tray gives way and scrolls while the
-    /// composer stands whole. The composer runs the pane's width under it, its line the tray's
-    /// foot.
+    /// The next turn's slot: the tray on the reading column, then the inline terminal in the
+    /// next turn's place, then the composer's field. Below the rows, never over them, so a click
+    /// above its edge is the rows'. When what waits is taller than the thread, the tray gives
+    /// way and scrolls while the field stands whole.
     fn foot(
         &self,
         bar: Option<AnyElement>,

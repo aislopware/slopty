@@ -190,7 +190,7 @@ fn a_tile_fills_its_pane_and_its_header_lies_on_it(cx: &mut TestAppContext) {
         let row: Vec<_> = quads_at(cx, header).iter().filter_map(fill).collect();
         assert!(row.contains(&plane), "{tile:?}: the bar on the tab bar's plane: {row:?}");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let line = slopty_kit::colors::hsla(theme.surfaces.border);
+        let line = slopty_kit::colors::hsla(theme.surfaces.stroke);
         let foot = quads.iter().any(|q| {
             fill(q) == Some(line)
                 && (q.bounds.bottom().0 / scale - f32::from(header.bottom())).abs() < 0.5

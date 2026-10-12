@@ -341,7 +341,7 @@ impl ThreadView {
                         .rounded_br(radius)
                         .mb(px(theme.spacing.xs))
                 })
-                .border_color(hsla(s.border))
+                .border_color(hsla(s.stroke))
                 .map(|el| kit::activity(el, theme))
                 .overflow_hidden()
                 .child(rest)

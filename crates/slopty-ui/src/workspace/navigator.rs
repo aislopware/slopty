@@ -2334,7 +2334,7 @@ impl WorkspaceView {
                         .flex_none()
                         .w(kit::HAIR)
                         .h(px(theme.typography.ui_size))
-                        .bg(hsla(s.border)),
+                        .bg(hsla(s.stroke)),
                 )
         });
         let filtering = !self.nav.filter.query.is_empty();

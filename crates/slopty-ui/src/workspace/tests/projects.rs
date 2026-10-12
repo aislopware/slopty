@@ -159,7 +159,10 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, frame, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-composer").is_some(), "its thread is drawn");
-    assert!(cx.debug_bounds("thread-hero").is_none(), "a task's agent is never asked what to do");
+    assert!(
+        cx.debug_bounds("thread-question").is_none(),
+        "a task's agent is never asked what to do"
+    );
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();

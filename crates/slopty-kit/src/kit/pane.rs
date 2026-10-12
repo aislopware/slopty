@@ -30,7 +30,7 @@ pub fn pane_surface(theme: &Theme) -> Div {
 ///
 /// What comes back is the hit area, laid absolute and centred on the line,
 /// [`slopty_theme::Density::sash`] across (4, Zed's); the caller adds the mouse handlers. It
-/// paints the one line ([`slopty_theme::Surfaces::border`]) at rest, under the pointer and while
+/// paints the one line ([`slopty_theme::Surfaces::stroke`]) at rest, under the pointer and while
 /// dragged alike, as Zed's divider does: the resize cursor says it can be dragged.
 #[must_use]
 pub fn sash(
@@ -43,7 +43,7 @@ pub fn sash(
     let across = px(theme.density.sash);
     let centre = line.center();
     let area = div().id(id).absolute().flex().justify_center().items_center();
-    let mark = div().flex_none().bg(hsla(theme.surfaces.border));
+    let mark = div().flex_none().bg(hsla(theme.surfaces.stroke));
     match axis {
         Axis::Vertical => area
             .left(centre.x - across / 2.0)
@@ -119,7 +119,7 @@ mod tests {
     fn a_sash_is_the_one_line(cx: &mut TestAppContext) {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
-            let border = hsla(theme.surfaces.border);
+            let border = hsla(theme.surfaces.stroke);
             for axis in [Axis::Vertical, Axis::Horizontal] {
                 let (scale, quads) = drawn(cx, variant, axis);
                 let line = quads

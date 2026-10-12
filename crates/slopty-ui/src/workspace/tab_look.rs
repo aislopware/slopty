@@ -1,9 +1,9 @@
 //! The one look of a tab: Zed's tab (`.research/zed-clone-2026-10-11.md` §3.4 and §5.1). Pane
 //! tab bars are the only tabs; a tile alone in its pane has one cell.
 //!
-//! A row of tabs is Zed's tab bar: the tab bar's plane with the `border` line along its foot.
+//! A row of tabs is Zed's tab bar: the tab bar's plane with the `stroke` line along its foot.
 //! Every tab is a square cell the bar's full height, as wide as its title between
-//! [`TAB_FLOOR`] and [`TAB_SLOT`]. The tab on show is the work's ground, the `border` line on
+//! [`TAB_FLOOR`] and [`TAB_SLOT`]. The tab on show is the work's ground, the `stroke` line on
 //! its two sides and none under it, so it opens into the pane below; the rest are bare words
 //! in `text_secondary` that take the hover wash and the full tone under the pointer. Its words
 //! never change weight. A tab leads with one 16 pt mark, and ends in a close laid over its end.
@@ -42,13 +42,14 @@ pub(super) const FOCUS_DOT: f32 = 6.0;
 /// The side of the dot that says a file has an edit not yet on disk: Zed's indicator dot.
 const EDITED_DOT: f32 = 6.0;
 
-/// `row`, a row of tabs or a bar that tabs stand in, with Zed's tab bar's `border` line along
-/// its foot; the caller lays its plane (the tab bar's where tabs stand). The line is the row's
-/// first child and lies inside it, so what is added after it (the tab on show) paints over it.
+/// `row`, a row of tabs or a bar that tabs stand in, with the one structural `stroke` line along
+/// its foot, as every bar's; the caller lays its plane (the tab bar's where tabs stand). The line
+/// is the row's first child and lies inside it, so what is added after it (the tab on show) paints
+/// over it.
 #[must_use]
 pub(super) fn row<E: gpui::Styled + gpui::ParentElement>(theme: &Theme, row: E) -> E {
     let s = theme.surfaces;
-    let foot = div().absolute().left_0().right_0().bottom_0().h(kit::HAIR).bg(hsla(s.border));
+    let foot = div().absolute().left_0().right_0().bottom_0().h(kit::HAIR).bg(hsla(s.stroke));
     row.relative().child(foot)
 }
 
@@ -69,7 +70,7 @@ pub(super) const fn cell_inset(theme: &Theme) -> f32 {
 /// `tab` as Zed's tab: a square cell its bar's full height, as wide as its title
 /// between [`TAB_FLOOR`] and [`TAB_SLOT`], its words at the row role (Delta's header title,
 /// 12, measured from the signed-in app). On show it is the
-/// work's ground with the `border` line on its two sides and none under it, so it opens into
+/// work's ground with the `stroke` line on its two sides and none under it, so it opens into
 /// the pane; at rest it is bare, in `text_secondary`. Its lead stands [`cell_inset`] in, past
 /// its side line. `closable` leaves room at its end for the close
 /// [`close`] lays over it. The caller gives it its identity and its children.
@@ -95,7 +96,7 @@ pub(super) fn tab(theme: &Theme, tab: Stateful<Div>, shown: bool, closable: bool
         .whitespace_nowrap();
     let tab = kit::eased(tab);
     if shown {
-        tab.bg(hsla(s.ground)).border_color(hsla(s.border)).text_color(hsla(s.text))
+        tab.bg(hsla(s.ground)).border_color(hsla(s.stroke)).text_color(hsla(s.text))
     } else {
         tab.border_color(gpui::transparent_black())
             .text_color(hsla(s.text_secondary))
@@ -332,7 +333,7 @@ mod tests {
     /// A way to draw a tab: [`tab`] or [`pane_tab`].
     type Look = fn(&Theme, gpui::Stateful<gpui::Div>, bool, bool) -> gpui::Stateful<gpui::Div>;
 
-    /// Zed's tab: the one on show is the work's ground with the `border` line on its sides,
+    /// Zed's tab: the one on show is the work's ground with the `stroke` line on its sides,
     /// the rest bare words in the secondary tone. Both are square, the density's tab tall, as
     /// wide as their words within one floor and one ceiling, at the regular weight; a pane's
     /// tab is the same.
@@ -347,7 +348,7 @@ mod tests {
                 let style = shown.style();
                 assert_eq!(style.background, Some(gpui::Fill::from(hsla(s.ground))), "{variant:?}");
                 assert_eq!(style.text.color, Some(hsla(s.text)), "{variant:?}");
-                assert_eq!(style.border_color, Some(hsla(s.border)), "{variant:?}: its sides");
+                assert_eq!(style.border_color, Some(hsla(s.stroke)), "{variant:?}: its sides");
                 assert!(style.border_widths.bottom.is_none(), "{variant:?}: open below");
                 assert!(style.corner_radii.top_left.is_none(), "{variant:?}: square");
                 assert_eq!(style.size.height, Some(gpui::relative(1.0).into()), "its bar's height");

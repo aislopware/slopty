@@ -691,7 +691,7 @@ fn a_start_is_written_in_the_threads_composer(cx: &mut TestAppContext) {
     };
 
     begin("codex", 2, cx);
-    assert!(cx.debug_bounds("thread-hero").is_some(), "the new thread asks what to do there");
+    assert!(cx.debug_bounds("thread-question").is_some(), "the new thread asks what to do there");
     click("thread-attach", cx);
     assert!(cx.debug_bounds("thread-add-menu-files").is_some(), "the + menu is open");
     assert!(cx.debug_bounds("thread-add-menu-modes").is_none(), "Codex: no mode offered");
@@ -880,9 +880,9 @@ fn one_message_starts_on_several_agents_each_in_a_worktree(cx: &mut TestAppConte
     let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     let asked = "What should Codex and Claude Code each do in a new worktree of atlas?";
     let heads: Vec<_> =
-        tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();
+        tree.iter().filter(|n| n.role.ends_with("TextInput")).map(|n| n.label.clone()).collect();
     assert!(
-        tree.iter().any(|n| n.is("Heading", Some(asked))),
+        tree.iter().any(|n| n.label.as_deref() == Some(asked)),
         "who will, in the question: {heads:?}"
     );
     let first = view.read_with(cx, |v, _| v.focused()).expect("the draft's tile");
@@ -1020,7 +1020,7 @@ fn the_place_chip_starts_a_worktree_from_a_branch_picked(cx: &mut TestAppContext
     click(cx, "thread-menu-2");
     let asked = "What should Codex do in a new worktree of atlas from develop?";
     let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Heading", Some(asked))), "the question says where");
+    assert!(tree.iter().any(|n| n.label.as_deref() == Some(asked)), "the question says where");
     // Back in the folder the base goes with the worktree; a new worktree again starts from
     // the branch checked out until one is picked.
     click(cx, "thread-place");
@@ -1731,8 +1731,8 @@ fn a_pull_request_is_reviewed_in_a_worktree_that_checks_it_out(cx: &mut TestAppC
     let tree = cx.update(|window, _| slopty_kit::a11y::tree(window));
     let asked = "What should Claude Code do with #123 in a new worktree of atlas?";
     let heads: Vec<_> =
-        tree.iter().filter(|n| n.role == "Heading").map(|n| n.label.clone()).collect();
-    assert!(tree.iter().any(|n| n.is("Heading", Some(asked))), "which, asked: {heads:?}");
+        tree.iter().filter(|n| n.role.ends_with("TextInput")).map(|n| n.label.clone()).collect();
+    assert!(tree.iter().any(|n| n.label.as_deref() == Some(asked)), "which, asked: {heads:?}");
 
     cx.simulate_keystrokes("enter");
     settle(cx);

@@ -724,7 +724,7 @@ impl FileView {
                     .aspect_ratio(w / h.max(1.0))
                     .bg(hsla(s.elevated))
                     .border(slopty_kit::kit::HAIR)
-                    .border_color(hsla(s.border))
+                    .border_color(hsla(s.stroke))
                     .role(Role::Image)
                     .aria_label(SharedString::from(format!(
                         "Page {} of {count}",
