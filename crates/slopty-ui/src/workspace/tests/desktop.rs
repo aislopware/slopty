@@ -756,3 +756,40 @@ fn a_held_curtain_stays_liftable_and_a_down_unasked_lets_it_go(cx: &mut TestAppC
     let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("The curtain over studio is down"));
 }
+
+/// A press on a streamed window's picture gives it the keyboard and it keeps it: the tile is
+/// focused, and the workspace does not take the keys back in the frame after, as it does for
+/// a window focused by a key walk through the panes.
+#[gpui::test]
+fn a_press_on_a_streamed_picture_gives_it_the_keyboard(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let window = WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 2);
+    opened(&view, cx, &fake, 1, CaptureTarget::Window(window), (1280, 800));
+    let pane = pos_of(&view, cx, shell).pane;
+    view.update(cx, |v, cx| {
+        let right = Some(slopty_client::layout::Side::Right);
+        assert!(v.layout.place(tile, slopty_client::layout::Drop { pane, edge: right }));
+        v.focus_tile(shell, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(shell));
+    let screen_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            let screen = view.read(cx).screen(tile.item).cloned();
+            screen.is_some_and(|s| s.read(cx).focus_handle(cx).is_focused(window))
+        })
+    };
+    assert!(!screen_focused(cx));
+
+    let body = cx.debug_bounds(selector("item", tile.item)).expect("the window's tile");
+    cx.simulate_mouse_down(body.center(), gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(body.center(), gpui::MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(tile), "the tile is focused");
+    assert!(screen_focused(cx), "and its picture holds the keyboard");
+}

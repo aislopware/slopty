@@ -1211,7 +1211,12 @@ impl WorkspaceView {
                 let behind_stale = self.screens.contains_key(&id)
                     && self.workers.get(&key).is_some_and(|w| w.stale_screens.contains(&id));
                 cx.subscribe(&view, move |this, view, event, cx| match event {
-                    crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
+                    crate::screen::ScreenViewEvent::Pressed => {
+                        this.focus_tile(tile, cx);
+                        // The press gave the picture the keyboard, which its tile's focus
+                        // would hand back to the workspace.
+                        this.pending_focus_self = false;
+                    }
                     crate::screen::ScreenViewEvent::Ready => {
                         this.fresh_stream_shows(key, id, &view, cx);
                         cx.notify();
