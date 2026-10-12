@@ -273,7 +273,9 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
 /// A merged task's agent, closed once it rests, frees the worktree it worked in after its
 /// terminal is gone: the worker is asked to remove it with where the work landed, and the card
 /// lets it go while the timeline says whether its branch went. One the worker keeps (a terminal
-/// still in it) stays on the card, and the timeline says why.
+/// still in it) stays on the card, and the timeline says why. A given-up task's goes the same
+/// way, its branch kept with the work that did not land, rather than staying for as long as
+/// the goal does with whatever its agent built in it.
 #[tokio::test]
 async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -294,7 +296,14 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
         code: ErrorCode::Conflict,
         message: "a terminal works in /w/demo/.claude/worktrees/slopty-demo-2".to_owned(),
     };
-    for (n, worker_says) in [(1, removed), (2, kept)] {
+    let given_up = Outcome::WorktreeRemoved {
+        branch: Some("worktree-slopty-demo-3".to_owned()),
+        branch_removed: false,
+    };
+    let merged = [TaskState::Done, TaskState::Merged];
+    for (n, worker_says, states) in
+        [(1, removed, &merged[..]), (2, kept, &merged[..]), (3, given_up, &[TaskState::Failed][..])]
+    {
         let task = new_task(&hub).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude() });
         let term = opened(&lease, &request(&mut rx).await);
@@ -309,7 +318,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
         };
         let branch = AgentBranch { session: term.session, worktree: Some(worktree) };
         lease.handle(ToServer::Report(AgentReport::Branch(branch)));
-        for state in [TaskState::Done, TaskState::Merged] {
+        for &state in states {
             let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
             let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
             assert!(matches!(moved, Outcome::Task(_)), "{moved:?}");
@@ -366,6 +375,13 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
                 said,
                 "The server removed its worktree, and its branch worktree-slopty-demo-1, whose \
                  work all landed."
+            );
+        } else if n == 3 {
+            assert_eq!(card.worktree, None, "a given-up task's goes too");
+            assert_eq!(
+                said,
+                "The server removed its worktree; its branch worktree-slopty-demo-3 is kept, \
+                 with work that did not land."
             );
         } else {
             assert_eq!(card.worktree.as_deref(), Some(path.as_str()), "kept on the card");

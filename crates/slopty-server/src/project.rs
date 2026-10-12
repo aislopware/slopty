@@ -2264,15 +2264,17 @@ impl Projects {
 
     /// What frees a settled task's worktree once its agent is closed: the worktree its agent
     /// reported, and where its work landed (the merge queue's head, the target, the target on
-    /// `origin`). Only a merged task's: one given up may be tried again, and its agent would
-    /// remake a worktree gone, its branch reset to the base with it.
+    /// `origin`). A merged task's, and a given-up one's: the worker keeps a branch whose work
+    /// did not land, and a worktree with anything not committed, and a task tried again has
+    /// its worktree made again by the worker from the branch kept, never reset to the base
+    /// (`crate::repo::worktrees::make` on the worker).
     pub(crate) fn take_free(
         &mut self,
         id: &ProjectId,
         task: TaskId,
     ) -> Option<(String, Vec<String>)> {
         let record = self.records.get(id)?;
-        let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
+        let t = record.task(task).ok().filter(|t| settled_work(t.state))?;
         let free = (t.worktree.clone()?, landed_of(record, t));
         let at = (id.clone(), task);
         (!self.kept.contains(&at) && self.freeing.insert(at)).then_some(free)
@@ -2285,7 +2287,7 @@ impl Projects {
         self.freeing.remove(&(id.clone(), task));
     }
 
-    /// The merged tasks on `worker` whose worktree is still there though their agent's
+    /// The merged and given-up tasks on `worker` whose worktree is still there though their agent's
     /// terminal is no longer open (`terminals`): the person closed it, or it ended while the
     /// server was away, so the settle loop never closes it ([`Self::finished_agents`]). Each
     /// with its project, its terminal, its worktree and where its work landed, once.
@@ -2296,7 +2298,7 @@ impl Projects {
     ) -> Vec<(ProjectId, TaskId, TermRef, String, Vec<String>)> {
         let mut found = Vec::new();
         for record in self.records.values() {
-            for t in record.tasks.iter().filter(|t| t.state == TaskState::Merged) {
+            for t in record.tasks.iter().filter(|t| settled_work(t.state)) {
                 let (Some(worktree), Some(a)) = (&t.worktree, &t.assignment) else { continue };
                 if a.term.worker != worker || terminals.contains(&a.term) {
                     continue;
@@ -2692,6 +2694,12 @@ fn landed(t: &mut Task, pull: Option<&PullSeen>, now: WallMs) -> Option<Moment> 
         }
         _ => None,
     }
+}
+
+/// Whether a task in `state` is over, so the worktree its agent worked in can go once the agent
+/// is closed: merged, or given up.
+const fn settled_work(state: TaskState) -> bool {
+    matches!(state, TaskState::Merged | TaskState::Failed)
 }
 
 #[cfg(test)]

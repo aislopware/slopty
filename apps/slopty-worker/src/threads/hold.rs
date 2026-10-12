@@ -51,6 +51,26 @@ const HOLD_MARGIN: Duration = Duration::from_secs(1);
 /// front of the person hands it back sooner.
 pub const APPROVAL_HOLD: Duration = Duration::from_secs(120);
 
+/// How long the prompts held for a client whose link was lost wait for it to come back on a
+/// new one ([`lost`]). The link was silent for the idle timeout already (45 s), so a person off
+/// the network for up to three minutes or so still answers what they were shown.
+pub const LOST_HOLD: Duration = Duration::from_secs(120);
+
+/// `link` was lost, not closed: what it alone could answer is held [`LOST_HOLD`] more for its
+/// client to come back and follow again, then handed back unless someone did. What nobody can
+/// answer even so is handed back now.
+pub fn lost(daemon: &Daemon, link: Link) -> Vec<(u64, Held<Pending>)> {
+    let until = std::time::Instant::now().checked_add(LOST_HOLD);
+    let Some(until) = until else { return daemon.follows.lock().holds.leave(link) };
+    let later = daemon.clone();
+    drop(tokio::spawn(async move {
+        tokio::time::sleep(LOST_HOLD).await;
+        let released = later.follows.lock().holds.expire(std::time::Instant::now());
+        release(&later, released);
+    }));
+    daemon.follows.lock().holds.lose(link, until)
+}
+
 /// Who follows which session's thread, the prompts held for them, and what the hooks said.
 #[derive(Debug, Default)]
 pub struct Follows {

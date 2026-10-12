@@ -21,6 +21,9 @@
 //!   orchestration ([`ORCHESTRATION`]), whose link a phone's note reaches before any worker's. A
 //!   plan to confirm or a question waits the same while the note opens the thread on the phone,
 //!   which follows it and answers there;
+//! - the last follower's link is lost rather than closed (a train's tunnel, a laptop's lid): it is
+//!   held on for that follower to come back ([`Holds::lose`]), until the grace the caller gives
+//!   runs out ([`Holds::expire`]);
 //! - the last follower lets the thread go (the person went back to the TUI), nobody who could
 //!   answer it is connected any more, a client hands it to the TUI, the worker has held it as long
 //!   as it may, or the relay went away: it is released, undecided. A release and an answer race for
@@ -91,6 +94,9 @@ pub struct Holds<R> {
     /// The server says a pocketed phone can answer ([`Self::set_pushed`]).
     pushed: bool,
     held: BTreeMap<u64, Held<R>>,
+    /// The sessions whose last follower's link was lost, and until when their prompts are held
+    /// for it to come back ([`Self::lose`]).
+    away: HashMap<SessionId, Instant>,
 }
 
 impl<R> Default for Holds<R> {
@@ -101,6 +107,7 @@ impl<R> Default for Holds<R> {
             approvers: BTreeSet::new(),
             pushed: false,
             held: BTreeMap::new(),
+            away: HashMap::new(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl<R> Holds<R> {
     /// `link` follows `session`'s thread, which shows the prompts already held for it.
     pub fn follow(&mut self, session: SessionId, link: Link) {
         self.followers.entry(session).or_default().insert(link);
+        self.away.remove(&session);
     }
 
     /// `link` stops following `session`'s thread. When no follower is left, every prompt held
@@ -142,6 +150,33 @@ impl<R> Holds<R> {
         self.orphans()
     }
 
+    /// `link`'s connection was lost, not closed: the person may be back on a new link soon,
+    /// having said nothing. As [`Self::leave`], but a session it was the last to follow keeps
+    /// its prompts held, and holds new ones, for a follower until `until`; whoever follows it
+    /// first answers them. [`Self::expire`] then lets go of what is left.
+    pub fn lose(&mut self, link: Link, until: Instant) -> Vec<(u64, Held<R>)> {
+        let mut away = Vec::new();
+        self.followers.retain(|session, links| {
+            if links.remove(&link) && links.is_empty() {
+                away.push(*session);
+            }
+            !links.is_empty()
+        });
+        for session in away {
+            let kept = self.away.entry(session).or_insert(until);
+            *kept = (*kept).max(until);
+        }
+        self.approvers.remove(&link);
+        self.orphans()
+    }
+
+    /// The followers lost and not back by `now` are given up: every prompt nobody else can
+    /// answer is handed back.
+    pub fn expire(&mut self, now: Instant) -> Vec<(u64, Held<R>)> {
+        self.away.retain(|_session, until| *until > now);
+        self.orphans()
+    }
+
     /// Whether a pocketed phone the server pushes to can answer, as the server says on every
     /// change, and `false` once the server's link is gone. When it no longer
     /// can, every prompt nobody else can answer is handed back.
@@ -152,11 +187,15 @@ impl<R> Holds<R> {
 
     /// Every prompt nobody can answer now, taken out.
     fn orphans(&mut self) -> Vec<(u64, Held<R>)> {
-        let (followers, approvers, pushed) =
-            (&self.followers, !self.approvers.is_empty(), self.pushed);
+        let (followers, away) = (&self.followers, &self.away);
+        let (approvers, pushed) = (!self.approvers.is_empty(), self.pushed);
         self.held
             .extract_if(.., |_id, held| {
-                !(followers.contains_key(&held.session) || pushed || approvers)
+                let session = &held.session;
+                !(followers.contains_key(session)
+                    || away.contains_key(session)
+                    || pushed
+                    || approvers)
             })
             .collect()
     }
@@ -164,6 +203,7 @@ impl<R> Holds<R> {
     /// `session` ended: nobody follows it any more, and every prompt held for it is handed back.
     pub fn forget(&mut self, session: SessionId) -> Vec<(u64, Held<R>)> {
         self.followers.remove(&session);
+        self.away.remove(&session);
         self.held.extract_if(.., |_id, held| held.session == session).collect()
     }
 
@@ -188,7 +228,7 @@ impl<R> Holds<R> {
     /// plan or a question in the thread their card opens.
     #[must_use]
     pub fn reach(&self, session: SessionId) -> Option<Reach> {
-        if self.followers.contains_key(&session) {
+        if self.followers.contains_key(&session) || self.away.contains_key(&session) {
             Some(Reach::Followers)
         } else if self.pushed {
             Some(Reach::Pushed)
@@ -567,6 +607,37 @@ mod tests {
         assert_eq!(holds.leave(A), [(on_s, Held { session: s, approvable: false, reply: "s" })]);
         assert!(holds.get(on_t).is_some(), "B still follows t");
         assert_eq!(holds.ask(s, false, |_| "again"), None, "nobody follows s now");
+    }
+
+    /// A follower whose link is lost, not closed, keeps the prompts it alone could answer held,
+    /// and new ones are held for it too: back on a new link in time, it answers them. What it
+    /// never came back for is handed back once the grace runs out, and a closed link hands
+    /// back at once as before.
+    #[test]
+    fn a_lost_follower_keeps_its_prompts_until_the_grace_runs_out() {
+        const C: Link = 3;
+        let mut holds = Holds::default();
+        let (s, t, u) = (session(1), session(2), session(3));
+        holds.follow(s, A);
+        holds.follow(t, A);
+        holds.follow(u, C);
+        let on_s = holds.ask(s, false, |_| "s").expect("held");
+        let on_t = holds.ask(t, false, |_| "t").expect("held");
+        let on_u = holds.ask(u, false, |_| "u").expect("held");
+        let now = Instant::now();
+        let until = now.checked_add(std::time::Duration::from_secs(120)).expect("a time");
+        assert!(holds.lose(A, until).is_empty(), "held for A to come back");
+        let more = holds.ask(s, false, |_| "more").expect("held while A is away");
+        assert_eq!(holds.leave(C).len(), 1, "a closed link hands back at once");
+        assert!(holds.get(on_u).is_none());
+        holds.follow(s, B);
+        assert!(holds.answer(B, s, on_s).is_some(), "back on a new link, it answers");
+        assert!(holds.expire(now).is_empty(), "not yet");
+        let after = until.checked_add(std::time::Duration::from_secs(1)).expect("a time");
+        let given_up: Vec<u64> = holds.expire(after).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(given_up, [on_t], "t was never followed again");
+        assert!(holds.get(more).is_some(), "s is followed again");
+        assert_eq!(holds.ask(t, false, |_| "late"), None, "nobody follows t now");
     }
 
     /// A client that starts following while a prompt is held can answer it; ids are never

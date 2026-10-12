@@ -404,6 +404,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         saves,
         curtain: daemon.curtain.as_ref().map(|c| c.link(hello.client)),
         lease: InputLease::new(tokio::time::Instant::now()),
+        lost: false,
     };
     daemon.wake.lock().client_joined();
     // A client back on a new link leaves its old one behind, which may still hold keys down
@@ -460,6 +461,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             Some(_finished) = peer.streams.join_next(), if !peer.streams.is_empty() => {}
             reason = peer.conn.closed() => {
                 tracing::info!(client = %peer.client, %reason, "connection closed");
+                peer.lost = matches!(reason, noq::ConnectionError::TimedOut);
                 break Ok("connection closed");
             }
         }
@@ -989,6 +991,9 @@ struct Peer<'d> {
     curtain: Option<crate::CurtainLink>,
     /// The lease on the input the client holds down through its streams.
     lease: InputLease,
+    /// The connection was lost (it went silent and timed out), not closed: the prompts held
+    /// for this client wait for it a while ([`crate::threads::hold::LOST_HOLD`]).
+    lost: bool,
 }
 
 impl Drop for Peer<'_> {
@@ -1011,7 +1016,11 @@ impl Drop for Peer<'_> {
         for session in unwatched {
             let _sent = self.daemon.presence.send((session, false));
         }
-        let released = self.daemon.follows.lock().holds.leave(self.link);
+        let released = if self.lost {
+            crate::threads::hold::lost(self.daemon, self.link)
+        } else {
+            self.daemon.follows.lock().holds.leave(self.link)
+        };
         crate::threads::hold::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
         if let Some(curtain) = &self.curtain {

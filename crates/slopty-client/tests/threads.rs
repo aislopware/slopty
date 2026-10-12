@@ -517,30 +517,10 @@ mod threads {
         let acted = back.elapsed();
         b.until("the review", |t| t.review(thread, &scope).is_some()).await;
         let reviewed = back.elapsed();
-        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
-        while !(answered(&b.threads, thread, &ask)
-            && b.threads.outbox().all().iter().all(|s| s.id != first))
-        {
-            if b.step(deadline).await.is_none() {
-                let sent = b.threads.outbox().all().iter().find(|s| s.id == first).cloned();
-                let request = state(&b.threads, thread)
-                    .and_then(|s| s.requests.iter().find(|r| r.id == ask).cloned());
-                // The worker's own view: the thread followed again from nothing.
-                let (_cached, unfollow) = b.threads.close_thread(thread);
-                b.send_all(unfollow).await;
-                let follow = b.threads.open_thread(thread, None);
-                b.send_all(follow).await;
-                let again = tokio::time::Instant::now().checked_add(STEP).unwrap();
-                while state(&b.threads, thread).is_none() && b.step(again).await.is_some() {}
-                let worker_s = state(&b.threads, thread)
-                    .and_then(|s| s.requests.iter().find(|r| r.id == ask).map(|r| r.state.clone()));
-                panic!(
-                    "never the answer settled: {sent:?}; its request {request:?}; {:?}; the \
-                     worker's request now {worker_s:?}; frames {:?}",
-                    b.done, b.came
-                );
-            }
-        }
+        b.until("the answer settled", |t| {
+            answered(t, thread, &ask) && t.outbox().all().iter().all(|s| s.id != first)
+        })
+        .await;
         let answer = b.done.iter().find(|d| d.id == first).map(|d| d.outcome.clone());
         assert!(
             matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
@@ -581,6 +561,89 @@ mod threads {
 
         c.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(c);
+        drop(daemons);
+    }
+
+    /// Longer than the worker's idle timeout (45 s): the worker has given the link up as lost
+    /// before the network is back.
+    const LONG_AWAY: Duration = Duration::from_secs(55);
+
+    /// The person off the network longer than the worker waits on a silent link: the worker
+    /// gives the link up as lost, not closed, and keeps the prompt shown to them held for them
+    /// to come back (`hold::LOST_HOLD`), rather than handing it to the TUI. Back on a new link,
+    /// their answer is acted on.
+    #[tokio::test]
+    async fn a_prompt_waits_for_a_person_whose_link_the_worker_gave_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let cable = slopty_testkit::relay::Relay::start(daemons.addr).await.unwrap();
+        let me = ClientId::new();
+        let mut a = Client::connect_to(cable.addr(), me, Threads::default()).await;
+        let spec = OpenSession {
+            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            env: vec![("PS1".to_owned(), "$ ".to_owned())],
+            title: None,
+            attach: false,
+        };
+        a.link.send(ClientMsg::OpenSession { request: 1, spec }).await.unwrap();
+        let session = a
+            .heard("the session opened", |msg| match msg {
+                WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+                _ => None,
+            })
+            .await;
+        let main = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let transcript = main.to_string_lossy().into_owned();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        let _started = relay(dir.path(), session, &start).wait_with_output().await.unwrap();
+        let hooks = std::fs::read_to_string(fixture("permission").join("hooks.jsonl")).unwrap();
+        let mut ask_hook = hooks
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .find(|input| input["hook_event_name"] == "PermissionRequest")
+            .unwrap();
+        ask_hook["transcript_path"] = transcript.clone().into();
+        ask_hook["session_id"] = "s1".into();
+        let thread = slopty_agent::observed::thread_of("s1");
+        a.until("the thread in the table", |t| t.rows().rows.contains_key(&thread)).await;
+        let follow = a.threads.open_thread(thread, None);
+        a.send_all(follow).await;
+        a.until("the thread's snapshot", |t| state(t, thread).is_some()).await;
+
+        let held = relay(dir.path(), session, &ask_hook);
+        a.until("the prompt", |t| open_ask(t, thread, None).is_some()).await;
+        let ask = open_ask(&a.threads, thread, None).unwrap();
+        cable.cut();
+        let cut = tokio::time::Instant::now();
+        tokio::time::sleep(SILENCE_DROP).await;
+        a.link.close();
+        a.threads.disconnected();
+        let threads = std::mem::take(&mut a.threads);
+        drop(a);
+        tokio::time::sleep_until(cut.checked_add(LONG_AWAY).unwrap()).await;
+        cable.restore();
+        let mut b = Client::connect_to(cable.addr(), me, threads).await;
+        let (_id, msg) = b.threads.intent(
+            thread,
+            Intent::Answer { ask: ask.clone(), choice: "allow".to_owned(), message: None },
+        );
+        b.send_all(msg).await;
+        let out = printed(held).await;
+        let behaviour = out["hookSpecificOutput"]["decision"]["behavior"].as_str();
+        assert_eq!(behaviour, Some("allow"), "acted on, not handed to the TUI: {out}");
+        b.until("the answer settled", |t| answered(t, thread, &ask)).await;
+
+        b.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+        drop(b);
         drop(daemons);
     }
 }

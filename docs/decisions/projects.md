@@ -1545,16 +1545,22 @@ R2).
   stops counting" above), after the worker answers that close, so the agent's own terminal is
   gone. The card drops the worktree that went, and the timeline says what went and what was
   kept. A worktree the worker keeps stays on the card with the reason on the timeline.
-- Only a merged task's worktree is freed. A task given up may be tried again, and Claude
-  Code's `--worktree` remakes a missing worktree with `git worktree add -B`, which would reset
-  the kept branch to the base. A worktree the worker made for a task is on its card from the
+- A merged task's worktree is freed, and since 2026-10-12 a given-up task's too. It was kept
+  for a task tried again, as Claude Code's `--worktree` remakes a missing worktree with
+  `git worktree add -B`, which would reset the kept branch to the base. But the worker makes a
+  task's worktree itself before the agent opens it, and checks a branch there already out
+  where it is (`repo::worktrees::make`), so a retry takes the kept branch up. Kept, a long
+  goal's given-up tasks each held a whole checkout with whatever their agents built in it
+  until the goal was let go. Freeing still keeps the branch with work that did not land, and
+  the worktree with anything not committed. A worktree the worker made for a task is on its card from the
   start: `OpenTerminal` and `SpawnAgent` that named one answer `Outcome::OpenedIn` with it, as
   `StartThread` answers with its thread's, so a Codex terminal's worktree, which Codex never
   reports, is freed once merged too (2026-10-06). A status line still updates the card after.
 - `RemoveWorktree` is the server's alone: a tool that asks is `Forbidden`.
 - Tests: `a_clean_worktree_goes_and_its_branch_only_once_landed` and
   `a_worktree_in_use_or_not_committed_is_kept` (`slopty-worker`, on real git repositories),
-  `a_merged_task_s_worktree_goes_once_its_agent_is_closed` (`slopty-server`), and the goldens
+  `a_merged_task_s_worktree_goes_once_its_agent_is_closed` (`slopty-server`, a given-up task's
+  with it), and the goldens
   `remove_worktree` and `worktree_removed`.
 
 **Any agent runs a task, as a thread.** ✅ 2026-10-04 (server, wire and the worker's door; each
@@ -3542,6 +3548,14 @@ then was refused in git's words, "fatal: not a git repository", with the agent's
   `a_review_not_come_is_asked_again_on_the_next_link` and, against real daemons on macOS,
   `an_answer_and_a_review_cross_a_cut_link` (an answer sent into a cut, or acted on and its
   reply lost, is answered once on the next link, not refused as answered already).
+- **A prompt waits for a person whose link the worker gave up.** Off the network longer than
+  the worker waits on a silent link (45 s), the person's link ended as lost and the prompt
+  shown to them went back to the TUI, so their answer on coming back was refused. A link that
+  times out now leaves its prompts held for its client to follow again for two more minutes
+  (`hold::LOST_HOLD`), new prompts of those sessions held too; a link closed on purpose hands
+  back at once, as the person went to the TUI. Tests:
+  `a_lost_follower_keeps_its_prompts_until_the_grace_runs_out` and, against real daemons on
+  macOS, `a_prompt_waits_for_a_person_whose_link_the_worker_gave_up` (55 s off the network).
 - **A worker that moves under its link is published where it went.** A laptop roaming to
   another network keeps its QUIC connection (migration), so its lease never ended and it was
   never registered again, but clients went on dialling the address it first came from. The
