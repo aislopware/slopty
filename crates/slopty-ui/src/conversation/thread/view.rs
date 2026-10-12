@@ -2766,7 +2766,10 @@ impl ThreadView {
             div()
                 .id("thread-tray")
                 .debug_selector(|| "thread-tray".to_owned())
-                .w_full()
+                // Stretched across the column and out by a hang: room for a hung card's line,
+                // which its scroll would otherwise clip.
+                .ml(px(-kit::HANG))
+                .pl(px(kit::HANG))
                 .min_h_0()
                 // Apart from the last row above it.
                 .pt(px(spacing.sm))

@@ -11568,6 +11568,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     activity card, a header's divider); `border` rings controls only (a field, a dropdown, a
     secondary button, a checkbox, a segmented track). `call_border` and `alpha::CALL_BORDER`
     are deleted: three greys inside one thread read as three kinds of thing.
+  - **Every box in a thread hangs** (§2.5.2): the plan card, a call put to the person, the
+    request's card and the activity card hang `kit::HANG` (9) left of the prose's edge, with
+    their heads and bodies padded `kit::HUNG_PAD` (8) inside the line, so a card's head glyph
+    and its body text start on the edge the turns start on, as the code wells already did.
+    The tray stands out by a hang so its scroll does not clip a hung card's line. A picture
+    keeps its box on the edge: the picture is its content.
   - **The board keeps two left edges** (§2.3.1): the numbers and the lanes' glyphs on one,
     the pane's inset in; every title, lane name, ask, why and failed check's word on the next.
     A failed check's glyph hangs into the numbers' column, and its last lines sit in Delta's
@@ -11575,7 +11581,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     lines on it), where four edges stood in 63 pt.
   - Tests: `slopty-ui` `conversation::thread::tests::composing::{the_foot_spans_the_pane_with_equal_ends,
     the_field_follows_the_last_turn}`,
-    `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`;
+    `workspace::tests::projects::a_verifier_shows_on_its_task_and_opens_its_terminal`,
+    `conversation::thread::tests::face::an_approval_follows_the_last_turn`,
+    `…::proposed::a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge`;
     `slopty-kit` `kit::tests::a_hung_box_holds_its_content_on_the_edge`,
     `conversation::thread::tests::an_empty_thread_asks_in_its_field_under_the_header`,
     `…::face::the_composer_runs_the_panes_width_at_its_foot`, `lints::a_region_line_is_stroke`;

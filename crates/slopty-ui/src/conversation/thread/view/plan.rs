@@ -89,7 +89,7 @@ impl ThreadView {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
-            .px(px(theme.spacing.md))
+            .px(px(kit::HUNG_PAD))
             .min_h(px(theme.density.row))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
@@ -111,7 +111,7 @@ impl ThreadView {
                     .child(copy),
             );
         let heading = div()
-            .px(px(theme.spacing.md))
+            .px(px(kit::HUNG_PAD))
             .pt(px(theme.spacing.sm))
             .text_size(px(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
@@ -145,13 +145,14 @@ impl ThreadView {
             Some(word) => format!("Plan: {title}, {word}"),
             None => format!("Plan: {title}"),
         };
+        // Hung, Delta's: its line left of the prose's edge, its glyph and words on it.
         kit::call_card(div(), theme)
             .id(ElementId::Name(SharedString::from(selector.clone())))
             .debug_selector(move || selector)
             .group(group)
             .role(Role::Article)
             .aria_label(SharedString::from(label))
-            .w_full()
+            .ml(px(-kit::HANG))
             .flex()
             .flex_col()
             .pb(px(theme.spacing.sm + theme.spacing.xxs))
@@ -159,7 +160,7 @@ impl ThreadView {
             .child(heading)
             .child(
                 div()
-                    .px(px(theme.spacing.md))
+                    .px(px(kit::HUNG_PAD))
                     .flex()
                     .flex_col()
                     .gap(px(theme.spacing.xs))
@@ -171,7 +172,7 @@ impl ThreadView {
                     .children(open_more)
                     .children(clipped),
             )
-            .children(answers.map(|a| div().px(px(theme.spacing.md)).child(a)))
+            .children(answers.map(|a| div().px(px(kit::HUNG_PAD)).child(a)))
             .into_any_element()
     }
 }

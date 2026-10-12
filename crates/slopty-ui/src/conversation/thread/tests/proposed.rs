@@ -193,8 +193,7 @@ fn a_call_s_well_hangs_so_its_code_starts_on_the_prose_edge(cx: &mut TestAppCont
     cx.run_until_parked();
     let line = cx.debug_bounds("tool-e").expect("the call's line");
     let well = cx.debug_bounds("patch-e").expect("the diff's well");
-    let theme = slopty_theme::Theme::default();
-    let hang = theme.spacing.sm + slopty_theme::stroke::LINE;
+    let hang = slopty_kit::kit::HANG;
     let off = f32::from(line.left() - well.left());
     assert!((off - hang).abs() < 0.5, "hung {hang} left of the edge: {off}");
     assert!((f32::from(well.right() - line.right())).abs() < 0.5, "to the column's end");

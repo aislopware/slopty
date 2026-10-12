@@ -327,6 +327,8 @@ impl ThreadView {
                 .debug_selector(|| "thread-activity".to_owned())
                 .role(Role::Group)
                 .aria_label("Activity")
+                // Hung, Delta's: its line left of the prose's edge, its rows' marks on it.
+                .ml(px(-kit::HANG))
                 .min_h_0()
                 .flex()
                 .flex_col()
@@ -378,6 +380,8 @@ impl ThreadView {
         div()
             .id("thread-decision")
             .debug_selector(|| "thread-decision".to_owned())
+            // Hung, Delta's: its line left of the prose's edge, its head's mark on it.
+            .ml(px(-kit::HANG))
             .key_context(crate::conversation::REQUEST_CTX)
             .track_focus(&self.request_focus)
             .on_mouse_down(
@@ -388,7 +392,6 @@ impl ThreadView {
                     }
                 }),
             )
-            .w_full()
             .flex()
             .flex_col()
             .map(|el| kit::call_card(el, theme))
@@ -685,7 +688,7 @@ impl ThreadView {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .px(px(theme.spacing.md))
+                .px(px(kit::HUNG_PAD))
                 .pb(px(theme.spacing.md))
                 .child(asking.questions().element(theme, answers, cx))
                 .into_any_element();
@@ -698,7 +701,7 @@ impl ThreadView {
             let body = self.decision(request, cx).map(|decision| {
                 div()
                     .flex_none()
-                    .px(px(theme.spacing.md))
+                    .px(px(kit::HUNG_PAD))
                     .pb(px(theme.spacing.md))
                     .child(decision)
                     .into_any_element()
@@ -725,7 +728,7 @@ impl ThreadView {
                     // A head with nothing under it is the whole card.
                     .map(|el| if under { el.mb(px(theme.spacing.md)) } else { el.border_b_0() })
                     .min_h(px(theme.density.decision))
-                    .px(px(theme.spacing.md))
+                    .px(px(kit::HUNG_PAD))
                     .child(self.needs_you())
                     .child(
                         div()
@@ -756,7 +759,7 @@ impl ThreadView {
                     .id("request-text")
                     .min_h_0()
                     .overflow_y_scroll()
-                    .mx(px(theme.spacing.md))
+                    .mx(px(kit::HUNG_PAD))
                     .mb(px(theme.spacing.md))
                     .whitespace_normal()
                     .map(|el| kit::typed(el, theme.roles().chrome));

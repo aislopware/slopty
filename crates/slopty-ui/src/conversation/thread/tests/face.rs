@@ -129,6 +129,10 @@ fn an_approval_follows_the_last_turn(cx: &mut TestAppContext) {
     assert!(card.top() >= last.bottom() + step - px(0.5), "under the turn: {card:?} {last:?}");
     assert!(card.top() - last.bottom() < step * 3.0, "following it: {card:?} {last:?}");
     assert!(composer.top() - card.bottom() < step * 3.0, "the field follows it: {composer:?}");
+    // Hung, Delta's: its line a hang left of the prose's edge, so its head's mark and words
+    // start on the edge the turn's do.
+    let hang = px(slopty_kit::kit::HANG);
+    assert!((card.left() + hang - last.left()).abs() < px(0.5), "hung: {card:?} {last:?}");
     assert!(cx.debug_bounds("thread-activity").is_none(), "nothing else waits over it");
 }
 

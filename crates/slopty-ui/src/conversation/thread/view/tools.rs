@@ -159,19 +159,21 @@ impl ThreadView {
         if waiting && child.is_none() {
             // A call put to the person is the column's one card, Zed's tool card: its line the
             // head, what it would do and the answers under it.
+            // Hung, Delta's: its line left of the prose's edge, its head's glyph on it.
             return kit::call_card(div(), theme)
                 .debug_selector(selector)
-                .w_full()
+                .ml(px(-kit::HANG))
                 .flex()
                 .flex_col()
-                .child(kit::card_head(div(), theme).px(px(theme.spacing.md)).child(line))
+                .child(kit::card_head(div(), theme).px(px(kit::HUNG_PAD)).child(line))
                 .child(
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .gap(px(theme.spacing.xxs))
-                        .p(px(theme.spacing.md))
+                        .px(px(kit::HUNG_PAD))
+                        .py(px(theme.spacing.md))
                         .children(body)
                         .children(pictures.map(gpui::IntoElement::into_any_element))
                         .children(answers.map(gpui::IntoElement::into_any_element)),
@@ -594,22 +596,16 @@ impl ThreadView {
     }
 
     /// An opened call's well: Delta's code well ([`kit::well`]), its code at the code role,
-    /// clipped to its corners. It hangs [`well_hang`] left of the content edge, so the code
+    /// clipped to its corners. It hangs [`kit::HANG`] left of the content edge, so the code
     /// inside, padded a base unit, starts on the prose's edge as Delta's does, and still runs to
     /// the column's end.
     fn well(&self, content: impl gpui::IntoElement) -> Div {
         let theme = &self.theme;
         kit::typed(kit::well(div(), theme), theme.roles().code)
-            .ml(px(-well_hang(theme)))
+            .ml(px(-kit::HANG))
             .overflow_hidden()
             .child(content)
     }
-}
-
-/// How far a well hangs left of the content edge: its line and the base unit its code is
-/// padded by, Delta's 9 (`.research/delta-signed-in-2026-10-12.md` §2.4).
-pub(super) fn well_hang(theme: &slopty_theme::Theme) -> f32 {
-    theme.spacing.sm + slopty_theme::stroke::LINE
 }
 
 /// What a call was called with, as JSON laid out to read; its own text when that is not

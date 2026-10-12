@@ -175,7 +175,7 @@ impl ThreadView {
             .min_h_0()
             .max_h(most)
             .overflow_y_scroll()
-            .mx(px(theme.spacing.md))
+            .mx(px(kit::HUNG_PAD))
             .mb(px(theme.spacing.md))
             .px(px(theme.spacing.md))
             .py(px(theme.spacing.sm))
