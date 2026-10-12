@@ -114,6 +114,42 @@ impl Side {
     }
 }
 
+/// How much of a pane's room a new pane split from it takes.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Share {
+    /// Halves in a new split; in a row it joins, the row's panes made equal again.
+    #[default]
+    Even,
+    /// This part of the room of the pane it is split from, between 0 and 1, that pane keeping
+    /// the rest, in a new split or in a row it joins.
+    Of(f32),
+}
+
+impl Share {
+    /// A thread split over a terminal: the thread, which is read, takes 60 and the terminal
+    /// beside it 40 (the composition study's ruling).
+    pub const THREAD: Self = Self::Of(0.6);
+
+    /// The new pane's part, kept inside 0.05..=0.95 so neither side vanishes; `None` for
+    /// [`Self::Even`] and for a part that is no number.
+    fn part(self) -> Option<f32> {
+        match self {
+            Self::Even => None,
+            Self::Of(part) => part.is_finite().then(|| part.clamp(0.05, 0.95)),
+        }
+    }
+
+    /// The smaller of the two parts a split by this share makes of a pane `extent` long, one
+    /// of `len` in its row (`len` 1 for a new split).
+    #[must_use]
+    pub fn least(self, extent: f32, len: usize) -> f32 {
+        match self.part() {
+            None => extent / count(len.saturating_add(1)),
+            Some(part) => extent * part.min(1.0 - part),
+        }
+    }
+}
+
 /// A leaf: one tile, or several as tabs with one shown.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pane {
@@ -661,9 +697,16 @@ impl Tab {
     }
 
     /// Put `tile` in a new pane `id` on `side` of pane `of`, focused: beside it in its split
-    /// when that runs the same way (the row's shares made equal again), else in a new split of
-    /// the two, halves each. Lets a zoom go.
-    pub fn split(&mut self, of: PaneId, side: Side, id: PaneId, tile: TileRef) -> bool {
+    /// when that runs the same way, else in a new split of the two, the room shared as `share`
+    /// says. Lets a zoom go.
+    pub fn split(
+        &mut self,
+        of: PaneId,
+        side: Side,
+        id: PaneId,
+        tile: TileRef,
+        share: Share,
+    ) -> bool {
         let Some(path) = self.root.path_of(of) else { return false };
         self.zoomed = None;
         let new = Node::Pane(Pane::new(id, tile));
@@ -676,12 +719,29 @@ impl Tab {
         if let Some((i, split)) = same {
             let at = if side.after() { i.saturating_add(1) } else { i };
             split.children.insert(at, new);
-            split.shares.insert(at, 0.0);
-            split.equalize();
+            match share.part() {
+                None => {
+                    split.shares.insert(at, 0.0);
+                    split.equalize();
+                }
+                Some(part) => {
+                    let room = split.shares.get(i).copied().unwrap_or(0.0);
+                    split.shares.insert(at, room * part);
+                    let kept = if at <= i { i.saturating_add(1) } else { i };
+                    if let Some(share) = split.shares.get_mut(kept) {
+                        *share = room * (1.0 - part);
+                    }
+                }
+            }
         } else if let Some(node) = self.root.at_mut(&path) {
             let old = std::mem::replace(node, Node::Pane(Pane::new(id, tile)));
-            let children = if side.after() { vec![old, new] } else { vec![new, old] };
-            *node = Node::Split(Split { axis, children, shares: vec![0.5, 0.5] });
+            let part = share.part().unwrap_or(0.5);
+            let (children, shares) = if side.after() {
+                (vec![old, new], vec![1.0 - part, part])
+            } else {
+                (vec![new, old], vec![part, 1.0 - part])
+            };
+            *node = Node::Split(Split { axis, children, shares });
         }
         self.normalize();
         self.focus = id;

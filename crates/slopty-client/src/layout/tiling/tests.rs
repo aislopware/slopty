@@ -391,6 +391,44 @@ fn beside_gives_two_panes_then_a_split_below_then_tabs() {
     assert!(widths.iter().all(|w| (*w - 575.0).abs() < 1.0), "{widths:?}");
 }
 
+/// A thread split over a terminal takes 60 of the terminal's room and the terminal keeps 40,
+/// on whichever side it goes, in a new split or in a row it joins (the rest of the row kept as
+/// it was). The room rule judges the terminal's 40: on a 1264 pt tab a thread opened beside
+/// one goes below it instead, still 60 to 40.
+#[test]
+fn a_thread_over_a_terminal_takes_sixty_of_its_room() {
+    let mut wide = Tiling::new(TilingConfig::default());
+    wide.set_area(2300.0, 1200.0);
+    wide.new_tab(t(1), &home("atlas"));
+    wide.open_beside_with(t(2), &home("atlas"), Share::THREAD);
+    assert_eq!(rect_of(&wide, t(1)), Rect { x: 0.0, y: 0.0, w: 920.0, h: 1200.0 });
+    assert_eq!(rect_of(&wide, t(2)), Rect { x: 920.0, y: 0.0, w: 1380.0, h: 1200.0 });
+    assert_eq!(wide.focused(), Some(t(2)));
+
+    // Split from the left pane, to its left: the row's other pane keeps its 1380.
+    wide.focus(t(1));
+    wide.split_focused_with(t(3), Side::Left, &home("atlas"), Share::THREAD);
+    let widths: Vec<(TileRef, f32)> = [t(3), t(1), t(2)].map(|n| (n, rect_of(&wide, n).w)).into();
+    let want = [(t(3), 552.0), (t(1), 368.0), (t(2), 1380.0)];
+    for ((tile, w), (_, want)) in widths.iter().zip(want) {
+        assert!((w - want).abs() < 0.5, "{tile:?}: {w} not {want} in {widths:?}");
+    }
+    assert!(rect_of(&wide, t(3)).x < rect_of(&wide, t(1)).x, "on its left");
+
+    let mut small = mac();
+    small.new_tab(t(1), &home("atlas"));
+    small.open_beside_with(t(2), &home("atlas"), Share::THREAD);
+    assert_eq!(rect_of(&small, t(1)), Rect { x: 0.0, y: 0.0, w: 1264.0, h: 320.0 });
+    assert_eq!(rect_of(&small, t(2)), Rect { x: 0.0, y: 320.0, w: 1264.0, h: 480.0 });
+
+    // Even is as it always was: halves, and a row made equal again.
+    let mut even = mac();
+    even.config.room = Room { min_w: 100.0, min_h: 100.0 };
+    even.new_tab(t(1), &home("atlas"));
+    even.split_focused_with(t(2), Side::Right, &home("atlas"), Share::Even);
+    assert_eq!(rect_of(&even, t(2)).w, 632.0);
+}
+
 /// A phone shows the focused pane alone over the whole area, and nothing splits there: what
 /// opens is a tab.
 #[test]

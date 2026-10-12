@@ -17,7 +17,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use slopty_core::ItemId;
 pub use tiling::{Drop, Pos, Project, SavedTiling, TabId, Tiling, TilingConfig};
-pub use tree::{Laid, Pane, PaneId, Room, Sash, Side, SplitAxis, Tab, TabFrame};
+pub use tree::{Laid, Pane, PaneId, Room, Sash, Share, Side, SplitAxis, Tab, TabFrame};
 
 use crate::groups::Frecency;
 pub use crate::groups::GroupKey;

@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::ItemId;
 
-use super::tree::{Node, Pane, PaneId, Room, Side, Split, SplitAxis, Tab, TabFrame, Taken};
+use super::tree::{Node, Pane, PaneId, Room, Share, Side, Split, SplitAxis, Tab, TabFrame, Taken};
 use super::{GroupKey, Rect, TileRef, WorkerKey};
 
 /// How far back the tabs visited are kept.
@@ -343,6 +343,12 @@ impl Tiling {
     /// `tile` opened from the focused tile, by the room rule beside it; a new tab of `home`'s
     /// project when nothing is on show. On a phone, a tab of the focused pane.
     pub fn open_beside(&mut self, tile: TileRef, home: &GroupKey) {
+        self.open_beside_with(tile, home, Share::Even);
+    }
+
+    /// [`Self::open_beside`], a new pane taking `share` of the focused one's room: a thread
+    /// opened from a terminal takes [`Share::THREAD`]. The room rule judges the smaller part.
+    pub fn open_beside_with(&mut self, tile: TileRef, home: &GroupKey, share: Share) {
         if self.contains(tile) {
             self.focus(tile);
             return;
@@ -387,10 +393,16 @@ impl Tiling {
         let Some(tab) = self.shown_tab_mut() else { return };
         if let Some(beside) = right {
             tab.join(beside, tile);
-        } else if width / count(len.saturating_add(1)) >= room.min_w {
-            tab.split(source, Side::Right, id, tile);
-        } else if rect.h / 2.0 >= room.min_h {
-            tab.split(source, Side::Bottom, id, tile);
+        } else if match share {
+            // The row made even: each of its panes, the new one with them.
+            Share::Even => share.least(width, len),
+            // The source's own room parted.
+            Share::Of(_) => share.least(rect.w, 1),
+        } >= room.min_w
+        {
+            tab.split(source, Side::Right, id, tile, share);
+        } else if share.least(rect.h, 1) >= room.min_h {
+            tab.split(source, Side::Bottom, id, tile, share);
         } else {
             tab.join(source, tile);
         }
@@ -399,6 +411,12 @@ impl Tiling {
     /// `tile` in a new pane on `side` of the focused one (⌘D, ⌘⇧D); a new tab of `home`'s
     /// project when nothing is on show, and a tab of the focused pane on a phone.
     pub fn split_focused(&mut self, tile: TileRef, side: Side, home: &GroupKey) {
+        self.split_focused_with(tile, side, home, Share::Even);
+    }
+
+    /// [`Self::split_focused`], the new pane taking `share` of the focused one's room: a thread
+    /// split over a terminal takes [`Share::THREAD`].
+    pub fn split_focused_with(&mut self, tile: TileRef, side: Side, home: &GroupKey, share: Share) {
         if self.contains(tile) {
             return;
         }
@@ -412,7 +430,7 @@ impl Tiling {
         if phone {
             tab.join(source, tile);
         } else {
-            tab.split(source, side, id, tile);
+            tab.split(source, side, id, tile, share);
         }
     }
 
@@ -793,7 +811,7 @@ impl Tiling {
         };
         match drop.edge {
             None => tab.join(drop.pane, tile),
-            Some(side) => tab.split(drop.pane, side, id, tile),
+            Some(side) => tab.split(drop.pane, side, id, tile, Share::Even),
         }
     }
 
@@ -814,7 +832,7 @@ impl Tiling {
             tab.join(at.pane, tile)
         } else {
             let focus = tab.focus();
-            tab.split(focus, Side::Right, id, tile)
+            tab.split(focus, Side::Right, id, tile, Share::Even)
         };
         if placed {
             self.focus(tile);
@@ -1102,11 +1120,6 @@ pub enum SavedNode {
         /// Put away.
         hidden: bool,
     },
-}
-
-#[expect(clippy::cast_precision_loss, reason = "counts of panes are tiny")]
-const fn count(n: usize) -> f32 {
-    n as f32
 }
 
 #[cfg(test)]
