@@ -9,8 +9,11 @@
 //!   registered for the payload's event, with the payload on stdin (naming the session it was
 //!   started on with `--session-id`, unless the payload names one) and the session's environment,
 //!   keeping what each printed. Which hooks, in order, is `STUB_HOOKS` (a JSON array of payloads);
-//!   a `SessionStart` alone when it is unset. `STUB_LATER` is more of them, fired once its prompt
-//!   shows and the file `STUB_LATER_AFTER` exists, as a later turn's.
+//!   a `SessionStart` alone when it is unset (its source `resume` when started with `--resume`,
+//!   whose session the hooks then name). With `STUB_TRANSCRIPT`, that file is made at once and
+//!   every payload names it as its `transcript_path`, as Claude Code's do: what a worker resumes
+//!   the conversation by after a reboot. `STUB_LATER` is more of them, fired once its prompt shows
+//!   and the file `STUB_LATER_AFTER` exists, as a later turn's.
 //! - With `STUB_MCP_CALLS` (`[{"name": …, "arguments": …}, …]`), it calls those tools in order
 //!   through the `slopty` MCP server its `--mcp-config` names, over stdio, as Claude Code starts
 //!   it: the session's environment is the server's. With `STUB_MCP_AFTER` too, it first waits for
@@ -33,9 +36,9 @@
 //! variable's name with a digest of its value (to tell what it inherited without writing any
 //! value), the MCP configs, the hooks it fired, the tool's answer and the lines typed.
 //!
-//! In `STUB_RECORD`, `STUB_MCP_CALLS`, `STUB_MCP_AFTER` and `STUB_INBOX`, `{task}` is the task
-//! the agent was started for (`SLOPTY_TASK`, `none` for no task's), so one script serves every
-//! task a machine runs, each with its own files and its own report.
+//! In `STUB_RECORD`, `STUB_MCP_CALLS`, `STUB_MCP_AFTER`, `STUB_INBOX` and `STUB_TRANSCRIPT`,
+//! `{task}` is the task the agent was started for (`SLOPTY_TASK`, `none` for no task's), so one
+//! script serves every task a machine runs, each with its own files and its own report.
 
 #![allow(
     clippy::print_stdout,
@@ -140,13 +143,19 @@ fn run(args: &[String]) -> Fallible<()> {
         hook_env: Vec::new(),
     };
     let settings = settings(args);
+    // Claude Code writes its transcript from its first moment: one resumed finds it there.
+    if let Some(transcript) = knob("STUB_TRANSCRIPT") {
+        drop(std::fs::OpenOptions::new().create(true).append(true).open(transcript)?);
+    }
     if let Some(file) = knob("STUB_INBOX") {
         record.hook_env = inbox(PathBuf::from(file), settings.clone())?;
     }
 
-    let script = match std::env::var("STUB_HOOKS") {
-        Ok(text) => serde_json::from_str(&text)?,
-        Err(_) => json!([{ "hook_event_name": "SessionStart", "source": "startup" }]),
+    let script = if let Ok(text) = std::env::var("STUB_HOOKS") {
+        serde_json::from_str(&text)?
+    } else {
+        let source = if args.iter().any(|a| a == "--resume") { "resume" } else { "startup" };
+        json!([{ "hook_event_name": "SessionStart", "source": source }])
     };
     fire_all(&settings, &script, &mut record)?;
     record.save()?;
@@ -220,7 +229,7 @@ fn inbox(file: PathBuf, settings: Value) -> Fallible<Vec<(String, String)>> {
         file,
         token,
         hold: std::env::var_os("STUB_INBOX_HOLD").is_some(),
-        transcript: std::env::var_os("STUB_TRANSCRIPT").map(PathBuf::from),
+        transcript: knob("STUB_TRANSCRIPT").map(PathBuf::from),
         settings,
         hook_env: hook_env.clone(),
     };
@@ -337,15 +346,22 @@ fn settings(args: &[String]) -> Value {
 
 /// Fire every payload of `script` in order, recording each: whether every hook registered for
 /// its event ran cleanly (none registered is not fired), and what they printed. A payload that
-/// names no session carries the one the stub was started on (`--session-id`), as each of Claude
-/// Code's does.
+/// names no session carries the one the stub was started on (`--session-id`), and one that names
+/// no directory the stub's own, as each of Claude Code's does.
 fn fire_all(settings: &Value, script: &Value, record: &mut Record) -> Fallible<()> {
-    let at = record.argv.iter().position(|a| a == "--session-id");
+    let at = record.argv.iter().position(|a| a == "--session-id" || a == "--resume");
     let session = at.and_then(|at| record.argv.get(at.saturating_add(1))).cloned();
+    let transcript = knob("STUB_TRANSCRIPT");
     for payload in script.as_array().into_iter().flatten() {
         let mut payload = payload.clone();
         if let (Some(session), Some(fields)) = (&session, payload.as_object_mut()) {
             fields.entry("session_id").or_insert_with(|| json!(session));
+        }
+        if let (Some(transcript), Some(fields)) = (&transcript, payload.as_object_mut()) {
+            fields.entry("transcript_path").or_insert_with(|| json!(transcript));
+        }
+        if let (Some(cwd), Some(fields)) = (&record.cwd, payload.as_object_mut()) {
+            fields.entry("cwd").or_insert_with(|| json!(cwd));
         }
         let payload = &payload;
         let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or_default();

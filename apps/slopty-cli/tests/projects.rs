@@ -2473,4 +2473,226 @@ slopty_worker::orchestrate=debug,slopty_ptyd=debug";
         server.shutdown().await;
         assert!(found.0.is_empty(), "{}", found.so_far());
     }
+
+    /// A reboot mid-goal, walked to find what a person meets after one: the machine running the
+    /// orchestrator and a task's agent goes down (ptyd and the worker end, and every program in
+    /// their terminals with them) while the task's agent works, and comes back on the same
+    /// data. Each agent should come back in its own terminal, on its own conversation, and be
+    /// told it was cut off, so the goal goes on without the person.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reboot_mid_goal_picks_the_goal_up_again() {
+        use std::time::Instant;
+
+        const AFTER_BOOT: Duration = Duration::from_secs(30);
+        server_log();
+        let mut found = Findings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let clone = root.join("demo");
+        std::fs::create_dir_all(&clone).unwrap();
+        git_out(&clone, &["init", "-q", "-b", "main"]);
+        std::fs::write(clone.join("a.txt"), "one\n").unwrap();
+        git_out(&clone, &["add", "."]);
+        git_out(&clone, &["commit", "-q", "-m", "first"]);
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.claude.json"), "{}").unwrap();
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let calls = json!([{ "name": "task_report", "arguments": {
+            "note": "Wrote it.", "branch": "worktree-slopty-demo-{task}" } }]);
+        let tasks_env = vec![
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+            ("STUB_MCP_AFTER".to_owned(), at("go-{task}")),
+            ("STUB_RECORD".to_owned(), at("task-{task}.json")),
+            ("STUB_INBOX".to_owned(), at("inbox-{task}.jsonl")),
+            ("STUB_TRANSCRIPT".to_owned(), at("transcript-{task}.jsonl")),
+        ];
+        let (server, mut machine, studio) = fleet_with(&root, "", &tasks_env).await;
+        let hub = server.hub().clone();
+
+        let starts = json!([{ "name": "task_start", "arguments": {
+            "title": "The notes", "brief": "Write notes.txt.", "worker": "projects-test" } }]);
+        let go_orch = root.join("go-orchestrator");
+        let spawn = Verb::SpawnAgent {
+            worker: studio,
+            cwd: clone.to_string_lossy().into_owned(),
+            prompt: None,
+            args: Vec::new(),
+            env: vec![
+                ("STUB_MCP_CALLS".to_owned(), starts.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), go_orch.to_string_lossy().into_owned()),
+                ("STUB_RECORD".to_owned(), at("orchestrator.json")),
+                ("STUB_INBOX".to_owned(), at("inbox-orchestrator.jsonl")),
+                ("STUB_TRANSCRIPT".to_owned(), at("transcript-orchestrator.jsonl")),
+            ],
+            size: None,
+            session: None,
+            autonomy: None,
+            worktree: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(spawn).await else {
+            panic!("the orchestrator")
+        };
+        let project = ProjectId::new("demo").unwrap();
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Write the notes".to_owned(),
+                goal: Some("Write the notes.".to_owned()),
+                autonomy: slopty_proto::project::Autonomy::Ask,
+                repo: clone.to_string_lossy().into_owned(),
+                target: String::new(),
+                verifier: None,
+                push: false,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+        std::fs::write(&go_orch, "").unwrap();
+        let agent = until("the task's agent starts", async || {
+            let tasks = status(&hub, &project).await.tasks;
+            tasks.iter().find(|c| c.id == TaskId(1))?.assignment.as_ref().map(|a| a.term)
+        })
+        .await;
+        let record = |name: &str| -> Option<Value> {
+            serde_json::from_slice(&std::fs::read(root.join(name)).ok()?).ok()
+        };
+        let pid_of = |name: &str| record(name).and_then(|r| r["pid"].as_u64());
+        let task_pid = until("the task's agent is at work", async || pid_of("task-1.json")).await;
+        let orch_pid = pid_of("orchestrator.json").expect("the orchestrator's record");
+        let inbox_lines = |name: &str| {
+            std::fs::read_to_string(root.join(name)).map_or(0, |text| text.lines().count())
+        };
+        let (task_said, orch_said) =
+            (inbox_lines("inbox-1.jsonl"), inbox_lines("inbox-orchestrator.jsonl"));
+        // What the worker keeps of each terminal for a reboot: its recipe, which names the
+        // conversation to resume once the agent tick has found it.
+        let kept_agent = |session: slopty_core::SessionId| -> Value {
+            fn find(dir: &Path, name: &str) -> Option<PathBuf> {
+                for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                    let path = entry.path();
+                    if path.file_name().is_some_and(|n| n == name) {
+                        return Some(path);
+                    }
+                    if path.is_dir()
+                        && let Some(found) = find(&path, name)
+                    {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            find(&root.join("data"), &format!("{session}.json"))
+                .and_then(|path| std::fs::read(path).ok())
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .map_or(Value::Null, |recipe| recipe["agent"].clone())
+        };
+        let kept = soon(Duration::from_secs(10), async || {
+            let both = [agent.session, orchestrator.session].map(kept_agent);
+            both.iter().all(|agent| !agent.is_null()).then_some(())
+        })
+        .await;
+        found.check(
+            kept.is_some(),
+            &format!(
+                "the worker keeps each agent's conversation for a reboot: task {}, orchestrator {}",
+                kept_agent(agent.session),
+                kept_agent(orchestrator.session)
+            ),
+        );
+
+        // The machine goes down: ptyd and the worker end, and their terminals' programs with
+        // them, as a reboot ends them.
+        let ended = slopty_testkit::group::end(&mut machine, Child::id, |child| {
+            child.try_wait().is_ok_and(|status| status.is_some())
+        });
+        assert!(ended, "the machine's daemons ended");
+        let left = soon(Duration::from_secs(10), async || {
+            let alive = |pid: u64| {
+                std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .is_ok_and(|s| s.success())
+            };
+            (!alive(task_pid) && !alive(orch_pid)).then_some(())
+        })
+        .await;
+        found.check(left.is_some(), "the agents ended with their terminals");
+        until("the server sees the machine away", async || {
+            let away = hub
+                .directory()
+                .iter()
+                .any(|w| w.worker == studio && w.liveness != Liveness::Online);
+            away.then_some(())
+        })
+        .await;
+
+        // It comes back on the same data.
+        let booted = Instant::now();
+        let programs = root.join("programs");
+        let _machine =
+            daemons(&root, server.quic_addr(), &programs, "", "projects-test", &tasks_env).await;
+        let back = registered_with_claude(&hub, "projects-test").await;
+        eprintln!(
+            "MEASURE reboot: the machine online with Claude Code after {:?}",
+            booted.elapsed()
+        );
+        found.check(back == studio, "the machine comes back as the same worker");
+
+        let again =
+            soon(AFTER_BOOT, async || pid_of("task-1.json").filter(|pid| *pid != task_pid)).await;
+        found.check(again.is_some(), "the task's agent runs again after the reboot");
+        if again.is_some() {
+            eprintln!(
+                "MEASURE reboot: the task's agent running again after {:?}",
+                booted.elapsed()
+            );
+            let argv = record("task-1.json").map(|r| r["argv"].to_string()).unwrap_or_default();
+            found.check(argv.contains("--resume"), &format!("on its own conversation: {argv}"));
+        }
+        let orch_again =
+            soon(AFTER_BOOT, async || pid_of("orchestrator.json").filter(|pid| *pid != orch_pid))
+                .await;
+        found.check(orch_again.is_some(), "the orchestrator runs again after the reboot");
+        let card = status(&hub, &project).await;
+        let on = card.tasks.iter().find(|c| c.id == TaskId(1)).and_then(|c| c.assignment.clone());
+        found.check(
+            on.as_ref().is_some_and(|a| a.term == agent && a.open()),
+            &format!("the task keeps its agent's terminal: {on:?}"),
+        );
+        // Told through its inbox, or by a hook as the conversation started again, whichever
+        // the worker reached first.
+        let told_by = |inbox: &str, said: usize, record_of: &str, words: &str| {
+            let hooked = record(record_of).is_some_and(|r| r["hooks"].to_string().contains(words));
+            (hooked || inbox_lines(inbox) > said).then_some(())
+        };
+        let told = soon(AFTER_BOOT, async || {
+            told_by("inbox-1.jsonl", task_said, "task-1.json", "Carry on with the task")
+        })
+        .await;
+        found.check(told.is_some(), "the task's agent is told it was cut off and to carry on");
+        let orch_told = soon(AFTER_BOOT, async || {
+            let words = "while you orchestrated this goal";
+            told_by("inbox-orchestrator.jsonl", orch_said, "orchestrator.json", words)
+        })
+        .await;
+        found.check(orch_told.is_some(), "the orchestrator is told the machine came back");
+
+        // The task's agent goes on and reports: the goal goes on.
+        std::fs::write(root.join("go-1"), "").unwrap();
+        let done = soon(STEP, async || {
+            let tasks = status(&hub, &project).await.tasks;
+            let card = tasks.into_iter().find(|c| c.id == TaskId(1))?;
+            (card.state == TaskState::Done).then_some(())
+        })
+        .await;
+        found.check(done.is_some(), "the task's report after the reboot reaches its card");
+        assert!(found.0.is_empty(), "{}", found.so_far());
+        server.shutdown().await;
+    }
 }

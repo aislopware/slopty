@@ -167,6 +167,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       unasked.
     - Test: `a_start_reads_the_heads_and_opens_a_log_on_first_use`; the measurement
       `host_open_cost`.
+    - **And goes back to its head once it rests** (2026-10-12, a week on the agent side).
+      Nothing closed a log once opened, so a worker up for a week held every thread opened
+      since its start, each its whole state and its tail: 144 KiB for 20 turns of 2 KB
+      answers, megabytes for a long conversation (`docs/MEASUREMENTS.md`). The daemon looks
+      each minute (`Host::rest`): a thread nobody follows, unused for 10 min, that holds
+      nothing the worker alone knows (a message typed and not yet seen, a start's first
+      message, a scheduled one, a snapshot waiting for its turn), has its head written and
+      its log closed. Its next use opens it again as at the start: the same state, the same
+      cursor, so a follower from before is sent only what it missed. Test:
+      `a_thread_at_rest_goes_back_to_its_head_and_comes_back_the_same` (`tests/rest.rs`).
   - **The table** is in memory and rebuilt from the logs' heads at start, under a new random epoch,
     so a client's cursor from an earlier run gets every row. It sends a delta while it still
     remembers every removal since the cursor (the last 1024 of them). A row that differs only

@@ -77,7 +77,12 @@ enum Cmd {
     Verb(verbs::VerbCmd),
     /// Serve the verbs to an AI agent over MCP on stdio.
     #[command(after_help = mcp::REGISTER_HELP)]
-    Mcp,
+    Mcp {
+        /// Call this one tool, its arguments a JSON object on stdin, and print its result: how
+        /// an older `slopty mcp` reaches a server on this build.
+        #[arg(long, hide = true, value_name = "TOOL")]
+        call: Option<String>,
+    },
     /// Run the server as a `LaunchAgent`.
     Server {
         #[command(subcommand)]
@@ -356,7 +361,10 @@ async fn run() -> Result<ExitCode> {
             let key = cli.idempotency_key;
             verbs::run(cmd, cli.server.as_deref(), &data_dir, cli.json, key).await
         }
-        Cmd::Mcp => Box::pin(mcp::run(cli.server.as_deref(), &data_dir)).await,
+        Cmd::Mcp { call: None } => Box::pin(mcp::run(cli.server.as_deref(), &data_dir)).await,
+        Cmd::Mcp { call: Some(tool) } => {
+            Box::pin(mcp::call_once(cli.server.as_deref(), &data_dir, &tool)).await
+        }
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
         Cmd::Attach { worker, session: Some(session), .. } => {
             return attach::attach(&data_dir, server, worker.as_deref(), &session).await;

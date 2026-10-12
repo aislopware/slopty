@@ -14,6 +14,11 @@
 //!
 //! Only the calling thread is counted. Work the closure hands to another thread is that
 //! thread's; a budget over a path that crosses threads measures each side on its own thread.
+//!
+//! [`live`] is what the calling thread holds now: the bytes it allocated less those it freed,
+//! for what a structure keeps rather than what building it cost. A block freed on another
+//! thread than the one that made it moves two threads' counts apart, so it is read over work
+//! that stays on one thread.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -21,6 +26,17 @@ use std::cell::Cell;
 thread_local! {
     static BLOCKS: Cell<u64> = const { Cell::new(0) };
     static BYTES: Cell<u64> = const { Cell::new(0) };
+    static LIVE: Cell<i64> = const { Cell::new(0) };
+}
+
+/// Move this thread's live bytes by `by`.
+fn hold(by: i64) {
+    let _held = LIVE.try_with(|c| c.set(c.get().wrapping_add(by)));
+}
+
+/// `bytes` as a signed count, saturated: no allocation comes near it.
+fn signed(bytes: usize) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
 }
 
 /// Count one allocation of `bytes` on this thread.
@@ -42,23 +58,27 @@ pub struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         count(layout.size());
+        hold(signed(layout.size()));
         // SAFETY: the caller's `layout` is forwarded as `GlobalAlloc::alloc` requires.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         count(layout.size());
+        hold(signed(layout.size()));
         // SAFETY: as `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        hold(signed(layout.size()).wrapping_neg());
         // SAFETY: `ptr` came from this allocator, which is `System`, with this `layout`.
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         count(new_size);
+        hold(signed(new_size).wrapping_sub(signed(layout.size())));
         // SAFETY: `ptr` came from `System` with `layout`, and the caller guarantees `new_size`
         // is valid for it, as `GlobalAlloc::realloc` requires.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -99,6 +119,13 @@ pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Allocs) {
         bytes: after.bytes.wrapping_sub(before.bytes),
     };
     (out, used)
+}
+
+/// The bytes this thread holds now: allocated on it less freed on it, since it began. The
+/// difference of two readings is what the work between them kept.
+#[must_use]
+pub fn live() -> i64 {
+    LIVE.try_with(Cell::get).unwrap_or(0)
 }
 
 /// Whether [`Counting`] is this binary's global allocator: a budget read without it would

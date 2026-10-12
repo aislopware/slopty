@@ -9,6 +9,11 @@
 //! thread's head ([`Log::head`]): its row for the table, and its state without items for a look
 //! over every thread ([`Host::visit`]). A thread whose head is missing or behind its log is
 //! opened then, and its head written, so the next start reads the head alone.
+//!
+//! A thread opened goes back to its head once it has rested ([`Host::rest`]): nobody follows it,
+//! nothing used it for a while, and it holds nothing the worker alone knows (a message typed and
+//! not yet seen, a first message, one scheduled). Its next use opens it again, the same, so a
+//! worker that runs for weeks holds the threads in use and not every thread ever opened.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -183,6 +188,32 @@ struct Hosted {
     intents: Intents,
     feed: broadcast::Sender<Arc<Batch>>,
     own: Own,
+    /// When it was last used ([`Host::rest`]).
+    used: std::time::Instant,
+}
+
+impl Hosted {
+    /// Whether it can go back to its head: nobody follows it, nothing used it since `before`,
+    /// and its log and files hold all of it, since nothing waits on what only the worker knows.
+    fn resting(&self, before: std::time::Instant) -> bool {
+        self.used <= before
+            && self.feed.receiver_count() == 0
+            && self.own.typed.is_empty()
+            && self.own.first.is_none()
+            && self.own.scheduled.is_empty()
+            && self.trees_kept()
+    }
+
+    /// Whether every snapshot the worker took is on a turn of the state, where the log keeps
+    /// it: one taken as the agent got busy waits in [`Own`] for its turn to begin.
+    fn trees_kept(&self) -> bool {
+        if self.own.trees.is_empty() {
+            return true;
+        }
+        let turns: std::collections::HashSet<TurnId> =
+            self.log.state().turns.iter().map(|turn| turn.id).collect();
+        self.own.trees.keys().all(|turn| turns.contains(turn))
+    }
 }
 
 impl Hosted {
@@ -205,6 +236,7 @@ impl Hosted {
             intents: Intents::open(&dir.join("intents"))?,
             feed: broadcast::Sender::new(FEED_BATCHES),
             own,
+            used: std::time::Instant::now(),
         })
     }
 }
@@ -484,10 +516,42 @@ impl Host {
         inner.threads.contains_key(&thread) || inner.cold.contains_key(&thread)
     }
 
-    /// How many threads have their logs open: those used since the worker started.
+    /// How many threads have their logs open: those used since the worker started that have
+    /// not rested since ([`Self::rest`]).
     #[must_use]
     pub fn opened(&self) -> usize {
         self.inner.lock().threads.len()
+    }
+
+    /// Put every opened thread that has rested `idle` back to its head, as at the start: its
+    /// head written over its log, its state and tail let go, its files closed. How many went.
+    /// One whose head cannot be written keeps its head in memory alone, as at the start.
+    pub fn rest(&self, idle: std::time::Duration) -> usize {
+        let Some(before) = std::time::Instant::now().checked_sub(idle) else { return 0 };
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let resting: Vec<ThreadId> = inner
+            .threads
+            .iter()
+            .filter(|(_, hosted)| hosted.resting(before))
+            .map(|(thread, _)| *thread)
+            .collect();
+        for thread in &resting {
+            let Some(mut hosted) = inner.threads.remove(thread) else { continue };
+            let row = inner
+                .table
+                .row(*thread)
+                .cloned()
+                .unwrap_or_else(|| hosted.log.state().row(WallMs::now()));
+            let head = hosted.log.write_head(&row).unwrap_or_else(|e| {
+                tracing::warn!(%thread, "a resting thread's head was not kept: {e}");
+                let mut state = hosted.log.state().clone();
+                state.items.clear();
+                Head { row, state }
+            });
+            inner.cold.insert(*thread, head);
+        }
+        resting.len()
     }
 
     /// The threads held.
@@ -1167,6 +1231,10 @@ impl Inner {
     /// Open `thread`'s log if it is held and not opened yet, on its first use. One that cannot
     /// be read is let go, with a warning: its agent's own session still has everything.
     fn load(&mut self, thread: ThreadId) {
+        if let Some(hosted) = self.threads.get_mut(&thread) {
+            hosted.used = std::time::Instant::now();
+            return;
+        }
         let Some(head) = self.cold.remove(&thread) else { return };
         let dir = self.dir.join(thread.to_string());
         match Log::open(&dir, self.limits).and_then(|log| Hosted::open(&dir, log)) {

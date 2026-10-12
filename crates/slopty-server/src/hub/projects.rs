@@ -278,10 +278,12 @@ pub(super) fn agent_scope(
     Ok(verb)
 }
 
-/// What letting `project` go leaves on its workers: its tasks' worktrees, the branches the
-/// server named in its clones, and the checkout its work was verified in on the orchestrator's
-/// worker ([`VERIFY_PLACES`]).
-fn left_by(state: &State, project: &ProjectId) -> Vec<Cleanup> {
+/// What letting `project` go leaves on its workers: the agents the server started for its
+/// tasks that still run, first, so a worktree one worked in is no longer busy as it goes; its
+/// tasks' worktrees; the branches the server named in its clones; and the checkout its work was
+/// verified in on the orchestrator's worker ([`VERIFY_PLACES`]).
+fn left_by(state: &mut State, project: &ProjectId) -> Vec<Cleanup> {
+    let agents = started_agents(state, project).into_iter().map(|term| Cleanup::Agent { term });
     let worktrees = state
         .projects
         .worktrees_of(project)
@@ -294,7 +296,7 @@ fn left_by(state: &State, project: &ProjectId) -> Vec<Cleanup> {
         let worktree = format!("{VERIFY_PLACES}/{project}");
         Cleanup::Worktree { worker: o.worker, worktree, landed: Vec::new() }
     });
-    worktrees.chain(branches).chain(verify).collect()
+    agents.chain(worktrees).chain(branches).chain(verify).collect()
 }
 
 /// Whether the program in `session` on `worker` has exited, or its terminal is gone, as the
@@ -305,14 +307,20 @@ fn program_gone(state: &State, worker: WorkerId, session: SessionId) -> bool {
     known.is_none_or(|s| matches!(s.state, slopty_proto::terminal::SessionState::Exited { .. }))
 }
 
-/// The terminals of the agents the server started for `project`'s tasks that still run.
+/// The terminals, or the threads' seats, of the agents the server started for `project`'s
+/// tasks that still run: a thread's as its worker's table last said, and one on a worker that
+/// has published none is asked anyway, its worker knowing best.
 fn started_agents(state: &mut State, project: &ProjectId) -> Vec<TermRef> {
     let Ok(status) = Hub::status_of(state, project, None) else { return Vec::new() };
+    let runs = |a: &&Assignment| {
+        a.thread.is_none_or(|thread| state.board.thread_there(a.term.worker, thread) != Some(false))
+    };
     status
         .tasks
         .iter()
         .filter_map(|card| card.assignment.as_ref())
-        .filter(|a| a.spawned && a.thread.is_none() && a.ended_ms.is_none())
+        .filter(|a| a.spawned && a.ended_ms.is_none())
+        .filter(runs)
         .map(|a| a.term)
         .collect()
 }
@@ -953,39 +961,22 @@ impl Hub {
 
     /// The person lets `project` go: its record, its lane's work and the reports waiting in
     /// it. Every client is sent the projects afresh, which a snapshot's first part replaces
-    /// whole, as no change says a project is gone. The agents the server started for its tasks
-    /// stop, their terminals closed: a goal let go is no one's work any more. The orchestrator
-    /// stays, as the person's own terminal. What the project left on its workers then goes,
-    /// each kept until its worker answers ([`Self::clean_up`]): its tasks' worktrees, each kept
-    /// by its worker while anything in it is not committed or a terminal works in it, with the
-    /// branch of work that did not land; the branches the server named in its clones; and its
-    /// verify checkout.
+    /// whole, as no change says a project is gone. What the project left on its workers then
+    /// goes, each kept until its worker answers, so a worker away is asked once it is back
+    /// ([`Self::clean_up`]): first the agents the server started for its tasks, in terminals
+    /// or as threads, stop, since a goal let go is no one's work any more; then its tasks'
+    /// worktrees, each kept by its worker while anything in it is not committed or a terminal
+    /// works in it, with the branch of work that did not land; the branches the server named
+    /// in its clones; and its verify checkout. The orchestrator stays, as the person's own.
     pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         let cleanups = left_by(state, project);
-        let started = started_agents(state, project);
         if let Err(refused) = state.projects.delete(project) {
             return refused;
         }
         keep(state, Keep::Forget(project.clone()));
-        if started.is_empty() || tokio::runtime::Handle::try_current().is_err() {
-            self.clean_up(state, cleanups);
-        } else {
-            // Closed first, so a worktree an agent worked in is no longer busy as it goes.
-            let hub = self.clone();
-            tokio::spawn(async move {
-                for term in started {
-                    if let failed @ Outcome::Error { .. } =
-                        hub.forward(None, Verb::Close { term }).await
-                    {
-                        tracing::info!(%term.session, ?failed, "a let-go project's agent not closed");
-                    }
-                }
-                let mut state = hub.inner.state.lock();
-                hub.clean_up(&mut state, cleanups);
-            });
-        }
+        self.clean_up(state, cleanups);
         let projects = Self::projects_snapshot(state);
         let seq = self.inner.log.lock().next.saturating_sub(1);
         for part in parts(seq, projects) {
@@ -2512,6 +2503,63 @@ impl Hub {
             self.projects_moved(state, updates);
         }
         // What did not fit that batch may go now.
+        self.inner.deliver.notify_one();
+    }
+
+    /// The agent in `term` came back on its own conversation after its machine went down with
+    /// it ([`AgentReport::Resumed`]): cut off mid-work, it sits at its prompt and nothing tells
+    /// it to go on, so a goal would stand still after a reboot. A task's agent is told to carry
+    /// on with its task, the orchestrator above hears it was cut off, and the timeline says
+    /// so; a project's orchestrator is told to carry on with the goal. A task done, merged or
+    /// given up is nobody's work and says nothing.
+    ///
+    /// [`AgentReport::Resumed`]: slopty_proto::project::AgentReport::Resumed
+    pub(super) fn resumed(&self, state: &mut State, term: TermRef) {
+        use crate::deliver::Kind;
+        let Some((project, node)) = state.projects.working_on(term) else { return };
+        let machine = state
+            .workers
+            .get(&term.worker)
+            .map_or_else(|| "its machine".to_owned(), |e| e.info.name.clone());
+        let at = tokio::time::Instant::now();
+        let changes = if let Some(task) = node {
+            let Ok(t) = state.projects.task(&project, task) else { return };
+            if matches!(t.state, TaskState::Done | TaskState::Merged | TaskState::Failed) {
+                return;
+            }
+            let own = format!(
+                "{machine} restarted while you worked on task {task} (\"{}\"), and your \
+                 conversation was resumed where it stopped. Carry on with the task: see what is \
+                 already in your worktree, finish it, and report.",
+                t.title
+            );
+            let above = format!(
+                "Task {task}'s agent was cut off by a restart of {machine}; its conversation was \
+                 resumed and it was told to carry on."
+            );
+            state.deliveries.notice(
+                (project.clone(), Some(task)),
+                task,
+                Kind::NeedsInput,
+                &own,
+                at,
+            );
+            state.deliveries.notice((project.clone(), None), task, Kind::Done, &above, at);
+            let said = format!("Its agent came back after a restart of {machine} and goes on");
+            state.projects.note(&project, Some(task), &said, WallMs::now())
+        } else {
+            let words = format!(
+                "{machine} restarted while you orchestrated this goal, and your conversation was \
+                 resumed where it stopped. Carry on: read where the goal stands \
+                 (project_status), then go on with it."
+            );
+            state.deliveries.instructions((project.clone(), None), &words, at);
+            let said =
+                format!("The orchestrator came back after a restart of {machine} and goes on");
+            state.projects.note(&project, None, &said, WallMs::now())
+        };
+        tracing::info!(%project, ?node, %term.session, "an agent came back after a restart");
+        self.projects_moved(state, changes);
         self.inner.deliver.notify_one();
     }
 

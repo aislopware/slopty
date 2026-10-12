@@ -3506,14 +3506,95 @@ then was refused in git's words, "fatal: not a git repository", with the agent's
 - **A change's lookups wait as the change does.** A tool that changes something runs over
   `slopty_tools::Waiting`, so its reads (a done report's lookup of the caller's own task)
   wait out the server as its change does; a read tool still answers at once.
-- **Letting a goal go stops the agents the server started for its tasks** (their terminals
-  closed) before its worktrees are cleaned up, so the worktrees are no longer busy. The
-  orchestrator stays, as the person's own terminal. Before, the task agents kept working on a
-  goal nobody had any more.
+- **Letting a goal go stops the agents the server started for its tasks** before its worktrees
+  are cleaned up, so the worktrees are no longer busy. The orchestrator stays, as the person's
+  own terminal. Before, the task agents kept working on a goal nobody had any more. Each stop
+  is a cleanup like a worktree's (`Cleanup::Agent`, a `Close` of its terminal or its thread's
+  seat): kept by the store until its worker answers, so a worker away when the goal is let go
+  stops the agent once it is back, after a server restart too. A thread task's agent (Codex,
+  pi, ACP) stops by its seat as a terminal's does; one whose row says its agent already ended
+  is not asked.
 - **Measured** on a Linux runner: the server restarted, to both workers online, 254 ms; a box
   off the network, to shown away, 6.0 s (the 5 s idle timeout); the network back, to the box
   online, 461 ms.
 - Tests: `a_change_waits_out_a_server_it_cannot_reach` (`slopty-cli`, `link`);
   `an_orchestrator_that_exits_is_gone_on_the_timeline_once` (`slopty-server`);
   `an_agent_whose_program_exited_has_ended` (`slopty-agent`);
-  `a_cut_link_drops_everything_both_ways_until_restored` (`slopty-testkit`); and the walk.
+  `a_cut_link_drops_everything_both_ways_until_restored` (`slopty-testkit`);
+  `a_let_go_goal_stops_its_thread_tasks_agents_once_their_worker_is_back` (`slopty-server`);
+  and the walk.
+
+**Links that fail and come back, and an update mid-goal.** ✅ 2026-10-12 (the link walks)
+
+- **Each link failure is a relay the test cuts** (`slopty_testkit::relay`): both ways, the
+  way back only (a request acted on and its answer lost), or the dialer moved to another
+  address under its link. The relay sits on loopback, so the processes keep running.
+- **The app off the network.** The server link is said lost within its 5 s lease, and the
+  board keeps what it last knew. A verb on its way as the network went goes again under its
+  key on the next link and is done once. One asked once the link is known lost is refused at
+  once (`ServerUnreachable`): a person's press is not queued to happen half a minute later.
+  Back on the network, the link and the board come back by themselves (times in
+  `docs/MEASUREMENTS.md`). Test: `the_app_off_the_network_keeps_its_board_and_catches_up_once_back`.
+- **A review asked into a link that went comes on the next one.** The client core keeps every
+  review not come yet and asks it again on each link, as it does intents. Before, the review
+  tile's own "asked already" kept it empty after a blip until its scope moved.
+  `Threads::ask_review` takes `&mut self` for it. Tests:
+  `a_review_not_come_is_asked_again_on_the_next_link` and, against real daemons on macOS,
+  `an_answer_and_a_review_cross_a_cut_link` (an answer sent into a cut, or acted on and its
+  reply lost, is answered once on the next link, not refused as answered already).
+- **A worker that moves under its link is published where it went.** A laptop roaming to
+  another network keeps its QUIC connection (migration), so its lease never ended and it was
+  never registered again, but clients went on dialling the address it first came from. The
+  server's worker link looks at the peer's address each second and republishes on a move, as
+  a registration publishes it. Test: `a_worker_that_moves_under_its_link_is_published_where_it_went`
+  (Linux, where `127.0.0.2` is loopback too).
+- **An agent's tools outlive an update of Slopty.** An agent's `slopty mcp` runs the build it
+  started with for the agent's whole life, and once the server is updated to another wire it
+  could not talk to it. A done report then waited five minutes and failed, for every agent
+  started before the update. Now a server on another build fails a call at once
+  (`ErrorCode::OtherBuild`, a caller's own answer), and `slopty mcp` carries each call from
+  then on through the binary installed in its place, run once per call (`slopty mcp --call
+  <tool>`, the arguments on stdin, MCP's `CallToolResult` printed). What crosses is the tool's
+  name and arguments, the agent's own words, which both builds read alike; no wire type
+  crosses between builds. Linux names a replaced binary `… (deleted)`; the path is taken
+  without it. Tests: `a_server_on_another_build_fails_a_change_at_once`,
+  `a_call_is_carried_by_the_build_installed_since` and
+  `one_tool_call_for_an_older_mcp_prints_its_result`.
+
+**After a reboot, the goal goes on.** ✅ 2026-10-12 (the reboot walk,
+`a_reboot_mid_goal_picks_the_goal_up_again`)
+
+- **The walk:** the machine running the orchestrator and a task's agent goes down mid-task
+  (ptyd and the worker end, and every program in their terminals with them) and comes back on
+  the same data.
+- **Each agent comes back on its own conversation** (`claude --resume`, as `claude-code.md`
+  rules in "An agent comes back after a reboot"), in the session it had, so its task keeps it.
+  Before, it then sat at its prompt and nothing told it to go on: the goal stood still until
+  the person noticed.
+- **The worker says which agents it resumed** (`AgentReport::Resumed`, once, on its first
+  registration after), and the server tells each through its own door, the deliveries a hook
+  or the agent's inbox hands it: a task's agent to carry on with its task, and the orchestrator
+  above it that it was cut off; an orchestrator to carry on with the goal and read where it
+  stands. The timeline says each came back. A task done, merged or given up says nothing.
+- **The worker listens for hooks before it restores.** It used to bring the sessions back
+  first and bind its control socket after: an agent quick to start (the walk's stand-in) said
+  `SessionStart` to nobody, its hook was lost, and the worker never heard it start again, so
+  the word to carry on found no inbox to go to.
+- **The stand-in's hooks say their directory**, as Claude Code's do. Without it the worker
+  kept no conversation to resume, and the walk's agents came back as shells.
+- **A resumed agent orchestration started is still orchestration's.** The restore used to
+  drop its `Orchestrated` mark, as for a new program, so its prompts were no longer held for
+  orchestration; it is kept, with no brief owed.
+- **A task's agent the worker drove (pi, an ACP agent) ended with the worker**, as its child,
+  on a reboot or on any restart of the worker. The next worker says each such seat, live when
+  the last one stopped, as resumed too; the server's word to carry on is then the message that
+  starts it again in its own session, as any message to an exited pi or ACP thread does.
+- **The orchestrator's notice settles first.** It is the server's word on a task, so it waits
+  as long as any other (`DONE_SETTLE`, two minutes) and a report of the task's own replaces
+  it; the agent's own word to carry on goes at once.
+- **A task's Codex counts too.** Its terminal comes back as a shell with `codex resume
+  <thread>` typed at the first prompt (`restore.rs`); that is a resume as much as Claude Code's,
+  so it is said, and the session stays orchestration's. A line that could not be typed is not.
+- Tests: `an_agent_back_after_a_reboot_is_told_to_carry_on` (`slopty-server`),
+  `the_tasks_agents_cut_off_by_a_restart_are_their_driven_live_seats` (`slopty-workerd`) and
+  the walk.

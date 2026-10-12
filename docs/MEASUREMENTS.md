@@ -16612,3 +16612,83 @@ are coloured. Release build, a macos-26 runner (Apple M1, virtual, 3 cores, load
 ```sh
 cargo test -p slopty-kit --release --lib -- --ignored --nocapture timing_of_a_coloured_viewport
 ```
+
+## 2026-10-12 — links that fail and come back: what the person waits for
+
+The link-failure cases of `docs/decisions/projects.md`, "Links that fail and come back", played
+through `slopty_testkit::relay`, which drops packets without a word as a train's network does.
+Times are from the network coming back unless the row says otherwise. Linux probe run
+38205101747 (`ubuntu-24.04`), macOS probe run 38206745859 (`macos-26`, three runs of the test,
+two timed):
+
+```sh
+cargo xtask remote --name W-probe2 --runner ubuntu-24.04 --only … --probe '… cargo nextest run \
+  -p slopty-cli -p slopty-server --no-capture -E "test(the_app_off_the_network) | \
+  test(a_worker_that_moves)" | grep -E "off the network|moved to published"'
+cargo xtask remote --name W-probe-mac --only … --probe '… cargo nextest run -p slopty-client \
+  --no-capture -E "test(an_answer_and_a_review_cross_a_cut_link)" | grep -E "cut both|reply lost"'
+```
+
+**The app off the network for 30 s** while the agents go on
+(`the_app_off_the_network_keeps_its_board_and_catches_up_once_back`, the client core's server
+link against a real server on loopback):
+
+| | Linux |
+| --- | --- |
+| the link said lost, from the cut | 5.0 s (the lease's idle timeout) |
+| a verb made once the link is known lost, refused as unreachable | 50 µs |
+| back on the network: linked again | 0.77 s |
+| back on the network: the board current with the agents' work | 0.77 s |
+
+A verb made as the network went is carried under its key and done once on the next link.
+
+**The app's worker link cut both ways for 30 s mid-answer and mid-review**
+(`an_answer_and_a_review_cross_a_cut_link`: an answer to a held permission prompt and a review
+asked into the cut; the app gives up the silent link after 5 s, as it does):
+
+| | macOS run 2 | macOS run 3 |
+| --- | --- | --- |
+| linked again | 5.1 ms | 3.1 ms |
+| the answer acted on (the hook got its allow) | 7.2 ms | 5.9 ms |
+| the review there | 11.1 ms | 5.9 ms |
+| a reply lost on the way back: the answer settled on the next link | 1.9 ms | 2.4 ms |
+
+Three of nine runs (each the first on its runner) failed after the answer was acted on: the
+worker said it was answered and answered the intent `Done`, but the app's copy of the thread
+still showed the request open 20 s later, so the answer never settled there. The test now
+prints the worker's own view of the request when that happens; it is open.
+
+**A worker that moves under its link** (`a_worker_that_moves_under_its_link_is_published_where_it_went`,
+Linux, the dialer moved from 127.0.0.1 to 127.0.0.2): published at its new address 2.0 s after
+the move, two of the server's 1 s looks (`MOVE_CHECK`). QUIC migrates the link, so it never
+dropped.
+
+## 2026-10-12 — a reboot mid-goal, and what a thread opened holds
+
+**The reboot walk** (`a_reboot_mid_goal_picks_the_goal_up_again`, Linux probe run
+38206739571): ptyd and the worker end with every agent in their terminals, and start again on
+the same data.
+
+| from the restart | |
+| --- | --- |
+| the machine online with Claude Code | 89 ms |
+| the task's agent running again on its own conversation (`claude --resume`) | 89 ms |
+| the whole walk, the task's report after the reboot on its card included | 7.2 s |
+
+**A thread opened on the worker** (`crates/slopty-worker/tests/rest.rs`, counted by
+`slopty_testkit::alloc` on the test's thread, same run): 40 threads of 20 turns, each answer
+about 2 KB (40 KB of text a thread).
+
+| | |
+| --- | --- |
+| held by a thread once opened (its state and its tail) | 144 KiB |
+| all 40 opened | 5,648 KiB |
+| after they rested (`Host::rest`), their heads | 96 KiB |
+
+Before, nothing put an opened thread back, so a worker held every thread opened since it
+started; a long conversation's state is megabytes. Now one unused and unfollowed for 10 min
+goes back to its head and opens again, the same, on its next use.
+
+```sh
+cargo nextest run -p slopty-worker --test rest --no-capture
+```

@@ -388,3 +388,59 @@ async fn a_task_whose_machine_is_away_starts_again_elsewhere() {
     let term = moved.assignment.map(|a| a.term);
     assert_eq!(term, Some(TermRef { worker: mac, session: again }), "the old seat let go");
 }
+
+/// Letting a goal go stops the agents of its thread tasks as it does those in terminals, by
+/// their seats: one whose worker is away is asked once the worker is back, after a restart of
+/// the server too, and one whose agent had already ended is not asked at all.
+#[tokio::test]
+async fn a_let_go_goal_stops_its_thread_tasks_agents_once_their_worker_is_back() {
+    use super::project_tests::worker_again;
+    use crate::project::Cleanup;
+
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let pi = AgentId::named(AgentId::PI);
+    let mut rows = Vec::new();
+    for _ in 0..2 {
+        let task = new_task(&hub).await;
+        let verb = Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone()) };
+        let asked = spawn(&hub, verb);
+        let (id, verb) = request(&mut rx).await;
+        let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+        let thread = ThreadId::new();
+        answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
+        assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+        let mut seated = row(Phase::Working, 1, None);
+        seated.id = thread;
+        seated.agent = pi.clone();
+        seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+        rows.push((TermRef { worker: linux, session: seat }, seated));
+    }
+    // The second's agent ended on its own: it is asleep, nothing to stop.
+    rows[1].1.status.liveness = slopty_proto::thread::Liveness::Exited { resumable: true };
+    lease.handle(snapshot(rows.iter().map(|(_, r)| r.clone()).collect()));
+    let running = rows[0].0;
+
+    drop(lease);
+    assert_eq!(hub.dispatch(Verb::ProjectDelete { project: project() }).await, Outcome::Done);
+    let waiting: Vec<Verb> = hub.projects_file(0).cleanups.iter().map(Cleanup::verb).collect();
+    assert_eq!(waiting, [Verb::Close { term: running }], "only the one that runs, kept");
+
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    drop(hub);
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let (_, lease, mut rx) = worker_again(&hub, linux, "box", Os::Linux, Vec::new());
+    let (id, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term: running }, "stopped by its seat once back");
+    answer(&lease, id, Outcome::Done);
+    for _ in 0..500 {
+        if hub.projects_file(0).cleanups.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(hub.projects_file(0).cleanups, [], "answered, nothing waits");
+}

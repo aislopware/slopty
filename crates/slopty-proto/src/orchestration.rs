@@ -841,8 +841,8 @@ pub enum Verb {
         task: TaskId,
     },
     /// The person lets a project go: its board, its tasks and its queue. The agents the server
-    /// started for its tasks stop, their terminals closed; the orchestrator and every other
-    /// terminal stay. Answered with [`Outcome::Done`].
+    /// started for its tasks stop, in terminals or as threads, on a worker away once it is
+    /// back; the orchestrator and every other terminal stay. Answered with [`Outcome::Done`].
     ProjectDelete {
         /// Which.
         project: ProjectId,
@@ -1468,6 +1468,9 @@ pub enum ErrorCode {
     /// The forge refused a push to the branch because it is protected: work lands on it
     /// through a pull request.
     Protected,
+    /// The server runs another build than the caller, which this build cannot talk to: one of
+    /// them is to be updated. A caller's own answer, never the server's.
+    OtherBuild,
 }
 
 /// The answer to a [`Verb`].

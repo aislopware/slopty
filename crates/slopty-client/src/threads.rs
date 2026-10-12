@@ -74,6 +74,9 @@ pub struct Threads {
     /// Each open thread's last review of each scope asked: a review tile's and the thread's
     /// own card of its last turn's changes ask different scopes of one thread at once.
     reviews: HashMap<ThreadId, Vec<Arc<Review>>>,
+    /// Reviews asked for and not come yet, by thread and scope: asked again on the next link,
+    /// since one asked into a link that was going is lost with it.
+    reviews_asked: Vec<(ThreadId, ReviewScope)>,
     /// Expansions asked for and not come yet.
     asked: HashSet<ContentRef>,
     /// Who wrote the lines of the files shown.
@@ -161,6 +164,7 @@ impl Threads {
         let mut out = vec![ClientMsg::Thread(ThreadRequest::Table { have })];
         out.extend(self.mirrors.iter().map(|(thread, mirror)| follow(*thread, mirror)));
         out.extend(self.outbox.unanswered().map(intent_msg));
+        out.extend(self.reviews_asked.iter().map(|(thread, scope)| review_msg(*thread, scope)));
         out
     }
 
@@ -190,6 +194,7 @@ impl Threads {
     /// Close `thread` here: what it last was, for the cache, and what to send.
     pub fn close_thread(&mut self, thread: ThreadId) -> (Option<Cached>, Option<ClientMsg>) {
         self.reviews.remove(&thread);
+        self.reviews_asked.retain(|(t, _)| *t != thread);
         let cached = self.mirrors.remove(&thread).and_then(|m| cached(&m));
         let msg = self.linked.then_some(ClientMsg::Thread(ThreadRequest::Unfollow { thread }));
         (cached, msg)
@@ -243,6 +248,7 @@ impl Threads {
             if !self.mirrors.contains_key(&thread) {
                 return (Changed::Nothing, Vec::new());
             }
+            self.reviews_asked.retain(|(t, scope)| !(*t == thread && *scope == review.scope));
             let held = self.reviews.entry(thread).or_default();
             held.retain(|r| r.scope != review.scope);
             held.push(Arc::from(review));
@@ -299,11 +305,17 @@ impl Threads {
     }
 
     /// What to send to see what `thread` changed over `scope`; the answer comes as
-    /// [`Changed::Review`].
-    #[must_use]
-    pub fn ask_review(&self, thread: ThreadId, scope: ReviewScope) -> Option<ClientMsg> {
-        (self.linked && self.mirrors.contains_key(&thread))
-            .then_some(ClientMsg::Thread(ThreadRequest::Review { thread, scope }))
+    /// [`Changed::Review`]. Until it comes it is asked again on every link: one asked while the
+    /// link is down goes once it is back, and one lost with a link that went goes again.
+    pub fn ask_review(&mut self, thread: ThreadId, scope: ReviewScope) -> Option<ClientMsg> {
+        if !self.mirrors.contains_key(&thread) {
+            return None;
+        }
+        let msg = self.linked.then(|| review_msg(thread, &scope));
+        if !self.reviews_asked.iter().any(|(t, s)| *t == thread && *s == scope) {
+            self.reviews_asked.push((thread, scope));
+        }
+        msg
     }
 
     /// The last review of `thread` over `scope` that came.
@@ -384,6 +396,10 @@ fn intent_msg(sent: &Sent) -> ClientMsg {
         thread: sent.thread,
         intent: sent.intent.clone(),
     })
+}
+
+fn review_msg(thread: ThreadId, scope: &ReviewScope) -> ClientMsg {
+    ClientMsg::Thread(ThreadRequest::Review { thread, scope: scope.clone() })
 }
 
 fn cached(mirror: &Mirror) -> Option<Cached> {

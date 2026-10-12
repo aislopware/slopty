@@ -875,6 +875,7 @@ mod golden_project {
             ("project_reply_bad_expression", ErrorCode::BadExpression),
             ("project_reply_nothing_new", ErrorCode::NothingNew),
             ("project_reply_protected", ErrorCode::Protected),
+            ("project_reply_other_build", ErrorCode::OtherBuild),
         ] {
             snap(name, &reply(Outcome::Error { code, message: String::new() }));
         }
@@ -1047,6 +1048,7 @@ mod golden_project {
             }),
         );
         snap("report_delivered", &ToServer::Report(AgentReport::Delivered { session, batch: 7 }));
+        snap("report_resumed", &ToServer::Report(AgentReport::Resumed { session }));
         snap(
             "deliver",
             &FromServer::Deliver {

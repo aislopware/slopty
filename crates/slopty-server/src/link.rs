@@ -98,6 +98,7 @@ async fn worker(
         () = read_worker(&lease, &mut rx) => {}
         () = write_worker(&lease, tx, queue) => {}
         () = republish(&lease, (remote.ip(), bound, at), admission, REPUBLISH_EVERY) => {}
+        () = follow_moves(&lease, &conn, (remote.ip(), bound), admission, MOVE_CHECK) => {}
     }
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"lease ended");
     drop(lease);
@@ -128,6 +129,36 @@ async fn republish(
             lease.republish(now);
             at = now;
         }
+    }
+    std::future::pending::<()>().await;
+}
+
+/// How often a worker's link is looked at for a move of the worker's own address.
+const MOVE_CHECK: Duration = Duration::from_secs(1);
+
+/// Keep a worker published where it is as it moves under a link that holds: a laptop roaming to
+/// another network, or a NAT rebinding, takes its QUIC connection along (migration), so its
+/// lease goes on and nothing registers again, but the address it was published at is no longer
+/// where clients reach it. Each move is published as a registration would publish it
+/// ([`published`]); one that changes nothing published (a worker bound to one address) says
+/// nothing. Never returns: the link's select ends it with the lease.
+async fn follow_moves(
+    lease: &Lease,
+    conn: &slopty_net::Connection,
+    (from, bound): (IpAddr, IpAddr),
+    admission: &Admission,
+    every: Duration,
+) {
+    let mut seen = from;
+    while conn.close_reason().is_none() {
+        tokio::time::sleep(every).await;
+        let Some(now) = slopty_net::endpoint::remote(conn).map(|r| r.ip()) else { continue };
+        if now == seen {
+            continue;
+        }
+        tracing::info!(from = %seen, to = %now, "a worker's link moved");
+        seen = now;
+        lease.republish(published(now, bound, admission.local_api().as_ref()).await);
     }
     std::future::pending::<()>().await;
 }

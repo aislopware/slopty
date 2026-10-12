@@ -254,4 +254,38 @@ mod tests {
         assert!(took < lease.checked_add(Duration::from_secs(5)).unwrap(), "{took:?}");
         server.shutdown().await;
     }
+
+    /// A worker that moves under a link that holds (a laptop roaming to another network) keeps
+    /// its lease, and is published at its new address within a couple of seconds: clients dial
+    /// it there. Linux only, where `127.0.0.2` is loopback too.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_that_moves_under_its_link_is_published_where_it_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = start(dir.path()).await;
+        let relay = slopty_testkit::relay::Relay::start(server.quic_addr()).await.unwrap();
+        let id = WorkerId::new();
+        let endpoint = bind_client().unwrap();
+        let through = HostAddr::from(relay.addr());
+        let worker = connect(&endpoint, &through, worker_role(id));
+        let _worker = tokio::time::timeout(PATIENCE, worker).await.unwrap().unwrap();
+        let mut client = dial(&server, client_role()).await.unwrap();
+        let FromServer::Directory(directory) = next(&mut client).await else { panic!("first") };
+        assert_eq!(directory[0].address, "127.0.0.1:45999");
+
+        let elsewhere = std::net::IpAddr::from([127, 0, 0, 2]);
+        relay.move_to(elsewhere).await.unwrap();
+        let moved = std::time::Instant::now();
+        let info = loop {
+            if let FromServer::Worker(info) = next(&mut client).await {
+                break info;
+            }
+        };
+        let took = moved.elapsed();
+        assert_eq!(info.address, "127.0.0.2:45999", "published where it went");
+        assert_eq!(info.liveness, Liveness::Online, "the same lease, never away");
+        println!("moved to published: {took:?}");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+        server.shutdown().await;
+    }
 }

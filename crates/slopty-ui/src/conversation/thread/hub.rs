@@ -578,7 +578,7 @@ impl ThreadHub {
     }
 
     /// Ask what `thread` changed over `scope`.
-    pub fn ask_review(&self, thread: ThreadId, scope: ReviewScope, cx: &mut Context<Self>) {
+    pub fn ask_review(&mut self, thread: ThreadId, scope: ReviewScope, cx: &mut Context<Self>) {
         if let Some(msg) = self.threads.ask_review(thread, scope) {
             cx.emit(HubEvent::Send(vec![msg]));
         }

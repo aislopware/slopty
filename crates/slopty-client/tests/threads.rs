@@ -26,7 +26,9 @@ mod threads {
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
-    use slopty_proto::thread::wire::{Intent, ThreadFrame};
+    use slopty_proto::thread::wire::{
+        Against, Intent, IntentDone, Outcome, ReviewScope, ThreadFrame,
+    };
     use slopty_proto::thread::{AskId, Cursor, RequestState, ThreadId, ThreadState};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -167,6 +169,8 @@ mod threads {
         threads: Threads,
         /// The thread frames as they came: snapshot or the actions from a cursor.
         came: Vec<Came>,
+        /// The worker's answers to this client's intents, as they came.
+        done: Vec<IntentDone>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,12 +181,17 @@ mod threads {
 
     impl Client {
         /// Connected as `id`, with `threads` caught up from wherever they stand.
-        async fn connect(daemons: &Daemons, id: ClientId, mut threads: Threads) -> Self {
+        async fn connect(daemons: &Daemons, id: ClientId, threads: Threads) -> Self {
+            Self::connect_to(daemons.addr, id, threads).await
+        }
+
+        /// [`Self::connect`] at `addr`, dialled again until it answers.
+        async fn connect_to(addr: SocketAddr, id: ClientId, mut threads: Threads) -> Self {
             let endpoint = bind_client().unwrap();
             let hello = Hello { client: id, name: "client-threads".to_owned() };
             let dialing = async {
                 loop {
-                    match connect_addr(&endpoint, daemons.addr, hello.clone()).await {
+                    match connect_addr(&endpoint, addr, hello.clone()).await {
                         Err(slopty_net::NetError::NoAnswer(_)) => {}
                         other => break other,
                     }
@@ -194,7 +203,7 @@ mod threads {
             for msg in threads.connected() {
                 link.send(msg).await.unwrap();
             }
-            Self { _endpoint: endpoint, link, events, threads, came: Vec::new() }
+            Self { _endpoint: endpoint, link, events, threads, came: Vec::new(), done: Vec::new() }
         }
 
         async fn send_all(&self, msgs: impl IntoIterator<Item = ClientMsg>) {
@@ -222,6 +231,7 @@ mod threads {
                 LinkEvent::Control(WorkerMsg::Threads(frame)) => self.threads.table(&frame),
                 LinkEvent::Control(WorkerMsg::IntentDone(done)) => {
                     assert!(self.threads.done(&done), "every answer is for an intent sent here");
+                    self.done.push(done);
                 }
                 LinkEvent::Control(msg) => return Some(Some(msg)),
                 LinkEvent::Disconnected(why) => panic!("disconnected: {why}"),
@@ -409,6 +419,168 @@ mod threads {
         drop(file);
         drop(b);
         drop(witness);
+        drop(daemons);
+    }
+
+    /// Five keep-alives of silence, after which the app gives a worker's link up and dials
+    /// again (`slopty_app::workers::SILENCE_DROP`).
+    const SILENCE_DROP: Duration = Duration::from_secs(5);
+    /// How long the network is gone.
+    const AWAY: Duration = Duration::from_secs(30);
+
+    /// The app's link to its worker cut while the person answers and reviews, as the app meets
+    /// it: the link goes silent, the app gives it up after five keep-alives and dials again
+    /// until the network is back. Cut both ways for 30 s, an answer and a review asked into the
+    /// cut go again on the next link and arrive, the answer acted on once and the review without
+    /// being asked again. Cut on the way back alone, an answer is acted on and its reply lost;
+    /// on the next link it goes again under its id and is answered as it was, not refused as
+    /// answered already. The times from the network back are printed: the measurement.
+    #[tokio::test]
+    async fn an_answer_and_a_review_cross_a_cut_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let cable = slopty_testkit::relay::Relay::start(daemons.addr).await.unwrap();
+        let me = ClientId::new();
+        let mut a = Client::connect_to(cable.addr(), me, Threads::default()).await;
+        let spec = OpenSession {
+            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+            cwd: Some(dir.path().to_string_lossy().into_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            env: vec![("PS1".to_owned(), "$ ".to_owned())],
+            title: None,
+            attach: false,
+        };
+        a.link.send(ClientMsg::OpenSession { request: 1, spec }).await.unwrap();
+        let session = a
+            .heard("the session opened", |msg| match msg {
+                WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+                _ => None,
+            })
+            .await;
+        let main = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let transcript = main.to_string_lossy().into_owned();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        let _started = relay(dir.path(), session, &start).wait_with_output().await.unwrap();
+        let hooks = std::fs::read_to_string(fixture("permission").join("hooks.jsonl")).unwrap();
+        let mut prompts = hooks
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .filter(|input| input["hook_event_name"] == "PermissionRequest")
+            .map(|mut ask| {
+                ask["transcript_path"] = transcript.clone().into();
+                ask["session_id"] = "s1".into();
+                ask
+            });
+        let thread = slopty_agent::observed::thread_of("s1");
+        a.until("the thread in the table", |t| t.rows().rows.contains_key(&thread)).await;
+        let follow = a.threads.open_thread(thread, None);
+        a.send_all(follow).await;
+        a.until("the thread's snapshot", |t| state(t, thread).is_some()).await;
+        let allow = |ask: &AskId| Intent::Answer {
+            ask: ask.clone(),
+            choice: "allow".to_owned(),
+            message: None,
+        };
+        let behaviour = |out: &serde_json::Value| {
+            out["hookSpecificOutput"]["decision"]["behavior"].as_str().map(str::to_owned)
+        };
+
+        // Cut both ways: the answer and a review go into the cut, and the app gives up.
+        let held = relay(dir.path(), session, &prompts.next().unwrap());
+        a.until("the first prompt", |t| open_ask(t, thread, None).is_some()).await;
+        let ask = open_ask(&a.threads, thread, None).unwrap();
+        cable.cut();
+        let cut = tokio::time::Instant::now();
+        let (first, msg) = a.threads.intent(thread, allow(&ask));
+        a.send_all(msg).await;
+        let scope = ReviewScope::WorkingTree(Against::Head);
+        let msg = a.threads.ask_review(thread, scope.clone());
+        a.send_all(msg).await;
+        tokio::time::sleep(SILENCE_DROP).await;
+        a.link.close();
+        a.threads.disconnected();
+        let threads = std::mem::take(&mut a.threads);
+        drop(a);
+        tokio::time::sleep_until(cut.checked_add(AWAY).unwrap()).await;
+        cable.restore();
+        let back = tokio::time::Instant::now();
+        let mut b = Client::connect_to(cable.addr(), me, threads).await;
+        let linked = back.elapsed();
+        assert_eq!(behaviour(&printed(held).await).as_deref(), Some("allow"), "acted on");
+        let acted = back.elapsed();
+        b.until("the review", |t| t.review(thread, &scope).is_some()).await;
+        let reviewed = back.elapsed();
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while !(answered(&b.threads, thread, &ask)
+            && b.threads.outbox().all().iter().all(|s| s.id != first))
+        {
+            if b.step(deadline).await.is_none() {
+                let sent = b.threads.outbox().all().iter().find(|s| s.id == first).cloned();
+                let request = state(&b.threads, thread)
+                    .and_then(|s| s.requests.iter().find(|r| r.id == ask).cloned());
+                // The worker's own view: the thread followed again from nothing.
+                let (_cached, unfollow) = b.threads.close_thread(thread);
+                b.send_all(unfollow).await;
+                let follow = b.threads.open_thread(thread, None);
+                b.send_all(follow).await;
+                let again = tokio::time::Instant::now().checked_add(STEP).unwrap();
+                while state(&b.threads, thread).is_none() && b.step(again).await.is_some() {}
+                let worker_s = state(&b.threads, thread)
+                    .and_then(|s| s.requests.iter().find(|r| r.id == ask).map(|r| r.state.clone()));
+                panic!(
+                    "never the answer settled: {sent:?}; its request {request:?}; {:?}; the \
+                     worker's request now {worker_s:?}; frames {:?}",
+                    b.done, b.came
+                );
+            }
+        }
+        let answer = b.done.iter().find(|d| d.id == first).map(|d| d.outcome.clone());
+        assert!(
+            matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
+            "answered as done: {answer:?}"
+        );
+        println!(
+            "cut both ways {AWAY:?}: back to linked {linked:?}, to the answer acted on \
+             {acted:?}, to the review {reviewed:?}"
+        );
+
+        // Cut on the way back: the answer is acted on, its reply lost, and the app gives up.
+        let held = relay(dir.path(), session, &prompts.next().unwrap());
+        b.until("the second prompt", |t| open_ask(t, thread, Some(&ask)).is_some()).await;
+        let next = open_ask(&b.threads, thread, Some(&ask)).unwrap();
+        cable.cut_back();
+        let cut = tokio::time::Instant::now();
+        let (second, msg) = b.threads.intent(thread, allow(&next));
+        b.send_all(msg).await;
+        assert_eq!(behaviour(&printed(held).await).as_deref(), Some("allow"), "acted on");
+        tokio::time::sleep_until(cut.checked_add(SILENCE_DROP).unwrap()).await;
+        assert!(b.done.iter().all(|d| d.id != second), "its reply was lost");
+        b.link.close();
+        b.threads.disconnected();
+        let threads = std::mem::take(&mut b.threads);
+        drop(b);
+        cable.restore();
+        let back = tokio::time::Instant::now();
+        let mut c = Client::connect_to(cable.addr(), me, threads).await;
+        c.until("the second answer settled", |t| t.outbox().all().iter().all(|s| s.id != second))
+            .await;
+        let settled = back.elapsed();
+        let answer = c.done.iter().find(|d| d.id == second).map(|d| d.outcome.clone());
+        assert!(
+            matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
+            "answered as it was, not refused as answered already: {answer:?}"
+        );
+        println!("reply lost: back to the answer settled {settled:?}");
+
+        c.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+        drop(c);
         drop(daemons);
     }
 }

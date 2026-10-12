@@ -1,7 +1,10 @@
 //! A link a test can cut: a UDP relay on loopback between a daemon and the server it dials.
 //!
 //! It forwards every datagram both ways until it is [cut](Relay::cut), drops every one while it
-//! is, and forwards again once [restored](Relay::restore).
+//! is, and forwards again once [restored](Relay::restore). Cut [one way](Relay::cut_back), what
+//! the dialer sends arrives and nothing comes back: a request acted on whose answer is lost. And
+//! it can [move](Relay::move_to) the dialer to another address, as a laptop roaming between
+//! networks moves under a link that holds.
 //!
 //! A server link is QUIC, so this is a network loss as the two ends meet one: packets stop and
 //! nothing says so, while both processes and everything else on the box keep running. Nothing
@@ -10,12 +13,13 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::net::UdpSocket;
-use tokio::task::JoinHandle;
+use tokio::sync::watch;
+use tokio::task::{AbortHandle, JoinHandle};
 
 /// The largest datagram forwarded; QUIC's are well under it.
 const DATAGRAM: usize = 65_535;
@@ -29,18 +33,22 @@ pub struct Relay {
 }
 
 /// What the relay's tasks share.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Link {
-    /// Whether the link is cut: every datagram is dropped.
-    cut: AtomicBool,
-    /// Datagrams dropped while it was.
+    /// Whether what the dialer sends is dropped.
+    forth_cut: AtomicBool,
+    /// Whether what comes back to the dialer is dropped.
+    back_cut: AtomicBool,
+    /// Datagrams dropped while either way was cut.
     dropped: AtomicU64,
+    /// The address the far end sees the dialer at, port aside.
+    from: watch::Sender<IpAddr>,
 }
 
 impl Link {
-    /// Whether a datagram goes on; one that does not is counted.
-    fn passes(&self) -> bool {
-        let cut = self.cut.load(Ordering::Acquire);
+    /// Whether a datagram goes on the way `cut` says; one that does not is counted.
+    fn passes(&self, cut: &AtomicBool) -> bool {
+        let cut = cut.load(Ordering::Acquire);
         if cut {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -59,7 +67,12 @@ impl Relay {
     pub async fn start(to: SocketAddr) -> io::Result<Self> {
         let front = Arc::new(UdpSocket::bind(loopback(to)).await?);
         let addr = front.local_addr()?;
-        let link = Arc::new(Link::default());
+        let link = Arc::new(Link {
+            forth_cut: AtomicBool::new(false),
+            back_cut: AtomicBool::new(false),
+            dropped: AtomicU64::new(0),
+            from: watch::Sender::new(loopback(to).ip()),
+        });
         let task = tokio::spawn(forward(front, to, Arc::clone(&link)));
         Ok(Self { addr, link, task })
     }
@@ -72,12 +85,34 @@ impl Relay {
 
     /// Cut the link: every datagram either way is dropped from now on, and nobody is told.
     pub fn cut(&self) {
-        self.link.cut.store(true, Ordering::Release);
+        self.link.forth_cut.store(true, Ordering::Release);
+        self.link.back_cut.store(true, Ordering::Release);
     }
 
-    /// Restore the link: datagrams go on again.
+    /// Cut the way back alone: what the dialer sends still arrives, and nothing the far end
+    /// sends reaches it, its answers and acknowledgements both.
+    pub fn cut_back(&self) {
+        self.link.back_cut.store(true, Ordering::Release);
+    }
+
+    /// Restore the link: datagrams go on again, both ways.
     pub fn restore(&self) {
-        self.link.cut.store(false, Ordering::Release);
+        self.link.forth_cut.store(false, Ordering::Release);
+        self.link.back_cut.store(false, Ordering::Release);
+    }
+
+    /// Move the dialer: from its next datagram on, the far end sees it at `ip` on a port of its
+    /// own, a new address on the same connection, as a NAT rebinding or a roaming laptop shows
+    /// it. Its answers still find the dialer.
+    ///
+    /// # Errors
+    ///
+    /// When no socket can be bound at `ip` (only `127.0.0.1` is loopback on macOS unless
+    /// another is configured; Linux routes all of `127.0.0.0/8`).
+    pub async fn move_to(&self, ip: IpAddr) -> io::Result<()> {
+        drop(UdpSocket::bind(SocketAddr::new(ip, 0)).await?);
+        self.link.from.send_replace(ip);
+        Ok(())
     }
 
     /// How many datagrams were dropped while the link was cut.
@@ -101,28 +136,45 @@ fn loopback(to: SocketAddr) -> SocketAddr {
     }
 }
 
+/// One sender's way to the far end: the socket it goes out on, bound at the address the far
+/// end sees it at, and the task bringing the answers back.
+struct Way {
+    /// The socket.
+    up: Arc<UdpSocket>,
+    /// Where it is bound.
+    at: IpAddr,
+    /// The task bringing the answers back.
+    back: AbortHandle,
+}
+
 /// Forward what reaches `front` to `to`, each sender through a socket of its own whose replies
-/// go back to it, until the relay is dropped; the senders' tasks end with this one.
+/// go back to it, until the relay is dropped; the senders' tasks end with this one. A sender
+/// moved ([`Relay::move_to`]) gets a new socket at its new address, the old one let go.
 async fn forward(front: Arc<UdpSocket>, to: SocketAddr, link: Arc<Link>) {
-    let mut toward: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
+    let mut toward: HashMap<SocketAddr, Way> = HashMap::new();
     let mut backs = tokio::task::JoinSet::new();
     let mut buf = vec![0_u8; DATAGRAM];
     loop {
         let Ok((len, from)) = front.recv_from(&mut buf).await else { return };
-        if !link.passes() {
+        if !link.passes(&link.forth_cut) {
             continue;
         }
-        let up = if let Some(up) = toward.get(&from) {
-            Arc::clone(up)
-        } else {
-            let Ok(up) = UdpSocket::bind(loopback(to)).await else { continue };
-            if up.connect(to).await.is_err() {
-                continue;
+        let at = *link.from.borrow();
+        let up = match toward.get(&from) {
+            Some(way) if way.at == at => Arc::clone(&way.up),
+            _ => {
+                let Ok(up) = UdpSocket::bind(SocketAddr::new(at, 0)).await else { continue };
+                if up.connect(to).await.is_err() {
+                    continue;
+                }
+                let up = Arc::new(up);
+                let back =
+                    backs.spawn(back(Arc::clone(&up), Arc::clone(&front), from, Arc::clone(&link)));
+                if let Some(old) = toward.insert(from, Way { up: Arc::clone(&up), at, back }) {
+                    old.back.abort();
+                }
+                up
             }
-            let up = Arc::new(up);
-            backs.spawn(back(Arc::clone(&up), Arc::clone(&front), from, Arc::clone(&link)));
-            toward.insert(from, Arc::clone(&up));
-            up
         };
         // A datagram lost on the way is a datagram lost; QUIC sends it again.
         let _sent = up.send(buf.get(..len).unwrap_or_default()).await;
@@ -140,7 +192,7 @@ async fn back(up: Arc<UdpSocket>, front: Arc<UdpSocket>, sender: SocketAddr, lin
             Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => continue,
             Err(_) => return,
         };
-        if !link.passes() {
+        if !link.passes(&link.back_cut) {
             continue;
         }
         let _sent = front.send_to(buf.get(..len).unwrap_or_default(), sender).await;
@@ -189,5 +241,55 @@ mod tests {
         assert_eq!((&buf[..len], again), (&b"again"[..], path), "the same path");
         far.send_to(b"back again", path).await.unwrap();
         assert_eq!(heard(&near).await.as_deref(), Some(&b"back again"[..]));
+    }
+
+    /// Cut one way, what the dialer sends arrives and the answer is dropped; restored, the
+    /// answers come again.
+    #[tokio::test]
+    async fn a_link_cut_on_the_way_back_delivers_and_loses_the_answer() {
+        let far = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay = Relay::start(far.local_addr().unwrap()).await.unwrap();
+        let near = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        relay.cut_back();
+        near.send_to(b"do it", relay.addr()).await.unwrap();
+        let mut buf = [0_u8; 64];
+        let (len, path) = far.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"do it", "the request arrives");
+        far.send_to(b"done", path).await.unwrap();
+        assert_eq!(heard(&near).await, None, "its answer is lost");
+        assert_eq!(relay.dropped(), 1);
+
+        relay.restore();
+        far.send_to(b"done again", path).await.unwrap();
+        assert_eq!(heard(&near).await.as_deref(), Some(&b"done again"[..]));
+    }
+
+    /// Moved, the dialer reaches the far end from a new address, and its answers still come
+    /// back. Linux routes all of `127.0.0.0/8` to loopback; macOS only `127.0.0.1`, and the move
+    /// says so.
+    #[tokio::test]
+    async fn a_moved_dialer_arrives_from_its_new_address_and_still_hears_back() {
+        let far = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let port = far.local_addr().unwrap().port();
+        let relay = Relay::start(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await.unwrap();
+        let near = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        near.send_to(b"here", relay.addr()).await.unwrap();
+        let mut buf = [0_u8; 64];
+        let (_, before) = far.recv_from(&mut buf).await.unwrap();
+        let elsewhere = IpAddr::from([127, 0, 0, 2]);
+        let moved = relay.move_to(elsewhere).await;
+        if cfg!(target_os = "linux") {
+            moved.unwrap();
+        } else if moved.is_err() {
+            return;
+        }
+        near.send_to(b"there", relay.addr()).await.unwrap();
+        let (len, after) = far.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"there");
+        assert_eq!((before.ip(), after.ip()), (IpAddr::from(Ipv4Addr::LOCALHOST), elsewhere));
+        far.send_to(b"heard", after).await.unwrap();
+        assert_eq!(heard(&near).await.as_deref(), Some(&b"heard"[..]));
     }
 }

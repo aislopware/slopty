@@ -1633,6 +1633,14 @@ pub enum AgentReport {
         /// Each thing that loosens, as a reader would name it.
         found: Vec<String>,
     },
+    /// The agent in a session came back on its own conversation after its program was lost
+    /// with its shell (a reboot, or ptyd ending): the worker reopened the session and resumed
+    /// the conversation. Said once, on the worker's first registration after; the server tells
+    /// the agent and the project above it that it was cut off.
+    Resumed {
+        /// The session.
+        session: SessionId,
+    },
 }
 
 impl AgentReport {
@@ -1646,7 +1654,8 @@ impl AgentReport {
             | Self::PermissionMode { session, .. }
             | Self::Loosened { session, .. }
             | Self::NativeTask { session, .. }
-            | Self::Delivered { session, .. } => *session,
+            | Self::Delivered { session, .. }
+            | Self::Resumed { session } => *session,
         }
     }
 }

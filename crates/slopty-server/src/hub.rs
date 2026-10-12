@@ -1610,8 +1610,9 @@ impl Lease {
     }
 
     /// Publish the worker at `ip` from now on, on the port it listens on: its machine came to
-    /// have an address other machines reach (Tailscale came up after it registered). Every
-    /// client is told, and the listing kept; nothing when it is there already.
+    /// have an address other machines reach (Tailscale came up after it registered), or moved
+    /// under its link (a laptop roaming to another network). Every client is told, and the
+    /// listing kept; nothing when it is there already.
     pub fn republish(&self, ip: IpAddr) {
         let mut state = self.hub.inner.state.lock();
         let Some(entry) =
@@ -1734,6 +1735,10 @@ impl Lease {
                     }
                     AgentReport::Loosened { found, .. } => {
                         hub.loosened(&mut state, term, found);
+                        return;
+                    }
+                    AgentReport::Resumed { .. } => {
+                        hub.resumed(&mut state, term);
                         return;
                     }
                     AgentReport::SubagentStarted { .. }

@@ -226,7 +226,11 @@ async fn session(
         let natives = agents.native_reports();
         branches.chain(agents.permission_reports()).chain(natives).collect::<Vec<_>>()
     };
-    for report in standing {
+    // And the agents a reboot cut off, back on their own conversations: said once, on the
+    // first registration after, so the server tells each to carry on.
+    let resumed =
+        daemon.worker.take_resumed().into_iter().map(|session| AgentReport::Resumed { session });
+    for report in standing.into_iter().chain(resumed) {
         if out.send(ToServer::Report(report)).await.is_err() {
             return Ok("the writer stopped");
         }

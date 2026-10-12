@@ -1062,6 +1062,10 @@ async fn run(
     daemon.worker.set_session_env(env);
     daemon.worker.set_presence_dir(presence_dir.clone());
     tokio::spawn(handoff::presence(presence_dir.clone(), presence_changes));
+    // The control socket first: an agent resumed below says it started through its hooks at
+    // once, and a hook that finds no socket is lost, so the agent was never heard to start.
+    let ctl_listener = ctl::bind(&ctl_path).await.context("control socket")?;
+    tokio::spawn(ctl::serve(daemon.clone(), ctl_listener));
     // Sessions whose shells were lost to a reboot or to ptyd ending come back under their old
     // ids, before any client asks for them, so every item keeps its tile.
     for session in daemon.worker.restore().await {
@@ -1069,8 +1073,6 @@ async fn run(
             let _sent = daemon.events.send(slopty_proto::WorkerMsg::Items(delta));
         }
     }
-    let ctl_listener = ctl::bind(&ctl_path).await.context("control socket")?;
-    tokio::spawn(ctl::serve(daemon.clone(), ctl_listener));
 
     let joined = server.and_then(|addr| join_server(&daemon, addr, &data_dir));
     tokio::spawn(follow_settings(

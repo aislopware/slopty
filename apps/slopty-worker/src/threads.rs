@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use hold::Orchestrated;
 use slopty_agent::codex::shared::Setting;
@@ -354,6 +355,13 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let settings = slopty_settings::path_in(&asks.data);
     let own: acp::Own =
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
+    // The tasks' agents pi and ACP ran as the last worker's children ended with it, before
+    // their adapters here mark them gone: the server is told, so each is sent word to carry on,
+    // which starts it again in its own session.
+    for seat in cut_off(&threads.host) {
+        daemon.worker.cut_off(seat);
+    }
+    drop(tokio::spawn(rest(threads.host.clone())));
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
     // A scheduled message goes as the person's own, the way a client's does.
@@ -364,6 +372,28 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     });
     drop(schedule::spawn(threads.host.clone(), fire));
     resume_starts(threads);
+}
+
+/// How long a thread opened goes unused before it goes back to its head ([`Host::rest`]).
+const REST: Duration = Duration::from_mins(10);
+
+/// How often the threads opened are looked over for those that rested.
+const REST_CHECK: Duration = Duration::from_mins(1);
+
+/// Put the threads that rested back to their heads, every [`REST_CHECK`], for as long as the
+/// worker runs: a worker up for weeks holds the threads in use, not every one ever opened.
+async fn rest(host: Host) -> ! {
+    let mut every = tokio::time::interval(REST_CHECK);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        every.tick().await;
+        let host = host.clone();
+        match tokio::task::spawn_blocking(move || host.rest(REST)).await {
+            Ok(0) => {}
+            Ok(rested) => tracing::debug!(rested, "threads back to their heads"),
+            Err(e) => tracing::warn!(error = %e, "the threads were not rested"),
+        }
+    }
 }
 
 /// Why a start whose agent was opening when the worker stopped is said to have failed.
@@ -1620,6 +1650,16 @@ fn ends_with_daemon(drive: &Drive, nested: bool, liveness: Liveness) -> bool {
     drive.is(Drive::DRIVEN) && !nested && matches!(liveness, Liveness::Live)
 }
 
+/// The seats of the server's tasks whose agent ran as this daemon's child and was live when the
+/// worker before this one stopped, so ended with it ([`ends_with_daemon`]).
+fn cut_off(host: &Host) -> Vec<SessionId> {
+    host.visit(|state| {
+        let meta = &state.meta;
+        let ended = ends_with_daemon(&meta.drive, meta.parent.is_some(), state.status.liveness);
+        meta.facts.get(slopty_proto::project::SEAT_FACT).filter(|_| ended)?.parse().ok()
+    })
+}
+
 /// Whether a thread at `phase` is in the middle of a turn: working, waiting on its own work, or
 /// asking the person.
 const fn mid_turn(phase: Phase) -> bool {
@@ -1647,6 +1687,58 @@ mod tests {
         assert!(mid.into_iter().all(mid_turn));
         let resting = [Phase::Idle, Phase::Done, Phase::Failed, Phase::Stopped];
         assert!(!resting.into_iter().any(mid_turn));
+    }
+
+    /// After a worker restart, the server hears of each task whose agent the last worker drove
+    /// and that was live: not a thread of nobody's task, one whose agent goes on elsewhere (a
+    /// terminal's, Codex's), a subagent, or one that had exited already.
+    #[test]
+    fn the_tasks_agents_cut_off_by_a_restart_are_their_driven_live_seats() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(dir.path(), slopty_worker::thread::log::Limits::default()).unwrap();
+        let thread = |drive: &str, seat: Option<SessionId>, nested: bool| {
+            let mut facts = std::collections::BTreeMap::new();
+            if let Some(seat) = seat {
+                facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.to_string());
+            }
+            let parent = nested.then(|| slopty_proto::thread::Link {
+                thread: ThreadId::new(),
+                item: slopty_proto::thread::ItemId("call".to_owned()),
+            });
+            let meta = slopty_proto::thread::ThreadMeta {
+                id: ThreadId::new(),
+                agent: AgentId::named(AgentId::PI),
+                agent_version: String::new(),
+                native: "n".to_owned(),
+                cwd: "/w".to_owned(),
+                title: String::new(),
+                terminal: None,
+                parent,
+                origin: slopty_proto::thread::ThreadMeta::PERSON.to_owned(),
+                forked_from: None,
+                drive: Drive::named(drive),
+                caps: Vec::new(),
+                models: Vec::new(),
+                modes: Vec::new(),
+                efforts: Vec::new(),
+                facts,
+                created_ms: slopty_core::WallMs::ZERO,
+            };
+            let id = meta.id;
+            host.create(meta).unwrap();
+            id
+        };
+        let cut = SessionId::new();
+        thread(Drive::DRIVEN, Some(cut), false);
+        thread(Drive::DRIVEN, None, false);
+        thread(Drive::OBSERVED, Some(SessionId::new()), false);
+        thread(Drive::SHARED, Some(SessionId::new()), false);
+        thread(Drive::DRIVEN, Some(SessionId::new()), true);
+        let exited = thread(Drive::DRIVEN, Some(SessionId::new()), false);
+        let liveness = Liveness::Exited { resumable: true };
+        let status = slopty_proto::thread::Status { liveness, ..Default::default() };
+        host.apply(exited, vec![Action::Status(status)]).unwrap();
+        assert_eq!(cut_off(&host), vec![cut]);
     }
 
     /// A review asked for again stops the one still being read, and the stream's end stops the

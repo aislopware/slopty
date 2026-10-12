@@ -94,10 +94,18 @@ pub struct KeptStart {
     pub conversation: Option<String>,
 }
 
-/// What a project let go leaves for a worker to remove, kept until the worker answers: one away
-/// then is asked again once it registers, so nothing is left behind on a machine that was off.
+/// What a project let go leaves for a worker to stop or remove.
+///
+/// Each is kept until the worker answers: one away then is asked again once it registers, so
+/// nothing is left running or left behind on a machine that was off.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Cleanup {
+    /// An agent the server started for one of its tasks that still ran, in a terminal or as a
+    /// thread at its seat ([`Verb::Close`]): asked before what it worked in goes.
+    Agent {
+        /// Its terminal, or its thread's seat.
+        term: TermRef,
+    },
     /// A task's worktree, or the project's verify checkout
     /// ([`slopty_proto::project::VERIFY_PLACES`]), with where the work landed
     /// ([`Verb::RemoveWorktree`]).
@@ -125,7 +133,9 @@ impl Cleanup {
     #[must_use]
     pub const fn worker(&self) -> WorkerId {
         match self {
-            Self::Worktree { worker, .. } | Self::Branches { worker, .. } => *worker,
+            Self::Agent { term: TermRef { worker, .. } }
+            | Self::Worktree { worker, .. }
+            | Self::Branches { worker, .. } => *worker,
         }
     }
 
@@ -133,7 +143,9 @@ impl Cleanup {
     #[must_use]
     pub const fn on(mut self, to: WorkerId) -> Self {
         match &mut self {
-            Self::Worktree { worker, .. } | Self::Branches { worker, .. } => *worker = to,
+            Self::Agent { term: TermRef { worker, .. } }
+            | Self::Worktree { worker, .. }
+            | Self::Branches { worker, .. } => *worker = to,
         }
         self
     }
@@ -142,6 +154,7 @@ impl Cleanup {
     #[must_use]
     pub fn verb(&self) -> Verb {
         match self.clone() {
+            Self::Agent { term } => Verb::Close { term },
             Self::Worktree { worker, worktree, landed } => {
                 Verb::RemoveWorktree { worker, worktree, landed }
             }
@@ -2490,6 +2503,7 @@ impl Projects {
                 | AgentReport::PermissionMode { .. }
                 | AgentReport::Loosened { .. }
                 | AgentReport::Delivered { .. }
+                | AgentReport::Resumed { .. }
         );
         if !held && !leafless {
             self.hold_unclaimed(term, report, now);
@@ -2579,7 +2593,8 @@ fn leaf(report: &AgentReport, natives: &mut Natives, now: WallMs) -> Option<Nati
         AgentReport::Branch(_)
         | AgentReport::PermissionMode { .. }
         | AgentReport::Loosened { .. }
-        | AgentReport::Delivered { .. } => return None,
+        | AgentReport::Delivered { .. }
+        | AgentReport::Resumed { .. } => return None,
         AgentReport::SubagentStarted { agent, kind, .. } => Native::Agent(NativeAgent {
             id: clipped(agent, REF_MAX),
             kind: clipped(kind, KIND_MAX),

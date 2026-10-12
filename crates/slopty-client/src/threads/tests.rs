@@ -223,6 +223,39 @@ fn intents_wait_out_a_dropped_link_and_go_again_under_their_ids() {
     );
 }
 
+/// A review asked into a link that went is asked again on the next, as is one asked while the
+/// link was down; one that came is not asked again.
+#[test]
+fn a_review_not_come_is_asked_again_on_the_next_link() {
+    let thread = ThreadId::new();
+    let mut threads = followed(thread);
+    let asked = |out: &[ClientMsg]| -> Vec<ReviewScope> {
+        out.iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Review { scope, .. }) => Some(scope.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let came = ReviewScope::Turn(TurnId(1));
+    let lost = ReviewScope::Turn(TurnId(2));
+    let offline = ReviewScope::Kept;
+    assert!(threads.ask_review(thread, came.clone()).is_some());
+    let review = Review { scope: came.clone(), from: None, to: None, files: vec![], absent: None };
+    let (changed, _out) = threads.frame(thread, ThreadFrame::Review(Box::new(review)));
+    assert_eq!(changed, Changed::Review);
+    assert!(threads.ask_review(thread, lost.clone()).is_some(), "goes into the link");
+    threads.disconnected();
+    assert!(threads.ask_review(thread, offline.clone()).is_none(), "nothing goes while down");
+    assert!(threads.ask_review(thread, offline.clone()).is_none(), "asked once, held once");
+
+    let out = threads.connected();
+    assert_eq!(asked(&out), [lost, offline], "the ones that did not come, once each");
+    assert!(threads.ask_review(ThreadId::new(), came).is_none(), "a thread not open here");
+    let (_cached, _msg) = threads.close_thread(thread);
+    assert_eq!(asked(&threads.connected()), [], "a closed thread's are let go");
+}
+
 #[test]
 fn the_table_resumes_from_its_cursor_and_settles_a_list_s_answers() {
     let thread = ThreadId::new();

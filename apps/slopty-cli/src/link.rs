@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -134,6 +136,8 @@ pub struct Link {
     /// How long a change waits out a server it cannot reach ([`OFFLINE_PATIENCE`] for a link
     /// held for the process lifetime; nothing for one a command dials once).
     patience: Duration,
+    /// Whether the server last answered a dial on another build ([`Self::other_build`]).
+    other_build: Arc<AtomicBool>,
 }
 
 /// How a connection ended.
@@ -152,6 +156,8 @@ impl Link {
         let (endpoint, server) = (endpoint.clone(), server.clone());
         let (calls, mut rx) = mpsc::channel(64);
         let (unheard, _) = broadcast::channel(1);
+        let other_build = Arc::new(AtomicBool::new(false));
+        let other = Arc::clone(&other_build);
         tokio::spawn(async move {
             let mut held = None;
             loop {
@@ -161,7 +167,9 @@ impl Link {
                 }
                 link = loop {
                     let Some(call) = rx.recv().await else { return };
-                    match dial(&endpoint, &server, role.clone()).await {
+                    let dialled = dial(&endpoint, &server, role.clone()).await;
+                    other.store(is_other_build(dialled.as_ref().err()), Ordering::Release);
+                    match dialled {
                         Ok(link) => {
                             held = Some(call);
                             break link;
@@ -173,7 +181,7 @@ impl Link {
                 };
             }
         });
-        Ok(Self { calls, patience: Duration::ZERO })
+        Ok(Self { calls, patience: Duration::ZERO, other_build })
     }
 
     /// A link held for the process lifetime: it dials in the background and redials whenever
@@ -191,11 +199,15 @@ impl Link {
     ) -> (Self, broadcast::Receiver<FromServer>) {
         let (calls, mut rx) = mpsc::channel(64);
         let (events, heard) = broadcast::channel(256);
+        let other_build = Arc::new(AtomicBool::new(false));
+        let other = Arc::clone(&other_build);
         tokio::spawn(async move {
             let mut redial = Redial::default();
             let mut held: Option<Call> = None;
             loop {
-                let wait = match dial(&endpoint, &server, role.clone()).await {
+                let dialled = dial(&endpoint, &server, role.clone()).await;
+                other.store(is_other_build(dialled.as_ref().err()), Ordering::Release);
+                let wait = match dialled {
                     Ok(link) => {
                         tracing::info!(%server, "connected to the server");
                         redial.linked(Instant::now());
@@ -222,7 +234,16 @@ impl Link {
                 }
             }
         });
-        (Self { calls, patience: OFFLINE_PATIENCE }, heard)
+        (Self { calls, patience: OFFLINE_PATIENCE, other_build }, heard)
+    }
+
+    /// Whether the server answered the last dial on another build, which this one cannot talk
+    /// to until one of them is updated: what it is asked fails at once with
+    /// [`ErrorCode::OtherBuild`], and a caller that can reach the build installed since
+    /// (`slopty mcp`'s bridge) goes through that instead.
+    #[must_use]
+    pub fn other_build(&self) -> bool {
+        self.other_build.load(Ordering::Acquire)
     }
 
     /// Send `verb` once and wait for its outcome, or for the reason it could not be sent.
@@ -320,8 +341,20 @@ fn fresh_key() -> IdempotencyKey {
     IdempotencyKey::from_id(uuid::Uuid::new_v4().as_u128())
 }
 
+/// Why a verb could not reach the server: a server on another build is
+/// [`ErrorCode::OtherBuild`], which no wait mends; anything else [`ErrorCode::ServerUnreachable`].
 fn unreachable(why: &anyhow::Error) -> Outcome {
-    Outcome::Error { code: ErrorCode::ServerUnreachable, message: format!("{why:#}") }
+    let code = if is_other_build(Some(why)) {
+        ErrorCode::OtherBuild
+    } else {
+        ErrorCode::ServerUnreachable
+    };
+    Outcome::Error { code, message: format!("{why:#}") }
+}
+
+/// Whether a dial failed for a server on another build.
+fn is_other_build(failed: Option<&anyhow::Error>) -> bool {
+    failed.is_some_and(|e| e.downcast_ref::<UpdateNotice>().is_some())
 }
 
 fn interrupted() -> Outcome {
@@ -484,6 +517,36 @@ mod tests {
     /// A held link's change that cannot reach the server at all waits it out under one key and
     /// arrives once it is back; a read fails at once, as does a change on a link a command dialed
     /// once; and past the patience a change fails, saying how long it was tried.
+    /// A server on another build is its own failure, which no wait mends: a change fails at
+    /// once rather than waiting the server out, so `slopty mcp` can carry it through the
+    /// build installed since.
+    #[tokio::test(start_paused = true)]
+    async fn a_server_on_another_build_fails_a_change_at_once() {
+        use slopty_core::{SessionId, WorkerId};
+        use slopty_proto::orchestration::TermRef;
+
+        let wrong = slopty_net::WrongBuild { peer: "0.9.0+wire.0badf00d".to_owned() };
+        let notice: anyhow::Error = UpdateNotice::server("studio", &wrong).into();
+        let other = unreachable(&notice);
+        let Outcome::Error { code: ErrorCode::OtherBuild, message } = &other else {
+            panic!("{other:?}")
+        };
+        assert!(message.contains("0.9.0"), "it names the server's build: {message}");
+        assert!(is_other_build(Some(&notice)));
+        assert!(!is_other_build(Some(&anyhow!("no answer"))) && !is_other_build(None));
+        let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+        let started = tokio::time::Instant::now();
+        let mut tries = 0;
+        let outcome =
+            retried(None, Verb::Close { term }, (OFFLINE_PATIENCE, false), |_key, verb| {
+                tries += 1;
+                std::future::ready((other.clone(), Some(verb)))
+            })
+            .await;
+        assert_eq!((outcome, tries), (other, 1));
+        assert_eq!(started.elapsed(), Duration::ZERO, "at once");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_change_waits_out_a_server_it_cannot_reach() {
         use slopty_core::{SessionId, WorkerId};

@@ -275,3 +275,14 @@ slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }
 filter = 'package(slopty-cli) & test(=tests::a_person_s_hard_day_across_two_workers)'
 priority = 90
 slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }
+
+# The reboot walk waits out what is missing after the reboot, half a minute at a time, to name
+# every finding in one run.
+[[profile.default.overrides]]
+filter = 'package(slopty-cli) & test(=tests::a_reboot_mid_goal_picks_the_goal_up_again)'
+slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }
+
+[[profile.ci.overrides]]
+filter = 'package(slopty-cli) & test(=tests::a_reboot_mid_goal_picks_the_goal_up_again)'
+priority = 90
+slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }

@@ -159,6 +159,10 @@ struct Inner {
     /// The sessions whose agent orchestration started, with what is kept of each
     /// ([`Worker::orchestrated`]).
     orchestrated: Mutex<HashMap<SessionId, Orchestrated>>,
+    /// The sessions [`Worker::restore`] reopened with their agent's conversation resumed, and
+    /// the seats of the task agents the last worker drove ([`Worker::cut_off`]), not yet said to
+    /// the server ([`Worker::take_resumed`]).
+    resumed: Mutex<Vec<SessionId>>,
 }
 
 /// A session being opened, from before ptyd starts it until it is in the table or the open
@@ -259,6 +263,7 @@ impl Worker {
                 lost: Mutex::new(recipes),
                 clipboard: Mutex::new(None),
                 orchestrated: Mutex::new(orchestrated),
+                resumed: Mutex::new(Vec::new()),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
@@ -571,6 +576,16 @@ impl Worker {
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         let cwd = plan.cwd.map(|cwd| cwd.to_string_lossy().into_owned());
+        // The agent orchestration started, back on its own conversation (Claude Code resumed,
+        // or a Codex or pi with its resuming line typed), is still orchestration's: followed
+        // again as it was, with no brief owed, since it had its own. A new program in its place
+        // is not.
+        let mut resumed = plan.agent.is_some() || plan.launch.is_some();
+        let orchestrated =
+            recipe.orchestrated.as_ref().filter(|_| resumed).map(|_| Orchestrated { brief: None });
+        if let Some(kept) = &orchestrated {
+            self.inner.orchestrated.lock().insert(id, kept.clone());
+        }
         self.inner.keeper.opened(
             id,
             Recipe {
@@ -578,8 +593,7 @@ impl Worker {
                 cwd: cwd.clone(),
                 restored: Some(plan.restored.clone()),
                 agent: plan.agent,
-                // A new program: the agent orchestration started ended with the old one.
-                orchestrated: None,
+                orchestrated,
                 ..recipe.clone()
             },
         );
@@ -596,6 +610,10 @@ impl Worker {
             && let Err(e) = handle.type_at_first_prompt(line)
         {
             tracing::warn!(session = %id, error = %e, "agent not resumed");
+            resumed = false;
+        }
+        if resumed {
+            self.inner.resumed.lock().push(id);
         }
         Ok(handle)
     }
@@ -712,6 +730,21 @@ impl Worker {
             }
         };
         tokio::time::timeout(within, adopted).await.map_err(|_elapsed| WorkerError::NoSuchSession)
+    }
+
+    /// A task's agent the worker before this one ran as its own child, seated at `seat`, ended
+    /// with it; it goes on in its own session with the next message sent to it, which the
+    /// server is told to send ([`Self::take_resumed`]).
+    pub fn cut_off(&self, seat: SessionId) {
+        self.inner.resumed.lock().push(seat);
+    }
+
+    /// The sessions reopened since this was last asked with their agent's conversation resumed
+    /// ([`Self::restore`]), and the seats of the agents [`Self::cut_off`]: each agent was cut
+    /// off mid-work, which the server is told once.
+    #[must_use]
+    pub fn take_resumed(&self) -> Vec<SessionId> {
+        std::mem::take(&mut *self.inner.resumed.lock())
     }
 
     /// The sessions whose agent orchestration started and that this worker holds or is taking

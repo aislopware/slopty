@@ -874,6 +874,57 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     assert!(matches!(merged, Outcome::Task(_)), "the person's own shell: {merged:?}");
 }
 
+/// An agent cut off by a reboot and back on its own conversation is told to carry on: a
+/// task's agent with its task, the orchestrator with the goal, and the orchestrator hears of
+/// the task's agent once that has settled, as any word of the server's on a task; the timeline
+/// says each came back. A task merged says nothing.
+#[tokio::test(start_paused = true)]
+async fn an_agent_back_after_a_reboot_is_told_to_carry_on() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrator, working) = (SessionId::new(), SessionId::new());
+    let (studio, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrator, true);
+    announce(&lease, working, true);
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub).await;
+    let assigned =
+        hub.assign_for_test(&project(), task, TermRef { worker: studio, session: working });
+    assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
+
+    // The orchestrator's brief goes first, alone: the notice below waits to settle.
+    delivered(&hub, &mut rx, "You orchestrate").await;
+    lease.handle(ToServer::Report(AgentReport::Resumed { session: working }));
+    let own = delivered(&hub, &mut rx, "Carry on with the task").await;
+    assert!(own.contains("studio restarted while you worked on task 1"), "{own}");
+    tokio::time::advance(crate::deliver::DONE_SETTLE).await;
+    let above = delivered(&hub, &mut rx, "was cut off by a restart of studio").await;
+    assert!(above.contains("told to carry on"), "{above}");
+    lease.handle(ToServer::Report(AgentReport::Resumed { session: orchestrator }));
+    let goal = delivered(&hub, &mut rx, "while you orchestrated this goal").await;
+    assert!(goal.contains("project_status"), "{goal}");
+    let notes: Vec<String> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Note { text } if text.contains("came back after a restart") => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+
+    for state in [TaskState::Done, TaskState::Merged] {
+        let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
+        let verb = Verb::TaskUpdate { project: project(), task, change };
+        assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+    }
+    lease.handle(ToServer::Report(AgentReport::Resumed { session: working }));
+    let notes = status(&hub).await.timeline.iter().filter(|e| {
+        matches!(&e.what, Moment::Note { text } if text.contains("came back after a restart"))
+    }).count();
+    assert_eq!(notes, 2, "a merged task's agent says nothing");
+}
+
 /// A task's machine that stops answering mid-task, and stays away, is said on the task's
 /// timeline and to its orchestrator, and its agent no longer holds a place against the
 /// person's bound at once; back, the task and its orchestrator hear so, once.

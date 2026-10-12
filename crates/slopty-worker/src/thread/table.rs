@@ -89,6 +89,12 @@ impl Table {
             .max_by_key(|row| (row.updated_ms, row.id))
     }
 
+    /// Thread `id`'s row.
+    #[must_use]
+    pub fn row(&self, id: ThreadId) -> Option<&ThreadRow> {
+        self.rows.get(&id).map(|(row, _)| row)
+    }
+
     /// Where it stands.
     #[must_use]
     pub const fn cursor(&self) -> Cursor {

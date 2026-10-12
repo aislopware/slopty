@@ -473,4 +473,47 @@ mod tests {
         mcp.request(4, "tools/call", json!({ "name": "task_tell", "arguments": tell })).await;
         assert_eq!(tool_json(&mcp.reply(4).await), json!({ "ok": true }));
     }
+
+    /// `slopty mcp --call`: one tool called with its arguments on stdin, its result printed as
+    /// MCP's `CallToolResult`, as an older `slopty mcp` runs it to reach a server on this
+    /// build. A tool error is a result too; a tool that does not exist fails.
+    #[tokio::test]
+    async fn one_tool_call_for_an_older_mcp_prints_its_result() {
+        let mut fake = Fake::start();
+        let data = tempfile::tempdir().unwrap();
+        let address = fake.address();
+        let call = async |tool: &str, arguments: Value| {
+            let mut child = slopty(&data, &address, &["mcp", "--call", tool])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(arguments.to_string().as_bytes()).await.unwrap();
+            drop(stdin);
+            let out = tokio::time::timeout(PATIENCE, child.wait_with_output()).await.unwrap();
+            out.unwrap()
+        };
+
+        let tell = json!({ "project": "slopty", "task": 7, "text": "Cover the iPad." });
+        let out = call("task_tell", tell).await;
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(result["isError"], false, "{result}");
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, json!({ "ok": true }));
+        let Role::Agent { name, .. } = fake.next_role().await else { panic!("an agent") };
+        assert!(name.contains("for an older build"), "{name}");
+
+        let tell = json!({ "project": "slopty", "task": 9, "text": "Hello." });
+        let out = call("task_tell", tell).await;
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(result["isError"], true, "the model's to read: {result}");
+
+        let out = call("no_such_tool", json!({})).await;
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("no tool is called no_such_tool"));
+    }
 }
