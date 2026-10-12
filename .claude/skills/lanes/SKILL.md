@@ -15,7 +15,7 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
 - A lane keeps its crates compiling between edits, since a half-edited crate breaks the others'
   remote checks. A lane blocked by another's half-edited crate reports rather than waits.
 - A lane checks its edits where they return soonest: `cargo clippy` and `cargo nextest` on its
-  own crates here, within CLAUDE.md's limits, and with `SLOPTY_LANE=<its name>` set,
+  own crates here at full power, and with `SLOPTY_LANE=<its name>` set,
   `cargo xtask remote --only <its paths>` for the wide, Linux and iOS part (`--full` before a
   checkpoint, since a quick check skips rustdoc). Checks run in the background while the lane
   moves on, and it reports a checkpoint on green.

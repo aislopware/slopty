@@ -14,9 +14,7 @@ Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs
 ## Hard lines
 
 - Checks run where they return soonest: this Mac for a lane's own crates and Mac-only tests,
-  GitHub runners (`cargo xtask remote`) for wide, Linux and iOS work. The Mac is the person's and
-  they use it over Parsec, so local cargo runs one at a time under `nice -n 19` with
-  `CARGO_BUILD_JOBS=4`, and never makes it hot or felt; `target/` stays under 30 GB. Landing
+  GitHub runners (`cargo xtask remote`) for wide, Linux and iOS work, both at full power. Landing
   is `cargo gate`, commit, `cargo xtask land`; CI's gate decides (`docs/DEV.md`). Parallel
   agents share this checkout: the `lanes` skill.
 - Pre-release: no backward compatibility, no versioning. Replace cleanly and delete the old.

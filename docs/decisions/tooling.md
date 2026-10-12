@@ -1909,10 +1909,8 @@ more full-window layer.
     runs, and the wait for a runner Mac slot was p90 23 min, up to 90 min. An incremental local
     check took 40–55 s on 2026-09-12. The gate itself got faster (push to main, median 24 min on
     10-06, 8 min on 10-12), so the loss was in each check and the Mac queue.
-  - Until the router is built: a lane runs `cargo clippy` and `cargo nextest` on its own crates
-    here, one cargo at a time (cargo's lock on `target/` serialises them), under `nice -n 19`
-    with `CARGO_BUILD_JOBS=4`, half of the eight performance cores, so the person's Parsec
-    session keeps the rest. Wide checks, Linux, iOS and goldens stay on runners.
+  - A lane runs `cargo clippy` and `cargo nextest` on its own crates here, and wide checks,
+    Linux, iOS and goldens on runners. The same day the person ruled out any throttle (no
+    `nice`, no job cap, no disk budget): local cargo runs at full power, for speed.
   - Next: `cargo xtask remote` picks local, remote or both per check by what returns soonest,
-    yields when the Mac is hot or in use, and records latency and thermal state in
-    MEASUREMENTS.
+    and records the latency in MEASUREMENTS.
