@@ -95,6 +95,20 @@ pub struct Device {
     /// this device row. Missing on older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    // slopty: what the person can do to the machine from here (update, remove, wake…), as the
+    // app offers it; the Devices page shows each and calls `DeviceAction` with its id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DeviceAction>,
+}
+
+// slopty: one thing the person can do to a machine or the server, named by the app.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAction {
+    /// What the app is asked to do, handed back in `DeviceAction`.
+    pub id: String,
+    /// The button's words.
+    pub label: String,
 }
 
 impl Device {
@@ -1402,6 +1416,25 @@ pub struct Connectivity {
 pub struct ServerPresence {
     pub name: String,
     pub online: bool,
+    /// What the person can do to the server from here (update it), as for a device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<DeviceAction>,
+    // slopty: what a phone or iPad scans to connect to the server, where this device can show it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invite: Option<ServerInvite>,
+}
+
+// slopty: the code a phone or iPad scans for the server's address, or why there is none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerInvite {
+    /// The link the code carries (`slopty://connect?server=<host:port>`); `None` while there is
+    /// no address a device reaches the server by.
+    pub link: Option<String>,
+    /// The address the link names, as the person reads it.
+    pub address: Option<String>,
+    /// How to use the code, or why there is none.
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

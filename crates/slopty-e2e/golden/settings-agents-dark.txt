@@ -1,0 +1,17 @@
+Window
+Group │ Settings
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance
+Tab │ Notifications
+Tab │ Shortcuts
+Tab │ Providers (focused)
+Tab │ Devices
+Tab │ Files
+Tab │ Archived sessions
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button │ Device: This device
+Button │ Claude Code preferences
+Button │ Autonomy: Auto

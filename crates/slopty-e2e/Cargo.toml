@@ -48,15 +48,7 @@ name = "ios"
 required-features = [ "live" ]
 
 [[test]]
-name = "ios_uikit"
-required-features = [ "live" ]
-
-[[test]]
 name = "linux"
-required-features = [ "live" ]
-
-[[test]]
-name = "pair"
 required-features = [ "live" ]
 
 [[test]]
@@ -64,19 +56,7 @@ name = "server"
 required-features = [ "live" ]
 
 [[test]]
-name = "smooth"
-required-features = [ "live" ]
-
-[[test]]
-name = "through_server"
-required-features = [ "live" ]
-
-[[test]]
 name = "vm"
-required-features = [ "live" ]
-
-[[test]]
-name = "workers"
 required-features = [ "live" ]
 
 [dependencies]
@@ -118,23 +98,15 @@ anyhow.workspace = true
 # A drop's files, as the worker's record of its release names them (`tests/app/dnd.rs`).
 blake3.workspace = true
 data-encoding.workspace = true
-# The showcase's stand-in for the person's Codex daemon, a WebSocket on a Unix socket
-# (`tests/app/showcase.rs`).
-futures-util.workspace = true
-slopty-agent.workspace = true
 # The Linux worker test reaches its worker as the app does (`tests/linux.rs`).
 slopty-client.workspace = true
 slopty-core.workspace = true
 # The app's hang reports, read as `slopty crashes` reads them (`tests/app/hangs.rs`).
 slopty-crash.workspace = true
-slopty-media.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
-# The iOS test plays the server: it seals a notice to the phone's key (`tests/ios_uikit.rs`).
-slopty-push.workspace = true
 slopty-testkit.workspace = true
 image.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "process" ] }
-tokio-tungstenite.workspace = true

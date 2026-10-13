@@ -12,7 +12,14 @@
 //! a search carry a number of the surfaces' own; a read, a listing and a find are told apart by
 //! their path, and the workspace's own tiles hear them too.
 
+mod adding;
 mod changes;
+mod devices;
+
+pub use adding::{
+    AddAnswer, AddChoice, AddDevice, AddFailure, AddFix, AddKind, AddMark, AddProgress, AddStep,
+    Found, FoundNode, Look,
+};
 mod files;
 mod live;
 mod settings;
@@ -42,7 +49,7 @@ const FIRST_REQUEST: RequestId = 1 << 48;
 const ANSWER_WITHIN: Duration = Duration::from_secs(30);
 
 /// The paths a find answered, relative to its root.
-type Found = Vec<String>;
+type FoundPaths = Vec<String>;
 
 /// What the surfaces wait on from the workers.
 #[derive(Default)]
@@ -62,12 +69,16 @@ pub(super) struct Surfaces {
     /// Listings waiting, by worker and path as asked.
     listings: HashMap<(WorkerKey, String), Vec<oneshot::Sender<Listing>>>,
     /// Finds waiting, by worker, root and query as asked.
-    finds: HashMap<(WorkerKey, String, String), Vec<oneshot::Sender<Found>>>,
+    finds: HashMap<(WorkerKey, String, String), Vec<oneshot::Sender<FoundPaths>>>,
     /// The sides of the recent diffs' files, for their highlighting.
     changes: changes::Kept,
     /// What the files surfaces keep between calls: pictures being read in chunks, the folders
     /// a watch follows.
     files: files::Kept,
+    /// The threads the person archived.
+    archived: devices::Archived,
+    /// The Add device runs under way.
+    adding: adding::Adding,
 }
 
 impl std::fmt::Debug for Surfaces {
@@ -165,6 +176,10 @@ impl WorkspaceView {
             | methods::CHECK_HARNESS_UPDATES
             | methods::GET_AGENT_SETTINGS
             | methods::SET_AGENT_SETTINGS => self.settings_call(method, &params, cx)?,
+            methods::ADD_DEVICE => self.add_device(&params, cx),
+            methods::ANSWER_ADD_DEVICE => Task::ready(self.answer_add_device(&params)),
+            methods::LOOK_ON_TAILNET => self.look_on_tailnet(cx),
+            methods::DEVICE_ACTION => Task::ready(self.device_action(&params, cx)),
             _ => return None,
         };
         Some(answer)

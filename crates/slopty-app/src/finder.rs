@@ -10,22 +10,7 @@ use std::path::{Path, PathBuf};
 use gpui::Context;
 use slopty_core::WorkerId;
 
-pub mod actions {
-    //! The palette's way to the workers in Finder.
-    #![expect(
-        clippy::derive_partial_eq_without_eq,
-        reason = "gpui::actions! derives PartialEq only"
-    )]
-    use gpui::actions;
-
-    actions!(
-        files,
-        [
-            /// Show each worker's home in Finder, or where to switch Slopty's place there on.
-            ShowWorkersInFinder,
-        ]
-    );
-}
+use crate::Workspace;
 
 /// The palette's words for it.
 pub const TITLE: &str = "Show machines in Finder";
@@ -90,7 +75,7 @@ pub fn step(
     }
 }
 
-impl crate::Workspace {
+impl Workspace {
     /// "Show machines in Finder": the system is asked on the networking runtime, and the step
     /// is taken and said here.
     pub(crate) fn show_workers_in_finder(&self, cx: &Context<Self>) {
@@ -102,7 +87,7 @@ impl crate::Workspace {
             let Ok(step) = rx.await else { return };
             take(&step);
             if let Some(notice) = step.notice() {
-                let _gone = this.update(cx, |ws, cx| ws.show_notice(notice, cx));
+                let _gone = this.update(cx, |_, cx| Self::show_notice(notice, cx));
             }
         })
         .detach();

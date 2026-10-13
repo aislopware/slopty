@@ -5,111 +5,60 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
 ## Four layers, fastest first
 1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`
    for the injector, `Layout`/`ItemDoc` in `slopty-client`). Runs under `cargo gate`.
-2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui`: a `VisualTestContext` window with real
-   layout, `simulate_keystrokes`/`simulate_click`, a channel for the worker. Read the UI like
-   a DOM: `cx.debug_bounds("item-<uuid>")` (set with `.debug_selector`), `window.painted_quads()`
-   for colours and borders, view accessors (`rows()`, `active_item()`, a stream's `zoom()`),
-   `slopty_kit::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
-   the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
-   behaviour gets a test here first.
+2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui` and `slopty-shell`: a `VisualTestContext`
+   window with real layout, `simulate_keystrokes`/`simulate_click`, a channel for the worker.
+   The view model (`slopty_ui::workspace::view_model::tests`) is driven through the shell's own
+   calls and read back as the shell reads it; the shell's tests read its views like a DOM
+   (`cx.debug_bounds`, `window.painted_quads()`, `slopty_kit::a11y::tree(window)` after
+   `window.set_a11y_active(true)`). No pixels, no process, runs under `cargo gate`.
    **Retained frames.** GPUI draws only the views that heard of a change, so a view left out
-   keeps showing the old state while every assertion on state passes. `retained::stale` is the
-   oracle: it takes what the window last painted (every quad and sprite with its bounds, clip
-   and colour, as sorted lines), draws the same state again with every view built from scratch,
-   and names the lines only one side holds. When two scratch draws differ (something moves),
-   the lines both agree on must still be in the frame shown. `workspace/tests/retained.rs` runs it after each
-   step of an echo, a command that ends beside the focused shell and one that starts on a tab
-   not shown, the pane keys, a sash drag, a hover, a remote window resized, the keyboard
-   moving, title tabs that run past the bar, a shell's lines of output, and a page tile whose
-   page fails as it is drawn, with the workspace's clock held so a frame of motion and its
-   scratch twin fall on the same instant; its own test proves it catches a view changed without a notify and that
-   scratch after scratch agrees. The oracle compares quads and sprites, so what they cannot
-   show is asserted beside it: a stream's picture laid out at the bounds its view was drawn in,
-   a view drawn again after a change (`renders()`), a shell not built again when only the area
-   around it was, or when the shell beside it wrote a line. In the app self-test every `dump` carries the same check
-   (`Dump::stale`), and `render` answers with an error, the scratch frame saved beside the
-   render, when the frame the app drew is stale: the goldens are the frames the app draws
-   through its notifies, never a forced full redraw. The check runs once the frame's
-   next-frame callbacks have run, so an animation's own notify is in the frame it judges. A
-   notify raised while a frame is drawn (in a paint, or in a focus listener) wakes nothing,
-   and the check sees what it left out. A
-   live app cannot hold the clock, so what moves on it paints differently between the frame
-   and its scratch twin a few milliseconds later: the self-test runs under GPUI's Reduce Motion
-   (the frame-time runs set `SLOPTY_E2E_MOTION=1` to keep it), and a frame whose two scratch
-   draws disagree is in motion and not judged.
+   keeps showing the old state while every assertion on state passes. `slopty_kit::retained::stale`
+   is the oracle: it takes what the window last painted (every quad and sprite with its bounds,
+   clip and colour, as sorted lines), draws the same state again with every view built from
+   scratch, and names the lines only one side holds. When two scratch draws differ (something
+   moves), the lines both agree on must still be in the frame shown. In the app self-test every
+   `dump` carries the same check (`Dump::stale`), and `render` answers with an error, the
+   scratch frame saved beside the render, when the frame the app drew is stale: the goldens are
+   the frames the app draws through its notifies, never a forced full redraw. The check runs
+   once the frame's next-frame callbacks have run, so an animation's own notify is in the frame
+   it judges. A live app cannot hold the clock, so the self-test runs under GPUI's Reduce Motion
+   and a frame whose two scratch draws disagree is in motion and not judged.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker
-   through the directory as every app does (`harness::Stack`; a first-run stack's app is pointed
-   at the server through its panel, `Stack::connect_server`), and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
-   dump, render). `dump` is the structured state (tiles, each with its project, tab, pane path and place
-   among the pane's tabs, the project and tab on show, focus, terminal rows and the PTY sizes
-   each asked for, and `a11y`: the accessibility tree as role/label/value/focused/bounds in
-   reading order, from the frame that painted the state in the same dump);
-   `render` is GPUI drawing its own window to a PNG, compared numerically with
-   `crates/slopty-e2e/golden`, and what the same frame says in words (its accessibility tree's
-   roles, labels and values, a line a node) compared exactly with the `.txt` beside it, so a
-   changed word fails with the lines that changed where the pixel tolerance cannot see it (`--accept` writes missing and failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails on none, leaving each changed frame's render and diff in the artifacts, so a design review sees every golden in one run; it also draws every render again at 2x beside the 1x ones, as `target/e2e/artifacts/<name>@2x.png`, the set shown to the person, since a 1x render is not what a Retina Mac shows). `--filter <filterset>` (nextest's `-E`, such
-   as `test(a_folder_tile_browses_the_worker)`) runs only the tests it picks, in any case, and
+   through the directory as every app does (`harness::Stack`), and drives the app over its own
+   control socket (`SLOPTY_TEST_SOCKET`: keys, clicks, dump, render). `dump` is the structured
+   state (the workspace's items, each with its kind, worker and session, the live terminals
+   and screens with their rows and sizes, which one holds the keyboard, and `a11y`: the
+   accessibility tree as role/label/value/focused/bounds in reading order, from the frame that
+   painted the state in the same dump); `render` is GPUI drawing its own window to a PNG,
+   composited over one slate backdrop, compared numerically with `crates/slopty-e2e/golden`,
+   and what the same frame says in words (its accessibility tree's roles, labels and values, a
+   line a node) compared exactly with the `.txt` beside it, so a changed word fails with the
+   lines that changed where the pixel tolerance cannot see it (`--accept` writes missing and
+   failing goldens, `--accept-all` rewrites every golden, and `--review` writes none and fails
+   on none, leaving each changed frame's render and diff in the artifacts, so a design review
+   sees every golden in one run; it also draws every render again at 2x beside the 1x ones, as
+   `target/e2e/artifacts/<name>@2x.png`, the set shown to the person, since a 1x render is not
+   what a Retina Mac shows). `--filter <filterset>` (nextest's `-E`, such as
+   `test(the_terminal_dock_holds_a_shell_of_the_worker)`) runs only the tests it picks, and
    `--accept`/`--review` then touch only the goldens those tests render. `--no-build` reruns
-   what the last run built without calling cargo, so a rerun right after a build takes seconds
-   instead of waiting on the other sessions' builds in `target/`; an edit since then is not in it.
-   The temp dir
-   is named for its test, not at random, because a golden draws the paths under it. Nothing touches another app.
+   what the last run built without calling cargo; an edit since then is not in it. The temp dir
+   is named for its test, not at random, because a golden draws the paths under it. Nothing
+   touches another app.
    Remote windows and displays stream for real here too. With `SLOPTY_SYNTHETIC_SCREEN=1` the
    worker serves its drawn screen (`slopty_worker::screen::synthetic::Synthetic`) in place of
    the Mac's: one display and two windows, the same on every Mac, whose pictures are drawn
-   (`slopty_capture::synthetic::Canvas`: a still desktop, a strip of blocks, and a page of glyphs
-   scrolling in the middle half) and then encoded by VideoToolbox, sent and decoded as any other
-   worker's. Nothing is captured, so no grant is asked for. `tests/app/stream.rs` holds each
-   tile to its numbers (frames, arrival → present, loss, NACKs, the worker's own counters). Its
-   goldens mask the scrolling page and hold it to the golden's mix of luma instead
-   (`snapshot::luma_distance`), so the chrome, the overlay and the still parts of the picture are
-   compared pixel for pixel while the page moves. Its `frame_time` case, under
-   `cargo xtask e2e smooth`, times drawn frames from their capture stamp to the paint that
-   shows them. Every app the harness starts takes GPUI's presented handler as the glass when
-   the display reports no scan-out (`GPUI_PRESENTED_AT_CALLBACK=1`): this Mac is reached over
-   Parsec, whose virtual display gives every frame a zero presentation time, and a keystroke
-   or frame timed at the glass would otherwise never count. Its `showcase` module, under `cargo xtask e2e showcase` only, renders every
-   surface with a busy day's data (stand-in programs and agents, light and dark) into
-   `target/e2e/artifacts/showcase/` for a person's design review; nothing in it passes or fails
-   on pixels.
-   A drag from this Mac onto a remote tile is driven the same way. `drag_over`, `drag_drop` and
-   `drag_leave` hand the workspace each step as the platform's drop destination would
-   (`DropSink`), with the files on a pasteboard of the command's own, so no system drag runs
-   here. On the worker, `SLOPTY_DND_RECORD=<file>:<copy|none>` is the seam: no drag helper
-   starts and no system drag runs there either. A scripted one answers every step with the
-   operation named, and each release appends a line to `<file>` naming the drag and each file
-   in its landing with its BLAKE3 digest. Only a test sets it; a worker installed or launched
-   by the app never has it. `tests/app/dnd.rs` judges a drop on those digests against its
-   sources, and a refused or left drag on its landing being gone (`SLOPTY_DROP_DIR`). The
-   system's half (the destination, the helper's source and catcher, the badge) is proved in
-   `crates/slopty-dnd/tests/roles.rs` against apps the test owns.
-   `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with
-   the app in the simulator: the way to check anything on the phone or the tablet. There the
-   socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /
-   `ui_delete_backward` (`Driver::ui_key`, `ui_tap`, `ui_pan`, `ui_pinch`, `ui_insert_text`),
-   delivered at the UIKit boundary by the fork (`tests/ios_uikit.rs`): use them for anything
-   about how the phone's own keyboard, fingers or key bar reach the app.
+   (`slopty_capture::synthetic::Canvas`) and then encoded by VideoToolbox, sent and decoded as
+   any other worker's. Nothing is captured, so no grant is asked for. Every app the harness
+   starts takes GPUI's presented handler as the glass when the display reports no scan-out
+   (`GPUI_PRESENTED_AT_CALLBACK=1`): this Mac is reached over Parsec, whose virtual display
+   gives every frame a zero presentation time.
+   `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with the app in the simulator.
    A note's button pressed on a killed app is the one press simctl cannot make (it delivers
    pushes, not presses), so the e2e build alone reads `SLOPTY_E2E_LAUNCH_TAP` at launch and
    hands that press to notify's own delivery before any window, as the system's launching
    response would (`Stack::relaunch_on_simulator`); no release build carries the seam.
-   `cargo xtask e2e pair` (serial) runs two app processes on one worker,
-   each on its own socket and data dir, to prove many-clients-one-server: a terminal opened on
-   one shows on the other, typing on both is serialised, attention badges both, a client dying
-   leaves the other streaming and reattaches on relaunch, closing and notes propagate. The
-   display scenario also needs `--screen-recording`. `cargo xtask e2e pair-ios [--sim iphone|ipad]`
-   puts the second client in the simulator: the Mac and the phone
-   on one worker. `cargo xtask e2e workers` (serial)
-   is one client and two workers on this Mac: a second ptyd + `slopty-worker` under a root of
-   its own with a private HOME (`harness::SecondWorker`), registered with the stack's server,
-   whose directory lists a `slopty-shape` relay in front of it, shaped like the tailnet path to
-   another Mac (`harness::TAILNET`: 8 to
-   12 ms round trip, 3 % loss). It proves cross-worker attention: the pill sums both workers, a
-   banner routes to the worker holding its session, a hook is played only by spawning
-   `slopty hook` with the payload on its stdin, never a real agent, and a killed worker shows
-   down and reattaches on restart while the other keeps streaming.
    `cargo xtask e2e server` (about 7 s) is the server with a real
    worker: `slopty-server`, then ptyd + `slopty-worker` registered with it through `--server`,
    on ports of their own under a temp root (`harness::ServerStack`). It drives them only
@@ -117,20 +66,6 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    capabilities, a shell typed to, waited on and read back, files both ways (binary too), a
    listener found by `ports`, a close, and a shell that exits on its own. A killed worker must
    turn unreachable and come back online under the same id.
-   `cargo xtask e2e through-server` (serial, about 20 s) is
-   the app as it is normally used (`harness::ServerFleet`). A `slopty-server` has two workers
-   registered with it: one on loopback and one behind the tailnet-shaped relay, which the
-   directory lists at the relay's address. The app starts at its first run, and the server's
-   address is typed into the panel and entered. Both workers must then come from the directory
-   with a shell each that answers a command, and a hook played on the far one through
-   `slopty hook` must badge the pill. The far worker is killed and restarted twice, as soon as
-   it shows down and again after the server has called it unreachable. It must show down within
-   5 s and be connected within 2 s of each restart. Golden `through-server`.
-   A project's board runs in the `app` suite on `harness::ProjectStack`: a `slopty-server`, one
-   worker registered with it with `slopty-stub-claude` first on its `PATH` as `claude` and a
-   `HOME` of its own, and the app pointed at the server by its settings. The orchestrator and a
-   task's agent are stubs the server starts; the project and its tasks are made and moved with
-   the `slopty` CLI. Goldens `project-lanes`, `project-lanes-dark` and `project-live-lanes`.
    `cargo xtask linux e2e` (serial) is a terminal-only Linux worker.
    ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,
@@ -150,8 +85,7 @@ The tests of layers 3 and 4 are live: each carries `#[ignore = "live: <the comma
 it>"]`, so `cargo gate` lists it as skipped rather than passing it without running it, and
 its xtask command runs it with nextest's `--run-ignored only`. A live test reads no variable to
 decide whether to run. One that needs the Screen Recording grant sits in its target's
-`screen_recording` module and runs only with `--screen-recording`. The app's frame-time
-measurement sits in `frame_time` and runs under `smooth`, alone. The live tests of
+`screen_recording` module and runs only with `--screen-recording`. The live tests of
 `slopty-capture` and `slopty-input` still return early without `SLOPTY_SCREEN_E2E` or
 `SLOPTY_INPUT_E2E`, which the xtask sets for them.
 

@@ -1673,23 +1673,14 @@ pub struct Changes {
     _observe: Subscription,
 }
 
-/// Events the host (the right pane's surface strip) listens for.
-#[derive(Debug, Clone)]
-pub struct DiscardWorkingTreeRequest {
-    pub chat_id: String,
-    pub checkout_id: String,
-    pub expected_checksum: String,
-    pub target_device_id: Option<String>,
-    pub file_count: usize,
-}
+// slopty: no Discard changes: the person reviews, agents fix (ruled out).
 
+/// Events the host (the right pane's surface strip) listens for.
 pub enum ChangesEvent {
     // slopty: no History surface (ruled out)
     /// Open the post-change path in the workspace file browser.
     OpenFile(String),
-    /// The working-tree trash button was clicked. The shell owns the global
-    /// confirmation dialog and only then dispatches the destructive RPC.
-    DiscardWorkingTree(DiscardWorkingTreeRequest),
+    // slopty: no Discard changes (ruled out).
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -1886,23 +1877,7 @@ impl Changes {
         }
     }
 
-    fn discard_request(&self, cx: &App) -> Option<DiscardWorkingTreeRequest> {
-        if self.scope != DiffScope::WorkingTree {
-            return None;
-        }
-        let diff = self.resolved(cx)?;
-        if diff.truncated || (diff.files.is_empty() && diff.patch.trim().is_empty()) {
-            return None;
-        }
-        let chat = self.state.read(cx).selected_chat_row()?;
-        Some(DiscardWorkingTreeRequest {
-            chat_id: chat.id.clone(),
-            checkout_id: diff.checkout_id,
-            expected_checksum: diff.checksum,
-            target_device_id: self.desired_target(cx),
-            file_count: diff.files.len(),
-        })
-    }
+    // slopty: no Discard changes (ruled out).
 
     /// Scope discriminant folded into the parse key, so a scope or base
     /// switch re-parses even when checksums collide.

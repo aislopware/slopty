@@ -29,10 +29,7 @@ pub fn main() -> Result<()> {
     let app = slopty_shell::application(handle.clone());
     app.run(move |cx| {
         gpui_kit::init(cx);
-        if let Err(e) = slopty_app::open_workspace(cx, handle) {
-            tracing::error!(error = %e, "open window");
-            cx.quit();
-        }
+        slopty_app::open_workspace(cx, handle);
     });
     Ok(())
 }

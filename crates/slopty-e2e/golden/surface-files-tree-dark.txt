@@ -1,0 +1,26 @@
+Window
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Group │ Workspace files
+SearchInput │ Search files
+Button │ Show all files (even hidden)
+Tree │ Workspace file tree (focused)
+TreeItem │ src
+TreeItem │ NOTES.md
+TreeItem │ README.md
+Button │ Collapse Subagents
+Button │ Collapse Chats
+Button │ New side chat
+Button │ Fork this chat
+Button │ Fork
+Button │ New side chat
+Button │ Show session details
+Button │ Working tree
+Button │ Close tab
+Button │ Expand panel
+Button │ Hide files panel
+Button │ Toggle left sidebar
+Button │ New session
+Button │ Sidebar view options

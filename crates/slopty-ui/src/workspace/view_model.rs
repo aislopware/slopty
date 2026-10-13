@@ -21,10 +21,15 @@ use slopty_view_proto::HarnessId;
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 use tokio::sync::mpsc;
 
-use super::{WorkerStatus, WorkspaceView};
+use super::WorkspaceView;
 use crate::view_model::{Ask, Feed, rows, transcript};
 
 mod surfaces;
+
+pub use surfaces::{
+    AddAnswer, AddChoice, AddDevice, AddFailure, AddFix, AddKind, AddMark, AddProgress, AddStep,
+    Found, FoundNode, Look,
+};
 
 /// How long changes gather before the lists go out: a frame.
 const GATHER: Duration = Duration::from_millis(16);
@@ -167,14 +172,8 @@ impl WorkspaceView {
         self.view_hear_hubs(cx);
         let Some(feed) = self.view_model.feed.clone() else { return };
         let now = Utc::now();
-        let devices = self
-            .workers
-            .iter()
-            .map(|(key, worker)| {
-                let linked = matches!(worker.status, WorkerStatus::Connected);
-                rows::device(&key.to_string(), &worker.name, linked, now)
-            })
-            .collect();
+        let devices =
+            self.workers.keys().filter_map(|key| self.surface_device_row(*key, now)).collect();
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
         // Each folder, and whether a thread in it named it as its repository.
@@ -191,6 +190,7 @@ impl WorkspaceView {
             let row = *row;
             let id = self.chat_id(row.id);
             let mut chat = rows::chat(row, device);
+            chat.archived = self.surface_archived(&id);
             chat.id.clone_from(&id);
             if let Some(parent) = rows::parent(row) {
                 chat.parent_chat_id = Some(self.chat_id(parent));
@@ -212,7 +212,7 @@ impl WorkspaceView {
                 id: id.clone(),
                 device_id: device.clone(),
                 title: None,
-                archived: false,
+                archived: self.surface_archived(id),
                 cwd: Some(minted.cwd.clone()),
                 branch: None,
                 checkout_id: None,
@@ -314,7 +314,7 @@ impl WorkspaceView {
     fn view_mutate(
         &mut self,
         params: &serde_json::Value,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Result<serde_json::Value, RpcError> {
         let op = param(params, "op").unwrap_or_default();
         let chat = param(params, "chatId");
@@ -338,12 +338,24 @@ impl WorkspaceView {
                 self.view_changed(cx);
                 Ok(serde_json::json!({}))
             }
+            // The person looked at the chat: its thread is seen through its latest turn, on
+            // its worker, which tells every other device.
+            ("markChatSeen", Some(chat)) => {
+                if let Some((key, thread)) = self.chat_thread(chat, cx)
+                    && let Some(ended) = self.thread_stand(thread).and_then(|stand| stand.ended)
+                {
+                    self.mark_seen(key, thread, ended.turn, cx);
+                }
+                Ok(serde_json::json!({}))
+            }
             ("deleteChat", Some(chat)) => {
                 self.view_model.minted.remove(chat);
                 self.view_changed(cx);
                 Ok(serde_json::json!({}))
             }
-            _ => Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread"))),
+            _ => self.surface_mutate(op, params, cx).unwrap_or_else(|| {
+                Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread")))
+            }),
         }
     }
 

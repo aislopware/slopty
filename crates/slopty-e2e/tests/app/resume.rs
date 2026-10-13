@@ -70,8 +70,10 @@ fn report(what: &str, mut took: Vec<Duration>) -> (f64, f64) {
 async fn a_resume_brings_a_dead_link_back_at_once() {
     let (mut stack, cut) = Stack::launch_behind_cut("e2e-worker").await.unwrap();
     let drv = &mut stack.driver;
+    drv.wait_for("the worker", STEP, |d| status(d) == "connected").await.unwrap();
+    drv.keys("cmd-j").await.unwrap();
     let d =
-        drv.wait_for("the first shell with a prompt", STEP, |d| live_after(d, 0)).await.unwrap();
+        drv.wait_for("the dock's shell with a prompt", STEP, |d| live_after(d, 0)).await.unwrap();
 
     // A live link: probed, it answers, and nothing is dialled again.
     let seen = links(&d);

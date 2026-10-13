@@ -18,15 +18,19 @@ use serde::{Deserialize, Serialize};
 use slopty_view_proto::{AuthState, WorkspaceScope};
 
 // slopty: no agent accounts: Slopty never touches a credential.
+// slopty: Settings → Devices' Add device dialog.
+pub mod add_device;
 pub mod appearance;
 pub mod archived;
 pub mod composer;
 pub mod devices;
 pub mod files;
 pub mod harnesses;
+// slopty: the code a phone or iPad scans for the server.
+pub mod invite;
 pub mod notifications;
 pub mod shortcuts;
-pub mod thread_naming;
+// slopty: no thread naming: an agent's thread is titled by the agent.
 pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;

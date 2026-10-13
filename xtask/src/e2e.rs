@@ -43,46 +43,12 @@ pub enum Case {
     Screen,
     /// One pointer move on the main display and back. Needs Accessibility for the test binary.
     Input,
-    /// Frame-time budget: 20 streaming shells panned and zoomed, a display stream beside
-    /// shells (only with `--screen-recording`), typing with and without the local echo, and the
-    /// conversation face under a streaming answer; prints the percentiles and fails when
-    /// panning is over budget. No permissions needed for the shell scenarios.
-    Smooth,
-    /// Renders of every surface with a busy day's data, for a person's review: no golden is
-    /// compared; the pictures land in `target/e2e/artifacts/showcase/`.
-    Showcase,
-    /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
-    /// indicative only, the simulator has no GPU-backed display link.
-    SmoothIos,
-    /// Two clients on one worker: two app processes on this Mac, each on its own socket, both
-    /// added to the same daemons; a terminal opened on one appears on the other, typing on both is
-    /// serialised, attention badges both, a client dying leaves the other streaming, closing
-    /// and notes propagate. No permissions needed (the display scenario also needs
-    /// `--screen-recording`).
-    Pair,
-    /// The same with the second client in the simulator (`--sim iphone|ipad`): the Mac and
-    /// the phone on one worker.
-    PairIos,
-    /// One client, two workers: ptyd + worker + the app, and a second ptyd + worker under a root
-    /// of its own with a private HOME, reached through a relay shaped like the tailnet path to
-    /// another Mac. Proves cross-worker attention against a real second daemon: the app adds two
-    /// workers, a shell on the second round-trips over the shaped link, a permission hook played
-    /// to it through `slopty hook` badges the cross-worker pill and routes a banner back to it, and
-    /// killing it mid-stream shows it down while the first keeps streaming, then connected again
-    /// on restart. No permissions needed.
-    Workers,
     /// The server with a real worker: `slopty-server` and ptyd + worker registered with it, on
     /// ports of their own, driven through the `slopty` CLI with `--json` and MCP over HTTP:
     /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
     /// lease lost on a killed worker and taken back. No permissions needed.
     Server,
-    /// The app as it is normally used: at its first run it is pointed at a `slopty-server` with
-    /// two workers registered, one on loopback and one behind a relay shaped like the tailnet.
-    /// Both come from the directory with a shell each, a hook on the far one badges the pill,
-    /// and the far one killed and restarted is measured back, by its own link and by the
-    /// server listing it online. No permissions needed.
-    ThroughServer,
-    /// All of the above but the simulator cases (`smooth-ios`, `pair-ios`).
+    /// All of the above but the simulator case (`ios`).
     All,
     /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
     /// through its test socket: add the worker, open a shell, type, read the rows back, render
@@ -156,8 +122,6 @@ struct Suite {
     /// A nextest filterset for a run the caller gives none: what the case means when the target
     /// holds more live tests, which `--filter` can still reach.
     default: Option<&'static str>,
-    /// One test at a time: the frame-time scenarios measure a quiet machine.
-    serial: bool,
     /// Its tests code video through VideoToolbox: they run after the rest, behind the encoder
     /// probe and a deadline ([`coding_step`]).
     codes: bool,
@@ -175,7 +139,6 @@ impl Suite {
             test,
             only: None,
             default: None,
-            serial: false,
             codes: false,
             no_videotoolbox: false,
         }
@@ -189,11 +152,6 @@ impl Suite {
     /// Only the tests `filterset` picks.
     const fn only(self, filterset: &'static str) -> Self {
         Self { only: Some(filterset), ..self }
-    }
-
-    /// One test at a time.
-    const fn serial(self) -> Self {
-        Self { serial: true, ..self }
     }
 
     /// Its tests code video ([`Suite::codes`]).
@@ -210,23 +168,12 @@ impl Suite {
 /// The module holding a target's tests that need the Screen Recording grant; they run only
 /// with `--screen-recording`.
 const SCREEN_RECORDING: &str = "test(~screen_recording::)";
-/// The module holding the app target's frame-time measurements, which run alone under `smooth`.
-const FRAME_TIME: &str = "test(~frame_time::)";
-/// The module holding the app target's showcase renders, which run only as their own case.
-const SHOWCASE: &str = "test(~showcase::)";
-
-/// The app target's tests that code video: a window or a display streamed into a tile, a
-/// remote window opened, and the screen captured. Each is named; a new one left out fails in
-/// the first group, where every `VideoToolbox` session is refused ([`NO_VIDEOTOOLBOX`]), naming
-/// the call.
+/// The app target's tests that code video: a remote window streamed into the right pane, which
+/// needs the Screen Recording grant too. A new one left out fails in the first group, where every
+/// `VideoToolbox` session is refused ([`NO_VIDEOTOOLBOX`]), naming the call.
 macro_rules! coding {
     () => {
-        "(test(~stream::) | test(~screen_recording::) \
-         | test(=clipboard::text_copied_on_one_worker_is_ready_to_paste_in_another_workers_window) \
-         | test(=gallery::a_remote_window_waits_in_its_chrome) \
-         | test(=dnd::files_dropped_on_a_display_are_whole_on_the_worker_when_it_lets_go) \
-         | test(=dnd::a_refused_or_left_drag_leaves_nothing_on_the_worker) \
-         | test(=conversation::the_screen_an_agent_drives_opens_beside_its_thread))"
+        "(test(~screen_recording::))"
     };
 }
 
@@ -234,15 +181,9 @@ macro_rules! coding {
 /// so a runner whose encoder stops cannot hold them; then the ones that code, last, behind the
 /// encoder probe ([`coding_step`]).
 const APP: &[Suite] = &[
-    Suite::live("slopty-e2e", "app")
-        .only(concat!("not test(~frame_time::) and not test(~showcase::) and not ", coding!()))
-        .no_videotoolbox(),
-    Suite::live("slopty-e2e", "app")
-        .only(concat!("not test(~frame_time::) and not test(~showcase::) and ", coding!()))
-        .codes(),
+    Suite::live("slopty-e2e", "app").only(concat!("not ", coding!())).no_videotoolbox(),
+    Suite::live("slopty-e2e", "app").only(coding!()).codes(),
 ];
-
-const SHOWCASE_APP: &[Suite] = &[Suite::live("slopty-e2e", "app").only(SHOWCASE)];
 
 const WORKER: &[Suite] = &[Suite {
     kept: Kept::No,
@@ -263,34 +204,13 @@ const SCREEN: &[Suite] = &[
 
 const INPUT: &[Suite] = &[Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject")];
 
-const IOS: &[Suite] = &[
-    Suite::live("slopty-e2e", "ios"),
-    // The UIKit-boundary scenarios share the one simulator: one app at a time.
-    Suite::live("slopty-e2e", "ios_uikit").serial(),
-];
-
-const SMOOTH: &[Suite] = &[
-    Suite::live("slopty-e2e", "smooth").only("test(~on_the_mac)").serial(),
-    Suite::live("slopty-e2e", "app").only(FRAME_TIME).serial(),
-];
-
-const PAIR: &[Suite] = &[Suite::live("slopty-e2e", "pair").only("test(~on_the_mac)").serial()];
-
-const PAIR_IOS: &[Suite] =
-    &[Suite::live("slopty-e2e", "pair").only("test(~with_the_simulator)").serial()];
-
-const WORKERS: &[Suite] = &[Suite::live("slopty-e2e", "workers").serial()];
+const IOS: &[Suite] = &[Suite::live("slopty-e2e", "ios")];
 
 const SERVER: &[Suite] = &[Suite::live("slopty-e2e", "server")];
 
-const THROUGH_SERVER: &[Suite] = &[Suite::live("slopty-e2e", "through_server").serial()];
-
-const SMOOTH_IOS: &[Suite] =
-    &[Suite::live("slopty-e2e", "smooth").only("test(~on_the_simulator)").serial()];
-
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     // The simulator cases' tools, before a minute of compiling.
-    if matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos) {
+    if matches!(opts.case, Case::Ios) {
         crate::ios::preflight(sh, true)?;
     }
     let suites: Vec<&Suite> = match opts.case {
@@ -298,25 +218,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Worker => WORKER.iter().collect(),
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
-        Case::Smooth => SMOOTH.iter().collect(),
-        Case::Showcase => SHOWCASE_APP.iter().collect(),
-        Case::SmoothIos => SMOOTH_IOS.iter().collect(),
-        Case::Pair => PAIR.iter().collect(),
-        Case::PairIos => PAIR_IOS.iter().collect(),
-        Case::Workers => WORKERS.iter().collect(),
         Case::Server => SERVER.iter().collect(),
-        Case::ThroughServer => THROUGH_SERVER.iter().collect(),
-        Case::All => APP
-            .iter()
-            .chain(WORKER)
-            .chain(SERVER)
-            .chain(SCREEN)
-            .chain(INPUT)
-            .chain(SMOOTH)
-            .chain(PAIR)
-            .chain(WORKERS)
-            .chain(THROUGH_SERVER)
-            .collect(),
+        Case::All => APP.iter().chain(WORKER).chain(SERVER).chain(SCREEN).chain(INPUT).collect(),
         Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
@@ -385,7 +288,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
-    let simulator = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)
+    let simulator = matches!(opts.case, Case::Ios)
         .then(|| -> Result<_> {
             let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
             let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
@@ -414,12 +317,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
         let expr: &[String] = expr.as_ref().map_or(&[], |e| std::slice::from_ref(e));
         let filter_flag: &[&str] = if expr.is_empty() { &[] } else { &["-E"] };
-        let threads: &[&str] = if suite.serial { &["--test-threads", "1"] } else { &[] };
         let ignored: &[&str] =
             if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
         let mut command = cmd!(
             sh,
-            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {threads...} {filter_flag...} {expr...}"
+            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} --no-capture --no-fail-fast {ignored...} {filter_flag...} {expr...}"
         );
         if suite.no_videotoolbox {
             command = command.env(NO_VIDEOTOOLBOX, "1");
@@ -448,8 +350,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                 matched = matched.saturating_add(1);
                 "✓"
             }
-            // Nextest's "no tests to run": the filter picked nothing in this suite.
-            Ran::Exited(Some(NO_TESTS_RUN)) if opts.filter.is_some() => "–",
+            // Nextest's "no tests to run": the filter picked nothing in this suite, or every test
+            // it holds captures the screen and this run has no `--screen-recording`.
+            Ran::Exited(Some(NO_TESTS_RUN)) if opts.filter.is_some() || !opts.screen_recording => {
+                "–"
+            }
             Ran::Exited(_) => {
                 matched = matched.saturating_add(1);
                 failed.push(title.to_owned());
@@ -674,8 +579,8 @@ mod tests {
         assert!(rest.no_videotoolbox && !rest.codes);
         assert!(coding.codes && !coding.no_videotoolbox);
         let (rest, coding) = (rest.only.unwrap_or_default(), coding.only.unwrap_or_default());
-        assert_eq!(rest.replace(" and not (", " and ("), coding, "the same list, once negated");
-        assert!(coding.contains("test(~stream::)"), "{coding}");
+        assert_eq!(rest.strip_prefix("not "), Some(coding), "the same list, once negated");
+        assert!(coding.contains("test(~screen_recording::)"), "{coding}");
     }
 
     #[test]

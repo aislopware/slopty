@@ -227,9 +227,7 @@ fn run() {
     let handle = Box::leak(Box::new(runtime)).handle().clone();
     ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
-        if let Err(e) = slopty_app::open_workspace(cx, handle) {
-            tracing::error!(error = %e, "open workspace");
-        }
+        slopty_app::open_workspace(cx, handle);
     }));
     // The shell's icons and fonts.
     ffi::run_app_with_assets(slopty_shell::icons::Assets);

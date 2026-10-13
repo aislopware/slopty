@@ -3,4 +3,5 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Group (focused)
 Terminal │ shell │ ~ %
+Button │ Toggle left sidebar
 Button │ Sidebar view options

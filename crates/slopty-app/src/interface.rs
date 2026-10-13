@@ -28,9 +28,10 @@ pub(crate) fn open(
     gpui_tokio::init_from_handle(cx, runtime);
     let (view_model, feed, asks) = slopty_ui::view_model::ViewModel::new(CLIENT.to_owned());
     let view = workspace.read(cx).view.clone();
-    workspace.update(cx, |ws, _| {
+    workspace.update(cx, |ws, cx| {
         ws.interface_feed = Some(std::sync::Arc::clone(&feed));
-        ws.tell_server_presence();
+        ws.tell_server_presence(cx);
+        ws.tell_local_device();
     });
     view.update(cx, |v, cx| v.serve_interface(feed, asks, cx));
     host_live_views(&view, cx);
@@ -45,6 +46,9 @@ pub(crate) fn open(
         activate: !self_test(),
     };
     let shell = slopty_shell::start(config, links, cx);
+    // The shell's and the kit's bindings are in: Tab and the rest go back to the views that take
+    // every key.
+    slopty_ui::key_takers::release(cx);
     let watched = workspace.clone();
     let _open = shell.update(cx, move |_shell, window, cx| {
         let observed = watched.clone();
@@ -61,12 +65,14 @@ pub(crate) fn open(
                 ws.set_active(active, cx);
                 ws.tell_presence_in(window, cx);
                 if active {
-                    ws.this_mac_activated(window, cx);
+                    ws.wake_this_mac_run();
                 }
             });
             ws.window_subscriptions = vec![appearance, activation];
             ws.window_dark = dark;
             ws.window = Some(handle);
+            // The clipboard follows the keyboard of this window's live views.
+            ws.view.update(cx, |v, cx| v.set_pasteboard(crate::pasteboard(), Some(handle), cx));
             ws.apply_loaded(loaded, cx);
         });
     });

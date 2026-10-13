@@ -7,7 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Entity, WeakEntity, Window};
+use gpui::{
+    AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, WeakEntity, Window,
+};
 use slopty_client::clip::{Answer, Fetched, Place, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
@@ -18,37 +20,23 @@ use slopty_core::{SessionId, XferId};
 use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
 use slopty_proto::drag::DragId;
-use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 
-#[cfg(target_os = "macos")]
-mod drag_out;
-#[cfg(target_os = "macos")]
-pub(super) use drag_out::DragsOut;
-mod drop_in;
 pub mod transfers;
 
-#[cfg(target_os = "macos")]
-pub use drop_in::Carried;
-pub use drop_in::DropIn;
 use slopty_terminal::{ClipHook, ClipPaste};
 
-use super::actions::{ListPorts, SaveCopy};
-use super::{KeyTarget, WorkspaceView};
+use super::WorkspaceView;
 use crate::clipboard::{ClipFiles, ClipSync, provider, worker_file_paths};
-use crate::conversation::Attach;
-use crate::conversation::attach::Target;
-use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
 
 /// How long a paste waits for a worker's clipboard bytes before it gives up. The pasting app's
 /// main thread waits with it, so this is as long as a paste may hang.
 const CLIP_WAIT: Duration = Duration::from_secs(5);
 
-/// Takes the file promises of a drag out of the app, and says whether a drag began.
-#[cfg(target_os = "macos")]
-pub type DragSink = Rc<dyn Fn(Vec<slopty_platform::drag::Promise>) -> bool>;
+/// How often the clipboard is looked at for a change to hand the watched worker.
+pub(super) const CLIP_TICK: Duration = Duration::from_millis(250);
 
 /// An upload in flight: where it was dropped and how far it got.
 #[derive(Clone, Debug)]
@@ -67,8 +55,6 @@ pub struct Upload {
     pub paste: Option<WeakEntity<ScreenView>>,
     /// Where files brought from another worker wait to go up, deleted once the upload ends.
     pub scratch: Option<PathBuf>,
-    /// The composer the files are attached to, and the attachment's chip there.
-    pub attach: Option<(Target, u64)>,
     /// The drag from this device whose drop the files are, into its landing on the worker.
     pub drag: Option<DragId>,
     /// The worker's remote it was sent through, which reaches it while the worker is away.
@@ -101,7 +87,6 @@ impl Upload {
             done: 0,
             paste: None,
             scratch: None,
-            attach: None,
             drag: None,
             via: None,
             names: Vec::new(),
@@ -123,7 +108,6 @@ impl Upload {
             done: 0,
             paste: None,
             scratch: None,
-            attach: None,
             drag: None,
             via: None,
             names: Vec::new(),
@@ -132,26 +116,6 @@ impl Upload {
             taken_up: false,
             dropped: false,
         }
-    }
-
-    /// Nothing sent yet, to a directory of its own on the worker, its paths typed into
-    /// `composer` once done, where chip `id` shows it meanwhile.
-    #[must_use]
-    pub fn to_face(tile: TileRef, composer: Target, id: u64) -> Self {
-        Self { attach: Some((composer, id)), ..Self::to_staging(tile) }
-    }
-
-    /// Nothing sent yet, into the landing on the worker of `drag`, a drag over `tile`, which
-    /// drops them at its point there.
-    #[must_use]
-    pub fn to_drag(tile: TileRef, drag: DragId) -> Self {
-        Self { drag: Some(drag), ..Self::to_staging(tile) }
-    }
-
-    /// Nothing sent yet, into `dir`, a folder tile's directory.
-    #[must_use]
-    pub fn to_folder(tile: TileRef, dir: String) -> Self {
-        Self { dir: Some(dir), ..Self::to_staging(tile) }
     }
 
     /// An earlier run's upload to `dest`, dropped on `tile`, taken up again: a folder's lists
@@ -194,44 +158,65 @@ impl Upload {
 
 impl WorkspaceView {
     /// Keep the clipboard in step with the workers through `board` (the general pasteboard in
-    /// the app, a named one under the self-test).
-    pub fn set_pasteboard(&mut self, board: Rc<dyn Pasteboard>) {
+    /// the app, a named one under the self-test), looked at every `CLIP_TICK`, with the
+    /// keyboard of `window` (the shell's), whose live view holding it names the worker whose
+    /// clipboard is watched.
+    pub fn set_pasteboard(
+        &mut self,
+        board: Rc<dyn Pasteboard>,
+        window: Option<AnyWindowHandle>,
+        cx: &Context<Self>,
+    ) {
         self.clip = Some(Rc::new(RefCell::new(ClipSync::new(board))));
+        self.clip_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CLIP_TICK).await;
+                let looked = window.and_then(|window| {
+                    let this = this.clone();
+                    window
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |this, cx| this.follow_keyboard(window, cx))
+                        })
+                        .ok()
+                });
+                // With no window, no live view holds a keyboard.
+                let synced = match looked {
+                    Some(looked) => looked,
+                    None => this.update(cx, |this, _| {
+                        this.clip_focus = None;
+                        this.sync_clipboard_watch();
+                    }),
+                };
+                if synced.is_err() {
+                    return;
+                }
+            }
+        }));
     }
 
-    /// The person pasted with the system's paste button (iOS), which handed over `pasted`, the
-    /// clipboard as it is, with no prompt. It goes where the key bar's Paste goes, the focused
-    /// shell or remote window, and stands for the read of the clipboard that paste would make.
-    pub fn paste_made(&self, pasted: &dyn Pasteboard, cx: &mut Context<Self>) {
-        let Some(tile) = self.focused() else { return };
-        if let (Some(me), Some(clip)) = (self.me(tile.worker), self.clip.as_ref()) {
-            clip.borrow_mut().pasted(pasted, me);
-        }
-        match self.active_key_target() {
-            Some(KeyTarget::Terminal(terminal)) => {
-                let text = pasted
-                    .data(slopty_platform::pasteboard::TEXT_UTI)
-                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-                terminal.update(cx, |t, cx| t.paste_made(text, cx));
-            }
-            Some(KeyTarget::Screen(screen)) => screen.update(cx, ScreenView::paste_key),
-            None => {}
-        }
+    /// The live terminal or window holding `window`'s keyboard names the worker whose clipboard
+    /// is watched; with none holding it, none is.
+    fn follow_keyboard(&mut self, window: &Window, cx: &App) {
+        let holds = |focus: FocusHandle| focus.contains_focused(window, cx);
+        let terminal = self
+            .terminals
+            .iter()
+            .find(|(_, view)| holds(view.read(cx).focus_handle(cx)))
+            .and_then(|(session, _)| self.worker_of_session(*session));
+        let key = terminal.or_else(|| {
+            let (item, _) =
+                self.screens.iter().find(|(_, view)| holds(view.read(cx).focus_handle(cx)))?;
+            self.items().find(|(_, it)| it.id == *item).map(|(key, _)| key)
+        });
+        self.clip_focus = key;
+        self.sync_clipboard_watch();
     }
 
     /// The app is frontmost or not: a worker's clipboard is watched only while it is.
     pub fn set_app_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.app_active != active {
             self.app_active = active;
-            if active {
-                self.release_held_toasts(cx);
-                // The tile in front is looked at again: its thread's turn is read.
-                self.see_focused(cx);
-            } else {
-                // The app may be ended while it is away (iOS ends a suspended one): what the
-                // person wrote is on the disk before it goes.
-                self.keep_drafts_now(cx);
-            }
+            self.sync_clipboard_watch();
             cx.notify();
         }
     }
@@ -270,26 +255,18 @@ impl WorkspaceView {
         self.watching.iter().copied().collect()
     }
 
-    /// The worker whose clipboard matters now: the focused tile's, while it is a terminal or a
-    /// remote window and the app is frontmost, or the tile whose own window has the keyboard.
+    /// The worker whose clipboard matters now: the one whose live terminal or window has the
+    /// keyboard ([`Self::follow_keyboard`]), while the app is frontmost, it is linked and
+    /// the clipboard is shared with it.
     fn clipboard_worker(&self) -> Option<WorkerKey> {
-        let tile = match self.popouts.active() {
-            Some(item) => self.tile_of(item)?,
-            None if self.app_active => self.focused()?,
-            None => return None,
-        };
-        let item = self.item(tile)?;
-        let remote = matches!(
-            item.kind,
-            ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
-        );
-        let linked = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
-        (remote && linked && self.clip_shared(tile.worker)).then_some(tile.worker)
+        let key = self.clip_focus.filter(|_| self.app_active)?;
+        let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
+        (linked && self.clip_shared(key)).then_some(key)
     }
 
     /// Tell each worker whether its clipboard is wanted, and give the one that just became
     /// wanted this client's clipboard, and again whenever it changes while wanted, so the
-    /// worker mirrors it. Runs every frame; sends only changes.
+    /// worker mirrors it. Runs on every tick of the clipboard; sends only changes.
     pub(super) fn sync_clipboard_watch(&mut self) {
         let wanted = self.clipboard_worker();
         let stale: Vec<WorkerKey> =
@@ -401,7 +378,7 @@ impl WorkspaceView {
                             let paste = TermRequest::Paste { text, confirmed: false };
                             this.send_session(session, ClientMsg::Term { session, req: paste });
                         }
-                        _ => this.show_notice("The copied files are gone".to_owned(), cx),
+                        _ => Self::show_notice("The copied files are gone".to_owned(), cx),
                     });
                 })
                 .detach();
@@ -498,7 +475,7 @@ impl WorkspaceView {
                     }
                     Err(Some(e)) => {
                         let said = format!("Cannot bring the files over: {e}");
-                        this.show_failure_at(tile, said, cx);
+                        Self::show_failure(said, cx);
                         Self::upload_ended(Upload { scratch: Some(scratch), ..upload }, cx);
                     }
                 }
@@ -533,9 +510,6 @@ impl WorkspaceView {
         if let Some(view) = upload.paste {
             let _gone = view.update(cx, |v, _cx| v.release_paste());
         }
-        if let Some((composer, id)) = upload.attach {
-            composer.ended(id, cx);
-        }
         if let Some(scratch) = upload.scratch {
             cx.background_executor()
                 .spawn(async move {
@@ -548,17 +522,6 @@ impl WorkspaceView {
     /// A clipboard message from `key`. Its fetch of another worker's offer, which this client
     /// relayed, is answered by fetching from that worker, off the main thread.
     pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg, cx: &Context<Self>) {
-        // The program a drag was dropped on reads what it carries: the person's own drop,
-        // whatever the clipboard shares.
-        #[cfg(target_os = "macos")]
-        if let ClipMsg::Fetch { rep, max, urgent } = &msg
-            && let Some(fetched) = self.drag_fetch(rep, *max, cx)
-        {
-            if let Some(to) = self.remote(key) {
-                to.send_clip(rep.clone(), fetched, *urgent);
-            }
-            return;
-        }
         let Some(clip) = self.clip.clone() else { return };
         // Not shared: the worker's copies stay its own, and none of this Mac's is handed over.
         if !self.clip_shared(key) {
@@ -587,7 +550,7 @@ impl WorkspaceView {
                 if placeless {
                     let text = no_finder_place(&self.worker_name(key));
                     cx.spawn(async move |this, cx| {
-                        let _gone = this.update(cx, |this, cx| this.show_notice(text, cx));
+                        let _gone = this.update(cx, |_, cx| Self::show_notice(text, cx));
                     })
                     .detach();
                 }
@@ -621,150 +584,12 @@ impl WorkspaceView {
         }
     }
 
-    /// The answer to a fetch of a drag a terminal tile carries; `None` when `rep` is no
-    /// terminal's drag.
-    #[cfg(target_os = "macos")]
-    fn drag_fetch(&self, rep: &RepRef, max: Option<u64>, cx: &Context<Self>) -> Option<Fetched> {
-        let slopty_proto::transfer::Source::Drag(drag) = rep.source else { return None };
-        self.terminals.values().find_map(|v| v.read(cx).drag_fetch(drag, rep.item, &rep.kind, max))
-    }
-
-    /// Attachment `id` of the thread composer on `tile` goes up to a directory of its own on
-    /// the tile's worker, its chip showing meanwhile: files as they are, a pasted picture
-    /// written to a scratch directory here first, which goes once the upload ends. With no
-    /// tile, the chip ends.
-    pub(super) fn attach_to_composer(
-        &mut self,
-        tile: Option<TileRef>,
-        composer: Target,
-        id: u64,
-        what: Attach,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tile) = tile else {
-            composer.ended(id, cx);
-            return;
-        };
-        let upload = Upload::to_face(tile, composer, id);
-        match what {
-            Attach::Files(paths) => {
-                let _started = self.upload(tile, &paths, upload, cx);
-            }
-            Attach::Picture { name, bytes } => {
-                let scratch = std::env::temp_dir().join(format!("slopty-attach-{}", XferId::new()));
-                let file = scratch.join(name);
-                let (dir, at) = (scratch.clone(), file.clone());
-                let written = cx.background_executor().spawn(async move {
-                    std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&at, bytes))
-                });
-                cx.spawn(async move |this, cx| {
-                    let written = written.await;
-                    let upload = Upload { scratch: Some(scratch), ..upload };
-                    let _gone = this.update(cx, |this, cx| match written {
-                        Ok(()) => {
-                            let _started = this.upload(tile, &[file], upload, cx);
-                        }
-                        Err(e) => {
-                            let said = format!("Cannot attach the picture: {e}");
-                            this.show_failure_at(tile, said, cx);
-                            Self::upload_ended(upload, cx);
-                        }
-                    });
-                })
-                .detach();
-            }
-        }
-    }
-
-    /// The person took attachment `id` off `composer`'s draft: its upload stops. A picture still
-    /// being written here has no upload yet; it goes up, and lands on no chip.
-    pub(super) fn detach_from_composer(
-        &mut self,
-        composer: &Target,
-        id: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let xfer = self.uploads.iter().find_map(|(xfer, upload)| {
-            upload.attach.as_ref().filter(|(c, at)| *at == id && c == composer).map(|_| *xfer)
-        });
-        if let Some(xfer) = xfer {
-            self.cancel_upload(xfer, cx);
-        }
-    }
-
-    /// The upload on `tile` that its header shows: not an attachment, whose chip in the face's
-    /// composer already says how far it got and stops it.
-    #[must_use]
-    pub fn header_upload(&self, tile: TileRef) -> Option<(XferId, &Upload)> {
-        self.uploads
-            .iter()
-            .find(|(_, u)| u.tile == tile && u.attach.is_none())
-            .map(|(x, u)| (*x, u))
-    }
-
-    /// Files dropped on `tile`: to the shell's directory for a terminal, whose paths are typed
-    /// into it once they are there; to the thread's composer, as attachments, on a thread tile
-    /// and on a terminal while its thread face shows; to the worker's staging for a remote
-    /// window, where they wait on its clipboard; into the folder a folder tile is at. Nothing
-    /// happens on a file, a page or a review.
-    ///
-    /// Files the platform received for the drop wait in its landing: the upload deletes it
-    /// when it ends, and a tile that takes nothing deletes it at once.
-    pub fn drop_files(&mut self, tile: TileRef, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let landing = self.drop_landing.take();
-        let upload = match self.item(tile).map(|i| &i.kind) {
-            Some(ItemKind::Terminal { session })
-                if let Some(composer) = self.shown_composer(*session)
-                    && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
-            {
-                Upload::to_face(tile, composer, id)
-            }
-            Some(ItemKind::Terminal { session }) => Upload::to_shell(tile, *session),
-            Some(ItemKind::Thread { .. })
-                if let Some(composer) =
-                    self.thread_item(tile.item).map(|v| Target(v.downgrade()))
-                    && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
-            {
-                Upload::to_face(tile, composer, id)
-            }
-            // A thread on its way: to the composer writing its first message.
-            None if let Some(composer) = self.starting.composer(tile.item)
-                && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
-            {
-                Upload::to_face(tile, composer, id)
-            }
-            Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
-            Some(ItemKind::Folder { path }) => Upload::to_folder(tile, path.clone()),
-            Some(
-                ItemKind::File { .. }
-                | ItemKind::Browser { .. }
-                | ItemKind::Review { .. }
-                | ItemKind::Changes { .. }
-                | ItemKind::Thread { .. },
-            )
-            | None => {
-                Self::discard_landing(landing, cx);
-                return;
-            }
-        };
-        let _started = self.upload(tile, paths, Upload { scratch: landing, ..upload }, cx);
-    }
-
     /// An upload for a shell will not land: a program waiting for the files of its drop is
     /// told they will not come.
     fn terminal_upload_failed(&self, upload: &Upload, cx: &mut Context<Self>) {
         if let Some(view) = upload.session.and_then(|s| self.terminals.get(&s)).cloned() {
             let drag = upload.drag;
             view.update(cx, |view, cx| view.files_failed(drag, cx));
-        }
-    }
-
-    /// Delete a drop's landing that nothing will upload from, off the main thread.
-    fn discard_landing(landing: Option<PathBuf>, cx: &Context<Self>) {
-        if let Some(landing) = landing {
-            cx.background_executor()
-                .spawn(async move { slopty_platform::file_drop::discard(&landing) })
-                .detach();
         }
     }
 
@@ -778,14 +603,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(remote) = self.remote(tile.worker) else {
-            self.show_notice_at(tile, "The machine is away; nothing was sent".to_owned(), cx);
+            Self::show_notice("The machine is away; nothing was sent".to_owned(), cx);
             Self::upload_ended(upload, cx);
             return false;
         };
         upload.total = match slopty_client::xfer::entries(paths) {
             Ok(entries) => entries.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size)),
             Err(e) => {
-                self.show_failure_at(tile, format!("Cannot send that: {e}"), cx);
+                Self::show_failure(format!("Cannot send that: {e}"), cx);
                 Self::upload_ended(upload, cx);
                 return false;
             }
@@ -794,7 +619,6 @@ impl WorkspaceView {
             _ if let Some(drag) = upload.drag => Dest::Drag(drag),
             (Some(session), _) => Dest::SessionCwd(*session),
             (None, Some(dir)) => Dest::Path(dir.clone()),
-            (None, None) if upload.attach.is_some() => Dest::Attachment,
             (None, None) => Dest::Staging,
         };
         let xfer = XferId::new();
@@ -808,8 +632,7 @@ impl WorkspaceView {
         upload.pace.note(cx.background_executor().now(), 0);
         // A drop on a shell or a folder still means something to the next run of the app; a
         // paste, an attachment or a drag ends with this one.
-        let kept = upload.paste.is_none()
-            && matches!(dest, Dest::SessionCwd(_) | Dest::Path(_) if upload.attach.is_none());
+        let kept = upload.paste.is_none() && matches!(dest, Dest::SessionCwd(_) | Dest::Path(_));
         if kept {
             let way = Way::Up {
                 tile,
@@ -824,33 +647,6 @@ impl WorkspaceView {
         remote.upload(xfer, paths.to_vec(), dest, false);
         cx.notify();
         true
-    }
-
-    /// Take every drag over the window (`drop_in`): over a remote window or display, the
-    /// worker drops it at the point there; elsewhere GPUI's own handling takes it. Files apps
-    /// promise rather than name (Mail, Photos) and, on iPad, every drop land in a temporary
-    /// directory first, and go to the tile under the drop as a file drop of their paths, which
-    /// uploads them. A file that did not arrive is named in a notice. Once, with the app's
-    /// window.
-    pub fn accept_dropped_files(window: &Window, cx: &Context<Self>) {
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::AppKit(handle)) => handle.ns_view,
-            Ok(RawWindowHandle::UiKit(handle)) => handle.ui_view,
-            _ => return,
-        };
-        let sink =
-            drop_in::Sink::new(window.window_handle(), cx.entity().downgrade(), cx.to_async());
-        slopty_platform::file_drop::install(host, Rc::new(sink));
-        // Drops in and drags out are the same window's two directions; iPad takes both.
-        #[cfg(target_os = "ios")]
-        Self::offer_drags(window, cx);
-    }
-
-    /// The upload in flight on `tile`, if any.
-    #[must_use]
-    pub fn upload_on(&self, tile: TileRef) -> Option<(XferId, &Upload)> {
-        self.uploads.iter().find(|(_, u)| u.tile == tile).map(|(x, u)| (*x, u))
     }
 
     /// Upload `xfer` ends, however it does: it leaves the list and the ledger.
@@ -884,9 +680,6 @@ impl WorkspaceView {
                 {
                     upload.done = done;
                     upload.pace.note(cx.background_executor().now(), done);
-                    if let Some((composer, id)) = upload.attach.clone() {
-                        composer.progress(id, upload.fraction(), cx);
-                    }
                     cx.notify();
                 }
             }
@@ -894,10 +687,7 @@ impl WorkspaceView {
                 let Some(upload) = self.take_upload(xfer) else { return };
                 if upload.taken_up {
                     let machine = self.worker_name(upload.tile.worker);
-                    self.show_notice(format!("{} reached {machine}", sent(&upload.names)), cx);
-                    if upload.dir.is_some() {
-                        self.refresh_folder(upload.tile.item, cx);
-                    }
+                    Self::show_notice(format!("{} reached {machine}", sent(&upload.names)), cx);
                     Self::upload_ended(upload, cx);
                     cx.notify();
                     return;
@@ -913,21 +703,17 @@ impl WorkspaceView {
                     Some(_) => {
                         let what = if paths.len() == 1 { "file" } else { "files" };
                         let gone = "landed, but the shell they were for has closed";
-                        self.show_notice(format!("{} {what} {gone}", paths.len()), cx);
-                    }
-                    None if let Some((composer, id)) = upload.attach.clone() => {
-                        composer.landed(id, &paths, cx);
+                        Self::show_notice(format!("{} {what} {gone}", paths.len()), cx);
                     }
                     None if upload.dir.is_some() => {
                         if let Some(text) = kept_both(&upload.names, &paths) {
-                            self.show_notice(text, cx);
+                            Self::show_notice(text, cx);
                         }
-                        self.refresh_folder(upload.tile.item, cx);
                     }
                     None if upload.paste.is_some() || upload.drag.is_some() => {}
                     None => {
                         let what = if paths.len() == 1 { "file" } else { "files" };
-                        self.show_notice(
+                        Self::show_notice(
                             format!("{} {what} on the machine's clipboard", paths.len()),
                             cx,
                         );
@@ -965,7 +751,7 @@ impl WorkspaceView {
                 .get(&upload.tile.worker)
                 .map_or_else(|| "the machine".to_owned(), |w| w.name.clone());
             let said = format!("{} did not reach {machine}: {error}", sent(&upload.names));
-            self.show_failure_at(upload.tile, said, cx);
+            Self::show_failure(said, cx);
             Self::upload_ended(upload, cx);
             cx.notify();
         }
@@ -987,14 +773,14 @@ impl WorkspaceView {
             match moved.local {
                 Some(local) if local != moved.port.number => {
                     let port = moved.port.number;
-                    self.show_notice(
+                    Self::show_notice(
                         format!("Port {port} is taken here; forwarded on {local}"),
                         cx,
                     );
                 }
                 None => {
                     let port = moved.port.number;
-                    self.show_failure(format!("Port {port} could not be forwarded"), cx);
+                    Self::show_failure(format!("Port {port} could not be forwarded"), cx);
                 }
                 Some(_) => {}
             }
@@ -1019,87 +805,6 @@ impl WorkspaceView {
             tracing::info!(%url, "opening a forwarded port");
             slopty_platform::open_url(&url);
         }
-    }
-
-    /// The palette as the list of forwarded ports; ↩ opens one in a tile or in the browser.
-    pub fn list_ports(&mut self, _: &ListPorts, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
-            return;
-        }
-        let mut lines: Vec<PaletteItem> = self
-            .ports
-            .iter()
-            .flat_map(|(session, forwards)| {
-                let shell = self.terminal_title(*session);
-                forwards
-                    .iter()
-                    .filter_map(move |f| {
-                        let url = f.url()?;
-                        let local = f.local.unwrap_or(f.port.number);
-                        let detail = format!("{} · {shell}", f.port.process);
-                        let tile = format!("Open localhost:{} in a tile", f.port.number);
-                        let browser = format!("Open localhost:{local} in the browser");
-                        Some([
-                            PaletteItem::in_tile(&tile, &detail, &f.worker_url()),
-                            PaletteItem::url(&browser, &detail, &url),
-                        ])
-                    })
-                    .flatten()
-            })
-            .collect();
-        lines.sort_by(|a, b| a.label.cmp(&b.label));
-        if lines.is_empty() {
-            self.show_notice("No ports are forwarded".to_owned(), cx);
-            return;
-        }
-        let theme = self.theme.clone();
-        let palette = cx.new(|cx| CommandPalette::new(lines, theme, window, cx));
-        self.show_palette(palette, window, cx);
-    }
-
-    /// Drag the worker's file at `path` out of the app, from the mouse event being handled: a
-    /// file promise, kept by bringing the file down when something takes the drop. Returns
-    /// whether a drag began. A worker that is away, or a file that could not be brought down
-    /// once dropped, is said in a notice: the drop's app shows only a bare error.
-    pub fn drag_out(&mut self, worker: WorkerKey, path: &str, cx: &mut Context<Self>) -> bool {
-        let name = worker_name(path).to_owned();
-        let Some(remote) = self.remote(worker) else {
-            let machine = self.workers.get(&worker).map_or("The machine", |w| w.name.as_str());
-            let text = format!("{machine} is away; {name} was not dragged out");
-            self.show_notice(text, cx);
-            return false;
-        };
-        #[cfg(target_os = "macos")]
-        {
-            let tell = Self::tell_downloads(worker, Arc::clone(&remote), Bringing::Drag, cx);
-            let Some(promise) = promise(remote, path, tell) else { return false };
-            match &self.drag_sink {
-                Some(sink) => sink(vec![promise]),
-                None => slopty_platform::drag::drag_out(vec![promise]),
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _unsupported = (remote, cx);
-            false
-        }
-    }
-
-    /// "Save a copy…": the focused file tile's file comes down whole onto this device, as a
-    /// folder's "Download…" brings its entry: to where the Mac's save panel says, or into a
-    /// folder chosen in Files on iPhone and iPad. It comes as a download, not the editor's
-    /// text, so a file of any size or kind is saved as its bytes are on the worker.
-    pub fn save_copy(&mut self, _: &SaveCopy, _window: &mut Window, cx: &mut Context<Self>) {
-        let file = self.focused().and_then(|tile| match &self.item(tile)?.kind {
-            ItemKind::File { path } => Some((tile.worker, path.clone())),
-            _ => None,
-        });
-        let Some((worker, source)) = file else {
-            self.show_notice("Focus a file to save a copy of".to_owned(), cx);
-            return;
-        };
-        tracing::info!(%source, "save a copy");
-        self.ask_files(&super::folders::FilesAsk::Export { worker, path: source }, cx);
     }
 
     /// Where downloads from `worker` through `via` that the view did not start itself tell it
@@ -1128,50 +833,6 @@ impl WorkspaceView {
         })
         .detach();
         tell
-    }
-
-    /// The save panel, opened in `~/Downloads` on the file's or folder's name; it comes down to
-    /// the path it gives, off the main thread, and the person is told as `bringing` says.
-    #[cfg(not(target_os = "ios"))]
-    pub(super) fn bring_down_as(
-        &mut self,
-        worker: WorkerKey,
-        source: String,
-        bringing: Bringing,
-        cx: &mut Context<Self>,
-    ) {
-        if self.remote(worker).is_none() {
-            self.show_notice(format!("The machine is away; nothing was {}", bringing.done()), cx);
-            return;
-        }
-        let name = worker_name(&source).to_owned();
-        let downloads = slopty_platform::web::downloads_dir(&slopty_platform::dirs::home());
-        let chosen = cx.prompt_for_new_path(&downloads, Some(&name));
-        cx.spawn(async move |this, cx| {
-            let dest = match chosen.await {
-                Ok(Ok(Some(dest))) => dest,
-                // Cancelled, or the panel went with the window.
-                Ok(Ok(None)) | Err(_) => return,
-                Ok(Err(e)) => {
-                    let text = format!("Cannot show the save panel: {e}");
-                    let _gone = this.update(cx, |this, cx| this.show_notice(text, cx));
-                    return;
-                }
-            };
-            let _gone = this.update(cx, |this, cx| {
-                let versions = slopty_client::xfer::Versions::new();
-                let down = transfers::Down { worker, xfer: XferId::new(), source, dest, versions };
-                this.bring_down(down, bringing, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// Send the file promises of drags out of the app to `sink` instead of a system drag: the
-    /// self-test keeps them itself.
-    #[cfg(target_os = "macos")]
-    pub fn set_drag_sink(&mut self, sink: DragSink) {
-        self.drag_sink = Some(sink);
     }
 
     /// A worker's link came up or went, as `workers` holds it now: its watch and its ports
@@ -1309,76 +970,31 @@ fn fetch_told(
     came
 }
 
-/// Bring the worker's `source` down to exactly `dest` for a drop, told to `tell` as it begins
-/// and ends ([`bring_down_seen`]).
-#[cfg(target_os = "macos")]
-fn keep_told(
-    remote: &dyn Remote,
-    source: &str,
-    dest: &std::path::Path,
-    tell: &Tell,
-) -> Result<(), String> {
-    let xfer = XferId::new();
-    let (seen, heard) = tokio::sync::watch::channel(slopty_client::xfer::Brought::default());
-    let began =
-        Told::Began { xfer, source: source.to_owned(), dest: dest.to_path_buf(), seen: heard };
-    let _told = tell.send(began);
-    let none = slopty_client::xfer::Versions::new();
-    let kept = bring_down_seen(remote, source, dest, xfer, Some(seen), none);
-    let _told = tell.send(Told::Ended { xfer, result: kept.clone() });
-    kept
-}
-
-/// The promise of one worker file, kept by a download into the drop's directory, told to
-/// `tell` as it begins and ends.
-#[cfg(target_os = "macos")]
-fn promise(
-    remote: Arc<dyn Remote>,
-    path: &str,
-    tell: Tell,
-) -> Option<slopty_platform::drag::Promise> {
-    let name = worker_name(path).to_owned();
-    if name.is_empty() {
-        return None;
-    }
-    let source = path.to_owned();
-    let keep: slopty_platform::drag::Keep =
-        Arc::new(move |dest: &std::path::Path| keep_told(remote.as_ref(), &source, dest, &tell));
-    Some(slopty_platform::drag::Promise { name, keep })
-}
-
 /// Why a worker's file comes down, for what the person is told.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::workspace) enum Bringing {
     /// Saved where the Mac's save panel said: "Save a copy…" of a file tile's file and
     /// "Download…" of a folder tile's entry, two words for one save, or one an earlier run left.
     Save,
-    /// Dragged out of a folder tile, a shell or a remote window and dropped here.
-    #[cfg_attr(target_os = "ios", expect(dead_code, reason = "a drag out is the Mac's"))]
-    Drag,
     /// Copied on one machine and pasted on another: it comes down on its way there.
     #[cfg_attr(
         target_os = "ios",
         expect(dead_code, reason = "iOS brings a paste over without listing it")
     )]
     Paste,
-    /// "Save to Files" on iPhone and iPad: into a folder chosen in Files, under the folder's
-    /// security scope, which a new run of the app does not hold.
-    Files,
 }
 
 impl Bringing {
     /// What it was, as in "nothing was saved".
     const fn done(self) -> &'static str {
         match self {
-            Self::Save | Self::Files => "saved",
-            Self::Drag => "dragged out",
+            Self::Save => "saved",
             Self::Paste => "brought over",
         }
     }
 
-    /// Whether it still means something to the next run of the app: a drop's place may be
-    /// another app's scratch, and a paste is over with this run.
+    /// Whether it still means something to the next run of the app: a paste is over with this
+    /// run.
     const fn kept(self) -> bool {
         matches!(self, Self::Save)
     }

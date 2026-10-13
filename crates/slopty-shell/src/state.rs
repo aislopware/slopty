@@ -3438,6 +3438,7 @@ mod tests {
             version: None,
             cursor_sdk_version: None,
             capabilities: Vec::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -4945,6 +4946,7 @@ mod tests {
             version: Some("0.2.12".into()),
             cursor_sdk_version: None,
             capabilities: Vec::new(),
+            actions: Vec::new(),
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
         assert!(!s.device_version_at_least("d1", (0, 2, 13)));
@@ -4968,6 +4970,7 @@ mod tests {
                 version: Some("0.2.31".into()),
                 cursor_sdk_version: None,
                 capabilities: vec![slopty_view_proto::capabilities::MESSAGE_QUEUE_V1.into()],
+                actions: Vec::new(),
             },
             Device {
                 id: "upstream".into(),
@@ -4978,6 +4981,7 @@ mod tests {
                 version: Some("0.2.31".into()),
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                actions: Vec::new(),
             },
         ];
 
@@ -5005,6 +5009,7 @@ mod tests {
             version: None,
             cursor_sdk_version: None,
             capabilities: Vec::new(),
+            actions: Vec::new(),
         }];
         s.connectivity.state = ConnectivityState::Connected;
         s.connectivity.chats = vec![ChatConnectivity {

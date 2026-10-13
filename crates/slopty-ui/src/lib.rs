@@ -1,22 +1,13 @@
-//! GPUI views and elements, drawn with the chrome kit (`slopty-kit`), around the terminal
-//! (`slopty-terminal`).
+//! GPUI views and elements around the terminal (`slopty-terminal`), and the model that feeds
+//! the shell (`slopty-shell`).
 //!
-//! * [`add_worker`] — a worker put on a machine over SSH, step by step, for the add sheet and a
-//!   tile on a different build.
-//! * [`workspace`] — every worker's items as tiles in scrollable columns, the titlebar, actions.
+//! * [`workspace`] — every worker this client reaches: links, threads, terminals, screens.
+//! * [`view_model`] — what feeds the shell from the server and the workers.
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
 //! * [`clipboard`] — the clipboard shared with the workers: announced, fetched on paste, echoes
 //!   broken.
-//! * [`conversation`] — a Claude Code terminal's conversation face: the transcript as a list, the
-//!   composer that types into the same PTY, the permission card.
-//! * [`folder`] — a directory on a worker, browsed in place: files open beside it, rows drag out,
-//!   drops go up into it.
-//! * [`picker`] — the "add a window" chooser.
-//! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
-//! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
-//! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
-//! * [`view_model`] — what feeds the shell (`slopty-shell`) from the server and the workers.
-//! * `lints` — the chrome's source lints, as tests, over every crate it is drawn in.
+//! * [`conversation`] — a thread's model: its transcript, turns and approvals.
+//! * [`key_takers`] — Tab, ⇧Tab and ⌃C given back to a terminal's program and a remote window.
 
 #![warn(unreachable_pub)]
 #![allow(
@@ -24,30 +15,16 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-pub mod add_worker;
-pub mod authorship;
-pub mod browser;
 pub mod clipboard;
-pub mod components;
 pub mod conversation;
-pub mod file;
-pub mod folder;
 pub mod identity;
-pub mod keymap;
-#[cfg(test)]
-mod lints;
+pub mod key_takers;
 mod outbox;
-pub mod palette;
-pub mod paste_key;
-pub mod picker;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"
 )]
 pub mod screen;
-pub mod search;
-pub mod settings_editor;
-pub mod settings_form;
 pub mod view_model;
 pub mod window_frame;
 #[expect(

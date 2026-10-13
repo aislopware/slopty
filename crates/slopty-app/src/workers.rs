@@ -8,33 +8,6 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::WorkerId;
 use slopty_platform::resume::Resume;
 use slopty_ui::workspace::WorkerStatus;
-
-/// GPUI actions for the workers.
-pub mod actions {
-    #![expect(
-        clippy::derive_partial_eq_without_eq,
-        reason = "gpui::actions! derives PartialEq only"
-    )]
-    use gpui::actions;
-
-    actions!(
-        workers,
-        [
-            /// Open the panel that adds a machine: this Mac, one over SSH, or one the tailnet
-            /// finds.
-            AddWorker,
-            /// Open the panel that connects to a server, whose directory lists the workers.
-            ConnectServer,
-            /// Copy the tailnet policy grant that lets the tailnet's devices in as the server's
-            /// clients.
-            CopyTailnetGrant,
-            /// Copy the tailnet policy grant that lets nodes tagged as Slopty's machines
-            /// register with the server as its workers.
-            CopyWorkerGrant,
-        ]
-    );
-}
-
 /// The workspace's key for a worker: its id's 128 bits.
 pub use slopty_ui::workspace::worker_key;
 
@@ -108,12 +81,12 @@ pub const PROBE_POLL: Duration = Duration::from_millis(2);
 /// A probe of a live link after a [`Resume`], sized from the link's last round trip.
 ///
 /// A QUIC PING goes out, and the link counts as alive the moment anything arrives from the
-/// worker. How long it waits, and when the tiles show the doubt, come from the round trip.
+/// worker. How long it waits, and when the views show the doubt, come from the round trip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Probe {
     /// Past this with nothing heard, the link is given up and dialled again at once.
     pub deadline: Duration,
-    /// When the tiles are set back: at once when the device was away or the path moved, else
+    /// When the views are set back: at once when the device was away or the path moved, else
     /// once the probe has run longer than a healthy link takes to answer.
     pub doubt_after: Duration,
 }
@@ -241,7 +214,7 @@ mod tests {
     use super::*;
 
     /// A probe waits four round trips, never less than a quarter second nor more than one; the
-    /// tiles show the doubt at once after the device was away or the path moved, and otherwise
+    /// views show the doubt at once after the device was away or the path moved, and otherwise
     /// only once the probe outlasts what a healthy link takes.
     #[test]
     fn a_probe_is_sized_from_the_round_trip() {

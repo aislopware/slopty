@@ -36,7 +36,6 @@ slopty-app.workspace = true
 slopty-crash.workspace = true
 slopty-platform.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 # The application the app runs: the shell's, with its assets.
 slopty-shell.workspace = true

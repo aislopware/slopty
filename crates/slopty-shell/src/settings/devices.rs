@@ -1,7 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, an Online/Offline badge, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! and an Add device dialog (AddDevice).
+// slopty: no Rename: a machine is named by its own name. Add device is Slopty's own dialog
+// (`add_device`): this Mac, a machine over ssh, or the server. The page shows the server this
+// app follows, with a way to change it.
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -11,10 +14,9 @@ use gpui::{
 use std::time::Duration;
 
 use slopty_view_proto::WorkspaceScope;
-use slopty_view_rpc::methods;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover;
+use crate::settings::add_device::{AddDeviceDialog, Choice, Closed};
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -56,21 +58,27 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     }
 }
 
-struct RenameDialog {
-    device_id: String,
-    input: Entity<ComposerInput>,
-    _events: Subscription,
-}
+// slopty: Add device in place of Rename.
+/// What the page says it lists.
+const DEVICES_SUBTITLE: &str = "The machines Slopty works on, each with its own agents, files and terminals.";
 
 pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
-    rename: Option<RenameDialog>,
+    // slopty: Add device in place of Rename.
+    add: Option<(Entity<AddDeviceDialog>, Subscription)>,
+    /// Open the dialog on this choice at the next draw, which has the window its fields need.
+    add_wanted: Option<Choice>,
+    /// The server address a link named, for the dialog's field when it opens.
+    add_server: Option<String>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
-    task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    // slopty: the action call under way.
+    action_task: Option<Task<()>>,
+    // slopty: the server's code is up ("Connect a phone").
+    inviting: bool,
     _observe: Subscription,
 }
 
@@ -80,74 +88,69 @@ impl DevicesPage {
         Self {
             state,
             scroll: widgets::PageScroll::default(),
-            rename: None,
+            add: None,
+            add_wanted: None,
+            add_server: None,
             copied: None,
             error: None,
-            task: None,
             copy_task: None,
+            action_task: None,
+            inviting: false,
             _observe: observe,
         }
     }
 
-    pub(crate) fn open_rename(
-        &mut self,
-        device_id: String,
-        current: String,
-        cx: &mut Context<Self>,
-    ) {
-        let input = cx.new(|cx| ComposerInput::new("Device name", cx));
-        input.update(cx, |input, cx| input.set_text(current, cx));
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Submitted) {
-                this.submit_rename(cx);
-            }
-        });
-        self.rename = Some(RenameDialog {
-            device_id,
-            input,
-            _events: events,
-        });
+    // slopty: Add device in place of Rename.
+    /// Open Settings → Devices' Add device dialog (the first run's "Add a device").
+    pub fn open_add_device(&mut self, cx: &mut Context<Self>) {
+        self.open_add_device_on(Choice::ThisMac, cx);
+    }
+
+    /// Open the Add device dialog on `choice` (the menu's Add worker, Connect to server).
+    pub fn open_add_device_on(&mut self, choice: Choice, cx: &mut Context<Self>) {
+        self.add_wanted = Some(choice);
         cx.notify();
     }
 
-    /// Escape that reached Settings unclaimed closes the rename dialog first,
+    /// Open the Add device dialog on "A server" with `address` in its field (a link that names
+    /// the server); connecting stays the person's press.
+    pub fn open_add_device_with_server(&mut self, address: String, cx: &mut Context<Self>) {
+        self.add_wanted = Some(Choice::Server);
+        self.add_server = Some(address);
+        cx.notify();
+    }
+
+    fn show_add_device(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_wanted = None;
+        let server = self.add_server.take();
+        if let Some((dialog, _)) = &self.add {
+            if let Some(address) = server {
+                dialog.update(cx, |dialog, cx| dialog.fill_server(address, window, cx));
+            }
+            return;
+        }
+        let state = self.state.clone();
+        let dialog = cx.new(|cx| AddDeviceDialog::new(state, choice, window, cx));
+        if let Some(address) = server {
+            dialog.update(cx, |dialog, cx| dialog.fill_server(address, window, cx));
+        }
+        let closed = cx.subscribe(&dialog, |this, _, _: &Closed, cx| {
+            this.add = None;
+            cx.notify();
+        });
+        self.add = Some((dialog, closed));
+        cx.notify();
+    }
+
+    /// Escape that reached Settings unclaimed closes the Add device dialog first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.rename.take().is_none() {
+        // slopty: the server's code closes the same way.
+        if self.add.take().is_none() && !std::mem::take(&mut self.inviting) {
             return false;
         }
         cx.notify();
         true
-    }
-
-    fn submit_rename(&mut self, cx: &mut Context<Self>) {
-        let Some(dialog) = self.rename.take() else {
-            return;
-        };
-        let name = dialog.input.read(cx).text().trim().to_string();
-        if name.is_empty() {
-            cx.notify();
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let params = serde_json::json!({
-            "op": "renameDevice",
-            "deviceId": dialog.device_id,
-            "name": name,
-        });
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(methods::MUTATE, params).await;
-            this.update(cx, |page, cx| {
-                if let Err(err) = result {
-                    page.error = Some(format!("Rename failed: {err}").into());
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
     }
 
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
@@ -166,60 +169,22 @@ impl DevicesPage {
         cx.notify();
     }
 
-    fn render_rename_dialog(
-        &mut self,
-        viewport: gpui::Size<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).for_popup();
-        let dialog = self.rename.as_ref()?;
-        let input = dialog.input.clone();
-        let card = popover::dialog_card(&theme)
-            .id("rename-device-card")
-            .role(gpui::Role::Dialog)
-            .aria_label("Rename device")
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.rename = None;
+    // slopty: a machine's (or the server's, `"server"`) action, run by the app; it says how
+    // that went in a toast, and a call that does not reach it is said here.
+    fn run_action(&mut self, device_id: String, action: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return };
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let params = serde_json::json!({ "deviceId": device_id, "action": action });
+            let result =
+                engine.client().call(slopty_view_rpc::methods::DEVICE_ACTION, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(err.to_string().into());
                     cx.notify();
-                    cx.stop_propagation();
                 }
-            }))
-            .child(popover::dialog_title(&theme, "Rename device"))
-            .child(
-                div()
-                    .mt(px(12.0))
-                    .child(popover::dialog_field(input.into_any_element())),
-            )
-            .child(
-                div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        widgets::text_action(&theme, widgets::ActionTone::Quiet, "Cancel")
-                            .id("rename-cancel")
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.rename = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        widgets::text_action(&theme, widgets::ActionTone::Solid, "Rename")
-                            .id("rename-save")
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename(cx))),
-                    ),
-            )
-            .into_any_element();
-        Some(popover::modal("rename-device-dialog", viewport, card))
+            })
+            .ok();
+        }));
     }
 
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
@@ -266,16 +231,73 @@ impl Render for DevicesPage {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
         let now = Utc::now();
-        let (devices, local_id, workspace_scope) = {
+        // slopty: every machine is listed, whatever the scope; Add device in place of Rename.
+        let (devices, local_id) = {
             let state = self.state.read(cx);
-            (
-                state.devices.clone(),
-                state.local_device_id.clone(),
-                state.workspace_scope,
-            )
+            (state.devices.clone(), state.local_device_id.clone())
         };
         let copied = self.copied.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        if let Some(choice) = self.add_wanted {
+            self.show_add_device(choice, window, cx);
+        }
+        let viewport = window.viewport_size();
+        let dialog = self
+            .add
+            .as_ref()
+            .map(|(dialog, _)| popover::modal("add-device-dialog", viewport, dialog.clone().into_any_element()));
+        let server = self.state.read(cx).connectivity.server.clone();
+        // slopty: the server's code, while it is up and the app still offers one.
+        let invite = server.as_ref().and_then(|server| server.invite.clone());
+        let invite_dialog = invite.as_ref().filter(|_| self.inviting).map(|invite| {
+            let link = invite.link.clone();
+            let card = popover::dialog_card(&theme)
+                .w(px(360.0))
+                .id("invite-card")
+                .role(gpui::Role::Dialog)
+                .aria_label("Connect a phone or iPad")
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.inviting = false;
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(popover::dialog_title(&theme, "Connect a phone or iPad"))
+                .child(crate::settings::invite::body(&theme, invite))
+                .child(
+                    div()
+                        .mt(px(16.0))
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .children(link.map(|link| {
+                            widgets::text_action(&theme, widgets::ActionTone::Quiet, "Copy link")
+                                .id("invite-copy")
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .aria_label("Copy link")
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                    crate::toast::info(cx, "Link copied");
+                                }))
+                        }))
+                        .child(
+                            widgets::text_action(&theme, widgets::ActionTone::Filled, "Done")
+                                .id("invite-done")
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .aria_label("Done")
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inviting = false;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            popover::modal("invite-dialog", viewport, card.into_any_element())
+        });
         // Split into this device and the rest; each renders as rows in one
         // block, like every other settings page.
         let (local, others): (Vec<_>, Vec<_>) = devices
@@ -287,15 +309,17 @@ impl Render for DevicesPage {
             let is_local = local_id.as_deref() == Some(device.id.as_str());
             let id_copied = copied.as_deref() == Some(device.id.as_str());
             let copy_id = device.id.clone();
-            let rename_id = device.id.clone();
-            let rename_name = device.name.clone();
-            let mut meta: Vec<AnyElement> = vec![
-                div()
-                    .child(SharedString::from(
-                        platform_label(&device.platform).to_string(),
-                    ))
-                    .into_any_element(),
-            ];
+            // slopty: a machine whose worker has not said what it runs shows no platform.
+            let mut meta: Vec<AnyElement> = (!device.platform.is_empty())
+                .then(|| {
+                    div()
+                        .child(SharedString::from(
+                            platform_label(&device.platform).to_string(),
+                        ))
+                        .into_any_element()
+                })
+                .into_iter()
+                .collect();
             if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
                 meta.push(
                     div()
@@ -319,6 +343,19 @@ impl Render for DevicesPage {
                         .into_any_element()
                 });
             }
+            // slopty: what the app offers to do to the machine, before Copy ID.
+            let actions = device.actions.iter().enumerate().map(|(n, action)| {
+                let (id, run) = (device.id.clone(), action.id.clone());
+                widgets::text_action(&theme, widgets::ActionTone::Quiet, action.label.clone())
+                    .id(SharedString::from(format!("device-action-{ix}-{n}")))
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("{} {}", action.label, device.name))
+                    .focus_visible(|s| s.border_2().border_color(theme.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_action(id.clone(), run.clone(), cx);
+                    }))
+            });
             widgets::card_row(&theme, first)
                 .child(
                     div()
@@ -333,6 +370,7 @@ impl Render for DevicesPage {
                         .flex()
                         .items_center()
                         .gap(px(4.0))
+                        .children(actions)
                         .child(
                             widgets::text_action(
                                 &theme,
@@ -349,18 +387,7 @@ impl Render for DevicesPage {
                                     this.copy_id(copy_id.clone(), cx);
                                 },
                             )),
-                        )
-                        .child(
-                            widgets::text_action(&theme, widgets::ActionTone::Filled, "Rename")
-                                .id(("device-rename", ix))
-                                .tab_index(0)
-                                .role(gpui::Role::Button)
-                                .aria_label(format!("Rename {}", device.name))
-                                .focus_visible(|s| s.border_2().border_color(theme.accent))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_rename(rename_id.clone(), rename_name.clone(), cx);
-                                })),
-                        ),
+                        ), // slopty: no Rename.
                 )
                 .into_any_element()
         };
@@ -371,36 +398,131 @@ impl Render for DevicesPage {
             }
             block
         });
-        let others_block = if others.is_empty() {
-            widgets::section_card(&theme).mt(px(8.0)).child(
-                widgets::card_row(&theme, true).child(
+        // slopty: the other machines, then Add device as the block's last row.
+        let mut others_block = widgets::section_card(&theme).mt(px(8.0));
+        let first_add = others.is_empty();
+        for (n, (ix, device)) in others.into_iter().enumerate() {
+            others_block = others_block.child(device_row(ix, device, n == 0));
+        }
+        let others_block = others_block.child(
+            widgets::card_row(&theme, first_add)
+                .child(widgets::row_tile(&theme, crate::icons::PLUS))
+                .child(
                     div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "Sign in on another device to see it here.",
+                        .flex_1()
+                        .min_w(px(160.0))
+                        .child(widgets::row_title(&theme, "Add a device"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![div()
+                                .child(SharedString::from(
+                                    "This Mac, or a Mac or Linux machine you reach with ssh",
+                                ))
+                                .into_any_element()],
                         )),
+                )
+                .child(
+                    widgets::text_action(&theme, widgets::ActionTone::Filled, "Add device")
+                        .id("device-add")
+                        .flex_none()
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .aria_label("Add device")
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_add_device(Choice::ThisMac, window, cx);
+                        })),
                 ),
+        );
+        // slopty: the server this app follows, and a way to change it.
+        let server_actions = server.as_ref().map(|server| server.actions.clone()).unwrap_or_default();
+        let server_block = {
+            let (title, meta, action) = match &server {
+                Some(server) => (
+                    server.name.clone(),
+                    if server.online {
+                        div()
+                            .text_color(theme.success_muted)
+                            .child(SharedString::from("Online"))
+                            .into_any_element()
+                    } else {
+                        div().child(SharedString::from("Offline")).into_any_element()
+                    },
+                    "Change",
+                ),
+                None => (
+                    "No server yet".to_owned(),
+                    div()
+                        .child(SharedString::from("Your devices meet at one Slopty server"))
+                        .into_any_element(),
+                    "Connect",
+                ),
+            };
+            widgets::section_card(&theme).mt(px(8.0)).child(
+                widgets::card_row(&theme, true)
+                    .child(widgets::row_tile(&theme, crate::icons::REMOTE_SERVER))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.0))
+                            .child(widgets::row_title(&theme, title))
+                            .child(widgets::meta_line(&theme, vec![meta])),
+                    )
+                    .children(server_actions.into_iter().enumerate().map(|(n, action)| {
+                        let run = action.id.clone();
+                        widgets::text_action(&theme, widgets::ActionTone::Quiet, action.label.clone())
+                            .id(SharedString::from(format!("server-action-{n}")))
+                            .flex_none()
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("{} server", action.label))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_action("server".to_owned(), run.clone(), cx);
+                            }))
+                    }))
+                    // slopty: the code a phone or iPad scans, where this device shows one.
+                    .when(invite.is_some(), |row| {
+                        row.child(
+                            widgets::text_action(&theme, widgets::ActionTone::Quiet, "Connect a phone")
+                                .id("device-server-invite")
+                                .flex_none()
+                                .tab_index(0)
+                                .role(gpui::Role::Button)
+                                .aria_label("Connect a phone or iPad")
+                                .focus_visible(|s| s.border_2().border_color(theme.accent))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inviting = true;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(
+                        widgets::text_action(&theme, widgets::ActionTone::Quiet, action)
+                            .id("device-server")
+                            .flex_none()
+                            .tab_index(0)
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("{action} server"))
+                            .focus_visible(|s| s.border_2().border_color(theme.accent))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_add_device(Choice::Server, window, cx);
+                            })),
+                    ),
             )
-        } else {
-            let mut block = widgets::section_card(&theme).mt(px(8.0));
-            for (n, (ix, device)) in others.into_iter().enumerate() {
-                block = block.child(device_row(ix, device, n == 0));
-            }
-            block
         };
         let card = div()
             .flex()
             .flex_col()
+            .child(widgets::section_label(&theme, "Server").mt(px(28.0)))
+            .child(server_block)
             .when_some(local_block, |el, block| {
                 el.child(widgets::section_label(&theme, "This device").mt(px(28.0)))
                     .child(block)
             })
-            // A local-only workspace never has other devices to list.
-            .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
-                el.child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
-                    .child(others_block)
-            });
+            // slopty: Slopty lists every machine its server knows.
+            .child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
+            .child(others_block);
 
         let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
         div()
@@ -421,10 +543,8 @@ impl Render for DevicesPage {
                         .child(
                             widgets::page_column()
                                 .child(widgets::page_header(&theme, "Devices", None))
-                                .child(widgets::page_subtitle(
-                                    &theme,
-                                    devices_subtitle(workspace_scope),
-                                ))
+                                // slopty: Slopty's machines, not a synced registry.
+                                .child(widgets::page_subtitle(&theme, DEVICES_SUBTITLE))
                                 .child(card),
                         ),
                 )
@@ -432,6 +552,7 @@ impl Render for DevicesPage {
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(invite_dialog, |el, dialog| el.child(dialog))
     }
 }
 

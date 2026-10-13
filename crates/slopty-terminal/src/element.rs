@@ -1637,15 +1637,22 @@ impl Element for TerminalElement {
                 let top = origin.y + line_height * f32::from(run.start);
                 (top, line_height * f32::from(run.end.saturating_sub(run.start)))
             };
-            let failed = runs.iter().map(band).collect();
+            // A host's chrome (`GridFrame`) draws no blocks: no hairline over a prompt, no
+            // failed block's bar or wash, as the host's own terminals draw none.
+            let blocks = frame.is_none();
+            let failed = if blocks { runs.iter().map(band).collect() } else { Vec::new() };
             let marks: Vec<Option<slopty_grid::SemanticMark>> =
                 rows_view.iter().map(|row| row.line.map(|line| line.mark)).collect();
-            let failed_heads = head_runs(&runs, &marks).iter().map(band).collect();
+            let failed_heads = if blocks {
+                head_runs(&runs, &marks).iter().map(band).collect()
+            } else {
+                Vec::new()
+            };
             let failed_look = FailedLook::new(theme);
             // The alternate screen has no blocks, whatever marks a program leaves on it. From
             // their own pass, not the row loop: deciding them there cost the dense screen's
             // frame about 100 µs (MEASUREMENTS, "the head band on its own step").
-            let rules = if modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
+            let rules = if !blocks || modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
                 Vec::new()
             } else {
                 rule_rows(rows_view.iter().map(|row| row.line.map(|line| line.mark)))

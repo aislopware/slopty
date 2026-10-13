@@ -54,7 +54,7 @@ fn target_of(choice: &str) -> Option<CaptureTarget> {
 impl WorkspaceView {
     /// `slopty.ListScreens`: the windows and displays of `params.chatId`'s machine.
     pub(super) fn live_list_screens(
-        &mut self,
+        &self,
         params: &serde_json::Value,
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {

@@ -94,10 +94,6 @@ parking_lot = "0.12.5"
 uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
 # WHATWG URL parsing: the host a handed-over web page opens at, as a browser reads it.
 url = "2.5.8"
-# Unicode decomposition and general categories, to fold a Latin letter's marks into its ASCII
-# base for a branch name; `url` already builds both through `idna`.
-icu_normalizer = { version = "2.3.0", default-features = false, features = [ "compiled_data" ] }
-icu_properties = { version = "2.3.0", default-features = false, features = [ "compiled_data" ] }
 # The MCP SDK (protocol revision 2026-07-28): the server's Streamable HTTP endpoint and the
 # `slopty mcp` stdio shim. Each crate adds the transport it serves.
 rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }
@@ -149,9 +145,6 @@ two-face = { version = "0.5.2", default-features = false, features = [ "syntect-
 fontdb = "0.23.0"
 ttf-parser = "0.25.1"
 rust-embed = { version = "8.12.0", features = [ "debug-embed", "include-exclude" ] }
-# The code a phone or iPad scans for the server's address (`slopty_app::invite`): the matrix
-# alone, drawn by the app; its image, SVG and PIC renderers are off.
-qrcode = { version = "0.14.1", default-features = false }
 postcard = { version = "1.1.3", default-features = false, features = [ "alloc", "use-std" ] }
 zerocopy = { version = "0.8.58", features = [ "derive" ] }
 toml = "1.1.6"
@@ -307,7 +300,6 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGError",
     "libc",
 ] }
-objc2-image-io = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-core-services = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
@@ -406,10 +398,6 @@ gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = [
 # `VideoLayer`: a stream's pictures go from the decoder straight to a layer of their own, not
 # through a GPUI frame (`slopty-ui::screen::glass`).
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git" }
-# The platform crate behind `gpui_kit::application()`; named directly only so the `e2e`
-# feature can turn on its `test-support` (`Window::render_to_image` on a real window).
-# The native view under a GPUI window (the browser tile puts a web view in it).
-raw-window-handle = "0.6.2"
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git" }
 # The shell (`crates/slopty-shell`): GPUI's helpers for the Tokio bridge, the bridge itself, and
 # gpui-kit's own base crate (editor, input, scrollbar), which the shell calls gpui-base.

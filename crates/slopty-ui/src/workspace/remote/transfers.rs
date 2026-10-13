@@ -106,7 +106,7 @@ pub fn progress_words(done: u64, total: u64, pace: &Pace, now: Instant) -> Strin
     if let Some(left) = pace.left(now, done, total) {
         parts.push(format!("{} left", kit::clock(left)));
     }
-    parts.join(crate::workspace::rollup::META_SEPARATOR)
+    parts.join(" \u{b7} ")
 }
 
 /// A worker's file or folder coming down to a place here.
@@ -218,9 +218,6 @@ impl WorkspaceView {
         if self.transfers.ledger.end(xfer) {
             self.write_ledger();
         }
-        if !self.transfers_in_flight() {
-            self.close_transfers();
-        }
     }
 
     /// Whether any transfer is in flight or waits for its worker.
@@ -293,7 +290,7 @@ impl WorkspaceView {
     ) {
         let xfer = down.xfer;
         let Some(remote) = self.remote(down.worker) else {
-            self.show_notice(format!("The machine is away; nothing was {}", bringing.done()), cx);
+            Self::show_notice(format!("The machine is away; nothing was {}", bringing.done()), cx);
             self.transfer_over(xfer);
             return;
         };
@@ -384,32 +381,21 @@ impl WorkspaceView {
         let Download { name, dest, bringing, .. } = download;
         let text = match (result, bringing) {
             (Ok(()), Bringing::Save) => Some(format!("Saved {}", super::tildes(&dest))),
-            (Ok(()), Bringing::Files) => {
-                let saved = dest.file_name().map_or(name, |n| n.to_string_lossy().into_owned());
-                Some(format!("Saved {saved} in Files"))
-            }
-            // The drop's own window showed it land; the paste it came down for goes on, or
-            // says why not.
-            (Ok(()), Bringing::Drag) | (_, Bringing::Paste) => None,
+            // The paste it came down for goes on, or says why not.
+            (_, Bringing::Paste) => None,
             (Err(e), _) => Some(format!("{name} was not {}: {e}", bringing.done())),
         };
         if let Some(text) = text {
-            self.show_notice(text, cx);
+            Self::show_notice(text, cx);
         }
         cx.notify();
     }
 
     /// Stop transfer `xfer`, whichever way it goes, or one that waits for its worker; what the
     /// worker holds of an upload stays there.
-    ///
-    /// A drop's files stop with the drop itself: the window lets go of it on the worker, whose
-    /// button no longer waits for them, and the drop's other files stop too.
     pub fn cancel_transfer(&mut self, xfer: XferId, cx: &mut Context<Self>) {
-        if let Some(upload) = self.uploads.get(&xfer) {
-            match upload.drag {
-                Some(drag) => self.cancel_drop(upload.tile, drag, cx),
-                None => self.cancel_upload(xfer, cx),
-            }
+        if self.uploads.contains_key(&xfer) {
+            self.cancel_upload(xfer, cx);
             return;
         }
         if let Some(download) = self.transfers.downloads.remove(&xfer) {
@@ -440,11 +426,7 @@ impl WorkspaceView {
                     progress_words(u.done, u.total, &u.pace, now)
                 };
                 let fraction = u.away_since.is_none().then(|| u.fraction());
-                // A drop says the window it lands in, as the person aimed it.
-                let name = match self.item(u.tile).filter(|_| u.drag.is_some()) {
-                    Some(item) => format!("{} into {}", sent(&u.names), self.tile_title(item)),
-                    None => sent(&u.names),
-                };
+                let name = sent(&u.names);
                 let (done, total) = (u.done, u.total);
                 TransferRow { xfer: *xfer, up: true, name, machine, fraction, done, total, words }
             })

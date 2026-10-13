@@ -103,43 +103,6 @@ impl Driver {
         self.ok(&Command::DropFiles { paths, x, y }).await
     }
 
-    /// Carry a drag of `paths` and `texts` to a window point: what it is over (`local`, or the
-    /// worker's `none`, `copy`, `link`, `move`) and the drag the window carries to the worker.
-    ///
-    /// # Errors
-    ///
-    /// When the app answers an error or the socket fails.
-    pub async fn drag_over(
-        &mut self,
-        paths: &[&Path],
-        texts: &[&str],
-        x: f32,
-        y: f32,
-    ) -> Result<(String, Option<String>)> {
-        let paths = paths.iter().map(|p| p.display().to_string()).collect();
-        let texts = texts.iter().map(|&t| t.to_owned()).collect();
-        let command = Command::DragOver { paths, texts, x, y };
-        match self.call(&command).await? {
-            Reply::Over { op, drag } => Ok((op, drag)),
-            Reply::Error { message } => bail!("{command:?}: {message}"),
-            other => bail!("{command:?}: unexpected {other:?}"),
-        }
-    }
-
-    /// Let go of the carried drag at a window point: whether the drop was taken.
-    ///
-    /// # Errors
-    ///
-    /// When the app answers an error or the socket fails.
-    pub async fn drag_drop(&mut self, x: f32, y: f32) -> Result<bool> {
-        let command = Command::DragDrop { x, y };
-        match self.call(&command).await? {
-            Reply::Taken { taken } => Ok(taken),
-            Reply::Error { message } => bail!("{command:?}: {message}"),
-            other => bail!("{command:?}: unexpected {other:?}"),
-        }
-    }
-
     /// Left click at a window point.
     ///
     /// # Errors
@@ -192,16 +155,6 @@ impl Driver {
     /// When the socket breaks.
     pub async fn cmd_drag(&mut self, x: f32, y: f32, to_x: f32, to_y: f32) -> Result<()> {
         self.ok(&Command::Drag { x, y, to_x, to_y, command: true }).await
-    }
-
-    /// Keep the promises of the last drag out of the app in the directory `into`
-    /// ([`Command::KeepDragged`]); returns once every file is written.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks, or a promise could not be kept.
-    pub async fn keep_dragged(&mut self, into: &Path) -> Result<()> {
-        self.ok(&Command::KeepDragged { into: into.display().to_string() }).await
     }
 
     /// Scroll `dx`, `dy` lines at a window point.
@@ -298,30 +251,6 @@ impl Driver {
         self.ok(&Command::UiDeleteBackward).await
     }
 
-    /// Open `count` sessions running `command` in the active workspace.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks.
-    pub async fn open(&mut self, command: &[&str], count: u32) -> Result<()> {
-        let command = command.iter().map(|s| (*s).to_owned()).collect();
-        self.ok(&Command::Open { command, count }).await
-    }
-
-    /// Open a file tile for `path` on the worker.
-    pub async fn open_file(&mut self, path: &str, line: Option<u32>) -> Result<()> {
-        self.ok(&Command::OpenFile { path: path.to_owned(), line }).await
-    }
-
-    /// Add the worker's first display to the workspace.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks.
-    pub async fn add_display(&mut self) -> Result<()> {
-        self.ok(&Command::AddDisplay).await
-    }
-
     /// Start a fresh frame-time window.
     ///
     /// # Errors
@@ -329,24 +258,6 @@ impl Driver {
     /// When the socket breaks.
     pub async fn frames_reset(&mut self) -> Result<()> {
         self.ok(&Command::FramesReset).await
-    }
-
-    /// Bring `session`'s terminal into view, active and holding the keyboard.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks.
-    pub async fn reveal(&mut self, session: &str) -> Result<()> {
-        self.ok(&Command::Reveal { session: session.to_owned() }).await
-    }
-
-    /// Show `item`'s tile, focused and holding the keyboard.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks, or the app holds no tile of `item`.
-    pub async fn focus_item(&mut self, item: &str) -> Result<()> {
-        self.ok(&Command::FocusItem { item: item.to_owned() }).await
     }
 
     /// Activate an agent banner: reveal `tag`'s session, on whichever worker runs it, as the

@@ -34,10 +34,9 @@ pub mod methods {
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
+    // slopty: no thread naming: an agent's thread is titled by the agent.
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
-    pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
-    pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
@@ -196,9 +195,7 @@ pub mod methods {
     pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
     pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
-    /// Permanently restore one chat-owned checkout to its current HEAD and
-    /// remove only its untracked, non-ignored paths.
-    pub const DISCARD_WORKING_TREE: &str = "DiscardWorkingTree";
+    // slopty: no Discard changes (ruled out).
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
@@ -233,6 +230,17 @@ pub mod methods {
     // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
     pub const GET_AGENT_SETTINGS: &str = "GetAgentSettings";
     pub const SET_AGENT_SETTINGS: &str = "SetAgentSettings";
+    // slopty: Settings → Devices' Add device. `AddDevice { kind: thisMac | ssh | server |
+    // serveSsh, target }` streams the run's progress (`run`, `steps`, `share`, `failure`,
+    // `choices`, `added`); `AnswerAddDevice { run, trust | password + addKey | fix | choose }`
+    // answers a run that stopped to ask. Dropping the stream stops the run. `LookOnTailnet`
+    // streams the servers and machines the tailnet answers with.
+    pub const ADD_DEVICE: &str = "AddDevice";
+    pub const ANSWER_ADD_DEVICE: &str = "AnswerAddDevice";
+    pub const LOOK_ON_TAILNET: &str = "LookOnTailnet";
+    // slopty: one of a device's (or the server's, `deviceId: "server"`) actions pressed:
+    // `DeviceAction { deviceId, action }`; the app runs it and says how it went in a toast.
+    pub const DEVICE_ACTION: &str = "DeviceAction";
 }
 
 /// Stable capability error codes transported without provider stderr.

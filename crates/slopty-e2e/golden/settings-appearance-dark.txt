@@ -1,0 +1,40 @@
+Window
+Group │ Settings
+Button │ Back
+TabList │ Settings sections
+Tab │ General
+Tab │ Appearance (focused)
+Tab │ Notifications
+Tab │ Shortcuts
+Tab │ Providers
+Tab │ Devices
+Tab │ Files
+Tab │ Archived sessions
+Button │ Server: e2e-server, Connected
+Button │ Close settings
+Button
+Button
+Button
+Button │ Light theme: Slopty Light
+Button │ Dark theme: Slopty Dark
+Button │ Theme default
+Button │ Slopty
+Button │ Orange
+Button │ Amber
+Button │ Green
+Button │ Cyan
+Button │ Blue
+Button │ Pink
+Switch │ Match wallpaper colors
+Button │ Glass: Opaque
+Button
+Button
+Button │ Reduce motion: System
+Switch │ Pause animations in background
+Button
+Button │ Interface font: Geist
+Button │ Interface font size: 16 px
+Button │ Terminal font: Geist Mono
+Button │ Terminal font size: 13 px
+Button │ Code & diff font: Geist Mono
+Button │ Code & diff font size: 12.5 px

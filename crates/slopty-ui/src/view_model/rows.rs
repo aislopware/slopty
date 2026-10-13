@@ -25,6 +25,7 @@ pub fn device(id: &str, name: &str, linked: bool, now: DateTime<Utc>) -> Device 
         version: None,
         cursor_sdk_version: None,
         capabilities: Vec::new(),
+        actions: Vec::new(),
     }
 }
 

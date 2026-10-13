@@ -3,9 +3,9 @@
 Slopty is a remote-coding workstation in three roles. **Workers** (macOS; Linux for terminals
 and agents) expose shells, agents, windows and displays. One **server** keeps the worker
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
-iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show the workers'
-items as tiles in one tiled workspace (projects, their tabs, each tab a split layout of panes),
-several workers mixed. Every agent (Claude Code, Codex, pi, any ACP agent) is one thread in
+iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show every worker's
+agents, terminals, files and screens in one interface, several workers mixed: zeron's shell,
+copied as Slopty's own (`slopty-shell`), fed by Slopty's view model. Every agent (Claude Code, Codex, pi, any ACP agent) is one thread in
 one agent-neutral model. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
@@ -33,9 +33,9 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      ┌────────────────────────────────────────┼─────────────────────────────┐
                      │ client (macOS app · iOS app · CLI)     ▼                              │
                      │ slopty-client: session state · line cache · prediction · items · layout│
-                     │ slopty-ui (GPUI): workspace · surface element · the views · the keymap│
+                     │ slopty-ui (GPUI): workspace · view model · surface element · the views│
+                     │ slopty-shell (GPUI): the interface, zeron's shell copied              │
                      │ slopty-terminal: the terminal view · its element · find · copy mode   │
-                     │ slopty-kit: the chrome kit · icons · type · colour · motion           │
                      │ slopty-codec (decode) → CVPixelBuffer → gpui surface (zero copy)      │
                      └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -87,8 +87,7 @@ copies of a keystroke and its echo").
 The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**, not bytes
 (mosh / zellij / wezterm-mux model). Consequences:
 
-- Reconnect and multi-client are proven, not just cheap (`crates/slopty-e2e/tests/pair.rs`,
-  `cargo xtask e2e pair`): a joining client receives the current screen plus a scrollback window,
+- Reconnect and multi-client are cheap: a joining client receives the current screen plus a scrollback window,
   nothing is replayed. Two clients share one worker and its items at once, each arranging them in its own layout. A terminal opened on one
   is on the other within a round trip; both type into the same session and the actor serialises
   their keys in arrival order (nothing lost or reordered); one client is the size **driver** (§2,
@@ -1553,9 +1552,7 @@ after that paint reached the glass. Presentation is vsync-synced (the fork's `CA
 keeps `displaySyncEnabled` at its default) and the compositor adds about a refresh, so a
 paint's own clock, or the next display tick, reads a refresh or more early. The video pacer
 stops its arrival → present clock the same way. The iOS simulator reports no presentation;
-there the next display tick stands in. `cargo xtask e2e smooth`
-runs the load scenarios (MEASUREMENTS 2026-09-05, frame time under streaming load, measured
-before the workspace replaced the canvas).
+there the next display tick stands in.
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘, and the palette's "Open settings" open it in the in-app editor, `SettingsEditor`

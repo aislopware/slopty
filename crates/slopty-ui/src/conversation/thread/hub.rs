@@ -27,7 +27,7 @@ use slopty_proto::thread::wire::{
     Authors, Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, SEARCH_THREADS, Start,
     TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
 };
-use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId};
+use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId, ThreadState};
 use slopty_proto::{ClientMsg, RequestId};
 
 use super::git::GitBook;
@@ -486,7 +486,7 @@ impl ThreadHub {
     }
 
     /// Take `thread` up again once it is known here, by its agent's own door
-    /// ([`crate::conversation::thread::view::exited::gone`]): a start of its session, where its
+    /// (`gone`): a start of its session, where its
     /// agent takes one. One whose next message starts it, one that cannot go on, and one still
     /// running are left as they are.
     pub fn resume_when_known(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
@@ -501,8 +501,8 @@ impl ThreadHub {
         }
         let Some(state) = self.threads.mirror(thread).and_then(|m| m.state()) else { return };
         self.waking.remove(&thread);
-        let gone = crate::conversation::thread::view::exited::gone(state);
-        if let Some(crate::conversation::thread::view::exited::Gone::Resume(start)) = gone
+        let gone = gone(state);
+        if let Some(Gone::Resume(start)) = gone
             && !self.resuming(thread)
         {
             let _id = self.resume(thread, *start, cx);
@@ -723,5 +723,76 @@ fn write(cache: &Cache, batch: Writes) {
         && let Err(error) = cache.keep_outbox(&outbox)
     {
         tracing::warn!(%error, "outbox not kept");
+    }
+}
+
+/// What `claude` takes to go on with a session: `--resume <id>`
+/// (`slopty_agent::resume::RESUME_FLAG`, which the app does not link).
+const RESUME_FLAG: &str = "--resume";
+
+/// What a start of a Codex thread takes to take it up again: `resume <thread>`
+/// (`slopty_agent::codex::shared::RESUME`).
+const CODEX_RESUME: &str = "resume";
+
+/// How a thread whose agent exited goes on.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Gone {
+    /// By this start of the agent's own session.
+    Resume(Box<Start>),
+    /// With the next message.
+    ByMessage,
+    /// It does not: the agent cannot take the session up again.
+    Over,
+}
+
+/// How `state`'s thread goes on, when its agent has exited; `None` while it runs.
+fn gone(state: &ThreadState) -> Option<Gone> {
+    use slopty_proto::thread::{Drive, Liveness};
+    let Liveness::Exited { resumable } = state.status.liveness else { return None };
+    let meta = &state.meta;
+    if !resumable {
+        return Some(Gone::Over);
+    }
+    let codex = meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED);
+    let claude = meta.agent.is(AgentId::CLAUDE_CODE) && meta.drive.is(Drive::OBSERVED);
+    if !codex && !claude {
+        return Some(Gone::ByMessage);
+    }
+    if meta.native.trim().is_empty() {
+        return Some(Gone::Over);
+    }
+    let (model, args) = if codex {
+        (None, vec![CODEX_RESUME.to_owned(), meta.native.clone()])
+    } else {
+        let model = state.meters.model_id.clone().filter(|m| !m.trim().is_empty());
+        (model, vec![RESUME_FLAG.to_owned(), meta.native.clone()])
+    };
+    Some(Gone::Resume(Box::new(Start {
+        agent: meta.agent.clone(),
+        cwd: meta.cwd.clone(),
+        drive: Some(meta.drive.clone()),
+        prompt: None,
+        model,
+        mode: None,
+        effort: None,
+        attachments: Vec::new(),
+        args,
+        worktree: None,
+    })))
+}
+
+/// An agent's name as a menu lists it: Claude Code, Codex, pi, an ACP agent by its registry's
+/// name.
+#[must_use]
+pub fn agent_label(agent: &AgentId) -> String {
+    match agent.0.as_str() {
+        AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
+        AgentId::CODEX => "Codex".to_owned(),
+        AgentId::PI => "pi".to_owned(),
+        other => other
+            .strip_prefix("acp:")
+            .filter(|name| !name.is_empty())
+            .unwrap_or("the agent")
+            .to_owned(),
     }
 }

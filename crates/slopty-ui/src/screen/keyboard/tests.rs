@@ -627,7 +627,7 @@ fn the_kits_tab_around_a_remote_window_goes_to_the_worker(cx: &mut gpui::TestApp
     let (out, mut rx) = mpsc::channel(256);
     cx.update(|cx| {
         gpui_kit::init(cx);
-        crate::keymap::install(crate::keymap::Keymap::default(), cx);
+        crate::key_takers::release(cx);
     });
     let opened = Opened {
         stream: StreamId(4),

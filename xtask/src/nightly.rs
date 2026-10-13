@@ -201,20 +201,6 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str, gpui: &[String]) -> V
             needs: None,
         },
         Check {
-            name: "app-soak",
-            program: "cargo".to_owned(),
-            args: own(&[
-                "nextest",
-                "run",
-                "-p",
-                "slopty-ui",
-                "-E",
-                "test(every_tile_kind_opened_and_closed_many_times_leaves_nothing)",
-            ]),
-            env: vec![("SLOPTY_SOAK_CYCLES", "1000".to_owned()), no_spawned_bins()],
-            needs: None,
-        },
-        Check {
             name: "tailnet",
             program: xtask.to_owned(),
             args: own(&["tailnet", "test", "--no-fail-fast"]),

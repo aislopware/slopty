@@ -12,12 +12,12 @@
 //!
 //! Nothing on iOS asks for notes by itself until the first note is posted, and that happens
 //! only away from the front, so a new phone would never be pushed to. Once its server link is
-//! up, and on each return to the front, the phone reads whether notes reach the person and its
-//! navigator says so while they do not (`Workspace::look_at_notes`): never asked, its line
-//! asks, and the answer goes to the server at once; turned off, it opens the system's settings.
+//! up, and on each return to the front, the phone reads whether notes reach the person
+//! (`Workspace::look_at_notes`): never asked, it asks then, the one moment notes start to mean
+//! something, and the answer goes to the server at once; turned off, a toast says where to turn
+//! them on, once for each time they are found off. The self-test never asks: the system's
+//! question would stand over the app it drives.
 
-#[cfg(target_os = "ios")]
-use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(target_os = "ios")]
@@ -56,8 +56,12 @@ pub(crate) fn device(
 pub(crate) struct Pushing {
     /// This installation's id and the public half of its key, read once both could be.
     me: Option<(slopty_core::ClientId, [u8; 32])>,
-    /// The system's question about notes is up: a second press waits for its answer.
+    /// The system's question about notes is up: a second look waits for its answer.
     asking: bool,
+    /// What the last look found, so a toast says notes are off once, not on every return.
+    seen: Option<Alerts>,
+    /// The server's last word on whether it can push here.
+    pushable: Option<bool>,
 }
 
 #[cfg(target_os = "ios")]
@@ -108,32 +112,50 @@ impl Workspace {
         .detach();
     }
 
-    /// Read whether notes reach the person, and have the navigator say so while they do not:
-    /// once the server link is up, and on each return to the front, since the person may have
-    /// turned them on or off in Settings meanwhile.
+    /// Read whether notes reach the person, and ask or say so while they do not: once the
+    /// server link is up, and on each return to the front, since the person may have turned
+    /// them on or off in Settings meanwhile.
     pub(crate) fn look_at_notes(cx: &Context<Self>) {
         cx.spawn(async move |this, cx| {
             let alerts = slopty_platform::notify::settings().await;
-            let _gone = this.update(cx, |ws, cx| ws.show_notes(alerts, cx));
+            let _gone = this.update(cx, |ws, cx| ws.notes_stand(alerts, cx));
         })
         .detach();
     }
 
-    /// The navigator's line for notes that stand at `alerts`, and its door.
-    fn show_notes(&self, alerts: Alerts, cx: &mut Context<Self>) {
-        let this = cx.entity().downgrade();
-        let door: crate::MenuRun = Rc::new(move |_window, cx| {
-            let _gone = this.update(cx, |ws, cx| match alerts {
-                Alerts::Unasked => ws.ask_phone_notes(cx),
-                Alerts::Denied => slopty_platform::notify::open_settings(),
-                Alerts::Allowed | Alerts::Unavailable => {}
-            });
-        });
-        self.view.update(cx, |v, cx| v.set_notes(alerts, door, cx));
+    /// Notes stand at `alerts`: never asked, the system asks now; off, a toast says where they
+    /// are turned on, once until they are found otherwise.
+    fn notes_stand(&mut self, alerts: Alerts, cx: &mut Context<Self>) {
+        let was = self.pushing.seen.replace(alerts);
+        match alerts {
+            Alerts::Unasked if !crate::self_test() => self.ask_phone_notes(cx),
+            Alerts::Denied if was != Some(Alerts::Denied) => Self::show_notice(
+                "Notifications are off for Slopty: turn them on in Settings \u{2192} Slopty to \
+                 hear from your agents away from the app"
+                    .to_owned(),
+                cx,
+            ),
+            Alerts::Unasked | Alerts::Denied | Alerts::Allowed | Alerts::Unavailable => {}
+        }
     }
 
-    /// The navigator's "Allow": the system's question, once while it is up, then the answer
-    /// to the navigator and the server, which may push to this phone from now on.
+    /// The server says whether it can push here: with notes allowed here and the server unable,
+    /// a toast says so once, with no door, since the fix (an APNs key named, the token said
+    /// again) is on the server's machine or comes by itself on the next link.
+    pub(crate) fn server_pushes(&mut self, pushable: bool, cx: &mut Context<Self>) {
+        let was = self.pushing.pushable.replace(pushable);
+        if !pushable && was != Some(false) && self.pushing.seen == Some(Alerts::Allowed) {
+            Self::show_notice(
+                "The server can't send notifications to this device: nothing reaches you here \
+                 while Slopty is away"
+                    .to_owned(),
+                cx,
+            );
+        }
+    }
+
+    /// The system's question, once while it is up, then the answer to the server, which may
+    /// push to this phone from now on.
     fn ask_phone_notes(&mut self, cx: &Context<Self>) {
         if std::mem::replace(&mut self.pushing.asking, true) {
             return;
@@ -142,7 +164,7 @@ impl Workspace {
             let alerts = slopty_platform::notify::ask().await;
             let _gone = this.update(cx, |ws, cx| {
                 ws.pushing.asking = false;
-                ws.show_notes(alerts, cx);
+                ws.pushing.seen = Some(alerts);
                 ws.tell_phone(cx);
             });
         })

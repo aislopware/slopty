@@ -38,6 +38,8 @@ mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 unicode-segmentation = "1"
 unicode-width = "0.2"
 fontdb = "0.23"
+# slopty: the code a phone or iPad scans for the server (`settings::invite`): the matrix alone.
+qrcode = { version = "0.14.1", default-features = false }
 ttf-parser = "0.25.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

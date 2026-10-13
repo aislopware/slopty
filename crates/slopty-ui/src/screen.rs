@@ -833,27 +833,6 @@ pub fn past_grace(key: impl Into<gpui::ElementId>, window: &mut Window, cx: &mut
     over.read(cx).0
 }
 
-/// `shown` once the grace keyed by `key` has passed ([`past_grace`]), nothing before. Its clock
-/// starts as it is laid out, so a view built from another view's state, which cannot start
-/// one while it reads, can hold a grace too.
-#[derive(IntoElement)]
-pub(crate) struct AfterGrace {
-    key: gpui::ElementId,
-    shown: gpui::AnyElement,
-}
-
-impl AfterGrace {
-    pub(crate) fn new(key: impl Into<gpui::ElementId>, shown: impl IntoElement) -> Self {
-        Self { key: key.into(), shown: shown.into_any_element() }
-    }
-}
-
-impl gpui::RenderOnce for AfterGrace {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if past_grace(self.key, window, cx) { self.shown } else { gpui::Empty.into_any_element() }
-    }
-}
-
 /// How often the overlay's rates are recomputed, and the stream's health read.
 const HUD_PERIOD: Duration = Duration::from_millis(1000);
 
@@ -1159,12 +1138,6 @@ impl ScreenView {
     #[must_use]
     pub const fn renders(&self) -> u32 {
         self.renders
-    }
-
-    /// Where the body was drawn, and where the last render laid the picture out for (tests).
-    #[cfg(test)]
-    pub(crate) const fn bounds_rendered(&self) -> (Bounds<Pixels>, Bounds<Pixels>) {
-        (self.bounds, self.rendered_at)
     }
 
     /// Take what the stream hands over: a new shape of picture (the first, a new size) draws
@@ -3420,7 +3393,7 @@ impl Render for ScreenView {
         // While the view has the keys, the workspace's own chords stand back (`!Screen`); with
         // system shortcuts sent, so do the app's ⌘Q and ⌘H (`!SystemKeys`).
         let mut key_context = gpui::KeyContext::new_with_defaults();
-        key_context.add("Screen");
+        key_context.add(CTX);
         if self.system_keys {
             key_context.add(SYSTEM_KEYS_CTX);
         }
@@ -3907,9 +3880,11 @@ const fn is_modifier(code: KeyCode) -> bool {
     )
 }
 
-/// The key context a remote view adds while it sends system shortcuts to its worker: the app
-/// binds ⌘Q, ⌘H and ⌘⌥H outside it ([`crate::keymap::app_chords`]), so there they quit or hide
-/// the remote app.
+/// The key context of a remote window or display's view, which takes every key.
+pub const CTX: &str = "Screen";
+
+/// The key context a remote view adds while it sends system shortcuts to its worker, so there
+/// ⌘Q, ⌘H and ⌘⌥H quit or hide the remote app.
 pub const SYSTEM_KEYS_CTX: &str = "SystemKeys";
 
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the worker read its pasteboard,

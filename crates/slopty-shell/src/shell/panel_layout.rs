@@ -339,6 +339,10 @@ impl Shell {
     /// or what it had while the fit slides it out. Below the saved width
     /// when the window squeezes it.
     pub(super) fn sidebar_content_width(&self) -> f32 {
+        // slopty: on a phone's Sessions page the list is the page.
+        if let Some(width) = self.compact_sidebar_width() {
+            return width;
+        }
         self.fit_exit_content(0)
             .unwrap_or(self.horizontal_fit().sidebar_limit)
     }

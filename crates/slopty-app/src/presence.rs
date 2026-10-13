@@ -3,7 +3,7 @@
 //!
 //! The workspace reads where the person is ([`WorkspaceView::presence`]); the app sends it on
 //! the window's activation and resignation, after any change to the workspace (the workspace
-//! in front, the tiles on screen, the focus), and on a slow clock that also lowers `active`
+//! in front, the views on screen, the focus), and on a slow clock that also lowers `active`
 //! once this Mac has gone unused a while. The server's list of every client's presence decides
 //! whether a handheld stays quiet, and its notices are the only agent moments that post.
 //!
@@ -23,14 +23,14 @@ use slopty_platform::away::Left;
 use slopty_platform::resume::Resume;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Presence, Present, Seat};
 
-use crate::{Workspace, alert, settings};
+use crate::{Workspace, bounce, settings};
 
 /// How long this Mac goes with no input before the person counts as away from it.
 #[cfg(target_os = "macos")]
 const AWAY_AFTER: Duration = Duration::from_secs(120);
 
 /// How often the away clock is read and where the person is told again: a change the
-/// workspace made without telling (a tile scrolled into view) goes up by then at the latest.
+/// workspace made without telling (a view scrolled into sight) goes up by then at the latest.
 const LOOK_EVERY: Duration = Duration::from_secs(5);
 
 /// A change in the workspace goes up this long after it, once the frame that drew it is down,
@@ -229,8 +229,9 @@ impl Workspace {
     pub(crate) fn heard_notice(&mut self, notice: &Notice, cx: &Context<Self>) {
         let Some(heard) = self.view.read(cx).heard(notice) else { return };
         let in_front = cx.active_window().is_some();
+        // The shell's "Input required" chime is its sound; the Dock bounces.
         if heard.kind == NoticeKind::NeedsYou && settings::alerts(&self.settings, in_front) {
-            alert();
+            bounce();
         }
         self.attention.notice(&heard);
     }

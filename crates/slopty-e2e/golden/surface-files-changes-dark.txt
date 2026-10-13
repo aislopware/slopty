@@ -1,0 +1,13 @@
+Window (focused)
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Button │ Attach images
+MultilineTextInput │ Do anything…
+Button │ Show session details
+Button │ Working tree
+Button │ Close tab
+Button │ Expand panel
+Button │ Show files panel
+Button │ Toggle left sidebar
+Button │ New session
+Button │ Sidebar view options

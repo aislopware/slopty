@@ -2,65 +2,24 @@
 //! them, a finished command's badge, the banner when the human is away, and the count of the ones
 //! waiting on the human.
 
-use gpui::accesskit::Role;
-use gpui::{
-    Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, px,
-};
-use slopty_client::layout::{TileRef, WorkerKey};
+use gpui::Context;
+use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
-use slopty_kit::a11y::tab_stop;
-use slopty_kit::chrome_text::ChromeText;
-use slopty_kit::colors::{hsla, hsla_alpha};
-use slopty_kit::draw::Draw;
 use slopty_kit::icons::Status;
-use slopty_proto::items::ItemKind;
 use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::{Phase, Request, Wait};
-use slopty_theme::alpha;
 
-use super::actions::NextAttention;
 use super::attention::About;
-use super::faces::{ThreadStand, ThreadWait};
+use super::faces::ThreadStand;
 use super::{Finished, WorkspaceEvent, WorkspaceView};
 
-/// An agent waiting on the human: where, and the tile that shows it, if one does.
+/// An agent waiting on the human: where.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Waiting {
     /// The worker it runs on.
     pub worker: WorkerKey,
-    /// Its tile here.
-    pub tile: Option<TileRef>,
     /// Its session.
     pub session: SessionId,
-}
-
-/// Something on the attention ladder: an agent in a terminal, or a thread whose row speaks
-/// for it, having no terminal whose agent could (Codex, pi, an ACP agent).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Step {
-    /// A terminal's agent, or a command that ended in it.
-    Session(Waiting),
-    /// A thread.
-    Thread(ThreadWait),
-}
-
-impl Step {
-    /// Its tile here, if one shows it.
-    pub(super) const fn tile(self) -> Option<TileRef> {
-        match self {
-            Self::Session(w) => w.tile,
-            Self::Thread(w) => w.tile,
-        }
-    }
-}
-
-/// What `step` is about, to tell the same agent reached two ways.
-const fn step_about(step: Step) -> About {
-    match step {
-        Step::Session(w) => About::Session(w.session),
-        Step::Thread(w) => About::Thread(w.thread),
-    }
 }
 
 /// A banner's title: what the agent is doing, led by the tile's name when the human gave it
@@ -231,85 +190,15 @@ impl WorkspaceView {
         }
     }
 
-    /// Sessions whose agent is waiting on the human, or whose program is (`OSC 7501`) where no
-    /// agent speaks for the tile: those with a tile in reading order
-    /// (project, tab, pane) so ⌘⇧A walks the tiles predictably, then those the server's
-    /// ladder names on a worker with no tile for them here.
+    /// Sessions whose agent is waiting on the human, on every worker, by worker.
     pub(super) fn needs_you(&self) -> Vec<Waiting> {
-        let mut shown: Vec<(Option<usize>, Waiting)> = self
-            .items()
-            .filter_map(|(worker, i)| match i.kind {
-                ItemKind::Terminal { session } => {
-                    Some(Waiting { worker, tile: Some(TileRef { worker, item: i.id }), session })
-                }
-                _ => None,
-            })
-            .filter(|w| {
-                self.agent_state(w.session).is_some_and(needs_human) || self.program_asks(w.session)
-            })
-            .map(|w| (w.tile.and_then(|t| self.reading_rank(t)), w))
+        let mut out: Vec<Waiting> = self
+            .agent_sessions()
+            .filter(|(_, stand)| needs_human(stand))
+            .map(|(session, stand)| Waiting { worker: stand.worker, session })
             .collect();
-        shown.sort_by_key(|(rank, w)| (*rank, w.tile.map(|t| t.item)));
-        let mut unshown: Vec<Waiting> = self
-            .agent_sessions()
-            .filter(|(session, stand)| {
-                needs_human(stand) && self.tile_of_session(*session).is_none()
-            })
-            .map(|(session, stand)| Waiting { worker: stand.worker, tile: None, session })
-            .collect();
-        unshown.sort_by_key(|w| (w.worker, w.session));
-        shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
-    }
-
-    /// What is left for the person to review, in reading order, each once: the agents whose
-    /// worker says their changes wait unkept (their row's [`Rung::ToReview`], the same on every
-    /// device, until the person keeps them), then the turns that ended while nobody looked. A
-    /// terminal's agent counts while its tile is here; a thread with no terminal (Codex beside
-    /// no TUI, pi, an ACP agent, a message's runs) counts with or without one.
-    pub(super) fn to_review(&self) -> Vec<Step> {
-        let waiting = self
-            .agent_sessions()
-            .filter(|(_, stand)| stand.rung == Rung::ToReview)
-            .filter_map(|(session, _)| self.step_of(About::Session(session)))
-            .chain(self.threads_on(Rung::ToReview).into_iter().map(Step::Thread));
-        let unread = self.agent_turns().filter_map(|about| self.step_of(about));
-        let mut steps: Vec<Step> = Vec::new();
-        for step in self.steps_in_reading_order(waiting).into_iter().chain(unread) {
-            let about = step_about(step);
-            if !steps.iter().any(|s| step_about(*s) == about) {
-                steps.push(step);
-            }
-        }
-        steps
-    }
-
-    /// The agents and threads whose turn stopped on an error, a usage limit among them, in
-    /// reading order: a terminal's agent while its tile is here, a thread with no terminal with
-    /// or without one.
-    pub(super) fn failed(&self) -> Vec<Step> {
-        let sessions = self
-            .agent_sessions()
-            .filter(|(_, stand)| stand.rung == Rung::Failed)
-            .filter_map(|(session, _)| self.step_of(About::Session(session)))
-            .collect::<Vec<_>>();
-        let threads = self.threads_on(Rung::Failed).into_iter().map(Step::Thread);
-        self.steps_in_reading_order(sessions.into_iter().chain(threads))
-    }
-
-    /// The ladder's step for what `about` names: a terminal whose tile is here, or a thread
-    /// its worker's table holds, with its tile when one shows it.
-    pub(super) fn step_of(&self, about: About) -> Option<Step> {
-        match about {
-            About::Session(session) => {
-                let tile = self.tile_of_session(session)?;
-                Some(Step::Session(Waiting { worker: tile.worker, tile: Some(tile), session }))
-            }
-            About::Thread(thread) => {
-                let worker = self.thread_stand(thread)?.worker;
-                let tile = self.tile_of_thread(thread);
-                Some(Step::Thread(ThreadWait { worker, thread, tile }))
-            }
-        }
+        out.sort_by_key(|w| (w.worker, w.session));
+        out
     }
 
     /// Drop what the server said about threads: on `worker` (gone), or everywhere (`None`,
@@ -335,165 +224,21 @@ impl WorkspaceView {
         sessions.saturating_add(threads)
     }
 
-    /// What some agent is doing changed: tell the app the count (the Dock badge), and take
-    /// down the corner's word about any that was answered.
-    pub(super) fn agents_moved(&mut self, cx: &mut Context<Self>) {
-        if self.drop_answered_attention() {
-            cx.notify();
-        }
+    /// What some agent is doing changed: tell the app the count (the Dock badge).
+    pub(super) fn agents_moved(&self, cx: &mut Context<Self>) {
         cx.emit(WorkspaceEvent::NeedsYou(self.needs_you_count()));
     }
 
-    /// What wants the person, on every worker, in the ladder's order: the agents and threads
-    /// that need them, then what failed (the finishes not yet looked at and the threads that
-    /// stopped on an error), then the rest of those finishes. Each rung in reading order, what
-    /// has no tile here after it.
-    pub(super) fn attention_ladder(&self) -> Vec<Step> {
-        let finished = |failed: bool| {
-            self.finished
-                .iter()
-                .filter(|(_, done)| done.exit.is_some_and(|e| e != 0) == failed)
-                .filter_map(|(about, _)| self.step_of(*about))
-                .collect::<Vec<_>>()
-        };
-        let threads = |rung: Rung| self.threads_on(rung).into_iter().map(Step::Thread);
-        let mut ladder = self.steps_in_reading_order(
-            self.needs_you().into_iter().map(Step::Session).chain(threads(Rung::NeedsYou)),
-        );
-        ladder.extend(
-            self.steps_in_reading_order(finished(true).into_iter().chain(threads(Rung::Failed))),
-        );
-        ladder.extend(self.steps_in_reading_order(finished(false)));
-        ladder
-    }
-
-    /// `steps` in reading order (workspace, column, tile), those with no tile here after them
-    /// in the order they came.
-    pub(super) fn steps_in_reading_order(
-        &self,
-        steps: impl IntoIterator<Item = Step>,
-    ) -> Vec<Step> {
-        let mut steps: Vec<(Option<usize>, Step)> = steps
-            .into_iter()
-            .map(|step| (step.tile().and_then(|t| self.reading_rank(t)), step))
-            .collect();
-        steps.sort_by_key(|(rank, _)| (rank.is_none(), *rank));
-        steps.into_iter().map(|(_, step)| step).collect()
-    }
-
-    /// ⌘⇧A: reveal and focus the next thing on the attention ladder, on whichever worker:
-    /// the agents that need the person first, then what failed, then what finished unseen,
-    /// cycling from the focused tile.
-    pub fn next_attention(
-        &mut self,
-        _: &NextAttention,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ladder = self.attention_ladder();
-        if ladder.is_empty() {
-            return;
-        }
-        // From the focused rung, the next; from a finish the last step looked at (and so took
-        // off the ladder), the one that took its place.
-        let at = match self.focused().and_then(|f| ladder.iter().position(|w| w.tile() == Some(f)))
-        {
-            Some(i) => i.saturating_add(1),
-            None => self.attention_at.unwrap_or(0),
-        };
-        let at = if at < ladder.len() { at } else { 0 };
-        self.attention_at = Some(at);
-        let Some(next) = ladder.get(at).copied() else { return };
-        self.reveal_step(next, cx);
-    }
-
-    /// Bring up what `step` is about: a terminal's tile, a thread's, or, with none here, a
-    /// new one on its worker. A worker this client cannot reach says so instead.
-    pub(super) fn reveal_step(&mut self, step: Step, cx: &mut Context<Self>) {
-        match step {
-            Step::Session(w) if w.tile.is_some() => self.reveal_session(w.session, cx),
-            Step::Session(w) => self.show_untiled(w.worker, w.session, cx),
-            Step::Thread(ThreadWait { tile: Some(tile), .. }) => self.go_to(tile.item, cx),
-            Step::Thread(w) => {
-                let Some(worker) = self.workers.get(&w.worker) else { return };
-                if worker.link.is_none() {
-                    let text = format!("{} is not reachable from here", worker.name);
-                    self.show_notice(text, cx);
-                    return;
-                }
-                self.open_thread(w.worker, w.thread, cx);
-            }
-        }
-    }
-
-    /// An agent that needs the human in a session with no tile here: give it one, which the
-    /// worker then syncs to every client. A worker this client cannot reach says so instead.
-    pub(super) fn show_untiled(
-        &mut self,
-        worker: WorkerKey,
-        session: SessionId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(w) = self.workers.get(&worker) else { return };
-        if w.link.is_none() {
-            let text = format!("{} is not reachable from here", w.name);
-            self.show_notice(text, cx);
-            return;
-        }
-        let item = slopty_proto::items::Item {
-            id: slopty_core::ItemId::new(),
-            kind: ItemKind::Terminal { session },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        self.propose(worker, slopty_proto::items::ItemOp::Add(item), cx);
-        self.pending_focus = Some(session);
-    }
-
-    /// A shell command ended in `session`. Long enough, and not watched (on a tile other than
-    /// the focused one, or with the app away), it earns its tile's unseen dot, cleared when the
-    /// tile is focused. Neither the corner nor the bell says it: they speak for agents.
+    /// A shell command ended in `session`. Long enough, and with the app away, it is kept as
+    /// unseen. Neither the bell nor a note says it: they speak for agents.
     pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
-        let tile = self.tile_of_session(session);
-        let watched = self.app_active && tile.is_some_and(|t| self.focused() == Some(t));
         let slow = done.elapsed >= self.slow_command;
-        tracing::info!(%session, watched, slow, elapsed = ?done.elapsed, "command finished");
-        if watched || !slow {
+        tracing::info!(%session, slow, elapsed = ?done.elapsed, "command finished");
+        if self.app_active || !slow {
             return;
         }
         self.finished.insert(About::Session(session), done);
         cx.notify();
-    }
-
-    /// The badge for a long shell command that ended unwatched: its status and how long it
-    /// took, in the tone of its status mark (done or failed). A press focuses the tile (which
-    /// clears it).
-    pub(super) fn finished_badge(
-        &self,
-        tile: TileRef,
-        session: SessionId,
-        done: &Finished,
-        cx: &Draw<'_, Self>,
-    ) -> gpui::AnyElement {
-        let theme = &self.theme;
-        // The status slot beside it already says done or failed in its tone, and the unseen
-        // dot that it went unwatched: this is only the readout, quiet, still a button to it.
-        let quiet = theme.surfaces.text_secondary;
-        let label = done.label();
-        let item = tile.item;
-        let pill = slopty_kit::kit::pill_frame(theme)
-            .id("finished")
-            .debug_selector(move || format!("finished-{}", item.as_uuid()))
-            .role(Role::Button)
-            .aria_label(label.clone())
-            .flex_none()
-            .text_color(hsla(quiet))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla_alpha(quiet, alpha::FAINT)))
-            .child(ChromeText::new(label, px(theme.typography.small())).fill());
-        tab_stop(pill, theme.surfaces.focus)
-            .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
-            .into_any_element()
     }
 }
 

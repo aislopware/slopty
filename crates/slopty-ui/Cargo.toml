@@ -26,45 +26,22 @@ gpui.workspace = true
 # A stream's `VideoLayer` (`screen::glass`).
 gpui_apple.workspace = true
 gpui-kit.workspace = true
-# A worktree's branch named from the first message, a Latin letter's marks folded away
-# (`workspace::starting`).
-icu_normalizer.workspace = true
-icu_properties.workspace = true
 # The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 # A file tile's picture or PDF, decoded or drawn at the size the tile shows it (`file::decode`).
 objc2-core-foundation = { workspace = true, features = [ "CFData", "CFDate", "CFTimeZone" ] }
-objc2-core-graphics = { workspace = true, features = [
-    "CGAffineTransform",
-    "CGBitmapContext",
-    "CGColorSpace",
-    "CGContext",
-    "CGPDFDocument",
-    "CGPDFPage",
-] }
 # GPUI's surface takes `objc2-core-video`'s pixel buffer; a remote picture is handed to it as one
 # (`screen::glass::surface`).
 objc2-core-video.workspace = true
-objc2-image-io = { workspace = true, features = [
-    "CGImageProperties",
-    "CGImageSource",
-    "objc2-core-graphics",
-] }
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
-regex.workspace = true
-# The native view under the window, where a browser tile's page goes (`browser`).
-raw-window-handle.workspace = true
-# Which lines an agent's edit changed, when a file tile reads its file again (`file`).
-similar.workspace = true
 # Which of Claude Code's commands open a dialog in its terminal, as its build says
 # (`slopty_agent::commands`). The captured sessions feed the face's tests too.
 slopty-agent.workspace = true
 slopty-client.workspace = true
 slopty-platform.workspace = true
 slopty-core.workspace = true
-slopty-grid.workspace = true
 # The chrome kit every view is drawn with.
 slopty-kit.workspace = true
 # The terminal view, which the workspace tiles and the keymap takes the commands of.
@@ -91,12 +68,8 @@ e2e = [ "gpui/test-support", "slopty-kit/e2e" ]
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
-# The platform's own text system (Core Text), so the settings editor's tests wrap a line where
-# the Mac does (`settings_editor`).
-gpui_platform = { workspace = true, features = [ "font-kit" ] }
 slopty-client = { workspace = true, features = [ "headless" ] }
 # The kit's test reach (`a11y::tree`, the retained-frame oracle, the held spin clock).
 slopty-kit = { workspace = true, features = [ "e2e" ] }
 # The terminal's test reach (its paint probe's counters, how often a view was drawn).
 slopty-terminal = { workspace = true, features = [ "e2e" ] }
-tempfile.workspace = true

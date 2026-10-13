@@ -31,26 +31,21 @@ use crate::{Workspace, net};
 pub(crate) const UNREACHABLE: &str = "Server offline";
 /// The cluster's word while the server answers on a different build.
 pub(crate) const OTHER_BUILD: &str = "Server runs a different build";
-/// The palette's line that brings the server to this build.
-pub(crate) const UPDATE_SERVER: &str = "Update the server";
+/// How a server on another build is brought to this one from here.
+pub(crate) const UPDATE_HOW: &str = "Press Update on the server in Settings \u{2192} Devices.";
 /// The cluster's line while the server turns this app away: the tailnet policy grants this
 /// device no client role there.
 pub(crate) const NOT_GRANTED: &str = "Server needs a tailnet grant for this device";
 /// Said once as the server starts turning this app away: where a grant is added, and where it
 /// is copied from. Headscale keeps the same grants in its policy file.
-pub(crate) const GRANT_WHERE: &str =
-    "Copy the tailnet grant from the palette into Tailscale's Access controls";
-/// The palette's line that copies [`client_grant`].
-pub(crate) const COPY_GRANT: &str = "Copy the tailnet grant for Slopty's clients";
+pub(crate) const GRANT_WHERE: &str = "Press Copy grant on the server in Settings \u{2192} Devices and paste it into Tailscale's Access controls";
 /// Said once the grant is on the clipboard.
 const GRANT_COPIED: &str = "Copied: paste it into the grants of Tailscale's Access controls";
-/// The palette's line that copies [`worker_grant`].
-pub(crate) const COPY_WORKER_GRANT: &str = "Copy the tailnet grant for Slopty's machines";
 /// What a machine the tailnet's policy turns away as a worker says to do: where the grant is
 /// copied from, and where it goes.
 pub(crate) const WORKER_GRANT_WHERE: &str = "Its tailnet tag grants it no worker role on the \
-     server: run \u{201c}Copy the tailnet grant for Slopty's machines\u{201d} from the palette \
-     and paste it into the grants of Tailscale's Access controls.";
+     server: copy the tailnet grant for Slopty's machines and paste it into the grants of \
+     Tailscale's Access controls.";
 /// The tag a tailnet gives the nodes that run a Slopty worker, which [`client_grant`] names
 /// beside the server's.
 pub(crate) const WORKER_TAG: &str = "tag:slopty-worker";
@@ -266,7 +261,7 @@ impl Workspace {
         let Some(address) = address else {
             self.directory = Directory::default();
             self.drop_unlisted(&unlisted, cx);
-            self.tell_server_presence();
+            self.tell_server_presence(cx);
             return;
         };
         self.directory = Directory::cached(Directory::load(&cache_path(), &address));
@@ -279,6 +274,7 @@ impl Workspace {
         tracing::info!(server = %address, cached = self.directory.workers().count(), "server");
         let (tx, rx) = tokio::sync::oneshot::channel();
         let dial = address.clone();
+        let dial_host = address.host().to_owned();
         self.runtime.spawn(async move {
             let _sent = tx.send(net::serve_directory(dial, first));
         });
@@ -292,7 +288,11 @@ impl Workspace {
             #[cfg(test)]
             caller: None,
         });
-        self.tell_server_presence();
+        self.tell_server_presence(cx);
+        // The self-test's tailnet is the stand-in its harness names (`net::tailnet_status`).
+        if cfg!(target_os = "macos") && crate::invite::loopback(&dial_host) {
+            self.look_up_tailnet_name(cx);
+        }
         cx.spawn(async move |this, cx| {
             let (task, mut events) = match rx.await {
                 Ok(Ok(started)) => started,
@@ -333,7 +333,7 @@ impl Workspace {
         .detach();
     }
 
-    /// Workers that only a dropped directory listed leave with their tiles.
+    /// Workers that only a dropped directory listed leave with their items.
     fn drop_unlisted(&mut self, unlisted: &[WorkerId], cx: &mut Context<Self>) {
         for id in unlisted {
             if self.directory.get(*id).is_none() && self.slot(*id).is_some() {
@@ -343,19 +343,19 @@ impl Workspace {
     }
 
     /// Puts [`client_grant`] on the clipboard, for the tailnet's policy file.
-    pub(crate) fn copy_grant(&self, cx: &mut Context<Self>) {
-        self.copy_grant_text(client_grant(), cx);
+    pub(crate) fn copy_grant(cx: &mut Context<Self>) {
+        Self::copy_grant_text(client_grant(), cx);
     }
 
     /// Puts [`worker_grant`] on the clipboard, for the tailnet's policy file.
-    pub(crate) fn copy_worker_grant(&self, cx: &mut Context<Self>) {
-        self.copy_grant_text(worker_grant(), cx);
+    pub(crate) fn copy_worker_grant(cx: &mut Context<Self>) {
+        Self::copy_grant_text(worker_grant(), cx);
     }
 
     /// Puts `grant` on the clipboard and says where it goes.
-    pub(crate) fn copy_grant_text(&self, grant: String, cx: &mut Context<Self>) {
+    pub(crate) fn copy_grant_text(grant: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(grant));
-        self.show_notice(GRANT_COPIED.to_owned(), cx);
+        Self::show_notice(GRANT_COPIED.to_owned(), cx);
     }
 
     /// One thing the server link said.
@@ -382,7 +382,7 @@ impl Workspace {
                     tracing::warn!(
                         "the server's tailnet policy grants this device no client role; add the grant"
                     );
-                    self.show_notice(GRANT_WHERE.to_owned(), cx);
+                    Self::show_notice(GRANT_WHERE.to_owned(), cx);
                 }
                 self.server_down(why.text().to_owned(), status, cx);
             }
@@ -394,26 +394,44 @@ impl Workspace {
                 }
                 if listing {
                     self.directory_caps(cx);
-                    self.tell_editor_machines(cx);
                     self.save_directory();
                 }
             }
         }
-        self.tell_server_presence();
-        self.refresh_menu(cx);
+        self.publish_device_actions(cx);
         cx.notify();
     }
 
     /// Tell the interface the server this app follows: its name (its address until it has
     /// linked once) and whether the link is up now.
-    pub(crate) fn tell_server_presence(&self) {
+    pub(crate) fn tell_server_presence(&self, cx: &gpui::App) {
         let presence = self.server.as_ref().map(|slot| ServerPresence {
             name: slot.name.clone().unwrap_or_else(|| slot.address.host().to_owned()),
             online: matches!(self.directory.server(), ServerState::Linked { .. }),
+            actions: self.server_actions(cx),
+            // A Mac shows the code a phone or iPad scans; a phone has no one to show it to.
+            invite: cfg!(target_os = "macos")
+                .then(|| crate::invite::invite(&slot.address, self.tailnet_name.as_deref())),
         });
         if let Some(feed) = &self.interface_feed {
             feed.server(presence);
         }
+    }
+
+    /// Ask the tailnet for this Mac's name, for the code of a server on this Mac.
+    fn look_up_tailnet_name(&self, cx: &Context<Self>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _unheard = tx.send(net::tailnet_name().await);
+        });
+        cx.spawn(async move |this, cx| {
+            let name = rx.await.ok().flatten();
+            let _gone = this.update(cx, |ws, cx| {
+                ws.tailnet_name = name;
+                ws.tell_server_presence(cx);
+            });
+        })
+        .detach();
     }
 
     /// The server answers on a different build: the cluster says so (not that it is
@@ -433,7 +451,7 @@ impl Workspace {
         if notice.here() && notice.newer() == Some(Newer::Here) && self.updates_itself() {
             self.update_server(cx);
         } else {
-            self.show_notice(other_build_notice(notice, self.deployer.is_some()), cx);
+            Self::show_notice(other_build_notice(notice, self.deployer.is_some()), cx);
         }
     }
 
@@ -462,7 +480,7 @@ impl Workspace {
         if notice.here() && self.updates_itself() {
             self.update_server(cx);
         } else {
-            self.show_notice(older_server_notice(&notice, self.deployer.is_some()), cx);
+            Self::show_notice(older_server_notice(&notice, self.deployer.is_some()), cx);
         }
     }
 
@@ -520,7 +538,7 @@ impl Workspace {
                 let Some(slot) = self.slot(worker) else { return };
                 match away(now) {
                     None => slot.wake(),
-                    // A worker whose direct link still carries its tiles keeps them: that link
+                    // A worker whose direct link still carries its items keeps them: that link
                     // is the data path's own judge, and a server restarted a moment ago lists
                     // every worker as gone until it registers again.
                     Some(status) if !slot.linked() => {
@@ -532,7 +550,7 @@ impl Workspace {
                     self.view.update(cx, |v, cx| v.forget_server_agents(Some(key), cx));
                 }
             }
-            // The server forgot it: it goes with its tiles, and its pages with their store.
+            // The server forgot it: it goes with its items, and its pages with their store.
             Change::Unlisted(id) => {
                 if let Some(key) = self.slot(id).map(|slot| slot.key) {
                     self.drop_slot(id, cx);
@@ -561,9 +579,11 @@ impl Workspace {
             // What speaks for the agents and threads of the workers this client reaches only
             // through the server.
             Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),
-            // Notes allowed here reach nobody while the server cannot push to this phone: the
-            // navigator says so beside the notes' own line.
-            Change::Pushable(now) => self.view.update(cx, |v, cx| v.set_pushable(now, cx)),
+            // Whether the server can push to this phone; a Mac is never pushed to.
+            #[cfg(target_os = "ios")]
+            Change::Pushable(pushable) => self.server_pushes(pushable, cx),
+            #[cfg(not(target_os = "ios"))]
+            Change::Pushable(_) => {}
         }
     }
 
@@ -626,7 +646,7 @@ impl Workspace {
         let Some(caller) =
             self.server.as_ref().and_then(|s| s.task.as_ref()).map(ServerTask::caller)
         else {
-            self.show_notice(format!("Could not wake {name}: the server does not answer yet"), cx);
+            Self::show_notice(format!("Could not wake {name}: the server does not answer yet"), cx);
             return;
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -635,24 +655,23 @@ impl Workspace {
         });
         cx.spawn(async move |this, cx| {
             let Ok(outcome) = rx.await else { return };
-            let _gone = this.update(cx, |ws, cx| ws.show_notice(wake_notice(&name, outcome), cx));
+            let _gone = this.update(cx, |_, cx| Self::show_notice(wake_notice(&name, outcome), cx));
         })
         .detach();
     }
 }
 
 /// What the person hears once of a server on a different build: what it runs, and how it is
-/// brought to this build: from the palette where this app can run `ssh` (`deploys`), else by
-/// the command on a Mac.
+/// brought to this build, as [`update_how`] says.
 fn other_build_notice(notice: &UpdateNotice, deploys: bool) -> String {
     format!("{}. {} {}", notice.title(), notice.detail(), update_how(notice, deploys))
 }
 
-/// How the server in `notice` is brought to this build: from the palette where this app can
-/// run `ssh` (`deploys`), else by the command on a Mac.
+/// How the server in `notice` is brought to this build: its Update in Settings → Devices where
+/// this app can run `ssh` (`deploys`), else by the command on a Mac.
 fn update_how(notice: &UpdateNotice, deploys: bool) -> String {
     if deploys {
-        format!("Run \u{201c}{UPDATE_SERVER}\u{201d} from the palette.")
+        UPDATE_HOW.to_owned()
     } else {
         format!("Update it from a Mac with {}.", notice.command())
     }
@@ -787,16 +806,17 @@ mod tests {
         let said = |cx: &mut gpui::VisualTestContext| {
             ws.read_with(cx, |ws, cx| {
                 let view = ws.view.read(cx);
-                (view.server_status().map(str::to_owned), view.toast_text())
+                (
+                    view.server_status().map(str::to_owned),
+                    slopty_shell::toast::messages(cx).last().map(ToString::to_string),
+                )
             })
         };
         ws.update(cx, |ws, cx| ws.server_event(ServerEvent::Refused(Refusal::NotGranted), cx));
         cx.run_until_parked();
         assert_eq!(said(cx), (Some(NOT_GRANTED.to_owned()), Some(GRANT_WHERE.to_owned())));
 
-        cx.executor().advance_clock(Duration::from_secs(20));
-        cx.run_until_parked();
-        assert_eq!(said(cx).1, None, "the notice went");
+        cx.update(|_, cx| slopty_shell::toast::clear(cx));
         ws.update(cx, |ws, cx| ws.server_event(ServerEvent::Refused(Refusal::NotGranted), cx));
         cx.run_until_parked();
         assert_eq!(said(cx), (Some(NOT_GRANTED.to_owned()), None), "said once, not per redial");
@@ -809,24 +829,25 @@ mod tests {
         assert_eq!(one["dst"], serde_json::json!(["100.64.0.9"]), "one node, by its address");
     }
 
-    /// The palette's command puts the grant on the clipboard, as the policy file takes it, and
+    /// The server's Copy grant puts the grant on the clipboard, as the policy file takes it, and
     /// says so.
     #[gpui::test]
     fn the_grant_is_copied_for_the_policy_file(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
-        cx.dispatch_action(crate::CopyTailnetGrant);
+        ws.update(cx, |ws, cx| ws.device_action(None, "copy-grant", cx));
         cx.run_until_parked();
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied, Some(client_grant()));
-        let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+        let said =
+            cx.update(|_, cx| slopty_shell::toast::messages(cx).last().map(ToString::to_string));
         assert_eq!(said.as_deref(), Some(GRANT_COPIED));
     }
 
     /// A machine the tailnet's policy turns away as a worker is let in by a grant of the worker
     /// role from nodes tagged as Slopty's machines, to a tagged server or one a member owns;
-    /// the palette's line copies it.
+    /// Add device's fix copies it.
     #[gpui::test]
     fn the_worker_grant_lets_a_tagged_machine_in(cx: &mut gpui::TestAppContext) {
         let grant: serde_json::Value = serde_json::from_str(&worker_grant()).unwrap();
@@ -838,8 +859,8 @@ mod tests {
         assert_eq!(grant["app"][slopty_tailnet::policy::CAP][0]["roles"][0], "worker");
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let (_ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
-        cx.dispatch_action(crate::CopyWorkerGrant);
+        let (ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
+        ws.update(cx, |_, cx| Workspace::copy_worker_grant(cx));
         cx.run_until_parked();
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied, Some(worker_grant()));
@@ -857,7 +878,7 @@ mod tests {
         };
         let here = other_build_notice(&notice, true);
         assert!(here.starts_with("The server runs a different build. It runs 0.0.9"), "{here}");
-        assert!(here.ends_with(&format!("Run \u{201c}{UPDATE_SERVER}\u{201d} from the palette.")));
+        assert!(here.ends_with(UPDATE_HOW), "{here}");
         let phone = other_build_notice(&notice, false);
         assert!(phone.ends_with("Update it from a Mac with slopty server deploy hub."), "{phone}");
     }

@@ -1,116 +1,31 @@
-//! The thread face of an agent's terminal, and threads as tiles of their own.
-//!
-//! Every worker's threads come through one [`ThreadHub`] per worker, fed by the link
+//! Every worker's threads: one [`ThreadHub`] per worker, fed by the link
 //! ([`WorkspaceView::threads_linked`], [`WorkspaceView::thread_table`],
-//! [`WorkspaceView::thread_frame`], [`WorkspaceView::thread_done`]).
+//! [`WorkspaceView::thread_frame`], [`WorkspaceView::thread_done`]), and what their tables last
+//! said of each thread: its title, its place, its terminal and where it stands.
 //!
-//! A terminal whose agent the worker's thread table names can show its TUI or its thread
-//! ([`ThreadView`]), toggled per tile (⌘J, the header's button); it opens on the thread on
-//! every device. The same PTY and session go on under both, and the pick is saved with the
-//! layout. The thread view is made while it shows: its thread is followed while some view of
-//! it is open.
-//!
-//! An agent that runs in a live terminal has one tile, that terminal's, whatever the agent: a
-//! thread tile (`ItemKind::Thread`) is for a thread with no live terminal (an ACP or pi RPC
-//! agent, Codex with no TUI open, an agent whose process has gone). A thread tile whose thread
-//! comes to run in a terminal becomes that terminal's tile in its place, under its id, and its
-//! thread view goes on as the terminal's face ([`WorkspaceView::settle_thread_tiles`]); a start
-//! lands the same way ([`WorkspaceView::start_thread`]).
-//!
-//! An aside ([`hub::is_aside`]) is its thread view's own business: it is no tile, no row and no
-//! terminal's thread here.
+//! An aside ([`hub::is_aside`]) is the shell's own business: it is no row and no terminal's
+//! thread here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Window};
-use slopty_client::layout::{TileRef, WorkerKey};
-use slopty_core::{ItemId, SessionId};
-use slopty_kit::icons::{Status, Symbol};
+use gpui::{App, AppContext as _, Context, Entity};
+use slopty_client::layout::WorkerKey;
+use slopty_core::SessionId;
+use slopty_proto::RequestId;
 use slopty_proto::git::GitOutcome;
-use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
-use slopty_proto::thread::wire::{
-    Authors, IntentDone, ItemHit, NewWorktree, Outcome, RequestCard, SEARCH_THREADS, Start,
-    TableFrame, ThreadFrame, ThreadHit, ThreadHits, ThreadRequest, ThreadRow,
-};
-use slopty_proto::thread::{self, AgentId, IntentId, ThreadId, TurnId};
-use slopty_proto::{ClientMsg, RequestId};
+use slopty_proto::thread::wire::{IntentDone, RequestCard, TableFrame, ThreadFrame, ThreadRow};
+use slopty_proto::thread::{self, AgentId, ThreadId, TurnId};
 
-use super::actions::SwitchFace;
 use super::{WorkspaceEvent, WorkspaceView};
-use crate::conversation::attach::Target;
-use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent, find, hub};
-use crate::palette::{CommandPalette, PaletteItem};
+use crate::conversation::thread::{HubEvent, ThreadHub, hub};
 
-/// What the workspace keeps about faces.
+/// What the workspace keeps of every worker's threads.
 #[derive(Default)]
 pub(super) struct Faces {
-    /// The thread or the TUI, as the person last picked for a session.
-    pub chosen: HashMap<SessionId, bool>,
-    /// Sessions whose thread view takes the keyboard on the next frame.
-    pub focus: HashSet<SessionId>,
-    /// The thread views and the hubs they read.
+    /// The hubs and what their tables last said.
     pub threads: ThreadFaces,
-    /// The live palette's ask of every worker for the threads its words were said in.
-    pub search: ThreadSearch,
-}
-
-/// The live palette's ask of every linked worker for the threads its field's words were said
-/// in, and what they answered. Answers come in any order, from each worker and for each ask,
-/// so each is kept only while its words are still the field's.
-#[derive(Default)]
-pub(super) struct ThreadSearch {
-    /// The words last asked for, trimmed; empty when the field says nothing worth an ask.
-    words: String,
-    /// The wait before the ask: dropped, and so never sent, when the words change first.
-    _asking: Option<gpui::Task<()>>,
-    /// Each worker's threads for `words`, in the order the workers answered.
-    heard: Vec<(WorkerKey, Vec<ThreadHit>)>,
-}
-
-/// The words of the palette's field worth asking the workers' threads for: two characters or
-/// more ([`find::ASK_FROM`]), and not a search of the commands alone (`>`).
-fn threads_query(text: &str) -> Option<&str> {
-    let words = text.trim();
-    (crate::palette::commands_only(words).is_none() && words.chars().count() >= find::ASK_FROM)
-        .then_some(words)
-}
-
-/// What `hit` shows of where its words were said: the words round the match, on one line, an
-/// ellipsis where they were cut.
-fn said(hit: &ItemHit) -> String {
-    let words = hit.text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let before = if hit.cut_before { "…" } else { "" };
-    let after = if hit.cut_after { "…" } else { "" };
-    format!("{before}{words}{after}")
-}
-
-/// A tile to become the tile of the live terminal its agent runs in.
-struct Retile {
-    /// The tile, which keeps its place.
-    tile: TileRef,
-    /// Its item as it stands: a thread's, or the terminal an exited agent left.
-    item: Item,
-    /// The worker the terminal is on.
-    key: WorkerKey,
-    /// The terminal.
-    session: SessionId,
-    /// The exited terminal the tile showed, when it was one.
-    from: Option<SessionId>,
-}
-
-/// A thread's folder and when the thread last changed, as its row says.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ThreadFolder {
-    pub thread: ThreadId,
-    pub agent: AgentId,
-    pub cwd: String,
-    /// The repository that folder is in, once the worker has looked.
-    pub repo: Option<String>,
-    /// The terminal its TUI runs in.
-    pub terminal: Option<SessionId>,
-    pub updated: slopty_core::WallMs,
 }
 
 /// Where a thread works, as its row says.
@@ -137,14 +52,8 @@ pub(super) struct ThreadFaces {
     heard: HashSet<WorkerKey>,
     /// The thread each agent terminal runs, as its worker's table says.
     of_session: HashMap<SessionId, ThreadId>,
-    /// The thread view of each tile that shows one, kept while it shows.
-    views: HashMap<SessionId, Entity<ThreadView>>,
-    asks: HashMap<SessionId, gpui::Subscription>,
     /// Where each worker's threads are kept: a directory per worker under it.
     cache: Option<PathBuf>,
-    /// The thread view of each thread tile, kept while its tile is there.
-    items: HashMap<ItemId, Entity<ThreadView>>,
-    item_asks: HashMap<ItemId, gpui::Subscription>,
     /// Each thread's title as its worker's table last said, for its tile's header.
     titles: HashMap<ThreadId, String>,
     /// The last line each thread's agent wrote as its worker's table last said, for the
@@ -168,273 +77,19 @@ pub(super) struct ThreadFaces {
     server: HashMap<ThreadId, ThreadStand>,
     /// Each machine's plan windows as its agents' rows last said them, for the cluster.
     meters: slopty_client::meters::PlanMeters,
-    /// Starts sent and not yet answered: the worker each went to, the start as it went, and
-    /// the tile it fills. One whose link goes is sent again, as it was, when the link comes
-    /// back: the worker's start outlived the link, and is taken up again.
-    starts: HashMap<IntentId, (WorkerKey, Box<Start>, ItemId)>,
-    /// The thread tile whose view takes the keyboard once it is made.
-    focus_item: Option<ItemId>,
-    /// The view of a thread tile that became its terminal's, for that terminal's face to take
-    /// up: its draft, its scroll and its keyboard go on.
-    handed: HashMap<SessionId, Entity<ThreadView>>,
-    /// Thread tiles becoming their terminal's this moment: their item goes and comes straight
-    /// back under the same id, and the tile keeps its place.
-    retiling: HashSet<ItemId>,
     /// The thread each listed terminal ran until its table stopped naming it there: what a
     /// tile left by an exited agent goes on with once the thread is taken up again elsewhere.
     ended: HashMap<SessionId, ThreadId>,
-    /// Threads opened at a turn, and the turn, until a view of each shows it.
-    going: HashMap<ThreadId, TurnId>,
 }
 
 impl ThreadFaces {
-    /// Each machine's plan windows, for the cluster.
-    pub(super) const fn meters(&self) -> &slopty_client::meters::PlanMeters {
-        &self.meters
-    }
-
     /// Forget a machine's plan windows, as it goes from the workspace.
     pub(super) fn forget_meters(&mut self, worker: WorkerKey) {
         self.meters.forget(worker);
     }
 }
 
-/// What ⌘J says on an agent's tile with its terminal alone: its worker has not named its
-/// thread yet.
-pub(crate) const NO_THREAD_YET: &str = "This agent has no thread yet";
-
-/// What an agent's tile shows: its thread or its agent's own terminal. One button in the
-/// tile's header switches it, and ⌘J.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Face {
-    /// The agent's thread, in place of its TUI.
-    Thread,
-    /// The agent's own terminal.
-    Terminal,
-}
-
-impl Face {
-    /// Its name, on the switch and after the tile's name to a screen reader.
-    #[must_use]
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Thread => "Thread",
-            Self::Terminal => "Terminal",
-        }
-    }
-
-    /// Its icon on the switch.
-    #[must_use]
-    pub(crate) const fn symbol(self) -> Symbol {
-        match self {
-            Self::Thread => Symbol::TextBubble,
-            Self::Terminal => Symbol::Terminal,
-        }
-    }
-
-    /// A word for it in an element's id.
-    #[must_use]
-    pub(crate) const fn key(self) -> &'static str {
-        match self {
-            Self::Thread => "thread",
-            Self::Terminal => "terminal",
-        }
-    }
-}
-
 impl WorkspaceView {
-    /// Keep `thread`, a run of its first message on `key`, and close every other run for good:
-    /// each one's agent ends and its worktree goes, as the worker does for a closed thread
-    /// (`Intent::Discard`). The person's own press, named in the menu line with how many go.
-    pub(super) fn keep_run(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
-        let hub = self.thread_hub(key, cx);
-        let rows: Vec<ThreadRow> = hub.read(cx).threads().rows().rows.values().cloned().collect();
-        let others: Vec<ThreadId> =
-            runs_of(&rows, thread).into_iter().filter(|t| *t != thread).collect();
-        tracing::info!(%thread, closed = others.len(), "keep a run");
-        hub.update(cx, |hub, cx| {
-            for run in others {
-                let _id = hub.intent(run, thread::wire::Intent::Discard, cx);
-            }
-        });
-        cx.notify();
-    }
-
-    /// Tell each thread view how many runs its first message has ([`ThreadView::set_runs`]),
-    /// as its worker's table says.
-    pub(super) fn count_runs(&self, cx: &mut Context<Self>) {
-        let mut views: Vec<(WorkerKey, Entity<ThreadView>)> = Vec::new();
-        for (session, view) in self.thread_faces() {
-            if let Some(key) = self.worker_of_session(*session) {
-                views.push((key, view.clone()));
-            }
-        }
-        for (item, view) in self.thread_items() {
-            if let Some(tile) = self.tile_of(*item) {
-                views.push((tile.worker, view.clone()));
-            }
-        }
-        let mut tables: HashMap<WorkerKey, Vec<ThreadRow>> = HashMap::new();
-        for (key, view) in views {
-            let Some(hub) = self.held_hub(key) else { continue };
-            let rows = tables
-                .entry(key)
-                .or_insert_with(|| hub.read(cx).threads().rows().rows.values().cloned().collect());
-            let runs = runs_of(rows, view.read(cx).thread()).len();
-            view.update(cx, |v, cx| v.set_runs(runs, cx));
-        }
-    }
-
-    /// The faces `session`'s tile can show, in the switch's order: the thread while an agent
-    /// runs in it and its worker's table names its thread, the terminal always.
-    #[must_use]
-    pub(crate) fn faces_of(&self, session: SessionId) -> Vec<Face> {
-        let mut faces = Vec::with_capacity(2);
-        if self.agent_state(session).is_some() && self.session_thread(session).is_some() {
-            faces.push(Face::Thread);
-        }
-        faces.push(Face::Terminal);
-        faces
-    }
-
-    /// The face `session`'s tile shows.
-    #[must_use]
-    pub(crate) fn tile_face(&self, session: SessionId) -> Face {
-        if self.face_shown(session) { Face::Thread } else { Face::Terminal }
-    }
-
-    /// Turn `session`'s tile to `face`.
-    pub(crate) fn set_face(&mut self, session: SessionId, face: Face, cx: &mut Context<Self>) {
-        let thread = face == Face::Thread;
-        if self.face_shown(session) != thread {
-            self.show_face(session, thread, cx);
-        }
-    }
-
-    /// Whether `session`'s tile shows its agent's thread: the person's pick, else the thread.
-    /// Only while an agent runs in it and its worker's table names its thread.
-    #[must_use]
-    pub fn face_shown(&self, session: SessionId) -> bool {
-        self.agent_state(session).is_some()
-            && self.faces.threads.of_session.contains_key(&session)
-            && self.faces.chosen.get(&session).copied().unwrap_or(true)
-    }
-
-    /// The thread view `session`'s tile shows in place of its TUI, once made.
-    #[must_use]
-    pub fn thread_face(&self, session: SessionId) -> Option<&Entity<ThreadView>> {
-        self.faces.threads.views.get(&session).filter(|_| self.face_shown(session))
-    }
-
-    /// The thread view of each agent tile turned to its thread, by its session.
-    pub(super) fn thread_faces(&self) -> impl Iterator<Item = (&SessionId, &Entity<ThreadView>)> {
-        self.faces.threads.views.iter()
-    }
-
-    /// The thread view of each thread tile, by its item.
-    pub(super) fn thread_items(&self) -> impl Iterator<Item = (&ItemId, &Entity<ThreadView>)> {
-        self.faces.threads.items.iter()
-    }
-
-    /// Draw every thread view in `theme`.
-    pub(super) fn set_threads_theme(&self, theme: &slopty_theme::Theme, cx: &mut Context<Self>) {
-        for view in self.faces.threads.views.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.faces.threads.items.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-    }
-
-    /// Start a thread of `agent` on `key`, in `cwd`, with `prompt` as its first word or nothing
-    /// said yet: its tile opens at once saying it is starting, and the worker answers with the
-    /// thread, which takes the tile ([`Self::thread_done`]), or in words why not.
-    pub fn start_thread(
-        &mut self,
-        key: WorkerKey,
-        agent: AgentId,
-        cwd: String,
-        prompt: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let item = ItemId::new();
-        self.open_starting(item, super::starting::Starting::new(key, agent, cwd, None), cx);
-        self.send_start(item, prompt, cx);
-    }
-
-    /// Take a past session of `agent` on `key` up again by a start in `cwd` with `args`, the
-    /// agent's own words for it: its tile opens at once saying it is starting.
-    pub(super) fn start_resumed(
-        &mut self,
-        key: WorkerKey,
-        agent: AgentId,
-        cwd: String,
-        args: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let item = ItemId::new();
-        let starting = super::starting::Starting::new(key, agent, cwd, None).with_args(args);
-        self.open_starting(item, starting, cx);
-        self.send_start(item, None, cx);
-    }
-
-    /// Send the start of the thread on its way in `item`'s tile, with `prompt` as its first
-    /// message and what its draft chose with it. A new worktree is named from `prompt`'s words
-    /// ([`super::starting::worktree_name`]).
-    pub(super) fn send_start(
-        &mut self,
-        item: ItemId,
-        prompt: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(starting) = self.starting.get(item) else { return };
-        let start = Start {
-            agent: starting.agent.clone(),
-            cwd: starting.cwd.clone(),
-            drive: None,
-            worktree: starting.worktree.then(|| NewWorktree {
-                base: starting.base.clone(),
-                ..NewWorktree::named(super::starting::worktree_name(
-                    prompt.as_deref(),
-                    &starting.agent,
-                    item,
-                ))
-            }),
-            prompt,
-            model: starting.chosen.model.clone(),
-            mode: starting.chosen.mode.clone(),
-            effort: starting.chosen.effort.clone(),
-            attachments: starting.chosen.attachments.clone(),
-            args: starting.args.clone(),
-        };
-        self.send_start_as(item, start, cx);
-    }
-
-    /// The tile of the start `key` was sent as intent `id`, while it is unanswered.
-    pub(super) fn start_item(&self, key: WorkerKey, id: IntentId) -> Option<ItemId> {
-        let (at, _, item) = self.faces.threads.starts.get(&id)?;
-        (*at == key).then_some(*item)
-    }
-
-    /// Send `start` for the thread on its way in `item`'s tile, under a new intent, and keep it
-    /// to send again as it was ([`Self::start_again`]).
-    pub(super) fn send_start_as(&mut self, item: ItemId, start: Start, cx: &mut Context<Self>) {
-        let Some(key) = self.starting.get(item).map(|s| s.worker) else { return };
-        let id = IntentId::new();
-        tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
-        self.starting.kept_start(item, start.clone());
-        let start = Box::new(start);
-        self.faces.threads.starts.insert(id, (key, start.clone(), item));
-        self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start }));
-        self.starting_sent(item, cx);
-    }
-
-    /// The thread view a thread tile shows, once made.
-    #[must_use]
-    pub fn thread_item(&self, item: ItemId) -> Option<&Entity<ThreadView>> {
-        self.faces.threads.items.get(&item)
-    }
-
     /// A thread's name, the one every surface calls it by: a thread tile's header, the
     /// navigator, the inbox, and who wrote a line. Where its agent runs in a tile here, the
     /// tile's title (the name the person gave it, its project role, or what the agent titled
@@ -443,93 +98,17 @@ impl WorkspaceView {
     /// either, its agent's name, as a Claude Code terminal is called before its summary.
     #[must_use]
     pub fn thread_title(&self, thread: ThreadId) -> String {
-        let tile = self.thread_terminal(thread).and_then(|session| {
-            self.items().find_map(|(_, item)| match item.kind {
-                ItemKind::Terminal { session: s } if s == session => Some(self.tile_title(item)),
-                _ => None,
-            })
-        });
-        tile.or_else(|| self.thread_named(thread))
+        self.thread_named(thread)
             .or_else(|| {
                 let agent = AgentId::named(self.thread_agent(thread)?);
-                Some(crate::conversation::thread::view::agent_label(&agent))
+                Some(hub::agent_label(&agent))
             })
             .unwrap_or_else(|| THREAD.to_owned())
-    }
-
-    /// The agent `item` shows, by its [`AgentId`] name: a thread's, or the one at work in a
-    /// terminal, as its thread's row names it or else by the kind the terminal reports.
-    pub(super) fn item_agent(&self, item: &Item) -> Option<&str> {
-        match item.kind {
-            ItemKind::Thread { thread } => self.thread_agent(thread),
-            ItemKind::Terminal { session } => self.session_agent(session),
-            _ => None,
-        }
-    }
-
-    /// The agent at work in `session`, by its [`AgentId`] name, as its thread's row names it.
-    pub(super) fn session_agent(&self, session: SessionId) -> Option<&str> {
-        self.agent_state(session)?;
-        let threads = &self.faces.threads;
-        threads.of_session.get(&session).and_then(|t| threads.agents.get(t)).map(|a| a.0.as_str())
-    }
-
-    /// `thread`'s open facts, as its worker's table last said.
-    pub(super) fn thread_facts(
-        &self,
-        thread: ThreadId,
-    ) -> Option<&std::collections::BTreeMap<String, String>> {
-        self.faces.threads.facts.get(&thread)
     }
 
     /// Where `thread` works, as its worker's table last said.
     pub(super) fn thread_place(&self, thread: ThreadId) -> Option<&ThreadPlace> {
         self.faces.threads.places.get(&thread)
-    }
-
-    /// The threads on `worker` whose agent has not exited and works in `root` or under it, as
-    /// their worker's table last said.
-    pub(super) fn threads_working_in(&self, worker: WorkerKey, root: &str) -> Vec<ThreadId> {
-        let threads = &self.faces.threads;
-        let inside = |cwd: &str| {
-            cwd.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-        };
-        threads
-            .stands
-            .iter()
-            .filter(|(_, stand)| stand.worker == worker && !stand.exited)
-            .filter(|(t, _)| {
-                threads.places.get(t).and_then(|p| p.cwd.as_deref()).is_some_and(inside)
-            })
-            .map(|(t, _)| *t)
-            .collect()
-    }
-
-    /// Where each of `worker`'s threads works, as its table last said.
-    pub(super) fn places_on(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadPlace> {
-        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
-        let places = &self.faces.threads.places;
-        hub.read(cx).threads().rows().rows.keys().filter_map(|t| places.get(t).cloned()).collect()
-    }
-
-    /// Where each of `worker`'s threads works and when it last changed, as its table last
-    /// said; a subagent's is its parent's, so it is left out.
-    pub(super) fn thread_folders(&self, worker: WorkerKey, cx: &App) -> Vec<ThreadFolder> {
-        let Some(hub) = self.faces.threads.hubs.get(&worker) else { return Vec::new() };
-        let rows = &hub.read(cx).threads().rows().rows;
-        rows.values()
-            .filter(|row| row.parent.is_none())
-            .filter_map(|row| {
-                Some(ThreadFolder {
-                    thread: row.id,
-                    agent: row.agent.clone(),
-                    cwd: row.cwd.clone()?,
-                    repo: row.repo.clone(),
-                    terminal: row.terminal,
-                    updated: row.updated_ms,
-                })
-            })
-            .collect()
     }
 
     /// `thread`'s title as its worker's table last said, while it has one.
@@ -542,11 +121,6 @@ impl WorkspaceView {
         self.faces.threads.lines.get(&thread).map(String::as_str)
     }
 
-    /// The terminal `thread`'s TUI runs in, as its worker's table last said.
-    pub(super) fn thread_terminal(&self, thread: ThreadId) -> Option<SessionId> {
-        self.faces.threads.terminals.get(&thread).copied()
-    }
-
     /// The thread `session`'s agent runs, as its worker's table says.
     pub(super) fn session_thread(&self, session: SessionId) -> Option<ThreadId> {
         self.faces.threads.of_session.get(&session).copied()
@@ -555,11 +129,6 @@ impl WorkspaceView {
     /// The agent that runs `thread`, by its [`AgentId`] name, as its worker's table last said.
     pub(super) fn thread_agent(&self, thread: ThreadId) -> Option<&str> {
         self.faces.threads.agents.get(&thread).map(|a| a.0.as_str())
-    }
-
-    /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
-    pub(super) fn kind_glyph(&self, item: &Item) -> slopty_kit::icons::Mark {
-        super::tile::kind_icon(item, self.item_agent(item))
     }
 
     /// Keep each worker's threads in `dir`, a directory per worker.
@@ -577,12 +146,6 @@ impl WorkspaceView {
         self.faces.threads.hubs.iter().map(|(key, hub)| (*key, hub))
     }
 
-    /// `thread` as a line's author: its agent, and its name ([`Self::thread_title`]).
-    pub(super) fn writer_of(&self, thread: ThreadId) -> Option<crate::authorship::Writer> {
-        let agent = self.faces.threads.agents.get(&thread)?.clone();
-        Some(crate::authorship::Writer { agent, title: self.thread_title(thread) })
-    }
-
     /// The worker whose table holds `thread`.
     pub(super) fn worker_of_thread(&self, thread: ThreadId, cx: &App) -> Option<WorkerKey> {
         self.faces
@@ -591,32 +154,6 @@ impl WorkspaceView {
             .iter()
             .find(|(_, hub)| hub.read(cx).threads().rows().rows.contains_key(&thread))
             .map(|(key, _)| *key)
-    }
-
-    /// Show `thread` at `turn` once a view of it is there.
-    pub(super) fn go_to_turn_when_shown(&mut self, thread: ThreadId, turn: TurnId) {
-        self.faces.threads.going.insert(thread, turn);
-    }
-
-    /// Each view of a thread opened at a turn goes to it; the thread is let go of once one has.
-    pub(super) fn settle_going(&mut self, cx: &mut Context<Self>) {
-        if self.faces.threads.going.is_empty() {
-            return;
-        }
-        let views: Vec<Entity<ThreadView>> = self
-            .faces
-            .threads
-            .items
-            .values()
-            .chain(self.faces.threads.views.values())
-            .cloned()
-            .collect();
-        for view in views {
-            let thread = view.read(cx).thread();
-            if let Some(turn) = self.faces.threads.going.remove(&thread) {
-                view.update(cx, |v, cx| v.go_to_turn(turn, cx));
-            }
-        }
     }
 
     /// `key`'s threads, made the first time they are asked for.
@@ -643,13 +180,6 @@ impl WorkspaceView {
                 }
             }
             HubEvent::Table => this.threads_of_sessions(key, cx),
-            HubEvent::Authors => this.author_files(key, cx),
-            // An aside's fork stays in the sheet of the view that asked it.
-            HubEvent::Started { thread, aside: false, .. } => this.open_thread(key, *thread, cx),
-            HubEvent::Git(repo) => {
-                this.worktree_heard(key, repo, cx);
-                this.scripts_heard(key, repo, cx);
-            }
             HubEvent::Thread(_) => this.answers_heard(cx),
             _ => {}
         });
@@ -657,94 +187,6 @@ impl WorkspaceView {
         self.faces.threads.hubs.insert(key, hub.clone());
         self.hub_agents(key, cx);
         hub
-    }
-
-    /// What `key` found in its threads for the words its hub last asked, or the palette did.
-    pub fn thread_hits(&mut self, key: WorkerKey, hits: ThreadHits, cx: &mut Context<Self>) {
-        self.palette_threads_heard(key, &hits, cx);
-        let hub = self.thread_hub(key, cx);
-        hub.update(cx, |hub, cx| hub.thread_hits(hits, cx));
-    }
-
-    /// The live palette's field says `text`. Once it rests [`find::ASK_AFTER`], every worker
-    /// linked then is asked which of its threads said it; a worker with no link is not asked,
-    /// and nothing waits for it. New words drop the last ask's wait and its answers, and an
-    /// answer for any other words is never shown ([`Self::palette_threads_heard`]).
-    pub(super) fn ask_threads(&mut self, text: &str, cx: &Context<Self>) {
-        let words = threads_query(text).unwrap_or_default();
-        if words == self.faces.search.words {
-            return;
-        }
-        if words.is_empty() {
-            self.faces.search = ThreadSearch::default();
-            return;
-        }
-        let asked = words.to_owned();
-        let words = words.to_owned();
-        let asking = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(find::ASK_AFTER).await;
-            let _gone = this.update(cx, |this, _cx| {
-                let linked: Vec<WorkerKey> = this
-                    .workers
-                    .iter()
-                    .filter(|(_, w)| w.link.is_some())
-                    .map(|(k, _)| *k)
-                    .collect();
-                for key in linked {
-                    let ask = ThreadRequest::Search { query: words.clone(), limit: SEARCH_THREADS };
-                    this.send(key, ClientMsg::Thread(ask));
-                }
-            });
-        });
-        self.faces.search = ThreadSearch { words: asked, _asking: Some(asking), heard: Vec::new() };
-    }
-
-    /// `key` answered the palette's ask: kept, and the Threads section drawn again, while its
-    /// words are still the ones asked for.
-    fn palette_threads_heard(&mut self, key: WorkerKey, hits: &ThreadHits, cx: &mut Context<Self>) {
-        let search = &mut self.faces.search;
-        if search.words.is_empty() || hits.query != search.words {
-            return;
-        }
-        search.heard.retain(|(k, _)| *k != key);
-        search.heard.push((key, hits.threads.clone()));
-        let Some(palette) = self.palette.clone().filter(|p| p.read(cx).is_live()) else {
-            return;
-        };
-        let lines = self.palette_thread_lines();
-        let words = self.faces.search.words.clone();
-        palette.update(cx, |p: &mut CommandPalette, cx| p.set_threads(&words, lines, cx));
-    }
-
-    /// The Threads section: each worker's threads in its own order, best first, taken in turn
-    /// so no worker's best waits behind another's worst; a thread's line names its worker when
-    /// there are two to tell apart.
-    fn palette_thread_lines(&self) -> Vec<PaletteItem> {
-        let heard = &self.faces.search.heard;
-        let named = self.workers.values().filter(|w| w.link.is_some()).count() > 1;
-        let longest = heard.iter().map(|(_, threads)| threads.len()).max().unwrap_or_default();
-        (0..longest)
-            .flat_map(|rank| {
-                heard.iter().filter_map(move |(key, threads)| Some((*key, threads.get(rank)?)))
-            })
-            .filter_map(|(key, hit)| {
-                let first = hit.hits.first()?;
-                let title = self.thread_title(hit.thread);
-                let agent = self.thread_agent(hit.thread);
-                let mut line =
-                    PaletteItem::thread_hit(&title, agent, &said(first), hit.thread, first.turn);
-                if named {
-                    line.worker = self.workers.get(&key).map(|w| w.name.clone());
-                }
-                Some(line)
-            })
-            .collect()
-    }
-
-    /// `key` said who wrote the lines of a file a tile shows.
-    pub fn thread_authors(&mut self, key: WorkerKey, authors: Authors, cx: &mut Context<Self>) {
-        let hub = self.thread_hub(key, cx);
-        hub.update(cx, |hub, cx| hub.heard_authors(authors, cx));
     }
 
     /// `key`'s answer to a git op its hub asked (the commit sheet, the pull request view).
@@ -766,21 +208,6 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
-        let again: Vec<ClientMsg> = self
-            .faces
-            .threads
-            .starts
-            .iter()
-            .filter(|(_, (at, ..))| *at == key)
-            .map(|(id, (_, start, _))| {
-                ClientMsg::Thread(ThreadRequest::Start { id: *id, start: start.clone() })
-            })
-            .collect();
-        for msg in again {
-            self.send(key, msg);
-        }
-        self.starting.linked(key, cx);
-        self.ask_past_places(key, None);
     }
 
     /// Tell `key`'s thread hub what that machine can start now ("Continue in…"), if it has
@@ -790,26 +217,6 @@ impl WorkspaceView {
             let agents = self.startable_on(key);
             hub.update(cx, |hub, cx| hub.set_agents(agents, cx));
         }
-    }
-
-    /// The row of `key`'s thread table that names `session` as its terminal: the agent a test
-    /// plays there moves that row, as the worker's codec does.
-    #[cfg(test)]
-    pub(super) fn row_of_terminal(
-        &self,
-        key: WorkerKey,
-        session: SessionId,
-        cx: &App,
-    ) -> Option<ThreadRow> {
-        let hub = self.faces.threads.hubs.get(&key)?.read(cx);
-        let rows = &hub.threads().rows().rows;
-        rows.values().find(|r| r.terminal == Some(session) && r.parent.is_none()).cloned()
-    }
-
-    /// What `key`'s thread hub was told it can start.
-    #[cfg(test)]
-    pub(super) fn hub_agents_of(&self, key: WorkerKey, cx: &App) -> Option<Vec<AgentId>> {
-        Some(self.faces.threads.hubs.get(&key)?.read(cx).agents().to_vec())
     }
 
     /// The link to `key` went: its thread views show what they last knew. A start sent there
@@ -844,258 +251,9 @@ impl WorkspaceView {
         if self.view_start_done(key, done, cx) {
             return;
         }
-        if self.faces.threads.starts.get(&done.id).is_some_and(|(at, ..)| *at == key) {
-            let Some((_, start, item)) = self.faces.threads.starts.remove(&done.id) else {
-                return;
-            };
-            let agent = start.agent;
-            match &done.outcome {
-                Outcome::Started { thread } => self.start_landed(key, item, *thread, &agent, cx),
-                Outcome::Refused { reason } => self.start_failed(key, item, reason.clone(), cx),
-                Outcome::SetupFailed { setup, code } => {
-                    self.setup_failed(item, setup.clone(), *code, cx);
-                }
-                Outcome::Unsupported { .. } | Outcome::Done | Outcome::Accepted => {
-                    let text = format!(
-                        "{} can\u{2019}t start {}",
-                        self.worker_name(key),
-                        crate::conversation::thread::view::agent_label(&agent)
-                    );
-                    self.start_failed(key, item, text, cx);
-                }
-            }
-            return;
-        }
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, |hub, cx| hub.done(done, cx));
         }
-    }
-
-    /// Go to `thread`'s tile, or add one on `key`: its terminal's, where its agent runs in a
-    /// live one.
-    pub(super) fn open_thread(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
-        if let Some(tile) = self.tile_of_thread(thread) {
-            self.go_to(tile.item, cx);
-            return;
-        }
-        if let Some((at, session)) = self.live_terminal(thread) {
-            self.open_terminal_as(at, session, ItemId::new(), cx);
-            return;
-        }
-        self.open_thread_as(key, thread, ItemId::new(), cx);
-    }
-
-    /// Add `session`'s tile on `key` as item `id`, to the front with the keyboard: a start's
-    /// tile keeps its place under it.
-    pub(super) fn open_terminal_as(
-        &mut self,
-        key: WorkerKey,
-        session: SessionId,
-        id: ItemId,
-        cx: &mut Context<Self>,
-    ) {
-        let item = Item {
-            id,
-            kind: ItemKind::Terminal { session },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        tracing::info!(id = %item.id, %session, "open an agent's terminal");
-        self.propose(key, ItemOp::Add(item), cx);
-        self.faces.focus.insert(session);
-        self.pending_focus = Some(session);
-        cx.notify();
-    }
-
-    /// The live terminal `thread`'s agent runs in, as its worker's table last said, and the
-    /// worker it is on: one that worker lists, whose program has not exited.
-    pub(super) fn live_terminal(&self, thread: ThreadId) -> Option<(WorkerKey, SessionId)> {
-        let session = self.own_terminal(thread)?;
-        self.workers.iter().find_map(|(key, w)| {
-            let summary = w.sessions.get(&session)?;
-            let live =
-                !matches!(summary.state, slopty_proto::terminal::SessionState::Exited { .. });
-            live.then_some((*key, session))
-        })
-    }
-
-    /// Every thread tile whose thread runs in a live terminal now becomes that terminal's tile.
-    /// It keeps its place and its id where the terminal has no tile yet, and its thread view
-    /// goes on as the terminal's face; where the terminal has one, the thread tile goes and
-    /// that tile takes its focus. So does the tile of an agent that exited, once its thread is
-    /// taken up again in another terminal: the exited session closes, and its face and draft go
-    /// on in the new one.
-    pub(super) fn settle_thread_tiles(&mut self, cx: &mut Context<Self>) {
-        let found: Vec<Retile> = self
-            .layout
-            .tiles()
-            .filter_map(|tile| {
-                let item = self.item(tile)?;
-                let (thread, from) = match item.kind {
-                    ItemKind::Thread { thread } => (thread, None),
-                    ItemKind::Terminal { session } if !self.session_live(session) => {
-                        (*self.faces.threads.ended.get(&session)?, Some(session))
-                    }
-                    _ => return None,
-                };
-                let (key, session) = self.live_terminal(thread)?;
-                let elsewhere = from.is_some() && self.tile_of_session(session).is_some();
-                (!elsewhere).then(|| Retile { tile, item: item.clone(), key, session, from })
-            })
-            .collect();
-        for retile in found {
-            self.retile(retile, cx);
-        }
-        let tiled: HashSet<SessionId> = self
-            .items()
-            .filter_map(|(_, i)| match i.kind {
-                ItemKind::Terminal { session } => Some(session),
-                _ => None,
-            })
-            .collect();
-        self.faces.threads.ended.retain(|s, _| tiled.contains(s));
-    }
-
-    /// Whether `session` is listed by its worker and its program has not exited.
-    fn session_live(&self, session: SessionId) -> bool {
-        self.workers.values().any(|w| {
-            w.sessions.get(&session).is_some_and(|s| {
-                !matches!(s.state, slopty_proto::terminal::SessionState::Exited { .. })
-            })
-        })
-    }
-
-    /// A tile becomes its agent's terminal's, as `retile` says.
-    fn retile(&mut self, retile: Retile, cx: &mut Context<Self>) {
-        let Retile { tile, item, key, session, from } = retile;
-        tracing::info!(item = %tile.item, %session, ?from, "a tile becomes its agent's terminal's");
-        let focused = self.focused() == Some(tile);
-        let threads = &mut self.faces.threads;
-        let view = if let Some(old) = from {
-            threads.asks.remove(&old);
-            threads.views.remove(&old)
-        } else {
-            threads.item_asks.remove(&tile.item);
-            threads.items.remove(&tile.item)
-        };
-        if let Some(view) = view
-            && !threads.views.contains_key(&session)
-        {
-            threads.handed.insert(session, view);
-        }
-        if let Some(old) = from
-            && let Some(face) = self.faces.chosen.remove(&old)
-        {
-            self.faces.chosen.insert(session, face);
-        }
-        if focused {
-            self.faces.focus.insert(session);
-        }
-        if let Some(there) = self.tile_of_session(session) {
-            self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
-            if focused {
-                self.focus_tile(there, cx);
-            }
-            return;
-        }
-        let terminal = Item {
-            id: tile.item,
-            kind: ItemKind::Terminal { session },
-            name: item.name,
-            facts: item.facts,
-        };
-        if key == tile.worker {
-            self.faces.threads.retiling.insert(tile.item);
-            self.propose(key, ItemOp::Remove(tile.item), cx);
-            self.propose(key, ItemOp::Add(terminal), cx);
-            self.faces.threads.retiling.remove(&tile.item);
-            if focused {
-                self.after_focus_moved(cx);
-            }
-        } else {
-            // An item lives on its worker's registry: one on another machine is a tile there.
-            self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
-            self.propose(key, ItemOp::Add(Item { id: ItemId::new(), ..terminal }), cx);
-        }
-        // The exited session's last screen gave way to the agent taken up again.
-        if let Some(old) = from
-            && let Some(at) = self.worker_of_session(old)
-        {
-            self.close_session_on(at, old);
-        }
-    }
-
-    /// Whether thread tile `item` is becoming its terminal's this moment, so its going leaves
-    /// its place in the layout to the item that comes back under its id.
-    pub(super) fn retiling(&self, item: ItemId) -> bool {
-        self.faces.threads.retiling.contains(&item)
-    }
-
-    /// Add `thread`'s tile on `key` as item `id`: a start's tile keeps its place under it.
-    pub(super) fn open_thread_as(
-        &mut self,
-        key: WorkerKey,
-        thread: ThreadId,
-        id: ItemId,
-        cx: &mut Context<Self>,
-    ) {
-        let item = Item {
-            id,
-            kind: ItemKind::Thread { thread },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        tracing::info!(id = %item.id, %thread, "open thread");
-        self.propose(key, ItemOp::Add(item), cx);
-        cx.notify();
-    }
-
-    /// A closed agent tile taken back after its session ended: `thread`'s tile where it was
-    /// (`at`), focused, and its agent taken up again through its own door once the thread is
-    /// known here ([`ThreadHub::resume_when_known`]).
-    pub(super) fn reopen_thread(
-        &mut self,
-        key: WorkerKey,
-        thread: ThreadId,
-        at: Option<slopty_client::layout::Pos>,
-        cx: &mut Context<Self>,
-    ) {
-        let tile = self.tile_of_thread(thread).unwrap_or_else(|| {
-            let id = ItemId::new();
-            self.open_thread_as(key, thread, id, cx);
-            TileRef { worker: key, item: id }
-        });
-        if let Some(at) = at {
-            self.layout.put_back(tile, at);
-            self.layout_touched(cx);
-        }
-        self.focus_tile(tile, cx);
-        let hub = self.thread_hub(key, cx);
-        hub.update(cx, |hub, cx| hub.resume_when_known(thread, cx));
-    }
-
-    /// The tile that shows `thread`, on any worker: its own, else its terminal's.
-    pub(super) fn tile_of_thread(&self, thread: ThreadId) -> Option<TileRef> {
-        let own = self.items().find_map(|(worker, item)| match item.kind {
-            ItemKind::Thread { thread: t } if t == thread => {
-                Some(TileRef { worker, item: item.id })
-            }
-            _ => None,
-        });
-        let live = || self.tile_of_session(self.live_terminal(thread)?.1);
-        let own_terminal = || self.tile_of_session(self.own_terminal(thread)?);
-        // The tile an agent left when it exited goes on with its thread taken up again.
-        let left = || {
-            let ended = &self.faces.threads.ended;
-            ended.iter().find(|(_, t)| **t == thread).and_then(|(s, _)| self.tile_of_session(*s))
-        };
-        own.or_else(live).or_else(own_terminal).or_else(left)
-    }
-
-    /// The terminal whose own thread `thread` is: not one a subagent's row shares with its
-    /// parent's.
-    pub(super) fn own_terminal(&self, thread: ThreadId) -> Option<SessionId> {
-        self.thread_terminal(thread).filter(|s| self.session_thread(*s) == Some(thread))
     }
 
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
@@ -1168,449 +326,19 @@ impl WorkspaceView {
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
         for thread in came_to_need.into_iter().filter(|_| linked) {
             cx.emit(WorkspaceEvent::Attention(thread));
-            let Some(stand) = self.faces.threads.stands.get(&thread) else { continue };
-            let word = super::agents::agent_status_word(stand).to_lowercase();
-            if let Some(tile) = self.tile_of_thread(thread) {
-                self.attention_toast(tile, Status::NeedsYou, &word, cx);
-            }
         }
         if moved {
             self.update_awake(cx);
             self.agents_moved(cx);
-            self.update_run_targets(cx);
         }
         // A note's verdict that waited for its request answers it as the table brings it.
         if self.approvals.taps_waiting() {
             self.settle_taps(cx);
         }
         if self.faces.threads.meters != meters_before {
-            App::notify(cx, self.chrome.cluster.entity_id());
-        }
-        self.settle_thread_tiles(cx);
-        self.count_runs(cx);
-        // The navigator's agents say their newest words as the table brings them.
-        cx.notify();
-    }
-
-    /// Make the thread views the shown tiles want, and let go of those no tile shows: the
-    /// last view of a thread unfollows it.
-    fn sync_thread_faces(
-        &mut self,
-        wanted: &[SessionId],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        for session in wanted {
-            let Some(thread) = self.faces.threads.of_session.get(session).copied() else {
-                continue;
-            };
-            let current = self.faces.threads.views.get(session).map(|v| v.read(cx).thread());
-            if current == Some(thread) {
-                continue;
-            }
-            let Some(key) = self.worker_of_session(*session) else { continue };
-            let handed = self.faces.threads.handed.remove(session);
-            let view = if let Some(view) = handed.filter(|v| v.read(cx).thread() == thread) {
-                view
-            } else {
-                let hub = self.thread_hub(key, cx);
-                let theme = self.theme.clone();
-                let draft = self.opening_draft(key, thread, cx);
-                cx.new(|cx| {
-                    let mut view = ThreadView::new(hub, thread, theme, window, cx);
-                    if let Some((draft, kept)) = draft {
-                        view.restore_kept_draft(&draft, kept, window, cx);
-                    }
-                    view
-                })
-            };
-            let session = *session;
-            // The keyboard follows the tile into the new view from what it replaces: the
-            // thread's last view, the TUI the tile showed until its thread was known, or the
-            // view itself, handed from the thread tile this one was.
-            let replaced =
-                self.faces.threads.views.get(&session).map(|v| v.read(cx).focus_handle(cx));
-            let terminal = self.terminals.get(&session).map(|t| t.read(cx).focus_handle(cx));
-            let own = Some(view.read(cx).focus_handle(cx));
-            if replaced
-                .into_iter()
-                .chain(terminal)
-                .chain(own)
-                .any(|h| h.contains_focused(window, cx))
-            {
-                self.faces.focus.insert(session);
-            }
-            let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
-                this.thread_view_event(session, &view, event.clone(), cx);
-            });
-            self.faces.threads.asks.insert(session, asks);
-            self.faces.threads.views.insert(session, view);
-        }
-        // A view that goes while it holds the keyboard hands it back to its tile, which then
-        // shows its TUI or its thread's next view: a thread that moved to another terminal or
-        // ended must not leave the keyboard with nothing.
-        let threads = &self.faces.threads;
-        let held = threads.views.iter().find_map(|(s, view)| {
-            let gone = !wanted.contains(s) || !threads.of_session.contains_key(s);
-            (gone && view.read(cx).focus_handle(cx).contains_focused(window, cx)).then_some(*s)
-        });
-        if held.is_some() {
-            self.pending_focus = held;
-        }
-        let threads = &mut self.faces.threads;
-        let drafts = &mut self.drafts;
-        let now = slopty_kit::clock::now(cx);
-        threads.views.retain(|s, view| {
-            let kept = wanted.contains(s) && threads.of_session.contains_key(s);
-            if !kept {
-                // What its composer held stays with its thread, for its next view.
-                let view = view.read(cx);
-                drafts.set_thread(view.thread(), &view.draft(cx), now);
-            }
-            kept
-        });
-        let views = &threads.views;
-        threads.asks.retain(|s, _| views.contains_key(s));
-    }
-
-    /// Make the thread view of each thread tile, and let go of those whose tile is gone. A view
-    /// made for the focused tile takes the keyboard.
-    fn sync_thread_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tiled: Vec<(ItemId, WorkerKey, ThreadId)> = self
-            .layout
-            .tiles()
-            .filter_map(|t| match self.item(t)?.kind {
-                ItemKind::Thread { thread } => Some((t.item, t.worker, thread)),
-                _ => None,
-            })
-            .collect();
-        for &(item, key, thread) in &tiled {
-            if self.faces.threads.items.contains_key(&item) {
-                continue;
-            }
-            let hub = self.thread_hub(key, cx);
-            let theme = self.theme.clone();
-            let draft = self.opening_draft(key, thread, cx);
-            let view = cx.new(|cx| {
-                let mut view = ThreadView::new(hub, thread, theme, window, cx);
-                if let Some((draft, kept)) = draft {
-                    view.restore_kept_draft(&draft, kept, window, cx);
-                }
-                view
-            });
-            let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
-                this.thread_item_event(key, item, &view, event.clone(), cx);
-            });
-            self.faces.threads.item_asks.insert(item, asks);
-            self.faces.threads.items.insert(item, view);
-        }
-        let threads = &mut self.faces.threads;
-        let drafts = &mut self.drafts;
-        let now = slopty_kit::clock::now(cx);
-        threads.items.retain(|item, view| {
-            let kept = tiled.iter().any(|(i, ..)| i == item);
-            if !kept {
-                let view = view.read(cx);
-                drafts.set_thread(view.thread(), &view.draft(cx), now);
-            }
-            kept
-        });
-        let items = &threads.items;
-        threads.item_asks.retain(|item, _| items.contains_key(item));
-        let focus = threads.focus_item.take().and_then(|item| threads.items.get(&item)).cloned();
-        if let Some(view) = focus {
-            view.update(cx, |v, cx| v.focus(window, cx));
-        }
-    }
-
-    /// The thread tile `item` took the focus: its view takes the keyboard in the next frame,
-    /// made first when it is new.
-    pub(super) fn focus_thread_item(&mut self, item: ItemId, cx: &mut Context<Self>) {
-        self.faces.threads.focus_item = Some(item);
-        self.faces_dirty = true;
-        cx.notify();
-    }
-
-    /// What the view of thread tile `item` asks for. Files attached go up to the tile's worker.
-    fn thread_item_event(
-        &mut self,
-        key: WorkerKey,
-        item: ItemId,
-        view: &Entity<ThreadView>,
-        event: ThreadViewEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let thread = view.read(cx).thread();
-        match event {
-            ThreadViewEvent::Drafted => self.drafts_changed(cx),
-            // The view asks only once its thread names a terminal: the tile becomes that
-            // terminal's, on its TUI.
-            ThreadViewEvent::ShowTerminal => match self.live_terminal(thread) {
-                Some((_, session)) => {
-                    self.show_face(session, false, cx);
-                    self.settle_thread_tiles(cx);
-                }
-                None => self.show_notice("The agent's terminal has ended".to_owned(), cx),
-            },
-            ThreadViewEvent::KeepRun { thread } => self.keep_run(key, thread, cx),
-            ThreadViewEvent::Attach { id, what } => {
-                let tile = self.tile_of(item);
-                self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
-            }
-            ThreadViewEvent::Detach { id } => {
-                self.detach_from_composer(&Target(view.downgrade()), id, cx);
-            }
-            ThreadViewEvent::Watch { thread, screen } => {
-                self.watch_agent_screen(key, thread, &screen, cx);
-            }
-            ThreadViewEvent::PickFiles => {
-                if let Some(tile) = self.tile_of(item) {
-                    self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
-                }
-            }
-            ThreadViewEvent::PickPhotos => {
-                if let Some(tile) = self.tile_of(item) {
-                    self.ask_files(&super::folders::FilesAsk::Photos(tile), cx);
-                }
-            }
-            ThreadViewEvent::RemoveWorktree(root) => self.remove_worktree_at(key, &root, cx),
-            ThreadViewEvent::FindFiles { root, query } => {
-                self.send(key, ClientMsg::FindFiles { root, query });
-            }
-            ThreadViewEvent::OpenFile { path } => self.open_file_on(Some(key), &path, None, cx),
-            ThreadViewEvent::InlineTerminal { cwd } => self.open_inline(key, view, cwd, cx),
-            ThreadViewEvent::InlineTerminalDone { session } => self.inline_done(session, cx),
-        }
-    }
-
-    /// The repositories threads work in, each with its machine and clone's root, as their table
-    /// last said: a thread with no terminal names one no shell stands in.
-    pub(super) fn thread_repos(
-        &self,
-    ) -> impl Iterator<Item = (WorkerKey, &str, &slopty_proto::terminal::RepoId)> {
-        let threads = &self.faces.threads;
-        threads.places.iter().filter_map(|(t, p)| {
-            let worker = threads.stands.get(t)?.worker;
-            Some((worker, p.repo.as_deref()?, p.repo_id.as_ref()?))
-        })
-    }
-
-    /// The subagent threads under `session`'s own thread, however deep: each row whose chain
-    /// of parents reaches it.
-    pub(super) fn subagents(&self, session: SessionId, cx: &App) -> Vec<ThreadRow> {
-        let Some(root) = self.faces.threads.of_session.get(&session).copied() else {
-            return Vec::new();
-        };
-        let Some(hub) =
-            self.worker_of_session(session).and_then(|k| self.faces.threads.hubs.get(&k))
-        else {
-            return Vec::new();
-        };
-        let rows = &hub.read(cx).threads().rows().rows;
-        let under = |row: &ThreadRow| {
-            // A chain longer than the table loops: it reaches nothing.
-            let mut link = row.parent.as_ref();
-            for _ in 0..rows.len() {
-                let Some(parent) = link else { return false };
-                if parent.thread == root {
-                    return true;
-                }
-                link = rows.get(&parent.thread).and_then(|r| r.parent.as_ref());
-            }
-            false
-        };
-        rows.values().filter(|row| under(row)).cloned().collect()
-    }
-
-    /// What a thread view asks for.
-    fn thread_view_event(
-        &mut self,
-        session: SessionId,
-        view: &Entity<ThreadView>,
-        event: ThreadViewEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            ThreadViewEvent::Drafted => self.drafts_changed(cx),
-            ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
-            ThreadViewEvent::KeepRun { thread } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.keep_run(key, thread, cx);
-                }
-            }
-            ThreadViewEvent::Attach { id, what } => {
-                let tile = self.tile_of_session(session);
-                self.attach_to_composer(tile, Target(view.downgrade()), id, what, cx);
-            }
-            ThreadViewEvent::Detach { id } => {
-                self.detach_from_composer(&Target(view.downgrade()), id, cx);
-            }
-            ThreadViewEvent::Watch { thread, screen } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.watch_agent_screen(key, thread, &screen, cx);
-                }
-            }
-            ThreadViewEvent::PickFiles => {
-                if let Some(tile) = self.tile_of_session(session) {
-                    self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
-                }
-            }
-            ThreadViewEvent::PickPhotos => {
-                if let Some(tile) = self.tile_of_session(session) {
-                    self.ask_files(&super::folders::FilesAsk::Photos(tile), cx);
-                }
-            }
-            ThreadViewEvent::RemoveWorktree(root) => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.remove_worktree_at(key, &root, cx);
-                }
-            }
-            ThreadViewEvent::FindFiles { root, query } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.send(key, ClientMsg::FindFiles { root, query });
-                }
-            }
-            ThreadViewEvent::OpenFile { path } => {
-                if let Some(key) = self.worker_of_session(session) {
-                    self.open_file_on(Some(key), &path, None, cx);
-                }
-            }
-            ThreadViewEvent::InlineTerminal { cwd } => match self.worker_of_session(session) {
-                Some(key) => self.open_inline(key, view, cwd, cx),
-                None => view.update(cx, ThreadView::inline_terminal_gone),
-            },
-            ThreadViewEvent::InlineTerminalDone { session } => self.inline_done(session, cx),
-        }
-    }
-
-    /// `key` found `paths` under `root` for `query`: the thread views of its tiles that asked
-    /// list them in their `@` menus.
-    pub fn threads_found(
-        &self,
-        key: WorkerKey,
-        root: &str,
-        query: &str,
-        paths: &[String],
-        cx: &mut Context<Self>,
-    ) {
-        for (session, view) in &self.faces.threads.views {
-            if self.worker_of_session(*session) == Some(key) {
-                view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
-            }
-        }
-        for (item, view) in &self.faces.threads.items {
-            if self.tile_of(*item).is_some_and(|t| t.worker == key) {
-                view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
-            }
-        }
-        self.starting.found(key, root, query, paths, cx);
-    }
-
-    /// A composer of `thread` on show: its own tile's, or its terminal's while that shows the
-    /// thread.
-    pub(super) fn composer_of_thread(&self, thread: ThreadId, cx: &App) -> Option<Target> {
-        let threads = &self.faces.threads;
-        let own = threads.items.values().find(|v| v.read(cx).thread() == thread);
-        let face = || {
-            threads.views.iter().find_map(|(session, v)| {
-                (v.read(cx).thread() == thread && self.face_shown(*session)).then_some(v)
-            })
-        };
-        own.or_else(face).map(|view| Target(view.downgrade()))
-    }
-
-    /// The composer files dropped on `session`'s tile are attached to: its thread view's
-    /// while that shows.
-    pub(super) fn shown_composer(&self, session: SessionId) -> Option<Target> {
-        self.thread_face(session).map(|view| Target(view.downgrade()))
-    }
-
-    /// Whether `session`'s tile shows its thread with a request open in it: the thread's tray
-    /// then says what the agent waits on, and nothing else on the tile says it again.
-    #[must_use]
-    pub fn face_asks(&self, session: SessionId) -> bool {
-        self.thread_face(session).is_some() && self.session_request(session).is_some()
-    }
-
-    /// Show `session`'s face or its TUI.
-    pub fn show_face(&mut self, session: SessionId, face: bool, cx: &mut Context<Self>) {
-        self.faces.chosen.insert(session, face);
-        // The pick is saved with the layout, by its tile.
-        self.layout_touched(cx);
-        if face {
-            self.faces.focus.insert(session);
-        } else {
-            self.faces.focus.remove(&session);
-            self.pending_focus = Some(session);
+            cx.notify();
         }
         cx.notify();
-    }
-
-    /// ⌘J: the focused agent's tile to its next face, in the switch's order, round to the
-    /// first.
-    pub(super) fn switch_face(
-        &mut self,
-        _: &SwitchFace,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Bound only while an agent runs in the focused terminal ([`Applies::agent`]).
-        let Some(session) = self.focused_session() else { return };
-        let faces = self.faces_of(session);
-        if faces.len() < 2 {
-            self.show_notice(NO_THREAD_YET.to_owned(), cx);
-            return;
-        }
-        let shown = self.tile_face(session);
-        let at = faces.iter().position(|f| *f == shown).map_or(0, |at| at.saturating_add(1));
-        let next = faces.get(at).or_else(|| faces.first()).copied().unwrap_or(Face::Terminal);
-        self.set_face(session, next, cx);
-    }
-
-    /// The session of the focused tile, if it is a terminal.
-    pub(super) fn focused_session(&self) -> Option<SessionId> {
-        match self.item(self.focused()?)?.kind {
-            ItemKind::Terminal { session } => Some(session),
-            _ => None,
-        }
-    }
-
-    /// Bring the thread views in step with the tiles, once a frame: make the view each shown
-    /// tile wants and let go of the rest.
-    pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.restore_faces();
-        let wanted: Vec<SessionId> = self
-            .layout
-            .tiles()
-            .filter_map(|t| match self.item(t)?.kind {
-                ItemKind::Terminal { session } => Some(session),
-                _ => None,
-            })
-            .filter(|s| self.terminals.contains_key(s) && self.face_shown(*s))
-            .collect();
-        self.sync_thread_faces(&wanted, window, cx);
-        self.sync_thread_items(window, cx);
-        self.count_runs(cx);
-        // Picks of sessions that are gone go with them, and views handed to a tile that went.
-        let terminals = &self.terminals;
-        self.faces.chosen.retain(|s, _| terminals.contains_key(s));
-        let tiled: HashSet<SessionId> = self
-            .layout
-            .tiles()
-            .filter_map(|t| match self.item(t)?.kind {
-                ItemKind::Terminal { session } => Some(session),
-                _ => None,
-            })
-            .collect();
-        self.faces.threads.handed.retain(|s, _| tiled.contains(s));
-        for session in std::mem::take(&mut self.faces.focus) {
-            if !wanted.contains(&session) {
-                continue;
-            }
-            if let Some(view) = self.faces.threads.views.get(&session).cloned() {
-                view.update(cx, |v, cx| v.focus(window, cx));
-            }
-        }
     }
 
     /// The agent at work in `session`, as the row of the thread whose TUI runs there says: its
@@ -1647,11 +375,6 @@ impl WorkspaceView {
     /// Whether any agent works, by its worker's own table.
     pub(super) fn any_working(&self) -> bool {
         self.faces.threads.stands.values().any(|s| s.rung == Rung::Working)
-    }
-
-    /// `session`'s agent in the status vocabulary, as a tile marks it: its thread's row.
-    pub(super) fn agent_mark(&self, session: SessionId) -> Option<Status> {
-        self.agent_state(session).map(super::agents::agent_mark_of)
     }
 
     /// The request `thread` waits on as its worker's table says, while that worker is linked:
@@ -1750,11 +473,6 @@ impl WorkspaceView {
         self.faces.threads.stands.iter().filter(move |(_, s)| s.worker == key).map(|(t, s)| (*t, s))
     }
 
-    /// `thread` as its worker's own table last said ([`Self::table_stands`]).
-    pub(super) fn table_stand(&self, thread: ThreadId) -> Option<&ThreadStand> {
-        self.faces.threads.stands.get(&thread)
-    }
-
     /// Every thread whose row speaks for it ([`Self::thread_stand`]), on every worker, each
     /// once however many ways its worker is reached.
     pub(super) fn thread_stands(&self) -> impl Iterator<Item = (ThreadId, &ThreadStand)> {
@@ -1769,34 +487,15 @@ impl WorkspaceView {
         self.threads_on(Rung::NeedsYou)
     }
 
-    /// The threads on `rung` whose rows speak for them: those with a tile in reading order,
-    /// then the rest by worker.
+    /// The threads on `rung` whose rows speak for them, by worker.
     pub(super) fn threads_on(&self, rung: Rung) -> Vec<ThreadWait> {
-        let tiles: HashMap<ThreadId, TileRef> = self
-            .items()
-            .filter_map(|(worker, i)| match i.kind {
-                ItemKind::Thread { thread } => Some((thread, TileRef { worker, item: i.id })),
-                _ => None,
-            })
-            .collect();
-        let mut out: Vec<(Option<usize>, ThreadWait)> = self
+        let mut out: Vec<ThreadWait> = self
             .thread_stands()
             .filter(|(_, stand)| stand.rung == rung)
-            .map(|(thread, stand)| {
-                let tile = tiles.get(&thread).copied();
-                let rank = tile.and_then(|t| self.reading_rank(t));
-                (rank, ThreadWait { worker: stand.worker, thread, tile })
-            })
+            .map(|(thread, stand)| ThreadWait { worker: stand.worker, thread })
             .collect();
-        out.sort_by_key(|(rank, w)| (rank.is_none(), *rank, w.worker, w.thread));
-        out.into_iter().map(|(_, w)| w).collect()
-    }
-
-    /// One line of what `session`'s agent does, for the navigator and the palette: the last
-    /// line its thread's agent wrote. The agent's words are Markdown, and the line says them as
-    /// plain words.
-    pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
-        self.thread_line(self.session_thread(session)?).map(slopty_kit::markdown::plain_line)
+        out.sort_by_key(|w| (w.worker, w.thread));
+        out
     }
 }
 
@@ -1831,18 +530,6 @@ pub(super) struct ThreadStand {
 }
 
 impl ThreadStand {
-    /// The one vocabulary's mark for its rung; none at rest.
-    pub(super) const fn status(&self) -> Option<Status> {
-        match self.rung {
-            Rung::NeedsYou => Some(Status::NeedsYou),
-            Rung::Failed => Some(Status::Failed),
-            Rung::Working => Some(Status::Working),
-            Rung::Waiting => Some(Status::Running),
-            Rung::ToReview => Some(Status::Done),
-            Rung::Idle => None,
-        }
-    }
-
     /// Its state in a word or two, as a terminal agent's pill says it ("Needs approval",
     /// "Has a question"); none at rest.
     pub(super) fn word(&self) -> Option<&'static str> {
@@ -1865,8 +552,6 @@ pub(super) struct ThreadWait {
     pub worker: WorkerKey,
     /// The thread.
     pub thread: ThreadId,
-    /// Its tile here, if one shows it.
-    pub tile: Option<TileRef>,
 }
 
 /// What a thread tile's header says before its worker's table names the thread or its agent.
@@ -1938,37 +623,3 @@ fn limit_resets(row: &ThreadRow) -> Option<slopty_core::WallMs> {
 
 /// A rate window used up, in hundredths of a percent.
 const FULL_BP: u32 = 10_000;
-
-/// Where a thread's worktree came from, as its runs share it: the folder its clone keeps
-/// worktrees in and the name's words, without the four hex digits that tell runs apart
-/// (`.claude/worktrees/<words>-<hex>`, [`super::starting::worktree_name`]). `None` for a thread
-/// in no such worktree, or one whose name is only its agent's, which no message named.
-fn run_key(row: &ThreadRow) -> Option<(&str, &str)> {
-    const DIR: &str = "/.claude/worktrees/";
-    let path = row.repo.as_deref().or(row.cwd.as_deref())?;
-    let at = path.find(DIR)?;
-    let (clone, rest) = (path.get(..at)?, path.get(at.saturating_add(DIR.len())..)?);
-    let name = rest.split('/').next()?;
-    let (words, hex) = name.rsplit_once('-')?;
-    let tail = hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit());
-    let agent: String =
-        row.agent.0.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-    (tail && !words.is_empty() && words != agent).then_some((clone, words))
-}
-
-/// The runs `thread`'s first message has among `rows`, itself among them: the threads in
-/// worktrees of the same clone named by the same words ([`run_key`]), subagents aside. Only
-/// `thread` when it has none.
-fn runs_of(rows: &[ThreadRow], thread: ThreadId) -> Vec<ThreadId> {
-    let Some(mine) = rows.iter().find(|r| r.id == thread) else { return vec![thread] };
-    let Some(key) = run_key(mine) else { return vec![thread] };
-    let mut runs: Vec<ThreadId> = rows
-        .iter()
-        .filter(|r| r.parent.is_none() && run_key(r) == Some(key))
-        .map(|r| r.id)
-        .collect();
-    if !runs.contains(&thread) {
-        runs.push(thread);
-    }
-    runs
-}

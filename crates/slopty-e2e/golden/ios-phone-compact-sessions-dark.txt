@@ -1,0 +1,9 @@
+Window (focused)
+Group │ Sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Button │ New session
+TabList │ Tabs
+Tab │ Sessions
+Tab │ Settings
+Tab │ Search

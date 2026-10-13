@@ -1,6 +1,0 @@
-Window
-Label │ Slopty
-Heading │ Connect to a server
-TextInput │ Server address (focused)
-Button │ Paste
-Button │ Connect

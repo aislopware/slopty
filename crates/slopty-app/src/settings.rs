@@ -6,33 +6,11 @@
 use std::path::Path;
 
 use gpui::WindowAppearance;
+pub use slopty_settings::follow::{POLL, Seen};
 use slopty_settings::{
     Appearance, Color, Loaded, OptionAsAlt, Palette, Settings, SettingsError, bounds,
 };
 use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
-
-/// GPUI actions.
-pub mod actions {
-    #![expect(
-        clippy::derive_partial_eq_without_eq,
-        reason = "gpui::actions! derives PartialEq only"
-    )]
-    use gpui::actions;
-
-    actions!(
-        slopty,
-        [
-            /// Open `settings.toml` in the in-app editor.
-            OpenSettings,
-            /// Open the settings on the Keyboard page: every command and its keys.
-            OpenKeyboardShortcuts,
-            /// Open the settings on the About page: the version, the build and the links.
-            OpenAbout,
-        ]
-    );
-}
-
-pub use slopty_settings::follow::{POLL, Seen};
 
 /// The text the in-app editor opens on: the file, or the commented defaults when there is
 /// none (or it cannot be read; saving then overwrites it, which is what fixing it means).
@@ -189,7 +167,7 @@ fn sized(v: f32, range: &std::ops::RangeInclusive<f32>, default: f32) -> f32 {
 /// bounce the Dock.
 ///
 /// As the settings say: by default only while the human is elsewhere (no window of ours
-/// active; in front, the tile flashes, and the inbox and the badge say it).
+/// active; in front, the terminal flashes, and the inbox and the badge say it).
 #[must_use]
 pub const fn alerts(settings: &Settings, window_active: bool) -> bool {
     settings.terminal.alert.sounds(window_active)
@@ -330,7 +308,7 @@ mod tests {
     fn an_alert_sounds_only_in_the_background_unless_asked() {
         let mut s = Settings::default();
         assert!(alerts(&s, false));
-        assert!(!alerts(&s, true), "in front of the window the tile says it");
+        assert!(!alerts(&s, true), "in front of the window the terminal says it");
         s.terminal.alert = slopty_settings::Alert::Never;
         assert!(!alerts(&s, false), "never: the flash, the banner and the inbox only");
         s.terminal.alert = slopty_settings::Alert::Always;

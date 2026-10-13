@@ -1,113 +1,41 @@
-//! `WorkspaceView`: every worker's items, tiled.
+//! `WorkspaceView`: every worker this client reaches, and what the shell (`slopty-shell`) is
+//! fed from them through the view model ([`crate::view_model`]).
 //!
-//! One view for every worker this client reaches: each worker's item registry is mirrored
-//! ([`slopty_client::ItemDoc`]) and each item is a tile in this device's tiling
-//! ([`slopty_client::layout::Tiling`]): projects, each with its tabs, each tab its panes tiled
-//! edge to edge. The registry is the worker's; the arrangement is this device's alone.
+//! One model for every worker: each worker's item registry is mirrored
+//! ([`slopty_client::ItemDoc`]), with its sessions, its link and its thread hub. It draws
+//! nothing of its own: the shell draws, and the live terminals, windows and previews it hosts
+//! are this model's views ([`crate::view_model::live`]).
 //!
-//! * [`actions`] — the actions, the key table and the palette lines.
 //! * `workers` — connecting, losing and forgetting a worker; the sync that follows.
-//! * `commands` — what the actions do.
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
-//! * `browsers` — web pages in tiles: opening them, and serving their ports here.
-//! * `folders` — folders in tiles, and a path opened as whatever it turns out to be.
-//! * `overlays` — the command palette, find in every tile, the window picker.
-//! * `toast` — the one-line notices: undo close, what needs the person off screen.
-//! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
-//! * `area` — the tab on show: its panes and their tiles, a header's drag, the start page.
-//! * `panes` — a tab's panes at their rectangles and the sashes between them.
-//! * `tile` — one tile's chrome and body: its pane's tab bar over it.
-//! * `cluster` — the top line's two ends: the lead (the toggle, back and forward) and the cluster
-//!   (the terminal toggle, the project, the readouts, the bell, "…").
-//! * `titlebar` — the window's own top line while no pane meets the top, and a phone's bar.
-//! * `navigator` — the workers and their tiles, down the left, and the filter over them.
-//! * `machines` — what each machine says of itself and what can be done to it, from its row.
-//! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
-//! * `readouts` — what the app says of itself in the cluster, while it has something.
-//! * `approvals` — "Allow" and "Deny" for an agent that waits, from its row or its note.
-//! * `turns` — agents' turns that ended unread, which the bell counts.
-//!
-//! The navigator, the lead, the cluster and the window's own top line are views of their own
-//! (`ChromeView`),
-//! drawn cached: a terminal's echo draws the terminal and the panes around it, never the
-//! chrome, which draws again only when the workspace itself changes or its own clock ticks.
+//! * [`remote`] — the clipboard shared with the workers, files to and from them, forwarded ports.
+//! * `approvals` — "Allow" and "Deny" for an agent that waits, from its note.
+//! * `turns` — agents' turns that ended unread.
+//! * [`attention`] — what reaches the person as a note, and where.
 
-pub mod actions;
-mod agent_screens;
 mod agent_start;
 mod agents;
 mod approvals;
-mod area;
 pub mod attention;
-mod authors;
-mod breadcrumb;
-mod browsers;
-mod clone_here;
-mod cluster;
 mod commands;
-mod component_page;
-mod context_menus;
-mod desktop;
-mod drafts;
 mod faces;
-mod facts;
-mod folder_typing;
-mod folders;
-mod grouping;
-mod handoffs;
-mod inline_shells;
-mod kept_items;
 mod keys;
-mod lineage;
-mod machine_remove;
-mod machines;
-mod navigator;
-mod overlays;
-mod page_goal;
-mod panes;
-mod popout;
 mod presence;
-mod preview;
-mod program_status;
-mod project_lines;
-mod project_search;
-mod readouts;
 pub mod remote;
-mod restore;
-mod rollup;
-mod run_scripts;
-mod secure;
 mod server_calls;
-mod settings_page;
-mod starting;
-mod tab_look;
-mod tabs;
-mod tile;
-mod titlebar;
-mod toast;
 mod turns;
-mod unsaved;
 mod view_model;
 mod workers;
-mod worktrees;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-pub use actions::*;
 pub use agents::{banner_title, program_banner};
-#[cfg(test)]
-pub(crate) use area::{ADD_WORKER, EMPTY_QUESTION, NO_WORKERS, NO_WORKERS_NEXT};
-use gpui::{
-    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
-    Subscription, Task, WeakEntity, Window,
-};
+use gpui::{Context, Entity, EventEmitter, Task};
 pub use keys::worker_key;
-pub use machines::HostActions;
-pub use navigator::NAVIGATOR_CTX;
-pub(crate) use rollup::META_SEPARATOR;
 use slopty_client::ItemDoc;
-use slopty_client::layout::{Navigator, Saved, TileRef, Tiling, TilingConfig, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
@@ -117,174 +45,20 @@ use slopty_proto::server::WorkerCaps;
 use slopty_proto::terminal::SessionSummary;
 use slopty_terminal::TerminalView;
 use slopty_theme::Theme;
-#[cfg(test)]
-pub(crate) use tile::{
-    ATTACHING, CLOSE_TILE, MUTE, OPENING, PAUSED, READING, RECONNECTING, SESSION_ENDED, TAKE,
-    TAKE_OVER,
-};
-pub use tile::{COPY_COMMAND, cwd_tail, file_title};
-pub use titlebar::titlebar_height;
 use tokio::sync::mpsc;
-pub(crate) use worktrees::{REMOVE_WORKTREE, worktree_root};
+pub use view_model::{
+    AddAnswer, AddChoice, AddDevice, AddFailure, AddFix, AddKind, AddMark, AddProgress, AddStep,
+    Found, FoundNode, Look,
+};
 
-use crate::file::FileView;
-use crate::folder::FolderView;
-use crate::palette::{CommandPalette, PaletteItem};
-use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
 
 /// How long a shell command or an agent's turn has to run before its end, unwatched, is worth a
 /// mark: shorter ones end before the person has looked away.
 pub const SLOW_COMMAND: Duration = Duration::from_secs(30);
 
-/// How long a shell command runs before its tile marks it running: a quick one ends before the
-/// mark would be read, and a mark that flickers on for it is noise.
-pub const RUNNING_AFTER: Duration = Duration::from_secs(3);
-
-/// How long a closed tile's notice offers it back, and how long a closed shell that was
-/// running something (a command, a program, an agent) keeps its session for ⌘Z.
-const UNDO_CLOSE: Duration = Duration::from_secs(5);
-
-/// How long a closed shell idle at its prompt keeps its session, to come back whole: it runs
-/// nothing meanwhile.
-const IDLE_SHELL_KEPT: Duration = Duration::from_mins(10);
-
-/// How many closed tiles ⌘Z and the palette's "Reopen" can bring back, the latest first.
-const CLOSED_KEPT: usize = 20;
-
-/// How long a remote window or display may sit off screen before its stream is let go: long
-/// enough for a glance at the next column and back, short enough that a stream nobody sees
-/// does not keep a worker encoding for long.
-const STREAM_GRACE: Duration = Duration::from_secs(5);
-
-/// How long the layout waits after its last change before it is written to disk.
-const SAVE_AFTER: Duration = Duration::from_millis(500);
-
-/// The longest refresh of a screen the app draws on (60 Hz): a typed key's echo is awaited for
-/// its round trip and this much more before the working marks step on without it.
-const ECHO_SLACK: Duration = Duration::from_nanos(16_666_667);
-
-/// A region of the frame drawn as a view of its own.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Region {
-    Navigator,
-    /// The navigator's rows, inside its panel: the list's wheel builds this view alone,
-    /// not the panel with its filter field.
-    NavigatorRows,
-    /// The window's own top line while no pane meets the top, and a phone's bar
-    /// ([`titlebar`]).
-    Titlebar,
-    /// The top line's lead ([`cluster`]).
-    Lead,
-    /// The top line's cluster ([`cluster`]).
-    Cluster,
-}
-
-/// One region of the workspace's chrome as a view of its own, so the frame can draw it
-/// cached. It holds nothing: it draws the workspace's region, which it reads and never writes
-/// ([`slopty_kit::draw`]), and is drawn again only when notified, by the workspace changing
-/// ([`Chrome::notify`]) or by a clock of its own (an age, a turn's time, the frame time).
-struct ChromeView {
-    workspace: WeakEntity<WorkspaceView>,
-    region: Region,
-    /// How many times it has drawn: the proof that an echo leaves it be.
-    #[cfg(test)]
-    renders: usize,
-}
-
-impl gpui::Render for ChromeView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        #[cfg(test)]
-        {
-            self.renders = self.renders.saturating_add(1);
-        }
-        let region = self.region;
-        if let Some(workspace) = self.workspace.upgrade() {
-            let projects = Rc::clone(&workspace.read(cx).frame_projects);
-            projects.hold(false, cx);
-        }
-        slopty_kit::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
-            workspace.render_region(region, window, cx)
-        })
-    }
-}
-
-/// The tab on show as a view of its own, built from the workspace, which it reads and never
-/// writes ([`slopty_kit::draw`]). What only changes the panes (a working mark's turn, the pointer
-/// over a tile, a body's own news) builds this view alone: the workspace's own notify is news
-/// of a change for the chrome and the titles. What the area drew is kept for it in
-/// [`area::Drawn`].
-struct AreaHost {
-    workspace: WeakEntity<WorkspaceView>,
-    /// How many times it has built: the proof that a pane's own news builds it alone.
-    #[cfg(test)]
-    builds: usize,
-}
-
-impl gpui::Render for AreaHost {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        #[cfg(test)]
-        {
-            self.builds = self.builds.saturating_add(1);
-        }
-        let host = cx.entity_id();
-        if let Some(workspace) = self.workspace.upgrade() {
-            let projects = Rc::clone(&workspace.read(cx).frame_projects);
-            projects.hold(false, cx);
-        }
-        slopty_kit::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
-            workspace.render_area(host, window, cx)
-        })
-    }
-}
-
-/// The chrome's views.
-struct Chrome {
-    navigator: Entity<ChromeView>,
-    nav_rows: Entity<ChromeView>,
-    titlebar: Entity<ChromeView>,
-    lead: Entity<ChromeView>,
-    cluster: Entity<ChromeView>,
-}
-
-impl Chrome {
-    fn new(cx: &mut Context<WorkspaceView>) -> Self {
-        use gpui::AppContext as _;
-        let workspace = cx.weak_entity();
-        let mut view = |region| {
-            let workspace = workspace.clone();
-            cx.new(|_| ChromeView {
-                workspace,
-                region,
-                #[cfg(test)]
-                renders: 0,
-            })
-        };
-        Self {
-            navigator: view(Region::Navigator),
-            nav_rows: view(Region::NavigatorRows),
-            titlebar: view(Region::Titlebar),
-            lead: view(Region::Lead),
-            cluster: view(Region::Cluster),
-        }
-    }
-
-    /// Draw every region again: the workspace changed, and any of them may show it.
-    fn notify(&self, cx: &mut App) {
-        for view in self.ids() {
-            App::notify(cx, view);
-        }
-    }
-
-    /// The views.
-    fn ids(&self) -> [gpui::EntityId; 5] {
-        [&self.navigator, &self.nav_rows, &self.titlebar, &self.lead, &self.cluster]
-            .map(Entity::entity_id)
-    }
-}
-
 /// Things the surrounding app reacts to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum WorkspaceEvent {
     /// A terminal rang its bell.
     Bell(SessionId),
@@ -318,15 +92,28 @@ pub enum WorkspaceEvent {
     /// Every note's "Allow" or "Deny" tapped so far was sent, or was said to have found
     /// nothing: an app woken in the background to send one may be let go once it is out.
     TapsSettled,
-}
-
-/// Where the phone key bar sends its keys (see [`WorkspaceView::active_key_target`]).
-#[derive(Clone, Debug)]
-pub enum KeyTarget {
-    /// A terminal: keys go through the grid and the predictor.
-    Terminal(Entity<TerminalView>),
-    /// A remote window: keys are injected on the worker.
-    Screen(Entity<ScreenView>),
+    /// Settings → Devices asked to add a device or follow a server: the app takes the run with
+    /// [`WorkspaceView::take_add_device`].
+    AddDevice,
+    /// Settings → Devices asked what is on the tailnet: the app takes the look with
+    /// [`WorkspaceView::take_look`].
+    LookOnTailnet,
+    /// Settings → Devices pressed one of the actions the app offers for a machine
+    /// ([`WorkspaceView::set_device_actions`]), or for the server when `worker` is `None`.
+    DeviceAction {
+        /// The machine, or `None` for the server.
+        worker: Option<WorkerKey>,
+        /// The action's id, as the app named it.
+        action: String,
+    },
+    /// Something to tell the person (a paste refused, an upload that landed elsewhere), or
+    /// something that went wrong: the app shows it as a toast.
+    Notice {
+        /// What to say.
+        text: String,
+        /// It went wrong.
+        failure: bool,
+    },
 }
 
 /// Where a worker's link stands.
@@ -424,7 +211,7 @@ impl std::fmt::Debug for WorkerLink {
 }
 
 /// One worker as the workspace keeps it: its registry, its sessions and its link, which comes
-/// and goes while the registry mirror (and so the tiles) stays.
+/// and goes while the registry mirror stays.
 struct Worker {
     name: String,
     status: WorkerStatus,
@@ -432,7 +219,7 @@ struct Worker {
     /// The link's control stream with what waits for room in it; `Some` while linked.
     outbox: Option<crate::outbox::Outbox>,
     /// Since when it has been out of reach on this client's clock: added and not yet linked,
-    /// or since its link dropped; `None` while linked. Its tiles say for how long.
+    /// or since its link dropped; `None` while linked.
     away_since: Option<Duration>,
     /// How many links have come up to it: the self-test's proof that a relink landed.
     links: u64,
@@ -442,8 +229,6 @@ struct Worker {
     /// How the tailnet carries the link, once the worker has said (never on a loopback or LAN
     /// link), and since when it has been on a DERP relay.
     relay: RelayWatch,
-    /// Draws again once a DERP path has held long enough to be said ([`RelayWatch::due`]).
-    relay_due: Option<Task<()>>,
     /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
     /// link has said, or when the daemon has none.
     home: Option<String>,
@@ -457,55 +242,29 @@ struct Worker {
     behind: Option<slopty_client::update::UpdateNotice>,
     /// Its one-minute load average, as its link or the server last said.
     load: Option<f32>,
-    /// The paths the worker was last asked to watch for its file tiles, sorted.
-    watched: Vec<String>,
-    /// The directories the worker was last asked to watch for its folder tiles, sorted.
-    watched_folders: Vec<String>,
-    /// A `List` is in flight to name restored window items.
+    /// A `List` is in flight to name window items.
     titles_requested: bool,
-    /// A `List` is in flight for the picker.
-    picker_wanted: bool,
-    /// The next listing adds its first display straight away (the self-test socket's way to
-    /// put a remote display in the workspace without the picker).
-    display_wanted: bool,
     /// Streams requested but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
-    /// The shells asked of it on this link and not come yet, and where each goes
-    /// ([`tabs::Opening`]).
-    openings: tabs::Openings,
-    /// Tiles this client opened by a drop on a pane, not come yet: where each lands.
-    dropped: HashMap<ItemId, slopty_client::layout::Drop>,
-    /// Remote tiles whose open the worker refused on this link, and why: not asked again
-    /// until the next link or a retry.
+    /// Windows whose open the worker refused on this link, and why: not asked again until the
+    /// next link or a retry.
     failed_opens: HashMap<ItemId, slopty_proto::screen::ScreenFailure>,
-    /// Remote tiles whose stream the worker ended unasked on this link
-    /// ([`workers::Stopped`]): asked for again at once, and shown as stopped, with a way to
-    /// reopen, when it ends again soon after.
+    /// Windows whose stream the worker ended unasked on this link ([`workers::Stopped`]):
+    /// asked for again at once, and shown as stopped when it ends again soon after.
     stopped: HashMap<ItemId, workers::Stopped>,
-    /// Remote tiles whose view came over a link that has gone: it shows its last picture, set
-    /// back, until a stream opened on the next link has one of its own.
+    /// Windows whose view came over a link that has gone: it shows its last picture, set back,
+    /// until a stream opened on the next link has one of its own.
     stale_screens: HashSet<ItemId>,
-    /// Streams opened on this link for a stale tile, waiting for their first picture to take
-    /// its place, so the tile never shows an empty frame between the two.
+    /// Streams opened on this link for a stale window, waiting for their first picture to take
+    /// its place.
     fresh_screens: HashMap<ItemId, Entity<ScreenView>>,
-    /// The display tile streamed from a display this worker made for this device.
-    sized: Option<desktop::Sized>,
     /// The first snapshot since the link came up has not been applied yet.
     awaiting_snapshot: bool,
     /// What the human did to this worker's items while it was out of reach (or before its
     /// first snapshot): replayed over the next snapshot and sent, in order.
     queued: Vec<ClientMsg>,
-    /// The edits its programs wait on; kept across links, since the worker asks again under
-    /// the same number after a reconnect.
-    handoffs: slopty_client::handoff::Handoffs,
     /// The changes to its files this client asked for, until it answers each.
     fs_ops: slopty_client::folders::FsOps,
-    /// Where the curtain over its Mac stands, as it last said; down until it says.
-    curtain: slopty_proto::screen::CurtainState,
-    /// This device holds the curtain over its Mac: asked again on each link.
-    curtain_wanted: bool,
-    /// This device asked to hold it and the worker has not answered yet.
-    curtain_asked: bool,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -525,32 +284,20 @@ impl Worker {
             sessions: HashMap::new(),
             rtt: None,
             relay: RelayWatch::default(),
-            relay_due: None,
             home: None,
             settings: None,
             caps: None,
             behind: None,
             load: None,
-            watched: Vec::new(),
-            watched_folders: Vec::new(),
             titles_requested: false,
-            picker_wanted: false,
-            display_wanted: false,
             pending_opens: HashMap::new(),
-            openings: tabs::Openings::new(),
-            dropped: HashMap::new(),
             failed_opens: HashMap::new(),
             stopped: HashMap::new(),
             stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
-            sized: None,
             awaiting_snapshot: false,
             queued: Vec::new(),
-            handoffs: slopty_client::handoff::Handoffs::default(),
             fs_ops: slopty_client::folders::FsOps::default(),
-            curtain: slopty_proto::screen::CurtainState::Down,
-            curtain_wanted: false,
-            curtain_asked: false,
         }
     }
 
@@ -627,700 +374,119 @@ impl Finished {
     }
 }
 
-/// What a menu row does when clicked.
-pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
-
-/// The sections of the titlebar's menus, in their order, a hairline between each.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum MenuGroup {
-    /// A phone's "…": the focused tile's own rows, which its header holds on a wider screen.
-    Tile,
-    /// The breadcrumb's: the projects, or a repository's checkouts.
-    Places,
-    /// A phone's title: the panes of the tab on show.
-    Panes,
-    /// A phone's title: the project's tabs.
-    Tabs,
-    /// "+": the worker a new tile goes to, where there are several.
-    Target,
-    /// "+": what a new tile can be.
-    Tiles,
-    /// Where to go and what to see: the palette, the stream stats.
-    Navigation,
-    /// The settings.
-    Settings,
-    /// The server and the workers: connecting, adding, updating, waking.
-    Connections,
-    /// Taking something away for good: forgetting a machine.
-    Removal,
-}
-
-/// An entry of the titlebar's "…" menu the app adds (settings, the server, adding a worker).
-#[derive(Clone)]
-pub struct MenuEntry {
-    /// The section it is listed in.
-    pub group: MenuGroup,
-    /// What the row says.
-    pub label: SharedString,
-    /// Muted text on the right ("connected", "⌘,").
-    pub detail: SharedString,
-    /// What a click does.
-    pub run: MenuRun,
-}
-
-impl std::fmt::Debug for MenuEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MenuEntry").field("label", &self.label).finish_non_exhaustive()
-    }
-}
-
-/// What the field open in a tile's header edits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Field {
-    /// The tile's name.
-    Name,
-    /// A page's address.
-    Address,
-}
-
-/// The field open in a tile's header: its name, or a page's address.
-struct Rename {
-    tile: TileRef,
-    field: Field,
-    input: Entity<gpui_kit::component::input::InputState>,
-    /// Who had the keyboard before the field: it goes back there after ↩ or Esc.
-    return_to: Option<FocusHandle>,
-    _subscription: Subscription,
-}
-
-/// A tile taken off, one of the last [`CLOSED_KEPT`], until ⌘Z or the palette puts it back
-/// where it was. A live shell's session runs on for a while, so its rows come back untouched.
-struct ClosedTile {
-    tile: TileRef,
-    item: Item,
-    /// Where it was in the layout, to put it back there.
-    at: Option<slopty_client::layout::Pos>,
-    /// The session kept alive for the wait, for a live shell.
-    session: Option<SessionId>,
-    /// A file tile's editor, kept while the notice is up: its edit is not on the worker's
-    /// disk, so a tile taken back then comes back with the buffer it closed with.
-    file: Option<Entity<FileView>>,
-    seq: u64,
-    /// What its header said, for the palette's "Reopen" line.
-    title: String,
-    /// Its notice is up.
-    offered: bool,
-    /// For a plain shell: what a new shell takes once its session has ended.
-    shell: Option<Reshell>,
-    /// For an agent's terminal: its thread, taken up again once its session has ended.
-    thread: Option<slopty_proto::thread::ThreadId>,
-}
-
-impl ClosedTile {
-    /// Whether it still holds a live thing: a running session or an editor.
-    #[cfg(test)]
-    const fn holds(&self) -> bool {
-        self.session.is_some() || self.file.is_some()
-    }
-}
-
-/// A closed plain shell, as a new shell stands in for it once its session has ended.
-struct Reshell {
-    /// Its directory when it closed.
-    cwd: Option<String>,
-    /// The name the person gave it.
-    name: Option<String>,
-}
-
 /// The workspace.
 pub struct WorkspaceView {
-    /// The theme in use: the settings' with ⌘=/⌘- applied to the terminal text.
+    /// The theme the live views are drawn in.
     theme: Theme,
-    /// The settings' theme, as the app last set it.
-    base_theme: Theme,
-    /// Points ⌘=/⌘- moved the terminal text by.
-    font_delta: f32,
-    /// The projects, their tabs and the panes they tile.
-    layout: Tiling,
-    /// The navigator's width, its grouping and whether it shows, kept with the tiling.
-    navigator: Navigator,
-    /// The sash being dragged.
-    panes: panes::Panes,
-    /// The remote windows' pane sizes when the sash was pressed, to ask them to follow once it
-    /// is let go.
-    sash_before: Vec<(ItemId, (f32, f32))>,
-    /// The file tile open as a preview, which the next file opened in passing replaces.
-    preview: preview::Preview,
-    /// The layout's clock starts here.
+    /// The workspace's clock starts here.
     epoch: Instant,
-    /// A tick runs while a worker is out of reach, so its tiles' "Reconnecting for …" keeps
-    /// time; it stops once every worker is linked.
-    away_ticking: bool,
-    /// The layout's clock held at a time, for tests that compare two frames drawn at one instant.
+    /// The workspace's clock held at a time, for tests that compare two moments at one instant.
     #[cfg(test)]
     held_clock: Option<Duration>,
-    /// The round trip the readouts (the navigator, the bar, the palette) show for every linked
-    /// worker in place of its link's, pinned by the e2e harness so a golden never carries the
-    /// machine's live timing. The predictors and the dump keep the link's own.
+    /// The round trip said for every linked worker in place of its link's, pinned by the e2e
+    /// harness so a golden never carries the machine's live timing.
     pinned_rtt: Option<Duration>,
-    /// Whether moves animate. Off under the self-test, where a frame is a step.
-    animate: bool,
-    /// GPUI's Reduce Motion flag as last read: on, nothing springs whatever [`Self::animate`]
-    /// says. Read at every drawing, so the flag alone decides.
-    reduced: bool,
     workers: BTreeMap<WorkerKey, Worker>,
     // Per-item views. Item and session ids are UUIDv7, unique across workers, so one map
     // each serves every worker.
     terminals: HashMap<SessionId, Entity<TerminalView>>,
     screens: HashMap<ItemId, Entity<ScreenView>>,
-    files: HashMap<ItemId, Entity<FileView>>,
-    folders: HashMap<ItemId, Entity<FolderView>>,
-    /// Paths asked of a worker to learn whether they are folders before a tile opens for them
-    /// ([`WorkspaceView::open_path_on`]), with the line a file lands on.
-    probes: Vec<(WorkerKey, String, Option<u32>)>,
-    browsers: HashMap<ItemId, Entity<crate::browser::BrowserView>>,
-    /// The link each browser tile's port is served by: a new link serves it anew.
-    browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
-    /// The line a file tile opened at, for a view not made yet.
-    file_focus: HashMap<ItemId, u32>,
-    /// A registry or a link changed since the file tiles and pages were last matched
-    /// to the items: the next frame matches them. Only then, since a frame comes with every
-    /// terminal and video update, and the matching walks every item.
-    items_dirty: bool,
-    /// Who needs the human, worked out when the workspace changes, for everything drawn until
-    /// the next change.
-    drawn_waiting: Vec<agents::Waiting>,
-    /// The threads that need the human whose rows speak for them, worked out with
-    /// `drawn_waiting`.
-    drawn_thread_waits: Vec<faces::ThreadWait>,
-    /// Where ⌘⇧A's last step stood on the attention ladder.
-    attention_at: Option<usize>,
-    /// The starts made here: the last one, what "New agent…" lists first, and each agent's
-    /// chips, where its next draft begins.
-    starts: slopty_client::starts::Starts,
-    /// Where they are kept, once the app says.
-    starts_file: Option<std::path::PathBuf>,
-    /// Their write under way: the next waits on it, so the latest lands last.
-    starts_writing: Option<Task<()>>,
-    /// The session step that is up: its agent and machine, and what the machine said for it.
-    sessions_asked: Option<agent_start::SessionsAsked>,
-    /// The folders each machine's agents' past sessions ran in, as it last listed them.
-    past_places: HashMap<WorkerKey, Vec<agent_start::PastPlace>>,
-    /// The folder step that is up.
-    folder_step: Option<agent_start::FolderStep>,
-    /// The clone a folder step asked for, until its machine says how it went.
-    clone_asked: Option<clone_here::CloneAsked>,
-    /// The run scripts a Run asked for, until its machine answers.
-    run_asked: Option<run_scripts::RunAsked>,
-    /// The asks for past sessions with no words still out, by machine and agent (every agent's
-    /// when `None`): one at a time each ([`Self::ask_past_places`]).
-    listing: HashSet<(WorkerKey, Option<slopty_proto::thread::AgentId>)>,
-    /// The tiles of threads on their way.
-    starting: starting::Starts,
-    /// Each worker's items kept on this device.
-    kept_items: kept_items::KeptItems,
-    /// The tiles, the faces or the links changed since the faces were last brought in step
-    /// with them: the next frame does it ([`Self::sync_faces`] makes a face with the window).
-    faces_dirty: bool,
-    /// The number each unnamed tile that reads like an earlier one of its worker carries after
-    /// its title ("Terminal 2"), worked out in the frame after [`Self::titles_dirty`].
-    twins: HashMap<ItemId, u32>,
-    /// Every item's derived title, as the twins were last worked out from.
-    derived: HashMap<ItemId, String>,
-    /// The placed files and folders whose title another placed one of their kind shares, on
-    /// any machine, worked out with the twins: only their place tells them apart in the
-    /// navigator ([`Self::nav_tile_meta`]).
-    alike: HashSet<ItemId>,
-    /// Every item's place ([`Self::tile_place`]), worked out with the titles.
-    places: HashMap<ItemId, Option<String>>,
-    /// A title may have changed since the twins were worked out: the workspace changed (its
-    /// own notify), a shell's command started or ended, a window was named. A frame another
-    /// tile causes (an echo, a video frame) changes no title, and works nothing out.
-    titles_dirty: bool,
-    /// What the area drew, for the handlers to read ([`area::Drawn`]).
-    drawn: Rc<area::Drawn>,
-    /// The navigator and the title bar, each a view of its own.
-    chrome: Chrome,
-    /// The area, a view of its own so a sash drag is not the chrome's news.
-    area_host: Entity<AreaHost>,
-    /// How many changes the workspace took and how many times the titles were worked out: the
-    /// proof that a frame of motion is neither.
-    #[cfg(test)]
-    counts: (usize, usize),
-    /// How many times the workspace was built: the proof that the keyboard moving is not.
-    #[cfg(test)]
-    renders: usize,
-    /// What the panes and the chrome show of the shells, streams and faces ([`facts`]).
-    facts: facts::Facts,
-    /// How often and how lately each project was gone to on this device, for the palette's
-    /// ranking; saved with the layout.
-    frecency: slopty_client::groups::Frecency,
-    /// The project the focus was last in, so moving among one project's tiles is one visit.
-    last_project: Option<slopty_client::layout::GroupKey>,
-    /// The projects as the frame being drawn groups them, worked out once a draw.
-    frame_projects: Rc<grouping::FrameProjects>,
-    /// Holds the working marks' steps while a typed key waits for its echo.
-    _keys: Subscription,
-    /// Window titles the picker or a listing gave (the registry stores ids).
+    /// Window items' titles, as the worker's listing named them.
     titles: HashMap<ItemId, String>,
-    /// The quiet line about the server in the titlebar ("server offline"), if any.
-    server_status: Option<SharedString>,
-    /// Long shell commands that finished unwatched, by session.
-    /// What ended while nobody looked, by what it is about: a terminal's command or agent turn,
-    /// or the turn of a thread with no terminal ([`attention::About`]).
+    /// What the server link says of itself, while it has something to say.
+    server_status: Option<gpui::SharedString>,
+    /// Sessions' and agents' ends that finished while nobody looked, by what they are about.
     finished: HashMap<attention::About, Finished>,
-    /// The results each terminal's program reported (`OSC 7501`) that the person has looked at
-    /// ([`program_status`]).
-    program_seen: HashMap<SessionId, Vec<slopty_proto::terminal::ProgramStatus>>,
-    /// When each program last sounded for a record that came to wait on the person: at most
-    /// once in [`attention::PROGRAM_QUIET`].
-    program_sounded: HashMap<SessionId, Instant>,
+    /// How long a command has to run before its end is worth a mark.
     slow_command: Duration,
-    /// How long a command runs before its tile says so ([`RUNNING_AFTER`]).
-    running_after: Duration,
-    /// Tiles by item, least recent first: one moves to the end when it arrives and when it is
-    /// focused. The "run in shell" target is the last shell here; the palette lists tiles from
-    /// the end.
-    recency: Vec<ItemId>,
-    /// Holds the device out of idle sleep while an agent works.
-    awake: Option<Task<()>>,
-    /// Remote tiles off screen since when; their streams go after [`STREAM_GRACE`].
-    unseen: HashMap<ItemId, Instant>,
-    /// How long a remote tile may be off screen before its stream goes ([`STREAM_GRACE`]).
-    stream_grace: Duration,
-    /// Remote tiles whose streams were let go for being off screen.
-    parked: HashSet<ItemId>,
-    picker: Option<(WorkerKey, Entity<WindowPicker>)>,
-    /// The picker just dismissed, drawn for the moment it takes to fade away.
-    picker_leaving: Option<Entity<WindowPicker>>,
-    palette: Option<Entity<CommandPalette>>,
-    /// A dismissed palette still drawing its way out, dropped once that has played.
-    palette_leaving: Option<Entity<CommandPalette>>,
-    /// Search in files: the surface, shown or kept, and where the keyboard goes back to.
-    search: project_search::Surface,
-    pending_find: Option<(SessionId, slopty_kit::kit::find::Query)>,
-    pending_find_file: Option<(ItemId, slopty_kit::kit::find::Query)>,
-    rename: Option<Rename>,
-    rename_return: Option<FocusHandle>,
-    pending_focus_rename: bool,
-    palette_return: Option<FocusHandle>,
-    palette_action: Option<Box<dyn gpui::Action>>,
-    /// The actions the open palette leaves out: nothing where the keyboard was answers them.
-    palette_hidden: HashSet<std::any::TypeId>,
-    /// What the app does for a line or a button of ours (wake a worker, dial it now), run on
-    /// the next frame, where there is a window to run it in.
-    pending_runs: Vec<MenuRun>,
-    /// The tailnet policy grant that lets this device in, as the app words it: the away pill
-    /// copies it for a worker whose policy turns the device away.
-    tailnet_grant: Option<SharedString>,
-    palette_extra: Vec<PaletteItem>,
-    /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
-    /// a phone or tablet.
-    hardware_keyboard: bool,
-    pending_focus_palette: bool,
-    /// Which titlebar menu is open.
-    menu: Option<titlebar::MenuKind>,
-    /// The bar's menu was opened by a key, so it arrives whole in its first frame.
-    menu_keyed: bool,
-    /// The bar's menu just closed, drawn for the moment it takes to fade away.
-    menu_leaving: Option<titlebar::MenuKind>,
-    /// Where a press opened the menu, which then hangs there rather than from a button.
-    menu_at: Option<gpui::Point<Pixels>>,
-    /// What a press on a tile or a project opened, while it shows.
-    context_menu: Option<context_menus::ContextMenu>,
-    /// Where the bar's buttons that hang a menu were last laid out.
-    anchors: titlebar::Anchors,
-    /// The navigator's state for this run (its width and whether it docks are the layout's).
-    nav: navigator::NavState,
-    /// The title bar's readouts' own state: the frame time's clock, the popovers, a release.
-    readouts: readouts::Readouts,
-    /// What the app lets the person do to each machine, and how one is added.
-    machines: machines::Machines,
-    /// The confirm of a machine's removal, while it is open.
-    machine_remove: Option<machine_remove::Asking>,
-    /// The permission prompts this client may answer from a row or a note.
+    /// Agents' approvals: the taps and answers on their way.
     approvals: approvals::Approvals,
-    /// The settings, as a page in the panes' place while they are up ([`settings_page`]).
-    settings: Option<Entity<crate::settings_editor::SettingsEditor>>,
-    /// The component preview, as a page in the panes' place while it is up
-    /// ([`component_page`]).
-    components: Option<Entity<crate::components::ComponentPreview>>,
-    /// Agents' turns under way, and the ones that ended unread.
+    /// Agents' turns that ended unread.
     turns: turns::Turns,
-    /// The app's rows in the "…" menu.
-    more_entries: Vec<MenuEntry>,
-    /// The app's rows in the server readout's menu.
-    server_entries: Vec<MenuEntry>,
-    /// How this device's notes stand, with the app's way to fix them, while they do not reach
-    /// the person: a phone's navigator says so ([`readouts`]).
-    notes_door: Option<(slopty_platform::notify::Alerts, MenuRun)>,
-    /// Whether the server can push to this phone, once it said: with notes allowed here and
-    /// this false, nothing reaches the person while the app is away ([`readouts`]).
-    pushable: Option<bool>,
-    /// A tapped note whose machine was still being dialled, and when it was tapped: it goes
-    /// where it leads once that machine has sent what it holds ([`attention`]).
-    parked_tap: Option<(slopty_platform::notify::Tap, Instant)>,
-    show_stats: bool,
-    /// The remote desktops' own state: this device's display key, the wait of a display
-    /// following its tile, the system shortcuts.
-    desktop: desktop::Desktop,
-    toast: Option<toast::Toast>,
-    closed: Vec<ClosedTile>,
-    closed_seq: u64,
-    /// A header, a tab or a row pressed, and where it would land once it moves.
-    drag: Option<area::Drag>,
-    /// Where the title strip and the navigator take a drop, as they were last drawn.
-    drop_spots: Rc<area::DropSpots>,
-    /// How much narrower than the window the workspace was laid out in the last frame: none,
-    /// unless the app gives it less (an iPad's Split View, as the self-test sets it).
-    width_inset: f32,
-    /// A timer is out to park the streams of remote tiles off screen.
-    park_pending: bool,
-    /// A terminal to focus on the next frame.
-    pending_focus: Option<SessionId>,
-    /// A pane is zoomed: whether the docked navigator was shown before, to put it back on the
-    /// way out.
-    zoom_hold: Option<bool>,
-    /// Agent terminals' conversation faces.
+    /// Each worker's thread hub.
     faces: faces::Faces,
     /// The shell, fed from here ([`crate::view_model`]).
     view_model: view_model::Bridge,
-    /// The shells behind threads' inline terminals.
-    inline: inline_shells::InlineShells,
     /// The way to the server, while the app is linked to one.
     server: Option<slopty_client::server::ServerCaller>,
     /// The number the next `OpenSession` goes under, for its answer to name.
     next_open: std::cell::Cell<slopty_proto::RequestId>,
-    /// A file tile whose editor takes the keyboard on the next frame.
-    pending_focus_file: Option<ItemId>,
-    /// A folder tile that takes the keyboard on the next frame.
-    pending_focus_folder: Option<ItemId>,
-    /// The worktrees asked to go and not yet answered.
-    worktrees: worktrees::Asked,
-    /// Text on its way to a composer not made yet.
-    quotes: workers::Quotes,
-    pending_focus_picker: bool,
-    pending_focus_self: bool,
-    /// What held the keyboard a moment is gone: it goes back where the focused tile keeps it
-    /// ([`Self::return_keyboard`]) in the next frame.
-    pending_return: bool,
-    /// The title bar's empty span is pressed: a move drags the window.
-    title_press: bool,
-    /// What the title bar asked of the window, kept by a test.
-    #[cfg(test)]
-    window_asks: Vec<titlebar::WindowAsk>,
-    /// The keyboard lost (what held it left the frame) comes back to an open modal, else to
-    /// where the focused tile keeps it.
-    focus_lost: Option<Subscription>,
-    /// Where the layout is saved (`layout.json` in the client's data directory), if anywhere.
-    layout_path: Option<std::path::PathBuf>,
-    /// What was last written there.
-    layout_saved: Option<Saved>,
-    /// What the last run left beside its layout that this one puts back as it can.
-    restore: restore::Restore,
-    save_pending: bool,
-    /// Workers whose empty registry was given a shell this run.
-    given_shell: HashSet<WorkerKey>,
-    /// Workers whose given shell has not arrived yet, and the tile that had the focus when it
-    /// was asked for: it goes back there when the shell lands.
-    given_pending: HashMap<WorkerKey, Option<TileRef>>,
     /// The clipboard kept in step with the workers; `None` where the platform has none here.
     clip: Option<Rc<std::cell::RefCell<crate::clipboard::ClipSync>>>,
     /// The app is frontmost.
     app_active: bool,
-    /// Remote tiles shown in windows of their own.
-    popouts: popout::PopOuts,
-    /// The window's title as last set: the project on show ([`Self::retitle_window`]).
-    window_title: String,
-    /// A thread held open from a navigator row's press until its tile's own view takes it.
-    warm: Option<navigator::Warm>,
     /// Workers told this client wants their clipboard.
     watching: HashSet<WorkerKey>,
+    /// The worker whose live terminal or window has the shell window's keyboard.
+    clip_focus: Option<WorkerKey>,
+    /// Looks at the clipboard every [`remote::CLIP_TICK`].
+    clip_tick: Option<Task<()>>,
     /// Which workers the clipboard is shared with, as the settings say.
     clip_sharing: slopty_settings::ClipboardSettings,
     /// The workers it is not shared with, by key: read by the paste hooks as they run, so a
     /// change holds for the views made before it.
     clip_unshared: Rc<std::cell::RefCell<HashSet<WorkerKey>>>,
-    /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
-    /// focus.
-    handoff: handoffs::HandoffState,
-    /// The file tiles' unsaved edits, kept on this device; `None` where nothing is kept (a
-    /// test without a store).
-    kept: Option<unsaved::Kept>,
-    /// What the person wrote and has not sent, kept on this device.
-    drafts: drafts::Drafts,
-    /// The empty workspace's composer, made the first time the page shows with a machine to
-    /// begin on: the words written there start a thread ([`Self::send_page_goal`]).
-    empty_goal: Option<(Entity<gpui_kit::component::input::TextareaState>, Subscription)>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// Downloads in flight, and the ledger that keeps transfers across a relaunch.
     transfers: remote::transfers::Transfers,
-    /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
-    /// from and delete once the upload ends.
-    drop_landing: Option<std::path::PathBuf>,
-    /// The tile a drag of files from elsewhere is over, which says where they would land.
-    files_over: Option<TileRef>,
-    /// The workspace is a phone's this frame: its bar is the focused tile's, and tiles have no
-    /// header of their own.
-    phone: bool,
-    /// Where a drag of worker files out of the app goes: a system drag, unless the self-test
-    /// keeps the promises itself.
-    #[cfg(target_os = "macos")]
-    drag_sink: Option<remote::DragSink>,
-    /// The drags out of a worker's app this window carried on.
-    #[cfg(target_os = "macos")]
-    drags_out: remote::DragsOut,
     /// Forwarded ports, by session.
     ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
-    /// Secure keyboard entry, held while the focused tile takes a password.
-    secure: secure::Secure,
-    focus: FocusHandle,
+    /// Keeps the workspace's clock ticking while a worker is out of reach.
+    awake: Option<Task<()>>,
+    /// What Settings → Devices offers to do to each machine, as the app says.
+    device_actions: HashMap<WorkerKey, Vec<slopty_view_proto::DeviceAction>>,
 }
 
 impl std::fmt::Debug for WorkspaceView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkspaceView")
             .field("workers", &self.workers.len())
-            .field("tiles", &self.layout.tiles().count())
             .finish_non_exhaustive()
     }
 }
 
 impl EventEmitter<WorkspaceEvent> for WorkspaceView {}
 
-impl Focusable for WorkspaceView {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
 impl WorkspaceView {
-    /// An empty workspace, arranged as `saved` left it (the layout of the last run on this
-    /// device), its tiles waiting for their workers.
-    pub fn new(theme: Theme, saved: Option<Saved>, cx: &mut Context<Self>) -> Self {
-        let layout = match saved.clone() {
-            Some(saved) => Tiling::restore(saved.tiling, tiling_config()),
-            None => Tiling::new(tiling_config()),
-        };
-        let navigator = saved.as_ref().map(|s| s.navigator.clone()).unwrap_or_default();
-        // A terminal's own change (an echo) is not the workspace's, and a pane's own news
-        // notifies the area's view instead ([`AreaHost`]): neither comes here.
-        cx.observe_self(Self::changed).detach();
-        let this = cx.weak_entity();
-        let keys = cx.intercept_keystrokes(move |event, window, cx| {
-            if event.keystroke.modifiers.platform {
-                return;
-            }
-            let until = this.upgrade().and_then(|this| this.read(cx).echo_awaited(window, cx));
-            if let Some(until) = until {
-                slopty_kit::icons::hold_steps(cx, until);
-            }
-        });
+    /// An empty workspace, its workers yet to come.
+    #[must_use]
+    pub fn new(theme: Theme) -> Self {
         Self {
-            base_theme: theme.clone(),
-            font_delta: 0.0,
             theme,
-            layout,
-            navigator,
-            panes: panes::Panes::default(),
-            sash_before: Vec::new(),
-            preview: preview::Preview::default(),
             epoch: Instant::now(),
-            away_ticking: false,
             #[cfg(test)]
             held_clock: None,
             pinned_rtt: None,
-            animate: true,
-            reduced: cx.reduce_motion(),
             workers: BTreeMap::new(),
             terminals: HashMap::new(),
             screens: HashMap::new(),
-            files: HashMap::new(),
-            folders: HashMap::new(),
-            probes: Vec::new(),
-            browsers: HashMap::new(),
-            browser_links: HashMap::new(),
-            file_focus: HashMap::new(),
-            items_dirty: true,
-            drawn_waiting: Vec::new(),
-            drawn_thread_waits: Vec::new(),
-            attention_at: None,
-            starts: slopty_client::starts::Starts::default(),
-            starts_file: None,
-            starts_writing: None,
-            sessions_asked: None,
-            past_places: HashMap::new(),
-            folder_step: None,
-            clone_asked: None,
-            run_asked: None,
-            listing: HashSet::new(),
-            starting: starting::Starts::default(),
-            kept_items: kept_items::KeptItems::default(),
-            faces_dirty: true,
-            twins: HashMap::new(),
-            derived: HashMap::new(),
-            alike: HashSet::new(),
-            places: HashMap::new(),
-            titles_dirty: true,
-            drawn: Rc::default(),
-            chrome: Chrome::new(cx),
-            area_host: {
-                let workspace = cx.weak_entity();
-                gpui::AppContext::new(cx, |_| AreaHost {
-                    workspace,
-                    #[cfg(test)]
-                    builds: 0,
-                })
-            },
-            #[cfg(test)]
-            counts: (0, 0),
-            #[cfg(test)]
-            renders: 0,
-            facts: facts::Facts::default(),
-            frecency: saved.as_ref().map(|s| s.frecency.clone()).unwrap_or_default(),
-            last_project: None,
-            frame_projects: Rc::default(),
-            _keys: keys,
             titles: HashMap::new(),
             server_status: None,
             finished: HashMap::new(),
-            program_seen: HashMap::new(),
-            program_sounded: HashMap::new(),
             slow_command: SLOW_COMMAND,
-            running_after: RUNNING_AFTER,
-            recency: Vec::new(),
-            awake: None,
-            unseen: HashMap::new(),
-            stream_grace: STREAM_GRACE,
-            parked: HashSet::new(),
-            picker: None,
-            picker_leaving: None,
-            palette: None,
-            palette_leaving: None,
-            search: project_search::Surface::default(),
-            pending_find: None,
-            pending_find_file: None,
-            rename: None,
-            rename_return: None,
-            pending_focus_rename: false,
-            palette_return: None,
-            palette_action: None,
-            palette_hidden: HashSet::new(),
-            pending_runs: Vec::new(),
-            tailnet_grant: None,
-            palette_extra: Vec::new(),
-            hardware_keyboard: true,
-            pending_focus_palette: false,
-            menu: None,
-            menu_keyed: false,
-            menu_leaving: None,
-            menu_at: None,
-            context_menu: None,
-            anchors: titlebar::Anchors::default(),
-            nav: navigator::NavState::default(),
-            readouts: readouts::Readouts::default(),
-            machines: machines::Machines::default(),
-            machine_remove: None,
             approvals: approvals::Approvals::default(),
-            settings: None,
-            components: None,
             turns: turns::Turns::default(),
-            more_entries: Vec::new(),
-            server_entries: Vec::new(),
-            notes_door: None,
-            pushable: None,
-            parked_tap: None,
-            show_stats: false,
-            desktop: desktop::Desktop::of(saved.as_ref()),
-            toast: None,
-            closed: Vec::new(),
-            closed_seq: 0,
-            drag: None,
-            drop_spots: Rc::default(),
-            width_inset: 0.0,
-            park_pending: false,
-            pending_focus: None,
-            zoom_hold: None,
             faces: faces::Faces::default(),
             view_model: view_model::Bridge::default(),
-            inline: inline_shells::InlineShells::default(),
             server: None,
             next_open: std::cell::Cell::new(1),
-            pending_focus_file: None,
-            pending_focus_folder: None,
-            worktrees: worktrees::Asked::default(),
-            quotes: workers::Quotes::default(),
-            pending_focus_picker: false,
-            pending_focus_self: false,
-            pending_return: false,
-            title_press: false,
-            #[cfg(test)]
-            window_asks: Vec::new(),
-            focus_lost: None,
-            layout_path: None,
-            restore: restore::Restore::of(saved.as_ref()),
-            layout_saved: saved,
-            save_pending: false,
-            given_shell: HashSet::new(),
-            given_pending: HashMap::new(),
             clip: None,
             app_active: true,
-            popouts: popout::PopOuts::default(),
-            window_title: String::new(),
-            warm: None,
             watching: HashSet::new(),
+            clip_focus: None,
+            clip_tick: None,
             clip_sharing: slopty_settings::ClipboardSettings::default(),
             clip_unshared: Rc::default(),
-            handoff: handoffs::HandoffState::default(),
-            kept: None,
-            drafts: drafts::Drafts::default(),
-            empty_goal: None,
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
-            drop_landing: None,
-            files_over: None,
-            phone: false,
-            #[cfg(target_os = "macos")]
-            drag_sink: None,
-            #[cfg(target_os = "macos")]
-            drags_out: remote::DragsOut::default(),
             ports: HashMap::new(),
-            secure: secure::secure(),
-            focus: cx.focus_handle(),
+            awake: None,
+            device_actions: HashMap::new(),
         }
     }
 
     // ----- reading ---------------------------------------------------------------------------
-
-    /// The tiling (read only; tests and the self-test dump).
-    #[must_use]
-    pub const fn layout(&self) -> &Tiling {
-        &self.layout
-    }
-
-    /// The navigator's width, grouping and whether it shows.
-    #[must_use]
-    pub(super) const fn navigator(&self) -> &Navigator {
-        &self.navigator
-    }
-
-    /// Change the navigator's width, grouping or whether it shows; saved with the tiling.
-    pub(super) fn set_navigator(&mut self, navigator: Navigator) {
-        self.navigator = navigator;
-    }
-
-    /// The focused tile.
-    #[must_use]
-    pub fn focused(&self) -> Option<TileRef> {
-        self.layout.focused()
-    }
-
-    /// The focused tile's item id.
-    #[must_use]
-    pub fn active_item(&self) -> Option<ItemId> {
-        self.focused().map(|t| t.item)
-    }
 
     /// An item, whichever worker holds it.
     #[must_use]
@@ -1361,12 +527,6 @@ impl WorkspaceView {
             .map(|(key, _)| *key)
     }
 
-    /// Where a tile was drawn last frame, in window points.
-    #[must_use]
-    pub fn tile_bounds(&self, tile: TileRef) -> Option<Bounds<Pixels>> {
-        self.drawn.placed.borrow().iter().find(|(t, _)| *t == tile).map(|(_, b)| *b)
-    }
-
     /// Number of items across every worker.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1389,18 +549,6 @@ impl WorkspaceView {
     #[must_use]
     pub fn screen(&self, item: ItemId) -> Option<&Entity<ScreenView>> {
         self.screens.get(&item)
-    }
-
-    /// The file tiles, for tests and the self-test dump.
-    #[must_use]
-    pub fn file(&self, id: ItemId) -> Option<&Entity<FileView>> {
-        self.files.get(&id)
-    }
-
-    /// The folder tiles, for tests and the self-test dump.
-    #[must_use]
-    pub fn folder(&self, id: ItemId) -> Option<&Entity<FolderView>> {
-        self.folders.get(&id)
     }
 
     /// The agent at work in `session` as its thread's row says, in the status vocabulary and
@@ -1434,92 +582,19 @@ impl WorkspaceView {
         self.workers.get(&worker).map_or(0, |w| w.links)
     }
 
-    /// Whether the palette is up.
-    #[cfg(test)]
-    #[must_use]
-    const fn palette_open(&self) -> bool {
-        self.palette.is_some()
-    }
-
     /// The badge a session's last long command left, if the tile has not been looked at since.
     #[must_use]
     pub fn finished(&self, session: SessionId) -> Option<&Finished> {
         self.finished.get(&attention::About::Session(session))
     }
 
-    /// Whether moves animate. The self-test turns this off so a dump right after an action
-    /// sees where things landed, not where they were passing through.
-    pub const fn set_animation(&mut self, on: bool) {
-        self.animate = on;
-    }
-
-    /// GPUI's Reduce Motion flag changed: the springs, and every view, follow it.
-    pub fn motion_setting_changed(&mut self, cx: &mut Context<Self>) {
-        self.reduced = cx.reduce_motion();
-        cx.notify();
-    }
-
-    /// Whether a keyboard is attached, so the palette prints chords that can be pressed.
-    pub fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
-        if self.hardware_keyboard != attached {
-            self.hardware_keyboard = attached;
-            cx.notify();
-        }
-    }
-
-    /// Lines the app adds to the palette after the workspace's own (settings, workers).
-    pub fn extend_palette(&mut self, items: Vec<PaletteItem>) {
-        self.palette_extra = items;
-    }
-
-    /// The app's rows in the titlebar's "…" menu.
-    pub fn set_more_menu(&mut self, entries: Vec<MenuEntry>, cx: &mut Context<Self>) {
-        self.more_entries = entries;
-        cx.notify();
-    }
-
-    /// The app's rows in the server readout's menu, while the server is offline: try it again
-    /// now, connect to another.
-    pub fn set_server_menu(&mut self, entries: Vec<MenuEntry>) {
-        self.server_entries = entries;
-    }
-
-    /// How this device's notes stand (`alerts`), and what its navigator's line does about it:
-    /// asks while they were never asked for, opens the system's settings while they are off.
-    /// Notes that reach the person, or a build that posts none, say nothing.
-    pub fn set_notes(
-        &mut self,
-        alerts: slopty_platform::notify::Alerts,
-        door: MenuRun,
-        cx: &mut Context<Self>,
-    ) {
-        self.notes_door = Some((alerts, door));
-        cx.notify();
-    }
-
-    /// The server's word on whether it can push to this phone while the person is away from
-    /// every client. With notes allowed here and this false, the navigator's notes line says
-    /// they reach nobody, since the fix is on the server's machine, not here.
-    pub fn set_pushable(&mut self, pushable: bool, cx: &mut Context<Self>) {
-        if self.pushable.replace(pushable) != Some(pushable) {
-            cx.notify();
-        }
-    }
-
-    /// Save the layout to `path` whenever it changes (debounced).
-    pub fn set_layout_path(&mut self, path: std::path::PathBuf) {
-        self.layout_path = Some(path);
-    }
-
-    // ----- plumbing --------------------------------------------------------------------------
-
-    /// The worker a new session, note or lookup goes to: the focused tile's, else the first
-    /// one that is up, else the first known.
+    /// The worker a new session or lookup goes to: the first one that is up, else the first
+    /// known.
     fn context_worker(&self) -> Option<WorkerKey> {
-        self.focused()
-            .map(|t| t.worker)
-            .filter(|w| self.workers.get(w).is_some_and(|w| w.link.is_some()))
-            .or_else(|| self.workers.iter().find(|(_, w)| w.link.is_some()).map(|(k, _)| *k))
+        self.workers
+            .iter()
+            .find(|(_, w)| w.link.is_some())
+            .map(|(k, _)| *k)
             .or_else(|| self.workers.keys().next().copied())
     }
 
@@ -1556,7 +631,7 @@ impl WorkspaceView {
         }
     }
 
-    /// The time on the layout's clock.
+    /// The time on the workspace's clock.
     fn now(&self) -> Duration {
         #[cfg(test)]
         if let Some(held) = self.held_clock {
@@ -1565,61 +640,9 @@ impl WorkspaceView {
         self.epoch.elapsed()
     }
 
-    /// The instant the layout's clock stands at: what the chrome's own motion (the navigator's
-    /// plate) moves by, so it keeps step with the springs.
-    fn clock_instant(&self) -> Instant {
-        self.epoch.checked_add(self.now()).unwrap_or(self.epoch)
-    }
-
-    /// Hold the layout's clock at `at` since the workspace was made, or let it run (`None`).
-    #[cfg(test)]
-    pub(crate) const fn hold_clock(&mut self, at: Option<Duration>) {
-        self.held_clock = at;
-    }
-
-    /// Something in the layout may have changed: save it once things settle.
-    fn layout_touched(&mut self, cx: &Context<Self>) {
-        if self.layout_path.is_none() || self.save_pending {
-            return;
-        }
-        self.save_pending = true;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SAVE_AFTER).await;
-            let write = this
-                .update(cx, |this, _cx| {
-                    this.save_pending = false;
-                    let saved = this.to_save();
-                    if this.layout_saved.as_ref() == Some(&saved) {
-                        return None;
-                    }
-                    this.layout_saved = Some(saved.clone());
-                    this.layout_path.clone().map(|path| (path, saved))
-                })
-                .ok()
-                .flatten();
-            if let Some((path, saved)) = write {
-                cx.background_executor().spawn(async move { write_layout(&path, &saved) }).await;
-            }
-        })
-        .detach();
-    }
-
-    /// Swap the theme everywhere: every terminal (which re-fits its grid to the new font on
-    /// its next frame), every window's chrome, every file tile and the picker.
+    /// Swap the theme everywhere: every live terminal (which re-fits its grid to the new font
+    /// on its next frame) and window.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.base_theme = theme;
-        self.apply_font(cx);
-    }
-
-    /// The settings' theme with the terminal text moved by ⌘=/⌘-.
-    fn apply_font(&mut self, cx: &mut Context<Self>) {
-        let mut theme = self.base_theme.clone();
-        let size = theme.typography.mono_size + self.font_delta;
-        theme.typography.mono_size = size.clamp(commands::FONT_MIN, commands::FONT_MAX);
-        self.apply_theme(theme, cx);
-    }
-
-    fn apply_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme == theme {
             return;
         }
@@ -1628,22 +651,6 @@ impl WorkspaceView {
         }
         for view in self.screens.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.files.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.folders.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.browsers.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        self.set_threads_theme(&theme, cx);
-        if let Some(page) = &self.components {
-            page.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
-        }
-        if let Some((_, picker)) = &self.picker {
-            picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
         if self.theme.terminal != theme.terminal {
             // Every shell hears the new colours; the worker applies the driver's.
@@ -1662,856 +669,27 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Something to tell the person (a paste refused, an upload that landed elsewhere), handed
+    /// to the app as [`WorkspaceEvent::Notice`].
+    pub fn show_notice(text: String, cx: &mut Context<Self>) {
+        tracing::info!(%text, "notice");
+        cx.emit(WorkspaceEvent::Notice { text, failure: false });
+    }
+
+    /// Something that went wrong, said as [`Self::show_notice`] says a notice.
+    pub fn show_failure(text: String, cx: &mut Context<Self>) {
+        tracing::warn!(%text, "failure");
+        cx.emit(WorkspaceEvent::Notice { text, failure: true });
+    }
+
+    /// `key`'s name, as its link or the server says it.
+    pub(crate) fn worker_name(&self, key: WorkerKey) -> String {
+        self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default()
+    }
+
     /// The theme in use (terminal size included).
     #[must_use]
     pub const fn theme(&self) -> &Theme {
         &self.theme
     }
-
-    /// How long a key typed now waits for its echo, at most: the round trip to the focused
-    /// terminal's worker and a refresh. `None` unless a terminal here has the keyboard.
-    fn echo_awaited(&self, window: &Window, cx: &App) -> Option<Instant> {
-        let terminal = self.active_terminal()?;
-        if !terminal.read(cx).focus_handle(cx).is_focused(window) {
-            return None;
-        }
-        let rtt = self.focused().and_then(|t| self.rtt(t.worker)).unwrap_or_default();
-        cx.background_executor().now().checked_add(rtt.saturating_add(ECHO_SLACK))
-    }
-
-    /// Draw one region of the chrome, for its view.
-    fn render_region(
-        &self,
-        region: Region,
-        window: &Window,
-        cx: &slopty_kit::draw::Draw<'_, Self>,
-    ) -> gpui::AnyElement {
-        match region {
-            Region::Navigator => self.render_navigator_region(window, cx),
-            Region::NavigatorRows => self.render_navigator_rows(window, cx),
-            Region::Titlebar => self.render_titlebar(window, cx),
-            Region::Lead => self.render_lead(window, cx),
-            Region::Cluster => self.render_cluster(window, cx),
-        }
-    }
-
-    /// The workspace changed (its own notify; never a frame of motion, see [`AreaHost`]): the
-    /// chrome may show it and a title may follow it, and who needs the human and which
-    /// worker's clipboard is wanted follow it at once, and so do the approvals asked of the
-    /// workers. The faces follow in the next frame.
-    fn changed(&mut self, cx: &mut Context<Self>) {
-        #[cfg(test)]
-        {
-            self.counts.0 = self.counts.0.saturating_add(1);
-        }
-        self.titles_dirty = true;
-        self.faces_dirty = true;
-        self.prune_facts();
-        self.drawn_waiting = self.needs_you();
-        self.drawn_thread_waits = self.threads_waiting();
-        self.sync_clipboard_watch();
-        self.sync_focus_report();
-        self.sync_approvals(cx);
-        self.chrome.notify(cx);
-    }
-
-    /// How many times each region of the chrome has drawn: the navigator (its panel and its
-    /// rows together), the top line (its own bar or a phone's, the lead and the cluster
-    /// together).
-    #[cfg(test)]
-    fn chrome_renders(&self, cx: &App) -> [usize; 2] {
-        let chrome = &self.chrome;
-        let renders = |view: &Entity<ChromeView>| view.read(cx).renders;
-        [
-            renders(&chrome.navigator).saturating_add(renders(&chrome.nav_rows)),
-            renders(&chrome.titlebar)
-                .saturating_add(renders(&chrome.lead))
-                .saturating_add(renders(&chrome.cluster)),
-        ]
-    }
-
-    /// The length of every map and list the workspace keeps per tile, session or worker, by
-    /// name: what closing everything that was opened must bring back to where it was.
-    #[cfg(test)]
-    fn footprint(&self) -> Vec<(&'static str, usize)> {
-        let per_worker = |f: fn(&Worker) -> usize| self.workers.values().map(f).sum::<usize>();
-        vec![
-            ("workers", self.workers.len()),
-            ("workers.sessions", per_worker(|w| w.sessions.len())),
-            ("workers.watched", per_worker(|w| w.watched.len())),
-            ("workers.watched_folders", per_worker(|w| w.watched_folders.len())),
-            ("workers.pending_opens", per_worker(|w| w.pending_opens.len())),
-            ("workers.openings", per_worker(|w| w.openings.len())),
-            ("workers.queued", per_worker(|w| w.queued.len())),
-            ("terminals", self.terminals.len()),
-            ("screens", self.screens.len()),
-            ("files", self.files.len()),
-            ("folders", self.folders.len()),
-            ("probes", self.probes.len()),
-            ("browsers", self.browsers.len()),
-            ("browser_links", self.browser_links.len()),
-            ("file_focus", self.file_focus.len()),
-            ("drawn_waiting", self.drawn_waiting.len()),
-            ("drawn_thread_waits", self.drawn_thread_waits.len()),
-            ("twins", self.twins.len()),
-            ("derived", self.derived.len()),
-            ("places", self.places.len()),
-            ("titles", self.titles.len()),
-            ("finished", self.finished.len()),
-            ("recency", self.recency.len()),
-            ("unseen", self.unseen.len()),
-            ("parked", self.parked.len()),
-            ("on_screen", self.drawn.on_screen.borrow().len()),
-            ("tile_hits", self.search.tile_hits()),
-            ("palette_extra", self.palette_extra.len()),
-            ("more_entries", self.more_entries.len()),
-            // The closed list itself is kept on purpose, up to `CLOSED_KEPT`; what must not
-            // outlive the closing is what an entry still holds.
-            ("closed_holding", self.closed.iter().filter(|c| c.holds()).count()),
-            ("placed", self.drawn.placed.borrow().len()),
-            ("given_shell", self.given_shell.len()),
-            ("handed", self.drawn.handed.borrow().len()),
-            ("given_pending", self.given_pending.len()),
-            ("watching", self.watching.len()),
-            ("uploads", self.uploads.len()),
-            ("ports", self.ports.len()),
-            ("nav.folded", self.nav.folded.len()),
-            ("faces.chosen", self.faces.chosen.len()),
-            ("faces.focus", self.faces.focus.len()),
-        ]
-        .into_iter()
-        .chain(self.facts.lens())
-        .chain(self.handoff.sizes())
-        .collect()
-    }
-
-    /// A shell changed, and its facts are copied again ([`facts::ShellFacts`]). Most of what a
-    /// shell changes (its grid, its cursor) is its own; the rest is news only for what shows it.
-    /// A command that starts or ends retitles the shell and renumbers its twins at once, for its
-    /// navigator row and its header; a title its program sets is the chrome's news when the
-    /// tile's title follows it; how the last command ended marks the tile, its row and its tab;
-    /// who sizes the PTY is its header's.
-    fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        self.follow_secure_input(cx);
-        let Some((was, now)) = self.copy_shell(session, cx) else { return };
-        let navigator = self.chrome.nav_rows.entity_id();
-        // A command that starts or ends renames its shell and its twins.
-        if was.running != now.running {
-            self.number_twins();
-            App::notify(cx, navigator);
-            self.header_news(session, cx);
-            // Still running at the threshold, the tile and its row say so: the readouts' clock
-            // moves then, as well as each second ([`Self::keep_time`]).
-            if now.running.is_some() {
-                self.keep_time(cx);
-                let after = self.running_after;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(after).await;
-                    let _gone = this.update(cx, |this, cx| {
-                        if this.shell(session).is_some_and(|s| s.running.is_some()) {
-                            this.tick_readouts(cx);
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
-        } else if was.last != now.last {
-            App::notify(cx, navigator);
-        }
-        if was.title != now.title {
-            self.retitled(session, cx);
-        }
-        if (was.exit, was.failure_in_view) != (now.exit, now.failure_in_view) {
-            cx.notify();
-        } else if was.driving != now.driving {
-            self.panes_news(cx);
-        }
-    }
-
-    /// `session`'s header changed, news for the area. On a phone the bar is the focused
-    /// tile's header, so a change to that tile's title, kind or state is the bar's news as
-    /// well; any other tile's is not.
-    fn header_news(&self, session: SessionId, cx: &mut App) {
-        self.panes_news(cx);
-        let tile = self.tile_of_session(session);
-        if self.phone && tile.is_some_and(|t| self.focused() == Some(t)) {
-            App::notify(cx, self.chrome.titlebar.entity_id());
-        }
-    }
 }
-
-impl WorkspaceView {
-    /// Tab from the workspace itself (nothing else focused) enters the keyboard ring; inside
-    /// a terminal or a text field Tab is theirs. ↵ there on an empty workspace gives its
-    /// composer the keyboard.
-    fn key_down(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.is_focused(window) {
-            return;
-        }
-        if slopty_kit::a11y::cycle(ev, window, cx) {
-            cx.stop_propagation();
-        } else if ev.keystroke.key == "enter"
-            && !ev.keystroke.modifiers.modified()
-            && self.bare()
-            && !self.workers.is_empty()
-        {
-            cx.stop_propagation();
-            if let Some((goal, _)) = &self.empty_goal {
-                goal.update(cx, |input, cx| input.focus(window, cx));
-            }
-        }
-    }
-
-    /// Esc closes the bar's open menu before the key reaches the tile that has the keyboard
-    /// (a shell would take it as its own), as a menu bar's menu closes on it.
-    fn menu_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() && ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified()
-        {
-            cx.stop_propagation();
-            self.close_menu(window, cx);
-        }
-    }
-
-    /// After a ring step: a remote window with no tab stop around it kept the keys, so the
-    /// workspace itself takes them — ⌃Tab is always the way out of a window, whose chords are
-    /// all the worker's while it has the focus.
-    fn leave_screen(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let on_screen = self
-            .active_screen()
-            .is_some_and(|screen| screen.read(cx).focus_handle(cx).is_focused(window));
-        if on_screen {
-            window.focus(&self.focus, cx);
-        }
-    }
-
-    /// Focus asked for since the last frame, now that there is a window to give it in. Given
-    /// here, so the views drawn after this one show it in this frame.
-    fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(session) = self.pending_focus.take() {
-            // A tile showing its thread takes the keyboard in its composer.
-            if let Some(thread) = self.thread_face(session).cloned() {
-                thread.update(cx, |v, cx| v.focus(window, cx));
-            } else if let Some(view) = self.terminals.get(&session) {
-                let handle = view.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-        }
-        if let Some((session, query)) = self.pending_find.take()
-            && let Some(view) = self.terminals.get(&session).cloned()
-        {
-            // After this frame: the tile is drawn and focused first, then its find bar takes
-            // the keyboard.
-            window.defer(cx, move |window, cx| {
-                view.update(cx, |v, cx| v.find_with(&query, window, cx));
-            });
-        }
-        if let Some((item, query)) = self.pending_find_file.take()
-            && let Some(view) = self.files.get(&item).cloned()
-        {
-            window.defer(cx, move |window, cx| {
-                view.update(cx, |v, cx| v.find_with(&query, window, cx));
-            });
-        }
-        if std::mem::take(&mut self.pending_focus_picker)
-            && let Some((_, picker)) = &self.picker
-        {
-            let handle = picker.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
-        if std::mem::take(&mut self.pending_return) {
-            self.return_keyboard(window, cx);
-        }
-        // A page's next dialog may have taken the keyboard since its last one gave it back.
-        if std::mem::take(&mut self.pending_focus_self)
-            && !self.browsers.values().any(|b| b.read(cx).dialog_has_keyboard(window, cx))
-        {
-            window.focus(&self.focus, cx);
-        }
-        if std::mem::take(&mut self.pending_focus_palette)
-            && let Some(palette) = &self.palette
-        {
-            let handle = palette.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }
-        if std::mem::take(&mut self.pending_focus_rename)
-            && let Some(rename) = &self.rename
-        {
-            rename.input.update(cx, |input, cx| {
-                input.focus(window, cx);
-                input.select_all(window, cx);
-            });
-        }
-        if self.rename.is_none()
-            && let Some(handle) = self.rename_return.take()
-        {
-            window.focus(&handle, cx);
-        }
-        if self.palette.is_none()
-            && (self.palette_return.is_some() || self.palette_action.is_some())
-        {
-            // Nothing had the keyboard, or what had it is gone: the workspace takes it, so a
-            // pick still runs from where its own actions are answered.
-            let handle = self
-                .palette_return
-                .take()
-                .filter(|h| self.focus.contains(h, window))
-                .unwrap_or_else(|| self.focus.clone());
-            window.focus(&handle, cx);
-            if let Some(action) = self.palette_action.take() {
-                // Once this frame is done, from the element that had the keyboard. A pick that
-                // nothing there answers any more says so, rather than doing nothing.
-                cx.defer_in(window, move |this, window, cx| {
-                    if window.is_action_available(action.as_ref(), cx) {
-                        window.dispatch_action(action, cx);
-                    } else {
-                        this.say_unavailable(action.as_ref(), cx);
-                    }
-                });
-            }
-        }
-        self.settle_search_focus(window, cx);
-        for run in std::mem::take(&mut self.pending_runs) {
-            cx.defer_in(window, move |_this, window, cx| run(window, cx));
-        }
-        if let Some(id) = self.pending_focus_file.take()
-            && let Some(view) = self.files.get(&id)
-        {
-            view.update(cx, |v, cx| v.focus(window, cx));
-        }
-        if let Some(id) = self.pending_focus_folder.take()
-            && let Some(view) = self.folders.get(&id)
-        {
-            view.update(cx, |v, cx| v.focus(window, cx));
-        }
-        self.settle_starting_focus(window, cx);
-    }
-}
-
-impl WorkspaceView {
-    /// The window is called by the project on show, as a document window is by its
-    /// document: the Window menu, Mission Control, cycling the windows by key and the screen
-    /// reader tell two windows apart by it, where every one was the app's name. Set only when it
-    /// changes.
-    fn retitle_window(&mut self, window: &mut Window) {
-        let title = self.project_name();
-        if title != self.window_title {
-            window.set_window_title(&title);
-            self.window_title = title;
-        }
-    }
-}
-
-impl gpui::Render for WorkspaceView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::prelude::FluentBuilder as _;
-        use gpui::{
-            InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _,
-            Styled as _,
-        };
-
-        if self.focus_lost.is_none() {
-            // Once the frame that lost it is done: a focus moved inside the draw's focus phase
-            // schedules no frame, so the new holder would not be drawn as holding it.
-            self.focus_lost = Some(cx.on_focus_lost(window, |_this, window, cx| {
-                cx.defer_in(window, |this, window, cx| {
-                    if window.focused(cx).is_none() && !slopty_kit::a11y::reclaim(window, cx) {
-                        this.return_keyboard(window, cx);
-                    }
-                });
-            }));
-        }
-
-        #[cfg(test)]
-        {
-            self.renders = self.renders.saturating_add(1);
-        }
-        self.frame_projects.hold(true, cx);
-        // A project's group can change only with the workspace or a fact, which both leave
-        // the titles to work out.
-        if self.titles_dirty && self.rehome_projects() {
-            self.layout_touched(cx);
-        }
-        self.retitle_window(window);
-        self.phone = self.width(window) < self.layout.config().phone_below;
-        self.reduced = cx.reduce_motion();
-        if std::mem::take(&mut self.items_dirty) {
-            self.reconcile_files(window, cx);
-            self.reconcile_browsers(cx);
-        }
-        if std::mem::take(&mut self.faces_dirty) {
-            self.sync_faces(window, cx);
-        }
-        self.settle_quotes(window, cx);
-        self.settle_agent_screens(cx);
-        self.settle_going(cx);
-        self.sync_empty_goal(window, cx);
-        self.keep_zoom(cx);
-        self.give_pending_focus(window, cx);
-        self.follow_secure_input(cx);
-        self.follow_top_line(window);
-        self.follow_sized_displays(window, cx);
-        self.arm_system_keys(window, cx);
-        if std::mem::take(&mut self.titles_dirty) {
-            self.number_twins();
-            #[cfg(test)]
-            {
-                self.counts.1 = self.counts.1.saturating_add(1);
-            }
-        }
-        // First: a docked navigator narrows the title bar and the area.
-        self.place_navigator(window);
-        self.sync_settings_aside(cx);
-        if self.nav.drawn.is_some() {
-            self.ensure_navigator_filter(window, cx);
-            self.settle_navigator_filter(window, cx);
-        }
-        self.serve_browsers(cx);
-        let area = gpui::IntoElement::into_any_element(self.area_host.clone());
-        let menu = self.render_menu(window, cx);
-        // What is leaving is drawn under the menu and what is live over it: a palette fading
-        // out where a menu then opens must not take the menu's clicks.
-        let picker = self.picker.as_ref().map(|(_, p)| p.clone());
-        let palette = self.palette.clone();
-        let picker_leaving = picker.is_none().then(|| self.picker_leaving.clone()).flatten();
-        let palette_leaving = palette.is_none().then(|| self.palette_leaving.clone()).flatten();
-        let mut key_context = gpui::KeyContext::new_with_defaults();
-        key_context.add("Workspace");
-        if self.page_keys(window, cx) {
-            key_context.add("Page");
-        }
-        if self.closing_offered() {
-            key_context.add(CLOSING_CTX);
-        }
-        let root = gpui::div()
-            .id("workspace")
-            .debug_selector(|| "workspace".to_owned())
-            .key_context(key_context)
-            .track_focus(&self.focus)
-            .role(gpui::accesskit::Role::Group)
-            .aria_label("Workspace")
-            .on_key_down(cx.listener(Self::key_down))
-            .capture_key_down(cx.listener(Self::menu_key))
-            .relative()
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(slopty_kit::colors::hsla(self.theme.surfaces.ground));
-        let applies = self.applies();
-        let root = Self::register_layout_actions(root, applies, cx);
-        // Global: whatever has the focus.
-        let root = root
-            .on_action(cx.listener(Self::new_terminal))
-            .on_action(cx.listener(Self::new_agent))
-            .on_action(cx.listener(Self::start_agent))
-            .on_action(cx.listener(Self::split_right))
-            .on_action(cx.listener(Self::split_down))
-            .on_action(cx.listener(Self::tab_terminal))
-            .on_action(cx.listener(|this, a: &ShowTab, _w, cx| this.show_tab(a.id, cx)))
-            .on_action(cx.listener(Self::new_note))
-            .on_action(cx.listener(Self::add_window))
-            .on_action(cx.listener(Self::open_file_palette))
-            .on_action(cx.listener(Self::open_folder_palette))
-            .on_action(cx.listener(Self::open_url_palette))
-            .on_action(cx.listener(Self::list_ports))
-            .on_action(cx.listener(Self::next_attention))
-            .on_action(cx.listener(Self::show_needs_you))
-            .on_action(cx.listener(Self::filter_navigator))
-            .on_action(cx.listener(Self::open_palette))
-            .on_action(cx.listener(Self::open_commands))
-            .on_action(cx.listener(Self::edit_address))
-            .on_action(cx.listener(Self::search_in_files))
-            .on_action(cx.listener(Self::start_thread_action))
-            .on_action(cx.listener(Self::new_agent_of))
-            .on_action(cx.listener(Self::new_agent_on))
-            .on_action(cx.listener(Self::resume_past_session))
-            .on_action(cx.listener(Self::clone_to_start))
-            .on_action(cx.listener(Self::run_script_on))
-            .on_action(cx.listener(Self::resume_session))
-            .on_action(cx.listener(Self::remove_machine))
-            .on_action(cx.listener(Self::scope_to))
-            .on_action(cx.listener(Self::pin_to_project))
-            .on_action(cx.listener(Self::share_clipboard))
-            .on_action(cx.listener(Self::edit_machine_settings));
-        // Only while they apply to the focus ([`actions::Applies`]).
-        let root = root
-            .when(applies.tile, |el| {
-                el.on_action(cx.listener(Self::close_item))
-                    .on_action(cx.listener(Self::rename_item))
-            })
-            .when(applies.agent, |el| el.on_action(cx.listener(Self::switch_face)))
-            .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
-            .when(applies.tabs, |el| {
-                el.on_action(cx.listener(Self::other_tabs))
-                    .on_action(cx.listener(Self::close_other_tabs))
-            })
-            .when(applies.projects, |el| {
-                el.on_action(cx.listener(Self::move_to_project))
-                    .on_action(cx.listener(Self::move_to_project_of))
-            })
-            .when(applies.changes, |el| el.on_action(cx.listener(Self::remove_merged)))
-            .when(applies.worktree, |el| el.on_action(cx.listener(Self::remove_worktree)))
-            .when(applies.run, |el| el.on_action(cx.listener(Self::run_here_action)))
-            .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
-            .when(applies.screen, |el| {
-                el.on_action(cx.listener(Self::toggle_mute))
-                    .on_action(cx.listener(Self::type_clipboard))
-                    .on_action(cx.listener(Self::toggle_system_keys))
-                    .on_action(cx.listener(Self::toggle_curtain))
-                    .on_action(cx.listener(Self::toggle_trackpad))
-                    .on_action(cx.listener(Self::toggle_remote_gestures))
-            })
-            .when(applies.display, |el| el.on_action(cx.listener(Self::toggle_sized_display)))
-            .when(applies.terminal || applies.file || applies.page, |el| {
-                el.on_action(cx.listener(Self::find_in_active))
-            })
-            .when(applies.page, |el| {
-                el.on_action(cx.listener(Self::page_back))
-                    .on_action(cx.listener(Self::page_forward))
-                    .on_action(cx.listener(Self::reload_page))
-            })
-            .when(applies.upload, |el| el.on_action(cx.listener(Self::upload_from_files)))
-            .when(applies.file, |el| el.on_action(cx.listener(Self::save_copy)));
-        root
-            // Esc in the name field: the input's own action, taken here so the field closes
-            // without a change and the workspace has the keyboard.
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::Escape, _window, cx| {
-                    // Unless an input method composes in it: its Esc cancels the word.
-                    if this.rename.as_ref().is_some_and(|r| !r.input.read(cx).is_composing()) {
-                        this.finish_rename(false, true, cx);
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                slopty_kit::a11y::step(true, window, cx);
-                this.leave_screen(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
-                slopty_kit::a11y::step(false, window, cx);
-                this.leave_screen(window, cx);
-            }))
-            .on_action(cx.listener(Self::toggle_navigator))
-            .on_action(cx.listener(Self::open_component_preview))
-            .child(Self::measure_width(cx))
-            .child(Self::render_follow(cx))
-            .child(self.render_frame(area, window, cx))
-            .when_some(picker_leaving, gpui::ParentElement::child)
-            .when_some(palette_leaving, gpui::ParentElement::child)
-            .children(menu)
-            .when_some(picker, gpui::ParentElement::child)
-            .when_some(palette, gpui::ParentElement::child)
-            .children(self.search_drawn())
-            .children(self.render_remove_machine(window, cx))
-    }
-}
-
-impl WorkspaceView {
-    /// How wide the workspace is: the window's width less what the app kept of it last frame.
-    /// A difference, not last frame's width: the window's width is this frame's, so a resize
-    /// is seen at once and never lays the panes out for the old size.
-    pub(super) fn width(&self, window: &Window) -> f32 {
-        f32::from(window.viewport_size().width) - self.width_inset
-    }
-
-    /// Takes how much of the window's width the workspace was laid out in; a change draws one
-    /// more frame at the new width, as the area's own measure does. Read while the window
-    /// draws, and written only once it is done, and only when it changed: a write while it
-    /// draws would build every view that read the workspace again.
-    fn measure_width(cx: &Context<Self>) -> gpui::AnyElement {
-        use gpui::{IntoElement as _, Styled as _};
-        let entity = cx.entity();
-        gpui::canvas(
-            move |bounds, window, cx| {
-                let inset = f32::from(window.viewport_size().width - bounds.size.width);
-                if (entity.read(cx).width_inset - inset).abs() > f32::EPSILON {
-                    cx.defer(move |cx| {
-                        entity.update(cx, |this, cx| {
-                            this.width_inset = inset;
-                            cx.notify();
-                        });
-                    });
-                }
-            },
-            |_bounds, (), _window, _cx| {},
-        )
-        .absolute()
-        .inset_0()
-        .into_any_element()
-    }
-
-    /// The frame: the navigator the window's full height on the left, docked beside the rest
-    /// or laid over it, and the area to its right from the window's top edge to its bottom,
-    /// its top tab bars the window's top line. The chrome's regions are their own views.
-    fn render_frame(
-        &self,
-        area: gpui::AnyElement,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        use gpui::{IntoElement as _, ParentElement as _, Styled as _, px};
-        let safe = window.insets().effective();
-        // No title bar: the panes' tab bars are the top line, and the window draws a line of
-        // its own only where no pane meets the top (`titlebar`), or a phone's bar. Not cached,
-        // as the docked navigator is not: a retained view is drawn again from last frame around
-        // a nested view notified alone, where a cached one is built again whole.
-        let titlebar = self.own_top_line().then(|| {
-            gpui::div()
-                .w_full()
-                .flex_none()
-                .h(px(titlebar_height(&self.theme)) + safe.top)
-                .flex()
-                .child(self.chrome.titlebar.clone())
-        });
-        let navigator = self.chrome.navigator.clone();
-        // A hidden navigator draws no project rows to drop on.
-        if self.nav.drawn.is_none() {
-            self.drop_spots.projects.borrow_mut().clear();
-        }
-        let (docked, over, handle) = match self.nav.drawn {
-            Some(navigator::Mode::Docked) => {
-                let width = px(self.navigator_width());
-                let handle = Self::render_handle(width, cx);
-                // Not cached, as in `navigator_over`. Its trailing edge is the one line, as
-                // every edge in the window is, laid over its last point so it takes no room;
-                // the handle lies over it.
-                let edge = gpui::div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right_0()
-                    .w(slopty_kit::kit::HAIR)
-                    .bg(slopty_kit::colors::hsla(self.theme.surfaces.stroke));
-                let column = gpui::div()
-                    .relative()
-                    .flex_none()
-                    .h_full()
-                    .w(width)
-                    .flex()
-                    .child(navigator)
-                    .child(edge);
-                (Some(column.into_any_element()), None, Some(handle))
-            }
-            Some(mode) => (None, Some(self.navigator_over(mode, navigator, window, cx)), None),
-            None => (None, None, None),
-        };
-        // The settings take the panes' place.
-        let page = self.render_settings_page().or_else(|| self.render_component_page());
-        let area = page.unwrap_or(area);
-        // The panes meet the frame's edges and each other on the one ground; on a Mac and an
-        // iPad their top tab bars are the window's top line, under the safe area's top.
-        let top = if self.phone || titlebar.is_some() { px(0.0) } else { safe.top };
-        let middle = gpui::div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .flex()
-            .flex_col()
-            .pt(top)
-            .overflow_hidden()
-            .child(area);
-        gpui::div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .flex()
-            .children(docked)
-            .child(
-                gpui::div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .children(titlebar)
-                    .child(middle),
-            )
-            .children(handle)
-            .children(over)
-            .into_any_element()
-    }
-
-    /// Whether the window draws a top line of its own: on a phone, its bar; elsewhere only
-    /// while no pane meets the top to hold the lead and the cluster (the settings page, the
-    /// empty workspace, no machine yet).
-    pub(super) fn own_top_line(&self) -> bool {
-        self.phone
-            || self.workers.is_empty()
-            || self.paged()
-            || self.layout.shown_tab().is_none()
-            || self.layout.frame().panes.is_empty()
-    }
-
-    /// The navigator laid over the frame in `mode`, on the scrim, which a click closes it by.
-    ///
-    /// It enters as a sheet does: the panel slides in from the leading edge while the scrim
-    /// comes up under it, on the sheet's time and the drawer's curve. Under Reduce Motion, or in
-    /// a headless frame, it is there at once. Only the entry moves; it leaves at once.
-    fn navigator_over(
-        &self,
-        mode: navigator::Mode,
-        panel: Entity<ChromeView>,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
-        use gpui::prelude::FluentBuilder as _;
-        use gpui::{
-            Animation, AnimationExt as _, InteractiveElement as _, IntoElement as _, MouseButton,
-            ParentElement as _, Styled as _, px,
-        };
-        let safe = window.insets().effective();
-        // A phone's home is the whole screen, over the frame, with nothing showing round it.
-        // Laid over a wider frame, the panel meets the window's edges and runs under the
-        // leading safe area, which its rows clear.
-        let home = mode == navigator::Mode::Home;
-        let width = if home {
-            px(self.navigator_panel_width(mode, window))
-        } else {
-            px(self.navigator_panel_width(mode, window)) + safe.left
-        };
-        // Not cached: a cached view is built again whenever a view in it is, and a scroll of
-        // the rows' view inside it then rebuilt the panel and its filter field.
-        let panel = gpui::div().h_full().w(width).flex().child(panel);
-        let handle = (mode == navigator::Mode::Overlay).then(|| Self::render_handle(width, cx));
-        let sheet = || {
-            Animation::new(slopty_theme::Motion::DEFAULT.sheet)
-                .with_easing(slopty_kit::kit::drawer())
-        };
-        let moves = self.animate && slopty_kit::kit::motion(cx);
-        let dim = slopty_kit::kit::scrim(&self.theme);
-        let scrim = gpui::div().absolute().inset_0().when(!home, |el| el.bg(dim));
-        let scrim = if moves {
-            scrim
-                .with_animation("navigator-scrim", sheet(), gpui::Styled::opacity)
-                .into_any_element()
-        } else {
-            scrim.into_any_element()
-        };
-        let (top, bottom, left) = (px(0.0), px(0.0), px(0.0));
-        let drawn = gpui::div()
-            .debug_selector(|| "navigator-sheet".to_owned())
-            .absolute()
-            .top(top)
-            .bottom(bottom)
-            .left(left)
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(panel);
-        let drawn = if moves {
-            // From wholly past the leading edge, its shadow with it.
-            drawn
-                .with_animation("navigator-slide", sheet(), move |el, t| {
-                    el.left(left - (width + left) * (1.0 - t))
-                })
-                .into_any_element()
-        } else {
-            drawn.into_any_element()
-        };
-        let away = gpui::div()
-            .id("navigator-away")
-            .debug_selector(|| "navigator-away".to_owned())
-            .absolute()
-            .inset_0()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.nav.open = false;
-                    cx.notify();
-                }),
-            )
-            .child(scrim)
-            .child(drawn)
-            .children(handle);
-        match mode {
-            // A touch device's workspace ends above the home indicator's band (and the key
-            // bar, when it shows), which the app draws below it. Laid over the frame, on a
-            // phone or an iPad, the panel is drawn after everything and unclipped, down to the
-            // window's bottom edge, so it and its scrim cover the band; the workspace starts
-            // at the window's top.
-            navigator::Mode::Home | navigator::Mode::Overlay => {
-                gpui::deferred(away.bottom_auto().h(window.viewport_size().height))
-                    .into_any_element()
-            }
-            navigator::Mode::Docked => away.into_any_element(),
-        }
-    }
-}
-
-/// The tiling's constants for this device: touch's on iOS (an iPad's panes at the touch
-/// minimum, and Split View below 900 pt drawn as a phone), a pointer's on the Mac.
-///
-/// Every pane heads its own tabs with its bar, Zed's and Delta's way, so the least height a
-/// pane takes is the tiling's least for its content (about 14 rows of a terminal) and that
-/// bar: with the window's own title and status bars gone, a 600 pt window would otherwise
-/// split a new tile below into two panes of 266 pt of content.
-const fn tiling_config() -> TilingConfig {
-    let (config, density) = if cfg!(target_os = "ios") {
-        (TilingConfig::TOUCH, slopty_theme::Density::TOUCH)
-    } else {
-        (TilingConfig::POINTER, slopty_theme::Density::COMPACT)
-    };
-    let room = slopty_client::layout::Room {
-        min_w: config.room.min_w,
-        min_h: config.room.min_h + density.header,
-    };
-    TilingConfig { room, ..config }
-}
-
-/// Write `saved` to `path` atomically; a failure is logged, never fatal: the layout is this
-/// device's convenience, and the next change tries again.
-fn write_layout(path: &std::path::Path, saved: &Saved) {
-    let bytes = match serde_json::to_vec_pretty(saved) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!(error = %e, "layout serialise");
-            return;
-        }
-    };
-    if let Err(e) = slopty_platform::fs::replace(path, &bytes) {
-        tracing::warn!(path = %path.display(), error = %e, "layout save");
-    }
-}
-
-/// What the app says when the last layout could not be read and was set aside.
-pub const LAYOUT_SET_ASIDE: &str =
-    "The last layout could not be read; it was kept as layout.json.bad";
-
-/// A layout file that does not read as this build's: set aside as `<path>.bad`, so the next
-/// save does not overwrite it, and said to the person.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct LayoutUnreadable;
-
-/// Read the layout a previous run saved at `path`: none when there is no file.
-///
-/// One that does not read (another build's, or broken) is renamed to `<path>.bad`, replacing
-/// an older one, so it costs an arrangement, never the app, and is still there to look at.
-/// There is no reading of an older shape: the layout is this device's convenience.
-///
-/// # Errors
-///
-/// [`LayoutUnreadable`] when the file is there and does not read.
-pub fn read_layout(path: &std::path::Path) -> Result<Option<Saved>, LayoutUnreadable> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "layout read");
-            return Err(LayoutUnreadable);
-        }
-    };
-    serde_json::from_slice(&bytes).map(Some).map_err(|e| {
-        let bad = path.with_extension("json.bad");
-        tracing::warn!(path = %path.display(), error = %e, "layout parse: set aside");
-        if let Err(e) = std::fs::rename(path, &bad) {
-            tracing::warn!(path = %bad.display(), error = %e, "layout set aside");
-        }
-        LayoutUnreadable
-    })
-}
-
-#[cfg(test)]
-mod tests;

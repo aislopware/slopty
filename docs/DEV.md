@@ -453,11 +453,10 @@ the gate checks its formatting.
   signature. `--stacks` adds `MallocStackLogging`, so the reports show where a leak came from.
 - `cargo xtask nightly [run] [--only <check>] [--skip <check>] [--soak-minutes 20]
   [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another: `soak`,
-  `bench` (with `--wall`), `proptest`, `gpui-iterations`, `app-soak` (every tile kind opened and
-  closed 1000 times), `miri`, `sanitize-address`, `sanitize-thread`, `sanitize-realtime`,
-  `coverage`, `features`, `fuzz`, `loom`, `leaks` and `metal`. Each writes `<check>.log` and
-  `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A check whose tool is
-  missing is skipped and says why. Here each check runs at `nice -n 19` with four build jobs and
+  `bench` (with `--wall`), `proptest`, `gpui-iterations`, `miri`, `sanitize-address`,
+  `sanitize-thread`, `sanitize-realtime`, `coverage`, `features`, `fuzz`, `loom`, `leaks` and
+  `metal`. Each writes `<check>.log` and `<check>.json` under `target/nightly/<date>/`, beside
+  a `summary.json`. A check whose tool is missing is skipped and says why. Here each check runs at `nice -n 19` with four build jobs and
   four test threads, and a full run is refused unless `--all-here` asks for it: the `Deep`
   workflow runs them (above), and `--only <check>` runs one here. On a runner the checks keep
   every core at `nice -n 10`. `cargo xtask nightly uninstall` removes the LaunchAgent an earlier

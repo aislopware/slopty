@@ -68,8 +68,7 @@ pub struct ShortcutsPage {
     // slopty: appshots removed.
     send_select: widgets::SelectState,
     // slopty: no pull-request pages.
-    /// Settings → General's thread naming card (its own title-bound picker).
-    thread_naming: Entity<crate::settings::thread_naming::ThreadNamingCard>,
+    // slopty: no thread naming: an agent's thread is titled by the agent.
     _state: Entity<AppState>,
 }
 
@@ -98,10 +97,7 @@ impl ShortcutsPage {
             // slopty: appshots removed.
             send_select: widgets::SelectState::default(),
             // slopty: no pull-request pages.
-            thread_naming: {
-                let state = state.clone();
-                cx.new(|cx| crate::settings::thread_naming::ThreadNamingCard::new(state, cx))
-            },
+            // slopty: no thread naming.
             _state: state,
         }
     }
@@ -670,8 +666,7 @@ impl Render for ShortcutsPage {
                                             .child(compact_mode_row)
                                             .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
-                                    )
-                                    .child(self.thread_naming.clone()),
+                                    ), // slopty: no thread naming.
                             ),
                     )
                     .fade_overflow_y(&self.scroll.scroll),

@@ -240,11 +240,17 @@ fn git_status(key: WorkerKey, root: &str, outcome: GitOutcome) -> Option<Checkou
     })
 }
 
-/// A listed folder's entries as the shell's, `dir` the folder relative to the workspace.
-fn entries(dir: &str, listed: &[slopty_proto::folder::FolderEntry]) -> Vec<WorkspaceEntry> {
+/// A listed folder's entries as the shell's, `dir` the folder relative to the workspace: its
+/// hidden ones (a dot name, the Mac's hidden flag) only when `include_hidden`, marked as the
+/// shell's ignored ones are.
+fn entries(
+    dir: &str,
+    listed: &[slopty_proto::folder::FolderEntry],
+    include_hidden: bool,
+) -> Vec<WorkspaceEntry> {
     listed
         .iter()
-        .filter(|entry| entry.name != GIT_DIR)
+        .filter(|entry| entry.name != GIT_DIR && (include_hidden || !entry.hidden))
         .map(|entry| WorkspaceEntry {
             mutation_revision: Some(version(entry.size, entry.modified_ms)),
             path: join(dir, &entry.name),
@@ -256,7 +262,7 @@ fn entries(dir: &str, listed: &[slopty_proto::folder::FolderEntry]) -> Vec<Works
             },
             size: (entry.kind != FileKind::Dir).then_some(entry.size),
             modified_at: time(entry.modified_ms),
-            ignored: false,
+            ignored: entry.hidden,
             read_only: false,
         })
         .collect()
@@ -345,7 +351,7 @@ impl WorkspaceView {
                         delete_entry: true,
                     }),
                     directory: dir.clone(),
-                    entries: entries(&dir, &listed),
+                    entries: entries(&dir, &listed, request.include_ignored),
                     next_cursor: None,
                     truncated: total > shown,
                 })

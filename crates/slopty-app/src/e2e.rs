@@ -27,13 +27,13 @@ use gpui::{
 };
 use slopty_core::{ItemId, SessionId, WorkerId};
 use slopty_e2e::{
-    BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
-    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
+    Button, Command, Dump, FaceInfo, FrameInfo, ItemInfo, LatencyInfo, Reply, ScreenInfo,
+    TerminalInfo, WindowInfo, WorkerInfo,
 };
 use slopty_kit::icons::Status;
 use slopty_proto::items::ItemKind;
 use slopty_ui::screen::ScreenView;
-use slopty_ui::workspace::{KeyTarget, WorkerStatus};
+use slopty_ui::workspace::WorkerStatus;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
@@ -53,8 +53,6 @@ pub(crate) fn serve(
 ) {
     let (tx, mut rx) = mpsc::channel::<Request>(16);
     runtime.spawn(listen(socket, tx));
-    #[cfg(target_os = "macos")]
-    let handle = runtime.clone();
     cx.spawn(async move |cx| {
         // GPUI's fades run on the wall clock, so a frame and the same state drawn from scratch a
         // few milliseconds later differ while one runs: under Reduce Motion they land at once,
@@ -68,34 +66,8 @@ pub(crate) fn serve(
         workspace.update(cx, |ws, cx| {
             ws.view.update(cx, |view, cx| view.pin_rtt_readout(Some(slopty_e2e::SHOWN_RTT), cx));
         });
-        #[cfg(target_os = "macos")]
-        let dragged = park_drags(&workspace, cx);
-        #[cfg(target_os = "macos")]
-        let mut carried = slopty_ui::workspace::remote::DropIn::default();
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
-                #[cfg(target_os = "macos")]
-                Command::DragOver { .. } | Command::DragDrop { .. } | Command::DragLeave => {
-                    let mut answer = None;
-                    let applied = cx.update_window(window, |_root, _window, cx| {
-                        answer = Some(carry(&workspace, &mut carried, command, cx));
-                    });
-                    match (applied, answer) {
-                        (Ok(()), Some(answer)) => after_frame(window, answer, cx).await,
-                        (Ok(()), None) => Reply::Error { message: "not applied".into() },
-                        (Err(e), _) => error(&e),
-                    }
-                }
-                #[cfg(not(target_os = "macos"))]
-                Command::DragOver { .. } | Command::DragDrop { .. } | Command::DragLeave => {
-                    Reply::Error { message: "no drag destination here".into() }
-                }
-                #[cfg(target_os = "macos")]
-                Command::KeepDragged { into } => keep_dragged(&dragged, into, &handle).await,
-                #[cfg(not(target_os = "macos"))]
-                Command::KeepDragged { .. } => {
-                    Reply::Error { message: "no drag out of the app here".into() }
-                }
                 Command::Render { path, scale } => {
                     // The frame the app draws with everything dispatched so far, as it draws
                     // it: only what was notified is built again. It must be the frame the same
@@ -143,11 +115,6 @@ pub(crate) fn serve(
                     let _sent = reply.send(Reply::Ok);
                     cx.update(|cx| cx.quit());
                     continue;
-                }
-                // From the async task too (no window leased): the key goes through AppKit, which
-                // hands it to GPUI's dispatch as the keyboard's would.
-                Command::PageKeys { url, keys } => {
-                    page_keys(&workspace, &url, &keys, window, cx).await
                 }
                 // At the UIKit boundary, from the async task (no window leased): the fork's
                 // delivery re-enters GPUI's dispatch exactly as a UIKit callback does. Then
@@ -197,165 +164,6 @@ pub(crate) fn serve(
         }
     })
     .detach();
-}
-
-/// Drags of worker files out of the app, parked for [`Command::KeepDragged`] instead of
-/// starting a system drag.
-#[cfg(target_os = "macos")]
-type Parked = std::rc::Rc<std::cell::RefCell<Vec<slopty_platform::drag::Promise>>>;
-
-/// Park the promises of every drag out of the app from now on.
-#[cfg(target_os = "macos")]
-fn park_drags(workspace: &Entity<Workspace>, cx: &mut gpui::AsyncApp) -> Parked {
-    let parked = Parked::default();
-    let sink = std::rc::Rc::clone(&parked);
-    workspace.update(cx, |ws, cx| {
-        ws.view.update(cx, |view, _cx| {
-            view.set_drag_sink(std::rc::Rc::new(move |promises| {
-                *sink.borrow_mut() = promises;
-                true
-            }));
-        });
-    });
-    parked
-}
-
-/// A step of a drag from this machine, handed to the workspace as the platform's destination
-/// hands it each one (`slopty_ui::workspace::remote::Sink`), with the files on a pasteboard of
-/// the step's own.
-#[cfg(target_os = "macos")]
-fn carry(
-    workspace: &Entity<Workspace>,
-    state: &mut slopty_ui::workspace::remote::DropIn,
-    command: Command,
-    cx: &mut App,
-) -> Reply {
-    use slopty_platform::file_drop::Over;
-    use slopty_proto::drag::{DragOp, DragOps};
-    let view = workspace.read(cx).view.clone();
-    match command {
-        Command::DragOver { paths, texts, x, y } => {
-            use slopty_platform::pasteboard::{FILE_URL_UTI, TEXT_UTI};
-            let board = slopty_platform::pasteboard::Memory::default();
-            let urls: Option<Vec<String>> = paths
-                .iter()
-                .map(|p| slopty_client::dnd::file_url(std::path::Path::new(p)))
-                .collect();
-            let Some(urls) = urls else {
-                return Reply::Error { message: format!("not absolute paths: {paths:?}") };
-            };
-            let items: Vec<[(&str, &[u8]); 1]> = urls
-                .iter()
-                .map(|u| [(FILE_URL_UTI, u.as_bytes())])
-                .chain(texts.iter().map(|t| [(TEXT_UTI, t.as_bytes())]))
-                .collect();
-            board.copy_items(&items.iter().map(<[_; 1]>::as_slice).collect::<Vec<_>>());
-            let over = view.update(cx, |v, cx| {
-                let carried = slopty_ui::workspace::remote::Carried {
-                    board: &board,
-                    allowed: DragOps::COPY,
-                    own: None,
-                };
-                v.drag_over(state, point(px(x), px(y)), carried, cx)
-            });
-            let op = match over {
-                Over::Local => "local",
-                Over::Remote(DragOp::None) => "none",
-                Over::Remote(DragOp::Copy) => "copy",
-                Over::Remote(DragOp::Link) => "link",
-                Over::Remote(DragOp::Move) => "move",
-            };
-            Reply::Over { op: op.to_owned(), drag: state.drag().map(|d| d.to_string()) }
-        }
-        Command::DragDrop { x, y } => {
-            let taken = view.update(cx, |v, cx| v.drag_dropped(state, point(px(x), px(y)), 0, cx));
-            Reply::Taken { taken: taken != slopty_platform::file_drop::Taken::Refused }
-        }
-        Command::DragLeave => {
-            view.update(cx, |v, cx| v.drag_left(state, cx));
-            Reply::Ok
-        }
-        other => Reply::Error { message: format!("not a drag step: {other:?}") },
-    }
-}
-
-/// Keep the parked promises in `into`, each as the drop there would ask, off the main thread
-/// as AppKit's own queue would.
-#[cfg(target_os = "macos")]
-async fn keep_dragged(parked: &Parked, into: String, runtime: &tokio::runtime::Handle) -> Reply {
-    let promises = std::mem::take(&mut *parked.borrow_mut());
-    if promises.is_empty() {
-        return Reply::Error { message: "nothing was dragged out".into() };
-    }
-    let into = PathBuf::from(into);
-    let kept = runtime.spawn_blocking(move || {
-        promises
-            .iter()
-            .try_for_each(|p| (p.keep)(&into.join(&p.name)).map_err(|e| (p.name.clone(), e)))
-    });
-    match kept.await {
-        Ok(Ok(())) => Reply::Ok,
-        Ok(Err((name, why))) => Reply::Error { message: format!("{name}: {why}") },
-        Err(e) => Reply::Error { message: format!("the keeper died: {e}") },
-    }
-}
-
-/// The page of the browser tile for `url`, given `keys` (a chord such as `cmd-a`) as AppKit
-/// delivers a key press, while the page holds the keyboard; replies after the frame that
-/// follows.
-async fn page_keys(
-    workspace: &Entity<Workspace>,
-    url: &str,
-    keys: &str,
-    window: AnyWindowHandle,
-    cx: &mut gpui::AsyncApp,
-) -> Reply {
-    let holds = cx.update(|cx| {
-        let view = workspace.read(cx).view.read(cx);
-        view.items().find_map(|(_, item)| match &item.kind {
-            ItemKind::Browser { url: u } if u == url => view.browser(item.id).map(|page| {
-                let page = page.read(cx);
-                #[cfg(target_os = "macos")]
-                let window = page.window_number();
-                #[cfg(not(target_os = "macos"))]
-                let window = None::<isize>;
-                (page.focused(), window)
-            }),
-            _ => None,
-        })
-    });
-    let window_number = match holds {
-        None => return Reply::Error { message: "no browser tile".to_owned() },
-        Some((false, _)) => {
-            return Reply::Error { message: "the page does not hold the keyboard".to_owned() };
-        }
-        Some((true, number)) => number,
-    };
-    let (mut command, mut shift, mut key) = (false, false, "");
-    for part in keys.split('-') {
-        match part {
-            "cmd" => command = true,
-            "shift" => shift = true,
-            other => key = other,
-        }
-    }
-    #[cfg(target_os = "macos")]
-    let delivered = window_number
-        .is_some_and(|number| slopty_platform::web::press(number, key, command, shift));
-    #[cfg(not(target_os = "macos"))]
-    let delivered = {
-        #[expect(
-            clippy::no_effect_underscore_binding,
-            reason = "no page takes keys off the Mac; the chord is read there only"
-        )]
-        let _chord = (window_number, key, command, shift);
-        false
-    };
-    if delivered {
-        after_frame(window, Reply::Ok, cx).await
-    } else {
-        Reply::Error { message: format!("no window to take {keys}") }
-    }
 }
 
 /// Run `f` in the next frame, once every next-frame callback of that frame has run and before
@@ -835,46 +643,8 @@ fn apply(
             );
             Reply::Ok
         }
-        Command::Open { command, count } => {
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, |view, cx| {
-                for _ in 0..count {
-                    view.open_command(command.clone(), cx);
-                }
-            });
-            Reply::Ok
-        }
-        Command::OpenFile { path, line } => {
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, |view, cx| view.open_file(&path, line, cx));
-            Reply::Ok
-        }
-        Command::OpenUrl { url } => {
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, |view, cx| view.open_browser(None, &url, cx));
-            Reply::Ok
-        }
         Command::FramesReset => {
             slopty_kit::frames::reset(cx);
-            Reply::Ok
-        }
-        Command::Reveal { session } => {
-            let Ok(session) = session.parse::<SessionId>() else {
-                return Reply::Error { message: format!("not a session id: {session}") };
-            };
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, |view, cx| view.reveal_session(session, cx));
-            Reply::Ok
-        }
-        Command::FocusItem { item } => {
-            let Ok(item) = item.parse::<ItemId>() else {
-                return Reply::Error { message: format!("not an item id: {item}") };
-            };
-            let view = workspace.read(cx).view.clone();
-            let Some(tile) = view.read(cx).tile_of(item) else {
-                return Reply::Error { message: format!("no tile of {item}") };
-            };
-            view.update(cx, |view, cx| view.focus_tile(tile, cx));
             Reply::Ok
         }
         Command::ForgetWorker { id } => {
@@ -882,16 +652,6 @@ fn apply(
                 return Reply::Error { message: format!("not a worker id: {id}") };
             };
             workspace.update(cx, |ws, cx| ws.forget_worker(id, cx));
-            Reply::Ok
-        }
-        Command::AddDisplay => {
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, slopty_ui::workspace::WorkspaceView::add_first_display);
-            Reply::Ok
-        }
-        Command::PickWindow { window, title } => {
-            let view = workspace.read(cx).view.clone();
-            view.update(cx, |v, cx| v.pick_window(slopty_core::WindowId(window), title, cx));
             Reply::Ok
         }
         Command::NotificationResponse { tag } => {
@@ -912,16 +672,9 @@ fn apply(
         }
         Command::Resize { width, height } => {
             if cfg!(target_os = "ios") {
-                // UIKit sizes the window; the app lays itself out in the size asked for.
-                let full = window.viewport_size();
-                let asked = size(px(width), px(height));
-                workspace.update(cx, |ws, cx| {
-                    ws.split_view = (asked != full).then_some(asked);
-                    cx.notify();
-                });
-            } else {
-                window.resize(size(px(width), px(height)));
+                return Reply::Error { message: "UIKit sizes the window on iOS".into() };
             }
+            window.resize(size(px(width), px(height)));
             Reply::Ok
         }
         Command::Appearance { dark } => {
@@ -943,11 +696,6 @@ fn apply(
         | Command::OpenPush { .. }
         | Command::Delivered
         | Command::PressNote { .. }
-        | Command::KeepDragged { .. }
-        | Command::DragOver { .. }
-        | Command::DragDrop { .. }
-        | Command::DragLeave
-        | Command::PageKeys { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }
@@ -1066,10 +814,10 @@ const BACKDROP: [u8; 3] = [72, 96, 128];
 #[cfg(feature = "e2e")]
 fn over_backdrop(image: &mut image::RgbaImage) {
     for pixel in image.pixels_mut() {
-        let clear = 255 - u16::from(pixel[3]);
+        let clear = 255_u16.saturating_sub(u16::from(pixel[3]));
         for (channel, backdrop) in pixel.0.iter_mut().zip(BACKDROP) {
-            let under = (clear * u16::from(backdrop) + 127) / 255;
-            *channel = u8::try_from(u16::from(*channel) + under).unwrap_or(u8::MAX);
+            let under = clear.saturating_mul(u16::from(backdrop)).saturating_add(127) / 255;
+            *channel = u8::try_from(u16::from(*channel).saturating_add(under)).unwrap_or(u8::MAX);
         }
         pixel[3] = u8::MAX;
     }
@@ -1097,7 +845,7 @@ fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dum
     window.draw(cx).clear(cx);
     let mut dump = workspace.read(cx).dump(window, cx);
     dump.frames = frames;
-    dump.stale = stale.map(|stale| format!("{stale} (focus {:?}, {})", dump.focus, dump.focused));
+    dump.stale = stale.map(|stale| format!("{stale} (focus {})", dump.focused));
     window.set_a11y_active(false);
     dump
 }
@@ -1289,53 +1037,24 @@ impl Workspace {
                 active: window.is_window_active(),
             },
             workers,
-            adding: self.adding.is_some(),
             status,
-            notice: view.toast_text(),
-            project: view.project_name(),
             dark: self.theme.variant() == slopty_theme::Variant::Dark,
             frames: frame_info(slopty_kit::frames::stats(cx)),
             pointer: cfg!(all(target_os = "ios", feature = "e2e")).then(pointer_look),
             ..Dump::default()
         };
-        let mut focused = if view.focus_handle(cx).is_focused(window) {
-            "workspace"
-        } else if window.focused(cx).is_some() {
-            "other"
-        } else {
-            "none"
-        }
-        .to_owned();
-        let context =
-            view.focused().map(|t| t.worker).or_else(|| view.workers().next().map(|w| w.0));
-        dump.client =
-            context.and_then(|key| view.me(key)).map(|me| me.to_string()).unwrap_or_default();
-        dump.focus = view.active_key_target().map(|t| match t {
-            KeyTarget::Terminal(_) => "terminal".to_owned(),
-            KeyTarget::Screen(_) => "screen".to_owned(),
-        });
+        let mut focused = if window.focused(cx).is_some() { "other" } else { "none" }.to_owned();
+        dump.client = view
+            .workers()
+            .next()
+            .and_then(|(key, ..)| view.me(key))
+            .map(|me| me.to_string())
+            .unwrap_or_default();
         let names: std::collections::HashMap<_, _> =
             view.workers().map(|(key, name, _)| (key, name.to_owned())).collect();
-        let layout = view.layout();
-        // A tile's place as indices: its project, its tab in the project, its pane's path in
-        // the tab's tree, and its place among the pane's tabs.
-        let place = |tile: slopty_client::layout::TileRef| {
-            let pos = layout.position(tile)?;
-            let project = layout.projects().get(pos.project)?;
-            let tab_at = project.tabs().iter().position(|t| t.id() == pos.tab)?;
-            let tab = project.tabs().get(tab_at)?;
-            let pane = tab.root().path_of(pos.pane)?;
-            let index = tab.pane(pos.pane)?.tiles().iter().position(|t| *t == tile)?;
-            Some((pos.project, tab_at, pane, index))
-        };
-        dump.shown = layout
-            .shown_index()
-            .and_then(|p| layout.projects().get(p).map(|project| [p, project.shown_index()]));
-        let mut tiles: Vec<_> =
-            layout.tiles().filter_map(|tile| place(tile).map(|at| (at, tile))).collect();
-        tiles.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for ((project, tab, pane, index), tile) in tiles {
-            let Some(item) = view.item(tile) else { continue };
+        let mut items: Vec<_> = view.items().collect();
+        items.sort_by_key(|(_, item)| item.id);
+        for (worker, item) in items {
             let (kind, session) = match &item.kind {
                 ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
                 ItemKind::Window { .. } => ("window", None),
@@ -1347,76 +1066,11 @@ impl Workspace {
                 ItemKind::Thread { .. } => ("thread", None),
                 ItemKind::Changes { .. } => ("changes", None),
             };
-            let file = match &item.kind {
-                ItemKind::File { path } => Some(FileItemInfo {
-                    path: path.clone(),
-                    summary: view
-                        .file(item.id)
-                        .map_or_else(|| "reading…".to_owned(), |v| v.read(cx).summary(cx)),
-                    lines: view.file(item.id).map_or(0, |v| v.read(cx).line_count(cx)),
-                    line: view.file(item.id).and_then(|v| v.read(cx).reading_line(cx)),
-                    edited: view.file(item.id).is_some_and(|v| {
-                        let v = v.read(cx);
-                        v.dirty() || v.saving()
-                    }),
-                    trouble: view.file(item.id).and_then(|v| {
-                        v.read(cx).trouble().map(|t| match t {
-                            slopty_ui::file::Trouble::Conflict => "conflict".to_owned(),
-                            slopty_ui::file::Trouble::Failed(why) => format!("failed: {why}"),
-                        })
-                    }),
-                    read_only: view
-                        .file(item.id)
-                        .and_then(|v| v.read(cx).read_only().map(str::to_owned)),
-                    text: view
-                        .file(item.id)
-                        .map(|v| v.read(cx).text(cx))
-                        .filter(|t| t.len() <= slopty_e2e::FILE_TEXT_SHOWN),
-                    previewing: view.file(item.id).is_some_and(|v| v.read(cx).previewing()),
-                }),
-                _ => None,
-            };
-            let browser = match &item.kind {
-                ItemKind::Browser { url } => Some(view.browser(item.id).map_or_else(
-                    || BrowserItemInfo { url: url.clone(), ..BrowserItemInfo::default() },
-                    |v| {
-                        let v = v.read(cx);
-                        let page = v.live_page();
-                        BrowserItemInfo {
-                            url: url.clone(),
-                            local_url: v.local_url().map(str::to_owned),
-                            page_url: page.url,
-                            title: page.title,
-                            loading: page.loading,
-                            failed: page.failed,
-                            shown: v.shown(),
-                            snapshot: v.has_snapshot(),
-                        }
-                    },
-                )),
-                _ => None,
-            };
-            let bounds = view.tile_bounds(tile).map_or([0.0; 4], |b| {
-                [
-                    f32::from(b.origin.x),
-                    f32::from(b.origin.y),
-                    f32::from(b.size.width),
-                    f32::from(b.size.height),
-                ]
-            });
             dump.items.push(ItemInfo {
                 id: item.id.to_string(),
                 kind: kind.to_owned(),
-                worker: names.get(&tile.worker).cloned().unwrap_or_default(),
+                worker: names.get(&worker).cloned().unwrap_or_default(),
                 session,
-                project,
-                tab,
-                pane,
-                index,
-                bounds,
-                active: view.focused() == Some(tile),
-                file,
-                browser,
             });
             if matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. })
                 && let Some(screen) = view.screen(item.id)
@@ -1427,15 +1081,6 @@ impl Workspace {
                 }
                 dump.screens.push(screen_info(item.id, screen, window));
             }
-            if view.file(item.id).is_some_and(|f| f.read(cx).focused(window, cx)) {
-                focused = format!("file:{}", item.id);
-            }
-            if view.folder(item.id).is_some_and(|f| f.read(cx).focused(window)) {
-                focused = format!("folder:{}", item.id);
-            }
-            if view.browser(item.id).is_some_and(|b| b.read(cx).focused()) {
-                focused = format!("browser:{}", item.id);
-            }
             if let ItemKind::Terminal { session } = item.kind
                 && let Some(terminal) = view.terminal(session)
             {
@@ -1443,18 +1088,11 @@ impl Workspace {
                 if terminal.focus_handle(cx).is_focused(window) {
                     focused = format!("terminal:{session}");
                 }
-                if view
-                    .thread_face(session)
-                    .is_some_and(|t| t.read(cx).focus_handle(cx).contains_focused(window, cx))
-                {
-                    focused = format!("thread:{session}");
-                }
                 let size = terminal.size();
                 let cursor = terminal.cursor();
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
                     kind: "terminal".to_owned(),
-                    title: Some(view.terminal_title(session)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
                     cursor_shape: format!("{:?}", cursor.shape),
@@ -1479,7 +1117,6 @@ impl Workspace {
                         .iter()
                         .map(|f| [f.port.number, f.local.unwrap_or(0)])
                         .collect(),
-                    upload: view.upload_on(tile).map(|(_, u)| u.label()),
                     resizes: terminal.state().resizes(),
                     grid: terminal.metrics().map(|m| {
                         let (x, y) = (f32::from(m.origin.x), f32::from(m.origin.y));

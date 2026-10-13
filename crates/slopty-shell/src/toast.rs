@@ -217,8 +217,16 @@ pub fn take_error<M: Into<SharedString>>(slot: &mut Option<M>, cx: &mut App) {
     }
 }
 
+// slopty: the app's tests start from no toasts.
+/// Take every toast down at once.
+pub fn clear(cx: &mut App) {
+    if cx.has_global::<ToastStore>() {
+        cx.global_mut::<ToastStore>().toasts.clear();
+    }
+}
+
 /// The live toasts' messages, oldest first.
-#[cfg(test)]
+// slopty: the app's tests read them too.
 pub fn messages(cx: &App) -> Vec<SharedString> {
     cx.try_global::<ToastStore>()
         .map(|store| {

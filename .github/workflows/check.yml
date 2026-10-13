@@ -377,14 +377,14 @@ jobs:
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
       # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
-      - if: contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+      - if: inputs.e2e == 'ios'
         id: xcodegen
         uses: actions/cache@v4
         with:
           path: ~/.local/xcodegen
           key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
       - if: >-
-          contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+          inputs.e2e == 'ios'
           && steps.xcodegen.outputs.cache-hit != 'true'
         run: |
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
@@ -392,7 +392,7 @@ jobs:
           echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
             | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
-      - if: contains(fromJSON('["ios", "smooth-ios", "pair-ios"]'), inputs.e2e)
+      - if: inputs.e2e == 'ios'
         run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its

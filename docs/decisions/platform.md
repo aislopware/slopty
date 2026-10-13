@@ -1231,16 +1231,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   rank 4). The phone registered for pushes only once alerts were allowed, and on iOS nothing
   asked until the first note posted, which happened only in the background. So the server
   knew no phone, held no prompt for one and pushed nothing.
-  - Where pushes are how an agent reaches the person (a phone, an iPad), the navigator
-    carries a line under the server's while notes do not reach them. Never asked, it reads
-    "Notify me when an agent needs me" with Allow, the system's question, asked once while it
-    is up. Turned off, it reads "Notifications are off" with "Turn on", which opens the
-    system's settings. Under either: "Nothing reaches you here while Slopty is away."
-  - The answer goes to the navigator and to the server, which may push to this phone from
-    then on. The state is read again once the server links and on each return to the front,
-    since the person may change it in Settings meanwhile.
-  - Test: `workspace::tests::setup_doors::a_phone_s_navigator_asks_for_notes_until_they_reach_the_person`
-    (slopty-ui).
+  - Where pushes are how an agent reaches the person (a phone, an iPad), the phone asks the
+    system's question once its server links, never asked before: the moment notes start to
+    mean something. Turned off, a toast says where in Settings they turn on, once for each
+    time they are found off (amended 2026-10-13: the navigator's notes line went with the old
+    workspace). The self-test never asks, since the question would stand over the app.
+  - The answer goes to the server, which may push to this phone from then on. The state is
+    read again once the server links and on each return to the front, since the person may
+    change it in Settings meanwhile.
+  - Test: none past the iOS build; the system's question cannot be answered in the self-test.
 
 - ✅ **A tapped note waits for its machine, and a press that did not land says so**
   (2026-10-12, readiness 10-12 rank 7). On a cold launch, a tap was refused as "not
@@ -1430,19 +1429,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     off, the kept phones loaded). The client link takes the latest from it beside its
     queue, so the word is never dropped or held behind a full queue, as with `Pushes`.
   - *In the app*: the directory turns it into `Change::Pushable`, and the workspace keeps the
-    latest (`WorkspaceView::set_pushable`). With notes allowed here and the server's word
-    false, the navigator's notes line says "The server can't send notifications to this
-    device" (an iPad's too, so not "phone") over "Nothing reaches you here while Slopty is
-    away." It has no door: the fix (an
-    APNs key named, the phone's token said again) is on the server's machine or comes by
-    itself on the next link. Notes off or never asked here are said first, with their doors,
-    since that is the fix the phone holds.
+    latest. With notes allowed here and the server's word false, a toast says once "The
+    server can't send notifications to this device" (an iPad's too, so not "phone"): nothing
+    reaches the person there while Slopty is away. It has no door: the fix (an APNs key named,
+    the phone's token said again) is on the server's machine or comes by itself on the next
+    link (amended 2026-10-13: a toast, the navigator's line having gone).
   - Tests: `hub::ladder::tests::a_phone_hears_whether_it_can_be_pushed_to` and
     `tests/push.rs` `a_notice_reaches_the_phone_and_is_taken_back` (slopty-server); golden
     `push_pushable` (slopty-proto);
-    `directory::tests::whether_the_server_can_push_here_is_a_change` (slopty-client);
-    `workspace::tests::setup_doors::a_phone_s_navigator_asks_for_notes_until_they_reach_the_person`
-    (slopty-ui).
+    `directory::tests::whether_the_server_can_push_here_is_a_change` (slopty-client).
 
 - ✅ **A hardware keyboard is heard as it comes and goes** (2026-10-11, the orchestrator-first
   study's simplifications, readiness gap 7). The app asked `GCKeyboard.coalescedKeyboard`

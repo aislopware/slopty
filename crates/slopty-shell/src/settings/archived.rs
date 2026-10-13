@@ -252,6 +252,7 @@ impl Render for ArchivedPage {
                             .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
                             .tab_index(0)
                             .role(gpui::Role::Button)
+                            .aria_label("Unarchive") // slopty: named in the accessibility tree.
                             .focus_visible(|s| s.border_2().border_color(theme.accent).opacity(1.0))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unarchive(chat_id.clone(), cx);

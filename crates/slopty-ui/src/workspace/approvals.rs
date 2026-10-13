@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use gpui::Context;
 use slopty_client::layout::WorkerKey;
-use slopty_core::{ClientId, SessionId};
+use slopty_core::ClientId;
 use slopty_platform::notify::Pressed;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, ThreadOf, ThreadView, Verb};
 use slopty_proto::thread::attention::Rung;
@@ -227,7 +227,7 @@ impl WorkspaceView {
                 .map(|worker| ThreadOf::Term(TermRef { worker, session })),
         };
         let (Some(caller), Some(of)) = (self.server.clone(), of) else {
-            self.unanswered(route, REPLY_NOT_SENT, cx);
+            Self::unanswered(route, REPLY_NOT_SENT, cx);
             self.settle_taps(cx);
             return;
         };
@@ -238,7 +238,7 @@ impl WorkspaceView {
             let _gone = this.update(cx, |this, cx| {
                 if let Outcome::Error { message, .. } = sent {
                     tracing::info!(message, "a note's reply was refused");
-                    this.unanswered(route, REPLY_NOT_SENT, cx);
+                    Self::unanswered(route, REPLY_NOT_SENT, cx);
                 }
                 this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
                 if !this.approvals.taps_waiting() {
@@ -286,9 +286,9 @@ impl WorkspaceView {
                 .map(|(_, at)| SYNCED.saturating_sub(now.saturating_duration_since(*at)));
             let hold = HOLD_VERDICT.saturating_sub(now.saturating_duration_since(tap.at));
             if answered || sync.is_some_and(|left| left.is_zero()) {
-                self.unanswered(tap.route, NO_LONGER_WAITING, cx);
+                Self::unanswered(tap.route, NO_LONGER_WAITING, cx);
             } else if hold.is_zero() {
-                self.unanswered(tap.route, NOT_REACHED, cx);
+                Self::unanswered(tap.route, NOT_REACHED, cx);
             } else {
                 let next = sync.map_or(hold, |sync| sync.min(hold));
                 due = Some(due.map_or(next, |due| due.min(next)));
@@ -341,7 +341,7 @@ impl WorkspaceView {
         if self.approvals.sent.get(&awaited.thread) == Some(&awaited.ask) {
             self.approvals.sent.remove(&awaited.thread);
         }
-        self.unanswered(awaited.route, ANSWER_NOT_SENT, cx);
+        Self::unanswered(awaited.route, ANSWER_NOT_SENT, cx);
     }
 
     /// A worker's threads moved: a note's answer waiting for it may have been taken.
@@ -433,7 +433,7 @@ impl WorkspaceView {
                     if why == ANSWER_NOT_SENT && this.approvals.sent.get(&thread) == Some(&ask) {
                         this.approvals.sent.remove(&thread);
                     }
-                    this.unanswered(route, why, cx);
+                    Self::unanswered(route, why, cx);
                 }
                 this.approvals.through_server = this.approvals.through_server.saturating_sub(1);
                 if !this.approvals.taps_waiting() {
@@ -444,19 +444,13 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// A note's verdict found no request to answer: a toast with the app in front, else the
-    /// app says it in a note of its own.
-    fn unanswered(&mut self, route: Route, why: &'static str, cx: &mut Context<Self>) {
+    /// A note's verdict found no request to answer: the app says it in a note of its own.
+    fn unanswered(route: Route, why: &'static str, cx: &mut Context<Self>) {
         tracing::info!(about = ?route.about, why, "a note's answer found no request");
-        if self.app_active {
-            self.show_notice(why.to_owned(), cx);
-        } else {
-            cx.emit(WorkspaceEvent::Unanswered { route, why });
-        }
+        cx.emit(WorkspaceEvent::Unanswered { route, why });
     }
 
-    /// The workspace changed: note when each worker's link came up, and hand the TUI a yes or
-    /// no whose terminal the person has in front of them.
+    /// The workspace changed: note when each worker's link came up.
     pub(in crate::workspace) fn sync_approvals(&mut self, cx: &mut Context<Self>) {
         let links: HashMap<WorkerKey, ClientId> =
             self.workers.iter().filter_map(|(key, w)| Some((*key, w.link.as_ref()?.me))).collect();
@@ -474,103 +468,7 @@ impl WorkspaceView {
         if linked && !self.approvals.tapped.is_empty() {
             self.settle_taps(cx);
         }
-        let in_front = self
-            .focused_session()
-            .filter(|session| self.app_active && !self.face_shown(*session))
-            .and_then(|session| {
-                let worker = self.worker_of_session(session)?;
-                let thread = self.session_thread(session)?;
-                let ask = self.session_request(session).filter(|a| answerable(a))?.id.clone();
-                (self.approvals.sent.get(&thread) != Some(&ask)).then_some((worker, thread, ask))
-            });
-        if let Some((worker, thread, ask)) = in_front {
-            tracing::info!(%thread, ask = ask.0, "the terminal is in front: its own dialog asks");
-            self.approvals.sent.insert(thread, ask.clone());
-            let hub = self.thread_hub(worker, cx);
-            let _id = hub.update(cx, |hub, cx| hub.intent(thread, Intent::Release { ask }, cx));
-            cx.notify();
-        }
     }
 }
 
-/// What a waiting row's "Deny" and "Allow" answer: a thread's open request, on its worker.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::workspace) struct Answer {
-    worker: WorkerKey,
-    thread: ThreadId,
-    ask: AskId,
-}
-
-/// The button that allows what an agent asks, wherever it is answered away from its thread.
-pub(crate) const ALLOW: &str = "Allow";
-
-/// The button that refuses it.
-pub(crate) const DENY: &str = "Deny";
-
-impl WorkspaceView {
-    /// What "Deny" and "Allow" would answer for `session`'s agent: its thread's open request,
-    /// while it is a plain yes or no not already answered here.
-    pub(in crate::workspace) fn session_answer(&self, session: SessionId) -> Option<Answer> {
-        self.thread_answer(self.worker_of_session(session)?, self.session_thread(session)?)
-    }
-
-    /// What "Deny" and "Allow" would answer for `thread` on `worker`: its open request, while
-    /// it is a plain yes or no not already answered here.
-    pub(in crate::workspace) fn thread_answer(
-        &self,
-        worker: WorkerKey,
-        thread: ThreadId,
-    ) -> Option<Answer> {
-        let asks = self.thread_request(thread)?;
-        (answerable(asks) && self.thread_answered_here(thread) != Some(&asks.id)).then(|| Answer {
-            worker,
-            thread,
-            ask: asks.id.clone(),
-        })
-    }
-
-    /// Allow (`allow`) or deny what a row's buttons answer.
-    pub(in crate::workspace) fn answer_row(
-        &mut self,
-        answer: &Answer,
-        allow: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.answer_thread(answer.worker, answer.thread, &answer.ask, allow, cx);
-    }
-
-    /// Deny and Allow as a row's two icon buttons, Zed's at 22: `x` in `error`, then `check`
-    /// in `success`, the yes last. The answer goes where the agent is, without going to it.
-    pub(in crate::workspace) fn approval_buttons(
-        &self,
-        answer: &Answer,
-        cx: &slopty_kit::draw::Draw<'_, Self>,
-    ) -> gpui::Div {
-        use gpui::{ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px};
-        use slopty_kit::icons::Symbol;
-        use slopty_kit::kit;
-
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let of = answer.thread.to_string();
-        let answered = |allow: bool| {
-            let answer = answer.clone();
-            cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                cx.stop_propagation();
-                this.answer_row(&answer, allow, cx);
-            })
-        };
-        let deny =
-            kit::icon_button_inked(theme, format!("nav-deny-{of}"), Symbol::Xmark, DENY, s.error)
-                .on_click(answered(false));
-        let allow = kit::icon_button_inked(
-            theme,
-            format!("nav-allow-{of}"),
-            Symbol::Checkmark,
-            ALLOW,
-            s.success,
-        )
-        .on_click(answered(true));
-        div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
-    }
-}
+impl WorkspaceView {}

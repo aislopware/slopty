@@ -75,8 +75,19 @@ pub struct Feed {
     sessions: watch::Sender<Arc<[Session]>>,
     /// The link to the server, for the sidebar's foot.
     connectivity: watch::Sender<Connectivity>,
+    /// This machine's own worker as a device id, once the app knows whether it has one.
+    local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Transcript>>,
+}
+
+/// This machine's own worker, as the app last said.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Local {
+    /// The app has not said yet.
+    Unknown,
+    /// Its device id, or `None` when this machine runs no worker (a phone, a Mac without one).
+    Known(Option<String>),
 }
 
 /// One followed chat's transcript and how many watches are open on it.
@@ -94,8 +105,20 @@ impl Feed {
             chats: watch::Sender::new(Arc::default()),
             sessions: watch::Sender::new(Arc::default()),
             connectivity: watch::Sender::new(Connectivity::default()),
+            local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// This machine's own worker, as a device id, or that it has none: the interface's "This
+    /// device".
+    pub fn local_device(&self, device: Option<String>) {
+        self.local.send_if_modified(|now| {
+            let known = Local::Known(device);
+            let changed = *now != known;
+            *now = known;
+            changed
+        });
     }
 
     /// The workers, as devices. Unchanged lists wake no watch.
@@ -336,8 +359,17 @@ impl RpcService for ViewModel {
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.info),
             methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
+            // This machine's worker, once the app knows whether there is one; the client's own
+            // id when there is none.
             methods::LOCAL_DEVICE => {
-                RpcReply::value(&serde_json::json!({ "deviceId": self.info.device_id }))
+                let mut local = self.feed.local.subscribe();
+                let known =
+                    local.wait_for(|local| *local != Local::Unknown).await.map(|l| l.clone());
+                let device = match known {
+                    Ok(Local::Known(Some(device))) => device,
+                    _ => self.info.device_id.clone(),
+                };
+                RpcReply::value(&serde_json::json!({ "deviceId": device }))
             }
             methods::WATCH_DEVICES => {
                 Ok(RpcReply::Stream(list_frames(self.feed.devices.subscribe())))

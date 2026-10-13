@@ -121,7 +121,7 @@ impl Shell {
             || self.delete_space_confirm.is_some()
             || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
-            || self.discard_working_tree.is_some()
+            // slopty: no Discard changes (ruled out).
             || self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()

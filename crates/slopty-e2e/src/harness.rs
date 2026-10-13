@@ -2771,12 +2771,9 @@ impl ServedApp {
         std::fs::write(app_dir.join("settings.toml"), app_settings(APPEARANCE, Some(&server)))?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
-        // The first run's own shell is in before any test opens another, so the tiles stand in
-        // one order on every run.
         driver
-            .wait_for("the worker the server lists, and its first shell", STARTUP, |d| {
+            .wait_for("the worker the server lists", STARTUP, |d| {
                 d.workers.iter().any(|w| w.name == worker_name && w.status == "connected")
-                    && d.items.iter().any(|i| i.session.is_some())
             })
             .await?;
         Ok(Self { driver, app, worker, server, dir })

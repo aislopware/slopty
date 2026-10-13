@@ -11743,3 +11743,63 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   screen_recording::a_remote_window_is_a_right_pane_surface_and_takes_the_window}`. Goldens:
   `surface-live-terminal`, `surface-live-screen` and `surface-live-screen-takeover`, each in
   light and dark.
+
+- ✅ **The tiling workspace is deleted; the shell is the only interface (2026-10-13).** With the
+  shell drawing the window, nothing of the old workspace's own drawing stayed reachable, so it
+  went whole rather than hidden: its tiles, columns and titlebar, keymap and command palette,
+  first run, settings editor and saved layout, its file editors, the update and Install over
+  SSH sheets, the phone's QR sheet and the menu bar it built. `WorkspaceView` is the view model's
+  half that keeps every link, thread, terminal and screen, and draws nothing. What the menus and
+  sheets did for machines is a row's actions in Settings → Devices, carried on the view
+  protocol's `Device.actions` and `ServerPresence.actions` (`DeviceAction`: an id and a label)
+  and pressed through `DeviceAction`: a machine on an older build offers Update, or Cancel
+  update while one runs; one installed from here offers Remove, which asks once more as "Remove
+  now"; one the server lists as away offers Wake and Forget; on a Mac a linked machine offers
+  Show in Finder. The server's row offers Update when it is older, Update all when more than one
+  thing is, and Copy grant while its tailnet policy turns this device away. A notice the
+  workspace raises is the shell's toast, a chat whose turn the person saw is marked seen by the
+  shell's `markChatSeen`, and an invite link opens Add device on the server it names. A failure
+  a toast cannot settle (a host key to trust, a password) names the Add device dialog, which
+  can. The self-test's drag, open, reveal and page commands and its `smooth`, `showcase`,
+  `pair`, `workers`, `through-server` and iOS UIKit suites drove the old tiles and went with
+  them; the suites that remain drive the shell. Tests: `slopty-app`
+  `ssh::tests::{a_removal_takes_the_worker_off_then_the_server_forgets_it,
+  the_server_s_row_updates_a_server_on_another_build,
+  an_update_that_ends_sessions_goes_on_only_when_pressed_again,
+  a_toast_sends_a_new_machine_s_key_to_the_dialog}`.
+
+- ✅ **One voice for a session's moments: Slopty's notes, the shell's chimes (2026-10-13).** The
+  shell posted its own banner when a chat's run ended, waited on the person or failed, beside
+  Slopty's notes for the same moments, so an agent's question arrived twice. Slopty's notes stay
+  (`slopty_ui::workspace::attention`): they carry Allow and Deny, open the chat they name, are
+  taken back when the person answers at another device, and are pushed to a pocketed phone. The
+  shell's banner is cut and its chimes stay, so the app's own alert for an agent waiting is the
+  Dock's bounce alone; a terminal's bell and a program's notification keep their sound, which no
+  chime makes. Settings → Notifications' Desktop switch is the notes' switch, read as the app
+  leaves the front (notes post only while away, and the switch is changed only in front), and
+  turning it off takes back every note up. "Only when in the background" is cut: Slopty's notes
+  are always that. Test: `slopty-ui`
+  `workspace::attention::tests::notes_switched_off_go_and_post_none_until_switched_on`.
+
+- ✅ **The clipboard follows the keyboard into a live view (2026-10-13).** A worker's clipboard
+  is watched while one of its live terminals or windows holds the shell window's keyboard and the
+  app is in front. The workspace looks at which of its views holds it on each clipboard tick
+  (250 ms; GPUI has no window-wide focus event a view outside the window's tree can hear), so the
+  dock's shell and a right-pane window share the clipboard as the old tiles did. Test:
+  `slopty-e2e` `app::clipboard::the_dock_s_shell_shares_the_clipboard_with_its_worker`.
+
+- ✅ **A phone or iPad finds the server from the Mac's Devices page (2026-10-13).** The code the
+  old workspace showed in a sheet is on the server's row of Settings → Devices as "Connect a
+  phone": a dialog with the QR code of `slopty://connect?server=<host:port>`, the address under
+  it, how to use it and Copy link, closed by Done or Esc. The app carries it on the view
+  protocol (`ServerPresence.invite`: the link, the address, and how to use it or why there is
+  none), only on a Mac. A server on this Mac, which the app reaches over loopback, is named by
+  this Mac's tailnet name, looked up as the server is set; with no tailnet, the dialog says to
+  type the VPN address instead. The code is drawn by the shell at whole points a module, with
+  its four-module quiet zone, dark on a white field in either appearance, since many scanners
+  read no inverted code. On the phone the link opens Add device on "A server" with the address
+  filled in, and connecting stays the person's press. Tests: `slopty-app`
+  `invite::tests::{a_link_carries_the_server_and_reads_back,
+  a_device_reaches_the_server_as_it_can}`; `slopty-shell`
+  `settings::invite::tests::{the_code_keeps_its_quiet_zone, the_code_is_dark_on_light}`;
+  `slopty-e2e` `app::devices::the_server_s_code_carries_this_mac_s_tailnet_name`.

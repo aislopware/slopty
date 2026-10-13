@@ -47,11 +47,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity};
-use slopty_client::layout::{TileRef, WorkerKey};
+use slopty_client::layout::WorkerKey;
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
 use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, Tap};
-use slopty_proto::items::ItemKind;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_proto::thread::wire::{NoteChoice, RequestCard};
 use slopty_proto::thread::{AskId, ThreadId};
@@ -263,16 +262,6 @@ enum Why {
     Unanswered,
 }
 
-/// How long a tapped note waits for its machine's link: a cold launch dials every worker at
-/// once, and a link that takes longer than this is not what the person is still waiting on.
-pub const PARKED_FOR: Duration = Duration::from_secs(30);
-
-/// What a tapped note says while its machine is still being dialled.
-#[must_use]
-pub fn connecting(machine: Option<&str>) -> String {
-    machine.map_or_else(|| "Connecting…".to_owned(), |name| format!("Connecting to {name}…"))
-}
-
 /// What the app says, once a run, on coming back after a note went unsaid because
 /// notifications are off.
 pub const NOTES_OFF: &str = if cfg!(target_os = "ios") {
@@ -286,6 +275,8 @@ pub struct Attention {
     notifier: Rc<dyn Notifier>,
     /// The app is in front.
     active: bool,
+    /// Notes are wanted at all (Settings → Notifications' Desktop switch).
+    enabled: bool,
     /// The person is at another of their devices.
     elsewhere: bool,
     /// The server's notices decide which agent moments post.
@@ -333,6 +324,7 @@ impl Attention {
         Self {
             notifier,
             active: true,
+            enabled: true,
             elsewhere: false,
             server_led: false,
             asking: HashSet::new(),
@@ -407,6 +399,15 @@ impl Attention {
                 self.notifier.withdraw(id);
             }
         }
+    }
+
+    /// Notes are wanted or not: turned off, every note up goes and none posts until they are
+    /// wanted again.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if !enabled && self.enabled {
+            self.withdraw_all();
+        }
+        self.enabled = enabled;
     }
 
     /// The person is at another of their devices, or has left it. Arriving there takes back
@@ -571,7 +572,7 @@ impl Attention {
         if !self.away() || done.elapsed < slow {
             return;
         }
-        let command = super::tile::command_words(&done.command);
+        let command = done.command.lines().next().unwrap_or_default().trim();
         let body = if command.is_empty() {
             done.label()
         } else {
@@ -610,6 +611,9 @@ impl Attention {
     }
 
     fn post(&mut self, about: About, why: Why, mut note: Note) {
+        if !self.enabled {
+            return;
+        }
         note.thread = self.projects.get(&about).cloned();
         // A muted project's moments post nothing; the bell and the navigator still say them.
         if note.thread.as_ref().is_some_and(|project| self.muted.contains(project)) {
@@ -627,32 +631,17 @@ impl Attention {
 }
 
 impl WorkspaceView {
-    /// What notifications follow now: the agents waiting on the human, with their tile's name
-    /// and what they ask, and the bell's count.
+    /// What notifications follow now: the agents waiting on the human, with their thread's
+    /// name and what they ask, and the bell's count.
     #[must_use]
     pub fn attention_look(&self) -> Look {
         let asking = self
             .needs_you()
             .into_iter()
             .filter_map(|w| {
-                let item = w.tile.map(|t| t.item);
-                let route = Route { worker: w.worker, item, about: About::Session(w.session) };
-                let Some(agent) = self.agent_state(w.session) else {
-                    // A program waiting on the person, in its record's words.
-                    let body = self
-                        .program_words(w.session)
-                        .or_else(|| self.program_need_word(w.session))?;
-                    let title = self.route_title(route);
-                    return Some(Asking {
-                        route,
-                        title,
-                        body,
-                        approval: None,
-                        picks: Vec::new(),
-                        answered: None,
-                        own: true,
-                    });
-                };
+                let agent = self.agent_state(w.session)?;
+                let route =
+                    Route { worker: w.worker, item: None, about: About::Session(w.session) };
                 let body = agent_ask_text(agent).unwrap_or_else(|| agent_status_word(agent));
                 let (approval, picks) = note_buttons(self.session_request(w.session));
                 let answered = self
@@ -669,8 +658,7 @@ impl WorkspaceView {
                     .filter(|a| !a.trim().is_empty())
                     .or_else(|| stand.word().map(str::to_owned))
                     .unwrap_or_default();
-                let item = w.tile.map(|t| t.item);
-                let route = Route { worker: w.worker, item, about: About::Thread(w.thread) };
+                let route = Route { worker: w.worker, item: None, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
                 let (approval, picks) = note_buttons(stand.asks.as_ref());
                 let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
@@ -684,8 +672,7 @@ impl WorkspaceView {
                     About::Session(session) => self.attention_route(session)?,
                     About::Thread(thread) => {
                         let worker = self.thread_stand(thread)?.worker;
-                        let item = self.tile_of_thread(thread).map(|t| t.item);
-                        (Route { worker, item, about }, self.thread_title(thread))
+                        (Route { worker, item: None, about }, self.thread_title(thread))
                     }
                 };
                 let done = self.finished.get(&about)?;
@@ -693,45 +680,22 @@ impl WorkspaceView {
                 if !done.turn.is_some_and(|t| t.fresh) {
                     return None;
                 }
-                let command = super::tile::command_words(&done.command);
+                let command = done.command.lines().next().unwrap_or_default().trim();
                 let body = format!("{command} \u{b7} {}", done.label());
                 Some(Turn { route, title, body })
             })
             .collect();
-        let muted = self.navigator().muted.iter().map(|k| k.as_str().to_owned()).collect();
-        Look { asking, turns, unread: self.bell_count(), projects: self.note_projects(), muted }
-    }
-
-    /// The project each terminal and thread is in, by its group's key: a tile's group (its
-    /// machine's where it is in no project), and a thread with no tile here where the navigator
-    /// lists it.
-    fn note_projects(&self) -> HashMap<About, String> {
-        let projects = self.project_groups();
-        let mut out = HashMap::new();
-        for (tile, group) in
-            projects.tiles.iter().filter_map(|t| Some((*t, projects.group_of(*t)?)))
-        {
-            let about = match self.item(tile).map(|i| &i.kind) {
-                Some(ItemKind::Terminal { session }) => About::Session(*session),
-                Some(ItemKind::Thread { thread }) => About::Thread(*thread),
-                _ => continue,
-            };
-            out.insert(about, group.key.as_str().to_owned());
+        Look {
+            asking,
+            turns,
+            unread: self.bell_count(),
+            projects: HashMap::new(),
+            muted: HashSet::new(),
         }
-        for (thread, stand) in self.thread_stands() {
-            if out.contains_key(&About::Thread(thread)) {
-                continue;
-            }
-            let facts = self.thread_listing_facts(stand.worker, thread);
-            let key = super::grouping::listing_group(&projects, &facts)
-                .map_or_else(|| slopty_client::groups::GroupKey::machine(stand.worker), |g| g.key);
-            out.insert(About::Thread(thread), key.as_str().to_owned());
-        }
-        out
     }
 
     /// The note the server's `notice` makes here; `None` for a finished turn shorter than the
-    /// slow-command time. A thread with no terminal leads to its own tile.
+    /// slow-command time.
     #[must_use]
     pub fn heard(&self, notice: &Notice) -> Option<Heard> {
         if notice.kind == NoticeKind::Finished
@@ -742,12 +706,9 @@ impl WorkspaceView {
         // A program's records are posted here as they come; the server only pushes them.
         let Subject::Thread(at) = &notice.about else { return None };
         let worker = super::keys::worker_key(at.worker);
-        let (about, item) = if let Some(tile) = notice.tile {
-            (About::Session(tile.session), self.tile_of_session(tile.session).map(|t| t.item))
-        } else {
-            (About::Thread(at.thread), self.tile_of_thread(at.thread).map(|t| t.item))
-        };
-        let route = Route { worker, item, about };
+        let about =
+            notice.tile.map_or(About::Thread(at.thread), |tile| About::Session(tile.session));
+        let route = Route { worker, item: None, about };
         let title = Some(notice.title.trim())
             .filter(|t| !t.is_empty())
             .map_or_else(|| self.route_title(route), str::to_owned);
@@ -756,12 +717,11 @@ impl WorkspaceView {
     }
 
     /// Where a note about `session` leads, and the name its title says; `None` for a session
-    /// with no tile here.
+    /// no worker here runs.
     #[must_use]
     pub fn attention_route(&self, session: SessionId) -> Option<(Route, String)> {
-        let tile = self.tile_of_session(session)?;
-        let route =
-            Route { worker: tile.worker, item: Some(tile.item), about: About::Session(session) };
+        let worker = self.worker_of_session(session)?;
+        let route = Route { worker, item: None, about: About::Session(session) };
         Some((route, self.route_title(route)))
     }
 
@@ -777,11 +737,9 @@ impl WorkspaceView {
         self.terminals.iter().map(|(s, v)| (*s, v.clone())).collect()
     }
 
-    /// The human tapped a note: focus the tile it names and give it the keyboard. A note without
-    /// a route (one another part of the app posted, tagged by its session) reveals that session.
-    /// An agent with no tile here gets one. An approval note's "Allow" or "Deny" answers its
-    /// prompt and a reply goes to its agent, each leaving the workspace where it is; "Show" is a
-    /// tap.
+    /// The human tapped a note. An approval note's "Allow" or "Deny" answers its prompt and a
+    /// reply goes to its agent, each leaving the app where it is; "Show" is a tap, which brings
+    /// the app forward (the app's own doing).
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
         tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
@@ -801,82 +759,55 @@ impl WorkspaceView {
                 // word that it is done with it.
                 _ => self.settle_taps(cx),
             }
-            return;
-        }
-        let Some(route) = route else {
-            if let Ok(session) = tap.id.parse::<SessionId>() {
-                self.reveal_session(session, cx);
-            }
-            return;
-        };
-        let tile = route.item.map(|item| TileRef { worker: route.worker, item });
-        if !self.leads_here(route) && !self.worker_ready(route.worker) {
-            let name = self.workers.get(&route.worker).map(|w| w.name.clone());
-            self.parked_tap = Some((tap.clone(), self.clock_instant()));
-            self.show_notice(connecting(name.as_deref()), cx);
-            return;
-        }
-        match (tile.and_then(|t| self.item(t)).map(|i| i.kind.clone()), route.about) {
-            (Some(kind), _) => {
-                if let Some(item) = route.item {
-                    self.go_to(item, cx);
-                }
-                if let ItemKind::Terminal { session } = kind {
-                    self.pending_focus = Some(session);
-                }
-            }
-            (None, About::Thread(thread)) => self.open_thread(route.worker, thread, cx),
-            (None, About::Session(session)) if self.tile_of_session(session).is_some() => {
-                self.reveal_session(session, cx);
-            }
-            (None, About::Session(session)) => self.show_untiled(route.worker, session, cx),
         }
     }
 
-    /// Whether `route` leads to a tile this device already has: one it names, or one of its
-    /// session or thread. Such a tap needs no link to come forward.
-    fn leads_here(&self, route: Route) -> bool {
-        let tile = route.item.map(|item| TileRef { worker: route.worker, item });
-        tile.and_then(|t| self.item(t)).is_some()
-            || match route.about {
-                About::Session(session) => self.tile_of_session(session).is_some(),
-                About::Thread(thread) => self.tile_of_thread(thread).is_some(),
-            }
-    }
-
-    /// Whether `key` is linked and has sent what it holds: what a tap that makes a tile there
-    /// needs.
-    fn worker_ready(&self, key: WorkerKey) -> bool {
-        self.workers.get(&key).is_some_and(|w| w.link.is_some() && !w.awaiting_snapshot)
-    }
-
-    /// `key` has sent what it holds: a tap parked for it, while it was still being dialled,
-    /// goes where it leads now, unless it waited past [`PARKED_FOR`].
-    pub(super) fn run_parked_tap(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let Some((tap, at)) = self.parked_tap.take() else { return };
-        if Route::of_tap(&tap).is_none_or(|r| r.worker != key) {
-            self.parked_tap = Some((tap, at));
-            return;
-        }
-        if self.clock_instant().saturating_duration_since(at) > PARKED_FOR {
-            tracing::debug!(id = tap.id, "a parked tap waited too long");
-            return;
-        }
-        self.open_notification(&tap, cx);
-    }
-
-    /// What a note's title says: the tile's name, else the worker's.
+    /// What a note's title says: its agent's thread's name, else the worker's.
     #[must_use]
     pub fn route_title(&self, route: Route) -> String {
-        route
-            .item
-            .map(|item| TileRef { worker: route.worker, item })
-            .and_then(|tile| self.item(tile).map(|i| self.tile_title(i)))
+        let thread = match route.about {
+            About::Session(session) => self.session_thread(session),
+            About::Thread(thread) => Some(thread),
+        };
+        thread
+            .map(|thread| self.thread_title(thread))
             .or_else(|| self.workers.get(&route.worker).map(|w| w.name.clone()))
             .unwrap_or_default()
     }
 }
 
 #[cfg(test)]
-#[path = "tests/attention.rs"]
-mod tests;
+mod tests {
+    use std::rc::Rc;
+
+    use slopty_core::{SessionId, WorkerId};
+    use slopty_platform::notify::Memory;
+
+    use super::{About, Attention, Route};
+
+    /// The notes' switch off takes back every note up and posts none while away; on again,
+    /// notes post as before.
+    #[test]
+    fn notes_switched_off_go_and_post_none_until_switched_on() {
+        let memory = Rc::new(Memory::default());
+        let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+        let route = |session| Route {
+            worker: crate::workspace::worker_key(WorkerId::new()),
+            item: None,
+            about: About::Session(session),
+        };
+        let (first, second) = (SessionId::new(), SessionId::new());
+        attention.set_active(false);
+        attention.program(route(first), "make".to_owned(), "done".to_owned());
+        assert_eq!(memory.posted().len(), 1, "away, a program's note posts");
+
+        attention.set_enabled(false);
+        assert_eq!(memory.withdrawn(), [About::Session(first).note_id()], "the note up goes");
+        attention.program(route(second), "make".to_owned(), "done".to_owned());
+        assert_eq!(memory.posted().len(), 1, "switched off, nothing posts");
+
+        attention.set_enabled(true);
+        attention.program(route(second), "make".to_owned(), "done".to_owned());
+        assert_eq!(memory.posted().len(), 2, "switched on, notes post again");
+    }
+}

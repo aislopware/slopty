@@ -27,7 +27,7 @@ use gpui::{
 use slopty_view_proto::WorkspaceScope; // slopty: no pull-request pages.
 use slopty_view_rpc::methods;
 
-use crate::changes::{Changes, ChangesEvent, DiscardWorkingTreeRequest};
+use crate::changes::{Changes, ChangesEvent}; // slopty: no Discard changes (ruled out).
 use crate::composer::{Composer, ComposerEvent, ComposerInput, ComposerInputEvent};
 use crate::files::{
     FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag,
@@ -91,6 +91,7 @@ mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
+mod compact; // slopty: the phone's anatomy
 // slopty: voice removed.
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -1548,11 +1549,7 @@ fn resolve_shell_escape(
 
 // slopty: no accounts, sync or sign-in.
 
-#[derive(Debug, Clone)]
-enum DiscardWorkingTreeFlow {
-    Confirm(DiscardWorkingTreeRequest),
-    Failed(SharedString),
-}
+// slopty: no Discard changes (ruled out).
 
 // slopty: no accounts, sync or sign-in.
 
@@ -1748,8 +1745,7 @@ pub struct Shell {
     delete_confirm: Option<String>,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
-    discard_working_tree: Option<DiscardWorkingTreeFlow>,
-    discard_working_tree_task: Option<Task<()>>,
+    // slopty: no Discard changes (ruled out).
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -2201,8 +2197,7 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_confirm: None,
-            discard_working_tree: None,
-            discard_working_tree_task: None,
+            // slopty: no Discard changes (ruled out).
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             sidebar_section_migration: None,
@@ -2452,8 +2447,9 @@ impl Shell {
             // focused app still stays a chime — you're already looking at
             // Slopty; the sidebar dot carries the rest.
             let app_focused = cx.active_window().is_some();
-            for (chat_id, status, send_pending, title, notify) in sessions {
-                let prev = self.sound_prev.insert(chat_id.clone(), status.clone());
+            // slopty: the title went with the banner.
+            for (chat_id, status, send_pending, _title, notify) in sessions {
+                let prev = self.sound_prev.insert(chat_id, status.clone());
                 // Keep side-chat baselines current, but never emit their
                 // completion, input-request, or failure sounds/banners.
                 if notify
@@ -2469,17 +2465,8 @@ impl Shell {
                             crate::sound::play(sound);
                         }
                     }
-                    if self.settings.notifications_enabled
-                        && !(self.settings.notifications_background_only && app_focused)
-                    {
-                        let title = title.unwrap_or_else(|| "New session".into());
-                        let body = match sound {
-                            crate::sound::Sound::Done => "Run finished",
-                            crate::sound::Sound::Request => "Waiting on your input",
-                            crate::sound::Sound::Attention => "Run failed",
-                        };
-                        crate::notify::post(&title, body, Some(&chat_id));
-                    }
+                    // slopty: no banner here; Slopty's own notes say a session's moments
+                    // (`slopty_ui::workspace::attention`), with their answers and their taps.
                 }
             }
             if let Some(sound) = self.connectivity_notifications.update(
@@ -2793,6 +2780,10 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        // slopty: on a phone the sidebar button goes back to Sessions.
+        if self.compact_back(cx) {
+            return;
+        }
         if !self.settings.sidebar_collapsed
             && self.promote_hidden_panel(AuxiliaryPanel::Sidebar, cx)
         {
@@ -3713,13 +3704,7 @@ impl Shell {
                     ChangesEvent::OpenFile(path) => {
                         this.add_file_surface(path.clone(), window, cx);
                     }
-                    ChangesEvent::DiscardWorkingTree(request) => {
-                        if this.discard_working_tree_task.is_none() {
-                            this.discard_working_tree =
-                                Some(DiscardWorkingTreeFlow::Confirm(request.clone()));
-                            cx.notify();
-                        }
-                    }
+                    // slopty: no Discard changes (ruled out).
                 },
             );
         self.diffs.insert(id, changes);
@@ -4790,6 +4775,40 @@ impl Shell {
         cx.notify();
     }
 
+    // slopty: the first run's way in: Settings → Devices with its Add device dialog open.
+    fn open_add_device(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Devices, cx);
+        let state = self.state.clone();
+        let page = self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        page.update(cx, |page, cx| page.open_add_device(cx));
+    }
+
+    // slopty: the app's menu (Add a machine, Connect to a server): Settings → Devices with Add
+    // device open on that choice.
+    pub fn open_add_device_on(
+        &mut self,
+        choice: crate::settings::add_device::Choice,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(SettingsSection::Devices, cx);
+        let state = self.state.clone();
+        let page = self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        page.update(cx, |page, cx| page.open_add_device_on(choice, cx));
+    }
+
+    // slopty: a link that names a server: Add device on "A server", the address filled in.
+    pub fn open_add_device_with_server(&mut self, address: String, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Devices, cx);
+        let state = self.state.clone();
+        let page = self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        page.update(cx, |page, cx| page.open_add_device_with_server(address, cx));
+    }
+
+    // slopty: the app's menu (Settings…): Settings where they were left.
+    pub fn open_settings_from_menu(&mut self, cx: &mut Context<Self>) {
+        self.open_last_settings(cx);
+    }
+
     /// Generic entry points (⌘, / Ctrl+,, the footer gear, the palette,
     /// `/settings`) reopen the section last viewed. Links that name a
     /// section go through [`Self::open_settings`] instead.
@@ -5626,59 +5645,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn confirm_discard_working_tree(&mut self, cx: &mut Context<Self>) {
-        if self.discard_working_tree_task.is_some() {
-            return;
-        }
-        let Some(DiscardWorkingTreeFlow::Confirm(request)) = self.discard_working_tree.clone()
-        else {
-            return;
-        };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.discard_working_tree = Some(DiscardWorkingTreeFlow::Failed(
-                "Engine is not connected.".into(),
-            ));
-            cx.notify();
-            return;
-        };
-
-        let mut params = serde_json::Map::new();
-        params.insert("chatId".into(), serde_json::Value::String(request.chat_id));
-        params.insert(
-            "checkoutId".into(),
-            serde_json::Value::String(request.checkout_id),
-        );
-        params.insert(
-            "expectedChecksum".into(),
-            serde_json::Value::String(request.expected_checksum),
-        );
-        if let Some(target) = request.target_device_id {
-            params.insert("targetDeviceId".into(), serde_json::Value::String(target));
-        }
-
-        // Dismiss the confirmation immediately. The task remains retained so
-        // repeat clicks cannot issue a second destructive request.
-        self.discard_working_tree = None;
-        self.discard_working_tree_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(
-                    methods::DISCARD_WORKING_TREE,
-                    serde_json::Value::Object(params),
-                )
-                .await;
-            this.update(cx, |shell, cx| {
-                shell.discard_working_tree_task = None;
-                shell.discard_working_tree = match result {
-                    Ok(_) => None,
-                    Err(error) => Some(DiscardWorkingTreeFlow::Failed(format!("{error}").into())),
-                };
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
+    // slopty: no Discard changes (ruled out).
 
     // slopty: no accounts, sync or sign-in.
     // ---- org gate ----
@@ -8370,11 +8337,7 @@ impl Shell {
             cx.notify();
             return true;
         }
-        if self.discard_working_tree.is_some() {
-            self.discard_working_tree = None;
-            cx.notify();
-            return true;
-        }
+        // slopty: no Discard changes (ruled out).
         // slopty: no self-updater.
         // The folded-breadcrumbs menu floats over the palette; it closes first.
         if self.add_space.is_some() && self.project_crumb_menu.is_open() {
@@ -8698,68 +8661,7 @@ impl Shell {
             overlays.push(popover::modal("delete-chat-dialog", viewport, card));
         }
 
-        if let Some(flow) = self.discard_working_tree.clone() {
-            let card = match flow {
-                DiscardWorkingTreeFlow::Confirm(_) => {
-                    popover::dialog_card(&theme)
-                        .child(popover::dialog_title(
-                            &theme,
-                            "Discard working tree changes?",
-                        ))
-                        .child(div().mt(px(6.0)).child(popover::dialog_body(
-                            &theme,
-                            "Discard all uncommitted changes in this working tree? This can’t be undone.",
-                        )))
-                        .child(
-                            div()
-                                .mt(px(16.0))
-                                .flex()
-                                .flex_row()
-                                .justify_end()
-                                .gap(px(8.0))
-                                .child(
-                                    popover::btn_ghost(
-                                        &theme,
-                                        "Cancel",
-                                        "discard-working-tree-cancel",
-                                    )
-                                    .id("discard-working-tree-cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.discard_working_tree = None;
-                                        cx.notify();
-                                    })),
-                                )
-                                .child(
-                                    popover::btn_danger(&theme, "Discard changes")
-                                        .id("discard-working-tree-confirm")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_discard_working_tree(cx)
-                                        })),
-                                ),
-                        )
-                        .into_any_element()
-                }
-                DiscardWorkingTreeFlow::Failed(error) => popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Couldn’t discard changes"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, error)))
-                    .child(
-                        div().mt(px(16.0)).flex().justify_end().child(
-                            popover::btn_primary(&theme, "Close")
-                                .id("discard-working-tree-error-close")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.discard_working_tree = None;
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .into_any_element(),
-            };
-            overlays.push(popover::modal(
-                "discard-working-tree-dialog",
-                viewport,
-                card,
-            ));
-        }
+        // slopty: no Discard changes (ruled out).
 
         // slopty: no accounts, sync or sign-in.
         // slopty: no self-updater.
@@ -9026,6 +8928,13 @@ impl Shell {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
             let _ = faint;
+            // slopty: with no device yet there is nowhere for a project: add one first.
+            let no_devices = self.state.read(cx).devices.is_empty();
+            let (headline, line, action) = if no_devices {
+                ("Add a device to get started", "A device is a machine Slopty works on.", "Add a device")
+            } else {
+                ("Add a project to get started", "A project is a folder on one of your devices.", "Add a project")
+            };
             div()
                 .size_full()
                 .flex()
@@ -9050,22 +8959,22 @@ impl Shell {
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from("Add a project to get started")),
+                                .child(SharedString::from(headline)), // slopty: devices first.
                         )
                         .child(
                             div()
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(
-                                    "A project is a folder on one of your devices.",
-                                )),
+                                .child(SharedString::from(line)), // slopty: devices first.
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, "Add a project")
-                                .id("onboarding-add-space")
+                            popover::btn_primary(&theme_owned, action) // slopty: devices first.
+                                .id(if no_devices { "onboarding-add-device" } else { "onboarding-add-space" })
                                 .mt(px(20.0))
-                                .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if no_devices { this.open_add_device(cx) } else { this.open_add_space(cx) }
+                                })),
                         ),
                 ))
                 .into_any_element()
@@ -10621,6 +10530,9 @@ fn window_control_button_with(
         })
         .child(glyph)
         .tooltip(crate::settings::widgets::text_tooltip(label))
+        // slopty: named for VoiceOver (and the simulator's e2e taps).
+        .role(gpui::Role::Button)
+        .aria_label(label)
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
@@ -11267,7 +11179,12 @@ impl Render for Shell {
                         .children(overlays);
                     break 'ready root
                         .child(sidebar_tone)
-                        .child(motion::fade_in("phase-app", page));
+                        // slopty: clear of a phone's or tablet's edges.
+                        .child(motion::fade_in("phase-app", self.compact_frame(page, window, cx)));
+                }
+                // slopty: the phone's Sessions page in place of the columns.
+                if let Some(page) = self.render_compact_sessions(window, cx) {
+                    break 'ready root.child(page);
                 }
                 // The Pull requests route shares this layout without the
                 // chat's side pane.
@@ -11485,7 +11402,8 @@ impl Render for Shell {
                     .children(self.render_sidebar_options_titlebar(cx))
                     .children(overlays);
                 root.child(sidebar_tone)
-                    .child(motion::fade_in("phase-app", page))
+                    // slopty: clear of a phone's or tablet's edges.
+                    .child(motion::fade_in("phase-app", self.compact_frame(page, window, cx)))
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::Failed(error) => { // slopty: no accounts, sync or sign-in.
@@ -12186,7 +12104,7 @@ mod tests {
     // slopty: the foot names the server this client follows.
     #[test]
     fn sidebar_footer_names_the_server_and_its_link() {
-        let server = |online| slopty_view_proto::ServerPresence { name: "studio".into(), online };
+        let server = |online| slopty_view_proto::ServerPresence { name: "studio".into(), online, actions: Vec::new(), invite: None };
         let up = server(true);
         let down = server(false);
         assert_eq!(
@@ -15117,6 +15035,30 @@ mod settings_modal_regressions {
 
     // slopty: voice removed.
 
+    // slopty: the first run, with no device to put a project on, lands on Devices with its Add
+    // device dialog open.
+    #[gpui::test]
+    fn the_first_run_without_a_device_opens_add_device(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            assert!(shell.state.read(cx).devices.is_empty());
+            shell.open_add_device(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
+        });
+        let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
+        assert!(
+            devices.update(cx, |page, cx| page.dismiss_on_escape(cx)),
+            "the Add device dialog is open"
+        );
+    }
+
     #[gpui::test]
     fn escape_closes_what_is_open_inside_settings_before_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -15130,12 +15072,9 @@ mod settings_modal_regressions {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
-        // A dialog that does not hold focus (the rename input was never
-        // clicked) still closes before Settings does.
+        // The Add device dialog closes before Settings does.
         let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
-        devices.update(cx, |page, cx| {
-            page.open_rename("device-1".into(), "Studio".into(), cx)
-        });
+        devices.update(cx, |page, cx| page.open_add_device(cx)); // slopty: Add device, no Rename.
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes("escape");

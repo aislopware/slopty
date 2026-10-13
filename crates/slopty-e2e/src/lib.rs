@@ -182,13 +182,6 @@ pub enum Command {
         /// ⌘ is held throughout.
         command: bool,
     },
-    /// Keep the file promises of the last drag out of the app, as a drop in the directory
-    /// `into` would: each promise's own keeper writes its file there. Under the self-test a
-    /// drag out parks its promises here instead of starting a system drag. macOS only.
-    KeepDragged {
-        /// An existing directory on this machine.
-        into: String,
-    },
     /// Drop files on a window point, as Finder's drag would end there: GPUI's own file-drop
     /// events (entered, over, dropped) through `Window::dispatch_event`, no system drag.
     DropFiles {
@@ -199,32 +192,6 @@ pub enum Command {
         /// Window y in points.
         y: f32,
     },
-    /// Carry a drag of files and texts from this machine to a window point, as the platform's
-    /// drag destination hands the workspace each step of a system drag (`DropSink::over`): they
-    /// sit on a pasteboard of the command's own, and no system drag runs. Over a remote tile
-    /// the drag goes on to the worker. The first step carries them; while the drag stays on the
-    /// same tile they are not read again. Answers [`Reply::Over`]. macOS only.
-    DragOver {
-        /// Absolute paths on this machine, an item each.
-        paths: Vec<String>,
-        /// Texts, an item of plain text each, after the files.
-        texts: Vec<String>,
-        /// Window x in points.
-        x: f32,
-        /// Window y in points.
-        y: f32,
-    },
-    /// Let go of the drag [`Command::DragOver`] carries at a window point, as the platform's
-    /// `performDragOperation:` would (`DropSink::dropped`): answers [`Reply::Taken`]. macOS
-    /// only.
-    DragDrop {
-        /// Window x in points.
-        x: f32,
-        /// Window y in points.
-        y: f32,
-    },
-    /// The drag [`Command::DragOver`] carries leaves the window (`DropSink::left`). macOS only.
-    DragLeave,
     /// Move the pointer to a window point (no button).
     Move {
         /// Window x in points.
@@ -273,69 +240,8 @@ pub enum Command {
         /// Vertical lines (positive scrolls the content down, GPUI convention).
         dy: f32,
     },
-    /// Open `count` sessions running `command` (the login shell when empty) in the project on
-    /// show, as ⌘N does. Load for the frame-time scenarios without
-    /// typing anything into a shell.
-    Open {
-        /// Program and arguments.
-        #[serde(default)]
-        command: Vec<String>,
-        /// How many.
-        #[serde(default = "one")]
-        count: u32,
-    },
-    /// Open a file tile for `path` on the worker, as "view" on a tool call does, landing on
-    /// `line` when given.
-    OpenFile {
-        /// Absolute path on the worker.
-        path: String,
-        /// 1-based line to land on.
-        #[serde(default)]
-        line: Option<u32>,
-    },
-    /// Open a browser tile for `url` on the context worker, as the palette's "Open URL…"
-    /// does.
-    OpenUrl {
-        /// An http or https address.
-        url: String,
-    },
-    /// Deliver `keys` (a chord such as `cmd-a` or `cmd-shift-z`) to the window of the page of
-    /// the browser tile for `url`, while the page holds the keyboard, as AppKit delivers a key
-    /// press: through the application's key equivalents and menu bar when the window is key,
-    /// else to the window itself. Replies with an error when the page does not hold the
-    /// keyboard (macOS).
-    PageKeys {
-        /// The tile's address, as its item names it.
-        url: String,
-        /// The chord.
-        keys: String,
-    },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
-    /// Bring a session's terminal into view, make it active and give it the keyboard, as
-    /// tapping a waiting badge does, so the soft keyboard can route to it.
-    Reveal {
-        /// The session id (`terminal:<id>` without the prefix), as the dump reports it.
-        session: String,
-    },
-    /// Show the tile of `item` and give it the keyboard, as a click on its tab does, whatever
-    /// kind it is.
-    FocusItem {
-        /// The item's id, as the dump reports it.
-        item: String,
-    },
-    /// Add the worker's first display to the project on show, as picking it would (the worker
-    /// needs Screen Recording permission; the stream opens when the item lands).
-    AddDisplay,
-    /// Put a window of the worker on the project on show, as picking it in the ⌘O picker does. The
-    /// id need not name a live window: one that never sends a frame is how a remote tile's
-    /// placeholder is reached on a machine that has granted no screen capture.
-    PickWindow {
-        /// The worker's window id.
-        window: u32,
-        /// The title the tile shows.
-        title: String,
-    },
     /// Drive the app's system-notification response path with `tag` (a session UUID),
     /// exactly as `cx.on_system_notification_response` would when the user activates an
     /// agent banner: reveal the session in whichever project holds its tile. System
@@ -621,19 +527,6 @@ pub enum Reply {
         /// Device pixels per point.
         scale: f32,
     },
-    /// A [`Command::DragOver`]: what the drag is over.
-    Over {
-        /// `local` over the app's own (GPUI takes it); over a remote tile, what a drop there
-        /// would do as the worker last said: `none`, `copy`, `link` or `move`.
-        op: String,
-        /// The drag the window carries to the worker, if it is.
-        drag: Option<String>,
-    },
-    /// A [`Command::DragDrop`]: whether the drop was taken (a refused one slides back).
-    Taken {
-        /// Taken.
-        taken: bool,
-    },
     /// A [`Command::PushRegister`]: the public half of the phone's X25519 key.
     PushKey {
         /// Its 32 bytes.
@@ -675,28 +568,14 @@ pub struct Dump {
     pub window: WindowInfo,
     /// Every added worker.
     pub workers: Vec<WorkerInfo>,
-    /// The add-worker panel is showing.
-    pub adding: bool,
     /// `connected` while every worker is, else the first other worker's state; `no workers`
     /// with none.
     pub status: String,
-    /// The toast over the workspace, if any.
-    pub notice: Option<String>,
-    /// Which kind of tile holds the keyboard (the workspace's own notion).
-    pub focus: Option<String>,
-    /// Who has the keyboard: `workspace`, `terminal:<session>`, `thread:<session>` (its
-    /// agent's thread, shown in place of the TUI), `screen:<stream>`, `file:<item>` (its
-    /// editor), `browser:<item>` (the page itself), `other`, or
-    /// `none`.
+    /// Who has the keyboard: `terminal:<session>`, `screen:<stream>`, `other`, or `none`.
     pub focused: String,
-    /// The name of the project on show.
-    pub project: String,
-    /// The project on show and its tab on show, by index ([`ItemInfo::project`],
-    /// [`ItemInfo::tab`]); `None` with nothing on show.
-    pub shown: Option<[usize; 2]>,
     /// The theme is the dark variant (`[theme] appearance`, or the system's under `system`).
     pub dark: bool,
-    /// Every tile, project by project, tab by tab, pane by pane in reading order.
+    /// Every item of every worker, by id.
     pub items: Vec<ItemInfo>,
     /// Terminals with a view.
     pub terminals: Vec<TerminalInfo>,
@@ -854,94 +733,18 @@ pub struct WorkerInfo {
 }
 
 /// One tile.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct ItemInfo {
     /// Item id.
     pub id: String,
-    /// `terminal`, `window`, `display`, `note`, `file`, `browser`.
+    /// `terminal`, `window`, `display`, `file`, `folder`, `browser`, `review`, `thread`,
+    /// `changes`.
     pub kind: String,
     /// The worker holding it, by name.
     #[serde(default)]
     pub worker: String,
     /// Session id for terminals.
     pub session: Option<String>,
-    /// Its project, by index in the projects' order.
-    pub project: usize,
-    /// Its tab, by index among its project's tabs.
-    pub tab: usize,
-    /// Its pane: the path from the tab's split tree's root, a child's index at each split
-    /// (empty where the tab is one pane). Its bounds say where the pane lies.
-    pub pane: Vec<usize>,
-    /// Its place among its pane's tabs.
-    pub index: usize,
-    /// Window rect: x, y, w, h in points (where to click); zero when it is not drawn.
-    pub bounds: [f32; 4],
-    /// The focused tile.
-    pub active: bool,
-    /// A file tile's path and what it shows.
-    #[serde(default)]
-    pub file: Option<FileItemInfo>,
-    /// A browser tile's page, read from the web view itself.
-    pub browser: Option<BrowserItemInfo>,
-}
-
-/// A pane, as [`ItemInfo::place`] says where an item is: what a test keeps to see whether an
-/// item moved, or lies in the same pane as another.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Place {
-    /// The project, by index.
-    pub project: usize,
-    /// The tab, by index in its project.
-    pub tab: usize,
-    /// The pane's path in the tab's tree.
-    pub pane: Vec<usize>,
-}
-
-/// A browser tile.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub struct BrowserItemInfo {
-    /// The address the item names, as the worker sees it.
-    pub url: String,
-    /// Where this client loads it: the worker's loopback port moved to the one served here.
-    pub local_url: Option<String>,
-    /// The page's address now, as the web view reports it, put back on the worker's port.
-    pub page_url: String,
-    /// The page's title, as the web view reports it.
-    pub title: String,
-    /// A navigation is under way.
-    pub loading: bool,
-    /// Why the page failed, if it did.
-    pub failed: Option<String>,
-    /// The web view is on screen, as the platform shows it.
-    pub shown: bool,
-    /// A picture of the page is ready for where the tile is drawn without it (a render).
-    pub snapshot: bool,
-}
-
-/// A file tile.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
-pub struct FileItemInfo {
-    /// Absolute path on the worker.
-    pub path: String,
-    /// The tile's one-line summary ("12 lines", "missing: …", "reading…").
-    pub summary: String,
-    /// Lines drawn.
-    pub lines: usize,
-    /// The caret's line, 1-based.
-    #[serde(default)]
-    pub line: Option<u32>,
-    /// The editor holds an edit not yet on disk (or on its way).
-    pub edited: bool,
-    /// What stops a save: `conflict`, or `failed: <why>`.
-    pub trouble: Option<String>,
-    /// Why the text cannot be edited, when it cannot.
-    pub read_only: Option<String>,
-    /// The editor's text, when it is short ([`FILE_TEXT_SHOWN`] bytes or fewer).
-    #[serde(default)]
-    pub text: Option<String>,
-    /// A Markdown file shows its preview, not its source.
-    #[serde(default)]
-    pub previewing: bool,
 }
 
 /// The longest file text a dump carries: enough for a test's file, and no dump of a large one.
@@ -954,8 +757,6 @@ pub struct TerminalInfo {
     pub session: String,
     /// Always `terminal`.
     pub kind: String,
-    /// What the title bar says: the program's title, else the session's, else "shell".
-    pub title: Option<String>,
     /// Columns × rows.
     pub size: [u16; 2],
     /// Cursor column and row.
@@ -994,9 +795,6 @@ pub struct TerminalInfo {
     /// port, local port]`.
     #[serde(default)]
     pub ports: Vec<[u16; 2]>,
-    /// An upload dropped on the tile, as the tile shows it (`↑ 42%`); `None` without one.
-    #[serde(default)]
-    pub upload: Option<String>,
     /// The grid in window points, once laid out: its origin x and y, the cell width and the
     /// row height. Where a test points at a cell.
     #[serde(default)]
@@ -1276,20 +1074,6 @@ impl Dump {
         self.items.iter().find(|i| i.kind == kind)
     }
 
-    /// The items of the tab on show, pane by pane.
-    pub fn on_show(&self) -> impl Iterator<Item = &ItemInfo> {
-        self.items.iter().filter(|i| self.shown == Some([i.project, i.tab]))
-    }
-
-    /// The panes of the tab on show that hold an item.
-    #[must_use]
-    pub fn panes_on_show(&self) -> usize {
-        let mut panes: Vec<&[usize]> = self.on_show().map(|i| i.pane.as_slice()).collect();
-        panes.sort_unstable();
-        panes.dedup();
-        panes.len()
-    }
-
     /// The terminal showing `session`.
     #[must_use]
     pub fn terminal(&self, session: &str) -> Option<&TerminalInfo> {
@@ -1308,48 +1092,6 @@ impl Dump {
         self.a11y
             .iter()
             .find(|n| n.role == role && label.is_none_or(|l| n.label.as_deref() == Some(l)))
-    }
-
-    /// The tabs of the pane `item` is drawn in, left to right: the `Tab` nodes on its header.
-    /// Empty when the pane holds one tile, or `item` is not drawn.
-    #[must_use]
-    pub fn pane_tabs(&self, item: &ItemInfo) -> Vec<&A11yNode> {
-        let [x, y, w, h] = item.bounds;
-        let inside = |n: &&A11yNode| {
-            let [nx, ny, nw, nh] = n.bounds;
-            nx >= x - 0.5 && ny >= y - 0.5 && nx + nw <= x + w + 0.5 && ny + nh <= y + h + 0.5
-        };
-        let mut tabs: Vec<&A11yNode> =
-            self.a11y.iter().filter(|n| n.role == "Tab").filter(inside).collect();
-        tabs.sort_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]));
-        tabs
-    }
-}
-
-impl ItemInfo {
-    /// The pane it is in.
-    #[must_use]
-    pub fn place(&self) -> Place {
-        Place { project: self.project, tab: self.tab, pane: self.pane.clone() }
-    }
-
-    /// It is in the same pane as `other`.
-    #[must_use]
-    pub fn same_pane(&self, other: &Self) -> bool {
-        self.place() == other.place()
-    }
-
-    /// It is in the same tab as `other`, in whichever pane.
-    #[must_use]
-    pub const fn same_tab(&self, other: &Self) -> bool {
-        self.project == other.project && self.tab == other.tab
-    }
-
-    /// The window point at the middle of the item.
-    #[must_use]
-    pub const fn center(&self) -> (f32, f32) {
-        let [x, y, w, h] = self.bounds;
-        (x + w / 2.0, y + h / 2.0)
     }
 }
 
@@ -1409,11 +1151,7 @@ mod tests {
     #[test]
     fn dump_helpers_find_lines_and_items() {
         let dump = Dump {
-            items: vec![ItemInfo {
-                kind: "terminal".into(),
-                bounds: [10.0, 20.0, 100.0, 50.0],
-                ..ItemInfo::default()
-            }],
+            items: vec![ItemInfo { kind: "terminal".into(), ..ItemInfo::default() }],
             terminals: vec![TerminalInfo {
                 lines: vec!["$ echo hi".into(), "hi".into(), String::new(), "% '/tmp/a b'".into()],
                 ..TerminalInfo::default()
@@ -1422,7 +1160,7 @@ mod tests {
         };
         assert_eq!(dump.lines_containing("hi"), ["$ echo hi", "hi"]);
         assert_eq!(dump.lines_containing("a b'"), ["% '/tmp/a b'"]);
-        assert_eq!(dump.item("terminal").unwrap().center(), (60.0, 45.0));
+        assert!(dump.item("terminal").is_some());
         assert!(dump.item("note").is_none());
     }
 }
