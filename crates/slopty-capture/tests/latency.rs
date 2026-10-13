@@ -463,6 +463,52 @@ mod tests {
         let _stopped = rx.recv_timeout(Duration::from_secs(5));
     }
 
+    /// A stopped capture, once dropped, lets go of its sink and everything the sink holds: the
+    /// worker's sink holds its encoder, and a session ScreenCaptureKit kept alive would hold a
+    /// hardware encoder for good. A runner's encoder stopped for good after a test that ran
+    /// five captures, each with its own encoder (`docs/decisions/video.md`).
+    #[test]
+    fn a_dropped_capture_lets_go_of_its_sink() {
+        if !gated() {
+            return;
+        }
+        let (_scroller, id, content) = launch("scroll");
+        let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
+        let held = std::sync::Arc::new(());
+        let in_sink = std::sync::Arc::clone(&held);
+        let (frames_tx, frames_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let capture = Capture::start(
+            &window,
+            &config(window.pixel_size(), 2, None),
+            move |_frame: CapturedFrame| {
+                let _gone = frames_tx.send(std::sync::Arc::strong_count(&in_sink));
+            },
+            |e| panic!("capture stopped: {e}"),
+            move |r| {
+                let _gone = started_tx.send(r);
+            },
+        )
+        .expect("start");
+        started_rx.recv_timeout(Duration::from_secs(10)).expect("start callback").expect("started");
+        frames_rx.recv_timeout(Duration::from_secs(5)).expect("a frame");
+        let (tx, rx) = mpsc::channel();
+        capture.stop(move |r| {
+            let _gone = tx.send(r);
+        });
+        rx.recv_timeout(Duration::from_secs(5)).expect("stop callback").expect("stopped");
+        drop(capture);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::sync::Arc::strong_count(&held) > 1 && Instant::now() < deadline {
+            pause(Duration::from_millis(50));
+        }
+        assert_eq!(
+            std::sync::Arc::strong_count(&held),
+            1,
+            "the sink outlived its capture by 5 s: ScreenCaptureKit keeps the output"
+        );
+    }
+
     /// The ruled floor for a window target's capture latency on this machine class
     /// (MEASUREMENTS.md "capture floor"): p95 ≈ 1 ms through the window filter. The margin
     /// covers a loaded machine.

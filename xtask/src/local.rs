@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use xshell::{Shell, cmd};
 
@@ -53,6 +53,10 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     // shares.
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
     sh.set_var(LOCAL, "1");
+    // nextest's setup script runs `$SLOPTY_XTASK spawned-bins`, else `cargo xtask`, which built a
+    // whole xtask in every lane's directory (~740 MB each) after any change to xtask or the lock.
+    // This binary is built; a lane that changes the spawned list is checked by the runners too.
+    sh.set_var("SLOPTY_XTASK", std::env::current_exe().context("the xtask binary")?);
     let watch = Watch::start();
     let lint = crate::check::run(&sh, crates, true, crate::check::Part::Lint);
     let tests = lint

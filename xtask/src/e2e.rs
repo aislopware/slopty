@@ -249,12 +249,16 @@ const WORKER: &[Suite] = &[Suite {
     ..Suite::live("slopty-workerd", "e2e").only("test(~shell_round_trip)")
 }];
 
+/// The real-capture cases. The worker's suites code video, so they run behind the encoder probe
+/// and its deadline: on run 38245137677 a hosted runner's encoder stopped after the rate
+/// control test, and `display_stream_produces_datagrams` then sat in `BuildStuck`, its process
+/// stuck in its exit inside the driver for 25 minutes.
 const SCREEN: &[Suite] = &[
     Suite::env("SLOPTY_SCREEN_E2E", "slopty-capture", "geometry"),
-    Suite::live("slopty-worker", "screen"),
     Suite::env("SLOPTY_SCREEN_E2E", "slopty-capture", "latency"),
+    Suite::live("slopty-worker", "screen").codes(),
     // The worker's other live tests are measurements, run by name with `--filter`.
-    Suite { default: Some("test(~screen_stream)"), ..Suite::live("slopty-workerd", "e2e") },
+    Suite { default: Some("test(~screen_stream)"), ..Suite::live("slopty-workerd", "e2e") }.codes(),
 ];
 
 const INPUT: &[Suite] = &[Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject")];
