@@ -132,6 +132,17 @@ pub fn replace_from(
     rustix::fs::fsync(File::open(dir)?).map_err(io::Error::from)
 }
 
+/// Whether `entry`, a file name in `name`'s directory, is a temporary file a [`replace`] or
+/// [`replace_from`] of `name` left there when it was cut short (its process killed mid-write).
+#[must_use]
+pub fn is_torn_write_of(entry: &str, name: &str) -> bool {
+    entry
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_prefix(name))
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|rest| rest.ends_with(".slopty-tmp"))
+}
+
 /// A temporary name's part that no other call, in this process or an earlier one with the same
 /// pid, has used: the pid, the clock and a count.
 fn unique() -> String {

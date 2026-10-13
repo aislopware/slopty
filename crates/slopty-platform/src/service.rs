@@ -1266,7 +1266,12 @@ pub fn purge_worker(session: &Session, data_dir: &Path) -> io::Result<Vec<PathBu
     let mut removed = Vec::new();
     for path in WORKER_STATE.iter().map(|rel| data_dir.join(rel)) {
         if remove_path(&path)? {
-            removed.push(path);
+            removed.push(path.clone());
+        }
+        for torn in torn_writes(&path) {
+            if remove_path(&torn)? {
+                removed.push(torn);
+            }
         }
     }
     let crashes = data_dir.join("crashes");
@@ -1304,6 +1309,19 @@ pub fn purge_worker(session: &Session, data_dir: &Path) -> io::Result<Vec<PathBu
         removed.push(stage);
     }
     Ok(removed)
+}
+
+/// The temporaries beside `path` that a write of it cut short left ([`crate::fs::replace`]).
+fn torn_writes(path: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return Vec::new() };
+    let name = name.to_string_lossy();
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| crate::fs::is_torn_write_of(&entry.file_name().to_string_lossy(), &name))
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// Whether a crash report's file name (`<ms>-<pid>-<program>.<ext>…`) is one of the worker's
@@ -1660,6 +1678,8 @@ mod tests {
                 write(path.join("held"));
             }
         }
+        // A write a killed daemon cut short, beside the file it was replacing.
+        write(data.join(".items.json.27600-1791883980795284000-1.slopty-tmp"));
         write(data.join("crashes/1700-42-slopty-worker.native"));
         write(data.join("crashes/1700-43-slopty-ptyd.json"));
         write(home.join("Library/Logs/Slopty/slopty-worker.log"));
@@ -1675,6 +1695,8 @@ mod tests {
             home.join("Library/Logs/Slopty/slopty-server.log"),
             home.join("slopty/clones/github.com/o/atlas/README"),
             home.join(".claude/settings.json"),
+            // The app's own torn write: not the worker's to take.
+            data.join(".layout.json.27600-1791883980795284000-2.slopty-tmp"),
         ];
         for path in &kept {
             write(path.clone());
@@ -1687,6 +1709,7 @@ mod tests {
         for path in &kept {
             assert_eq!(std::fs::read(path).unwrap(), b"x", "{} kept as it was", path.display());
         }
+        assert!(!data.join(".items.json.27600-1791883980795284000-1.slopty-tmp").exists(), "torn");
         assert!(removed.contains(&data.join("crashes/1700-42-slopty-worker.native")));
         assert!(!data.join("crashes/1700-43-slopty-ptyd.json").exists(), "ptyd's report");
         assert!(!home.join("Library/Logs/Slopty/slopty-worker.log").exists(), "its logs");
