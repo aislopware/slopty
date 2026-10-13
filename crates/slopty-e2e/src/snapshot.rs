@@ -42,6 +42,15 @@ pub const EDGE_SLACK: u8 = 64;
 /// status text went unseen.
 pub const MAC_TOLERANCE: f64 = 0.002;
 
+/// The longest straight run of differing pixels, across or down, that a golden still matches
+/// with.
+///
+/// [`MAC_TOLERANCE`] counts pixels wherever they are, so a seam slips under it: a 1-pt hairline
+/// across a terminal 1 064 pt wide is about 0.1 % of a 2× frame, and passed (2026-10-13). Glyph
+/// edges another macOS shades apart differ in short broken runs, one glyph's height at most,
+/// while a rule, a border or a band that came, went or moved differs along its whole length.
+pub const SEAM_RUN: u32 = 64;
+
 /// A frame the app drew, and what it says in words.
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -187,6 +196,8 @@ pub struct Diff {
     pub differing: u64,
     /// Pixels compared.
     pub total: u64,
+    /// The longest straight run of differing pixels, across or down ([`SEAM_RUN`]).
+    pub longest_run: u32,
 }
 
 impl Diff {
@@ -233,9 +244,20 @@ pub fn compare_masked(
     let (w, h) = actual.dimensions();
     let mut diff = RgbaImage::new(w, h);
     let (mut differing, mut total) = (0_u64, 0_u64);
+    // The run ending at the pixel before, across, and above, down each column.
+    let (mut across, mut down) = (0_u32, vec![0_u32; usize::try_from(w).unwrap_or(0)]);
+    let mut longest_run = 0_u32;
     for (x, y, pixel) in actual.enumerate_pixels() {
+        if x == 0 {
+            across = 0;
+        }
+        let column = down.get_mut(usize::try_from(x).unwrap_or(usize::MAX));
         if masks.iter().any(|m| holds(m, x, y)) {
             diff.put_pixel(x, y, Rgba([150, 180, 230, 255]));
+            across = 0;
+            if let Some(column) = column {
+                *column = 0;
+            }
             continue;
         }
         total = total.saturating_add(1);
@@ -251,12 +273,22 @@ pub fn compare_masked(
         });
         if same {
             diff.put_pixel(x, y, faded);
+            across = 0;
+            if let Some(column) = column {
+                *column = 0;
+            }
         } else {
             differing = differing.saturating_add(1);
             diff.put_pixel(x, y, Rgba([220, 30, 30, 255]));
+            across = across.saturating_add(1);
+            longest_run = longest_run.max(across);
+            if let Some(column) = column {
+                *column = column.saturating_add(1);
+                longest_run = longest_run.max(*column);
+            }
         }
     }
-    (Diff { differing, total }, diff)
+    (Diff { differing, total, longest_run }, diff)
 }
 
 /// Whether `pixel` lies, in every channel, within the range of `other`'s 3 × 3 neighbourhood
@@ -474,12 +506,12 @@ fn pixels_match(
         let total = u64::from(actual.width()).saturating_mul(u64::from(actual.height()));
         if golden_action(accept, false, false) == GoldenAction::Report {
             eprintln!("snapshot {name}: REVIEW no golden yet; render at {}", actual_path.display());
-            return Ok(Diff { differing: total, total });
+            return Ok(Diff { differing: total, total, longest_run: 0 });
         }
         std::fs::create_dir_all(golden_dir())?;
         actual.save(&golden_path).with_context(|| format!("write {}", golden_path.display()))?;
         eprintln!("snapshot {name}: wrote golden {}", golden_path.display());
-        return Ok(Diff { differing: 0, total });
+        return Ok(Diff { differing: 0, total, longest_run: 0 });
     }
 
     let golden = image::open(&golden_path)
@@ -488,7 +520,7 @@ fn pixels_match(
     let (diff, image) = compare_masked(actual, &golden, masks);
     let same_size = golden.dimensions() == actual.dimensions();
     let fraction = diff.fraction();
-    let within_tolerance = same_size && fraction <= tolerance;
+    let within_tolerance = same_size && fraction <= tolerance && diff.longest_run < SEAM_RUN;
     let action = golden_action(accept, true, within_tolerance);
 
     match action {
@@ -510,10 +542,11 @@ fn pixels_match(
                 std::fs::remove_file(&diff_path)?;
             }
             eprintln!(
-                "snapshot {name}: {} of {} pixels differ ({:.3}%)",
+                "snapshot {name}: {} of {} pixels differ ({:.3}%), longest run {}",
                 diff.differing,
                 diff.total,
-                fraction * 100.0
+                fraction * 100.0,
+                diff.longest_run
             );
             Ok(diff)
         }
@@ -523,9 +556,11 @@ fn pixels_match(
                 image.save(&diff_path)?;
             }
             eprintln!(
-                "snapshot {name}: REVIEW {:.3}% of pixels differ (tolerance {:.3}%)\n  actual: {}\n  diff:   {}",
+                "snapshot {name}: REVIEW {:.3}% of pixels differ (tolerance {:.3}%), a run of {} \
+                 (a seam from {SEAM_RUN})\n  actual: {}\n  diff:   {}",
                 fraction * 100.0,
                 tolerance * 100.0,
+                diff.longest_run,
                 actual_path.display(),
                 diff_path.display()
             );
@@ -543,9 +578,11 @@ fn pixels_match(
             let diff_path = artifacts.join(format!("{name}.diff.png"));
             image.save(&diff_path)?;
             bail!(
-                "snapshot {name}: {:.3}% of pixels differ (tolerance {:.3}%)\n  actual: {}\n  diff:   {}\n  golden: {}",
+                "snapshot {name}: {:.3}% of pixels differ (tolerance {:.3}%), a run of {} \
+                 (a seam from {SEAM_RUN})\n  actual: {}\n  diff:   {}\n  golden: {}",
                 fraction * 100.0,
                 tolerance * 100.0,
+                diff.longest_run,
                 actual_path.display(),
                 diff_path.display(),
                 golden_path.display()
@@ -748,7 +785,7 @@ mod tests {
     fn identical_frames_do_not_differ() {
         let a = solid(4, 4, [10, 20, 30]);
         let (diff, _) = compare(&a, &a);
-        assert_eq!(diff, Diff { differing: 0, total: 16 });
+        assert_eq!(diff, Diff { differing: 0, total: 16, longest_run: 0 });
         assert!((diff.fraction() - 0.0).abs() < f64::EPSILON);
     }
 
@@ -790,6 +827,33 @@ mod tests {
         assert_eq!(compare(&inked, &golden).0.differing, 1, "ink where the golden has ground");
     }
 
+    /// A hairline across the frame is a seam however few of its pixels it is; the same number
+    /// of pixels scattered, as glyph edges are, is not one.
+    #[test]
+    fn a_hairline_is_a_long_run_and_scattered_pixels_are_not() {
+        let golden = solid(200, 40, [13, 13, 13]);
+        let mut seamed = golden.clone();
+        for x in 0..200 {
+            seamed.put_pixel(x, 20, Rgba([232, 232, 234, 255]));
+        }
+        let (diff, _) = compare(&seamed, &golden);
+        assert_eq!((diff.differing, diff.longest_run), (200, 200), "across");
+        let mut post = golden.clone();
+        for y in 0..40 {
+            post.put_pixel(7, y, Rgba([232, 232, 234, 255]));
+        }
+        assert_eq!(compare(&post, &golden).0.longest_run, 40, "down");
+
+        let mut scattered = golden.clone();
+        for i in 0..200 {
+            scattered.put_pixel((i * 7) % 200, (i * 3) % 40, Rgba([232, 232, 234, 255]));
+        }
+        let (diff, _) = compare(&scattered, &golden);
+        assert!(diff.longest_run < SEAM_RUN, "{diff:?}");
+        let (diff, _) = compare_masked(&seamed, &golden, &[[100, 0, 1, 40]]);
+        assert_eq!(diff.longest_run, 100, "a mask breaks a run");
+    }
+
     #[test]
     fn a_missing_golden_pixel_counts_as_different() {
         let a = solid(2, 2, [1, 1, 1]);
@@ -805,9 +869,9 @@ mod tests {
         b.put_pixel(1, 1, Rgba([0, 0, 0, 255]));
         b.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
         let (diff, _) = compare_masked(&a, &b, &[[0, 0, 2, 2]]);
-        assert_eq!(diff, Diff { differing: 1, total: 12 });
+        assert_eq!(diff, Diff { differing: 1, total: 12, longest_run: 1 });
         let (diff, _) = compare_masked(&a, &b, &[[0, 0, 2, 2], [3, 3, 9, 9]]);
-        assert_eq!(diff, Diff { differing: 0, total: 11 });
+        assert_eq!(diff, Diff { differing: 0, total: 11, longest_run: 0 });
     }
 
     #[test]
