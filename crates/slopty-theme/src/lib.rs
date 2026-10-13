@@ -14,6 +14,9 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+pub mod layout;
+pub mod model;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

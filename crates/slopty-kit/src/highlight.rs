@@ -140,6 +140,12 @@ impl PartialEq for Syntax {
 
 impl Eq for Syntax {}
 
+impl std::hash::Hash for Syntax {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state);
+    }
+}
+
 impl std::fmt::Debug for Syntax {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Syntax").field(&self.0.name).finish()
@@ -178,6 +184,11 @@ impl Syntax {
         set.find_syntax_by_token(lang)
             .or_else(|| set.find_syntax_by_extension(lang))
             .and_then(Self::coloured)
+    }
+
+    /// The grammar itself.
+    pub(crate) const fn reference(self) -> &'static SyntaxReference {
+        self.0
     }
 
     /// The grammar's name ("Rust").
@@ -252,7 +263,7 @@ const BLOCK_COMMENTS: [(&str, &str); 4] =
 /// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid on a
 /// background thread by the first file tile): syntect's own set has no TOML, TypeScript,
 /// Dockerfile, Zig or Nix, all of which a remote project is made of.
-fn syntaxes() -> &'static SyntaxSet {
+pub(crate) fn syntaxes() -> &'static SyntaxSet {
     static SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
     &SET
 }
