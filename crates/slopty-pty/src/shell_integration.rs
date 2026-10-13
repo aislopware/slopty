@@ -1117,11 +1117,10 @@ mod tests {
     #[tokio::test]
     async fn a_typed_codex_runs_as_no_terminal() {
         use slopty_proto::ctl::{SESSION_ENV, SESSION_TOKEN_ENV};
-        use slopty_proto::project::{PROJECT_ENV, TASK_ENV};
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let named = [SESSION_ENV, SESSION_TOKEN_ENV, PROJECT_ENV, TASK_ENV];
+        let named = [SESSION_ENV, SESSION_TOKEN_ENV];
         let shown = named.map(|v| format!("{v}[${{{v}-unset}}]")).concat();
         let script = format!(
             "#!/bin/sh\nprintf 'codex'; printf '[%s]' \"$@\"; echo \" {shown} kept[$KEPT]\"\n"

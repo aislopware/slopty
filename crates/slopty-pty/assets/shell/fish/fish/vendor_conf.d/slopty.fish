@@ -169,15 +169,13 @@ if status is-interactive; and set -q SLOPTY_CLI; and test -x "$SLOPTY_CLI"; and 
     end
 end
 
-# `codex` runs without what names this terminal (SLOPTY_SESSION, its token, SLOPTY_PROJECT and
-# SLOPTY_TASK). Codex's app-server daemon, which the first `codex` starts, keeps its starter's
+# `codex` runs without what names this terminal (SLOPTY_SESSION and its token). Codex's app-server daemon, which the first `codex` starts, keeps its starter's
 # environment for every thread's commands, so a daemon started here would have every Codex
 # thread, whoever started it, speak as this terminal. A `codex` of the user's own (a
 # function, an alias, an autoloaded file) is left alone.
 if status is-interactive; and set -q SLOPTY_SESSION; and not functions -q codex
     function codex --wraps codex -d "codex, as no Slopty terminal"
-        command env -u SLOPTY_SESSION -u SLOPTY_SESSION_TOKEN -u SLOPTY_PROJECT -u SLOPTY_TASK \
-            codex $argv
+        command env -u SLOPTY_SESSION -u SLOPTY_SESSION_TOKEN codex $argv
     end
 end
 
